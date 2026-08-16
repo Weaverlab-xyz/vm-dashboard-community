@@ -78,7 +78,7 @@
         </button>
         <span x-show="wsConnected" class="h-2 w-2 rounded-full bg-green-500"></span>
         <span x-show="!wsConnected" class="h-2 w-2 rounded-full bg-gray-400"></span>
-        <span class="text-xs text-gray-400" x-text="wsConnected ? 'Connected' : 'Disconnected'"></span>
+        <span class="text-xs text-gray-400" x-text="streamLabel()"></span>
       </div>
     </div>
     <div class="bg-gray-900 text-gray-100 font-mono text-xs p-4 min-h-[150px] max-h-[400px] overflow-y-auto"
@@ -88,6 +88,104 @@
       <template x-for="(line, i) in logs" :key="i">
         <p class="leading-5" x-text="line"></p>
       </template>
+    </div>
+  </div>
+
+  <!--
+    Discovery findings (agent_discover only).
+
+    A scan writes its result into the job row and, before this panel existed, that was
+    the end of it: the job went green, the page showed a progress bar, and a run that
+    found a cluster looked exactly like a run that was refused by the agent's policy.
+    So the empty state below is not a courtesy — it is where the counters get to explain
+    which of those happened.
+  -->
+  <div x-show="findings !== null" x-cloak
+       class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-6">
+    <div class="px-4 py-3 bg-gray-50 border-b border-gray-200">
+      <p class="text-sm font-semibold text-gray-700">
+        Discovered
+        <span class="ml-1 font-normal text-gray-500" x-text="'(' + (findings || []).length + ')'"></span>
+      </p>
+      <p class="text-xs text-gray-500 mt-0.5" x-text="scanSummary()"></p>
+    </div>
+
+    <!-- Nothing found: say why, in the terms the operator can act on -->
+    <div x-show="(findings || []).length === 0" class="px-4 py-5">
+      <p class="text-sm font-medium text-gray-700 mb-2">This scan found nothing.</p>
+      <ul class="text-sm text-gray-600 space-y-1.5 list-disc list-inside">
+        <template x-for="(reason, i) in emptyReasons()" :key="i">
+          <li x-text="reason"></li>
+        </template>
+      </ul>
+      <p class="text-xs text-gray-400 mt-3">
+        The Live Output above is the agent's own account of the run — it names every range
+        it skipped and why.
+      </p>
+    </div>
+
+    <!-- Findings table -->
+    <div x-show="(findings || []).length > 0" x-cloak class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+          <tr>
+            <th class="px-4 py-2 text-left font-medium">Product</th>
+            <th class="px-4 py-2 text-left font-medium">Endpoint</th>
+            <th class="px-4 py-2 text-left font-medium">Identified as</th>
+            <th class="px-4 py-2 text-left font-medium">Suggested name</th>
+            <th class="px-4 py-2 text-right font-medium">Action</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="(f, i) in findings" :key="i">
+            <tr>
+              <td class="px-4 py-3">
+                <span class="inline-flex px-2 py-0.5 rounded text-xs font-semibold"
+                      :class="productClass(f.product)" x-text="productLabel(f.product)"></span>
+                <!--
+                  `possible` exists for WinRM alone: nearly every domain-joined Windows
+                  Server answers on 5985 and the overwhelming majority are not
+                  hypervisors. Rendering it identically to a confirmed vCenter would
+                  send operators to add connections to file servers.
+                -->
+                <span x-show="f.confidence === 'possible'" x-cloak
+                      class="block mt-1 text-xs text-amber-700"
+                      title="Something answered, but only credentials can confirm what it is">possible only</span>
+              </td>
+              <td class="px-4 py-3 font-mono text-xs text-gray-700">
+                <span x-text="f.endpoint || (f.host + ':' + f.port)"></span>
+                <span x-show="f.tls_cn" x-cloak class="block text-gray-400 mt-0.5"
+                      x-text="'CN=' + f.tls_cn"></span>
+              </td>
+              <td class="px-4 py-3 text-gray-700">
+                <span x-text="[f.server_version, f.build && ('build ' + f.build)].filter(Boolean).join(' ') || 'responded, version unknown'"></span>
+              </td>
+              <td class="px-4 py-3 font-mono text-xs text-gray-600" x-text="f.suggested_name || '–'"></td>
+              <td class="px-4 py-3 text-right whitespace-nowrap">
+                <span x-show="f.already_registered"
+                      class="inline-flex px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-700">
+                  Already configured
+                </span>
+                <!--
+                  A link, not a fetch. A connection needs a credential that the agent
+                  never had and must never be asked for — it authenticates to nothing
+                  during a scan. So this hands the operator to the Connections form with
+                  the non-secret fields already filled in, and that form runs under
+                  their own permissions.
+                -->
+                <a x-show="!f.already_registered" x-cloak :href="connectHref(f)"
+                   class="inline-flex px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded transition">
+                  Add connection…
+                </a>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      <p class="px-4 py-3 text-xs text-gray-500 border-t border-gray-100">
+        Adding a connection asks for the one thing a scan cannot supply — credentials.
+        Probes never authenticate.
+      </p>
     </div>
   </div>
 
@@ -135,6 +233,12 @@
     gce_destroy:        { href: '/gcp',        label: 'GCP' },
     gce_capture_image:  { href: '/gcp',        label: 'GCP' },
     packer_gcp_build:   { href: '/gcp',        label: 'GCP' },
+    // OCI
+    oci_deploy:         { href: '/oci',        label: 'OCI' },
+    oci_bulk_deploy:    { href: '/oci',        label: 'OCI' },
+    oci_destroy:        { href: '/oci',        label: 'OCI' },
+    packer_oci_build:   { href: '/oci',        label: 'OCI' },
+    oci_export_image:   { href: '/oci',        label: 'OCI' },
     // VMware / Workstation
     vm_start:           { href: '/vms',        label: 'Workstation' },
     vm_stop:            { href: '/vms',        label: 'Workstation' },
@@ -150,10 +254,11 @@
     // Config management
     ansible_run:               { href: '/config-mgmt', label: 'Configuration' },
     ansible_local:             { href: '/config-mgmt', label: 'Configuration' },
-    portainer_agent_install:   { href: '/config-mgmt', label: 'Configuration' },
     // Containers
-    container_deploy:   { href: '/containers', label: 'Containers' },
-    stack_deploy:       { href: '/containers', label: 'Containers' },
+    container_deploy:         { href: '/containers', label: 'Containers' },
+    stack_deploy:             { href: '/containers', label: 'Containers' },
+    portainer_node_deploy:    { href: '/containers#portainer', label: 'Containers' },
+    portainer_node_teardown:  { href: '/containers#portainer', label: 'Containers' },
     // Hypervisors
     nutanix_deploy:        { href: '/nutanix', label: 'Nutanix' },
     nutanix_import_image:  { href: '/nutanix', label: 'Nutanix' },
@@ -164,6 +269,8 @@
     proxmox_delete:        { href: '/proxmox', label: 'Proxmox' },
     // BeyondTrust EPM-L
     epml_sync:          { href: '/settings',   label: 'Settings' },
+    // Remote on-prem agents
+    agent_discover:     { href: '/agents',     label: 'Agents' },
   };
 
   function jobDetail(jobId) {
@@ -175,6 +282,10 @@
       wsConnected: false,
       logsLoading: false,
       tracker: null,
+      // null until loaded, so the panel stays hidden for job types that have none —
+      // an empty array means "this scan genuinely found nothing", which is a result.
+      findings: null,
+      scan: {},
 
       // Fallback when the job_type isn't in JOB_ORIGIN (typically only hit
       // when a new job_type is added without updating the map). Dashboard
@@ -191,6 +302,11 @@
         } else {
           this.connectWs();
         }
+        await this.loadFindings();
+      },
+
+      isTerminal() {
+        return ['completed', 'failed', 'cancelled'].includes(this.job.status);
       },
 
       async loadJob() {
@@ -203,10 +319,11 @@
       },
 
       connectWs() {
-        if (this.job.status && ['completed', 'failed', 'cancelled'].includes(this.job.status)) {
-          return; // No need for WS on terminal jobs
-        }
-
+        // Connect even when the job is already finished. /api/ws/jobs/{id} replays every
+        // persisted JobLog line and *then* closes precisely so this case works — opening
+        // a job after it completed used to short-circuit here and show "No output yet…"
+        // over a full log in the database. That made any job whose whole story is in its
+        // output (a discovery scan, a refused policy check) read as a silent no-op.
         this.tracker = new JobTracker(this.jobId, {
           onMessage: (data) => {
             this.job.status = data.status || this.job.status;
@@ -219,6 +336,9 @@
             }
             if (data.type === 'state' && data.status && ['completed', 'failed', 'cancelled'].includes(data.status)) {
               this.loadJob(); // Refresh for final details
+              // A scan that finishes while the operator is watching should fill the
+              // findings panel in place, not on the next reload.
+              this.loadFindings();
               this.wsConnected = false;
             }
           },
@@ -266,6 +386,104 @@
         }
       },
 
+      // "Disconnected" is alarming on a job that finished twenty minutes ago and whose
+      // output has already been replayed in full. Say what is actually true.
+      streamLabel() {
+        if (this.wsConnected) return 'Connected';
+        return this.isTerminal() ? 'Output complete' : 'Disconnected';
+      },
+
+      // ── Discovery findings (agent_discover) ──
+      // Kept out of GET /api/jobs/{id} on purpose: that response is a fixed projection of
+      // the job row, and the result lives in the row's metadata alongside things no
+      // caller should read. /findings is the allowlisted view.
+      async loadFindings() {
+        if (this.job.job_type !== 'agent_discover' || !this.isTerminal()) return;
+        try {
+          const resp = await API.get(`/api/jobs/${this.jobId}/findings`);
+          this.findings = resp.findings || [];
+          this.scan = resp;
+        } catch (e) {
+          // A missing result is not an error worth a toast — the job's own error message
+          // is already on the page, and the panel simply stays hidden.
+          this.findings = null;
+        }
+      },
+
+      scanSummary() {
+        const s = this.scan || {};
+        const parts = [`probed ${s.scanned || 0} endpoint(s) across ${s.hosts || 0} host(s)`];
+        if (s.refused) parts.push(`${s.refused} refused by the agent's policy`);
+        if (s.truncated) parts.push('result truncated at the findings cap');
+        if (s.audit_mode) parts.push('AUDIT MODE — nothing was actually probed');
+        return parts.join(' · ');
+      },
+
+      // Why a scan came back empty, in the operator's terms. Driven by the counters
+      // rather than guessed, so each line is something they can go and change.
+      emptyReasons() {
+        const s = this.scan || {};
+        const out = [];
+        if (s.audit_mode) {
+          out.push('The agent is running in audit mode (AGENT_MODE=audit), which logs ' +
+                   'what it would probe and probes nothing. Restart it without that to scan.');
+        }
+        if (s.refused && !s.scanned) {
+          out.push("The agent's policy.yaml refused every host and port in this scan. " +
+                   'Policy is the customer-owned allow-list and no dashboard setting can ' +
+                   "widen it — add the range to the agent's `targets:` list and restart it.");
+        } else if (s.refused) {
+          out.push(`${s.refused} host:port combination(s) were outside the agent's ` +
+                   'policy.yaml and were skipped.');
+        }
+        if (!s.hosts) {
+          out.push('No hosts were in scope. Give the scan a CIDR or a hostname, or add ' +
+                   "ranges to the agent's policy.yaml — with neither, there is nothing to sweep.");
+        } else if (s.scanned && !s.refused) {
+          out.push(`Probed ${s.scanned} endpoint(s) and nothing answered as a hypervisor ` +
+                   'management endpoint. Check the ports: 443 for vCenter/ESXi and XCP-ng, ' +
+                   '8006 for Proxmox, 9440 for Nutanix Prism, 5985/5986 for WinRM. A ' +
+                   'management UI behind a reverse proxy may answer as the proxy instead.');
+        }
+        if ((this.findings || []).length &&
+            (this.findings || []).every(f => f.confidence === 'possible')) {
+          out.push('Everything found came back as `possible` only — WinRM answered, but ' +
+                   'nothing about an anonymous response proves the host runs Hyper-V. ' +
+                   'Only credentials can tell you.');
+        }
+        return out;
+      },
+
+      productLabel(product) {
+        return ({vsphere: 'vCenter', esxi: 'ESXi', proxmox: 'Proxmox VE',
+                 nutanix: 'Nutanix Prism', xcpng: 'XCP-ng',
+                 winrm: 'WinRM (Windows)'})[product] || product || 'unknown';
+      },
+
+      productClass(product) {
+        return ({vsphere: 'bg-sky-100 text-sky-700', esxi: 'bg-sky-100 text-sky-700',
+                 proxmox: 'bg-orange-100 text-orange-700',
+                 nutanix: 'bg-indigo-100 text-indigo-700',
+                 xcpng: 'bg-emerald-100 text-emerald-700',
+                 winrm: 'bg-amber-100 text-amber-700'})[product] || 'bg-gray-100 text-gray-700';
+      },
+
+      // Hands off to the Connections form with the non-secret fields prefilled.
+      // Deliberately not a one-click add: a connection needs a credential the scan
+      // never had, and the form runs under the operator's own permissions.
+      connectHref(f) {
+        // A probe reports a PRODUCT; the form takes a connection KIND. ESXi and vCenter
+        // are both vsphere connections and WinRM is the Hyper-V case, so map rather
+        // than pass through — the form ignores an unrecognised kind, which would
+        // silently drop the prefill.
+        const kind = ({esxi: 'vsphere', winrm: 'hyperv'})[f.product] || f.product || '';
+        const p = new URLSearchParams({add: '1', kind});
+        if (f.host) p.set('host', f.host);
+        if (f.port) p.set('port', String(f.port));
+        if (f.suggested_name) p.set('name', f.suggested_name);
+        return '/connections?' + p.toString();
+      },
+
       async cancelJob() {
         if (!confirm('Cancel this job?')) return;
         try {
@@ -284,6 +502,7 @@
           bulk_start: `Bulk Start – ${this.job.workgroup || ''}`,
           bulk_stop:  `Bulk Stop – ${this.job.workgroup || ''}`,
           iso_to_vmx: `Build VMX – ${this.job.extra_data?.vm_name || ''}`,
+          agent_discover: 'Discovery scan',
         };
         return labels[this.job.job_type] || this.job.job_type || 'Job Details';
       },

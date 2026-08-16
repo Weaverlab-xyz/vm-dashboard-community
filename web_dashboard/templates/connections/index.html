@@ -1,0 +1,423 @@
+{% extends "base.html" %}
+{% block title %}Connections{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="connectionsPage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Hypervisor Connections</h1>
+    <button @click="openAdd()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Add connection
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    Where each on-premises hypervisor lives and how to authenticate to it. You can have
+    more than one of each kind — a second vCenter, a Proxmox cluster per site — and the
+    <strong>default</strong> is what a page uses when it isn't told otherwise.
+    A connection bound to a <strong>remote agent</strong> holds no host and no credential
+    here: the agent has them, and this row only names which of its connections to use.
+  </p>
+
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
+    <div x-show="!loading && connections.length === 0" x-cloak
+         class="p-10 text-center text-sm text-gray-400">
+      No connections yet. Click <strong>Add connection</strong>, or run a discovery scan
+      from an agent and add what it finds.
+    </div>
+    <table x-show="!loading && connections.length > 0" x-cloak class="min-w-full text-sm">
+      <thead>
+        <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+          <th class="px-4 py-3">Name</th>
+          <th class="px-4 py-3">Kind</th>
+          <th class="px-4 py-3">Endpoint</th>
+          <th class="px-4 py-3">Reached via</th>
+          <th class="px-4 py-3">Status</th>
+          <th class="px-4 py-3 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="c in connections" :key="c.id">
+          <tr :class="c.is_active ? '' : 'opacity-50'">
+            <td class="px-4 py-3">
+              <span class="font-medium text-gray-800" x-text="c.name"></span>
+              <span x-show="c.is_default" x-cloak
+                    class="ml-2 text-[10px] uppercase bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded">default</span>
+              <div class="text-xs text-gray-400" x-show="c.site" x-text="c.site"></div>
+            </td>
+            <td class="px-4 py-3" x-text="kindLabel(c.kind)"></td>
+            <td class="px-4 py-3 font-mono text-xs">
+              <span x-show="!c.via_agent" x-text="c.host + (c.port ? ':' + c.port : '')"></span>
+              <span x-show="c.via_agent" x-cloak class="text-gray-400"
+                    x-text="c.agent_connection_name"></span>
+            </td>
+            <td class="px-4 py-3">
+              <span x-show="!c.via_agent" class="text-gray-600">Dashboard</span>
+              <span x-show="c.via_agent" x-cloak
+                    class="text-xs bg-purple-50 text-purple-700 px-2 py-0.5 rounded"
+                    x-text="'Agent: ' + agentName(c.agent_id)"></span>
+            </td>
+            <td class="px-4 py-3">
+              <span x-show="c.last_error" x-cloak class="text-red-600 text-xs"
+                    :title="c.last_error">Error</span>
+              <span x-show="!c.last_error && c.last_ok_at" x-cloak
+                    class="text-green-600 text-xs">OK</span>
+              <span x-show="!c.last_error && !c.last_ok_at" x-cloak
+                    class="text-gray-400 text-xs">Untested</span>
+            </td>
+            <td class="px-4 py-3">
+              <div class="flex flex-wrap justify-end items-center gap-1">
+                <button @click="testConn(c)" :disabled="busy === c.id"
+                        class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">Test</button>
+                <button x-show="!c.is_default" @click="makeDefault(c)"
+                        class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Make default</button>
+                <button @click="openEdit(c)"
+                        class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Edit</button>
+                <button @click="removeConn(c)"
+                        class="text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50">Delete</button>
+              </div>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Add / edit -->
+  <div x-show="showForm" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showForm = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold" x-text="editingId ? 'Edit connection' : 'Add connection'"></h3>
+        <button @click="showForm = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Kind</label>
+            <select x-model="form.kind" :disabled="!!editingId"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-50">
+              <template x-for="k in kinds" :key="k">
+                <option :value="k" x-text="kindLabel(k)"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+            <input type="text" x-model="form.name" placeholder="dc1"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="form.viaAgent"
+                 class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+          Reached through a remote agent
+        </label>
+
+        <!-- Agent-bound: a name, never a credential. -->
+        <template x-if="form.viaAgent">
+          <div class="space-y-3 border-l-2 border-purple-200 pl-3">
+            <p class="text-xs text-gray-500">
+              The dashboard cannot dial this endpoint, so it stores no host and no
+              credential. Both live in the agent's own
+              <code class="bg-gray-100 px-1 rounded">connections.yaml</code>; this row
+              only names which entry to use.
+            </p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
+              <select x-model="form.agent_id"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">— select an agent —</option>
+                <template x-for="a in agents" :key="a.id">
+                  <option :value="a.id" x-text="a.name + (a.site ? ' (' + a.site + ')' : '')"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Name in the agent's connections.yaml</label>
+              <input type="text" x-model="form.agent_connection_name" placeholder="dc1-vcenter"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <p class="text-xs text-gray-400 mt-1">Must match the <code>name:</code> of an entry in that agent's file exactly.</p>
+            </div>
+          </div>
+        </template>
+
+        <!-- Dashboard-dialled -->
+        <template x-if="!form.viaAgent">
+          <div class="space-y-3">
+            <div class="grid grid-cols-3 gap-3">
+              <div class="col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
+                <input type="text" x-model="form.host" placeholder="vcenter.corp.internal"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+                <input type="number" x-model.number="form.port" :placeholder="defaultPort(form.kind)"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                <input type="text" x-model="form.username"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                  <span x-text="form.kind === 'proxmox' ? 'Token secret or password' : 'Password'"></span>
+                </label>
+                <input type="password" x-model="form.secret"
+                       :placeholder="editingId ? '(unchanged)' : ''"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <p x-show="editingId" x-cloak class="text-xs text-gray-400 mt-1">Leave blank to keep the stored one.</p>
+              </div>
+            </div>
+            <div x-show="form.kind === 'proxmox'" x-cloak>
+              <label class="block text-sm font-medium text-gray-700 mb-1">API token id <span class="text-gray-400 font-normal">(blank = password auth)</span></label>
+              <input type="text" x-model="form.token_id" placeholder="root@pam!dashboard"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            </div>
+            <div x-show="form.kind === 'vsphere'" x-cloak>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Datacenter <span class="text-gray-400 font-normal">(optional filter)</span></label>
+              <input type="text" x-model="form.datacenter"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            </div>
+            <div x-show="form.kind === 'hyperv'" x-cloak class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">WinRM transport</label>
+                <select x-model="form.transport"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="ntlm">NTLM</option>
+                  <option value="basic">Basic</option>
+                  <option value="kerberos">Kerberos</option>
+                </select>
+              </div>
+              <label class="flex items-end gap-2 text-sm text-gray-700 pb-2">
+                <input type="checkbox" x-model="form.use_ssl"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                Use HTTPS (5986)
+              </label>
+            </div>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="form.verify_ssl"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Verify the TLS certificate
+            </label>
+          </div>
+        </template>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Site <span class="text-gray-400 font-normal">(optional)</span></label>
+            <input type="text" x-model="form.site" placeholder="hq"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <label class="flex items-end gap-2 text-sm text-gray-700 pb-2">
+            <input type="checkbox" x-model="form.is_default"
+                   class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            Make this the default
+          </label>
+        </div>
+
+        <div x-show="formError" x-cloak
+             class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
+             x-text="formError"></div>
+      </div>
+
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+        <button @click="showForm = false"
+                class="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+        <button @click="submitForm()" :disabled="!formValid() || saving"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+          <span x-show="!saving" x-text="editingId ? 'Save' : 'Add'"></span>
+          <span x-show="saving" x-cloak>Saving…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CONN_KIND_LABELS = {
+  proxmox: 'Proxmox VE', vsphere: 'VMware vSphere', nutanix: 'Nutanix AHV',
+  xcpng: 'XCP-ng', hyperv: 'Hyper-V', workstation: 'VMware Workstation',
+};
+const CONN_DEFAULT_PORTS = {proxmox: 8006, vsphere: 443, nutanix: 9440, xcpng: 443, hyperv: 5985};
+
+function connectionsPage() {
+  return {
+    connections: [], agents: [], kinds: [],
+    loading: true, busy: '',
+    toast: '', toastType: 'success',
+    showForm: false, saving: false, formError: '', editingId: '',
+    form: {},
+
+    async init() {
+      requireAuth();
+      await this.refresh();
+      this.openFromQuery();
+    },
+
+    // ?add=1&kind=…&host=…&port=…&name=… — where a discovery finding on a job page
+    // sends the operator. Same guard discipline as the databases page: an
+    // unrecognised kind is IGNORED rather than assigned, so a stray query parameter
+    // cannot leave the dropdown on a value the API would refuse.
+    openFromQuery() {
+      const q = new URLSearchParams(window.location.search);
+      if (q.get('add') !== '1') return;
+      this.openAdd();
+      const kind = (q.get('kind') || '').toLowerCase();
+      if (this.kinds.includes(kind)) this.form.kind = kind;
+      if (q.get('host')) this.form.host = q.get('host');
+      const port = parseInt(q.get('port'), 10);
+      if (port > 0 && port < 65536) this.form.port = port;
+      if (q.get('name')) this.form.name = q.get('name');
+    },
+
+    kindLabel(k) { return CONN_KIND_LABELS[k] || k; },
+    defaultPort(k) { return CONN_DEFAULT_PORTS[k] || ''; },
+    agentName(id) {
+      const a = this.agents.find(x => x.id === id);
+      return a ? a.name : (id || '').slice(0, 8);
+    },
+    flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => this.toast = '', 4500); },
+
+    async refresh() {
+      try {
+        const data = await API.get('/api/connections');
+        this.connections = data.connections || [];
+        this.agents = data.agents || [];
+        this.kinds = data.kinds || [];
+      } catch (e) {
+        this.flash(e.message || 'Failed to load connections.', 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    _blank() {
+      return {kind: this.kinds[0] || 'proxmox', name: '', host: '', port: null,
+              username: '', secret: '', verify_ssl: false, site: '', is_default: false,
+              viaAgent: false, agent_id: '', agent_connection_name: '',
+              token_id: '', datacenter: '', transport: 'ntlm', use_ssl: false};
+    },
+
+    openAdd() {
+      this.form = this._blank();
+      this.editingId = '';
+      this.formError = '';
+      this.showForm = true;
+    },
+
+    openEdit(c) {
+      const o = c.options || {};
+      this.form = {kind: c.kind, name: c.name, host: c.host, port: c.port,
+                   username: c.username, secret: '', verify_ssl: c.verify_ssl,
+                   site: c.site, is_default: c.is_default, viaAgent: c.via_agent,
+                   agent_id: c.agent_id || '', agent_connection_name: c.agent_connection_name || '',
+                   token_id: o.token_id || '', datacenter: o.datacenter || '',
+                   transport: o.transport || 'ntlm', use_ssl: !!o.use_ssl};
+      this.editingId = c.id;
+      this.formError = '';
+      this.showForm = true;
+    },
+
+    formValid() {
+      if (!this.form.name) return false;
+      if (this.form.viaAgent) return !!(this.form.agent_id && this.form.agent_connection_name);
+      return !!this.form.host;
+    },
+
+    _options() {
+      const o = {};
+      if (this.form.kind === 'proxmox' && this.form.token_id) o.token_id = this.form.token_id;
+      if (this.form.kind === 'vsphere' && this.form.datacenter) o.datacenter = this.form.datacenter;
+      if (this.form.kind === 'hyperv') {
+        o.transport = this.form.transport;
+        if (this.form.use_ssl) o.use_ssl = true;
+      }
+      return o;
+    },
+
+    async submitForm() {
+      this.saving = true;
+      this.formError = '';
+      try {
+        const body = {
+          kind: this.form.kind, name: this.form.name.trim(),
+          site: this.form.site, options: this._options(),
+        };
+        if (this.form.viaAgent) {
+          body.agent_id = this.form.agent_id;
+          body.agent_connection_name = this.form.agent_connection_name.trim();
+        } else {
+          body.host = (this.form.host || '').trim();
+          body.port = this.form.port || null;
+          body.username = this.form.username;
+          body.verify_ssl = !!this.form.verify_ssl;
+          // Only sent when non-empty: on an edit, blank means "keep the stored one".
+          if (this.form.secret) body.secret = this.form.secret;
+        }
+        if (this.editingId) {
+          await API.patch('/api/connections/' + this.editingId, body);
+          if (this.form.is_default) await API.post('/api/connections/' + this.editingId + '/default', {});
+        } else {
+          body.is_default = !!this.form.is_default;
+          await API.post('/api/connections', body);
+        }
+        this.showForm = false;
+        await this.refresh();
+        this.flash('Connection saved.');
+      } catch (e) {
+        this.formError = e.message || 'Save failed.';
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async testConn(c) {
+      this.busy = c.id;
+      try {
+        const r = await API.post('/api/connections/' + c.id + '/test', {});
+        if (r.ok === true) this.flash(`${c.name} responded.`);
+        else if (r.ok === null) this.flash(r.detail, 'success');
+        else this.flash(`${c.name}: ${r.error}`, 'error');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Test failed.', 'error');
+      } finally {
+        this.busy = '';
+      }
+    },
+
+    async makeDefault(c) {
+      try {
+        await API.post('/api/connections/' + c.id + '/default', {});
+        await this.refresh();
+        this.flash(`${c.name} is now the default ${this.kindLabel(c.kind)} connection.`);
+      } catch (e) { this.flash(e.message, 'error'); }
+    },
+
+    async removeConn(c) {
+      if (!confirm(`Delete the ${this.kindLabel(c.kind)} connection "${c.name}"? Anything still pointing at it will fall back to the default.`)) return;
+      try {
+        await API.del('/api/connections/' + c.id);
+        await this.refresh();
+        this.flash('Connection deleted.');
+      } catch (e) { this.flash(e.message, 'error'); }
+    },
+  };
+}
+</script>
+{% endblock %}

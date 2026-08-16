@@ -37,6 +37,7 @@ _REQUIRED_FIELDS = {
     "s3":         ["storage_s3_bucket"],
     "azure_blob": ["storage_azure_account"],
     "gcs":        ["storage_gcs_bucket"],
+    "oci_object_storage": ["storage_oci_bucket"],
     "local":      ["storage_local_path"],
 }
 
@@ -45,6 +46,7 @@ _BACKEND_KEYS = {
     "s3":         ["storage_s3_bucket",       "storage_s3_region",       "storage_s3_prefix"],
     "azure_blob": ["storage_azure_account",   "storage_azure_container", "storage_azure_prefix"],
     "gcs":        ["storage_gcs_bucket",      "storage_gcs_prefix"],
+    "oci_object_storage": ["storage_oci_bucket", "storage_oci_namespace", "storage_oci_prefix"],
     "local":      ["storage_local_path",      "storage_local_username",  "storage_local_password",
                    "storage_local_domain"],
 }
@@ -78,6 +80,7 @@ async def list_backends(current_user: User = Depends(get_current_user)):
         "s3":         "AWS S3",
         "azure_blob": "Azure Blob Storage",
         "gcs":        "Google Cloud Storage",
+        "oci_object_storage": "OCI Object Storage",
         "local":      "Local Filesystem / UNC",
     }
     return {
@@ -91,8 +94,13 @@ async def list_backends(current_user: User = Depends(get_current_user)):
                 # Local-runner-only backends (UNC) refuse to activate when a
                 # cloud runner is selected; surface that to the UI so the
                 # radio can disable with a useful tooltip.
-                "selectable":    b not in _LOCAL_RUNNER_ONLY_BACKENDS or runner == "local",
+                "selectable":    (b not in _LOCAL_RUNNER_ONLY_BACKENDS or runner == "local")
+                                 and b not in storage_service.ACTIVE_BACKEND_EXCLUSIONS,
                 "runner_locked": b in _LOCAL_RUNNER_ONLY_BACKENDS,
+                # Hub-capable but not activatable (OCI: no Terraform state backend).
+                # The UI disables the "active" radio and shows this as the reason.
+                "hub_only":      b in storage_service.ACTIVE_BACKEND_EXCLUSIONS,
+                "hub_only_reason": storage_service.ACTIVE_BACKEND_EXCLUSIONS.get(b, ""),
             }
             for b in BACKENDS
         ],
@@ -172,6 +180,9 @@ class StorageConfigPatch(BaseModel):
     storage_azure_prefix:     str | None = None
     storage_gcs_bucket:     str | None = None
     storage_gcs_prefix:     str | None = None
+    storage_oci_bucket:     str | None = None
+    storage_oci_namespace:  str | None = None
+    storage_oci_prefix:     str | None = None
     storage_local_path:     str | None = None
     storage_local_username: str | None = None
     storage_local_password: str | None = None
@@ -240,6 +251,16 @@ async def patch_config(
                 status_code=400,
                 detail=f"Invalid backend '{chosen}'. Valid: {', '.join(BACKENDS)}.",
             )
+        # Some backends can hold the image hub but must never be the ACTIVE
+        # backend — the active selection also decides where Terraform state
+        # lives, and services/terraform.py silently falls through to local for
+        # a backend it has no state mapping for. Reject explicitly rather than
+        # let deployment state land on ephemeral container storage.
+        if chosen in storage_service.ACTIVE_BACKEND_EXCLUSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=storage_service.ACTIVE_BACKEND_EXCLUSIONS[chosen],
+            )
         # Verify the chosen backend will be configured AFTER this patch lands.
         if chosen:
             required = _REQUIRED_FIELDS[chosen]
@@ -284,7 +305,8 @@ async def patch_config(
                 status_code=400,
                 detail=(
                     "Local/SMB backend can't host the image-registry hub — promote "
-                    "runners need a cloud-native URL. Pick s3, azure_blob, or gcs."
+                    "runners need a cloud-native URL. Pick s3, azure_blob, gcs, or "
+                    "oci_object_storage."
                 ),
             )
         if chosen_hub:

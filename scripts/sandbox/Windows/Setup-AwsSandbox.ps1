@@ -182,6 +182,79 @@ if ($dbgExists -and $dbgExists -ne 'None') {
 }
 Set-StateValue aws db_subnet_group_name $DbSubnetGroupName
 
+# ── 4c. RDS parameter group with rds.force_ssl=0 ──────────────────────────────
+# Dashboard-managed DBs are reached ONLY through a BeyondTrust PRA *protocol*
+# tunnel, which proxies the cleartext PostgreSQL wire protocol (for credential
+# injection + session recording) — it has no backend-TLS option. RDS PG15+
+# defaults to rds.force_ssl=1, which rejects the tunnel's plaintext
+# jumpoint→RDS connection. We pre-create a group with force_ssl off here (the
+# scoped dashboard IAM user can't create parameter groups) and hand its name to
+# the dashboard via aws_db_parameter_group_name; the db_postgres module
+# references it. Safe posture: the instance is private-only, only the jumpoint
+# SG can reach it, and the client→jumpoint hop is PRA-encrypted.
+Write-Section 'RDS parameter group (force_ssl off, for the PRA tunnel)'
+$DbParamGroupName = 'clouddb-nossl-pg16'
+& aws rds describe-db-parameter-groups --region $Region --db-parameter-group-name $DbParamGroupName *> $null
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Reusing DB parameter group $DbParamGroupName"
+} else {
+    aws rds create-db-parameter-group --region $Region `
+        --db-parameter-group-name $DbParamGroupName `
+        --db-parameter-group-family postgres16 `
+        --description 'Dashboard managed DBs: force_ssl off (reached via PRA protocol tunnel)' `
+        --tags "Key=Name,Value=$DbParamGroupName" "Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)" | Out-Null
+    Write-Ok "Created DB parameter group $DbParamGroupName"
+}
+# force_ssl is a dynamic parameter — applies without a reboot.
+aws rds modify-db-parameter-group --region $Region `
+    --db-parameter-group-name $DbParamGroupName `
+    --parameters 'ParameterName=rds.force_ssl,ParameterValue=0,ApplyMethod=immediate' | Out-Null
+Write-Ok "Set rds.force_ssl=0 on $DbParamGroupName"
+Set-StateValue aws db_parameter_group_name $DbParamGroupName
+
+# ── 4d. RDS MySQL parameter group with require_secure_transport=0 ─────────────
+# MySQL's cleartext knob for the PRA tunnel — the analog of rds.force_ssl=0,
+# which doesn't exist for MySQL. A mysql8.4-family group with
+# require_secure_transport=0 lets the tunnel's plaintext jumpoint→RDS connection
+# through. The db_mysql module references it via aws_db_mysql_parameter_group_name.
+# Engine is MySQL 8.4 so the master user defaults to caching_sha2_password, which
+# the BeyondTrust PRA MySQL tunnel requires — 8.0's mysql_native_password is
+# rejected and RDS won't let default_authentication_plugin be changed on 8.0.
+Write-Section 'RDS MySQL parameter group (require_secure_transport off, for the PRA tunnel)'
+$DbMysqlParamGroupName = 'clouddb-nossl-mysql84'
+& aws rds describe-db-parameter-groups --region $Region --db-parameter-group-name $DbMysqlParamGroupName *> $null
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Reusing DB parameter group $DbMysqlParamGroupName"
+} else {
+    aws rds create-db-parameter-group --region $Region `
+        --db-parameter-group-name $DbMysqlParamGroupName `
+        --db-parameter-group-family mysql8.4 `
+        --description 'Dashboard managed DBs: require_secure_transport off (reached via PRA protocol tunnel)' `
+        --tags "Key=Name,Value=$DbMysqlParamGroupName" "Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)" | Out-Null
+    Write-Ok "Created DB parameter group $DbMysqlParamGroupName"
+}
+# require_secure_transport is a dynamic parameter — applies without a reboot.
+aws rds modify-db-parameter-group --region $Region `
+    --db-parameter-group-name $DbMysqlParamGroupName `
+    --parameters 'ParameterName=require_secure_transport,ParameterValue=0,ApplyMethod=immediate' | Out-Null
+Write-Ok "Set require_secure_transport=0 on $DbMysqlParamGroupName"
+Set-StateValue aws db_mysql_parameter_group_name $DbMysqlParamGroupName
+
+# RDS also needs its service-linked role before the FIRST CreateDBInstance in
+# an account. RDS normally auto-creates it, but that requires
+# iam:CreateServiceLinkedRole — which the scoped dashboard user (7c) doesn't
+# get. Pre-create it here with the operator's privileged login; otherwise the
+# first provision fails with "Verify that you have permission to create
+# service linked role".
+$slrExists = (aws iam get-role --role-name AWSServiceRoleForRDS `
+    --query 'Role.RoleName' --output text 2>$null)
+if ($slrExists -and $slrExists -ne 'None') {
+    Write-Ok 'Reusing RDS service-linked role AWSServiceRoleForRDS'
+} else {
+    aws iam create-service-linked-role --aws-service-name rds.amazonaws.com | Out-Null
+    Write-Ok 'Created RDS service-linked role AWSServiceRoleForRDS'
+}
+
 # ── 5. Security groups ────────────────────────────────────────────────────────
 Write-Section 'Security groups'
 function _MakeSG {
@@ -213,6 +286,19 @@ $ingressJson = "[{`"IpProtocol`":`"tcp`",`"FromPort`":22,`"ToPort`":22,`"UserIdG
 aws ec2 authorize-security-group-ingress --region $Region --group-id $VmSg `
     --ip-permissions $ingressJson 2>$null | Out-Null
 
+# DB SG: attached to dashboard-managed RDS instances (the /databases feature).
+# The PRA protocol tunnel terminates on the Jumpoint, which then dials the
+# private DB endpoint — so ingress is the three engine ports from the Jumpoint
+# SG only. Default egress wiped: RDS initiates no outbound connections.
+$DbSg = _MakeSG "$Name-db-sg" 'Managed databases — ingress DB ports from Jumpoint SG only, no egress'
+aws ec2 revoke-security-group-egress --region $Region --group-id $DbSg `
+    --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]' 2>$null | Out-Null
+foreach ($dbPort in 5432, 3306, 1433) {   # postgres, mysql, sqlserver
+    $dbIngressJson = "[{`"IpProtocol`":`"tcp`",`"FromPort`":$dbPort,`"ToPort`":$dbPort,`"UserIdGroupPairs`":[{`"GroupId`":`"$JumpointSg`"}]}]"
+    aws ec2 authorize-security-group-ingress --region $Region --group-id $DbSg `
+        --ip-permissions $dbIngressJson 2>$null | Out-Null
+}
+
 # NAT SG for the on-demand shared NAT instance (ingress all from VPC, egress all).
 $NatSg = _MakeSG "$Name-nat-sg" 'On-demand NAT instance — ingress from VPC, egress all'
 aws ec2 authorize-security-group-ingress --region $Region --group-id $NatSg `
@@ -220,43 +306,21 @@ aws ec2 authorize-security-group-ingress --region $Region --group-id $NatSg `
 
 Write-Ok "Jumpoint SG $JumpointSg (default egress 0.0.0.0/0)"
 Write-Ok "VM SG       $VmSg (egress: VPC + internet 80/443/53; ingress 22/tcp from Jumpoint SG)"
+Write-Ok "DB SG       $DbSg (ingress 5432/3306/1433 from Jumpoint SG; no egress)"
 Write-Ok "NAT SG      $NatSg (ingress all from VPC; egress all — for the on-demand NAT instance)"
 Set-StateValue aws jumpoint_sg $JumpointSg
 Set-StateValue aws vm_sg       $VmSg
+Set-StateValue aws db_sg       $DbSg
 Set-StateValue aws nat_sg      $NatSg
 
-# ── 5b. SSM interface VPC endpoints (private SSM path for onboarded VMs) ───────
-# Twin of setup-aws.sh: the VM SG egresses to the VPC only, so an onboarded VM
-# reaches the SSM control plane only through interface endpoints. Create the three
-# the agent needs (ssm, ssmmessages, ec2messages) with private DNS — no NAT/public
-# IP needed. Set SANDBOX_SSM_ENDPOINTS=0 to skip (small hourly cost per endpoint).
-if ($env:SANDBOX_SSM_ENDPOINTS -ne '0') {
-    Write-Section 'SSM VPC endpoints'
-    $SsmVpceSg = _MakeSG "$Name-ssm-vpce-sg" 'SSM interface endpoints — HTTPS ingress from the VPC'
-    $vpceIngress = "[{`"IpProtocol`":`"tcp`",`"FromPort`":443,`"ToPort`":443,`"IpRanges`":[{`"CidrIp`":`"10.99.0.0/16`"}]}]"
-    aws ec2 authorize-security-group-ingress --region $Region --group-id $SsmVpceSg `
-        --ip-permissions $vpceIngress 2>$null | Out-Null
-    foreach ($svc in @('ssm', 'ssmmessages', 'ec2messages')) {
-        $svcName = "com.amazonaws.$Region.$svc"
-        $existing = (aws ec2 describe-vpc-endpoints --region $Region `
-            --filters "Name=vpc-id,Values=$VpcId" "Name=service-name,Values=$svcName" `
-            --query 'VpcEndpoints[0].VpcEndpointId' --output text 2>$null)
-        if ($existing -and $existing -ne 'None') {
-            Write-Ok "Reusing $svc endpoint $existing"
-            continue
-        }
-        $epid = (aws ec2 create-vpc-endpoint --region $Region `
-            --vpc-id $VpcId --vpc-endpoint-type Interface --service-name $svcName `
-            --subnet-ids $PrivateSubnetId --security-group-ids $SsmVpceSg `
-            --private-dns-enabled `
-            --tag-specifications (_TagSpec 'vpc-endpoint' "$Name-$svc") `
-            --query 'VpcEndpoint.VpcEndpointId' --output text).Trim()
-        Write-Ok "Created $svc endpoint $epid"
-    }
-    Set-StateValue aws ssm_vpce_sg $SsmVpceSg
-} else {
-    Write-Ok 'SSM VPC endpoints skipped (SANDBOX_SSM_ENDPOINTS=0)'
-}
+# ── 5b. SSM interface VPC endpoints — created ON-DEMAND by the dashboard ───────
+# Twin of setup-aws.sh: the three SSM interface endpoints (ssm/ssmmessages/
+# ec2messages) a private-subnet target needs for Password Safe SSM onboarding used
+# to be stood up here, but each bills ~$7/mo even when idle (~$22/mo for all three).
+# The dashboard now creates them on the first EC2 deploy / AWS cloud-DB provision
+# and deletes them with the last one, so an idle sandbox costs ~$0. Enabled via the
+# aws_ssm_endpoints_enabled config emitted below — see
+# web_dashboard/services/ssm_endpoint_service.py.
 
 # ── 6. SSH keypair JSON in Secrets Manager ────────────────────────────────────
 Write-Section 'SSH keypair (Secrets Manager)'
@@ -299,12 +363,77 @@ if ($LASTEXITCODE -eq 0) {
     aws iam create-role --role-name $RoleName `
         --assume-role-policy-document $assumePolicy `
         --tags "Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)" | Out-Null
-    aws iam attach-role-policy --role-name $RoleName `
-        --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy | Out-Null
+    # A just-created IAM role can briefly 404 ("NoSuchEntity") on attach — retry
+    # until it has propagated. Once this succeeds the role is consistent, so the
+    # unconditional get-role below it needs no retry of its own.
+    Invoke-Retry -What "attach AmazonECSTaskExecutionRolePolicy to $RoleName" -Script {
+        aws iam attach-role-policy --role-name $RoleName `
+            --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy 2>&1
+    } | Out-Null
     Write-Ok "Created IAM role $RoleName"
 }
 $RoleArn = (aws iam get-role --role-name $RoleName --query 'Role.Arn' --output text).Trim()
 Set-StateValue aws ecs_role_arn $RoleArn
+
+# ── 7a. ECS instance role for the on-demand Jumpoint host ──────────────────────
+# The tunnel-capable Jumpoint runs on an EC2 ECS container instance (Fargate
+# forbids the NET_ADMIN/NET_RAW/IPC_LOCK caps + /dev/net/tun it needs). The
+# DASHBOARD creates and terminates that host on demand (when an EC2 instance or
+# database is provisioned / the last one is removed), so we DON'T stand up an
+# instance here — we only pre-create the role + instance profile the dashboard
+# attaches to it (the dashboard's scoped user can't create IAM roles itself).
+Write-Section 'ECS instance role for the Jumpoint host'
+
+$EcsInstanceRole = 'ecsInstanceRole'
+& aws iam get-role --role-name $EcsInstanceRole *> $null
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Reusing IAM role $EcsInstanceRole"
+} else {
+    $ec2AssumePolicy = '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+    aws iam create-role --role-name $EcsInstanceRole `
+        --assume-role-policy-document $ec2AssumePolicy `
+        --tags "Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)" | Out-Null
+    Write-Ok "Created IAM role $EcsInstanceRole"
+}
+# Attach OUTSIDE the create branch. Attaching only on create left a PRE-EXISTING
+# ecsInstanceRole without the ECS grants forever — and that role is easy to already
+# have, since `ecsInstanceRole` is AWS's own default name (an ECS console wizard, an
+# older run of this script, or a run whose attach failed all produce one). The agent
+# on every Jumpoint host then fails RegisterContainerInstance with AccessDenied and
+# *exits* — it treats the denial as terminal — so the cluster sits at zero container
+# instances and every gateway RunTask fails with "No Container Instances were found in
+# your cluster". That is silent: only gateway_deploy treats a missing Gateway as fatal,
+# so ordinary EC2/database/K8s deploys just record ecs_error and report success with no
+# tunnel. Attaching a managed policy is idempotent, so re-running costs nothing; the
+# retry absorbs IAM propagation right after create-role. Not warn-on-failure like the
+# SSM attach below: without this grant no Gateway can ever come up.
+Invoke-Retry -What "attach AmazonEC2ContainerServiceforEC2Role to $EcsInstanceRole" -Script {
+    aws iam attach-role-policy --role-name $EcsInstanceRole `
+        --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role 2>&1
+} | Out-Null
+# The Jumpoint host doubles as the SSM Run Command target for the optional
+# cloud-DB Password Safe onboarding (the dashboard runs the DB client on it via
+# SSM to create the managed DB user). Attach the SSM managed-instance core policy
+# so the host's SSM agent registers it as a managed instance (idempotent).
+try {
+    Invoke-Retry -What "attach AmazonSSMManagedInstanceCore to $EcsInstanceRole" -Script {
+        aws iam attach-role-policy --role-name $EcsInstanceRole `
+            --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore 2>&1
+    } | Out-Null
+} catch {
+    Write-Warn "could not attach AmazonSSMManagedInstanceCore to $EcsInstanceRole (cloud-DB PS onboarding needs it)"
+}
+# Instance profile wraps the role for EC2 attachment (idempotent).
+& aws iam get-instance-profile --instance-profile-name $EcsInstanceRole *> $null
+if ($LASTEXITCODE -ne 0) {
+    aws iam create-instance-profile --instance-profile-name $EcsInstanceRole `
+        --tags "Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)" | Out-Null
+    aws iam add-role-to-instance-profile --instance-profile-name $EcsInstanceRole `
+        --role-name $EcsInstanceRole | Out-Null
+    Write-Ok "Created instance profile $EcsInstanceRole"
+} else {
+    Write-Ok "Reusing instance profile $EcsInstanceRole"
+}
 
 # ── 7b. Image-hub S3 bucket + promote-runner IAM ─────────────────────────────
 # Provisions the prerequisites the dashboard's automated cross-cloud image
@@ -789,7 +918,9 @@ $cfg = @(
     "aws_default_subnet_id=$PrivateSubnetId            # Deploy form's default subnet for new EC2 instances",
     "aws_default_security_group_id=$VmSg               # Deploy form's default SG (VM-tier, no internet egress)",
     "aws_db_subnet_group_name=$DbSubnetGroupName       # Managed-DB deploys: private RDS subnet group (2 AZs)",
-    "aws_db_security_group_id=$VmSg                     # Managed-DB deploys: reuse the VM-tier SG (no internet egress)",
+    "aws_db_parameter_group_name=$DbParamGroupName     # Managed-DB deploys: force_ssl=0 group (PRA protocol tunnel needs a cleartext backend)",
+    "aws_db_mysql_parameter_group_name=$DbMysqlParamGroupName    # Managed-DB MySQL deploys: require_secure_transport=0 group (PRA protocol tunnel needs a cleartext backend)",
+    "aws_db_security_group_id=$DbSg                     # Managed-DB deploys: DB-tier SG (engine ports from Jumpoint SG only)",
     "aws_vpc_id=$VpcId                                  # Sandbox VPC the EKS module peers its own VPC back to",
     "aws_vpc_cidr=10.99.0.0/16                          # Sandbox VPC CIDR (EKS peering route target)",
     "aws_private_route_table_id=$PrivateRtId            # Sandbox private RT — gets the EKS peering return route",
@@ -800,14 +931,19 @@ $cfg = @(
     "bt_ecs_task_family=bt-jumpoint",
     "bt_ecs_image=beyondtrust/sra-jumpoint                # or your ECR mirror",
     "bt_ecs_execution_role_arn=$RoleArn",
-    "bt_ecs_jumpoint_subnet_id=$PublicSubnetId         # Jumpoint task lands here (public, IGW-routed)",
-    "bt_ecs_jumpoint_security_group_id=$JumpointSg      # SG for the Jumpoint task",
+    "bt_ecs_launch_type=EC2                               # Jumpoint runs on EC2 capacity — Fargate cannot do protocol tunneling",
+    "bt_ecs_host_instance_profile=$EcsInstanceRole      # instance profile the dashboard attaches to the on-demand Jumpoint host",
+    "bt_ecs_jumpoint_subnet_id=$PublicSubnetId         # subnet the dashboard launches the Jumpoint host into (public, IGW-routed)",
+    "bt_ecs_jumpoint_security_group_id=$JumpointSg      # SG for the Jumpoint host",
     "",
     "# On-demand shared NAT instance — created on the first EC2 deploy, removed with the last VM (private-subnet VM outbound internet, no standing NAT/EIP):",
     "aws_nat_instance_enabled=true",
     "aws_nat_security_group_id=$NatSg                    # SG for the on-demand NAT instance",
     "aws_nat_instance_type=t4g.nano                       # NAT size (arm64); subnet defaults to the public/IGW subnet, AMI to newest AL2023",
     "aws_nat_instance_name=$Name-nat                      # EC2 Name tag (find-or-create key)",
+    "",
+    "# On-demand SSM interface endpoints — created on the first EC2 deploy / AWS cloud-DB provision, removed with the last one (private-subnet SSM reach for Password Safe onboarding; ~`$7/mo each while up, `$0 idle):",
+    "aws_ssm_endpoints_enabled=true",
     "",
     "# Image-registry hub + automated cross-cloud promote:",
     "storage_s3_bucket=$StorageBucket                                       # Image hub + promote staging",

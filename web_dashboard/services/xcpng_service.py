@@ -22,14 +22,10 @@ class XcpNgError(Exception):
     pass
 
 
-def _cfg(key: str) -> str:
-    from . import config_service
-    return config_service.get(key) or ""
-
-
-def _cfg_bool(key: str, default: bool = False) -> bool:
-    from . import config_service
-    return config_service.get_bool(key, default)
+# No _cfg here any more. This module used to read `xcpng_host` and friends directly,
+# which meant there could only ever be ONE XCP-ng pool. It now takes a resolved
+# `Connection` (services/hypervisor_connection_service) as its first argument, and the
+# router is the only layer that chooses which one.
 
 
 # ── Transport with configurable timeout ───────────────────────────────────────
@@ -47,17 +43,21 @@ class _TimeoutTransport(xmlrpc.client.SafeTransport):
 
 # ── Session management ────────────────────────────────────────────────────────
 
-def _connect():
-    """Open an XAPI session. Caller must call server.session.logout(session) when done."""
-    host = _cfg("xcpng_host")
-    if not host:
-        raise XcpNgError("XCPNG_HOST is not configured")
+def _connect(conn):
+    """Open an XAPI session for ONE connection.
 
-    username   = _cfg("xcpng_username") or "root"
-    password   = _cfg("xcpng_password")
+    Caller must call server.session.logout(session) when done.
+    """
+    host = conn.host
+    if not host:
+        raise XcpNgError(f"Connection {conn.name!r} has no host configured")
+
+    username   = conn.username or "root"
+    password   = conn.secret
     if not password:
-        raise XcpNgError("XCPNG_PASSWORD is not configured")
-    verify_ssl = _cfg_bool("xcpng_verify_ssl", False)
+        raise XcpNgError(
+            f"Connection {conn.name!r} has no password. Edit it on the Connections page.")
+    verify_ssl = conn.verify_ssl
 
     if verify_ssl:
         ctx = ssl.create_default_context()
@@ -93,8 +93,8 @@ def _call(server, session: str, method: str, *args):
 
 # ── List VMs ──────────────────────────────────────────────────────────────────
 
-def _list_vms_sync() -> list[dict]:
-    server, session = _connect()
+def _list_vms_sync(conn) -> list[dict]:
+    server, session = _connect(conn)
     try:
         # Batch fetch everything in three calls — no per-VM round trips
         all_vms   = _call(server, session, "VM.get_all_records")
@@ -145,8 +145,8 @@ def _list_vms_sync() -> list[dict]:
 
 # ── Power operations ──────────────────────────────────────────────────────────
 
-def _power_op_sync(uuid: str, name: str, op: str) -> dict:
-    server, session = _connect()
+def _power_op_sync(conn, uuid: str, name: str, op: str) -> dict:
+    server, session = _connect(conn)
     try:
         vm_ref = _call(server, session, "VM.get_by_uuid", uuid)
         logger.info("XCP-ng: %s on %s (%s)", op, name or uuid, uuid)
@@ -188,22 +188,22 @@ _VALID_OPS = frozenset(
 
 # ── Async public API ──────────────────────────────────────────────────────────
 
-async def list_vms() -> list[dict]:
+async def list_vms(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_vms_sync)
+        return await asyncio.to_thread(_list_vms_sync, conn)
     except XcpNgError:
         raise
     except Exception as e:
         raise XcpNgError(f"Failed to list VMs: {e}") from e
 
 
-async def power_op(uuid: str, name: str, op: str) -> dict:
+async def power_op(conn, uuid: str, name: str, op: str) -> dict:
     if op not in _VALID_OPS:
         raise XcpNgError(
             f"Invalid operation '{op}'. Must be one of: {', '.join(sorted(_VALID_OPS))}"
         )
     try:
-        return await asyncio.to_thread(_power_op_sync, uuid, name, op)
+        return await asyncio.to_thread(_power_op_sync, conn, uuid, name, op)
     except XcpNgError:
         raise
     except Exception as e:

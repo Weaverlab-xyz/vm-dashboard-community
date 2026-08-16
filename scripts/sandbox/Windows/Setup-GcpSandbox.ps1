@@ -16,7 +16,79 @@ $ProjectId = if ($env:GCP_PROJECT_ID) { $env:GCP_PROJECT_ID } else {
     (gcloud config get-value project 2>$null).Trim()
 }
 $Region    = if ($env:GCP_REGION) { $env:GCP_REGION } else { 'us-central1' }
-$Zone      = if ($env:GCP_ZONE)   { $env:GCP_ZONE }   else { "$Region-a" }
+$Zone      = $env:GCP_ZONE   # resolved after login — not every region has an "-a" zone
+
+# Per-region subnet CIDR base. Subnets are ${CidrPrefix}.1/2/3.0/24. The VPC is
+# shared across regions, so when ADDING a second region set a DISTINCT prefix or
+# GCP rejects the overlapping range. Avoid the GKE ranges (10.98/10.100/10.101),
+# the Cloud SQL PSA range, and other regions' prefixes. Multi-region example:
+#   $env:GCP_REGION='us-east1'; $env:GCP_CIDR_PREFIX='10.102'
+# (the supernet auto-widens — see below; the zone defaults to the region's first
+# available zone — us-east1 has no "-a" — override with $env:GCP_ZONE)
+$CidrPrefix = if ($env:GCP_CIDR_PREFIX) { $env:GCP_CIDR_PREFIX } else { '10.99' }
+# Supernet the two VPC-wide firewall rules span (allow-internal / allow-vm-egress-vpc).
+# Left blank (the default) it is auto-widened by Get-SandboxSupernet (called in the
+# firewall section) to the minimal block enclosing every sandbox subnet across all
+# regions — so adding a region never needs a hand-computed supernet. Set it only to
+# pin a specific block (e.g. '10.96.0.0/12' for 10.96-10.111 headroom).
+$Supernet   = if ($env:GCP_SANDBOX_SUPERNET) { $env:GCP_SANDBOX_SUPERNET } else { '' }
+
+# ── CIDR helpers: auto-widen the sandbox supernet ────────────────────────────
+# Functional twin of setup-gcp.sh's _compute_sandbox_supernet. Derive the minimal
+# CIDR block enclosing every sandbox subnet (all regions, this run included) plus
+# the current allow-internal range (so a re-run never NARROWS a wider pinned block).
+# PSA peering ranges aren't subnets → correctly excluded (VMs must not reach the DB).
+function ConvertTo-Ip32([string]$Ip) {
+    $b = ([ipaddress]$Ip.Trim()).GetAddressBytes()
+    return ([long]$b[0] -shl 24) -bor ([long]$b[1] -shl 16) -bor ([long]$b[2] -shl 8) -bor [long]$b[3]
+}
+function ConvertFrom-Ip32([long]$N) {
+    return '{0}.{1}.{2}.{3}' -f (($N -shr 24) -band 255), (($N -shr 16) -band 255), (($N -shr 8) -band 255), ($N -band 255)
+}
+function Get-MinEnclosingCidr([string[]]$Cidrs) {
+    [long]$lo = 4294967295L
+    [long]$hi = 0L
+    foreach ($c in $Cidrs) {
+        if ([string]::IsNullOrWhiteSpace($c)) { continue }
+        $parts = $c.Split('/')
+        [long]$start = ConvertTo-Ip32 $parts[0]
+        $plen = if ($parts.Count -gt 1) { [int]$parts[1] } else { 32 }
+        [long]$mask = if ($plen -eq 0) { 0L } else { (4294967295L -shl (32 - $plen)) -band 4294967295L }
+        $start = $start -band $mask
+        [long]$end = $start -bor ((-bnot $mask) -band 4294967295L)
+        if ($start -lt $lo) { $lo = $start }
+        if ($end   -gt $hi) { $hi = $end }
+    }
+    if ($hi -lt $lo) { return $null }
+    for ($p = 32; $p -ge 0; $p--) {
+        [long]$m = if ($p -eq 0) { 0L } else { (4294967295L -shl (32 - $p)) -band 4294967295L }
+        if (($lo -band $m) -eq ($hi -band $m)) {
+            return ('{0}/{1}' -f (ConvertFrom-Ip32 ($lo -band $m)), $p)
+        }
+    }
+    return '0.0.0.0/0'
+}
+function Get-SandboxSupernet {
+    $ranges = New-Object System.Collections.Generic.List[string]
+    # Current allow-internal source ranges (never narrow a wider pinned block).
+    $existing = & gcloud compute firewall-rules describe "$Name-allow-internal" `
+        --project $ProjectId --format='value(sourceRanges.list())' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $existing) {
+        foreach ($r in ("$existing" -split ',')) { if ($r.Trim()) { $ranges.Add($r.Trim()) } }
+    }
+    # Reduce each subnet to its enclosing /16 (covers primary /24 + k8s secondary ranges).
+    $subnets = & gcloud compute networks subnets list --network $Vpc `
+        --project $ProjectId --format='value(ipCidrRange)' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $subnets) {
+        foreach ($s in $subnets) {
+            $t = "$s".Trim(); if (-not $t) { continue }
+            $o = $t.Split('/')[0].Split('.')
+            $ranges.Add("$($o[0]).$($o[1]).0.0/16")
+        }
+    }
+    $ranges.Add("$CidrPrefix.0.0/16")   # belt-and-suspenders against listing lag
+    return Get-MinEnclosingCidr $ranges.ToArray()
+}
 
 if (-not $ProjectId -or $ProjectId -eq '(unset)') {
     Write-Die 'No GCP project set. Run: gcloud config set project YOUR-PROJECT  (or set $env:GCP_PROJECT_ID)'
@@ -25,10 +97,30 @@ if (-not $ProjectId -or $ProjectId -eq '(unset)') {
 Assert-LoggedIn 'gcloud' { gcloud auth print-access-token --quiet } `
     'Run: gcloud auth login && gcloud auth application-default login'
 
+# Not every region has an "-a" zone (us-east1 / europe-west1 only have b/c/d),
+# and an invalid zone emitted into gcp_region.<region>.zone surfaces later on
+# deploy as a misleading LOCATION_POLICY_VIOLATED 403. Default to the region's
+# first real zone, and validate an explicit GCP_ZONE against the same list.
+$RegionZones = @(gcloud compute zones list --project $ProjectId --filter="region:$Region" --format="value(name)" 2>$null | Where-Object { $_ })
+if (-not $Zone) {
+    if ($RegionZones.Count -gt 0) {
+        $Zone = $RegionZones[0]
+    } else {
+        $Zone = "$Region-a"
+        Write-Warn "Could not list zones for region $Region - assuming $Zone exists (set `$env:GCP_ZONE to override)"
+    }
+} elseif ($RegionZones.Count -gt 0 -and $RegionZones -notcontains $Zone) {
+    Write-Die "GCP_ZONE=$Zone is not a zone in region ${Region}. Valid zones: $($RegionZones -join ', ')"
+}
+
 Write-Section "GCP sandbox in project $ProjectId, region $Region ($Zone)"
 
-# GCP labels can't contain hyphens-as-keys — substitute underscore.
-$Labels = "$($Script:SandboxTagKey -replace '-','_')=$($Script:SandboxTagValue -replace '-','_')"
+# Hyphens are legal in both GCP label keys and values ([a-z]([-_a-z0-9]*)), so keep the
+# tag verbatim — this used to normalize hyphens to underscores, which bought nothing and
+# desynced the sandbox from the dashboard's own hyphenated labels (gcp_service.py).
+# cost_service still accepts the underscored forms: billing-export rows are immutable, so
+# historical managed_by=dashboard_sandbox rows keep showing up forever.
+$Labels = "$($Script:SandboxTagKey)=$($Script:SandboxTagValue)"
 
 $Vpc       = "$Name-vpc"
 $JpSubnet  = "$Name-jumpoint-subnet"
@@ -39,6 +131,8 @@ $Nat       = "$Name-nat"
 
 $NetTagJp  = 'bt-jumpoint'      # the dashboard's Jumpoint COS VM gets this tag
 $NetTagVm  = "$Name-vm"         # the dashboard auto-attaches this to user VMs
+$NetTagK8s = "$Name-k8s"        # co-located GKE nodes (drives allow-db-from-k8s;
+                                # the k8s->VM:22 ingress rule is CIDR-sourced)
 
 # ── 1. Enable required APIs ───────────────────────────────────────────────────
 Write-Section 'Enable APIs'
@@ -79,8 +173,8 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     gcloud compute networks subnets create $JpSubnet `
         --project $ProjectId --network $Vpc --region $Region `
-        --range 10.99.1.0/24 --quiet | Out-Null
-    Write-Ok "Created jumpoint subnet $JpSubnet (10.99.1.0/24)"
+        --range "${CidrPrefix}.1.0/24" --quiet | Out-Null
+    Write-Ok "Created jumpoint subnet $JpSubnet (${CidrPrefix}.1.0/24)"
 } else {
     Write-Ok "Reusing jumpoint subnet $JpSubnet"
 }
@@ -89,22 +183,33 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     gcloud compute networks subnets create $VmSubnet `
         --project $ProjectId --network $Vpc --region $Region `
-        --range 10.99.2.0/24 --quiet | Out-Null
-    Write-Ok "Created VM subnet $VmSubnet (10.99.2.0/24)"
+        --range "${CidrPrefix}.2.0/24" --quiet | Out-Null
+    Write-Ok "Created VM subnet $VmSubnet (${CidrPrefix}.2.0/24)"
 } else {
     Write-Ok "Reusing VM subnet $VmSubnet"
 }
 
 # Dedicated subnet for managed Kubernetes (GKE) — separate from the jumpoint and
-# VM subnets above.
+# VM subnets above. Gets Cloud NAT egress (below) so a CO-LOCATED GKE cluster can
+# pull images / reach the Entitle SaaS. gke-pods / gke-services are the VPC-native
+# pod & service secondary ranges (carved from the free ${CidrPrefix}.128.0/17 block).
 & gcloud compute networks subnets describe $K8sSubnet --project $ProjectId --region $Region *> $null
 if ($LASTEXITCODE -ne 0) {
     gcloud compute networks subnets create $K8sSubnet `
         --project $ProjectId --network $Vpc --region $Region `
-        --range 10.99.3.0/24 --quiet | Out-Null
-    Write-Ok "Created K8s subnet $K8sSubnet (10.99.3.0/24)"
+        --range "${CidrPrefix}.3.0/24" `
+        --secondary-range "gke-pods=${CidrPrefix}.128.0/18,gke-services=${CidrPrefix}.192.0/20" --quiet | Out-Null
+    Write-Ok "Created K8s subnet $K8sSubnet (${CidrPrefix}.3.0/24; pods ${CidrPrefix}.128.0/18, services ${CidrPrefix}.192.0/20)"
 } else {
-    Write-Ok "Reusing K8s subnet $K8sSubnet"
+    $k8sRanges = & gcloud compute networks subnets describe $K8sSubnet --project $ProjectId --region $Region --format 'value(secondaryIpRanges[].rangeName)' 2>$null
+    if ($k8sRanges -notmatch 'gke-pods') {
+        gcloud compute networks subnets update $K8sSubnet `
+            --project $ProjectId --region $Region `
+            --add-secondary-ranges "gke-pods=${CidrPrefix}.128.0/18,gke-services=${CidrPrefix}.192.0/20" --quiet 2>$null | Out-Null
+        Write-Ok "Added GKE secondary ranges to $K8sSubnet (pods ${CidrPrefix}.128.0/18, services ${CidrPrefix}.192.0/20)"
+    } else {
+        Write-Ok "Reusing K8s subnet $K8sSubnet (GKE secondary ranges present)"
+    }
 }
 
 Set-StateValue gcp vpc        $Vpc
@@ -112,8 +217,8 @@ Set-StateValue gcp jp_subnet  $JpSubnet
 Set-StateValue gcp vm_subnet  $VmSubnet
 Set-StateValue gcp k8s_subnet $K8sSubnet
 
-# ── 3. Cloud Router + Cloud NAT (only the jumpoint subnet) ───────────────────
-Write-Section 'Cloud Router + Cloud NAT (jumpoint subnet only)'
+# ── 3. Cloud Router + Cloud NAT (jumpoint + k8s subnets) ─────────────────────
+Write-Section 'Cloud Router + Cloud NAT (jumpoint + k8s subnets)'
 & gcloud compute routers describe $Router --project $ProjectId --region $Region *> $null
 if ($LASTEXITCODE -ne 0) {
     gcloud compute routers create $Router `
@@ -123,15 +228,21 @@ if ($LASTEXITCODE -ne 0) {
     Write-Ok "Reusing router $Router"
 }
 
+# jumpoint-subnet + k8s-subnet (node primary) get NAT egress; co-located GKE pods
+# egress via SNAT to the node IP (ip-masq). vm-subnet stays OFF NAT (isolation).
+$NatRanges = "$JpSubnet,$K8sSubnet"
 & gcloud compute routers nats describe $Nat --project $ProjectId --router $Router --router-region $Region *> $null
 if ($LASTEXITCODE -ne 0) {
     gcloud compute routers nats create $Nat `
         --project $ProjectId --router $Router --router-region $Region `
-        --nat-custom-subnet-ip-ranges $JpSubnet `
+        --nat-custom-subnet-ip-ranges $NatRanges `
         --auto-allocate-nat-external-ips --quiet | Out-Null
-    Write-Ok "Created NAT $Nat (NAT'd subnets: $JpSubnet only)"
+    Write-Ok "Created NAT $Nat (NAT'd subnets: jumpoint + k8s)"
 } else {
-    Write-Ok "Reusing NAT $Nat"
+    gcloud compute routers nats update $Nat `
+        --project $ProjectId --router $Router --router-region $Region `
+        --nat-custom-subnet-ip-ranges $NatRanges --quiet 2>$null | Out-Null
+    Write-Ok "Reusing NAT $Nat (ensured jumpoint + k8s ranges)"
 }
 Set-StateValue gcp router $Router
 Set-StateValue gcp nat    $Nat
@@ -139,15 +250,43 @@ Set-StateValue gcp nat    $Nat
 # ── 4. Firewall rules ────────────────────────────────────────────────────────
 Write-Section 'Firewall rules'
 
+# Resolve the sandbox supernet now the subnets exist (so it can enclose this region).
+# Blank $Supernet → auto-widen; otherwise honour the pinned block.
+if (-not $Supernet) {
+    $Supernet = Get-SandboxSupernet
+    Write-Ok "Sandbox supernet (auto-widened): $Supernet"
+} else {
+    Write-Ok "Sandbox supernet (pinned via GCP_SANDBOX_SUPERNET): $Supernet"
+}
+
 # Idempotent — gcloud returns non-zero if the rule already exists; swallow.
 gcloud compute firewall-rules create "$Name-allow-internal" `
     --project $ProjectId --network $Vpc --direction INGRESS --priority 65534 `
-    --allow all --source-ranges 10.99.0.0/16 --quiet 2>$null | Out-Null
+    --allow all --source-ranges $Supernet --quiet 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute firewall-rules update "$Name-allow-internal" `
+        --project $ProjectId --source-ranges $Supernet --quiet 2>$null | Out-Null
+}
 
 gcloud compute firewall-rules create "$Name-allow-ssh-from-jumpoint" `
     --project $ProjectId --network $Vpc --direction INGRESS --priority 1000 `
     --action ALLOW --rules tcp:22 `
     --source-tags $NetTagJp --target-tags $NetTagVm --quiet 2>$null | Out-Null
+
+# Parity for a CO-LOCATED GKE cluster (PR #370): let the Entitle agent (pods AND nodes)
+# SSH sandbox VMs on :22. Pod IPs aren't masqueraded to RFC1918 dests, so source by BOTH
+# the k8s node subnet and the GKE pod secondary range (pod IPs carry no tag).
+gcloud compute firewall-rules create "$Name-allow-ssh-from-k8s" `
+    --project $ProjectId --network $Vpc --direction INGRESS --priority 1000 `
+    --action ALLOW --rules tcp:22 `
+    --source-ranges "${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18" `
+    --target-tags $NetTagVm --quiet 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute firewall-rules update "$Name-allow-ssh-from-k8s" `
+        --project $ProjectId `
+        --source-ranges "${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18" --quiet 2>$null | Out-Null
+}
+Write-Ok "Firewall: allow-ssh-from-k8s (tcp:22 <- ${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18 -> $NetTagVm)"
 
 gcloud compute firewall-rules create "$Name-deny-vm-egress" `
     --project $ProjectId --network $Vpc --direction EGRESS --priority 1000 `
@@ -157,7 +296,11 @@ gcloud compute firewall-rules create "$Name-deny-vm-egress" `
 gcloud compute firewall-rules create "$Name-allow-vm-egress-vpc" `
     --project $ProjectId --network $Vpc --direction EGRESS --priority 999 `
     --action ALLOW --rules all `
-    --target-tags $NetTagVm --destination-ranges 10.99.0.0/16 --quiet 2>$null | Out-Null
+    --target-tags $NetTagVm --destination-ranges $Supernet --quiet 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute firewall-rules update "$Name-allow-vm-egress-vpc" `
+        --project $ProjectId --destination-ranges $Supernet --quiet 2>$null | Out-Null
+}
 
 Write-Ok 'Firewall rules: allow-internal, allow-ssh-from-jumpoint, deny-vm-egress, allow-vm-egress-vpc'
 
@@ -204,8 +347,15 @@ if ($PsaCidr -match '^\d') {
         --action ALLOW --rules tcp:5432,tcp:3306,tcp:1433 `
         --target-tags $NetTagJp --destination-ranges $PsaCidr --quiet 2>$null | Out-Null
     Write-Ok "Firewall: allow-db-from-jumpoint (tcp:5432,tcp:3306,tcp:1433 -> $PsaCidr)"
+    # Parity for a CO-LOCATED GKE cluster: the Entitle agent's nodes (tagged
+    # $NetTagK8s) reach Cloud SQL directly (pods SNAT to the node IP via ip-masq).
+    gcloud compute firewall-rules create "$Name-allow-db-from-k8s" `
+        --project $ProjectId --network $Vpc --direction EGRESS --priority 998 `
+        --action ALLOW --rules tcp:5432,tcp:3306,tcp:1433 `
+        --target-tags $NetTagK8s --destination-ranges $PsaCidr --quiet 2>$null | Out-Null
+    Write-Ok "Firewall: allow-db-from-k8s (tcp:5432,tcp:3306,tcp:1433 -> $PsaCidr)"
 } else {
-    Write-Ok 'PSA CIDR not resolvable yet — skipping explicit DB egress rule (jumpoint default egress still reaches the DB)'
+    Write-Ok 'PSA CIDR not resolvable yet — skipping explicit DB egress rules (default egress still reaches the DB)'
 }
 
 # ── 5. Service account ──────────────────────────────────────────────────────
@@ -234,6 +384,12 @@ if ($LASTEXITCODE -ne 0) {
 # at Enable-federation time otherwise); gkehub.admin lets it register the cluster to the
 # fleet; resourcemanager.projectIamAdmin lets it grant the workforce principalSet the
 # gkehub.gateway* roles (a project-level setIamPolicy).
+# iam.roleAdmin is the fine-grained Entitle JIT tier: GKE gates the `impersonate` verb
+# in Cloud IAM as well as RBAC, so "Impersonation access" creates/reuses a project CUSTOM
+# role holding only container.clusters.impersonate and binds the group's principalSet to
+# it (roles/container.admin would carry it too, but hands the group standing cluster
+# admin and defeats the point). Without this role the action fails with a 403 on
+# projects.roles.create — see gcp_service.ensure_impersonate_role.
 # bigquery.jobUser + bigquery.dataViewer power the Cloud Costs page: the dashboard
 # runs a query job (jobUser) against the Cloud Billing export table and reads its
 # rows (dataViewer). Both are granted at project scope — if your billing export
@@ -243,11 +399,12 @@ foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin',
                     'roles/cloudbuild.builds.editor','roles/container.admin','roles/logging.viewer',
                     'roles/serviceusage.serviceUsageAdmin','roles/gkehub.admin','roles/resourcemanager.projectIamAdmin',
+                    'roles/iam.roleAdmin',
                     'roles/bigquery.jobUser','roles/bigquery.dataViewer')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }
-Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, bigquery.jobUser, bigquery.dataViewer'
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, iam.roleAdmin, bigquery.jobUser, bigquery.dataViewer'
 
 $SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
 if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {
@@ -363,6 +520,14 @@ $cfg = @(
     '# Managed databases (Cloud SQL private IP via the PRA tunnel):',
     "gcp_db_network=projects/$ProjectId/global/networks/$Vpc   # Cloud SQL private_network (private-services-access peered on it)",
     '',
+    '# CO-LOCATE GKE in the sandbox VPC (in-cluster Entitle agent reaches VMs AND',
+    '# Cloud SQL — peering is non-transitive and cannot reach the PSA range). Set',
+    '# gcp_k8s_subnetwork to enable co-located mode; blank = self-contained + peering.',
+    "gcp_k8s_subnetwork=projects/$ProjectId/regions/$Region/subnetworks/$K8sSubnet   # GKE nodes land here (Cloud NAT egress)",
+    'gcp_k8s_pods_range_name=gke-pods                          # VPC-native pods secondary range on the k8s subnet',
+    'gcp_k8s_services_range_name=gke-services                  # VPC-native services secondary range on the k8s subnet',
+    "gcp_k8s_node_tag=$NetTagK8s                              # Network tag on co-located GKE nodes (drives allow-db-from-k8s)",
+    '',
     '# Image-registry hub + automated cross-cloud promote:',
     "storage_gcs_bucket=$StorageBucket                       # Image hub + promote staging",
     'storage_active_backend=gcs                                # Active asset backend',
@@ -393,7 +558,11 @@ $cfg = @(
     "gcp_region.${Region}.ssh_key_secret=$SshSecret",
     "gcp_region.${Region}.default_network_tag=$NetTagVm",
     "gcp_region.${Region}.router_name=$Router",
-    "gcp_region.${Region}.nat_name=$Nat"
+    "gcp_region.${Region}.nat_name=$Nat",
+    "gcp_region.${Region}.k8s_subnetwork=projects/$ProjectId/regions/$Region/subnetworks/$K8sSubnet",
+    "gcp_region.${Region}.k8s_pods_range=gke-pods",
+    "gcp_region.${Region}.k8s_services_range=gke-services",
+    "gcp_region.${Region}.k8s_node_tag=$NetTagK8s"
 )
 Write-DashboardConfig 'GCP sandbox configuration' $cfg
 Export-ConfigJson -Cloud gcp -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1
@@ -409,15 +578,21 @@ if (Test-Path $SaKeyPath) {
 @"
 Sandbox topology summary
 
-  VPC $Vpc
-    ├─ $JpSubnet (10.99.1.0/24) → Cloud NAT → internet  [Jumpoint COS]
-    └─ $VmSubnet (10.99.2.0/24) → no NAT → no internet  [user VMs]
+  VPC $Vpc  (region $Region, subnet prefix ${CidrPrefix})
+    ├─ $JpSubnet (${CidrPrefix}.1.0/24) → Cloud NAT → internet  [Jumpoint COS]
+    ├─ $VmSubnet (${CidrPrefix}.2.0/24) → no NAT → no internet  [user VMs]
+    └─ $K8sSubnet (${CidrPrefix}.3.0/24) → Cloud NAT → internet  [co-located GKE nodes]
+         pods ${CidrPrefix}.128.0/18 · services ${CidrPrefix}.192.0/20 (VPC-native secondary ranges)
+    + servicenetworking PSA /20 (Cloud SQL private IP), reachable from jumpoint + co-located k8s
 
   Firewall:
-    • allow-internal      : within 10.99.0.0/16
+    • allow-internal      : within $Supernet
     • allow-ssh-from-jumpoint : tag $NetTagJp → tag $NetTagVm, tcp/22
+    • allow-ssh-from-k8s  : ${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18 (co-located GKE nodes+pods) → tag $NetTagVm, tcp/22
     • deny-vm-egress      : tag $NetTagVm → 0.0.0.0/0 (any proto)
-    • allow-vm-egress-vpc : tag $NetTagVm → 10.99.0.0/16
+    • allow-vm-egress-vpc : tag $NetTagVm → $Supernet
+    • allow-db-from-jumpoint : tag $NetTagJp → PSA range, tcp/5432,3306,1433
+    • allow-db-from-k8s   : tag $NetTagK8s → PSA range, tcp/5432,3306,1433
 
 Service-account JSON cached at $SaKeyPath (owner-only).
 

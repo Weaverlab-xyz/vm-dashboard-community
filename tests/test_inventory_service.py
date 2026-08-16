@@ -23,6 +23,17 @@ def _install_stubs():
         setattr(db, name, type(name, (), {}))
     sys.modules["web_dashboard.database"] = db
 
+    # sqlalchemy is only needed for the `Session` type hint and the query builder in
+    # collect() / live_or_pending_vm_names, neither of which the pure mappers touch.
+    # Stubbing it (as tests/test_job_batches.py does) means this file actually runs
+    # on a checkout without the app requirements instead of skipping itself.
+    sa = types.ModuleType("sqlalchemy")
+    sa_orm = types.ModuleType("sqlalchemy.orm")
+    sa_orm.Session = type("Session", (), {})
+    sa.orm = sa_orm
+    sys.modules.setdefault("sqlalchemy", sa)
+    sys.modules.setdefault("sqlalchemy.orm", sa_orm)
+
 
 _install_stubs()
 try:
@@ -41,7 +52,7 @@ _TS = datetime(2026, 6, 28, 12, 0, 0)
 def _job(**kw):
     base = dict(id="j1", job_type="ec2_deploy", workgroup="hydra",
                 cloud_resource_id="i-123", created_by="alice", created_at=_TS,
-                metadata_dict={})
+                expires_at=None, metadata_dict={})
     base.update(kw)
     return types.SimpleNamespace(**base)
 
@@ -57,6 +68,16 @@ def test_vm_item_aws_shape():
     assert it["job_id"] == "j1" and it["detail_href"] == "/aws#instances"
     assert it["created_at"] == _TS.isoformat()
     assert it["id"] == "job:j1"
+    # Auto-delete timer. A VM has no table, so its expiry rides on the deploy Job —
+    # and "provisioned" is true by construction: collect() only reaches _vm_item for a
+    # deploy the dashboard itself ran.
+    assert it["expires_at"] is None and it["source"] == "provisioned"
+
+
+def test_vm_item_carries_its_expiry():
+    exp = datetime(2026, 7, 1, 9, 30, 0)
+    it = svc._vm_item(_job(expires_at=exp))
+    assert it["expires_at"] == exp.isoformat()
 
 
 def test_vm_item_region_fallbacks():
@@ -80,24 +101,56 @@ def test_vm_item_name_fallback_to_resource_id_then_placeholder():
 # ── table mappers ────────────────────────────────────────────────────────────
 
 def test_db_item_shape():
-    row = types.SimpleNamespace(id="d1234567", cloud="azure", engine="postgres",
-                                instance_id="clouddb-ab", region="eastus",
-                                status="available", created_by="bob", created_at=_TS)
+    row = _db_row()
     it = svc._db_item(row)
     assert it["cloud"] == "azure" and it["kind"] == "database"
+    # Drives the delete verb on /databases and the badge on /inventory.
+    assert it["source"] == "provisioned"
     assert it["name"] == "postgres clouddb-ab" and it["state"] == "available"
     assert it["workgroup"] is None and it["detail_href"] == "/databases"
     assert it["id"] == "clouddb:d1234567"
+    assert it["expires_at"] is None
+
+
+def _db_row(**kw):
+    base = dict(id="d1234567", cloud="azure", engine="postgres",
+                instance_id="clouddb-ab", region="eastus",
+                status="available", created_by="bob", created_at=_TS,
+                source="provisioned", private_host=None, expires_at=None)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def _k8s_row(**kw):
+    base = dict(id="k1", cloud="gcp", name="prod-gke", region="us-central1",
+                status="registered", deploy_job_id="j9", source="provisioned",
+                created_by="bob", created_at=_TS, expires_at=None)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
 
 
 def test_k8s_item_shape():
-    row = types.SimpleNamespace(id="k1", cloud="gcp", name="prod-gke", region="us-central1",
-                                status="registered", deploy_job_id="j9",
-                                created_by="bob", created_at=_TS)
-    it = svc._k8s_item(row)
+    it = svc._k8s_item(_k8s_row())
     assert it["cloud"] == "gcp" and it["kind"] == "k8s"
     assert it["name"] == "prod-gke" and it["state"] == "registered"
     assert it["job_id"] == "j9" and it["detail_href"] == "/k8s"
+    assert it["source"] == "provisioned" and it["expires_at"] is None
+
+
+def test_db_and_k8s_items_carry_their_expiry():
+    exp = datetime(2026, 7, 1, 9, 30, 0)
+    assert svc._db_item(_db_row(expires_at=exp))["expires_at"] == exp.isoformat()
+    assert svc._k8s_item(_k8s_row(expires_at=exp))["expires_at"] == exp.isoformat()
+
+
+def test_a_registered_row_reports_its_source():
+    """`source` is what excludes a registered resource from the auto-delete timer, in
+    both the stamping and the reaping guard — so it has to reach the item."""
+    assert svc._db_item(_db_row(source="registered"))["source"] == "registered"
+    assert svc._k8s_item(_k8s_row(source="registered"))["source"] == "registered"
+    # A K8sCluster row predating the `source` column defaults to registered, which is
+    # the safe direction: unknown provenance is never auto-deleted.
+    assert svc._k8s_item(_k8s_row(source=None))["source"] == "registered"
 
 
 def test_desktop_item_includes_assignee():
@@ -106,6 +159,15 @@ def test_desktop_item_includes_assignee():
     it = svc._desktop_item(row)
     assert it["kind"] == "desktop" and it["state"] == "running"
     assert "eng" in it["name"] and "carol" in it["name"]
+
+
+def test_a_desktop_seat_never_carries_an_expiry():
+    """virtual_desktops has no expires_at column on purpose: the teardown takes seat_ids,
+    so expiring one seat would silently shrink a live pool. The mapper hardcodes None so
+    nothing can stamp what the sweeper wouldn't honour."""
+    row = types.SimpleNamespace(id="v1", cloud="azure", pool_name="eng", assigned_user=None,
+                                status="running", created_by="bob", created_at=_TS)
+    assert svc._desktop_item(row)["expires_at"] is None
 
 
 # ── RBAC predicate ───────────────────────────────────────────────────────────
@@ -125,6 +187,48 @@ def test_visible_nonworkgroup_is_owner_only():
     item = {"workgroup": None, "deployed_by": "alice"}
     assert svc.visible_to(item, ["hydra"], "alice") is True
     assert svc.visible_to(item, ["hydra"], "bob") is False
+
+
+# ── name claims (the pre-flight behind count-based deploys) ──────────────────
+#
+# live_or_pending_vm_names needs a Session, so what's tested here is the predicate it
+# is built on. That predicate decides whether a deploy can reuse a name — and because
+# Azure/GCP/OCI destroy resolve their deploy job by FIRST MATCH on name, getting it
+# wrong means a destroy can target the wrong VM.
+
+def test_name_claim_uses_the_same_key_order_as_the_inventory_mapper():
+    assert svc._name_claimed_by(_job(metadata_dict={"instance_name": "web-01"})) == "web-01"
+    assert svc._name_claimed_by(_job(metadata_dict={"vm_name": "vm-01"})) == "vm-01"
+    assert svc._name_claimed_by(_job(metadata_dict={"name": "n-01"})) == "n-01"
+
+
+def test_name_claim_falls_back_to_cloud_resource_id():
+    """Azure/GCP/OCI set cloud_resource_id to the VM name at enqueue, so an in-flight
+    row is still findable before its metadata is fully written."""
+    assert svc._name_claimed_by(_job(metadata_dict={}, cloud_resource_id="i-123")) == "i-123"
+
+
+def test_a_destroyed_vm_releases_its_name():
+    job = _job(metadata_dict={"instance_name": "web-01", "destroyed": True})
+    assert svc._name_claimed_by(job) is None
+
+
+def test_a_nameless_job_claims_nothing():
+    """Must be None, not '(unnamed)' — the mapper's placeholder would otherwise
+    become a name that every nameless job collides with."""
+    assert svc._name_claimed_by(_job(metadata_dict={}, cloud_resource_id=None)) is None
+    assert svc._name_claimed_by(_job(metadata_dict={"instance_name": "   "},
+                                     cloud_resource_id="")) is None
+
+
+def test_in_flight_statuses_hold_a_name():
+    """A batch submitted while another is still running has to see those names, or
+    both batches pick the same ones and collide at launch."""
+    for status in ("pending", "queued", "running"):
+        assert status in svc._NAME_HOLDING_STATUSES
+    assert "completed" in svc._NAME_HOLDING_STATUSES
+    assert "failed" not in svc._NAME_HOLDING_STATUSES
+    assert "cancelled" not in svc._NAME_HOLDING_STATUSES
 
 
 if __name__ == "__main__":

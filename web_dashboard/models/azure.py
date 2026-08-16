@@ -3,7 +3,9 @@ Pydantic models for Azure API endpoints.
 Mirrors web_dashboard/models/aws.py structure.
 """
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..services.vm_naming import MAX_DEPLOY_COUNT
 
 
 # ── Azure Image (Gallery image or standalone Managed Image) ──────────────────
@@ -108,15 +110,38 @@ class AzureDeployRequest(BaseModel):
     register_in_entitle: bool = False            # opt in to registering this VM as an Entitle SSH integration (Linux only)
     register_in_passwordsafe: bool = False       # opt in to onboarding this VM into Password Safe (managed system + account, Linux only)
     ssh_key_secret_override: Optional[str] = None  # optional Key Vault keypair secret to use for the SSH key (must be JSON with a public_key)
+    count: int = Field(
+        default=1, ge=1, le=MAX_DEPLOY_COUNT,
+        description="Number of identical VMs to deploy. 1 is a plain single deploy; "
+                    ">1 fans out into a batch and auto-numbers the names. Batch names "
+                    "are budgeted to 15 characters because azure_service derives the "
+                    "in-guest hostname as vm_name[:15] — see services/vm_naming.")
 
 
 class AzureBulkDeployItem(BaseModel):
+    """One VM in a bulk request.
+
+    The image fields are per item because bulk means one VM *per selected image* —
+    the UI multi-selects images, and previously every VM was built from the first
+    one. All of them are optional and fall back to the request-level value, so a
+    client posting the old shape (names only, one top-level image_id) is unchanged.
+    """
     vm_name: str
+    image_id: Optional[str] = None
+    image_publisher: Optional[str] = None
+    image_offer: Optional[str] = None
+    image_sku: Optional[str] = None
+    image_version: Optional[str] = None
+    os_type: Optional[str] = None          # falls back to the request-level os_type
+    trusted_launch: Optional[bool] = None
 
 
 class AzureBulkDeployRequest(BaseModel):
     items: List[AzureBulkDeployItem]
-    image_id: str
+    # Batch-level default for items that don't carry their own image. Relaxed from a
+    # required field so per-item images are expressible; the endpoint still rejects a
+    # request where any item resolves to no image at all.
+    image_id: str = ""
     vm_size: str = "Standard_B2s"
     location: str = ""
     resource_group: str = ""
@@ -136,16 +161,30 @@ class AzureBulkDeployRequest(BaseModel):
     image_offer: Optional[str] = None
     image_sku: Optional[str] = None
     image_version: Optional[str] = None
+    # PRA/jumpoint overrides, mirroring AzureDeployRequest. The bulk runner resolved
+    # these from config only, so a batch ignored whatever the form's pickers said.
+    jump_group: Optional[str] = None             # else azure_bt_jump_group_name / bt_jump_group_name
+    jumpoint_name: Optional[str] = None          # else azure_jumpoint_name / bt_jumpoint_name
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret for the shell jump
+    docker_deploy_key_ref: Optional[str] = None  # secret ref → ACI Jumpoint deploy key
 
 
 class AzureDeployResponse(BaseModel):
-    job_id: str
+    job_id: str          # for a batch (count > 1) this is the PARENT job
     vm_name: str
     message: str = "Deployment started"
+    # Batch fields, defaulted so a count-1 response is unchanged for existing callers.
+    count: int = 1
+    batch_id: Optional[str] = None
+    job_ids: List[str] = []   # child job ids, in name order
+    names: List[str] = []     # the expanded names actually used, post-truncation
 
 
 class AzureBulkDeployResponse(BaseModel):
     jobs: List[AzureDeployResponse]
+    # Already minted by the endpoint, never returned until now — without it the page
+    # can't link to the /jobs?batch_id= rollup.
+    batch_id: Optional[str] = None
 
 
 # ── Image capture ─────────────────────────────────────────────────────────────

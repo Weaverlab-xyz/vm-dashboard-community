@@ -7,7 +7,7 @@ plane**. Instead of standing up a whole Kubernetes cluster just to host
 [Rancher](https://www.rancher.com/), the dashboard runs the Rancher server as a
 **single privileged container on a Google Compute Engine (GCE) VM using
 Container-Optimized OS (COS)** — the same lightweight container-on-a-VM pattern
-the dashboard already uses for the BeyondTrust Jumpoint. The node gets a
+the dashboard already uses for the BeyondTrust Gateway. The node gets a
 **public, source-restricted IP**, and every Kubernetes cluster you manage is
 *imported* into it.
 
@@ -56,7 +56,7 @@ the downstream cluster only needs outbound reachability to the node's public
 | **GCP configured** | A GCP project + service-account JSON on **Settings → GCP** (or the setup wizard). The node always runs in GCP, regardless of where the imported clusters live. |
 | **Service-account IAM** | The dashboard SA needs `compute.instances.create`, `compute.firewalls.{get,create,update,delete}`, and instance delete. `scripts/sandbox/Linux/setup-gcp.sh` grants `roles/compute.admin`, which covers these. |
 | **A bootstrap password** | Set a Rancher bootstrap (first-run admin) password — see Setup. |
-| **Allowed source CIDRs** | The firewall **fails closed**, but dashboard-provisioned clusters' egress IPs (and, when the Web Jump is on, the dashboard-managed Jumpoint's egress IP) are **added automatically** — see [Automatic firewall whitelisting](#automatic-firewall-whitelisting). You only add extra operator IPs and pre-existing operator Jumpoints here. |
+| **Allowed source CIDRs** | The firewall **fails closed**, but dashboard-provisioned clusters' egress IPs (and, when the Web Jump is on, the dashboard-managed Gateway's egress IP) are **added automatically** — see [Automatic firewall whitelisting](#automatic-firewall-whitelisting). You only add extra operator IPs and pre-existing operator Gateways here. |
 | **A ≥ 4 GB machine type** | Rancher OOMs on shared-core types; the default `e2-medium` (4 GB) is the minimum. |
 
 ---
@@ -76,7 +76,7 @@ COS)** section:
 | Field | Notes |
 |---|---|
 | **Bootstrap password** | First-run admin password. The API token is minted from it and stored encrypted; you never re-enter it. |
-| **Allowed source CIDRs** | *Optional / additive.* Comma-separated CIDRs for the GCE firewall (tcp 80/443). Dashboard-provisioned clusters and the dashboard-managed Web-Jump Jumpoint are added automatically ([details](#automatic-firewall-whitelisting)); use this only for extra operator IPs and pre-existing operator Jumpoints. If nothing is set here **and** nothing is auto-discovered, the firewall stays closed unless *Allow open* is ticked. The panel shows the effective allow-list read-only. |
+| **Allowed source CIDRs** | *Optional / additive.* Comma-separated CIDRs for the GCE firewall (tcp 80/443). Dashboard-provisioned clusters and the dashboard-managed Web-Jump Gateway are added automatically ([details](#automatic-firewall-whitelisting)); use this only for extra operator IPs and pre-existing operator Gateways. If nothing is set here **and** nothing is auto-discovered, the firewall stays closed unless *Allow open* is ticked. The panel shows the effective allow-list read-only. |
 | **Machine type** | Default `e2-medium` (4 GB). Bump to `e2-standard-2` if you'll import several clusters. |
 | **Zone** | Blank → the configured GCP zone. |
 | **Container image** | Default `rancher/rancher:latest`. Pin a version for reproducibility. |
@@ -89,18 +89,87 @@ Settings apply immediately — no restart.
 
 ### Step 3 — Deploy the node
 
-On **Containers → Kubernetes (Rancher)**, click **Deploy Rancher node**. This
-enqueues a background job (follow it at `/jobs/{job_id}`) that:
+On **Containers → Kubernetes (Rancher)**, optionally choose a **Region / Zone**
+([placement](#placement-multi-region)) and fill the **PRA access** fieldset (see
+below), then click **Deploy Rancher node**. This enqueues a background job (follow
+it at `/jobs/{job_id}`) that:
 
 1. Creates/updates the source-restricted firewall rule (`<node>-allow-mgmt`, tcp 80/443).
 2. Launches the COS VM with the privileged Rancher container and an external IP.
 3. Pins the node's public IP as Rancher's `server-url`.
 4. Waits for Rancher to come up, then bootstraps it and mints the API token.
-5. If Entitle registration is enabled, registers the node in Entitle (best-effort).
+5. **Completes Rancher's first-run wizard** (see below) so the UI is ready to log into.
+6. If a PRA Web Jump was chosen, provisions it + vaults the admin credential.
+7. If Entitle registration is enabled, registers the node in Entitle (best-effort).
 
-When the job completes, the tab shows the node with a **RUNNING** status and a
-clickable **URL**. Open it (from an allowlisted IP) and log in as `admin` with
-your bootstrap password.
+When the job completes, the tab shows the node with a **RUNNING** status, a
+clickable **URL**, and an **Access** hint. Open it (from an allowlisted IP, or via
+the [PRA Web Jump](#pra-web-jump-optional)) and log in as `admin` with your
+password (see below).
+
+#### PRA access (chosen at deploy)
+
+Like the database and cloud-VM deploys, the deploy form offers **PRA pickers**
+(populated from your PRA appliance) so you choose access at deploy/redeploy time:
+
+- **Broker the Rancher UI via a PRA Web Jump** — tick to create a `rancher-ui`
+  Web Jump. Then pick:
+  - **Jump Group** and **Gateway** — where/through-what the Web Jump routes
+    (blank → the `bt_*` / `rancher_ui_*` config defaults).
+  - **Vault Account Group** — the PRA Vault group the generated **admin
+    credential is stored in**, so PRA **injects** it into the Rancher login (you
+    click the Web Jump and you're already logged in — the password never appears
+    in the dashboard). Leave blank to skip vaulting (the password is surfaced in
+    the *Access* hint instead).
+
+The picks are persisted to config, so they're reused by later console opens.
+
+#### Placement (multi-region)
+
+The deploy form also offers a **Region** (and optional **Zone**) picker so the
+single Rancher node can run in a region other than the GCP default:
+
+- **Region** — the dropdown lists only regions that have a configured subnet (the
+  default region plus any region seeded into `gcp_region_configs` via **Settings →
+  Multi-region** / a per-region sandbox run). The node's subnet is regional, so a
+  region with no subnet can't host it. Blank keeps the node's **current** region
+  (or the configured default).
+- **Zone** — optional, within the chosen region. Blank uses the region's **first
+  available** zone (which correctly skips regions with no `-a` zone, e.g. `us-east1`
+  starts at `-b`). If that zone is out of capacity
+  (`ZONE_RESOURCE_POOL_EXHAUSTED`), the deploy **automatically retries a sibling
+  zone in the same region** rather than failing.
+
+Rancher stays a **single** management plane: redeploying to a **different** region
+**relocates** the node — the old-region VM is deleted first so no duplicate
+`rancher-server` is stranded (the node is ephemeral, so state re-bootstraps and
+imported clusters re-import). The chosen zone is persisted to `gcp_rancher_zone`, so
+teardown and later bare redeploys stay in that region.
+
+### Automatic first-run
+
+A stock Rancher greets its first visitor with a **"Welcome to Rancher — enter your
+bootstrap password"** wizard (set a new admin password, accept the EULA, answer
+telemetry). On a **fresh** deploy the dashboard completes that for you
+(`rancher_auto_first_run`, on by default) using the API token it just minted:
+
+- **Sets the admin password.** Rancher **forbids reusing the bootstrap password**
+  as the new admin password (*"must not be the same as the current password"*), so
+  a distinct one is required. Set `rancher_admin_password` (≥12 chars) to choose it,
+  **or leave it blank and the dashboard auto-generates a strong one**, stores it
+  encrypted. When you chose a **Vault Account Group** at deploy, that credential is
+  **stored in the PRA Vault** and injected by the Web Jump (never shown); otherwise
+  it is **surfaced** in the Containers → Rancher panel's *Access* line + the job result.
+- **Accepts the EULA and opts out of telemetry**, and clears the `first-login`
+  flag — best-effort, version-tolerant.
+
+The result: the operator opens the URL and lands straight on the cluster list.
+**Log in as `admin`** with the password shown in the *Access* hint (change the
+auto-generated one after first login). This runs **only on a fresh deploy** — a
+reused/already-set-up node is left untouched; a generated password is cleared on
+teardown so the next fresh deploy makes a new one. If it can't complete, the deploy
+still succeeds and you finish the wizard by hand once (the job note says what
+happened). Turn it off with `rancher_auto_first_run=false` for the manual wizard.
 
 ---
 
@@ -139,39 +208,113 @@ Private clusters egress through a NAT, so their public source IP isn't knowable
 until the cluster exists — which made the "Allowed source CIDRs" field a chicken-
 and-egg problem. The dashboard now manages the allow-list for you:
 
+- **The dashboard itself** — the dashboard bootstraps the node and mints its API
+  token over the node's **public IP**, so the dashboard's *own* egress IP must be
+  allowed or the deploy can't reach the node it just launched (the readiness poll
+  would time out). On deploy the dashboard **auto-detects its public egress IP**
+  (best-effort, via a plain-HTTP IP-echo) and adds it as a `/32`. If detection can't
+  reach an echo service — e.g. behind a TLS-inspecting corporate proxy — set
+  `rancher_dashboard_egress_cidr` manually. If the firewall would end up **fully
+  closed**, the deploy now **fails fast** with that instruction instead of burning
+  the readiness timeout. **Corp proxy pools:** proxies like Cloudflare WARP egress
+  from a **pool** of IPs (consecutive requests can leave from different addresses),
+  so a single detected `/32` isn't reliable there — set the pool's CIDR (e.g.
+  `104.28.182.0/24`) in `rancher_dashboard_egress_cidr`; detection keeps a stored
+  CIDR that already contains the detected IP instead of clobbering it.
+- **API runner (VPC connector)** — when `rancher_api_transport=runner` (see
+  [Corp TLS inspection](#corp-tls-inspection-api-transport)), the Cloud Run
+  runner's VPC-connector range (`rancher_runner_source_cidr`) is auto-added so the
+  runner's internal-IP traffic is admitted (GCE ingress rules apply to internal
+  traffic too). Private RFC1918 range — no public exposure.
 - **Provisioned clusters** — each dashboard-provisioned cluster (EKS/AKS/GKE) is
   given a **stable, reserved egress IP** (an Elastic IP on AWS, a reserved Cloud
   NAT IP on GCP, a static NAT-gateway IP on Azure). The provision job captures it
   (module output `nat_public_ip` → `k8s_clusters.egress_ip`) and adds it to the
   node firewall as a `/32`. Decommissioning the cluster removes it again.
-- **Web-Jump Jumpoint** — when the [PRA Web Jump](#pra-web-jump-optional) is
-  enabled, the dashboard-managed Jumpoint host's egress IP is captured and added
-  as a `/32`. A Web Jump reaches the node **through a Jumpoint**, so this — not the
-  PRA appliance IP — is the source the firewall must allow. `rancher_ui_jumpoint_cloud`
-  (default `gcp`, same cloud as the node) picks which dashboard-managed Jumpoint
-  brokers the UI.
+- **Web-Jump Gateways** — when the [PRA Web Jump](#pra-web-jump-optional) is
+  enabled, a `/32` is added for **every gateway the dashboard deployed** in that cloud:
+  the shared managed host *and* any you added on **Containers → Gateways**. A Web Jump
+  reaches the node **through a Gateway**, so this — not the PRA appliance IP — is the
+  source the firewall must allow, and since all of a cloud's gateway hosts join one PRA
+  Gateway *cluster*, PRA may broker a given session through any node in it: allowing
+  only the shared host's IP left a session brokered by another node blocked.
+  `rancher_ui_jumpoint_cloud` (default `gcp`, same cloud as the node) picks which
+  cloud's gateways broker the UI. A provisioned Web Jump also holds a reference on the
+  shared gateway, so the idle teardown can't reclaim its broker.
 - **Manual CIDRs** — `rancher_allowed_source_cidrs` is still honoured and **added
-  on top**, for extra operator/human IPs and for **pre-existing operator Jumpoints**
-  (a Jumpoint the dashboard didn't provision has an egress IP the dashboard can't
+  on top**, for extra operator/human IPs and for **pre-existing operator Gateways**
+  (a Gateway the dashboard didn't provision has an egress IP the dashboard can't
   learn — add it here).
 
 The effective set is recomputed and re-applied idempotently on every relevant
-event: node deploy, cluster provision, cluster import, cluster decommission, and
-Web Jump enable. It stays **fail-closed** — if there are no manual CIDRs, no
-provisioned clusters, and no captured Jumpoint IP, the firewall is not opened
+event: node deploy, cluster provision, cluster import, cluster decommission, Web Jump
+enable, and every **gateway deploy or teardown**. It stays **fail-closed** — if there are no manual CIDRs, no
+provisioned clusters, and no captured Gateway IP, the firewall is not opened
 (unless *Allow open* is ticked). The **Settings → Kubernetes** panel shows the
 computed allow-list read-only.
 
-All three dashboard-managed jumpoint hosts expose a knowable egress IP: GCP and AWS
+All three dashboard-managed gateway hosts expose a knowable egress IP: GCP and AWS
 via the host's public IP, and Azure via a **Standard, secure-by-default public IP**
-on the jumpoint VM's NIC (Standard IPs block all inbound unless an NSG allows it, so
-this is egress-only — no ingress path). The AWS/GCP jumpoint IPs are ephemeral and
-re-captured on each ensure; the Azure one is static.
+on the gateway VM's NIC (Standard IPs block all inbound unless an NSG allows it, so
+this is egress-only — no ingress path). The AWS/GCP gateway IPs are ephemeral and
+re-captured on each ensure and recorded per-gateway (`gateways.egress_ip`); the Azure
+one is static. A gateway that is torn down has its `/32` dropped from the rule.
 
-**Limitations.** A **pre-existing operator Jumpoint** (one the dashboard didn't
+**Limitations.** A **pre-existing operator Gateway** (one the dashboard didn't
 provision) has an egress IP the dashboard can't learn — add it to
 `rancher_allowed_source_cidrs` manually. Registered (not dashboard-provisioned)
 clusters likewise have no captured egress IP and must be added manually.
+
+---
+
+## Corp TLS inspection (API transport)
+
+Corporate networks that **TLS-inspect** outbound traffic (e.g. Cloudflare
+Gateway/WARP) verify the *origin's* certificate at the proxy — and the Rancher
+node ships a **self-signed cert**, so the proxy kills every HTTPS handshake to it
+in transit. The dashboard's `verify=False` can't help: the block happens at the
+proxy, not the client. The symptom is a deploy that fails with *"Rancher IS up …
+but the HTTPS handshake is being terminated in transit"* (the readiness probe
+falls back to plain-HTTP `/ping` to detect exactly this), while `curl -k` to the
+node dies after ClientHello.
+
+Two ways out:
+
+1. **Proxy exception** — add a *Do Not Inspect* rule for the node's IP (or your
+   GCP ranges) in the proxy policy. Zero dashboard changes, but the node's IP is
+   ephemeral, and you may not control corp policy.
+2. **`rancher_api_transport = runner`** — the dashboard executes every Rancher
+   API call (readiness, bootstrap, server-url pin, cluster import/delete) as
+   `curl` inside a **one-shot GCP Cloud Run job**, which egresses from GCP with
+   no inspecting proxy in the path — the same corp-CA-dodging pattern as the
+   Ansible/k8s cloud runners. The job targets the node's **internal IP**
+   (`rancher_internal_url`, captured at deploy), so it needs VPC reach —
+   **either** of:
+   - **Direct VPC egress (recommended)** — `gcp_run_network` +
+     `gcp_run_subnetwork`: the job's NIC lands straight in the subnet. No
+     standing infrastructure or cost, and immune to the Serverless-VPC-Access
+     connector's shared-core zonal stockouts (`ZONE_RESOURCE_POOL_EXHAUSTED`
+     killed connector creation across three `us-central1` zones when this was
+     validated live). Set `rancher_runner_source_cidr` to the subnet's CIDR.
+   - **Serverless VPC Access connector** — `gcp_ansible_vpc_connector` (a
+     standing `/28` connector, ~$10-15/mo). Set `rancher_runner_source_cidr` to
+     the connector's `/28`.
+
+   Plus the k8s runner's base GCP knobs: `gcp_project_id` and `gcp_region` (or
+   `gcp_ansible_cloud_run_region`). `rancher_runner_source_cidr` is auto-merged
+   into the firewall allow-list while the transport is `runner`. The runner
+   fails fast with the exact keys when neither VPC option is configured.
+
+   Request payloads (API token, bootstrap password) travel to the job as a curl
+   config over stdin — never in the container's argv. Note each API call costs a
+   Cloud Run job cold-start (~20-40 s), which is fine for the deploy/import flows
+   this covers.
+
+**Downstream clusters are unaffected** either way — cattle-cluster-agents dial out
+from their cloud NAT, not through your corp proxy. The Rancher **UI** in your
+browser rides the same inspected path though: if the proxy blocks the self-signed
+UI too, use the [PRA Web Jump](#pra-web-jump-optional) (the Gateway egresses from
+the cloud, cleanly) or a proxy exception.
 
 ---
 
@@ -201,15 +344,15 @@ The node is reachable directly at its source-restricted URL, so the BeyondTrust
 PRA Web Jump is **off by default**. Enable **PRA Web Jump to the Rancher UI**
 (`rancher_ui_web_jump_enabled`) to *also* broker the UI through the PRA
 representative console — brokered, session-recorded access. It requires PRA to be
-configured (Jumpoint + Jump Group). This is independent of the Entitle JIT RBAC
+configured (Gateway + Jump Group). This is independent of the Entitle JIT RBAC
 grant, which continues to work either way.
 
-When enabled, the dashboard ensures its managed Jumpoint host is up, captures its
+When enabled, the dashboard ensures its managed Gateway host is up, captures its
 egress IP, and adds it to the node firewall automatically (see [Automatic firewall
 whitelisting](#automatic-firewall-whitelisting)) — so you don't pre-configure that
 address. `rancher_ui_jumpoint_cloud` (default `gcp`) selects which dashboard-managed
-Jumpoint brokers the UI. If you instead point the Web Jump at a **pre-existing**
-operator Jumpoint, add that Jumpoint host's egress IP to `rancher_allowed_source_cidrs`
+Gateway brokers the UI. If you instead point the Web Jump at a **pre-existing**
+operator Gateway, add that Gateway host's egress IP to `rancher_allowed_source_cidrs`
 manually (the dashboard can't discover an IP for a host it didn't provision).
 
 ---
@@ -254,12 +397,20 @@ apply immediately.
 | Key | Default | Purpose |
 |---|---|---|
 | `k8s_management_enabled` | `false` | Master toggle; surfaces the Rancher tab |
-| `rancher_bootstrap_password` | — | First-run admin password (secret) |
-| `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); provisioned clusters + the Web-Jump Jumpoint are auto-added. Empty + nothing auto-discovered = closed |
+| `rancher_bootstrap_password` | — | First-run bootstrap password (secret; transient — Rancher requires the admin password to differ). ≥12 chars |
+| `rancher_admin_password` | `""` | Admin UI password for auto first-run (secret); blank = auto-generate a distinct one, surfaced in the panel + job result |
+| `rancher_auto_first_run` | `true` | Auto-complete Rancher's first-run wizard on a fresh deploy (password + EULA + telemetry) |
+| `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); the dashboard's own egress, provisioned clusters + the Web-Jump Gateway are auto-added. Empty + nothing auto-discovered = closed |
+| `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Behind a corp proxy pool set the pool's CIDR — a stored CIDR containing the detected IP is kept, not clobbered. Bare IP → `/32` |
+| `rancher_ready_timeout_s` | `360` | Seconds the deploy waits for Rancher to serve after boot; raise for slow disks / large images |
+| `rancher_api_transport` | `direct` | `direct` \| `runner` — run the Rancher API calls as curl in a GCP Cloud Run job when this network's TLS inspection blocks the node's self-signed cert ([details](#corp-tls-inspection-api-transport)) |
+| `rancher_internal_url` | (runtime) | `https://<node internal IP>` captured at deploy — what the runner transport dials |
+| `rancher_runner_source_cidr` | `""` | The runner's source range — the direct-egress subnet's CIDR (or the connector's `/28`); auto-added to the firewall while the transport is `runner` |
+| `gcp_run_network` / `gcp_run_subnetwork` | `""` | Direct VPC egress for Cloud Run runner jobs (preferred over `gcp_ansible_vpc_connector`; no standing infra) |
 | `gcp_rancher_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs set (discouraged) |
 | `gcp_rancher_image` | `rancher/rancher:latest` | Rancher container image |
 | `gcp_rancher_machine_type` | `e2-medium` | VM size (≥ 4 GB enforced) |
-| `gcp_rancher_zone` | `""` | Blank → GCP default zone |
+| `gcp_rancher_zone` | `""` | Zone the node runs in. Set/overwritten on deploy to the **actual** launched zone (so teardown + bare redeploys stay in that region). Blank → the deploy-form region's first available zone, else the GCP default zone. Pick a region/zone per-deploy on the Rancher tab |
 | `gcp_rancher_name` | `rancher-server` | VM + firewall base name |
 | `gcp_rancher_boot_disk_gb` | `30` | Boot disk size |
 | `gcp_rancher_network_tag` | `rancher` | Network tag = firewall target |
@@ -268,8 +419,10 @@ apply immediately.
 | `rancher_api_token` | (runtime) | Minted at bootstrap (secret) |
 | `rancher_ui_web_jump_enabled` | `false` | Opt-in PRA Web Jump broker for the UI |
 | `rancher_ui_verify_certificate` | `false` | Web Jump cert verification |
-| `rancher_ui_jumpoint_cloud` | `gcp` | Which dashboard-managed Jumpoint host brokers the UI (`gcp`\|`aws`\|`azure`); its egress IP is auto-whitelisted |
-| `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the dashboard-managed Web-Jump Jumpoint (auto-added to the firewall) |
+| `rancher_ui_jumpoint_cloud` | `gcp` | Which dashboard-managed Gateway host brokers the UI (`gcp`\|`aws`\|`azure`); its egress IP is auto-whitelisted |
+| `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the SHARED Web-Jump Gateway (auto-added to the firewall). Gateways you deploy yourself come from the gateway registry, so every cluster node is allowed |
+| `rancher_ui_vault_account_group_id` | `""` | PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; usually chosen per-deploy |
+| `rancher_ui_vault_account_id` | (runtime) | PRA Vault account id created for the admin credential; cleared on teardown |
 | `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud) |
 
 ---
@@ -290,9 +443,31 @@ missing `compute.instances.create` or `compute.firewalls.*`. Re-run
 `rancher_allowed_source_cidrs` to include your IP (the node fails closed by
 design) and redeploy to patch the rule.
 
-**Deploy job fails waiting for Rancher** — Rancher needs 1–3 minutes to serve
-after the VM boots. If it never comes up, check the VM's serial console / the
-container's logs in GCP (`google-logging-enabled` is on).
+**Deploy job fails waiting for Rancher** — two common causes, and the error names
+both. (1) **The node is up but the dashboard's egress IP isn't in the firewall** —
+the dashboard talks to the node over its public IP, so its own egress must be
+allowed. Auto-detection usually handles this; if it's blocked (e.g. a TLS-inspecting
+proxy), set `rancher_dashboard_egress_cidr` and redeploy. Compare the node's firewall
+`sourceRanges` (or `GET /api/containers/rancher/firewall`) against the dashboard host's
+public egress IP. (2) **Rancher hasn't come up yet** — it needs 1–3 minutes (longer on
+a cold image pull / slow disk); raise `rancher_ready_timeout_s` and check the VM's
+serial console / the container's logs in GCP (`google-logging-enabled` is on).
+
+**Deploy job fails immediately: "firewall is closed"** — no source CIDRs were set
+and the dashboard couldn't auto-detect its own egress IP, so opening the firewall
+would leave the node unreachable. Set `rancher_dashboard_egress_cidr` or
+`rancher_allowed_source_cidrs` (or enable *Allow open*) and redeploy.
+
+**"Rancher IS up … but the HTTPS handshake is being terminated in transit"** —
+this network TLS-inspects and rejects the node's self-signed cert at the proxy
+(plain-HTTP `/ping` answered, so the node itself is fine). Set
+`rancher_api_transport=runner` and redeploy, or add a proxy *Do Not Inspect*
+exception for the node — see [Corp TLS inspection](#corp-tls-inspection-api-transport).
+
+**Readiness flip-flops / works one minute, times out the next** — a corp proxy
+pool (e.g. Cloudflare WARP) egresses from multiple IPs while the firewall pins one
+`/32`. Set the pool's CIDR in `rancher_dashboard_egress_cidr` (e.g.
+`104.28.182.0/24`); detection keeps a containing CIDR intact.
 
 **Machine type rejected** — types under 4 GB (`e2-micro`, `e2-small`, …) are
 refused; use `e2-medium` or larger.

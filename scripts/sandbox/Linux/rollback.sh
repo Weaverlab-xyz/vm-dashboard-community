@@ -105,6 +105,29 @@ rollback_aws() {
         || warn "Could not delete DB subnet group $g (a DB may still be provisioned — decommission it first)"
     done
 
+    # 2a-vpce. Interface VPC endpoints (SSM: ssm/ssmmessages/ec2messages). Created
+    # on-demand by the dashboard (or by older setup scripts). Each holds an ENI in
+    # the private subnet and references the ssm-vpce SG, so they MUST go before the
+    # SG (2b) and subnet (2d) sweeps or those deletes fail — and each keeps billing
+    # (~$7/mo) if left behind. There's no AWS waiter, so poll until they clear.
+    local vpces
+    vpces="$(aws ec2 describe-vpc-endpoints --region "$region" \
+      --filters "Name=vpc-id,Values=$vpc_id" \
+      --query 'VpcEndpoints[].VpcEndpointId' --output text 2>/dev/null || true)"
+    if [[ -n "$vpces" && "$vpces" != "None" ]]; then
+      aws ec2 delete-vpc-endpoints --region "$region" --vpc-endpoint-ids $vpces >/dev/null 2>&1 \
+        && ok "Deleting VPC endpoints $vpces (waiting for ENIs to detach…)" \
+        || warn "Could not delete VPC endpoints $vpces"
+      for _ in $(seq 1 24); do  # ~60s budget
+        local left
+        left="$(aws ec2 describe-vpc-endpoints --region "$region" \
+          --vpc-endpoint-ids $vpces \
+          --query "VpcEndpoints[?State!='deleted'].VpcEndpointId" --output text 2>/dev/null || true)"
+        [[ -z "$left" || "$left" == "None" ]] && break
+        sleep 2.5
+      done
+    fi
+
     # 2b. Security groups (delete sandbox-tagged, but skip the default SG).
     local sgs
     sgs="$(aws ec2 describe-security-groups --region "$region" \
@@ -363,64 +386,137 @@ rollback_gcp() {
     "Run: gcloud auth login"
 
   local project_id="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
-  local region="${GCP_REGION:-us-central1}"
   [[ -n "$project_id" && "$project_id" != "(unset)" ]] || die "No GCP project set."
 
-  section "GCP rollback in $project_id, region $region"
+  section "GCP rollback in $project_id (all regions on the shared sandbox VPC)"
 
   if (( !ASSUME_YES )); then
-    confirm "Delete GCP sandbox network, NAT, firewall rules, SA, secret in $project_id?" || return 0
+    confirm "Delete the GCP sandbox VPC across ALL regions — subnets, routers/NAT, firewall rules (incl. orphaned rancher/GKE rules), serverless egress IPs, PSA range + peering, SA, secret in $project_id?" || return 0
   fi
 
   local prefix="${SANDBOX_NAME_PREFIX}"
   local vpc="${prefix}-vpc"
-  local jp_subnet="${prefix}-jumpoint-subnet"
-  local vm_subnet="${prefix}-vm-subnet"
   local router="${prefix}-router"
   local nat="${prefix}-nat"
+
+  # Guard: a LIVE Rancher management node (VM tagged `rancher` / named rancher-server)
+  # owns firewall rules on this VPC. Don't force-delete under a running node — tear it
+  # down via the dashboard first so its runtime state stays consistent (AWS-parity, cf.
+  # the active-peering guard in rollback_aws).
+  local rancher_nodes
+  rancher_nodes="$(gcloud compute instances list --project "$project_id" \
+    --filter="tags.items=rancher OR name=rancher-server" --format="value(name)" 2>/dev/null || true)"
+  if [[ -n "$rancher_nodes" ]]; then
+    warn "Rancher management node(s) present: ${rancher_nodes//$'\n'/ }"
+    warn "Tear the Rancher node down via the dashboard (Kubernetes → Rancher) first, then re-run rollback. Aborting."
+    return 0
+  fi
+
+  # Guard: an ACTIVE GKE↔sandbox VPC peering (a non-co-located cluster lives in its own
+  # VPC and only the peering touches this one — no sandbox instance to catch). The
+  # servicenetworking peering is ours and is torn down below.
+  local gke_peers
+  # NB: `peerings list` returns the NETWORK object with its peerings nested, so a bare
+  # `value(name)` yields the VPC name (always non-empty when any peering — incl. our own
+  # servicenetworking — exists) and misfires this guard. Flatten to the peering rows.
+  gke_peers="$(gcloud compute networks peerings list --network "$vpc" --project "$project_id" \
+    --flatten="peerings[]" --format="value(peerings.name)" 2>/dev/null | grep -vx 'servicenetworking-googleapis-com' || true)"
+  if [[ -n "$gke_peers" ]]; then
+    warn "Active non-servicenetworking VPC peering(s) on $vpc: ${gke_peers//$'\n'/ }"
+    warn "A GKE cluster is still peered to this VPC. Decommission it via the dashboard first, then re-run rollback. Aborting."
+    return 0
+  fi
 
   # Refuse to tear down if user VMs are still running in the VPC.
   local instances
   instances="$(gcloud compute instances list --project "$project_id" \
     --filter "networkInterfaces.network:$vpc" --format="value(name)" 2>/dev/null || true)"
   if [[ -n "$instances" ]]; then
-    warn "Instances still running in $vpc: $instances"
+    warn "Instances still running in $vpc: ${instances//$'\n'/ }"
     warn "Terminate them via the dashboard first, then re-run rollback. Aborting."
     return 0
   fi
 
-  # 1. NAT + Router (NAT first since it's a child of the router).
-  gcloud compute routers nats delete "$nat" --router "$router" --router-region "$region" \
-    --project "$project_id" --quiet >/dev/null 2>&1 && ok "Deleted NAT $nat" || true
-  gcloud compute routers delete "$router" --region "$region" --project "$project_id" \
-    --quiet >/dev/null 2>&1 && ok "Deleted router $router" || true
+  # Every region that still has a sandbox subnet or router on the shared VPC. The VPC is
+  # global but subnets/router/NAT are regional (same fixed names in each region), so a
+  # multi-region sandbox must be torn down per region or the shared-VPC delete blocks.
+  local regions
+  regions="$({ gcloud compute networks subnets list --project "$project_id" \
+                 --filter="network~/${vpc}\$" --format="value(region.basename())" 2>/dev/null
+               gcloud compute routers list --project "$project_id" \
+                 --filter="network~/${vpc}\$" --format="value(region.basename())" 2>/dev/null; } | sort -u || true)"
 
-  # 2. Firewall rules (any rule whose name starts with prefix-).
+  # 1. Release Cloud Run direct-VPC-egress serverless IPs (purpose=SERVERLESS). GCP
+  # auto-reserves these in the jumpoint subnet on each ansible/k8s run and never frees
+  # them, so they pin the subnet unless released before the subnet delete.
+  local addr_rows
+  addr_rows="$(gcloud compute addresses list --project "$project_id" \
+    --filter="purpose=SERVERLESS AND subnetwork~/${prefix}-" \
+    --format="csv[no-heading](name,region.basename())" 2>/dev/null || true)"
+  while IFS=, read -r addr areg; do
+    [[ -n "$addr" ]] || continue
+    gcloud compute addresses delete "$addr" --region "$areg" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Released serverless egress IP $addr ($areg)" \
+      || warn "Could not release serverless egress IP $addr ($areg)"
+  done <<< "$addr_rows"
+
+  # 2. NAT + Router per region (deleting the router also removes its child Cloud NAT).
+  for reg in $regions; do
+    gcloud compute routers nats delete "$nat" --router "$router" --router-region "$reg" \
+      --project "$project_id" --quiet >/dev/null 2>&1 && ok "Deleted NAT $nat ($reg)" || true
+    gcloud compute routers delete "$router" --region "$reg" --project "$project_id" \
+      --quiet >/dev/null 2>&1 && ok "Deleted router $router ($reg)" || true
+  done
+
+  # 3. Firewall rules. First the sandbox-owned rules (name prefix), then any rule still
+  # attached to the VPC — the guards above already refused under a live owner, so what
+  # remains (e.g. rancher-server-allow-mgmt, <cluster>-allow-ssh-from-k8s) is orphaned.
   local rules
   rules="$(gcloud compute firewall-rules list --project "$project_id" \
-    --filter "name~^${prefix}-" --format="value(name)")"
+    --filter "name~^${prefix}-" --format="value(name)" 2>/dev/null || true)"
   for r in $rules; do
-    gcloud compute firewall-rules delete "$r" --project "$project_id" --quiet >/dev/null \
-      && ok "Deleted firewall rule $r"
+    gcloud compute firewall-rules delete "$r" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted firewall rule $r" || true
+  done
+  local vpc_rules
+  vpc_rules="$(gcloud compute firewall-rules list --project "$project_id" \
+    --filter="network~/${vpc}\$" --format="value(name)" 2>/dev/null || true)"
+  for r in $vpc_rules; do
+    gcloud compute firewall-rules delete "$r" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted orphaned firewall rule $r" || true
   done
 
-  # 3. Subnets, then VPC.
-  for sn in "$jp_subnet" "$vm_subnet"; do
-    if gcloud compute networks subnets describe "$sn" --region "$region" --project "$project_id" >/dev/null 2>&1; then
-      gcloud compute networks subnets delete "$sn" --region "$region" --project "$project_id" --quiet >/dev/null \
-        && ok "Deleted subnet $sn"
-    fi
-  done
+  # 4. Subnets — every sandbox subnet (jumpoint/vm/k8s) across every region on the VPC.
+  local subnet_rows
+  subnet_rows="$(gcloud compute networks subnets list --project "$project_id" \
+    --filter="network~/${vpc}\$" --format="csv[no-heading](name,region.basename())" 2>/dev/null || true)"
+  while IFS=, read -r sn sreg; do
+    [[ -n "$sn" ]] || continue
+    gcloud compute networks subnets delete "$sn" --region "$sreg" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted subnet $sn ($sreg)" \
+      || warn "Could not delete subnet $sn ($sreg)"
+  done <<< "$subnet_rows"
+
+  # 5. servicenetworking peering + reserved PSA range (Cloud SQL private-IP path) — both
+  # are VPC-scoped and pin the network delete.
+  gcloud compute networks peerings delete servicenetworking-googleapis-com \
+    --network "$vpc" --project "$project_id" --quiet >/dev/null 2>&1 \
+    && ok "Removed servicenetworking peering on $vpc" || true
+  gcloud compute addresses delete "${prefix}-psa-range" --global --project "$project_id" --quiet >/dev/null 2>&1 \
+    && ok "Deleted PSA range ${prefix}-psa-range" || true
+
+  # 6. VPC.
   if gcloud compute networks describe "$vpc" --project "$project_id" >/dev/null 2>&1; then
-    gcloud compute networks delete "$vpc" --project "$project_id" --quiet >/dev/null \
-      && ok "Deleted VPC $vpc"
+    gcloud compute networks delete "$vpc" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted VPC $vpc" \
+      || warn "Could not delete VPC $vpc (check for lingering attachments)"
   fi
 
-  # 4. Secret.
+  # 7. Secret.
   gcloud secrets delete "${prefix}-ssh-keypair" --project "$project_id" --quiet >/dev/null 2>&1 \
     && ok "Deleted secret ${prefix}-ssh-keypair" || true
 
-  # 5. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
+  # 8. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
   # IAM bindings go with the bucket; no separate cleanup step needed.)
   local storage_bucket="${project_id}-${prefix}-storage"
   if gcloud storage buckets describe "gs://$storage_bucket" --project "$project_id" >/dev/null 2>&1; then
@@ -429,7 +525,7 @@ rollback_gcp() {
       || warn "Could not delete bucket gs://$storage_bucket (may have retained objects)"
   fi
 
-  # 6. Service account (revoke role bindings + delete the SA).
+  # 9. Service account (revoke role bindings + delete the SA).
   local sa_email="${prefix}-sa@${project_id}.iam.gserviceaccount.com"
   if gcloud iam service-accounts describe "$sa_email" --project "$project_id" >/dev/null 2>&1; then
     for role in roles/compute.admin roles/secretmanager.secretAccessor \
@@ -453,7 +549,12 @@ rollback_oci() {
   require_cmd jq
   local profile="${OCI_PROFILE:-DEFAULT}"
   local cfgfile="${OCI_CLI_CONFIG_FILE:-$HOME/.oci/config}"
-  ensure_logged_in "oci" "oci iam region list --profile $profile" "Run: oci setup config"
+  # A browser/SSO login (`oci session authenticate`) writes a security_token_file
+  # and needs --auth security_token on every call; an API-key profile does not.
+  local sectok=""
+  [[ -f "$cfgfile" ]] && sectok="$(awk -v p="[$profile]" '$0==p{i=1;next} /^\[/{i=0} i&&/^security_token_file[[:space:]]*=/{print;exit}' "$cfgfile" 2>/dev/null || true)"
+  local authflag=""; [[ -n "$sectok" ]] && authflag="--auth security_token"
+  ensure_logged_in "oci" "oci $authflag iam region list --profile $profile" "Run: oci session authenticate  or  oci setup config"
 
   # Tenancy from state or the CLI config (needed to locate the compartment).
   local tenancy
@@ -461,6 +562,7 @@ rollback_oci() {
   local region; region="${OCI_REGION:-$(awk -v p="[$profile]" '$0==p{i=1;next} /^\[/{i=0} i&&/^region[[:space:]]*=/{sub(/^region[[:space:]]*=[[:space:]]*/,"");print;exit}' "$cfgfile" 2>/dev/null || true)}"
   local OCIC=(oci --profile "$profile")
   [[ -n "$region" ]] && OCIC+=(--region "$region")
+  [[ -n "$sectok" ]] && OCIC+=(--auth security_token)
 
   local prefix="${SANDBOX_NAME_PREFIX}"
   local compartment; compartment="$(state_read oci compartment)"
@@ -476,7 +578,7 @@ rollback_oci() {
 
   section "OCI rollback in compartment ${compartment:0:20}… (region ${region:-default})"
   if (( !ASSUME_YES )); then
-    confirm "Delete OCI sandbox VCN, subnets, gateways, security list in this compartment?" || return 0
+    confirm "Delete OCI sandbox VCN/subnets/gateways/security list + the dashboard IAM user, group & policy?" || return 0
   fi
 
   # Refuse if user VMs are still running (don't auto-terminate lab VMs).
@@ -524,6 +626,80 @@ rollback_oci() {
   # thread the RFC3339 timestamp + management-endpoint plumbing here.
   local vault; vault="$(state_read oci vault)"
   [[ -n "$vault" ]] && warn "Vault $vault + its SSH secret persist — schedule their deletion in the OCI console (KMS → Vaults) if you want them gone."
+
+  # ── Dedicated dashboard IAM user + group + policy (tenancy root) ─────────────
+  # These live at the tenancy root, not in the compartment, so they don't block
+  # the compartment delete — but we remove them here (children before parent) and
+  # only when they carry our managed-by tag. IAM writes must target the home
+  # region, and IAM identity deletes are synchronous (no --wait-for-state), so we
+  # can't reuse the network _oci_find/_oci_del helpers.
+  if [[ -n "$tenancy" ]]; then
+    local home_region
+    home_region="$("${OCIC[@]}" iam region-subscription list \
+      --query "data[?\"is-home-region\"]|[0].\"region-name\"" --raw-output 2>/dev/null || true)"
+    [[ -n "$home_region" && "$home_region" != "null" ]] || home_region="$region"
+    local OCIC_IAM=(oci --profile "$profile")
+    [[ -n "$home_region" ]] && OCIC_IAM+=(--region "$home_region")
+    [[ -n "$sectok" ]] && OCIC_IAM+=(--auth security_token)
+
+    local du_name="${prefix}-app" dg_name="${prefix}-app-group" dp_name="${prefix}-app-policy"
+
+    # Helper: is this identity resource ours? ($1=subcommand $2=id-flag $3=id)
+    _oci_iam_ours() {
+      # shellcheck disable=SC2086
+      [[ "$("${OCIC_IAM[@]}" $1 get $2 "$3" --query 'data."freeform-tags"."managed-by"' \
+        --raw-output 2>/dev/null || true)" == "dashboard-sandbox" ]]
+    }
+
+    # User: delete its API keys, drop group membership, then the user itself.
+    local du_id; du_id="$(state_read oci dashboard_user)"
+    [[ -z "$du_id" || "$du_id" == "null" ]] && du_id="$("${OCIC_IAM[@]}" iam user list \
+      --compartment-id "$tenancy" --all --query "data[?name=='$du_name']|[0].id" --raw-output 2>/dev/null || true)"
+    if [[ -n "$du_id" && "$du_id" != "null" ]]; then
+      if _oci_iam_ours "iam user" --user-id "$du_id"; then
+        local fps_json fp
+        fps_json="$("${OCIC_IAM[@]}" iam user api-key list --user-id "$du_id" 2>/dev/null || echo '{"data":[]}')"
+        for fp in $(echo "$fps_json" | jq -r '.data[].fingerprint' 2>/dev/null); do
+          "${OCIC_IAM[@]}" iam user api-key delete --user-id "$du_id" --fingerprint "$fp" --force >/dev/null 2>&1 || true
+        done
+        local dg_id; dg_id="$(state_read oci dashboard_group)"
+        [[ -z "$dg_id" || "$dg_id" == "null" ]] && dg_id="$("${OCIC_IAM[@]}" iam group list \
+          --compartment-id "$tenancy" --all --query "data[?name=='$dg_name']|[0].id" --raw-output 2>/dev/null || true)"
+        [[ -n "$dg_id" && "$dg_id" != "null" ]] && \
+          "${OCIC_IAM[@]}" iam group remove-user --user-id "$du_id" --group-id "$dg_id" --force >/dev/null 2>&1 || true
+        "${OCIC_IAM[@]}" iam user delete --user-id "$du_id" --force >/dev/null 2>&1 \
+          && ok "Deleted IAM user $du_name" || warn "Could not delete IAM user $du_name"
+      else
+        warn "IAM user $du_name lacks the managed-by tag — leaving it untouched."
+      fi
+    fi
+
+    # Policy (root-level).
+    local dp_id; dp_id="$(state_read oci dashboard_policy)"
+    [[ -z "$dp_id" || "$dp_id" == "null" ]] && dp_id="$("${OCIC_IAM[@]}" iam policy list \
+      --compartment-id "$tenancy" --all --query "data[?name=='$dp_name']|[0].id" --raw-output 2>/dev/null || true)"
+    if [[ -n "$dp_id" && "$dp_id" != "null" ]]; then
+      if _oci_iam_ours "iam policy" --policy-id "$dp_id"; then
+        "${OCIC_IAM[@]}" iam policy delete --policy-id "$dp_id" --force >/dev/null 2>&1 \
+          && ok "Deleted IAM policy $dp_name" || warn "Could not delete IAM policy $dp_name"
+      else
+        warn "IAM policy $dp_name lacks the managed-by tag — leaving it untouched."
+      fi
+    fi
+
+    # Group (after its members + policy are gone).
+    local dg_id2; dg_id2="$(state_read oci dashboard_group)"
+    [[ -z "$dg_id2" || "$dg_id2" == "null" ]] && dg_id2="$("${OCIC_IAM[@]}" iam group list \
+      --compartment-id "$tenancy" --all --query "data[?name=='$dg_name']|[0].id" --raw-output 2>/dev/null || true)"
+    if [[ -n "$dg_id2" && "$dg_id2" != "null" ]]; then
+      if _oci_iam_ours "iam group" --group-id "$dg_id2"; then
+        "${OCIC_IAM[@]}" iam group delete --group-id "$dg_id2" --force >/dev/null 2>&1 \
+          && ok "Deleted IAM group $dg_name" || warn "Could not delete IAM group $dg_name"
+      else
+        warn "IAM group $dg_name lacks the managed-by tag — leaving it untouched."
+      fi
+    fi
+  fi
 
   # Delete the sandbox compartment we created (best-effort; async + slow). Only
   # if it carries our freeform tag AND we didn't reuse a caller-supplied one.

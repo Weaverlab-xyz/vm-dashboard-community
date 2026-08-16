@@ -1,10 +1,15 @@
 """
-Cloud database infrastructure — the engine/cloud-agnostic service seam (community).
+Database infrastructure — the engine/cloud-agnostic service seam (community).
 
 Provisions **private** managed databases (Postgres / MySQL / SQL Server) reached
 only through a BeyondTrust PRA tunnel, and records each in the ``cloud_databases``
 inventory table. Shaped like the other cloud services; drives Terraform via a
 per-job deploy dir (``terraform/deployments/{job_id}``).
+
+Also **registers** databases it did not provision (``source='registered'``) — on-premises
+(``cloud='local'``) or in a cloud — so they can be Config Management targets. Provisioning
+needs a Terraform module and is therefore cloud-only; registering needs only somewhere to
+reach, which is why ``VALID_REGISTER_CLOUDS`` is wider than ``VALID_CLOUDS``.
 
 Implements **postgres / mysql / sqlserver across aws / azure / gcp**
 end-to-end on the dashboard side (record + Terraform variables + apply/destroy
@@ -44,6 +49,11 @@ logger = logging.getLogger(__name__)
 # (no MongoDB resource yet). All engine × cloud combos are wired — see _IMPLEMENTED.
 VALID_ENGINES = {"postgres", "mysql", "sqlserver", "oracle"}
 VALID_CLOUDS = {"aws", "azure", "gcp", "oci"}
+# Clouds a database may be REGISTERED from. Wider than VALID_CLOUDS because
+# provisioning needs a Terraform module and registering needs only somewhere to reach:
+# 'local' is an on-prem database, run against by the local runner (the same shape a
+# kubeconfig-registered k8s cluster already has).
+VALID_REGISTER_CLOUDS = VALID_CLOUDS | {"local"}
 _IMPLEMENTED = {
     ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
     ("mysql", "aws"), ("mysql", "azure"), ("mysql", "gcp"),
@@ -65,6 +75,60 @@ _PROVIDER = {
     ("sqlserver", "azure"): "sql_database",
     ("oracle", "oci"): "autonomous",
 }
+
+# SQL Server managed offerings that CAN satisfy Entitle's Microsoft SQL Server
+# connector, which requires sysadmin (standard mode) or CONTROL SERVER + a fixed
+# permission set (least-privilege mode). NONE of the managed SQL Server flavors this
+# dashboard provisions today qualify: GCP Cloud SQL (provider "cloudsql") and AWS RDS
+# (provider "rds") reserve sysadmin/CONTROL SERVER for the platform, and Azure SQL
+# Database (provider "sql_database") is a logical server with no server-level grants.
+# Empty today; PR2's Entitle-compatible offerings add "rds_custom" (AWS RDS Custom)
+# and "sql_managed_instance" (Azure SQL Managed Instance), which DO grant sysadmin.
+_ENTITLE_VIABLE_SQLSERVER_PROVIDERS: frozenset = frozenset()
+
+
+def _entitle_ineligible_reason(engine: str, provider: Optional[str], *,
+                               source: Optional[str] = None,
+                               cloud: Optional[str] = None) -> Optional[str]:
+    """``None`` if this cloud DB can be onboarded to Entitle, else the reason it can't,
+    worded for the user. Single source of truth for all three gates — the button (via
+    :func:`_serialize`'s ``entitle_viable``), the API pre-flight, and
+    :func:`_entitle_register_core` — so they can't disagree about what is offerable.
+
+    Two independent blockers, each with its own message:
+
+    * a **registered** database (``source="registered"``) was never provisioned here, so
+      there is no provisioning job, no ``tf_variables`` and no ``config://clouddb/<id>/
+      admin`` entry for :func:`_entitle_register_core` to build the connector's admin
+      credential from. Its Password Safe managed account is checked out at run time and
+      never stored on the row, so registration can only ever fail. Checked first: it
+      holds for every engine, and it is the more fundamental of the two.
+    * **SQL Server**'s connector needs sysadmin/CONTROL SERVER, which the managed
+      flavors this dashboard provisions can't grant (see
+      ``_ENTITLE_VIABLE_SQLSERVER_PROVIDERS``).
+
+    ``cloud`` only sharpens the SQL Server message for a row whose ``provider`` is unset;
+    omitting it is safe.
+    """
+    if (source or "provisioned") == "registered":
+        return ("Register in Entitle is only supported on dashboard-provisioned "
+                "databases. This database was registered, so there is no provisioning "
+                "credential to give the Entitle connector — its Password Safe managed "
+                "account is checked out at run time and never stored.")
+    if engine == "sqlserver" and (provider or "") not in _ENTITLE_VIABLE_SQLSERVER_PROVIDERS:
+        return (f"Entitle's Microsoft SQL Server connector requires sysadmin/CONTROL "
+                f"SERVER, which managed {provider or cloud or 'cloud'} SQL Server does "
+                f"not grant. Register is only supported on Entitle-compatible SQL Server "
+                f"(Azure SQL Managed Instance / AWS RDS Custom).")
+    return None
+
+
+def _entitle_viable(engine: str, provider: Optional[str],
+                    source: Optional[str] = None) -> bool:
+    """Whether this cloud DB can be managed by its Entitle DB connector — the boolean
+    face of :func:`_entitle_ineligible_reason` (see there for the blockers)."""
+    return _entitle_ineligible_reason(engine, provider, source=source) is None
+
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -150,7 +214,7 @@ def _build_tf_variables(
                 or resolve_region("aws", region)["db_subnet_group_name"],
             "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
             # Attach the force_ssl=0 parameter group the sandbox pre-created, so the
-            # PRA protocol tunnel's cleartext jumpoint→RDS connection isn't rejected.
+            # PRA protocol tunnel's cleartext gateway→RDS connection isn't rejected.
             # Empty config → "" → module falls back to the RDS default group.
             "parameter_group_name": _cfg("aws_db_parameter_group_name"),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
@@ -205,7 +269,7 @@ def _build_tf_variables(
         # The private_network the instance gets its private IP on; the sandbox
         # configures private-services-access on it. ssl_mode defaults inside the
         # module to ALLOW_UNENCRYPTED_AND_ENCRYPTED so the PRA tunnel's cleartext
-        # jumpoint→DB connection is accepted (mirrors AWS's force_ssl=0).
+        # gateway→DB connection is accepted (mirrors AWS's force_ssl=0).
         return {
             "project": _cfg("gcp_project") or _cfg("gcp_project_id"),
             "region": region,
@@ -333,7 +397,7 @@ def _build_tf_variables(
 
     if (engine, cloud) == ("oracle", "oci"):
         # OCI Autonomous Database (ATP/ADW). Free-tier (default) is a PUBLIC
-        # endpoint reached over the PRA tcp tunnel from the public-subnet jumpoint
+        # endpoint reached over the PRA tcp tunnel from the public-subnet gateway
         # (Always-Free ADB can't sit in a VCN); a private endpoint needs is_free_tier
         # false + a subnet. The admin login is always ADMIN; only the password is a
         # variable (mapped from the minted master_password). db_name is ADB-shaped
@@ -381,6 +445,7 @@ def provision(
             f"{engine} on {cloud} is not available yet"
         )
 
+    from . import expiry_policy
     row = CloudDatabase(
         engine=engine,
         provider=_PROVIDER.get((engine, cloud)),
@@ -393,6 +458,11 @@ def provision(
         jump_group=(jump_group or "").strip() or None,
         jumpoint_name=(jumpoint_name or "").strip() or None,
         pra_credential_ref=(pra_credential_ref or "").strip() or None,
+        # Auto-delete timer from the global default; None (no timer) unless the feature
+        # is on AND a default is configured. Only this PROVISION path stamps one —
+        # register_database deliberately does not, since deleting a registered row only
+        # deregisters it. See expiry_policy.default_expiry_for_kind.
+        expires_at=expiry_policy.default_expiry_for_kind("database", source="provisioned"),
     )
     db.add(row)
     db.commit()
@@ -456,7 +526,7 @@ def _cfg(key: str) -> str:
 
 
 def _pra_configured() -> bool:
-    """True when a PRA/SRA appliance + Jumpoint + Jump Group are configured —
+    """True when a PRA/SRA appliance + Gateway + Jump Group are configured —
     the prerequisites for brokering a tunnel. When false, a DB is still
     provisioned/recorded; it just isn't reachable until PRA is set up."""
     return all(_cfg(k) for k in ("bt_api_host", "bt_jumpoint_name", "bt_jump_group_name"))
@@ -470,7 +540,7 @@ def _pscli_configured() -> bool:
 
 
 async def _resolve_ecs_deploy_key() -> str:
-    """BeyondTrust Jumpoint Docker deploy key — same resolution as the EC2
+    """BeyondTrust Gateway Docker deploy key — same resolution as the EC2
     deploy flow (api/aws.py:_resolve_aws_ecs_deploy_key): direct config field
     first, then the legacy Password-Safe title. Empty when neither is set."""
     direct = _cfg("aws_ecs_docker_deploy_key")
@@ -487,10 +557,10 @@ async def _resolve_ecs_deploy_key() -> str:
 
 
 async def _ensure_jumpoint_node(region: str) -> None:
-    """Make sure the ECS-hosted Jumpoint (the PRA gateway) has at least one
+    """Make sure the ECS-hosted Gateway (the PRA gateway) has at least one
     live node before brokering a tunnel. The tunnel jump item can be created
     with zero nodes online, but it shows 'Unavailable' in PRA until a node
-    registers — so check the Jumpoint cluster for a running task and start one
+    registers — so check the Gateway cluster for a running task and start one
     (the same launch the EC2 deploy flow does) only when there is none.
     Non-fatal throughout, like the EC2 path."""
     from . import aws_service
@@ -499,13 +569,13 @@ async def _ensure_jumpoint_node(region: str) -> None:
     try:
         tasks = await aws_service.list_ecs_tasks(region, cluster)
     except Exception as exc:
-        logger.warning("clouddb: could not list Jumpoint ECS tasks (%s) — skipping node check", exc)
+        logger.warning("clouddb: could not list Gateway ECS tasks (%s) — skipping node check", exc)
         return
     live = [t for t in tasks
             if t.get("lastStatus") in ("PROVISIONING", "PENDING", "RUNNING")
             and f"task-definition/{family}:" in (t.get("taskDefinitionArn") or "")]
     if live:
-        logger.info("clouddb: Jumpoint node already up (%d live task(s) in cluster %s)",
+        logger.info("clouddb: Gateway node already up (%d live task(s) in cluster %s)",
                     len(live), cluster)
         return
 
@@ -522,8 +592,8 @@ async def _ensure_jumpoint_node(region: str) -> None:
         if missing_net:
             need += ", bt_ecs_jumpoint_subnet_id, bt_ecs_jumpoint_security_group_id"
         logger.warning(
-            "clouddb: no live Jumpoint node and cannot auto-start one — set %s. "
-            "The tunnel will show Unavailable in PRA until a Jumpoint node is online.",
+            "clouddb: no live Gateway node and cannot auto-start one — set %s. "
+            "The tunnel will show Unavailable in PRA until a Gateway node is online.",
             need)
         return
     try:
@@ -540,10 +610,10 @@ async def _ensure_jumpoint_node(region: str) -> None:
             image=_cfg("bt_ecs_image"),
             launch_type=launch_type,
         )
-        logger.info("clouddb: started Jumpoint ECS node %s (launch_type=%s) — "
+        logger.info("clouddb: started Gateway ECS node %s (launch_type=%s) — "
                     "registers with PRA in ~1-2 min", arn.split("/")[-1], launch_type)
     except Exception as exc:
-        logger.warning("clouddb: Jumpoint ECS node launch failed (non-fatal): %s", exc)
+        logger.warning("clouddb: Gateway ECS node launch failed (non-fatal): %s", exc)
 
 
 async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
@@ -558,7 +628,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
     ``(managed_user, managed_password)`` so the injected/vaulted credential is the
     dedicated managed DB user (the rotation target) rather than the master admin."""
     from . import terraform_pra_service as pra
-    # The shared Jumpoint host was ensured at the start of run_provision_apply
+    # The shared Gateway host was ensured at the start of run_provision_apply
     # (so its ~2-min boot overlaps the RDS apply); ensure again here — idempotent
     # and cheap when the host is already up — so the task is running before we
     # broker the tunnel.
@@ -566,7 +636,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
     try:
         await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _cfg(row.cloud + "_region") or row.region)
     except Exception as exc:
-        logger.warning("clouddb: ensure jumpoint host (broker) failed (non-fatal): %s", exc)
+        logger.warning("clouddb: ensure gateway host (broker) failed (non-fatal): %s", exc)
     try:
         jump_name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -657,6 +727,17 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
     ``tf_variables`` is supplied on the provision path (password already re-injected);
     the post-hoc path passes ``None`` and we reconstruct the admin credential from
     the provisioning job metadata + the encrypted config store."""
+    # Refuse an un-onboardable row up front, before any Entitle or Terraform work:
+    # a registered DB has no provisioning credential to register with, and managed SQL
+    # Server would yield an integration that then fails Entitle's resource sync
+    # ("missing required server permissions"). See _entitle_ineligible_reason. On the
+    # provision path _register_entitle swallows this, so non-viable rows simply never
+    # auto-register; on the user-initiated path run_entitle_register surfaces it as a
+    # failed job — and the API rejects it with a 400 before the job is even queued.
+    reason = _entitle_ineligible_reason(engine, row.provider, source=row.source,
+                                        cloud=row.cloud)
+    if reason:
+        raise CloudDatabaseError(reason)
     from . import entitle_registration_service as ent
     prov_job = _provision_job_for(db, row.id)
     tfv = tf_variables if tf_variables is not None else \
@@ -680,14 +761,40 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
             f"no admin credential available for db_id={row.id} "
             f"(provisioning job pruned?) — cannot register in Entitle")
 
+    # Entitle's Microsoft SQL Server connector requires a `version` field — its
+    # connection schema lists version/user/password/server/database as mandatory,
+    # so omitting it fails schema matching with API 400 "Didn't find matching
+    # connection schema" (the same class of failure the postgres `username`/
+    # `database` bug caused). Entitle documents 2017/2019; default to "2019", which
+    # is compatible with the SQL Server 2022 Cloud SQL provisions for the login/role
+    # DDL the connector runs. Override per-tenant via the `entitle_sqlserver_version`
+    # config key. Postgres/MySQL don't take a version on this path (postgres has no
+    # version field; MySQL registration isn't a current target — see note below).
+    version = ""
+    if engine == "sqlserver":
+        version = _cfg("entitle_sqlserver_version") or "2019"
+
+    # GCP Cloud SQL's private IP is unreachable from the Entitle agent's own GKE VPC
+    # (non-transitive peering). Stand up an on-demand socat forwarder in the sandbox
+    # VPC and point Entitle at it. Returns None (no override) for non-GCP DBs or when
+    # gcp_entitle_db_proxy_enabled is off; AWS RDS is reachable directly. Raises on a
+    # hard failure so a post-hoc register job fails clearly (the provision-path
+    # wrapper swallows it).
+    from . import entitle_db_proxy_service
+    reg_host, reg_port = row.private_host, row.port or 0
+    fwd = await entitle_db_proxy_service.ensure_db_forwarder(db, row)
+    if fwd:
+        reg_host, reg_port = fwd
+
     result = await ent.register_database(
         engine=engine,
         name=tfv.get("identifier") or f"clouddb-{row.id[:8]}",
-        host=row.private_host,
-        port=row.port or 0,
+        host=reg_host,
+        port=reg_port,
         username=admin_username,
         password=admin_password,
         database=("master" if engine == "sqlserver" else tfv.get("db_name", "")),
+        version=version,
         private=True,   # dashboard-built DBs are private (publicly_accessible=false)
         tag="clouddb",
     )
@@ -719,28 +826,32 @@ async def _deregister_entitle_core(db: Session, *, row: CloudDatabase) -> None:
     """Destroy the DB's Entitle integration using the state stashed on its
     provisioning job, then clear ``entitle_integration_id`` + the state key.
     **Raises** on a real destroy failure."""
-    from . import entitle_registration_service as ent
+    from . import entitle_registration_service as ent, entitle_db_proxy_service
     prov_job = _provision_job_for(db, row.id)
     ent_state = ((prov_job.metadata_dict or {}).get("entitle_registration_tf_state")
                  if prov_job else None)
-    if not ent_state:
+    if ent_state:
+        await ent.deregister(ent_state)   # raises on a real failure — surfaced by the caller
+        row.entitle_integration_id = None
+        db.commit()
+        j = db.query(Job).filter(Job.id == prov_job.id).first()
+        if j is not None:
+            meta = j.metadata_dict or {}
+            meta.pop("entitle_registration_tf_state", None)
+            j.metadata_dict = meta
+            db.commit()
+        logger.info("clouddb Entitle integration deregistered db_id=%s", row.id)
+    else:
         # Nothing recorded to destroy — just clear any stale id so the UI recovers.
         if row.entitle_integration_id:
             row.entitle_integration_id = None
             db.commit()
         logger.info("clouddb Entitle deregister: no stored state for db_id=%s "
                     "(nothing to destroy)", row.id)
-        return
-    await ent.deregister(ent_state)
-    row.entitle_integration_id = None
-    db.commit()
-    j = db.query(Job).filter(Job.id == prov_job.id).first()
-    if j is not None:
-        meta = j.metadata_dict or {}
-        meta.pop("entitle_registration_tf_state", None)
-        j.metadata_dict = meta
-        db.commit()
-    logger.info("clouddb Entitle integration deregistered db_id=%s", row.id)
+    # Tear down the on-demand GCP reachability forwarder (best-effort; no-op for
+    # non-GCP DBs or when none was created). Only reached after a successful
+    # deregister above, so a failed destroy leaves the forwarder for retry.
+    await entitle_db_proxy_service.teardown_db_forwarder(db, row)
 
 
 async def run_entitle_register(db: Session, *, db_id: str, job_id: str,
@@ -751,7 +862,7 @@ async def run_entitle_register(db: Session, *, db_id: str, job_id: str,
     provision path's non-fatal wrapper, a post-hoc request should surface failures)."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        job_service.set_failed(db, job_id, f"cloud database {db_id} not found")
+        job_service.set_failed(db, job_id, f"database {db_id} not found")
         return
     job_service.set_running(db, job_id)
     try:
@@ -858,11 +969,20 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
 # ── Optional Password Safe DB onboarding (AWS-only, opt-in) ───────────────────
 
 def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
-    """Gate for the full Password Safe DB onboarding: AWS-only, the Password Safe
-    OAuth client configured, and the operator opt-in flag set. When off, the DB
-    still provisions and the legacy admin-credential staging runs instead."""
-    return (row.cloud == "aws" and _pscli_configured()
-            and config_service.get_bool("clouddb_ps_onboarding_enabled", False))
+    """Gate for the full Password Safe DB onboarding: the Password Safe OAuth
+    client configured, the operator opt-in flag set, and a supported cloud —
+    AWS (SSM plugin) or Azure (Run Command plugins, unless the Azure method is set
+    to "off"). When off, the DB still provisions and the legacy admin-credential
+    staging runs instead."""
+    if not (_pscli_configured()
+            and config_service.get_bool("clouddb_ps_onboarding_enabled", False)):
+        return False
+    if row.cloud == "aws":
+        return True
+    if row.cloud == "azure":
+        return (config_service.get("passwordsafe_azure_db_registration_method")
+                or "runcommand").lower() != "off"
+    return False
 
 
 def _managed_user_name(db_id: str) -> str:
@@ -874,7 +994,7 @@ def _managed_user_name(db_id: str) -> str:
 async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: str,
                                   engine: str, tf_variables: dict) -> dict:
     """Create the dedicated managed DB user from the admin credential by running
-    the DB client on the shared Jumpoint host over AWS SSM. Returns the onboarding
+    the DB client on the shared Gateway host over AWS SSM. Returns the onboarding
     context (managed user + password, jump host id, region, db name, admin user,
     client image). Raises on failure so the caller falls back to admin staging."""
     from . import aws_service, jumpoint_host_service
@@ -883,8 +1003,8 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
     host_id = await jumpoint_host_service.ensure_jumpoint_host(row.cloud, region)
     if not host_id:
         raise CloudDatabaseError(
-            "no SSM jump host available — the shared Jumpoint host must be up to run "
-            "the DB client (check aws_ecs_docker_deploy_key + jumpoint config)")
+            "no SSM jump host available — the shared Gateway host must be up to run "
+            "the DB client (check aws_ecs_docker_deploy_key + gateway config)")
     admin_username = (tf_variables.get("master_username")
                       or tf_variables.get("administrator_login") or "dbadmin")
     admin_password = (config_service.get(f"clouddb/{row.id}/admin")
@@ -911,50 +1031,163 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
             "client_image": image, "port": port}
 
 
+def _azure_jump_prep_commands() -> list:
+    """Shell commands (run as root on the jump VM over Azure Run Command) that make
+    it plugin-ready: ensure the native DB clients are installed — idempotent, so an
+    already-prepped or fresh (cloud-init) VM is a fast no-op, and a reused VM the
+    head start missed gets them — and drop the plugin RSA key material to
+    /root/psplugin so the "{engine} Azure Run Command Plugin" can decrypt the
+    RSA-wrapped login password. The key/passphrase are base64-encoded here and
+    decoded on the VM so no PEM/newline/quote ever hits the shell literally."""
+    import base64
+    cmds = [
+        "command -v psql >/dev/null 2>&1 || { apt-get update && apt-get install -y postgresql-client; }",
+        "command -v mysql >/dev/null 2>&1 || { apt-get update && apt-get install -y mysql-client; }",
+        "[ -x /opt/mssql-tools18/bin/sqlcmd ] || { "
+        "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc -o /etc/apt/trusted.gpg.d/microsoft.asc; "
+        "curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list -o /etc/apt/sources.list.d/mssql-release.list; "
+        "apt-get update; ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev; }",
+    ]
+    priv = config_service.get("clouddb_ps_azure_plugin_private_key") or ""
+    if priv:
+        passphrase = config_service.get("clouddb_ps_azure_plugin_passphrase") or ""
+        kdir = "/root/psplugin"
+        b64key = base64.b64encode(priv.encode()).decode()
+        b64pass = base64.b64encode(passphrase.encode()).decode()
+        cmds += [
+            f"mkdir -p {kdir}",
+            f"chmod 700 {kdir}",
+            f"printf '%s' '{b64key}' | base64 -d > {kdir}/private.pem",
+            f"printf '%s' '{b64pass}' | base64 -d > {kdir}/passphrase.txt",
+            f"chmod 600 {kdir}/private.pem {kdir}/passphrase.txt",
+        ]
+    return cmds
+
+
+async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_id: str,
+                                        engine: str, tf_variables: dict) -> dict:
+    """Azure counterpart of :func:`_create_db_managed_user`: prep the shared
+    ``clouddb-jumpoint`` VM for the plugin (native clients + RSA key material) and
+    create the dedicated managed DB user from the admin credential by running the DB
+    client there over Azure VM Run Command. Returns the onboarding context. Raises
+    on failure so the caller falls back to admin staging."""
+    from . import azure_service, jumpoint_host_service
+    from . import cloud_db_sql_service as sql
+    region = _cfg(row.cloud + "_region") or row.region
+    host = await jumpoint_host_service.ensure_jumpoint_host(row.cloud, region)
+    if not host:
+        raise CloudDatabaseError(
+            "no Azure jump VM available — the shared clouddb-jumpoint VM must be up to "
+            "run the DB client (check azure_aci_deploy_key + azure_jumpoint_subnet_id)")
+    rg = _cfg("azure_resource_group")
+    admin_username = (tf_variables.get("administrator_login")
+                      or tf_variables.get("master_username") or "dbadmin")
+    admin_password = (config_service.get(f"clouddb/{row.id}/admin")
+                      or tf_variables.get("administrator_password") or "")
+    db_name = "master" if engine == "sqlserver" else tf_variables.get("db_name", "")
+    managed_user = _managed_user_name(row.id)
+    managed_pw = sql.generate_password()
+    image = _cfg(f"clouddb_db_client_image_{engine}") or sql.default_client_image(engine)
+    port = row.port or sql.default_port(engine)
+    # Make the jump VM plugin-ready (clients + key material). Longer timeout: a first
+    # run on a VM the cloud-init head start missed installs packages.
+    prep = _azure_jump_prep_commands()
+    prep_res = await azure_service.vm_run_command(rg, host, prep, timeout=600)
+    if prep_res.get("status") != "Success":
+        detail = (prep_res.get("stderr") or prep_res.get("stdout") or "")[:400]
+        raise CloudDatabaseError(
+            f"jump-VM plugin prep failed (status={prep_res.get('status')}, "
+            f"rc={prep_res.get('response_code')}): {detail}")
+    cmds = sql.onboard_commands(
+        engine, host=row.private_host, port=port,
+        database=db_name, admin_user=admin_username, admin_password=admin_password,
+        managed_user=managed_user, managed_password=managed_pw, client_image=image)
+    result = await azure_service.vm_run_command(rg, host, cmds, timeout=300)
+    if result.get("status") != "Success" or int(result.get("response_code", -1)) != 0:
+        detail = (result.get("stderr") or result.get("stdout") or "")[:400]
+        raise CloudDatabaseError(
+            f"managed-user creation on the jump VM failed "
+            f"(status={result.get('status')}, rc={result.get('response_code')}): {detail}")
+    logger.info("clouddb: managed DB user %r created via Azure Run Command on %s db_id=%s",
+                managed_user, host, row.id)
+    return {"managed_user": managed_user, "managed_pw": managed_pw, "jump_vm_name": host,
+            "resource_group": rg, "region": region, "db_name": db_name,
+            "admin_username": admin_username, "client_image": image, "port": port}
+
+
 async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id: str,
                                       engine: str, tf_variables: dict, ctx: dict) -> None:
     """Onboard the DB into Password Safe: a managed system + managed account on the
-    "{engine} SSM Custom Plugin" platform (functional account = the AWS IAM user for
-    SSM), and — when a PRA Vault account exists for this DB — a managed system +
-    managed account on the "PRA Vault Username Password" platform so Password Safe
-    propagates rotations into the vaulted credential the tunnel injects. Ids +
-    teardown state are stashed on the provisioning job's metadata. Best-effort."""
+    cloud-specific DB plugin platform — AWS "{engine} SSM Custom Plugin" (functional
+    account = the AWS IAM user for SSM) or Azure "{engine} Azure Run Command Plugin"
+    (functional account = the Azure SP + the privileged DB admin login) — and, when a
+    PRA Vault account exists for this DB, a managed system + managed account on the
+    "PRA Vault Username Password" platform so Password Safe propagates rotations into
+    the vaulted credential the tunnel injects. Ids + teardown state are stashed on the
+    provisioning job's metadata. Best-effort."""
     from . import ps_api_service, ps_resource_service
     name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
     workgroup_id = await ps_api_service.get_workgroup_id(
         _cfg("clouddb_ps_workgroup") or _cfg("passwordsafe_workgroup"))
     stash: dict = {
         "ps_db_managed_user": ctx["managed_user"],
-        "ps_db_jump_host_id": ctx["jump_host_id"],
+        "ps_db_jump_host_id": ctx.get("jump_host_id") or ctx.get("jump_vm_name"),
         "ps_db_region": ctx["region"],
         "ps_db_admin_username": ctx["admin_username"],
         "ps_db_client_image": ctx["client_image"],
         "ps_db_name": ctx["db_name"],
     }
 
-    # ── DB managed system (dbssm) ──
-    db_platform_id = await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_{engine}"))
-    iam_user = _cfg("clouddb_ps_ssm_iam_username")
-    akid = _cfg("clouddb_ps_ssm_access_key_id")
-    secret = _cfg("clouddb_ps_ssm_secret_access_key")
-    if iam_user and akid and secret:
-        fa_username, fa_password = iam_user, f"{akid}:{secret}"   # IAM-user mode
+    # ── DB managed system (cloud-specific custom plugin) ──
+    if row.cloud == "azure":
+        # "{engine} Azure Run Command Plugin": the functional account bundles the
+        # Azure control-plane SP with a privileged DB login (the minted admin), which
+        # rotates the dedicated managed user. Address is eight ;-separated fields.
+        db_platform_id = await ps_api_service.get_platform_id(
+            _cfg(f"clouddb_ps_platform_azure_{engine}"))
+        auth_mode = (_cfg("clouddb_ps_azure_auth_mode") or "SP").upper()
+        admin_password = config_service.get(f"clouddb/{row.id}/admin") or ""
+        fa_username = f"{auth_mode}:{ctx['admin_username']}"
+        if auth_mode == "MSI":
+            fa_password = f"-:-:{admin_password}"
+        else:
+            client_id = _cfg("clouddb_ps_azure_sp_client_id") or _cfg("azure_client_id")
+            client_secret = (_cfg("clouddb_ps_azure_sp_client_secret")
+                             or _cfg("azure_client_secret"))
+            fa_password = f"{client_id}:{client_secret}:{admin_password}"
+        fa_label, db_method = "azure", "dbazure"
+        ssl_flag = "sslTRUE" if config_service.get_bool("clouddb_ps_azure_ssl", True) else "sslFALSE"
+        # Address: vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;ssl
+        dns_name = ";".join([
+            ctx["jump_vm_name"], ctx["resource_group"], _cfg("azure_subscription_id"),
+            _cfg("azure_tenant_id"), row.private_host, ctx["db_name"] or "",
+            _cfg("clouddb_ps_azure_cert_path"), ssl_flag])
     else:
-        fa_username, fa_password = "EC2", secrets.token_urlsafe(16)  # EC2 mode: role-based; PS still stores a value
+        # "{engine} SSM Custom Plugin": functional account = the AWS IAM user (SSM
+        # transport); the managed account self-rotates. Address is six ;-separated fields.
+        db_platform_id = await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_{engine}"))
+        iam_user = _cfg("clouddb_ps_ssm_iam_username")
+        akid = _cfg("clouddb_ps_ssm_access_key_id")
+        secret = _cfg("clouddb_ps_ssm_secret_access_key")
+        if iam_user and akid and secret:
+            fa_username, fa_password = iam_user, f"{akid}:{secret}"   # IAM-user mode
+        else:
+            fa_username, fa_password = "EC2", secrets.token_urlsafe(16)  # EC2 mode: role-based; PS still stores a value
+        fa_label, db_method = "ssm", "dbssm"
+        # DNS name: {instance};{region};{db endpoint};{db name};{public key path};{suffix}
+        dns_name = ";".join([
+            ctx["jump_host_id"], ctx["region"], row.private_host, ctx["db_name"] or "",
+            _cfg("clouddb_ps_ssm_public_key_path"), _cfg("clouddb_ps_ssm_account_suffix") or "local"])
     db_fa_id = await ps_api_service.create_functional_account_on_platform(
         platform_id=db_platform_id, account_name=fa_username,
-        display_name=f"{name}-ssm-fa", password=fa_password,
-        description=f"AWS SSM functional account for dashboard database {name} (db_id={row.id})")
+        display_name=f"{name}-{fa_label}-fa", password=fa_password,
+        description=f"Cloud-DB functional account for dashboard database {name} (db_id={row.id})")
     stash["ps_db_functional_account_id"] = db_fa_id
-    # DNS name: {instance};{region};{db endpoint};{db name};{public key path};{suffix}
-    dns_name = ";".join([
-        ctx["jump_host_id"], ctx["region"], row.private_host, ctx["db_name"] or "",
-        _cfg("clouddb_ps_ssm_public_key_path"), _cfg("clouddb_ps_ssm_account_suffix") or "local"])
     reg = await ps_resource_service.register_managed_system(
         name=f"{name}-db", host_name=row.private_host, ip_address="127.0.0.1",
         port=ctx["port"], functional_account_id=db_fa_id, platform_id=db_platform_id,
         workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
-        method="dbssm", dns_name=dns_name)
+        method=db_method, dns_name=dns_name)
     stash["ps_db_registration_tf_state"] = reg.get("tf_state_json")
     stash["ps_db_system_id"] = reg.get("managed_system_id")
     stash["ps_db_account_id"] = reg.get("managed_account_id")
@@ -1029,6 +1262,48 @@ def _job_stream(job_id: str, start_pct: int, start_msg: str):
     return on_line
 
 
+async def _reclaim_gcp_create_wait_instance(
+    *, row: CloudDatabase, job_id: str, engine: str, tf_variables: dict, exc: Exception,
+) -> Optional[dict]:
+    """GCP-only self-heal for the transient Cloud SQL *create-wait* failure. The
+    google provider clears the resource id (``d.SetId("")``) when the create
+    operation-wait errors, so the instance is dropped from Terraform state even
+    though GCP finishes creating it — the apply raises "Error waiting for Create
+    Instance:" and, left alone, orphans a RUNNABLE instance (which
+    :func:`run_decommission` later has to sweep, wasting the instance and blocking
+    the name for ~a week).
+
+    Instead: poll GCP for the instance (guarded on our ``clouddb-id`` label) until
+    it is RUNNABLE, ``terraform import`` it back into state, then re-apply to
+    converge (create the database + user, read outputs). Returns the outputs dict
+    on success, or ``None`` when this isn't that failure or the instance can't be
+    reclaimed — the caller then fails the job as before."""
+    if row.cloud != "gcp" or "error waiting for create instance" not in str(exc).lower():
+        return None
+    from . import gcp_service
+    project = (tf_variables.get("project")
+               or _cfg("gcp_project") or _cfg("gcp_project_id"))
+    name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
+    logger.warning("clouddb apply: transient GCP create-wait error for %s — checking "
+                   "whether GCP created the instance anyway", name)
+    body = await gcp_service.wait_sql_instance_runnable(project, name, row.id)
+    if not body:
+        logger.warning("clouddb apply: %s not reclaimable (absent / not ours / not "
+                       "RUNNABLE) — failing the provision", name)
+        return None
+    logger.warning("clouddb apply: %s is RUNNABLE despite the create-wait error — "
+                   "importing it into state and re-applying to converge", name)
+    await terraform.import_resource(
+        _deploy_dir(job_id), "google_sql_database_instance.this", f"{project}/{name}",
+        env=terraform_provider_env.provider_env(row.cloud),
+        template_dir=template_dir(engine, row.cloud), variables=tf_variables)
+    return await terraform.apply(
+        _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
+        env=terraform_provider_env.provider_env(row.cloud),
+        on_line=_job_stream(job_id, 40, "Reclaiming the created instance…"),
+    )
+
+
 async def run_provision_apply(
     db: Session, *, db_id: str, job_id: str, engine: str, tf_variables: dict,
 ) -> None:
@@ -1050,20 +1325,39 @@ async def run_provision_apply(
         tf_variables[_pw_key] = _pw
     job_service.set_running(db, job_id)
     try:
-        # Kick the shared Jumpoint host EARLY (only when PRA is configured) so its
+        # Kick the shared Gateway host EARLY (only when PRA is configured) so its
         # ~2-min boot overlaps the 5-10-min RDS apply instead of stacking after it.
         if _pra_configured():
             try:
                 from . import jumpoint_host_service
                 await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _cfg(row.cloud + "_region") or row.region)
             except Exception as exc:
-                logger.warning("clouddb: ensure jumpoint host (pre-apply) failed (non-fatal): %s", exc)
+                logger.warning("clouddb: ensure gateway host (pre-apply) failed (non-fatal): %s", exc)
 
-        outputs = await terraform.apply(
-            _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
-            env=terraform_provider_env.provider_env(row.cloud),
-            on_line=_job_stream(job_id, 5, "Provisioning the database…"),
-        )
+        # On-demand SSM interface endpoints for the AWS dbssm onboarding path so a
+        # private-subnet target reaches the SSM control plane. Ref-counted; torn
+        # down with the last EC2/DB. Independent of PRA. Best-effort.
+        if row.cloud == "aws":
+            try:
+                from . import ssm_endpoint_service
+                await ssm_endpoint_service.ensure_ssm_endpoints(_cfg(row.cloud + "_region") or row.region)
+            except Exception as exc:
+                logger.warning("clouddb: ensure SSM endpoints (pre-apply) failed (non-fatal): %s", exc)
+
+        try:
+            outputs = await terraform.apply(
+                _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
+                env=terraform_provider_env.provider_env(row.cloud),
+                on_line=_job_stream(job_id, 5, "Provisioning the database…"),
+            )
+        except terraform.TerraformError as exc:
+            # GCP Cloud SQL create-wait self-heal: on the transient "Error waiting for
+            # Create Instance" the google provider drops the (still-created) instance
+            # from state. Try to reclaim it via import + re-apply rather than failing.
+            outputs = await _reclaim_gcp_create_wait_instance(
+                row=row, job_id=job_id, engine=engine, tf_variables=tf_variables, exc=exc)
+            if outputs is None:
+                raise
         row.instance_id = str(outputs.get("instance_id") or "")
         row.private_host = str(outputs.get("private_host") or "")
         if outputs.get("port"):
@@ -1077,8 +1371,12 @@ async def run_provision_apply(
         onboard_ctx = None
         if row.private_host and _ps_db_onboarding_enabled(row):
             try:
-                onboard_ctx = await _create_db_managed_user(
-                    db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+                if row.cloud == "azure":
+                    onboard_ctx = await _create_db_managed_user_azure(
+                        db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+                else:
+                    onboard_ctx = await _create_db_managed_user(
+                        db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
             except Exception as exc:
                 logger.warning("clouddb: PS managed-user creation failed db_id=%s "
                                "(falling back to admin staging): %s", db_id, exc)
@@ -1135,7 +1433,7 @@ def start_decommission(db: Session, db_id: str, created_by: str = "") -> dict:
     ``{ok, db_id, job_id}``; mirrors :func:`provision`."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        raise CloudDatabaseError(f"cloud database {db_id} not found")
+        raise CloudDatabaseError(f"database {db_id} not found")
 
     # Already in flight — return the existing job rather than starting a second.
     # Only short-circuit on an ACTIVE (pending/running) job; a cancelled/failed
@@ -1169,7 +1467,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     never configured) are skips, not failures."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        job_service.set_failed(db, job_id, f"cloud database {db_id} not found")
+        job_service.set_failed(db, job_id, f"database {db_id} not found")
         return
     job_service.set_running(db, job_id)
     errors: list[str] = []
@@ -1206,6 +1504,14 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
             warnings.append(f"Entitle integration removal: {exc}")
             logger.warning("clouddb Entitle deregister for %s failed (non-fatal): %s", db_id, exc)
 
+    # 1c. On-demand Entitle DB reachability forwarder (GCP-only; no-op otherwise / if none).
+    try:
+        from . import entitle_db_proxy_service
+        await entitle_db_proxy_service.teardown_db_forwarder(db, row)
+    except Exception as exc:
+        warnings.append(f"Entitle DB forwarder teardown: {exc}")
+        logger.warning("clouddb forwarder teardown for %s failed (non-fatal): %s", db_id, exc)
+
     # 2. Password Safe functional account.
     fa_id = meta.get("ps_functional_account_id")
     if fa_id:
@@ -1233,8 +1539,8 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     # 3b. Password Safe DB onboarding artifacts (managed systems + functional
     #     accounts). Deregister each managed system BEFORE deleting its functional
     #     account — a managed system that still references the functional account
-    #     blocks the delete. The managed DB user itself dies with the RDS instance
-    #     (step 4), so no DB-side drop is needed here.
+    #     blocks the delete. The managed DB user itself dies with the database
+    #     instance (step 4), so no DB-side drop is needed here.
     if any(meta.get(k) for k in ("ps_db_registration_tf_state", "ps_pravault_registration_tf_state",
                                  "ps_db_functional_account_id", "ps_pravault_functional_account_id")):
         job_service.update_progress(db, job_id, 50, "Removing Password Safe managed systems…")
@@ -1295,6 +1601,29 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
         errors.append("no provisioning job recorded for this database — the instance "
                       "may need manual termination in the cloud console")
 
+    # 4b. Orphan safety net (GCP Cloud SQL only). The google provider drops a Cloud
+    #     SQL instance from Terraform state when the create operation-wait errors
+    #     (d.SetId("")), even though GCP finishes creating it — so a mid-create apply
+    #     failure leaves a RUNNABLE instance the destroy above (empty state) can't
+    #     reclaim. Delete it directly by name, guarded on the clouddb-id label so we
+    #     never touch anything we didn't create. No-ops (404) after a clean destroy.
+    #     (AWS/Azure providers taint the resource in state on the same error, so their
+    #     destroy already covers it; only GCP exhibits the state-drop.)
+    if row.cloud == "gcp":
+        job_service.update_progress(db, job_id, 80, "Checking for an orphaned instance…")
+        try:
+            from . import gcp_service
+            project = _cfg("gcp_project") or _cfg("gcp_project_id")
+            result = await gcp_service.sweep_orphan_sql_instance(
+                project, f"clouddb-{db_id[:8]}", db_id)
+            if result == "deleted":
+                logger.warning("clouddb decommission: swept orphaned GCP instance "
+                               "clouddb-%s (Terraform state was lost to a create-wait "
+                               "failure)", db_id[:8])
+        except Exception as exc:
+            errors.append(f"GCP orphan sweep: {exc}")
+            logger.warning("clouddb GCP orphan sweep for %s failed: %s", db_id, exc)
+
     if errors:
         row.status = "failed"
         db.commit()
@@ -1307,15 +1636,25 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     # Retire the minted admin credential from the encrypted config store too.
     config_service.delete(f"clouddb/{db_id}/admin")
 
-    # Terminate the shared Jumpoint host if nothing is left using it (best-effort;
+    # Terminate the shared Gateway host if nothing is left using it (best-effort;
     # the row is no longer active, so it's excluded from the count).
-    job_service.update_progress(db, job_id, 90, "Reclaiming idle Jumpoint host…")
+    job_service.update_progress(db, job_id, 90, "Reclaiming idle Gateway host…")
     try:
         from . import jumpoint_host_service
         await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, row.cloud, _cfg(row.cloud + "_region") or row.region)
     except Exception as exc:
-        warnings.append(f"Jumpoint host teardown: {exc}")
-        logger.warning("clouddb: jumpoint host idle-teardown failed (non-fatal): %s", exc)
+        warnings.append(f"Gateway host teardown: {exc}")
+        logger.warning("clouddb: gateway host idle-teardown failed (non-fatal): %s", exc)
+
+    # Reclaim the shared SSM interface endpoints if no EC2 instance / AWS cloud DB
+    # is left (this row is already inactive, so it's excluded from the count).
+    if row.cloud == "aws":
+        try:
+            from . import ssm_endpoint_service
+            await ssm_endpoint_service.reclaim_ssm_endpoints(db, _cfg(row.cloud + "_region") or row.region)
+        except Exception as exc:
+            warnings.append(f"SSM endpoints teardown: {exc}")
+            logger.warning("clouddb: SSM endpoints idle-teardown failed (non-fatal): %s", exc)
 
     job_service.set_completed(db, job_id, {"db_id": db_id, **({"warnings": warnings} if warnings else {})})
     logger.info("clouddb decommissioned db_id=%s", db_id)
@@ -1334,13 +1673,210 @@ def list_databases(db: Session) -> list[dict]:
 def connection_info(db: Session, db_id: str) -> dict:
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        raise CloudDatabaseError(f"cloud database {db_id} not found")
+        raise CloudDatabaseError(f"database {db_id} not found")
     # jump_item_id is the PRA protocol-tunnel jump a user opens to reach the
     # private DB (populated once the tunnel is brokered; null if PRA is unset).
     return {
         "db_id": row.id, "engine": row.engine, "cloud": row.cloud,
+        "provider": row.provider,
+        # source lets a caller tell a provisioned row from a registered one without
+        # reaching for the ORM — the Entitle pre-flight in the API needs it.
+        "source": row.source or "provisioned",
         "status": row.status, "private_host": row.private_host, "port": row.port,
         "jump_item_id": row.jump_item_id,
+    }
+
+
+_MANAGED_REF_PREFIX = "psmanaged:"
+
+
+def register_database(db: Session, *, engine: str, cloud: str, host: str,
+                      port: int | None, db_name: str, managed_account: dict,
+                      created_by: str, region: str = "", instance_id: str = "") -> dict:
+    """Record a database that already exists, so it can be a Config Management target.
+
+    The sibling of :func:`k8s_service.register_cluster`: no Terraform, no provisioning
+    job, just an inventory row plus the reference needed to reach it. ``cloud='local'``
+    is an on-prem database — the local runner reaches it directly, the same shape a
+    kubeconfig-registered cluster already has.
+
+    ``managed_account`` is a Password Safe system/account pair. The credential itself is
+    never stored: it is checked out at run time by
+    :func:`_registered_connection_vars`, so this row holds only ids and a name."""
+    engine = (engine or "").strip().lower()
+    cloud = (cloud or "").strip().lower()
+    host = (host or "").strip()
+    if engine not in VALID_ENGINES:
+        raise CloudDatabaseError(
+            f"unknown engine {engine!r} (expected one of {sorted(VALID_ENGINES)})")
+    if cloud not in VALID_REGISTER_CLOUDS:
+        raise CloudDatabaseError(
+            f"unknown cloud {cloud!r} (expected one of {sorted(VALID_REGISTER_CLOUDS)})")
+    if not host:
+        raise CloudDatabaseError("a host is required — it is how the runner reaches the database")
+    for key in ("system_id", "account_id"):
+        if not (managed_account or {}).get(key):
+            raise CloudDatabaseError(
+                "a Password Safe managed account is required: the dashboard checks the "
+                "credential out at run time rather than storing one")
+    if db.query(CloudDatabase).filter(CloudDatabase.private_host == host,
+                                      CloudDatabase.engine == engine).first():
+        raise CloudDatabaseError(
+            f"a {engine} database at {host!r} is already registered")
+
+    row = CloudDatabase(
+        engine=engine, cloud=cloud, source="registered",
+        provider="registered", region=region or None, instance_id=instance_id or None,
+        private_host=host, port=port or _DEFAULT_PORTS.get(engine),
+        db_name=(db_name or "").strip() or None,
+        status="available",
+        created_at=datetime.utcnow(),
+        credentials_ref=_MANAGED_REF_PREFIX + json.dumps({
+            "system_id": managed_account["system_id"],
+            "account_id": managed_account["account_id"],
+            "account_name": managed_account.get("account_name") or "",
+            "uses_ssh_key": bool(managed_account.get("uses_ssh_key")),
+        }, sort_keys=True),
+        created_by=created_by,
+    )
+    db.add(row)
+    db.commit()
+    logger.info("Registered %s database %s (%s) at %s", engine, row.id, cloud, host)
+    return _serialize(row)
+
+
+def get_database(db: Session, db_id: str) -> Optional[dict]:
+    """One serialized row, or None. Lets a caller branch on ``source`` without reaching
+    for the ORM itself."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    return _serialize(row) if row else None
+
+
+def deregister_database(db: Session, db_id: str) -> None:
+    """Drop a registered database from the inventory.
+
+    Deliberately not a decommission: the dashboard did not create this database and has
+    no Terraform state for it, so there is nothing to destroy and destroying would be
+    the wrong verb for someone else's data. :func:`run_decommission` stays the path for
+    provisioned rows."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        raise CloudDatabaseError(f"database {db_id} not found")
+    if row.source != "registered":
+        raise CloudDatabaseError(
+            f"database {db_id} was provisioned by the dashboard — it is decommissioned "
+            "(Terraform destroy), not deregistered")
+    db.delete(row)
+    db.commit()
+    logger.info("Deregistered database %s (%s)", db_id, row.private_host)
+
+
+def managed_account_ref(row) -> dict:
+    """The Password Safe system/account this registered row was registered with."""
+    raw = (row.credentials_ref or "")
+    if not raw.startswith(_MANAGED_REF_PREFIX):
+        raise CloudDatabaseError(
+            f"database {row.id} has no Password Safe managed account recorded — "
+            "re-register it with an account so the credential can be checked out")
+    return json.loads(raw[len(_MANAGED_REF_PREFIX):])
+
+
+async def _registered_connection_vars(row) -> dict:
+    """Connection vars for a registered database, credential checked out just-in-time.
+
+    Mirrors the VM path in ``ansible_local_run_service``: check out against the pinned
+    system/account, use the value inline, and let the request expire on its duration.
+    That path only checks a request back in when it made an ephemeral store copy — the
+    inline runners (local, ACI) leave expiry to Password Safe, and this is one of those.
+    """
+    from . import btapi_service
+    ref = managed_account_ref(row)
+    duration = int(_cfg("ansible_managed_request_duration_min") or 60)
+    try:
+        _req_id, credential = await btapi_service.get_ps_credential_with_request(
+            ref["system_id"], ref["account_id"], duration_min=duration,
+            uses_ssh_key=ref.get("uses_ssh_key", False))
+    except btapi_service.BTAPIError as exc:
+        raise CloudDatabaseError(
+            f"Password Safe checkout failed for database {row.id}: {exc}") from exc
+    if not credential:
+        raise CloudDatabaseError(
+            f"Password Safe returned an empty credential for database {row.id}")
+
+    engine = row.engine
+    db_name = row.db_name or ("master" if engine == "sqlserver" else "")
+    from . import managed_accounts as ma
+    return {
+        "db_engine": engine,
+        "db_login_host": row.private_host or "",
+        "db_login_port": row.port or _DEFAULT_PORTS.get(engine),
+        # The account name is the login identity, minus any cloud-plugin scope suffix —
+        # the same normalization the SSH path applies before using it as ansible_user.
+        "db_login_user": ma.ssh_login_user(ref.get("account_name") or ""),
+        "db_login_password": credential,
+        "db_name": db_name,
+    }
+
+
+async def ansible_connection_vars(db: Session, db_id: str) -> dict:
+    """Connection variables an Ansible ``localhost`` play uses to reach this managed
+    DB over the network. Resolved server-side and injected as **scrubbed secret
+    extra-vars** — the operator never sees them.
+
+    The per-cloud admin-credential normalization mirrors :func:`_broker_tunnel` /
+    :func:`_entitle_register_core` exactly:
+      - user     — ``master_username`` | ``administrator_login`` from the provisioning
+                   job's tf_variables, with the Cloud SQL SQL Server (``sqlserver``) /
+                   Oracle (``ADMIN``) overrides, else ``dbadmin``.
+      - password — the encrypted config store (``clouddb/{id}/admin``); tf_variables
+                   never carry it (scrubbed).
+      - db_name  — ``master`` for SQL Server (you connect to ``master``; RDS omits a
+                   db_name), the ADB name for Oracle, else the provisioned db_name.
+
+    The returned keys are engine-independent so one sample playbook maps them onto any
+    module's args (``login_host: "{{ db_login_host }}"`` …). Raises
+    :class:`CloudDatabaseError` when the row or its admin credential can't be resolved."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        raise CloudDatabaseError(f"database {db_id} not found")
+    # A registered database has no Terraform state and no provisioning job, so there is
+    # no tf_variables to read a credential out of. It carries a Password Safe managed
+    # account instead, checked out at run time. Everything below this line is the
+    # provisioned path, unchanged.
+    if row.source == "registered":
+        return await _registered_connection_vars(row)
+    engine = row.engine
+    prov_job = _provision_job_for(db, db_id)
+    tfv = ((prov_job.metadata_dict or {}).get("tf_variables") if prov_job else None) or {}
+
+    default_user = ("ADMIN" if engine == "oracle"
+                    else "sqlserver" if (engine == "sqlserver" and row.cloud == "gcp")
+                    else "dbadmin")
+    admin_username = (tfv.get("master_username")
+                      or tfv.get("administrator_login") or default_user)
+    admin_password = (tfv.get("master_password")
+                      or tfv.get("administrator_password")
+                      or tfv.get("admin_password")
+                      or config_service.get(f"clouddb/{row.id}/admin") or "")
+    if not admin_password:
+        raise CloudDatabaseError(
+            f"no admin credential available for db_id={row.id} "
+            f"(provisioning job pruned?) — cannot build Ansible connection vars")
+
+    if engine == "sqlserver":
+        db_name = "master"
+    elif engine == "oracle":
+        db_name = _oracle_db_name(row.id)
+    else:
+        db_name = tfv.get("db_name", "")
+
+    return {
+        "db_engine": engine,
+        "db_login_host": row.private_host or "",
+        "db_login_port": row.port or _DEFAULT_PORTS.get(engine),
+        "db_login_user": admin_username,
+        "db_login_password": admin_password,
+        "db_name": db_name,
     }
 
 
@@ -1349,7 +1885,10 @@ def _serialize(r: CloudDatabase) -> dict:
         "id": r.id, "engine": r.engine, "provider": r.provider, "cloud": r.cloud,
         "region": r.region, "instance_id": r.instance_id, "private_host": r.private_host,
         "port": r.port, "status": r.status, "jump_item_id": r.jump_item_id,
+        # Drives the delete verb (deregister vs decommission) and the UI badge.
+        "source": r.source or "provisioned", "db_name": r.db_name,
         "entitle_integration_id": r.entitle_integration_id,
+        "entitle_viable": _entitle_viable(r.engine, r.provider, r.source),
         "created_by": r.created_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }

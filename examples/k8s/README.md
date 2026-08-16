@@ -1,10 +1,10 @@
 # Sample Kubernetes manifests (managed-cluster starters)
 
 Ready-to-adapt manifests for the **EKS / AKS / GKE clusters the dashboard
-manages** — provision or register a cluster, install the Portainer management
-plane, and broker access via BeyondTrust PRA
-(see [docs/integrations/portainer.md](../../docs/integrations/portainer.md) and
-[docs/integrations/beyondtrust.md](../../docs/integrations/beyondtrust.md)).
+manages** — provision or register a cluster, import it into the Rancher
+management plane, and broker access via BeyondTrust PRA
+(see [docs/integrations/rancher.md](../../docs/integrations/rancher.md) and
+[docs/integrations/privileged-remote-access.md](../../docs/integrations/privileged-remote-access.md)).
 
 They are the Kubernetes counterpart to [`examples/compose/`](../compose/) and
 [`examples/playbooks/`](../playbooks/): the community-edition answer to an
@@ -19,8 +19,8 @@ jobs, and namespace guardrails.
 The dashboard doesn't apply raw manifests for you — you deploy them into a
 managed cluster through the access it brokers:
 
-1. **Portainer** (the management plane the dashboard installs) → your cluster's
-   environment → **Applications → Create from manifest**, paste a file, deploy.
+1. **Rancher** (the management plane the dashboard installs) → your imported
+   cluster → **Import YAML**, paste a file, deploy.
 2. **kubectl through the PRA tunnel** — open the brokered session to the cluster
    (Kubernetes jump), then `kubectl apply -f <file>` from your workstation.
 
@@ -38,7 +38,10 @@ whole set.
 | `nginx-hpa.yaml` | HorizontalPodAutoscaler | CPU autoscaling 2→6 (needs metrics-server) |
 | `web-configmap.yaml` | ConfigMap · Deployment | Config as env var **and** mounted file |
 | `app-secret.yaml` | Secret · Deployment | Secret-as-env (prefer ESO/Password Safe for real creds) |
+| `app-externalsecret.yaml` | ExternalSecret · Deployment | Secret synced from Password Safe via ESO (real-use counterpart to `app-secret.yaml`; needs the ESO add-on) |
+| `app-db-externalsecret.yaml` | ExternalSecret · Deployment | Multi-key Secret (DB connection bundle) synced via ESO, loaded with `envFrom` (needs the ESO add-on) |
 | `redis-statefulset.yaml` | StatefulSet · Service · PVC | Persistence via a `volumeClaimTemplate` |
+| `redis-eso-statefulset.yaml` | ExternalSecret · StatefulSet · Service · PVC | Password-protected Redis with `requirepass` synced from Password Safe via ESO (needs the ESO add-on) |
 | `cronjob-housekeeping.yaml` | CronJob | Scheduled one-shot task |
 | `namespace-guardrails.yaml` | ResourceQuota · LimitRange | Cap namespace usage; default container requests/limits |
 | `network-policy.yaml` | NetworkPolicy | Default-deny ingress + targeted allows |
@@ -51,10 +54,14 @@ whole set.
   profile. Drop a non-compliant manifest into this namespace and the API server
   rejects it — the samples double as a hardened-pod template.
 - **Some samples need a cluster add-on.** `nginx-ingress.yaml` needs an ingress
-  controller, `nginx-hpa.yaml` needs metrics-server, and `network-policy.yaml`
-  needs a policy-enforcing CNI. Each file's header comment calls out its
-  prerequisite and what happens without it. Managed EKS/AKS/GKE clusters vary in
-  what ships by default — check before relying on one.
+  controller, `nginx-hpa.yaml` needs metrics-server, `network-policy.yaml`
+  needs a policy-enforcing CNI, and `app-externalsecret.yaml` /
+  `app-db-externalsecret.yaml` / `redis-eso-statefulset.yaml` need the External
+  Secrets Operator + `beyondtrust-store` ClusterSecretStore installed by the dashboard's
+  secret-delivery action (`POST /clusters/{id}/secret-delivery`, kind `eso`; see
+  [docs/kubernetes.md](../../docs/kubernetes.md)). Each file's
+  header comment calls out its prerequisite and what happens without it. Managed
+  EKS/AKS/GKE clusters vary in what ships by default — check before relying on one.
 
 ## JIT access (optional)
 

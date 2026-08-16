@@ -271,7 +271,7 @@
             <p class="text-xs text-gray-500 leading-snug" x-text="f.desc"></p>
           </div>
 
-          <!-- Configure: only preview flags that also carry config (e.g. Cloud Databases) -->
+          <!-- Configure: only preview flags that also carry config (e.g. Databases) -->
           <button x-show="f.configFeature" @click="openPanel({ key: f.configFeature, label: f.label })"
                   class="text-xs text-blue-600 hover:text-blue-700 font-medium flex-shrink-0">Configure →</button>
         </div>
@@ -317,7 +317,6 @@
            class="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm"
            x-text="panelError"></div>
 
-      <!-- ── BeyondTrust ── -->
       <!-- ── Cloud Costs ── -->
       <template x-if="panel?.key === 'cost_explorer' && !panelLoading">
         <div class="space-y-4">
@@ -340,7 +339,7 @@
           </div>
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Per-cloud budgets <span class="normal-case text-gray-400">(optional)</span></p>
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
               <div>
                 <label class="block text-xs font-medium text-gray-600 mb-1">AWS</label>
                 <input type="number" min="0" step="0.01" x-model.number="panelCfg.cost_budget_aws"
@@ -354,6 +353,11 @@
               <div>
                 <label class="block text-xs font-medium text-gray-600 mb-1">GCP</label>
                 <input type="number" min="0" step="0.01" x-model.number="panelCfg.cost_budget_gcp"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="0">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">OCI</label>
+                <input type="number" min="0" step="0.01" x-model.number="panelCfg.cost_budget_oci"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="0">
               </div>
             </div>
@@ -446,17 +450,610 @@
         </div>
       </template>
 
-      <template x-if="panel?.key === 'beyondtrust' && !panelLoading">
+      <template x-if="panel?.key === 'resource_expiry' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            BeyondTrust PRA (Password Safe) integration for secret retrieval and Shell Jump provisioning.
-            Shell Jumps are managed via the <strong>BeyondTrust SRA Terraform provider</strong> (ARM64-native, no binary dependency).
-            The Jump Group and Jumpoint referenced below must already exist in PRA — the dashboard does not create them.
+            Give every new deployment an expiry, then <strong>permanently delete</strong> it
+            when that time passes — the same destroy path the Destroy button uses.
+            Terminated instances, deleted databases and destroyed clusters are
+            <strong>not recoverable</strong>. Resources you <em>registered</em> rather than
+            provisioned are never touched, and neither is anything that already existed
+            before you enabled this: a resource only has a timer once something stamps one.
+            See <a href="/docs/auto-delete-timer" class="text-blue-600 underline">the auto-delete timer doc</a>.
           </p>
 
+          <label class="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <input type="checkbox" x-model="panelCfg.resource_expiry_dry_run"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-amber-900">
+              <span class="font-semibold">Observe only — log what would be deleted, delete nothing.</span>
+              <span class="block text-[11px] mt-1">
+                Leave this on for a full cycle and read the sweep report before you trust it.
+                Turning it off arms deletion for every resource whose timer has already
+                passed — <strong>including any that expired while you were in observe-only
+                mode</strong>.
+              </span>
+            </span>
+          </label>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.resource_expiry_enforce"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Allow deletion</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                A second, separate gate. With this off the timer is tracked and shown but
+                never acted on, whatever the setting above says.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Default lifetime for new deployments</label>
+            <input type="number" min="0" x-model.number="panelCfg.resource_expiry_default_hours"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                   placeholder="0 = no timer">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Hours. Applied to cloud VMs, databases and Kubernetes clusters the dashboard
+              provisions. <code>0</code> means new deploys get no timer and nothing is ever
+              deleted automatically — the safe way to enable this and watch it first.
+              The clock starts when the deploy is queued, so it includes provisioning time.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Maximum total lifetime</label>
+            <input type="number" min="0" x-model.number="panelCfg.resource_expiry_max_total_hours"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                   placeholder="720 = 30 days; 0 = no ceiling">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Hours, counted from when the resource was created — not from the last
+              extension — so repeated extending can't outrun it. Admins are not capped.
+            </p>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Extend button adds</label>
+              <input type="number" min="1" x-model.number="panelCfg.resource_expiry_extend_hours"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Hours per click, clamped by the ceiling above.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Warn this long before</label>
+              <input type="number" min="1" x-model.number="panelCfg.resource_expiry_warn_hours"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Hours. A resource entering this window shows a warning on the dashboard,
+                and — if <button type="button" @click="openPanelByKey('notifications')"
+                class="underline text-blue-600">Notifications</button> is on — fires one
+                <span class="font-mono">resource.expiring</span> message per endpoint,
+                once each. Otherwise an operator has to open the dashboard to see it.
+              </p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Grace</label>
+              <input type="number" min="15" x-model.number="panelCfg.resource_expiry_grace_minutes"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Min past expiry (floor 15).</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Sweep every</label>
+              <input type="number" min="5" x-model.number="panelCfg.resource_expiry_sweep_interval_minutes"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Minutes (floor 5).</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Max per sweep</label>
+              <input type="number" min="1" x-model.number="panelCfg.resource_expiry_max_per_pass"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Cap 50.</p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Keep sweep history</label>
+              <input type="number" min="0" x-model.number="panelCfg.resource_expiry_sweep_retention_days"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Days, 0 = forever.</p>
+            </div>
+            <div class="col-span-2 flex items-end">
+              <p class="text-[11px] text-gray-400 mb-1">
+                A sweep records a job every interval whether or not it found anything —
+                48 a day at the default. Completed ones are dropped past this age and are
+                hidden on
+                <a href="/jobs" class="underline text-blue-600">Job History</a> unless you
+                tick "Show routine sweeps"; a <em>failed</em> pass is always kept and always
+                shown.
+              </p>
+            </div>
+          </div>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.resource_expiry_allow_never"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Allow admins to remove a timer</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                Lets an admin clear a resource's timer entirely ("never expires"). Off means
+                every stamped resource keeps a timer and the most anyone can do is extend it.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Exempt workgroups</label>
+            <input type="text" x-model="panelCfg.resource_expiry_exempt_workgroups"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="platform, shared-infra">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Comma-separated. Resources in these workgroups never get a timer and are never
+              deleted. Only <strong>VMs</strong> carry a workgroup — databases, clusters and
+              desktop seats don't, so use "never expires" for those instead. Blank = none.
+            </p>
+          </div>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">Last sweep</span>
+              <button type="button" @click="runExpirySweep()" :disabled="expirySweeping"
+                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium disabled:opacity-50">
+                <span x-text="expirySweeping ? 'Queueing…' : 'Run a sweep now'"></span>
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-500 font-mono whitespace-pre-wrap"
+               x-text="expirySweepSummary()"></p>
+          </div>
+
+          <p class="text-[11px] text-amber-600">
+            Deletion runs on a schedule, not instantly, so a resource may sit briefly past
+            its expiry. Two one-hour arming delays stand in the way and neither is
+            configurable: the first sweep after you enable the feature only starts the
+            clock, and turning <strong>Observe only</strong> off starts a second one — so
+            there is always an hour, with the full list visible on
+            <a href="/inventory" class="underline">Inventory</a>, before anything is
+            destroyed. Turning Observe only back on resets that second clock.
+          </p>
+        </div>
+      </template>
+
+      <template x-if="panel?.key === 'worker' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Long jobs — provisions, image builds, exports, deploys — run in a separate
+            worker process, not in the web app. These limits say how many run
+            <strong>at the same time</strong>, and are read fresh every couple of seconds,
+            so a change here applies without restarting anything.
+            See <a href="/docs/job-worker" class="text-blue-600 underline">the job worker doc</a>.
+          </p>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px] text-gray-600">
+            The limits are split by what a job actually costs, because they aren't alike. A
+            job waiting on a cloud API is nearly free; one streaming a Terraform apply
+            writes a line to the database for every line of output. Raising the wrong one
+            makes everything slower rather than faster — so start with
+            <strong>poll-only</strong>.
+          </div>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Poll-only jobs</label>
+              <input type="number" min="1" x-model.number="panelCfg.worker_light_concurrency"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Image exports, promotes and copies, gateways, auto-delete sweeps. They start
+                something in the cloud and then just wait — an export can poll for two hours.
+                Cheap; raise this first. Max 12.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Heavy jobs</label>
+              <input type="number" min="1" x-model.number="panelCfg.worker_heavy_concurrency"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Cluster and database provisions, Packer builds. Each streams its output to
+                the database line by line, so two is usually enough to saturate a small
+                Postgres. Max 4.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Mixed jobs</label>
+              <input type="number" min="1" x-model.number="panelCfg.worker_medium_concurrency"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                VM deploys, tunnels, Kubernetes add-ons. Mostly cloud API calls plus a short
+                <span class="font-mono">terraform</span> or <span class="font-mono">helm</span>.
+                Max 4.
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Total at once</label>
+            <input type="number" min="1" x-model.number="panelCfg.worker_max_concurrency"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <p class="text-[11px] text-gray-400 mt-1">
+              The overall ceiling, and the one that actually binds — the three limits above
+              are allowed to add up to more than this, because they cap the <em>mix</em>
+              while this caps the <em>total</em>. Lower this to shrink the worker's
+              footprint. Max 16, but see the note below: it is also capped by how many
+              database connections the worker has.
+            </p>
+          </div>
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-800">
+            <strong>The database connection pool is the real limit.</strong> Every running
+            job holds connections, so the worker reduces the total above to what its pool
+            can serve and reports it below. That pool is sized by the
+            <span class="font-mono">DB_POOL_SIZE</span> and
+            <span class="font-mono">DB_MAX_OVERFLOW</span> environment variables, not here —
+            it is built before the app can read any setting out of the database. If the
+            readout below says your total was reduced, raise those and redeploy the worker.
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Shutdown grace</label>
+              <input type="number" min="0" x-model.number="panelCfg.worker_drain_timeout_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Seconds to let running jobs finish when the worker is asked to stop (a
+                redeploy). Keep it under your platform's termination grace period — 30s by
+                default on Azure Container Apps — or the process is killed before it
+                finishes waiting. Jobs longer than this are failed promptly by the next
+                worker instead of looking alive for ten minutes. 0 = don't wait.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Worker threads</label>
+              <input type="number" min="0" x-model.number="panelCfg.worker_executor_threads"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                <code>0</code> derives it from the limits above, which is almost always
+                right. Set it only if the log shows jobs stuck at 0% — that means cloud
+                calls are queueing for a thread. Applied at worker start, so this one needs
+                a restart. Max 128.
+              </p>
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">What the worker is using</span>
+              <button type="button" @click="loadWorkerStatus()" :disabled="workerStatusLoading"
+                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium disabled:opacity-50">
+                <span x-text="workerStatusLoading ? 'Checking…' : 'Refresh'"></span>
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-500 font-mono whitespace-pre-wrap"
+               x-text="workerStatusSummary()"></p>
+          </div>
+
+          <p class="text-[11px] text-gray-400">
+            Running more than one worker multiplies these limits — two workers with a total
+            of 3 each run up to 6 jobs. Jobs are claimed atomically, so no job ever runs
+            twice however many workers there are. Note that each worker needs its own
+            database connections, which is why raising the limits inside one worker is
+            usually cheaper than adding another.
+          </p>
+        </div>
+      </template>
+
+      <template x-if="panel?.key === 'notifications' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Push dashboard events to Slack, Microsoft Teams, or any HTTP endpoint. Delivery
+            is <strong>outbound only</strong> — nothing here opens an inbound webhook.
+            See <a href="/docs/notifications" class="text-blue-600 underline">the notifications doc</a>.
+          </p>
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-800">
+            There is no built-in email sender. To send mail, add a <span class="font-mono">custom</span>
+            endpoint pointed at a Power Automate Flow (or similar) and let that send the message —
+            the same endpoint can fan out to a mailbox, a channel and a ticket queue.
+          </div>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.notify_dry_run"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Dry run — record, don't send</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                On by default. Every message is written to the delivery log below with status
+                <span class="font-mono">dry-run</span> and nothing leaves the dashboard. Watch a
+                full day, then turn this off. The per-endpoint <strong>Test</strong> button
+                ignores this and always sends.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard URL</label>
+            <input type="text" x-model="panelCfg.notify_base_url"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="https://dashboard.example.com">
+            <p class="text-[11px] mt-1"
+               :class="panelCfg.notify_base_url ? 'text-gray-400' : 'text-amber-600'">
+              The worker has no idea what address you reach the dashboard on. Leave this blank
+              and every message ships with <strong>no link</strong> — which looks like a bug but
+              is this setting. No trailing path.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Events to send</label>
+            <input type="text" x-model="panelCfg.notify_event_types"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Comma-separated. Known:
+              <span class="font-mono" x-text="notif.knownEvents.join(', ')"></span>.
+              An individual endpoint can narrow this further, but not widen it.
+            </p>
+          </div>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Minimum severity</label>
+              <select x-model="panelCfg.notify_min_severity"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="info">info</option>
+                <option value="warning">warning</option>
+                <option value="critical">critical</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">Below this, nothing is queued.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Send every</label>
+              <input type="number" min="5" x-model.number="panelCfg.notify_flush_interval_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Seconds (floor 5).</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Condition scan every</label>
+              <input type="number" min="300" x-model.number="panelCfg.notify_scan_interval_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Seconds (floor 300). Budget, stale-secret and drift checks.
+              </p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-4 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Attempts</label>
+              <input type="number" min="1" max="5" x-model.number="panelCfg.notify_max_attempts"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Timeout</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_http_timeout_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Max per pass</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_max_per_flush"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Queue ceiling</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_max_queue"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-400 -mt-2">
+            Retries back off 30s → 2m → 10m → 30m and survive a worker restart. Past the queue
+            ceiling, new messages are recorded as <span class="font-mono">suppressed</span>
+            rather than queued — the brake that keeps a first enable against a large estate from
+            becoming an incident.
+          </p>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Keep delivery history</label>
+            <input type="number" min="0" x-model.number="panelCfg.notify_retention_days"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Days. 0 = keep forever. Failed deliveries are never pruned — they're the evidence.
+            </p>
+          </div>
+
+          <!-- ── Endpoints ─────────────────────────────────────────────── -->
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">Endpoints</span>
+              <button type="button" @click="newEndpoint()"
+                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium">
+                Add endpoint
+              </button>
+            </div>
+
+            <p x-show="notif.error" x-cloak class="text-[11px] text-red-600 mb-2"
+               x-text="notif.error"></p>
+            <p x-show="!notif.loading && !notif.endpoints.length && !notif.draft" x-cloak
+               class="text-[11px] text-gray-500">
+              No endpoints yet. Nothing will be sent until you add one.
+            </p>
+
+            <div class="space-y-2">
+              <template x-for="ep in notif.endpoints" :key="ep.id">
+                <div class="rounded border border-gray-200 bg-white p-2">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0">
+                      <span class="text-sm font-medium text-gray-800" x-text="ep.name"></span>
+                      <span class="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono"
+                            x-text="ep.fmt"></span>
+                      <span x-show="!ep.enabled" x-cloak
+                            class="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">off</span>
+                      <span class="block text-[11px] text-gray-400 font-mono truncate"
+                            x-text="ep.url_hint"></span>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0">
+                      <button type="button" @click="testEndpoint(ep)"
+                              :disabled="notif.testingId === ep.id"
+                              class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50">
+                        <span x-text="notif.testingId === ep.id ? 'Sending…' : 'Test'"></span>
+                      </button>
+                      <button type="button" @click="editEndpoint(ep)"
+                              class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Edit</button>
+                      <button type="button" @click="deleteEndpoint(ep)"
+                              class="text-xs px-2 py-1 rounded border border-red-200 text-red-600 bg-white hover:bg-red-50">Delete</button>
+                    </div>
+                  </div>
+                  <p x-show="ep.event_types" x-cloak class="text-[11px] text-gray-400 mt-1">
+                    Only: <span class="font-mono" x-text="ep.event_types"></span>
+                  </p>
+                  <p x-show="ep.last_error" x-cloak
+                     class="text-[11px] text-red-600 mt-1 font-mono break-all"
+                     x-text="'Last error: ' + ep.last_error"></p>
+                  <div x-show="notif.testResult && notif.testResult.id === ep.id" x-cloak
+                       class="mt-1 text-[11px] font-mono break-all"
+                       :class="notif.testResult?.ok ? 'text-green-700' : 'text-red-600'"
+                       x-text="notif.testResult?.ok
+                                 ? ('delivered (HTTP ' + notif.testResult.status_code + ')')
+                                 : notif.testResult?.error"></div>
+                </div>
+              </template>
+            </div>
+
+            <!-- add / edit form -->
+            <div x-show="notif.draft" x-cloak class="mt-3 rounded border border-blue-200 bg-white p-3 space-y-2">
+              <div class="grid grid-cols-3 gap-2">
+                <div class="col-span-2">
+                  <label class="block text-[11px] font-medium text-gray-600 mb-1">Name</label>
+                  <input type="text" x-model="notif.draft.name"
+                         class="w-full border border-gray-300 rounded px-2 py-1 text-sm"
+                         placeholder="platform-alerts">
+                </div>
+                <div>
+                  <label class="block text-[11px] font-medium text-gray-600 mb-1">Format</label>
+                  <select x-model="notif.draft.fmt"
+                          class="w-full border border-gray-300 rounded px-2 py-1 text-sm">
+                    <template x-for="f in notif.formats" :key="f">
+                      <option :value="f" x-text="f"></option>
+                    </template>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-[11px] font-medium text-gray-600 mb-1">Webhook URL</label>
+                <input type="text" x-model="notif.draft.url"
+                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+                       :placeholder="notif.draft.id ? (notif.draft.url_hint + '  (leave blank to keep)') : 'https://…'">
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="notif.draft.fmt === 'teams'" x-cloak>
+                  Teams: create a <strong>Power Automate Workflow</strong> from the "Post to a channel
+                  when a webhook request is received" template and paste its URL. The old
+                  <span class="font-mono">outlook.office.com</span> connector webhooks were
+                  permanently switched off in May 2026 and will not work. Messages post as the
+                  Flow bot; the name and icon can't be changed.
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="notif.draft.fmt === 'slack'" x-cloak>
+                  Slack: an Incoming Webhook URL from the Slack app that owns the channel.
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="notif.draft.fmt === 'custom'" x-cloak>
+                  Any endpoint that accepts JSON. The body is a stable, versioned envelope; set a
+                  secret below to have it signed with HMAC-SHA256.
+                </p>
+              </div>
+
+              <div x-show="notif.draft.fmt === 'custom'" x-cloak>
+                <label class="block text-[11px] font-medium text-gray-600 mb-1">Signing secret</label>
+                <input type="password" x-model="notif.draft.secret" autocomplete="new-password"
+                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+                       :placeholder="notif.draft.has_secret ? '•••••••• (leave blank to keep)' : 'optional'">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Sent as <span class="font-mono">X-Dashboard-Signature</span>. An
+                  <span class="font-mono">aws_sm://</span> / <span class="font-mono">azure_kv://</span> /
+                  <span class="font-mono">gcp_sm://</span> / <span class="font-mono">bt_safe://</span>
+                  reference is resolved at send time.
+                </p>
+              </div>
+
+              <div>
+                <label class="block text-[11px] font-medium text-gray-600 mb-1">Only these events</label>
+                <input type="text" x-model="notif.draft.event_types"
+                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+                       placeholder="blank = everything enabled above">
+              </div>
+
+              <label class="flex items-center gap-2">
+                <input type="checkbox" x-model="notif.draft.enabled"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                <span class="text-sm text-gray-700">Enabled</span>
+              </label>
+
+              <div class="flex justify-end gap-2 pt-1">
+                <button type="button" @click="notif.draft = null"
+                        class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Cancel</button>
+                <button type="button" @click="saveEndpoint()" :disabled="notif.saving"
+                        class="text-xs px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+                  <span x-text="notif.saving ? 'Saving…' : 'Save endpoint'"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Delivery log ──────────────────────────────────────────── -->
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">Recent deliveries</span>
+              <button type="button" @click="loadNotifications()"
+                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium">
+                Refresh
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-500 mb-2" x-text="notifSummaryLine()"></p>
+            <p x-show="!notif.deliveries.length" x-cloak class="text-[11px] text-gray-500">
+              Nothing recorded yet.
+            </p>
+            <div class="space-y-1 max-h-64 overflow-y-auto">
+              <template x-for="d in notif.deliveries" :key="d.id">
+                <div class="text-[11px] font-mono flex gap-2">
+                  <span class="shrink-0 w-14"
+                        :class="{'text-green-700': d.status === 'sent',
+                                 'text-red-600': d.status === 'failed',
+                                 'text-gray-400': d.status === 'dry_run' || d.status === 'suppressed',
+                                 'text-amber-600': d.status === 'pending' || d.status === 'sending'}"
+                        x-text="d.status"></span>
+                  <span class="shrink-0 text-gray-400" x-text="d.channel"></span>
+                  <span class="truncate text-gray-700"
+                        x-text="d.subject + (d.error ? ' — ' + d.error : '')"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <p class="text-[11px] text-amber-600">
+            Delivery is at-least-once: a worker killed mid-send retries when the row is
+            reclaimed, so a duplicate message is possible. A failing endpoint can never
+            slow down or fail the job it is reporting on — sending happens in a separate
+            process, after the fact.
+          </p>
+        </div>
+      </template>
+
+      <template x-if="panel?.key === 'password_safe' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            BeyondTrust Password Safe / Secrets Safe — on-demand checkout of secrets and
+            managed-account credentials via the <code class="bg-gray-100 px-1 rounded">ps-cli</code>
+            binary, plus onboarding of the VMs, cloud databases and Kubernetes ServiceAccount
+            tokens this dashboard builds as managed systems and accounts.
+          </p>
+          <p class="text-sm text-gray-500">
+            Shell Jump, Gateway and PRA Vault configuration lives on the
+            <button type="button" @click="openPanelByKey('pra')" class="underline text-blue-600">Privileged
+            Remote Access</button> panel.
+          </p>
           <!-- Password Safe -->
           <div>
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Password Safe</p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">API connection</p>
             <p class="text-xs text-gray-400 mb-3">
               Secret retrieval and managed-account credential checkout via the
               <code class="bg-gray-100 px-1 rounded">ps-cli</code> binary.
@@ -490,7 +1087,6 @@
               </div>
             </div>
           </div>
-
           <!-- Password Safe resource registration (optional, per-VM-deploy) -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Resource registration (VMs)</p>
@@ -524,7 +1120,7 @@
                 </p>
                 <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssh'">
                   Traditional managed system keyed by hostname/IP; pushes the VM's own SSH key and needs SSH
-                  line-of-sight (Resource Broker / Jumpoint). GCP always uses this method (Azure has its own below).
+                  line-of-sight (Resource Broker / Gateway). GCP always uses this method (Azure has its own below).
                 </p>
               </div>
               <div>
@@ -545,7 +1141,7 @@
                 </p>
                 <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_azure_registration_method || 'azurevm') === 'ssh'">
                   Traditional managed system keyed by hostname/IP; pushes the VM's own SSH key and needs SSH
-                  line-of-sight (Resource Broker / Jumpoint).
+                  line-of-sight (Resource Broker / Gateway).
                 </p>
                 <label class="flex items-center gap-2 text-sm text-gray-700 mt-2"
                        x-show="(panelCfg.passwordsafe_azure_registration_method || 'azurevm') === 'azurevm'">
@@ -574,7 +1170,7 @@
                 </p>
                 <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_gcp_registration_method || 'gcpvm') === 'ssh'">
                   Traditional managed system keyed by hostname/IP; pushes the VM's own SSH key and needs SSH
-                  line-of-sight (Resource Broker / Jumpoint).
+                  line-of-sight (Resource Broker / Gateway).
                 </p>
                 <label class="flex items-center gap-2 text-sm text-gray-700 mt-2"
                        x-show="(panelCfg.passwordsafe_gcp_registration_method || 'gcpvm') === 'gcpvm'">
@@ -645,103 +1241,67 @@
               </p>
             </div>
           </div>
-
-          <!-- Privileged Remote Access — Terraform provider -->
+          <!-- Database import (reads Password Safe; writes nothing to it) -->
           <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Privileged Remote Access (PRA)</p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Import</p>
             <p class="text-xs text-gray-400 mb-3">
-              Shell Jump provisioning via the BeyondTrust SRA Terraform provider.
-              Runs natively on ARM64 — no binary dependency.
+              Tunes the <span class="font-medium">Import from Password Safe</span> button on the Databases page,
+              which lists the databases Password Safe already knows about and registers the ones you pick.
+              It only <span class="font-medium">reads</span> &mdash; nothing in Password Safe is created or changed.
+              All four are optional. Importing needs both the <code class="bg-gray-100 px-1 rounded">cloud_database:write</code>
+              and <code class="bg-gray-100 px-1 rounded">secrets:use</code> permissions.
             </p>
-            <div class="space-y-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">PRA API Host</label>
-                <input type="text" x-model="panelCfg.bt_api_host"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="pra.company.com">
-              </div>
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
-                  <input type="text" x-model="panelCfg.bt_client_id"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client Secret</label>
-                  <input type="password" x-model="panelCfg.bt_client_secret"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="••••••••">
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Shell Jump provisioning -->
-          <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Shell Jump provisioning</p>
-            <p class="text-xs text-gray-400 mb-3">
-              The Jump Group and Jumpoint must already exist in PRA — the dashboard looks them up by name and creates Shell Jumps inside them.
-            </p>
-            <div class="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(AWS)</span></label>
-                <input type="text" x-model="panelCfg.bt_jump_group_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="us-east-2">
-              </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Name <span class="text-gray-400 font-normal">(AWS)</span></label>
-                <input type="text" x-model="panelCfg.bt_jumpoint_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="AWS ECS">
-              </div>
-            </div>
-            <p class="text-xs text-gray-400 mb-2">Azure overrides — leave blank to reuse the AWS values above.</p>
-            <div class="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(Azure)</span></label>
-                <input type="text" x-model="panelCfg.azure_bt_jump_group_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="same as AWS">
-              </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Name <span class="text-gray-400 font-normal">(Azure)</span></label>
-                <input type="text" x-model="panelCfg.azure_jumpoint_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="ACI">
-              </div>
-            </div>
-            <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>
             <div class="grid grid-cols-2 gap-3">
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(GCP)</span></label>
-                <input type="text" x-model="panelCfg.gcp_bt_jump_group_name"
+                <label class="block text-sm font-medium text-gray-700 mb-1">Import Workgroup <span class="text-gray-400 font-normal">(blank = everything visible)</span></label>
+                <input type="text" x-model="panelCfg.clouddb_ps_import_workgroup"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="same as AWS">
+                       placeholder="Default Workgroup">
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Name <span class="text-gray-400 font-normal">(GCP)</span></label>
-                <input type="text" x-model="panelCfg.gcp_jumpoint_name"
+                <label class="block text-sm font-medium text-gray-700 mb-1">Default Location</label>
+                <select x-model="panelCfg.clouddb_ps_import_default_cloud"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">On-premises</option>
+                  <option value="aws">AWS</option>
+                  <option value="azure">Azure</option>
+                  <option value="gcp">GCP</option>
+                  <option value="oci">OCI</option>
+                </select>
+                <p class="text-xs text-gray-400 mt-1">Preselected in the import dialog. Password Safe does not record a cloud, so this is a starting point, not a lookup.</p>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Max Candidates</label>
+                <input type="number" min="1" x-model.number="panelCfg.clouddb_ps_import_max_systems"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="500">
+                <p class="text-xs text-gray-400 mt-1">The dialog says so when it truncates &mdash; narrow with a workgroup rather than raising this.</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Platform Overrides <span class="text-gray-400 font-normal">(JSON)</span></label>
+                <input type="text" x-model="panelCfg.clouddb_ps_import_platform_map"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="same as AWS">
+                       placeholder='{"Percona Server": "mysql"}'>
+                <p class="text-xs text-gray-400 mt-1">Maps a Password Safe platform name to postgres, mysql, sqlserver or oracle. Invalid JSON is ignored.</p>
               </div>
             </div>
           </div>
-
-          <!-- Cloud Database Password Safe onboarding (AWS-only) -->
+          <!-- Database Password Safe onboarding (provisioned cloud DBs only) -->
           <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Cloud Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS only)</span></p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS only)</span></p>
             <p class="text-xs text-gray-400 mb-3">
               When on, provisioning an AWS database creates a dedicated managed DB user, onboards the DB as a
               Password Safe managed system + managed account (via the <code class="bg-gray-100 px-1 rounded">{engine} SSM Custom Plugin</code>),
               and onboards the PRA Vault credential (via the <code class="bg-gray-100 px-1 rounded">PRA Vault Username Password</code> plugin)
               so Password Safe propagates rotations into the tunnel-injected credential. The custom plugins + jump-host RSA
-              key prep are one-time manual setup — see the BeyondTrust integration docs.
+              key prep are one-time manual setup — see the <a href="/docs/databases#layer-2--password-safe-aws--azure" class="underline" target="_blank">database onboarding guide</a>.
             </p>
             <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
               <input type="checkbox" x-model="panelCfg.clouddb_ps_onboarding_enabled"
                      class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-              Enable Password Safe onboarding for AWS cloud databases
+              Enable Password Safe onboarding for provisioned AWS &amp; Azure databases
             </label>
             <div x-show="panelCfg.clouddb_ps_onboarding_enabled" class="space-y-3">
               <div class="grid grid-cols-3 gap-3">
@@ -813,21 +1373,11 @@
                          placeholder="C:\Utils\public_ssm.pem">
                 </div>
               </div>
-              <p class="text-xs text-gray-400">PRA Configuration-API OAuth account for the PRA Vault plugin — leave blank to reuse the PRA credentials above.</p>
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client ID</label>
-                  <input type="text" x-model="panelCfg.pra_config_api_client_id"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="(blank = reuse PRA client id)">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client Secret</label>
-                  <input type="password" x-model="panelCfg.pra_config_api_client_secret"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="••••••••">
-                </div>
-              </div>
+              <p class="text-xs text-gray-400">
+                The PRA Vault plugin authenticates with the PRA Configuration API account on the
+                <button type="button" @click="openPanelByKey('pra')" class="underline text-blue-600">Privileged
+                Remote Access</button> panel. Unsaved edits here are discarded when the panel switches.
+              </p>
               <div class="grid grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">psql Client Image</label>
@@ -848,21 +1398,493 @@
                          placeholder="mcr.microsoft.com/mssql-tools18">
                 </div>
               </div>
+
+              <!-- Azure (Run Command plugins) -->
+              <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">Azure (Run Command plugins)</p>
+                <p class="text-xs text-gray-400">
+                  For Azure databases the DB is onboarded onto the <code class="bg-gray-100 px-1 rounded">{engine} Azure Run Command Plugin</code>,
+                  whose plugin reaches the private DB by running the DB client on the shared <code class="bg-gray-100 px-1 rounded">clouddb-jumpoint</code> VM
+                  via Azure VM Run Command. The functional account is the minted DB admin bundled with an Azure service principal; it rotates a dedicated
+                  managed user. The three custom plugins + the RSA keypair (public cert on the Resource Broker, private key below) are one-time manual setup.
+                </p>
+                <div class="grid grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_azure_postgres"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="PostgreSQL Azure Run Command Plugin">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">MySQL Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_azure_mysql"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="MySQL Azure Run Command Plugin">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_azure_sqlserver"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="MSSQL Azure Run Command Plugin">
+                  </div>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Auth Mode</label>
+                    <select x-model="panelCfg.clouddb_ps_azure_auth_mode"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="SP">SP (service principal)</option>
+                      <option value="MSI">MSI (managed identity)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Broker Cert Path</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_azure_cert_path"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="C:\BeyondTrust\certs\public_cert.cer">
+                  </div>
+                  <div class="flex items-end">
+                    <label class="flex items-center gap-2 text-sm text-gray-700 pb-2">
+                      <input type="checkbox" x-model="panelCfg.clouddb_ps_azure_ssl"
+                             class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                      Require TLS (sslTRUE)
+                    </label>
+                  </div>
+                </div>
+                <p class="text-xs text-gray-400">Azure service principal for the functional account — leave blank to reuse the dashboard's Azure credentials. It needs Virtual Machine Contributor on the jump-VM resource group.</p>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SP Client ID</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_azure_sp_client_id"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="(blank = reuse azure_client_id)">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SP Client Secret</label>
+                    <input type="password" x-model="panelCfg.clouddb_ps_azure_sp_client_secret"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="••••••••">
+                  </div>
+                </div>
+                <p class="text-xs text-gray-400">Plugin RSA private key + passphrase the dashboard drops onto the jump VM at <code class="bg-gray-100 px-1 rounded">/root/psplugin</code> (matches the public cert on the Resource Broker).</p>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Plugin Private Key (PEM)</label>
+                    <textarea x-model="panelCfg.clouddb_ps_azure_plugin_private_key" rows="3"
+                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              placeholder="-----BEGIN ENCRYPTED PRIVATE KEY-----"></textarea>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Plugin Key Passphrase</label>
+                    <input type="password" x-model="panelCfg.clouddb_ps_azure_plugin_passphrase"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="••••••••">
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-
-          <!-- EPM for Linux -->
+          <!-- Kubernetes ServiceAccount token rotation (Password Safe) -->
           <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">EPM for Linux (EPM-L)</p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Kubernetes Token Rotation</p>
             <p class="text-xs text-gray-400 mb-3">
-              Site ID + Personal Access Token for the BeyondTrust Pathfinder API at
-              <code class="bg-gray-100 px-1 rounded">api.beyondtrust.io</code>.
-              Used to download EPML client packages and generate activation tokens.
-              Find your Site ID by opening
-              <code class="bg-gray-100 px-1 rounded">app.beyondtrust.io/api/platform/currentSite</code>
-              while signed in and copying the <code class="bg-gray-100 px-1 rounded">site_id</code> field.
-              The PAT must be created while that site is active.
+              Makes a cluster's PRA-injected ServiceAccount token a Password Safe managed account on the
+              <code class="bg-gray-100 px-1 rounded">Kubernetes Service Account Token</code> plugin so it rotates on schedule,
+              and registers the PRA Vault copy as a second managed account on the
+              <code class="bg-gray-100 px-1 rounded">PRA Vault Token</code> plugin. Registration then <em>syncs</em> the two in
+              Password Safe, so every rotation reaches PRA with nothing running on the dashboard's side.
+              Importing the two plugins, creating the functional accounts, and granting the API identity Requestor + an
+              auto-release access policy on the new managed accounts are one-time manual setup — see the
+              <a href="/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
+              <span class="text-amber-600">Neither account's access policy may enable "Change Password After
+              Release"</span> — a credential change on <em>either</em> member of a synced pair re-rotates both, so a
+              release-triggered change on the PRA copy would rotate the real cluster token.
             </p>
+            <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.k8s_ps_token_rotation_enabled"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Enable Password Safe rotation for k8s ServiceAccount tokens
+            </label>
+            <div x-show="panelCfg.k8s_ps_token_rotation_enabled" class="space-y-3">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Token Platform</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_token_platform"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="Kubernetes Service Account Token">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Token Platform</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_pravault_token_platform"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="PRA Vault Token">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">Functional accounts (name or id). Per cloud: an AWS access key, an Entra service principal (<code class="bg-gray-100 px-1 rounded">SP:&lt;tenantId&gt;:&lt;clientId&gt;</code>), a GCP service-account key, or a bootstrap ServiceAccount credential for on-prem/OKE. The PRA Vault mirror's is a PRA Config-API OAuth client.</p>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">AWS Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_functional_account_aws"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ps-k8s-rotator-aws">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Azure Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_functional_account_azure"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ps-k8s-rotator-azure">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">GCP Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_functional_account_gcp"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="psafe-rotator@project.iam.gserviceaccount.com">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Generic / On-prem Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_functional_account_local"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ps-k8s-rotator-generic">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Mirror Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_pravault_functional_account"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="pra-config-api">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(blank = reuse VM workgroup)</span></label>
+                  <input type="text" x-model="panelCfg.k8s_ps_workgroup"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="Default Workgroup">
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Token Mode</label>
+                  <select x-model="panelCfg.k8s_ps_token_mode"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="longlived">LongLived — rotation revokes the old token</option>
+                    <option value="bound">Bound — no revoke; old token valid until TTL</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Bound TTL (seconds)</label>
+                  <input type="number" x-model="panelCfg.k8s_ps_token_ttl_seconds" min="600"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="3600">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Extra Address Options</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_token_address_options"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="dnsEndpoint=true;serverName=…">
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_token_change_on_register"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Rotate once on register
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_token_delete_legacy_secret"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Delete the dashboard-minted token Secret
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_token_register_on_provision"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Pre-tick on the provision form
+                </label>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Token Checkout Duration (minutes) <span class="text-gray-400 font-normal">(Password Safe request)</span></label>
+                  <input type="number" x-model="panelCfg.k8s_ps_token_checkout_duration_min" min="1"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="15">
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mt-6">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_pravault_mirror_enabled"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Register the PRA Vault Token mirror
+                </label>
+              </div>
+              <p class="text-xs text-gray-400">In-cluster rotator RBAC. The binding subject differs per cloud: AKS needs the service principal's <em>object id</em> (the plugin logs it on every run — not the client id), EKS the access-entry username + the IAM principal ARN behind the functional account's key. GKE derives the subject from the functional account's name when blank.</p>
+              <div class="grid grid-cols-3 gap-3">
+                <label class="flex items-center gap-2 text-sm text-gray-700 col-span-3">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_rotator_apply_rbac"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Apply the rotator ClusterRole + binding on register
+                </label>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">GKE SA Email <span class="text-gray-400 font-normal">(blank = derive)</span></label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_gke_sa_email"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="psafe-rotator@project.iam.gserviceaccount.com">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">AKS SP Object ID</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_aks_sp_object_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="00000000-1111-2222-3333-444444444444">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">EKS Access-Entry Username</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_eks_username"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="passwordsafe-rotator">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">EKS Principal ARN <span class="text-gray-400 font-normal">(behind the FA's access key)</span></label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_eks_principal_arn"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="arn:aws:iam::123456789012:role/PasswordSafeRotator">
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mt-6">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_rotator_eks_create_access_entry"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Create the EKS access entry when the ARN is set
+                </label>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Bootstrap SA Namespace <span class="text-gray-400 font-normal">(generic/on-prem)</span></label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_bootstrap_namespace"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="beyondtrust">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Bootstrap SA Name</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_bootstrap_sa"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="password-safe-rotator">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">
+                There is nothing to tune for PS&nbsp;&rarr;&nbsp;PRA delivery: registration syncs the PRA Vault account to the
+                token account in Password Safe, and a managed account and its subscribers always share a credential, so
+                rotations reach PRA as part of the change itself. In LongLived mode the old token is revoked at rotation,
+                so use Bound mode on clusters whose tunnel must not break — Bound never revokes, and the old token stays
+                valid until its TTL.
+              </p>
+              <p class="text-xs text-gray-400">
+                The managed account name is <code class="bg-gray-100 px-1 rounded">&lt;namespace&gt;/&lt;serviceaccount&gt;</code>,
+                taken from the Kubernetes tunnel identity on the
+                <button type="button" @click="openPanelByKey('pra')" class="underline text-blue-600">Privileged
+                Remote Access</button> panel. Unsaved edits here are discarded when the panel switches.
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="panel?.key === 'pra' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            BeyondTrust Privileged Remote Access brokers access to everything the dashboard
+            builds — Shell Jump, Web Jump, Remote RDP and Protocol Tunnel jump items, plus PRA
+            Vault accounts. Provisioned via the <strong>BeyondTrust SRA Terraform provider</strong>
+            (ARM64-native, no binary dependency).
+          </p>
+          <p class="text-sm text-gray-500">
+            The Jump Group and Gateway named below must already exist in PRA — the dashboard
+            looks them up by name, it does not create them. Gateway <em>hosts</em> are deployed
+            from the Containers page.
+          </p>
+          <!-- Privileged Remote Access — Terraform provider -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">API connection</p>
+            <p class="text-xs text-gray-400 mb-3">
+              Shell Jump provisioning via the BeyondTrust SRA Terraform provider.
+              Runs natively on ARM64 — no binary dependency.
+            </p>
+            <div class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">PRA API Host</label>
+                <input type="text" x-model="panelCfg.bt_api_host"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="pra.company.com">
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
+                  <input type="text" x-model="panelCfg.bt_client_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client Secret</label>
+                  <input type="password" x-model="panelCfg.bt_client_secret"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Configuration API account</p>
+            <p class="text-xs text-gray-400 mb-3">
+              For the few calls the SRA Terraform provider cannot make — the PRA Vault accounts used by
+              cloud-database onboarding. Optional: leave blank to reuse the credentials above.
+            </p>
+            <div class="space-y-3">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client ID</label>
+                  <input type="text" x-model="panelCfg.pra_config_api_client_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = reuse PRA client id)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client Secret</label>
+                  <input type="password" x-model="panelCfg.pra_config_api_client_secret"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Shell Jump provisioning -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Shell Jump provisioning</p>
+            <p class="text-xs text-gray-400 mb-3">
+              The Jump Group and Gateway must already exist in PRA — the dashboard looks them up by name and creates Shell Jumps inside them.
+            </p>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(AWS)</span></label>
+                <input type="text" x-model="panelCfg.bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="us-east-2">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(AWS)</span></label>
+                <input type="text" x-model="panelCfg.bt_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="AWS ECS">
+              </div>
+            </div>
+            <p class="text-xs text-gray-400 mb-2">Azure overrides — leave blank to reuse the AWS values above.</p>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(Azure)</span></label>
+                <input type="text" x-model="panelCfg.azure_bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(Azure)</span></label>
+                <input type="text" x-model="panelCfg.azure_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ACI">
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">VM Gateway mode <span class="text-gray-400 font-normal">(Azure)</span></label>
+              <!-- x-init default is load-bearing: an unset string config key reads back
+                   as "" from /api/setup/feature, not as the model default. -->
+              <select x-model="panelCfg.azure_vm_jumpoint_mode"
+                      x-init="panelCfg.azure_vm_jumpoint_mode = panelCfg.azure_vm_jumpoint_mode || 'shared'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="shared">Shared host (default) — one Gateway VM for all VMs, databases and clusters</option>
+                <option value="aci">ACI — a dedicated container group per VM</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                Applies to single deploys; a batch always shares one ACI group. ACI is
+                Shell-Jump only — it cannot do protocol tunnels — and every group mounts
+                the same <span class="font-mono">/jpt</span> share, so they contend over one
+                Gateway identity. A deploy that supplies its own Gateway deploy key always
+                gets ACI, since the shared host uses the configured key.
+              </p>
+            </div>
+            <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(GCP)</span></label>
+                <input type="text" x-model="panelCfg.gcp_bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(GCP)</span></label>
+                <input type="text" x-model="panelCfg.gcp_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
+              </div>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">VM Gateway mode <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <!-- x-init default is load-bearing: an unset string config key reads back
+                   as "" from /api/setup/feature, not as the model default. -->
+              <select x-model="panelCfg.gcp_vm_jumpoint_mode"
+                      x-init="panelCfg.gcp_vm_jumpoint_mode = panelCfg.gcp_vm_jumpoint_mode || 'shared'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="shared">Shared host (default) — one Gateway for all VMs, databases and clusters</option>
+                <option value="paired">Paired — a dedicated bt-jumpoint-&lt;vm&gt; per VM</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                Applies to single deploys; a batch always shares one Gateway. Paired
+                costs an extra e2-micro per VM. A deploy that supplies its own Gateway
+                deploy key is always paired, since the shared host uses the configured key.
+              </p>
+            </div>
+          </div>
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Kubernetes tunnel identity</p>
+            <p class="text-xs text-gray-400 mb-3">
+              The ServiceAccount PRA injects into a managed cluster for API-server tunnels, and the PRA
+              Vault account group injected Kubernetes, database and Web Jump credentials land in. Password
+              Safe can rotate this token on a schedule — see the
+              <button type="button" @click="openPanelByKey('password_safe')" class="underline text-blue-600">Password
+              Safe</button> panel.
+            </p>
+            <div class="space-y-3">
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA SA Namespace</label>
+                  <input type="text" x-model="panelCfg.pra_k8s_namespace"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="pra-access">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA SA Name</label>
+                  <input type="text" x-model="panelCfg.pra_k8s_sa_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="pra-access">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Account Group ID <span class="text-gray-400 font-normal">(optional)</span></label>
+                  <input type="text" x-model="panelCfg.bt_vault_account_group_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(numeric id)">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="panel?.key === 'epml' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Site ID + Personal Access Token for the BeyondTrust Endpoint Privilege Management
+            for Linux API, on the Pathfinder gateway at
+            <code class="bg-gray-100 px-1 rounded">api.beyondtrust.io</code>. Used to build and
+            download EPM-L client packages, sync them to asset storage, and mint activation tokens.
+          </p>
+          <p class="text-sm text-gray-500">
+            Find your Site ID by opening
+            <code class="bg-gray-100 px-1 rounded">app.beyondtrust.io/api/platform/currentSite</code>
+            while signed in and copying the <code class="bg-gray-100 px-1 rounded">site_id</code>
+            field. The PAT must be created while that site is the active one — PATs are bound to
+            the site, not the user.
+          </p>
+          <div class="space-y-3">
             <div class="space-y-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">EPM-L Site ID</label>
@@ -886,8 +1908,10 @@
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
             Containers are shown for every configured cloud provider (AWS ECS, Azure ACI,
-            GCP Cloud Run) automatically. Optionally connect a Portainer CE server below to
-            also manage on-prem Docker hosts.
+            GCP Cloud Run) automatically. To also manage on-prem Docker hosts, either
+            <strong>deploy a managed Portainer CE server</strong> from
+            <a href="/containers#portainer" class="underline font-medium">Containers → Portainer</a>
+            (which fills in the URL and token below for you), or connect one you already run.
           </p>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Portainer URL</label>
@@ -916,6 +1940,196 @@
                     :class="panelCfg.portainer_verify_ssl ? 'translate-x-6' : 'translate-x-1'"></span>
             </button>
             <span class="text-sm text-gray-700">Verify SSL certificate</span>
+          </div>
+          <p class="text-xs text-gray-400 -mt-2">
+            A dashboard-deployed node serves a self-signed certificate, so deploying one
+            turns this off automatically.
+          </p>
+
+          <!-- ── Managed node (deploy knobs) ── -->
+          <div class="pt-4 border-t border-gray-200">
+            <h4 class="text-sm font-semibold text-gray-800 mb-1">Managed Portainer server</h4>
+            <p class="text-xs text-gray-500 mb-3">
+              Settings for a Portainer CE container the dashboard runs on a GCE
+              Container-Optimized-OS VM. The node is <strong>ephemeral</strong> — a teardown
+              wipes its users, environments and settings.
+            </p>
+
+            <div class="space-y-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Allowed source CIDRs</label>
+                <input type="text" x-model="panelCfg.portainer_allowed_source_cidrs"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="203.0.113.0/24, 198.51.100.7/32">
+                <p class="text-xs text-gray-400 mt-1">
+                  Comma-separated. Opens tcp <code class="bg-gray-100 px-1 rounded">9443</code> (UI/API) and
+                  <code class="bg-gray-100 px-1 rounded">8000</code> (Edge agent) to these sources only.
+                  Empty is <strong>fail-closed</strong> unless "Allow open" below is on — the dashboard's own
+                  egress IP is added automatically so a deploy can reach its node.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard egress CIDR</label>
+                <input type="text" x-model="panelCfg.portainer_dashboard_egress_cidr"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="auto-detected on deploy">
+                <p class="text-xs text-gray-400 mt-1">
+                  The dashboard's own public egress range. Auto-detected and saved on each deploy;
+                  set it by hand if you egress from a proxy <em>pool</em> (detection won't clobber a
+                  broader range that already contains the detected IP).
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Admin password</label>
+                <input type="password" x-model="panelCfg.portainer_admin_password"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="••••••••">
+                <p class="text-xs text-gray-400 mt-1">
+                  First-run password for the <code class="bg-gray-100 px-1 rounded">admin</code> user.
+                  Leave blank to auto-generate one (it is shown once on the Containers page).
+                  Stored encrypted.
+                </p>
+              </div>
+
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_image"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_machine_type"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_zone"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="(auto-picked in the region)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
+                  <input type="number" x-model.number="panelCfg.gcp_portainer_boot_disk_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Network tag</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_network_tag"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Ready timeout (s)</label>
+                  <input type="number" x-model.number="panelCfg.portainer_ready_timeout_s"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+              </div>
+
+              <div class="flex items-center gap-3">
+                <button @click="panelCfg.gcp_portainer_allow_open = !panelCfg.gcp_portainer_allow_open"
+                        class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                        :class="panelCfg.gcp_portainer_allow_open ? 'bg-red-600' : 'bg-gray-300'">
+                  <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                        :class="panelCfg.gcp_portainer_allow_open ? 'translate-x-6' : 'translate-x-1'"></span>
+                </button>
+                <span class="text-sm text-gray-700">
+                  Allow open (<code class="bg-gray-100 px-1 rounded">0.0.0.0/0</code>) when no CIDRs are set
+                </span>
+              </div>
+
+              <!-- PRA Web Jump (optional broker for the node's UI) -->
+              <div class="pt-3 border-t border-gray-100">
+                <div class="flex items-center gap-3">
+                  <button @click="panelCfg.portainer_ui_web_jump_enabled = !panelCfg.portainer_ui_web_jump_enabled"
+                          class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                          :class="panelCfg.portainer_ui_web_jump_enabled ? 'bg-blue-600' : 'bg-gray-300'">
+                    <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                          :class="panelCfg.portainer_ui_web_jump_enabled ? 'translate-x-6' : 'translate-x-1'"></span>
+                  </button>
+                  <span class="text-sm text-gray-700">Broker the UI via a PRA Web Jump</span>
+                </div>
+                <p class="text-xs text-gray-400 mt-1">
+                  Opt-in. Reach the node from the PRA representative console — brokered and recorded —
+                  without adding your IP to the CIDR list. The Gateway's egress IP is auto-allowed, and
+                  with a Vault account group the admin password is injected instead of shown. Can also be
+                  chosen per-deploy on the Containers page.
+                </p>
+                <div class="grid grid-cols-2 gap-3 mt-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group</label>
+                    <input type="text" x-model="panelCfg.portainer_ui_jump_group"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                           placeholder="(bt_jump_group_name)">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Gateway</label>
+                    <input type="text" x-model="panelCfg.portainer_ui_jumpoint_name"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                           placeholder="(bt_jumpoint_name)">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group id</label>
+                    <input type="text" x-model="panelCfg.portainer_ui_vault_account_group_id"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                           placeholder="(bt_vault_account_group_id)">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Gateway cloud</label>
+                    <select x-model="panelCfg.portainer_ui_jumpoint_cloud"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                      <option value="gcp">gcp</option>
+                      <option value="aws">aws</option>
+                      <option value="azure">azure</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="mt-3 flex items-center gap-2">
+                  <input type="checkbox" id="portainer_ui_verify_certificate" x-model="panelCfg.portainer_ui_verify_certificate"
+                         class="rounded border-gray-300">
+                  <label for="portainer_ui_verify_certificate" class="text-sm text-gray-700">Web Jump verifies the node's certificate <span class="text-gray-400">(separate from Verify SSL above, which covers dashboard → Portainer API calls — leave off for the self-signed cert on :9443)</span></label>
+                </div>
+              </div>
+
+              <!-- Live firewall breakdown (read-only) -->
+              <template x-if="portainerFirewall">
+                <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs">
+                  <p class="font-semibold text-gray-700 mb-2">
+                    Effective firewall sources
+                    <span x-show="!portainerFirewall.opened" class="ml-1 text-red-600">(closed — node unreachable)</span>
+                  </p>
+                  <div class="space-y-1 text-gray-600">
+                    <p>
+                      <span class="text-gray-500">Dashboard egress:</span>
+                      <code class="bg-white px-1 rounded" x-text="portainerFirewall.dashboard_egress_ip || '(not detected)'"></code>
+                    </p>
+                    <p x-show="(portainerFirewall.gateway_cidrs || []).length">
+                      <span class="text-gray-500">Web-Jump Gateways:</span>
+                      <template x-for="c in portainerFirewall.gateway_cidrs || []" :key="c">
+                        <code class="bg-white px-1 rounded mr-1" x-text="c"></code>
+                      </template>
+                    </p>
+                    <p>
+                      <span class="text-gray-500">Merged allow-list:</span>
+                      <span x-show="!(portainerFirewall.merged || []).length" class="text-red-600">none</span>
+                      <template x-for="c in portainerFirewall.merged || []" :key="c">
+                        <code class="bg-white px-1 rounded mr-1" x-text="c"></code>
+                      </template>
+                    </p>
+                    <p>
+                      <span class="text-gray-500">Ports:</span>
+                      <template x-for="p in portainerFirewall.ports || []" :key="p">
+                        <code class="bg-white px-1 rounded mr-1" x-text="p"></code>
+                      </template>
+                    </p>
+                  </div>
+                </div>
+              </template>
+            </div>
           </div>
         </div>
       </template>
@@ -1005,15 +2219,281 @@
             </div>
           </div>
 
-          <!-- Image-promote runner — always cloud-hosted (no selector); only the image is configurable here -->
+          <!-- Image-promote runner — always cloud-hosted (no selector): a one-shot
+               task in the *target* cloud, so each cloud's plumbing is configured below. -->
           <div class="rounded-lg border border-gray-200 p-3 space-y-2">
             <p class="text-sm font-semibold text-gray-700">Image-promote runner</p>
-            <p class="text-xs text-gray-400 -mt-1">Container image launched (ECS / ACI / Cloud Run) to convert &amp; stage a promoted disk image. Leave blank for the public Docker Hub image; set a full registry path to use a private mirror (e.g. your ACR).</p>
+            <p class="text-xs text-gray-400 -mt-1">A one-shot container (ECS / ACI / Cloud Run / Container Instances) that converts &amp; stages a promoted disk image in the target cloud. It reads the hub artefact over a short-lived presigned URL, then writes to that cloud's staging bucket.</p>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Runner image</label>
               <input type="text" x-model="panelCfg.promote_runner_image"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                      placeholder="chrweav/dashboard-promote-runner:latest">
+              <p class="text-xs text-gray-400 mt-1">Blank → the public Docker Hub image; set a full registry path to use a private mirror (e.g. your ACR). Used for all four target clouds.</p>
+            </div>
+
+            <!-- Per-target-cloud promote config. All four clouds are shown
+                 unconditionally: the promote runner always runs cloud-hosted
+                 regardless of the Ansible/K8s runner selections above, so gating
+                 these on those selectors would hide config the promote path needs.
+                 Fields bind to promote_runner_* on AnsibleFeatureConfig; the
+                 fallback keys named in the hints are resolved in
+                 promote_runner_service._resolve_*_runner_config. -->
+
+            <!-- AWS — ECS Fargate (image-promote target) -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              <p class="text-sm font-semibold text-gray-700">AWS — ECS Fargate</p>
+              <p class="text-xs text-gray-400 -mt-1">The task role is required and has no fallback — the Ansible runner's role can't write the S3 staging object. The rest falls back to the ECS Ansible-runner plumbing (cluster, subnet, SGs, execution role) and your S3 storage backend.</p>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Task role ARN <span class="text-gray-400 font-normal">(s3:PutObject on the staging bucket — required, no fallback)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_ecs_task_role_arn"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="arn:aws:iam::123456789012:role/promote-runner-task">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Execution role ARN <span class="text-gray-400 font-normal">(image pull + logs; blank → ansible_ecs_execution_role_arn)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_ecs_execution_role_arn"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="arn:aws:iam::123456789012:role/ecsTaskExecutionRole">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(needs egress to the presigned hub URL; blank → ansible_ecs_subnet_id)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_ecs_subnet_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="subnet-0abc1234">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Security Group IDs <span class="text-gray-400 font-normal">(comma-separated; blank → ansible_ecs_security_group_ids)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_ecs_security_group_ids"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="sg-0abc1234,sg-0def5678">
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(blank → storage_s3_bucket)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_aws_staging_bucket"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="my-hub-bucket">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_aws_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">ECS cluster <span class="text-gray-400 font-normal">(blank → ansible_ecs_cluster)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_ecs_cluster"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="bt-jumpoint">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Task family <span class="text-gray-400 font-normal">(auto-registered on first promote)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_ecs_task_family"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-runner">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">CPU units</label>
+                  <input type="number" min="256" step="256" x-model="panelCfg.promote_runner_ecs_cpu"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="1024">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory (MiB)</label>
+                  <input type="number" min="512" step="512" x-model="panelCfg.promote_runner_ecs_memory"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="4096">
+                </div>
+              </div>
+            </div>
+
+            <!-- Azure — Container Instances (image-promote target) -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              <p class="text-sm font-semibold text-gray-700">Azure — Container Instances</p>
+              <p class="text-xs text-gray-400 -mt-1">The runner writes the staged VHD with the dashboard's own Azure service principal, so no extra IAM plumbing is needed — only the resource group and staging account matter, and both fall back to your Azure configuration.</p>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging storage account <span class="text-gray-400 font-normal">(blank → storage_azure_account)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_azure_staging_account"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="btdashboardstorage">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging container <span class="text-gray-400 font-normal">(blank → storage_azure_container, then playbooks)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_azure_staging_container"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="playbooks">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_azure_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Resource group <span class="text-gray-400 font-normal">(runs the ACI container group; blank → azure_resource_group)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_azure_resource_group"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="bt-dashboard-rg">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(optional VNet binding for the container group)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_azure_subnet_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="/subscriptions/…/subnets/aci-subnet">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Target resource group <span class="text-gray-400 font-normal">(where the resulting managed image lands; blank → azure_resource_group)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_azure_target_resource_group"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="bt-dashboard-rg">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Target storage account ID <span class="text-gray-400 font-normal">(optional ARM ID Azure pins the image's OS disk to — compliance / BYOK)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_azure_target_storage_account_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="/subscriptions/…/storageAccounts/btimages">
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Location <span class="text-gray-400 font-normal">(blank → azure_location)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_azure_location"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="centralus">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">vCPUs</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_azure_cpu"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="2">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory (GB)</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_azure_memory_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="4">
+                </div>
+              </div>
+            </div>
+
+            <!-- GCP — Cloud Run Jobs (image-promote target) -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              <p class="text-sm font-semibold text-gray-700">GCP — Cloud Run Jobs</p>
+              <p class="text-xs text-gray-400 -mt-1">The project comes from gcp_project_id. The runner needs roles/storage.objectAdmin on the staging bucket — either via the service account below or the dashboard's own SA.</p>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(holds the disk.raw tar.gz; blank → storage_gcs_bucket)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_staging_bucket"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="my-hub-bucket">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Runner service account <span class="text-gray-400 font-normal">(optional; email the Cloud Run job runs as)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_gcp_service_account"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="promote-runner@my-project.iam.gserviceaccount.com">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">VPC connector <span class="text-gray-400 font-normal">(optional Serverless VPC Access connector for private egress)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_gcp_vpc_connector"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="projects/my-project/locations/us-east1/connectors/bt-connector">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Image family <span class="text-gray-400 font-normal">(optional family label on the resulting custom image)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_gcp_image_family"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="bt-dashboard-images">
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Region <span class="text-gray-400 font-normal">(blank → gcp_region)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_region"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="us-east1">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">CPU</label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_cpu"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="4">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory</label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_memory"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="16Gi">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">Cloud Run's /tmp is memory-backed and the GCP path materialises the VHD, a full raw disk, and the tar.gz there, so the default is 4 CPU / 16Gi — multi-GB images OOM at 4Gi. Jobs take whole vCPU only (1, 2, 4, 6, 8), and memory is capped by the CPU count, so raise both together: 2 CPU tops out at 8Gi, 4 at 16Gi, 6 at 24Gi, 8 at 32Gi.</p>
+            </div>
+
+            <!-- OCI — Container Instances (image-promote target). OCI has no
+                 Ansible/K8s runner, so this is its only remote-worker config.
+                 Shown unconditionally like the others (the OCI region catalog is
+                 static, so it can't gate on "OCI configured"). -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              <p class="text-sm font-semibold text-gray-700">OCI — Container Instances</p>
+              <p class="text-xs text-gray-400 -mt-1">OCI's only remote-worker task is the image-promote runner. The staging bucket is required; the rest fall back to your OCI configuration.</p>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(Object Storage bucket for the QCOW2 — required)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_oci_staging_bucket"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="my-promote-bucket">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_oci_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Compartment OCID <span class="text-gray-400 font-normal">(blank → uses oci_compartment_ocid)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_compartment"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ocid1.compartment.oc1..…">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subnet OCID <span class="text-gray-400 font-normal">(runner VNIC; blank → uses oci_default_subnet_ocid)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_subnet_ocid"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ocid1.subnet.oc1..…">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Availability domain <span class="text-gray-400 font-normal">(blank → first AD in the compartment)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_availability_domain"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="Uocm:PHX-AD-1">
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OCPUs</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_oci_ocpus"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="2">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory (GB)</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_oci_memory_gbs"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="16">
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1025,6 +2505,16 @@
                 Used by the Ansible runner, the Kubernetes runner, and the image-promote
                 runner. Only the cloud(s) selected above are shown.
               </p>
+
+              <!-- Cloud (k8s / database) Ansible image -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Cloud (k8s / database) Ansible Image
+                  <span class="text-gray-400 font-normal">— runs localhost plays against Kubernetes clusters &amp; databases</span></label>
+                <input type="text" x-model="panelCfg.ansible_cloud_image"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="chrweav/ansible-cloud:latest">
+                <p class="text-xs text-gray-400 mt-1">Carries kubernetes.core + community.postgresql/mysql/general. The winrm image lacks these, so k8s/DB runs always use this image.</p>
+              </div>
 
               <!-- AWS — ECS Fargate -->
               <div class="rounded-lg border border-gray-200 p-3 space-y-3"
@@ -1109,7 +2599,19 @@
                          placeholder="us-central1">
                 </div>
                 <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">VPC Connector <span class="text-gray-400 font-normal">(optional, for private egress)</span></label>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Direct VPC Egress — Network <span class="text-gray-400 font-normal">(preferred; reaches private targets with no standing infra)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_run_network"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="dashboard-sandbox-vpc">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Direct VPC Egress — Subnetwork <span class="text-gray-400 font-normal">(subnet in the Cloud Run region; set with Network — wins over Connector)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_run_subnetwork"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="dashboard-sandbox-vm-subnet">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VPC Connector <span class="text-gray-400 font-normal">(legacy alternative to Direct VPC Egress)</span></label>
                   <input type="text" x-model="panelCfg.gcp_ansible_vpc_connector"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="projects/proj/locations/region/connectors/name">
@@ -1263,7 +2765,7 @@
       <template x-if="panel?.key === 'entitle' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            Entitle integration. As the dashboard builds Linux VMs and cloud databases it
+            Entitle integration. As the dashboard builds Linux VMs and databases it
             registers each as an Entitle integration (SSH ephemeral accounts / PostgreSQL /
             MySQL / SQL Server) so users can request just-in-time access in Entitle. Requires
             an Entitle tenant.
@@ -1483,6 +2985,15 @@
       <!-- ── Hyper-V ── -->
       <template x-if="panel?.key === 'hyperv' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to a Windows host running Hyper-V via <strong>WinRM</strong> (Windows Remote
             Management). Runs PowerShell Hyper-V cmdlets remotely — no agent required on the host.
@@ -1574,6 +3085,15 @@
       <!-- ── vSphere / ESXi ── -->
       <template x-if="panel?.key === 'vsphere' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to a vCenter Server or standalone ESXi host via the vSphere Web Services API.
             Works with vCenter 6.7+ and ESXi 6.7+. Requires <code class="bg-gray-100 px-1 rounded">pyVmomi</code> (installed by default).
@@ -1629,6 +3149,15 @@
       <!-- ── Proxmox VE ── -->
       <template x-if="panel?.key === 'proxmox' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to a Proxmox VE node or cluster via the REST API. Supports
             API token auth (recommended) or username/password.
@@ -1692,6 +3221,15 @@
       <!-- ── Nutanix AHV ── -->
       <template x-if="panel?.key === 'nutanix' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to <strong>Prism Central</strong> (or Prism Element) via the Nutanix REST API v3.
             Supports start, graceful ACPI shutdown (requires Nutanix Guest Tools), force stop, reboot,
@@ -1746,8 +3284,115 @@
       </template>
 
       <!-- ── XCP-ng / XenServer ── -->
+      <template x-if="panel?.key === 'remote_agents' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Containerised agents run <strong>inside a private network</strong> and poll out to
+            this dashboard for work, so on-premises Kubernetes clusters and databases can be
+            discovered without opening any inbound firewall rule. Register and revoke them on the
+            <a href="/agents" class="underline text-blue-600">Agents</a> page.
+          </p>
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+            <p class="text-xs text-amber-800">
+              This publishes <code class="font-mono">/api/agent</code> for agents to reach —
+              the only API here that serves callers outside your own network.
+              <strong>Terminate TLS in front of the dashboard first.</strong> Signing gives the
+              agent protocol integrity and replay protection, not confidentiality; see
+              <a href="/docs/remote-agents" class="underline">the remote agent docs</a> and
+              <code class="font-mono">docker-compose.agent.yml</code>.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Public base URL</label>
+            <input type="text" x-model="panelCfg.public_base_url"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="https://agents.example.com">
+            <p class="text-[11px] text-gray-400 mt-1">
+              The origin agents reach you on. Leave blank only if nothing sits in front of the
+              dashboard — behind a reverse proxy the signing audience would otherwise be derived
+              from the request scheme, and an audience pinned as
+              <code class="font-mono">http://</code> makes every agent fail authentication in a
+              way that looks exactly like a revoked agent. Also fixes the OAuth callback URIs.
+            </p>
+          </div>
+
+          <!-- ── Signing audience (read-only) ──────────────────────────────────
+               A separate box from the field above, because they are separate values and
+               conflating them is the bug: Public base URL is what you *state*, the audience
+               is what was *pinned* on the first enrolment code and is write-once. Correcting
+               the field above does not move the pin, which is why this needs to be visible
+               and why Reset exists at all. -->
+          <template x-if="agentAudience">
+            <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                Signing audience <span class="normal-case font-normal text-gray-400">— pinned, read-only</span>
+              </p>
+              <div class="text-[11px] space-y-1">
+                <div x-show="agentAudience.pinned">
+                  <span class="text-gray-500">Pinned to:</span>
+                  <span class="ml-1 font-mono text-gray-800" x-text="agentAudience.pinned"></span>
+                </div>
+                <p class="text-gray-500" x-show="!agentAudience.pinned">
+                  Not pinned yet. The next enrolment code pins it permanently to
+                  <span class="font-mono text-gray-700" x-text="agentAudience.effective"></span>.
+                </p>
+                <div x-show="agentAudience.pinned && agentAudience.public_base_url !== agentAudience.pinned">
+                  <span class="text-gray-500">Public base URL says:</span>
+                  <span class="ml-1 font-mono text-gray-800"
+                        x-text="agentAudience.public_base_url || '(unset — derived per request)'"></span>
+                </div>
+                <div>
+                  <span class="text-gray-500">Enrolled agents signing against it:</span>
+                  <span class="ml-1 font-mono text-gray-800" x-text="agentAudience.agents_enrolled"></span>
+                </div>
+              </div>
+
+              <!-- The refusal. Say it here rather than letting the operator discover it
+                   from the Agents page when Register stops working. -->
+              <div x-show="agentAudience.conflict"
+                   class="mt-2 rounded border border-red-200 bg-red-50 px-2 py-1.5">
+                <p class="text-[11px] text-red-800">
+                  <strong>New enrolment codes are refused</strong> until this is resolved, or
+                  until you confirm the prompt to issue against the pinned value anyway.
+                  <span x-text="agentAudience.conflict"></span>
+                </p>
+              </div>
+
+              <template x-for="w in (agentAudience.warnings || [])" :key="w">
+                <div class="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5">
+                  <p class="text-[11px] text-amber-800" x-text="w"></p>
+                </div>
+              </template>
+
+              <button @click="resetAgentAudience()" x-show="agentAudience.pinned"
+                      :disabled="agentAudienceResetting"
+                      class="mt-3 text-xs px-3 py-1.5 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 transition disabled:opacity-50">
+                <span x-text="agentAudienceResetting ? 'Resetting…' : 'Reset signing audience'"></span>
+              </button>
+              <p class="text-[11px] text-gray-400 mt-1" x-show="agentAudience.pinned">
+                Clears the pin so the next enrolment code re-pins it from Public base URL.
+                <strong class="text-gray-500">Every enrolled agent stops authenticating</strong>
+                and has to be re-enrolled with a fresh code — each one signs against the
+                audience it was handed at enrolment.
+              </p>
+            </div>
+          </template>
+        </div>
+      </template>
+
       <template x-if="panel?.key === 'xcpng' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to an <strong>XCP-ng</strong> or <strong>XenServer</strong> host or pool master
             via the XAPI XML-RPC API (Python stdlib — no external SDK required). Supports start,
@@ -1794,7 +3439,7 @@
         </div>
       </template>
 
-      <!-- ── Cloud Databases (config panel; enable/disable via the feature toggle) ── -->
+      <!-- ── Databases (config panel; enable/disable via the feature toggle) ── -->
       <template x-if="panel?.key === 'cloud_database' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -1897,10 +3542,11 @@
       <template x-if="panel?.key === 'k8s_management' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            Defaults for <strong>provisioning</strong> AWS EKS clusters. Normally populated by
-            <code>setup-aws.sh</code> + the sandbox <code>--push-only</code> import; set or override
-            the values by hand here. Registering an existing cluster from its kubeconfig needs none of
-            this. Enable or disable the feature with its toggle in the integrations list above.
+            Defaults for <strong>provisioning</strong> AWS EKS (and OCI OKE) clusters. Normally
+            populated by <code>setup-aws.sh</code> + the sandbox <code>--push-only</code> import; set
+            or override the values by hand here. Registering an existing cluster from its kubeconfig
+            needs none of this. Enable or disable the feature with its toggle in the integrations list
+            above.
           </p>
 
           <!-- AWS EKS — cluster networking -->
@@ -1942,6 +3588,25 @@
                        placeholder="(module default — t3.small)">
               </div>
             </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Cluster VPC CIDR</label>
+              <input type="text" x-model="panelCfg.aws_eks_vpc_cidr"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(module default — 10.97.0.0/16)">
+              <p class="text-[11px] text-gray-400 mt-1">The EKS build creates + peers its <strong>own</strong> VPC. Must not overlap the sandbox VPC (<code>10.99.0.0/16</code>); the provision form can override it per-cluster.</p>
+            </div>
+          </div>
+
+          <!-- OCI OKE — defaults (optional) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">OCI OKE — defaults <span class="normal-case text-gray-400">(optional, experimental)</span></p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Cluster VCN CIDR</label>
+              <input type="text" x-model="panelCfg.oci_oke_vcn_cidr"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(module default — 10.96.0.0/16)">
+              <p class="text-[11px] text-gray-400 mt-1">The OKE build creates its <strong>own</strong> VCN (api / nodes / lb subnets carved from this block). Must not overlap the sandbox VCN (<code>10.98.0.0/16</code>); the provision form can override it per-cluster.</p>
+            </div>
           </div>
 
           <!-- Entra/IdP group → cluster RBAC (real-identity JIT) -->
@@ -1970,6 +3635,13 @@
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                      placeholder="cluster-admin">
               <p class="text-[11px] text-gray-400 mt-1">e.g. <code>cluster-admin</code>, <code>admin</code>, <code>view</code>, or a custom ClusterRole — the action lets you pick per-bind.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Entitle k8s user prefix</label>
+              <input type="text" x-model="panelCfg.entitle_k8s_user_prefix"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="entitle">
+              <p class="text-[11px] text-gray-400 mt-1">Subject Entitle's <strong>Kubernetes</strong> integration binds for a JIT grant (<code>&lt;prefix&gt;:&lt;email&gt;</code>) — and what a user passes to <code>kubectl --as=</code> with the <strong>Impersonation access</strong> action.</p>
             </div>
           </div>
 
@@ -2056,7 +3728,32 @@
               <input type="text" x-model="panelCfg.rancher_allowed_source_cidrs"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                      placeholder="203.0.113.4/32, 198.51.100.0/24">
-              <p class="text-[11px] text-gray-400 mt-1">GCE firewall source ranges for the node's public IP (tcp 80/443). Dashboard-provisioned clusters' egress IPs — and, when the Web Jump is enabled, the dashboard-managed Jumpoint's egress IP — are <strong>added automatically</strong>. Use this only for extra operator/human IPs and pre-existing (operator-owned) Jumpoints. <span class="text-amber-600">If nothing is set here <em>and</em> nothing is auto-discovered, the firewall stays closed unless you tick "Allow open".</span></p>
+              <p class="text-[11px] text-gray-400 mt-1">GCE firewall source ranges for the node's public IP (tcp 80/443). Dashboard-provisioned clusters' egress IPs — and, when the Web Jump is enabled, the dashboard-managed Gateway's egress IP — are <strong>added automatically</strong>. Use this only for extra operator/human IPs and pre-existing (operator-owned) Gateways. <span class="text-amber-600">If nothing is set here <em>and</em> nothing is auto-discovered, the firewall stays closed unless you tick "Allow open".</span></p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard egress IP <span class="text-gray-400 normal-case">(override — usually auto-detected)</span></label>
+              <input type="text" x-model="panelCfg.rancher_dashboard_egress_cidr"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="auto-detected on deploy (e.g. 198.51.100.7/32)">
+              <p class="text-[11px] text-gray-400 mt-1">The dashboard reaches the node over its <strong>public IP</strong> to bootstrap it, so its own egress must be allowed. Auto-detected + saved on deploy. Corp proxies (Cloudflare WARP) egress from a <strong>pool</strong> of IPs — set the pool's CIDR (e.g. <code>104.28.182.0/24</code>) and it is kept as long as the detected IP falls inside it. Bare IP → <code>/32</code>.</p>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">API transport</label>
+                <select x-model="panelCfg.rancher_api_transport"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="direct">direct — HTTPS from the dashboard</option>
+                  <option value="runner">runner — curl via a GCP Cloud Run job</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">Pick <strong>runner</strong> when this network TLS-inspects and blocks the node's self-signed cert (deploy fails with "HTTPS handshake terminated in transit"). Reuses the k8s runner's GCP region + VPC connector; calls target the node's internal IP.</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Runner source CIDR <span class="text-gray-400">(runner only)</span></label>
+                <input type="text" x-model="panelCfg.rancher_runner_source_cidr"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="10.8.0.0/28 (the VPC connector range)">
+                <p class="text-[11px] text-gray-400 mt-1">The Cloud Run VPC connector's /28 — auto-added to the node firewall so the runner's internal traffic is admitted.</p>
+              </div>
             </div>
             <!-- Auto-discovered allow-list (read-only) -->
             <template x-if="rancherFirewall">
@@ -2072,15 +3769,23 @@
                     </template>
                   </div>
                 </template>
-                <div class="mb-1" x-show="rancherFirewall.jumpoint_egress_ip">
-                  <span class="text-gray-500">Web-Jump Jumpoint:</span>
-                  <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.jumpoint_egress_ip"></span>
+                <div class="mb-1" x-show="rancherFirewall.dashboard_egress_ip">
+                  <span class="text-gray-500">Dashboard egress:</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.dashboard_egress_ip"></span>
+                </div>
+                <div class="mb-1" x-show="rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length">
+                  <span class="text-gray-500">Web-Jump Gateways:</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="(rancherFirewall.gateway_cidrs || []).join(', ')"></span>
+                </div>
+                <div class="mb-1" x-show="rancherFirewall.runner_source_cidr">
+                  <span class="text-gray-500">API runner (VPC connector):</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.runner_source_cidr"></span>
                 </div>
                 <div class="mb-1" x-show="rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length">
                   <span class="text-gray-500">Manual:</span>
                   <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.manual_cidrs.join(', ')"></span>
                 </div>
-                <p class="text-gray-400 mt-1" x-show="!(rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length) && !rancherFirewall.jumpoint_egress_ip && !(rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length)">
+                <p class="text-gray-400 mt-1" x-show="!(rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length) && !rancherFirewall.dashboard_egress_ip && !(rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length) && !(rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length)">
                   No sources yet — provision a cluster, enable the Web Jump, or add a CIDR above.
                 </p>
               </div>
@@ -2114,6 +3819,15 @@
                        placeholder="30">
               </div>
             </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Readiness timeout (s)</label>
+                <input type="number" min="60" step="30" x-model.number="panelCfg.rancher_ready_timeout_s"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="360">
+                <p class="text-[11px] text-gray-400 mt-1">How long the deploy waits for Rancher to serve after boot. Raise it for a cold image pull / slow disk.</p>
+              </div>
+            </div>
             <div class="mt-3 flex items-center gap-2">
               <input type="checkbox" id="gcp_rancher_allow_open" x-model="panelCfg.gcp_rancher_allow_open"
                      class="rounded border-gray-300">
@@ -2122,12 +3836,58 @@
             <div class="mt-2 flex items-center gap-2">
               <input type="checkbox" id="rancher_verify_tls" x-model="panelCfg.rancher_verify_tls"
                      class="rounded border-gray-300">
-              <label for="rancher_verify_tls" class="text-sm text-gray-700">Verify TLS certificate <span class="text-gray-400">(leave off for the node's self-signed cert)</span></label>
+              <label for="rancher_verify_tls" class="text-sm text-gray-700">Verify TLS certificate on dashboard → Rancher API calls <span class="text-gray-400">(leave off for the node's self-signed cert)</span></label>
             </div>
-            <div class="mt-2 flex items-center gap-2">
-              <input type="checkbox" id="rancher_ui_web_jump_enabled" x-model="panelCfg.rancher_ui_web_jump_enabled"
-                     class="rounded border-gray-300">
-              <label for="rancher_ui_web_jump_enabled" class="text-sm text-gray-700">PRA Web Jump to the Rancher UI <span class="text-gray-400">(opt-in zero-trust access without opening your IP)</span></label>
+
+            <!-- PRA Web Jump (optional broker for the node's UI) — mirrors the Portainer panel -->
+            <div class="pt-3 mt-3 border-t border-gray-100">
+              <div class="flex items-center gap-2">
+                <input type="checkbox" id="rancher_ui_web_jump_enabled" x-model="panelCfg.rancher_ui_web_jump_enabled"
+                       class="rounded border-gray-300">
+                <label for="rancher_ui_web_jump_enabled" class="text-sm text-gray-700">PRA Web Jump to the Rancher UI <span class="text-gray-400">(opt-in zero-trust access without opening your IP)</span></label>
+              </div>
+              <p class="text-xs text-gray-400 mt-1">
+                Opt-in. Reach the node from the PRA representative console — brokered and recorded —
+                without adding your IP to the CIDR list. The Gateway's egress IP is auto-allowed, and
+                with a Vault account group the admin password is injected instead of shown. Jump Group,
+                Gateway and Vault account group can also be chosen per-deploy on the Containers page —
+                these are the defaults it starts from.
+              </p>
+              <div class="grid grid-cols-2 gap-3 mt-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_jump_group"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                         placeholder="(bt_jump_group_name)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Gateway</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_jumpoint_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                         placeholder="(bt_jumpoint_name)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group id</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_vault_account_group_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="(bt_vault_account_group_id)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Gateway cloud</label>
+                  <select x-model="panelCfg.rancher_ui_jumpoint_cloud"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                    <option value="gcp">gcp</option>
+                    <option value="aws">aws</option>
+                    <option value="azure">azure</option>
+                  </select>
+                  <p class="text-[11px] text-gray-400 mt-1">Which dashboard-managed Gateway brokers the UI. Azure's host has no public IP — add that one to the CIDRs by hand.</p>
+                </div>
+              </div>
+              <div class="mt-3 flex items-center gap-2">
+                <input type="checkbox" id="rancher_ui_verify_certificate" x-model="panelCfg.rancher_ui_verify_certificate"
+                       class="rounded border-gray-300">
+                <label for="rancher_ui_verify_certificate" class="text-sm text-gray-700">Web Jump verifies the node's certificate <span class="text-gray-400">(separate from the API check above — leave off for the self-signed cert)</span></label>
+              </div>
             </div>
           </div>
         </div>
@@ -2308,6 +4068,7 @@
             read from the issuer's discovery document, so there is nothing else to fill in. SSO goes
             live as soon as an issuer and client id are saved; clear the issuer to turn it off.
             Sign-in with Microsoft is configured separately under Azure and is unaffected.
+            See <a href="/docs/integrations/oidc" class="underline" target="_blank">integration guide</a> for full setup.
           </p>
 
           <!-- Redirect URI is the thing operators most often get wrong, and the
@@ -2517,8 +4278,16 @@ function settingsPage() {
     integrations: [
       { key: 'vmware',       label: 'VMware Workstation',      hasConfig: false, enabled: false,
         desc: 'VM management on a Windows host. Toggle to enable.' },
-      { key: 'beyondtrust',  label: 'BeyondTrust',             hasConfig: true,  enabled: false,
-        desc: 'Password Safe secret retrieval and PRA session recording.' },
+      // The three BeyondTrust products gate independently — customers routinely license
+      // one or two, not all three. Each key derives its own config flag via
+      // _feature_to_cfg_key (password_safe -> password_safe_enabled), so renaming one
+      // silently repoints its toggle at a key nothing reads.
+      { key: 'password_safe', label: 'Password Safe',          hasConfig: true,  enabled: false,
+        desc: 'Secret and managed-account checkout, VM / database / Kubernetes onboarding, and scheduled credential rotation.' },
+      { key: 'pra',          label: 'Privileged Remote Access', hasConfig: true,  enabled: false,
+        desc: 'Shell Jump, protocol-tunnel and Web Jump provisioning through PRA, plus the Gateway hosts that carry them.' },
+      { key: 'epml',         label: 'EPM for Linux',           hasConfig: true,  enabled: false,
+        desc: 'Build and download EPM for Linux client packages and mint activation tokens via the BeyondTrust Pathfinder API.' },
       { key: 'portainer',    label: 'Containers',              hasConfig: true,  enabled: false,
         desc: 'Manage and view containers across all configured cloud providers (AWS ECS, Azure ACI, GCP Cloud Run), plus optional on-prem Portainer management.' },
       { key: 'ansible',      label: 'Remote Worker',           hasConfig: true,  enabled: false,
@@ -2539,14 +4308,22 @@ function settingsPage() {
         desc: 'Month-to-date cloud spend, with an optional monthly budget alert.' },
       { key: 'admission_control', label: 'Action Guardrails',   hasConfig: true,  enabled: false,
         desc: 'Pre-action policy gate (OPA): allowed regions, blocked sizes, change-freeze.' },
-      { key: 'cloud_database', label: 'Cloud Databases',        hasConfig: true,  enabled: false,
-        desc: 'Private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, reached through a PRA tunnel.' },
+      { key: 'resource_expiry', label: 'Auto-delete Timer',     hasConfig: true,  enabled: false,
+        desc: 'Give new cloud VMs, databases and clusters an expiry, then destroy them when it passes. Starts in report-only mode.' },
+      { key: 'notifications', label: 'Notifications',           hasConfig: true,  enabled: false,
+        desc: 'Send auto-delete warnings, job failures and budget/secret/drift alerts to Slack, Microsoft Teams, or a signed webhook. Starts in dry-run mode.' },
+      { key: 'cloud_database', label: 'Databases',              hasConfig: true,  enabled: false,
+        desc: 'Provision private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, or register ones you already run — on-premises or in a cloud. PRA tunnel for the private ones.' },
       { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
+      { key: 'remote_agents', label: 'Remote Agents',           hasConfig: true,  enabled: false,
+        desc: 'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules. Adds an Agents page for registering and revoking them. Terminate TLS in front of the dashboard before enabling — this is the only API that serves callers outside your own network.' },
       { key: 'multi_region', label: 'Multi-region',            hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
       { key: 'oidc',         label: 'Single sign-on (OIDC)',   hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Sign in with any OpenID Connect provider — Okta, Auth0, Keycloak, Authentik, Authelia, Google Workspace, JumpCloud, Ping, GitLab. Configured from the issuer URL; endpoints are discovered automatically.' },
+      { key: 'worker',       label: 'Job Worker',              hasConfig: true,  enabled: true, configOnly: true,
+        desc: 'How many background jobs run at once, per kind. Raise the poll-only limit if image exports and copies queue up; raise the heavy limit to provision more clusters or databases in parallel. Takes effect within seconds, no restart.' },
     ],
 
     // OIDC discovery probe result (Test connection in the SSO panel).
@@ -2559,7 +4336,25 @@ function settingsPage() {
     panelError: '',
     panelCfg: {},
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
+    agentAudience: null,     // read-only view of the pinned agent signing audience (Remote Agents panel)
+    agentAudienceResetting: false,
     rancherFirewall: null,   // read-only breakdown of the Rancher node firewall allow-list (k8s panel)
+    portainerFirewall: null, // same for the managed Portainer node (Containers panel)
+    expirySweep: null,       // last auto-delete sweep summary (Auto-delete Timer panel)
+    expirySweeping: false,
+    workerStatus: null,      // what the job worker resolved its limits to (Job Worker panel)
+    workerStatusLoading: false,
+
+    // ── Notifications panel ──────────────────────────────────────────────
+    // Endpoints are rows in their own table, not panel config keys, so they load and
+    // save through /api/notifications rather than the generic feature-panel plumbing.
+    notif: {
+      endpoints: [], formats: [], knownEvents: [], summary: null,
+      deliveries: [], loading: false, error: '',
+      draft: null,           // the endpoint being added/edited, or null
+      saving: false, testingId: '',
+      testResult: null,      // { id, ok, error, status_code }
+    },
 
     // Cross-cloud per-region config sets — the Multi-region panel. One state block
     // per cloud, each loaded from / saved to /api/setup/regions/{cloud}. The generic
@@ -2765,8 +4560,9 @@ function settingsPage() {
 
         const features = await API.get('/api/features');
         const map = {
-          chat: features.chat, vmware: features.vmware,
-          beyondtrust: features.beyondtrust, portainer: features.portainer,
+          vmware: features.vmware,
+          password_safe: features.password_safe, pra: features.pra, epml: features.epml,
+          portainer: features.portainer,
           ansible: features.ansible, entitle: features.entitle,
           proxmox: features.proxmox,
           vsphere: features.vsphere,
@@ -2775,8 +4571,14 @@ function settingsPage() {
           xcpng: features.xcpng,
           cost_explorer: features.cost,
           admission_control: features.admission,
+          resource_expiry: features.resource_expiry,
           cloud_database: features.cloud_database,
           k8s_management: features.k8s_management,
+          // Miss an entry here and the toggle renders permanently OFF however the flag
+          // is really set — silent, because nothing errors. Notifications was missing
+          // one until now. Pinned by tests/test_settings_integrations.py.
+          notifications: features.notifications,
+          remote_agents: features.remote_agents,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];
@@ -2843,18 +4645,247 @@ function settingsPage() {
           await Promise.all(['aws', 'gcp', 'azure'].map(c => this.loadRegionSets(c)));
         }
         // Kubernetes: lazy-load the read-only Rancher firewall breakdown so the
-        // operator can see which sources are auto-whitelisted (clusters + Jumpoint).
+        // operator can see which sources are auto-whitelisted (clusters + Gateway).
         if (intg.key === 'k8s_management') {
           this.rancherFirewall = null;
           try {
             this.rancherFirewall = await API.get('/api/containers/rancher/firewall');
           } catch (e) { /* node/GCP not configured yet — panel just omits the box */ }
         }
+        // Remote agents: the pinned signing audience is write-once and was previously
+        // invisible, so an audience pinned to the wrong hostname looked identical to a
+        // revoked agent. Read-only — the panel never puts it in the save payload.
+        if (intg.key === 'remote_agents') {
+          this.agentAudience = null;
+          try {
+            this.agentAudience = await API.get('/api/agent/audience');
+          } catch (e) { /* the router is feature-gated; off means 404, and this panel is where you turn it on */ }
+        }
+        // Containers: same read-only breakdown for the managed Portainer node, so the
+        // operator can see whether the node is actually reachable and from where.
+        if (intg.key === 'portainer') {
+          this.portainerFirewall = null;
+          try {
+            this.portainerFirewall = await API.get('/api/containers/portainer/node/firewall');
+          } catch (e) { /* node/GCP not configured yet — panel just omits the box */ }
+        }
+        // Auto-delete: the last sweep report is the only place an operator can see what
+        // the feature would actually do, so it loads with the panel.
+        if (intg.key === 'resource_expiry') {
+          this.expirySweep = null;
+          try {
+            this.expirySweep = await API.get('/api/expiry/last-sweep');
+          } catch (e) { /* never run yet — the summary line says so */ }
+        }
+        // Job Worker: the saved limits are clamped before use, so the panel is misleading
+        // without the worker's own readout of what it resolved them to.
+        if (intg.key === 'worker') {
+          this.workerStatus = null;
+          await this.loadWorkerStatus();
+        }
+        // Notifications: endpoints and the delivery log live outside the feature-panel
+        // config, so they load alongside it.
+        if (intg.key === 'notifications') {
+          await this.loadNotifications();
+        }
       } catch (e) {
         this.panelError = 'Failed to load configuration: ' + e.message;
       } finally {
         this.panelLoading = false;
       }
+    },
+
+    // ── Auto-delete timer panel ─────────────────────────────────────────────
+    expirySweepSummary() {
+      const s = this.expirySweep;
+      if (!s) return 'No sweep report yet.';
+      if (s.never_run) return 'Never run — the first pass happens on the next sweep interval.';
+      if (s.corrupted) return 'The stored report could not be read.';
+      if (s.skipped) return 'Last pass skipped: ' + s.skipped;
+      const lines = [
+        `${s.started_at} · scanned ${s.scanned}, past expiry ${s.due}, destroyed ${s.reaped}`
+        + (s.failed ? `, ${s.failed} failed` : '')
+        + (s.deleting ? '' : ' (report only — nothing deleted)')
+        + (s.capped ? ' · CAPPED' : ''),
+      ];
+      if (!s.armed) lines.push('The feature is still arming — nothing can be deleted yet.');
+      else if (!s.deleting && s.enforce_since) lines.push(
+        'Deletion was enabled at ' + s.enforce_since + ' and is still arming.');
+      for (const t of (s.targets || []).slice(0, 5)) {
+        lines.push(`  ${t.kind}/${t.cloud} ${t.name} — ${Math.floor(t.overdue_s / 60)}m overdue`);
+      }
+      if ((s.targets || []).length > 5) lines.push(`  …and ${s.targets.length - 5} more`);
+      return lines.join('\n');
+    },
+
+    async runExpirySweep() {
+      this.expirySweeping = true;
+      try {
+        const r = await API.post('/api/expiry/sweep', {});
+        toast(r.message || 'Sweep queued.', r.ok ? 'success' : 'info');
+        // The pass runs in the worker, so the report lands a moment later. Re-read once
+        // rather than polling — the operator can reopen the panel for a fresh look.
+        if (r.ok) {
+          setTimeout(async () => {
+            try { this.expirySweep = await API.get('/api/expiry/last-sweep'); } catch (e) {}
+          }, 4000);
+        }
+      } catch (e) {
+        toast('Could not queue a sweep: ' + e.message, 'error');
+      } finally {
+        this.expirySweeping = false;
+      }
+    },
+
+    // ── Job Worker panel ────────────────────────────────────────────────────
+    // Read-only. The worker publishes what it actually resolved, because the numbers
+    // saved above are clamped twice — to the code ceilings, then to what the worker's DB
+    // pool can serve. Without this an operator who raises a limit and sees no change has
+    // no way to find out why short of reading container logs.
+    async loadWorkerStatus() {
+      this.workerStatusLoading = true;
+      try {
+        this.workerStatus = await API.get('/api/worker/status');
+      } catch (e) {
+        this.workerStatus = { error: e.message };
+      } finally {
+        this.workerStatusLoading = false;
+      }
+    },
+
+    workerStatusSummary() {
+      const s = this.workerStatus;
+      if (!s) return 'Loading…';
+      if (s.error) return 'Could not read the worker status: ' + s.error;
+      if (s.never_run) return 'No worker has reported yet. If jobs are running, the worker '
+        + 'is on an older image; otherwise check that it is deployed and can reach the database.';
+      if (s.corrupted) return 'The stored status could not be read.';
+
+      const eff = s.effective || {};
+      const conf = s.configured || {};
+      const lines = [
+        `heavy ${eff.heavy}   mixed ${eff.medium}   poll-only ${eff.light}   total ${eff.total}`,
+      ];
+      // Only worth showing when they disagree — that gap IS the diagnosis.
+      const diffs = ['heavy', 'medium', 'light', 'total']
+        .filter(k => conf[k] !== undefined && conf[k] !== eff[k])
+        .map(k => `${k} ${conf[k]}→${eff[k]}`);
+      if (diffs.length) lines.push('reduced: ' + diffs.join(', '));
+      if (s.clamp_reason) lines.push('why: ' + s.clamp_reason);
+      lines.push(`${s.in_flight ?? 0} job(s) in flight when reported · ${s.executor_threads} threads`
+        + (s.pool_capacity ? ` · pool of ${s.pool_capacity}` : ''));
+      lines.push(`reported by ${s.hostname} at ${s.published_at}`);
+      return lines.join('\n');
+    },
+
+    // ── Notifications ────────────────────────────────────────────────────
+    // Endpoints and deliveries are their own resources, so none of this goes through
+    // the generic feature-panel save. The API never returns a URL or a secret — only
+    // a scheme+host hint and a has_secret flag.
+
+    openPanelByKey(key) {
+      const intg = this.integrations.find(i => i.key === key);
+      if (intg) this.openPanel(intg);
+    },
+
+    async loadNotifications() {
+      this.notif.loading = true;
+      this.notif.error = '';
+      this.notif.draft = null;
+      this.notif.testResult = null;
+      try {
+        const [eps, sum, del] = await Promise.all([
+          API.get('/api/notifications/endpoints'),
+          API.get('/api/notifications/summary').catch(() => null),
+          API.get('/api/notifications/deliveries?page_size=20').catch(() => null),
+        ]);
+        this.notif.endpoints = eps.endpoints || [];
+        this.notif.formats = eps.formats || [];
+        this.notif.knownEvents = eps.known_events || [];
+        this.notif.summary = sum;
+        this.notif.deliveries = (del && del.deliveries) || [];
+      } catch (e) {
+        this.notif.error = 'Could not load notification endpoints: ' + e.message;
+      } finally {
+        this.notif.loading = false;
+      }
+    },
+
+    newEndpoint() {
+      this.notif.draft = { id: '', name: '', url: '', fmt: 'custom', secret: '',
+                           event_types: '', enabled: true };
+    },
+
+    editEndpoint(ep) {
+      // url and secret start blank on an edit: the server never sends them back, and a
+      // blank means "leave it alone" on save. Typing in either field replaces it.
+      this.notif.draft = { id: ep.id, name: ep.name, url: '', fmt: ep.fmt, secret: '',
+                           event_types: ep.event_types || '', enabled: ep.enabled,
+                           url_hint: ep.url_hint, has_secret: ep.has_secret };
+    },
+
+    async saveEndpoint() {
+      const d = this.notif.draft;
+      if (!d) return;
+      this.notif.saving = true;
+      try {
+        if (d.id) {
+          const body = { name: d.name, fmt: d.fmt, event_types: d.event_types,
+                         enabled: d.enabled };
+          if (d.url) body.url = d.url;         // omitted = keep the stored URL
+          if (d.secret) body.secret = d.secret;
+          await API.patch(`/api/notifications/endpoints/${d.id}`, body);
+        } else {
+          await API.post('/api/notifications/endpoints', {
+            name: d.name, url: d.url, fmt: d.fmt, secret: d.secret,
+            event_types: d.event_types, enabled: d.enabled });
+        }
+        this.notif.draft = null;
+        await this.loadNotifications();
+        toast('Endpoint saved.', 'success');
+      } catch (e) {
+        toast('Could not save the endpoint: ' + e.message, 'error');
+      } finally {
+        this.notif.saving = false;
+      }
+    },
+
+    async deleteEndpoint(ep) {
+      if (!confirm(`Delete the notification endpoint "${ep.name}"? Queued deliveries to it will fail.`)) return;
+      try {
+        await API.delete(`/api/notifications/endpoints/${ep.id}`);
+        await this.loadNotifications();
+        toast('Endpoint deleted.', 'success');
+      } catch (e) {
+        toast('Could not delete the endpoint: ' + e.message, 'error');
+      }
+    },
+
+    async testEndpoint(ep) {
+      this.notif.testingId = ep.id;
+      this.notif.testResult = null;
+      try {
+        const r = await API.post(`/api/notifications/endpoints/${ep.id}/test`, {});
+        this.notif.testResult = { id: ep.id, ...r };
+        // Reload so last_success_at / last_error reflect the attempt.
+        const eps = await API.get('/api/notifications/endpoints');
+        this.notif.endpoints = eps.endpoints || [];
+      } catch (e) {
+        this.notif.testResult = { id: ep.id, ok: false, error: e.message };
+      } finally {
+        this.notif.testingId = '';
+      }
+    },
+
+    notifSummaryLine() {
+      const s = this.notif.summary;
+      if (!s) return 'No delivery activity recorded yet.';
+      const parts = [];
+      for (const k of ['sent', 'pending', 'failed', 'dry_run', 'suppressed']) {
+        if (s[k]) parts.push(`${s[k]} ${k.replace('_', '-')}`);
+      }
+      const head = parts.length ? parts.join(', ') : 'nothing sent';
+      return `Last ${s.window_hours}h: ${head}.`;
     },
 
     // Per-cloud runner backends fall back to the legacy global ansible_runner /
@@ -3120,6 +5151,28 @@ function settingsPage() {
         this.oidcTest = { running: false, ok: true, error: '', doc };
       } catch (e) {
         this.oidcTest = { running: false, ok: false, error: e.message || String(e), doc: null };
+      }
+    },
+
+    // Reset the pinned agent signing audience. Destructive in a way that is not obvious
+    // from the button — it does not touch any agent row, but every enrolled agent starts
+    // failing authentication — so the count goes in the confirm text.
+    async resetAgentAudience() {
+      const a = this.agentAudience || {};
+      const n = a.agents_enrolled || 0;
+      const affected = n
+        ? `\n\n${n} enrolled agent(s) will stop authenticating and must be re-enrolled with a fresh code.`
+        : '';
+      if (!confirm(`Reset the signing audience?\n\nIt is pinned to ${a.pinned}. The next enrolment code will pin it again — from Public base URL if you have set one, otherwise from the origin your browser is on.${affected}`)) return;
+      this.agentAudienceResetting = true;
+      try {
+        const r = await API.delete('/api/agent/audience');
+        this.agentAudience = r;
+        this.showToast(r.detail || 'Signing audience reset.');
+      } catch (e) {
+        this.showToast('Could not reset the signing audience: ' + e.message, 'error');
+      } finally {
+        this.agentAudienceResetting = false;
       }
     },
 

@@ -35,6 +35,10 @@
 <a href="/xcpng" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/xcpng' %}{{ nav_active }}{% endif %}">XCP-ng</a>
 {% endif %}
+{% if proxmox_enabled or vsphere_enabled or hyperv_enabled or nutanix_enabled or xcpng_enabled or vmware_enabled %}
+<a href="/connections" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Connections</a>
+{% endif %}
 
 {# ── Cloud providers ──────────────────────────────────────────────── #}
 <a href="/aws" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
@@ -92,6 +96,11 @@
    {% if request.url.path.startswith('/jobs') %}{{ nav_active }}{% endif %}">Jobs</a>
 
 {# ── Admin ────────────────────────────────────────────────────────── #}
+{% if remote_agents_enabled %}
+<a x-show="$store.auth.isAdmin" href="/agents"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/agents') %}{{ nav_active }}{% endif %}">Agents</a>
+{% endif %}
 <a x-show="$store.auth.isAdmin" href="/secrets"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>

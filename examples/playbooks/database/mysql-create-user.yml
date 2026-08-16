@@ -1,0 +1,75 @@
+# Create a MySQL user with minimal privileges.
+# Target: a MySQL database (provisioned or registered). Admin connection vars (db_login_*) are
+# auto-injected. Supply the new user's password via a Secrets-Management secret
+# (run form → "Use a secret", mapped to target_user_password).
+#
+# extra_vars:
+#   target_user: appuser              # required
+#   target_user_password: <secret>    # bind via "Use a secret" (recommended)
+#   target_user_priv: "appdb.*:ALL"   # optional; default USAGE only
+#
+# OPTIONAL — fetch the user's password from BeyondTrust Password Safe instead, by
+# setting a SECRET path (folder/title):
+#   target_user_password_secret: app-secrets/appuser-password
+# The PASSWORD_SAFE_* credentials are auto-injected into every runner, so nothing else
+# is needed. See examples/playbooks/password-safe/db-credential-from-ps.yml for the
+# standalone version of this pattern.
+- name: Create a MySQL user
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    target_user: ""
+    target_user_password: ""
+    target_user_priv: "*.*:USAGE"
+    # Optional Password Safe source for the password above (blank = don't use it).
+    target_user_password_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+  tasks:
+    # Fetched into its OWN fact, never onto target_user_password: extra vars outrank
+    # set_fact, so writing back to that name would be silently ignored whenever the
+    # password was also supplied as an extra var / "Use a secret" binding.
+    - name: Fetch the user password from Password Safe
+      ansible.builtin.set_fact:
+        _ps_target_user_password: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=target_user_password_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: target_user_password_secret | length > 0
+
+    - name: Resolve the effective password (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _user_password: "{{ _ps_target_user_password | default(target_user_password, true) }}"
+      no_log: true
+
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - target_user | length > 0
+          - _user_password | length > 0
+        fail_msg: >-
+          Set target_user, and a password — either target_user_password (bind it via
+          'Use a secret') or target_user_password_secret (a Password Safe path).
+
+    - name: Ensure the user exists
+      community.mysql.mysql_user:
+        name: "{{ target_user }}"
+        password: "{{ _user_password }}"
+        host: "%"
+        priv: "{{ target_user_priv }}"
+        state: present
+        login_host: "{{ db_login_host }}"
+        login_port: "{{ db_login_port }}"
+        login_user: "{{ db_login_user }}"
+        login_password: "{{ db_login_password }}"
+      no_log: true   # the user password is a secret

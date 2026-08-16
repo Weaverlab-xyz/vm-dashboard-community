@@ -1,0 +1,67 @@
+---
+# Activate the BeyondTrust EPM for Linux agent on a host that already has the package.
+#
+# The bt-ready provisioners install the EPM-L package at image-build time (BT_EPML_URL)
+# but deliberately do NOT activate it: a registration token expires hours after issue,
+# so one baked into an image is dead by the time the image is used. Activation is
+# therefore a post-deploy step, and this is it.
+#
+# The token is NOT an extra var you type. On the Config Management page, put a variable
+# name in "EPM-L installation token → variable" (e.g. epml_installation_token) and the
+# dashboard mints a fresh token server-side at run time, binds it to that variable, and
+# scrubs it from the job output. Nothing is stored.
+#
+#   extra_vars:
+#     epml_activate_binary: /opt/pbul/bin/pbactivate   # override if installed elsewhere
+#
+# Idempotent: `pbactivate` is skipped when the agent already reports as activated.
+
+- hosts: all
+  become: true
+  vars:
+    # Must match the variable name entered on the run form.
+    epml_token_var_name: epml_installation_token
+    epml_activate_binary: /opt/pbul/bin/pbactivate
+  tasks:
+    - name: ── Check the EPM-L agent is installed ──────────────────────────────
+      ansible.builtin.stat:
+        path: "{{ epml_activate_binary }}"
+      register: pbactivate_bin
+
+    - name: Fail with an actionable message when the package is missing
+      ansible.builtin.assert:
+        that: pbactivate_bin.stat.exists
+        fail_msg: >-
+          {{ epml_activate_binary }} not found. Build the image with the bt-ready
+          provisioner and BT_EPML_URL set (Build Image → Install EPM-L), or install
+          the package first — this play only activates an agent that is already there.
+
+    - name: Fail when no token was bound to the run
+      ansible.builtin.assert:
+        that: vars[epml_token_var_name] | default('', true) | length > 0
+        fail_msg: >-
+          No EPM-L token. On the Config Management page set "EPM-L installation token →
+          variable" to {{ epml_token_var_name }} so the run mints one.
+
+    - name: ── Current activation state ────────────────────────────────────────
+      ansible.builtin.command: "{{ epml_activate_binary }} -s"
+      register: pbactivate_state
+      changed_when: false
+      failed_when: false
+
+    - name: ── Activate against BeyondTrust ─────────────────────────────────────
+      # no_log: the token is on this command line. The dashboard also scrubs it from
+      # the stored output, but Ansible's own display happens first.
+      ansible.builtin.command: >-
+        {{ epml_activate_binary }} {{ vars[epml_token_var_name] }}
+      register: pbactivate_run
+      no_log: true
+      changed_when: pbactivate_run.rc == 0
+      when: "'activated' not in (pbactivate_state.stdout | default('') | lower)"
+
+    - name: ── Report ───────────────────────────────────────────────────────────
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Already activated — nothing to do.'
+             if 'activated' in (pbactivate_state.stdout | default('') | lower)
+             else 'EPM-L agent activated.' }}

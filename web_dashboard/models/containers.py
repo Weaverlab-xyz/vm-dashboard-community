@@ -167,7 +167,7 @@ class CloudRunJobInfo(BaseModel):
     region: str
     purpose: str = ""       # ansible-runner | promote-runner | k8s-runner
     image: str = ""
-    status: str = ""        # RUNNING | PENDING | COMPLETED
+    status: str = ""        # RUNNING | PENDING (finished jobs are not listed)
     created_at: Optional[str] = None
 
 
@@ -197,6 +197,22 @@ class RancherNodeResponse(BaseModel):
     count: int
     configured: bool       # GCP project + bootstrap password present
     server_url: str = ""   # the pinned rancher_server_url (if the node is bootstrapped)
+    login_hint: str = ""   # how to log in (username + which configured password); never the secret itself
+
+
+class RancherDeployRequest(BaseModel):
+    # Deploy-time region pick (multi-region). Blank → the persisted node region, else
+    # the configured default. zone is optional within the region (blank → the region's
+    # first available zone, with same-region capacity fallback).
+    region: Optional[str] = None             # GCP region for the Rancher node
+    zone: Optional[str] = None               # optional GCP zone within `region`
+    # Deploy-time PRA choices (parity with DB/VM deploys). All optional — omitted
+    # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault
+    # account group by numeric id (the list_pickers() contract).
+    web_jump_enabled: bool = False           # broker the Rancher UI via a PRA Web Jump
+    jump_group: Optional[str] = None         # PRA Jump Group name
+    jumpoint_name: Optional[str] = None      # PRA Jumpoint name
+    vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
 
 
 class RancherImportRequest(BaseModel):
@@ -207,3 +223,42 @@ class RancherImportResponse(BaseModel):
     cluster_id: str
     manifest_url: str
     apply_command: str     # kubectl apply -f <manifest_url> (run against the target cluster)
+
+
+# ── Managed Portainer CE server (COS on GCE) ────────────────────────────────
+
+class PortainerNodeInfo(BaseModel):
+    name: str
+    zone: str
+    status: str  # RUNNING | TERMINATED | STOPPING | PROVISIONING | ...
+    machine_type: str = ""
+    image: str = ""
+    internal_ip: str = ""
+    external_ip: str = ""
+    url: str = ""          # https://<external_ip>:9443
+    created_at: Optional[str] = None
+
+
+class PortainerNodeResponse(BaseModel):
+    nodes: list[PortainerNodeInfo]
+    project_id: str
+    count: int
+    configured: bool       # GCP project present (all a deploy needs — no pre-set secret)
+    server_url: str = ""   # the pinned portainer_url (if a node is deployed)
+    token_configured: bool = False  # a portainer_pat is stored, so the Containers tab can talk to it
+    login_hint: str = ""   # how to log in; the auto-generated password is echoed, an operator-set one never is
+
+
+class PortainerDeployRequest(BaseModel):
+    # Deploy-time region pick (multi-region). Blank → the persisted node region, else
+    # the configured default. zone is optional within the region (blank → the region's
+    # first available zone, with same-region capacity fallback).
+    region: Optional[str] = None             # GCP region for the Portainer node
+    zone: Optional[str] = None               # optional GCP zone within `region`
+    # Deploy-time PRA choices (parity with the Rancher node). All optional — omitted
+    # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault
+    # account group by numeric id (the list_pickers() contract).
+    web_jump_enabled: bool = False           # broker the Portainer UI via a PRA Web Jump
+    jump_group: Optional[str] = None         # PRA Jump Group name
+    jumpoint_name: Optional[str] = None      # PRA Jumpoint name
+    vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential

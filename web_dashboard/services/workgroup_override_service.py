@@ -21,7 +21,11 @@ from sqlalchemy.orm import Session
 
 from ..database import VMWorkgroupOverride, Workgroup
 
-ALLOWED_PROVIDERS = frozenset({"proxmox", "nutanix", "hyperv", "vsphere", "xcpng"})
+# `workstation` covers VMware Workstation VMs a co-located remote agent syncs. It is
+# keyed on vmrest's opaque VM id rather than a VMX path — the /vms page's LOCAL rows are
+# addressed by path and carry no override at all, so the two never collide.
+ALLOWED_PROVIDERS = frozenset({"proxmox", "nutanix", "hyperv", "vsphere", "xcpng",
+                               "workstation"})
 
 
 class OverrideError(ValueError):

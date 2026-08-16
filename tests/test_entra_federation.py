@@ -5,7 +5,9 @@ Entra token authenticates and its group Object IDs match the RBAC `Group` bindin
 (bind_entra_group) — the real-identity JIT story extended from AKS to EKS. These lock
 in the pure pieces: the shared-app settings resolver (_entra_oidc_settings), and the
 token-free `kubectl oidc-login` kubeconfig transform (_entra_oidc_login_kubeconfig /
-build_entra_oidc_kubeconfig).
+build_entra_oidc_kubeconfig), plus the AKS leg of the same download
+(_entra_aks_user_login_kubeconfig), which flips Azure kubelogin out of the stored
+service-principal mode into an interactive device-code sign-in as the user.
 
 Stubs the DB / sqlalchemy imports so k8s_service loads without an app/DB (same as
 test_entra_group / test_pra_api_tunnel). Runs under pytest or standalone.
@@ -29,9 +31,27 @@ _orm.Session = object
 sys.modules.setdefault("sqlalchemy.orm", _orm)
 _db = types.ModuleType("web_dashboard.database")
 _db.Job = type("Job", (), {})
-_db.K8sCluster = type("K8sCluster", (), {"id": None})
+# `cloud` is needed by the impersonator tests: remove_impersonator_binding filters on
+# K8sCluster.cloud, which would AttributeError on a bare stub.
+_db.K8sCluster = type("K8sCluster", (), {"id": None, "cloud": None})
 sys.modules.setdefault("web_dashboard.database", _db)
 
+# azure_service is lazily imported by the AKS transform, only for its two well-known
+# AAD app ids — stub it (real values) so no azure SDK is needed.
+_az = types.ModuleType("web_dashboard.services.azure_service")
+_az.AKS_AAD_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
+_az.AKS_AAD_CLIENT_APP_ID = "80faf920-1908-4b52-b5ef-a8e7bedfc67a"
+sys.modules.setdefault("web_dashboard.services.azure_service", _az)
+
+# config_service is imported inside the impersonator actions (apply/remove) to track
+# k8s_impersonator_{cid} — dict-backed stub, no DB.
+_CONF: dict = {}
+_conf_stub = types.ModuleType("web_dashboard.services.config_service")
+_conf_stub.get = lambda key: _CONF.get(key, "")
+_conf_stub.set = lambda key, val: _CONF.__setitem__(key, val)
+sys.modules.setdefault("web_dashboard.services.config_service", _conf_stub)
+
+from web_dashboard.services import gcp_service as g  # noqa: E402
 from web_dashboard.services import k8s_service as k  # noqa: E402
 
 
@@ -61,6 +81,31 @@ users:
 
 _OIDC = {"issuer": "https://login.microsoftonline.com/TENANT/v2.0",
          "client_id": "CLIENT-GUID", "username_claim": "oid", "groups_claim": "groups"}
+
+# A repointed AKS kubeconfig as _assemble_aks_kubeconfig writes it: `kubelogin` in
+# service-principal mode, which reads AAD_SERVICE_PRINCIPAL_CLIENT_ID/_SECRET from the
+# environment — the dashboard's identity, not the downloading user's.
+_AKS_REPOINTED_SPN = """
+apiVersion: v1
+kind: Config
+current-context: k8s-aks
+clusters:
+- name: k8s-aks
+  cluster:
+    server: https://127.0.0.1:6443
+    tls-server-name: k8s-aks-abc.hcp.eastus.azmk8s.io
+    certificate-authority-data: TEST_CA_B64
+contexts:
+- name: k8s-aks
+  context: {cluster: k8s-aks, user: k8s-aks}
+users:
+- name: k8s-aks
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kubelogin
+      args: [get-token, --server-id, 6dae42f8-4368-4678-94ff-3960e28e3630, --login, spn]
+"""
 
 
 def _with_cfg(mapping):
@@ -201,6 +246,314 @@ def test_connect_gateway_kubeconfig_is_token_free():
     assert exec_blk.get("provideClusterInfo") is True
     assert "token" not in cfg["users"][0]["user"]   # picks up the active workforce identity
     assert "k8s-aws-v1." not in out and "client-key-data" not in out
+
+
+# ── AKS (native managed-AAD, but the stored exec is service-principal mode) ───────
+
+def test_aks_download_is_user_login_not_spn():
+    restore = _with_cfg({"azure_tenant_id": "T-123"})
+    try:
+        out = k._entra_aks_user_login_kubeconfig(_AKS_REPOINTED_SPN)
+    finally:
+        restore()
+    cfg = yaml.safe_load(out)
+    exec_blk = cfg["users"][0]["user"]["exec"]
+    args = exec_blk["args"]
+    assert exec_blk["command"] == "kubelogin"          # Azure kubelogin, not int128's
+    # No longer the dashboard's service principal: `--login spn` reads
+    # AAD_SERVICE_PRINCIPAL_CLIENT_ID/_SECRET from the operator's environment.
+    assert "spn" not in args
+    assert args[args.index("--login") + 1] == "devicecode"
+    # Interactive as the *user*: well-known AKS AAD client app + the lab tenant, with
+    # the server-id (the token audience) preserved from the stored kubeconfig.
+    assert args[args.index("--client-id") + 1] == "80faf920-1908-4b52-b5ef-a8e7bedfc67a"
+    assert args[args.index("--tenant-id") + 1] == "T-123"
+    assert args[args.index("--server-id") + 1] == "6dae42f8-4368-4678-94ff-3960e28e3630"
+    # Token-free: no injected credential of any kind.
+    assert "token" not in cfg["users"][0]["user"]
+    assert "auth-provider" not in cfg["users"][0]["user"]
+    assert "client-key-data" not in out and "client-secret" not in out
+    assert "AAD_SERVICE_PRINCIPAL" not in out
+    # The cluster block (repoint + CA) is untouched.
+    cl = cfg["clusters"][0]["cluster"]
+    assert cl["server"] == "https://127.0.0.1:6443"
+    assert cl["certificate-authority-data"] == "TEST_CA_B64"
+    assert cl["tls-server-name"] == "k8s-aks-abc.hcp.eastus.azmk8s.io"
+
+
+def test_aks_registered_user_mode_exec_is_left_alone():
+    # A user-uploaded kubeconfig that already signs in as a person (azurecli here;
+    # equally devicecode/interactive) must not be rewritten.
+    src = _AKS_REPOINTED_SPN.replace("--login, spn", "--login, azurecli")
+    restore = _with_cfg({"azure_tenant_id": "T-123"})
+    try:
+        args = yaml.safe_load(k._entra_aks_user_login_kubeconfig(src))["users"][0]["user"]["exec"]["args"]
+    finally:
+        restore()
+    assert args[args.index("--login") + 1] == "azurecli"
+    assert "--client-id" not in args   # nothing injected
+
+
+def test_aks_legacy_azure_authprovider_is_left_alone():
+    src = """
+apiVersion: v1
+kind: Config
+current-context: k8s-aks
+clusters:
+- name: k8s-aks
+  cluster: {server: 'https://127.0.0.1:6443', certificate-authority-data: TEST_CA_B64}
+contexts:
+- name: k8s-aks
+  context: {cluster: k8s-aks, user: k8s-aks}
+users:
+- name: k8s-aks
+  user:
+    auth-provider:
+      name: azure
+      config: {apiserver-id: SRV, client-id: CLI, tenant-id: T, environment: AzurePublicCloud}
+"""
+    restore = _with_cfg({"azure_tenant_id": "T-123"})
+    try:
+        user = yaml.safe_load(k._entra_aks_user_login_kubeconfig(src))["users"][0]["user"]
+    finally:
+        restore()
+    assert user["auth-provider"]["name"] == "azure" and "exec" not in user
+
+
+def test_aks_download_raises_without_tenant():
+    restore = _with_cfg({})   # no azure_tenant_id — kubelogin can't do a device code
+    try:
+        try:
+            k._entra_aks_user_login_kubeconfig(_AKS_REPOINTED_SPN)
+            raise AssertionError("expected K8sError when azure_tenant_id unset")
+        except k.K8sError:
+            pass
+    finally:
+        restore()
+
+
+# ── GKE impersonation gate (Cloud IAM half of the fine-grained Entitle tier) ──
+#
+# GKE authorizes `impersonate` in Cloud IAM as well as Kubernetes RBAC, so the
+# impersonator ClusterRole alone leaves `kubectl --as` Forbidden. These pin the second
+# half: a project custom role holding ONLY container.clusters.impersonate, bound to the
+# group's workforce principalSet, granted on GKE and on no other cloud.
+
+_POOL_CFG = {"gcp_workforce_pool_id": "bt-entra-pool", "gcp_workforce_location": "global",
+             "gcp_project_id": "proj", "entra_rbac_group_id": "GID"}
+_PRINCIPALSET = ("principalSet://iam.googleapis.com/locations/global"
+                 "/workforcePools/bt-entra-pool/group/GID")
+
+
+class _Resp:
+    def __init__(self, status=200, payload=None):
+        self.status_code, self._payload, self.text = status, payload or {}, str(payload)
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise AssertionError(f"unexpected raise_for_status on {self.status_code}")
+
+
+class _FakeSession:
+    """Records (verb, url, body) and replays queued responses per verb."""
+
+    def __init__(self, get=None, post=None, patch=None):
+        self.calls, self._get, self._post, self._patch = [], get, post, patch
+
+    def get(self, url, **kw):
+        self.calls.append(("get", url, None))
+        return self._get or _Resp(404)
+
+    def post(self, url, json=None, **kw):
+        self.calls.append(("post", url, json))
+        return self._post or _Resp(200)
+
+    def patch(self, url, json=None, **kw):
+        self.calls.append(("patch", url, json))
+        return self._patch or _Resp(200)
+
+    def urls(self, verb):
+        return [u for v, u, _ in self.calls if v == verb]
+
+
+def _with_gcp_session(sess):
+    """Point gcp_service at a fake AuthorizedSession + project; returns a restore fn."""
+    orig_s, orig_p = g._authed_session, g._gcp_project
+    g._authed_session, g._gcp_project = (lambda: sess), (lambda: "proj")
+    def restore():
+        g._authed_session, g._gcp_project = orig_s, orig_p
+    return restore
+
+
+def test_impersonate_role_is_created_with_exactly_one_permission():
+    # The whole point of a custom role: roles/container.admin also carries
+    # container.clusters.impersonate but hands the group standing cluster admin.
+    sess = _FakeSession(get=_Resp(404))
+    restore = _with_gcp_session(sess)
+    try:
+        name = g.ensure_impersonate_role()
+    finally:
+        restore()
+    assert name == "projects/proj/roles/dashboardGkeImpersonator"
+    create = [(u, b) for v, u, b in sess.calls if v == "post"]
+    assert len(create) == 1
+    url, body = create[0]
+    assert url.endswith("/roles?roleId=dashboardGkeImpersonator")
+    assert body["role"]["includedPermissions"] == ["container.clusters.impersonate"]
+    assert body["role"]["stage"] == "GA"
+
+
+def test_impersonate_role_existing_is_reused_without_writes():
+    sess = _FakeSession(get=_Resp(200, {"includedPermissions": ["container.clusters.impersonate"]}))
+    restore = _with_gcp_session(sess)
+    try:
+        g.ensure_impersonate_role()
+    finally:
+        restore()
+    assert sess.urls("post") == [] and sess.urls("patch") == []
+
+
+def test_impersonate_role_soft_deleted_is_undeleted_not_recreated():
+    # GCP keeps a deleted custom role ~7 days and `create` on it fails ALREADY_EXISTS.
+    sess = _FakeSession(get=_Resp(200, {"deleted": True}))
+    restore = _with_gcp_session(sess)
+    try:
+        g.ensure_impersonate_role()
+    finally:
+        restore()
+    assert any(u.endswith(":undelete") for u in sess.urls("post"))
+    assert not any("roleId=" in u for u in sess.urls("post"))   # no create
+    assert sess.urls("patch")                                   # permission re-applied
+
+
+def test_impersonate_role_denied_names_the_missing_role_admin():
+    sess = _FakeSession(get=_Resp(404), post=_Resp(403, {"error": "denied"}))
+    restore = _with_gcp_session(sess)
+    try:
+        g.ensure_impersonate_role()
+        raise AssertionError("expected GCPError")
+    except g.GCPError as exc:
+        assert "roles/iam.roleAdmin" in str(exc)
+    finally:
+        restore()
+
+
+def test_grant_and_revoke_bind_the_custom_role_to_the_principalset():
+    seen = []
+    orig_mod, orig_ensure = g._modify_project_iam, g.ensure_impersonate_role
+    g._modify_project_iam = lambda member, project, roles, *, add: seen.append(
+        (member, project, roles, add))
+    g.ensure_impersonate_role = lambda project="": g.impersonate_role_name(project or "proj")
+    try:
+        g.grant_impersonate_iam(_PRINCIPALSET, "proj")
+        # Revoke must NOT create/ensure the role — teardown shouldn't provision IAM.
+        g.ensure_impersonate_role = lambda project="": (_ for _ in ()).throw(
+            AssertionError("revoke must not ensure the custom role"))
+        g.revoke_impersonate_iam(_PRINCIPALSET, "proj")
+    finally:
+        g._modify_project_iam, g.ensure_impersonate_role = orig_mod, orig_ensure
+    assert [s[3] for s in seen] == [True, False]
+    for member, project, roles, _ in seen:
+        assert member == _PRINCIPALSET and project == "proj"
+        assert roles == ("projects/proj/roles/dashboardGkeImpersonator",)
+
+
+class _Row:
+    def __init__(self, cid, cloud, name=""):
+        self.id, self.cloud, self.name = cid, cloud, name or cid
+
+
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *a, **kw):
+        return self
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+    def all(self):
+        return list(self._rows)
+
+
+class _FakeDB:
+    """Filters are ignored, so the TARGET cluster must be rows[0] (what .first() returns)
+    while .all() stands in for "every GKE cluster" in the ref-count scan."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, *a, **kw):
+        return _FakeQuery(self._rows)
+
+
+def _with_impersonator_stubs(iam_calls):
+    """Neutralise the runner/kubeconfig side of the impersonator actions and capture
+    the Cloud IAM calls. Returns a restore callable."""
+    orig = (k._apply_manifest_via_runner, k._delete_manifest_via_runner,
+            k.resolve_kubeconfig, k._cfg, g.grant_impersonate_iam, g.revoke_impersonate_iam)
+
+    async def _noop(*a, **kw):
+        return ""
+
+    k._apply_manifest_via_runner = _noop
+    k._delete_manifest_via_runner = _noop
+    k.resolve_kubeconfig = lambda db, cid: "apiVersion: v1\nkind: Config\n"
+    k._cfg = lambda key, default="": _POOL_CFG.get(key, default)
+    g.grant_impersonate_iam = lambda subject, project="": iam_calls.append(
+        ("grant", subject, project))
+    g.revoke_impersonate_iam = lambda subject, project="": iam_calls.append(
+        ("revoke", subject, project))
+
+    def restore():
+        (k._apply_manifest_via_runner, k._delete_manifest_via_runner, k.resolve_kubeconfig,
+         k._cfg, g.grant_impersonate_iam, g.revoke_impersonate_iam) = orig
+    return restore
+
+
+def test_impersonator_apply_grants_cloud_iam_on_gke_only():
+    import asyncio
+    calls = []
+    restore = _with_impersonator_stubs(calls)
+    try:
+        res = asyncio.run(k.apply_impersonator_binding(_FakeDB([_Row("c1", "gcp")]), "c1"))
+        assert res["cloud_iam_granted"] is True
+        assert calls == [("grant", _PRINCIPALSET, "proj")]
+        calls.clear()
+        # EKS/AKS authorize impersonation purely in k8s RBAC — no cloud-side grant.
+        for cloud in ("aws", "azure"):
+            res = asyncio.run(k.apply_impersonator_binding(_FakeDB([_Row("c2", cloud)]), "c2"))
+            assert res["cloud_iam_granted"] is False
+        assert calls == []
+    finally:
+        restore()
+        _CONF.clear()
+
+
+def test_impersonator_remove_refcounts_the_project_level_iam():
+    import asyncio
+    calls = []
+    restore = _with_impersonator_stubs(calls)
+    try:
+        # Two GKE clusters share the group: removing one must NOT revoke the binding,
+        # or `--as` silently breaks on the cluster left behind.
+        _CONF.update({"k8s_impersonator_c1": "GID", "k8s_impersonator_c2": "GID"})
+        db = _FakeDB([_Row("c1", "gcp"), _Row("c2", "gcp")])
+        res = asyncio.run(k.remove_impersonator_binding(db, "c1"))
+        assert res["cloud_iam_revoked"] is False and calls == []
+        # Now c1 is the last holder → revoke.
+        _CONF.clear()
+        _CONF["k8s_impersonator_c1"] = "GID"
+        res = asyncio.run(k.remove_impersonator_binding(_FakeDB([_Row("c1", "gcp")]), "c1"))
+        assert res["cloud_iam_revoked"] is True
+        assert calls == [("revoke", _PRINCIPALSET, "proj")]
+    finally:
+        restore()
+        _CONF.clear()
 
 
 if __name__ == "__main__":

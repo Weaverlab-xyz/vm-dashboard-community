@@ -1,0 +1,77 @@
+# Remove a node from a Docker Swarm
+# Target: the swarm node you want to remove. Idempotent — a host that is not in a
+# swarm is a no-op, not a failure.
+#
+# DESTRUCTIVE, and requires confirm: true to do anything.
+#   * On a WORKER: the node leaves; its tasks are rescheduled elsewhere by the managers.
+#   * On a MANAGER: needs --force, and removing the LAST manager DESTROYS the swarm —
+#     services, stacks, secrets, configs and overlay networks all go with it. Demote
+#     the node first (`docker node demote`) if you only want to shrink the manager set.
+#
+# After a node leaves, a manager still lists it as `Down`. Reap it there with:
+#   docker node rm <node-id>
+#
+# extra_vars:
+#   confirm: true       # required — nothing happens without it
+#   force:   false      # required to remove a manager (docker refuses otherwise)
+- name: Remove this node from the Docker Swarm
+  hosts: all
+  become: true
+  vars:
+    confirm: false
+    force: false
+  tasks:
+    - name: Detect swarm state
+      ansible.builtin.command: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Nothing to do
+      ansible.builtin.debug:
+        msg: "This host is not in a swarm (state '{{ swarm_state.stdout }}') — nothing to leave."
+      when: swarm_state.stdout != "active"
+
+    - name: Detect whether this node is a manager
+      ansible.builtin.command: docker info --format '{% raw %}{{.Swarm.ControlAvailable}}{% endraw %}'
+      register: is_manager
+      changed_when: false
+      when: swarm_state.stdout == "active"
+
+    - name: Require explicit confirmation
+      ansible.builtin.assert:
+        that: confirm | bool
+        fail_msg: >-
+          Refusing to leave the swarm without confirm: true. This removes the node from
+          the cluster{{ ' — and this node is a MANAGER, so if it is the last one the
+          whole swarm is destroyed' if is_manager.stdout | default('') == 'true' else '' }}.
+      when: swarm_state.stdout == "active"
+
+    - name: Require --force for a manager
+      ansible.builtin.assert:
+        that: force | bool
+        fail_msg: >-
+          This node is a MANAGER. Docker refuses to let a manager leave without --force,
+          because losing the last manager destroys the swarm. Set force: true if you are
+          certain, or demote the node first with `docker node demote <node-id>`.
+      when:
+        - swarm_state.stdout == "active"
+        - is_manager.stdout == "true"
+
+    # ── Leave ────────────────────────────────────────────────────────────────
+    - name: Leave the swarm
+      ansible.builtin.command: >-
+        docker swarm leave {{ '--force' if force | bool else '' }}
+      register: swarm_leave
+      changed_when: swarm_leave.rc == 0
+      when:
+        - swarm_state.stdout == "active"
+        - confirm | bool
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          Node has left the swarm. A remaining manager will still list it as 'Down' —
+          remove it there with `docker node rm <node-id>`.
+      when:
+        - swarm_state.stdout == "active"
+        - confirm | bool

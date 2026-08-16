@@ -1,0 +1,129 @@
+# Password-protected, persistent Redis whose credential comes from ESO — the
+# stateful counterpart to app-externalsecret.yaml. redis-statefulset.yaml stays
+# the minimal "persistence works" sample (no auth, applies as-is); this variant
+# adds a `requirepass` sourced from BeyondTrust Password Safe by the External
+# Secrets Operator, so nothing sensitive is committed — only a POINTER
+# (remoteRef.key) to where the password lives.
+#
+# PREREQUISITE: the dashboard's secret-delivery action must have installed ESO +
+# the BeyondTrust `beyondtrust-store` ClusterSecretStore on this cluster
+# (POST /clusters/{id}/secret-delivery, kind=eso; see docs/kubernetes.md). Without
+# the CRDs + store, the ExternalSecret won't reconcile and the pod gets no password.
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: redis-credentials
+  namespace: sample-apps
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: beyondtrust-store          # = eso_bt_clustersecretstore (dashboard default)
+  target:
+    name: redis-credentials          # the K8s Secret ESO creates and owns
+    creationPolicy: Owner
+  data:
+    - secretKey: REDIS_PASSWORD       # key inside the produced Secret
+      remoteRef:
+        # Password Safe pointer — format depends on eso_bt_retrieval_type:
+        #   SECRET (default): "folder/title"   MANAGED_ACCOUNT: "system/account"
+        key: change-me/REDIS_PASSWORD
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-eso
+  namespace: sample-apps
+  labels:
+    app: redis-eso
+spec:
+  clusterIP: None          # headless — StatefulSet stable network IDs
+  selector:
+    app: redis-eso
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-eso
+  namespace: sample-apps
+  labels:
+    app: redis-eso
+spec:
+  serviceName: redis-eso
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-eso
+  template:
+    metadata:
+      labels:
+        app: redis-eso
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999       # the `redis` user in the official image
+        fsGroup: 999         # make the mounted PVC writable by that user
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # $(REDIS_PASSWORD) is expanded by Kubernetes from the env var below, so
+          # the password never appears literally in the manifest.
+          args:
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --save
+            - "60"
+            - "1"            # snapshot to /data if >=1 key changed in 60s
+          env:
+            # requirepass value (expanded into args above)
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: REDIS_PASSWORD
+            # redis-cli reads REDISCLI_AUTH automatically, so the probe below
+            # authenticates without putting the password on the command line —
+            # without it, requirepass makes an unauthenticated ping return NOAUTH.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: REDIS_PASSWORD
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+        # storageClassName: gp3   # uncomment to pin a StorageClass; omit = cluster default

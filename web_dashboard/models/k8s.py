@@ -37,10 +37,11 @@ class ClusterProvisionRequest(BaseModel):
     k8s_version: Optional[str] = None         # control-plane version (else config / module default)
     node_instance_type: Optional[str] = None  # node size: EC2 type / AKS vm_size / GKE machine type
     node_count: Optional[int] = None          # desired node count (else module default)
-    vpc_cidr: Optional[str] = None            # AWS only — the EKS module's own VPC CIDR (default 10.97.0.0/16; distinct per concurrent cluster)
+    vpc_cidr: Optional[str] = None            # AWS + OCI — the module's own network CIDR: EKS VPC (default 10.97.0.0/16) / OKE VCN (default 10.96.0.0/16). One shared field, no separate vcn_cidr; distinct per concurrent cluster
     authorized_cidrs: Optional[list[str]] = None  # restrict the public API endpoint (empty = open)
     zone: Optional[str] = None                # GCP only — zonal cluster zone (else <region>-a)
     enable_ebs_csi: Optional[bool] = None     # AWS only — install the EBS CSI driver addon (dynamic PVCs); off by default, opt in for stateful workloads (e.g. Rancher)
+    register_token_in_passwordsafe: Optional[bool] = None  # onboard the PRA SA token as a Password Safe managed account after provisioning (None → k8s_ps_token_register_on_provision)
 
 
 class K8sProvisionOptions(BaseModel):
@@ -80,6 +81,28 @@ class BrokerAccessRequest(BaseModel):
     vault_account_group_id: Optional[int] = None  # PRA Vault account group for the injected token (else bt_vault_account_group_id)
 
 
+class PSTokenRegisterRequest(BaseModel):
+    """Register the cluster's PRA ServiceAccount token as a Password Safe managed
+    account on the "Kubernetes Service Account Token" plugin, so it can be ROTATED
+    (today it is minted once, vaulted in PRA, and lives forever). All optional —
+    omitted fields fall back to the configured defaults.
+
+    ``cluster_name`` / ``resource_group`` / ``location`` exist for *registered*
+    clusters, whose rows carry a dashboard label rather than the cloud's own cluster
+    identity; a provisioned cluster resolves them from its deploy job's Terraform
+    variables."""
+    mode: Optional[str] = None                # longlived | bound (else k8s_ps_token_mode)
+    ttl_seconds: Optional[int] = None         # bound mode only; the API server's floor is 600
+    namespace: Optional[str] = None           # else pra_k8s_namespace
+    service_account: Optional[str] = None     # else pra_k8s_sa_name
+    cluster_name: Optional[str] = None        # the CLOUD cluster name for the address (else the deploy's tf var)
+    resource_group: Optional[str] = None      # AKS only — not stored on the row
+    location: Optional[str] = None            # GKE zone/region override for the address
+    functional_account: Optional[str] = None  # Password Safe functional account override (name or id)
+    change_on_register: Optional[bool] = None  # rotate once on register (else k8s_ps_token_change_on_register)
+    mirror_to_pra: Optional[bool] = None      # register the "PRA Vault Token" mirror (else k8s_ps_pravault_mirror_enabled)
+
+
 class SecretDeliveryRequest(BaseModel):
     """Choose the in-cluster Password Safe secret-delivery mechanism (Phase 4).
     v1: ``eso`` (External Secrets Operator → Password Safe) or ``none`` (remove)."""
@@ -106,6 +129,14 @@ class EntraGroupRequest(BaseModel):
     role: Optional[str] = None                # ClusterRole to bind (else entra_rbac_group_role, default cluster-admin)
 
 
+class ImpersonatorRequest(BaseModel):
+    """Grant an Entra group cluster-wide `impersonate` on `users` (the fine-grained
+    JIT tier — the group authenticates + can impersonate, but has nothing to
+    impersonate as until the Entitle Kubernetes integration binds `<prefix>:<email>`
+    → a role on this cluster). ``group_id`` optional — falls back to entra_rbac_group_id."""
+    group_id: Optional[str] = None            # Entra group Object ID (else entra_rbac_group_id)
+
+
 class ClusterInfo(BaseModel):
     id: str
     cloud: str
@@ -125,5 +156,14 @@ class ClusterInfo(BaseModel):
     api_tunnel_jump: bool = False             # true when a direct API TCP tunnel jump exists (config-tracked)
     entra_group_bound: bool = False           # true when an Entra group is bound to a ClusterRole (config-tracked)
     entra_federation_enabled: bool = False    # true when the cluster trusts Entra as an OIDC IdP (AKS native; EKS via action)
+    # Password Safe token rotation. Ids are not secrets — they are what an operator
+    # pastes into the plugin configuration. There is no sync state here: Password Safe
+    # keeps the PRA Vault account in step via SyncedAccounts, and whether that link is
+    # still in place is read live from Password Safe (GET .../ps-token/status), not
+    # cached on the row where it could only ever be a claim about registration time.
+    ps_token_managed: bool = False            # true when the SA token is a Password Safe managed account
+    ps_token_account_id: Optional[str] = None
+    ps_pra_vault_account_id: Optional[str] = None
+    pra_vault_account_id: Optional[str] = None
     created_by: Optional[str] = None
     created_at: str

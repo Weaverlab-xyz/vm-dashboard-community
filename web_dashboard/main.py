@@ -4,6 +4,7 @@ FastAPI application entry point for the VM CLI Web Dashboard.
 import asyncio
 import logging
 import os
+import random
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -25,6 +26,7 @@ from .logging_context import (
 from .database import SessionLocal, User, create_admin_user, init_db
 from .services import cache_service
 from .services import config_service
+from .services import public_url
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -99,6 +101,14 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_ci_sweeper_loop(), name="ci_sweeper_loop")
     )
 
+    # Auto-delete timer sweeper. Loop always launched; it no-ops while the feature is
+    # off, so flipping it on in Settings activates the next pass without an app restart.
+    warmers.append(
+        asyncio.create_task(_hypervisor_sync_loop(), name="hypervisor_sync_loop")
+    )
+    warmers.append(
+        asyncio.create_task(_expiry_sweeper_loop(), name="expiry_sweeper_loop")
+    )
     # Cost-summary warmer — always launched; no-ops (no billable calls) while the
     # cost feature is off, so flipping the flag in Settings warms the next pass.
     warmers.append(
@@ -196,7 +206,94 @@ async def _ci_sweeper_loop() -> None:
         await asyncio.sleep(interval)
 
 
+# ── Auto-delete timer sweeper loop ───────────────────────────────────────────
+
+async def _expiry_sweeper_loop() -> None:
+    """Enqueue one auto-delete (resource expiry) sweep per interval.
+
+    This loop ONLY enqueues — it must never call ``sweep_once`` itself. The app runs
+    under ``gunicorn -w 2``, so every task started here runs twice; letting
+    ``jobs_worker._claim_one``'s ``UPDATE ... WHERE status='pending'`` rowcount decide the
+    winner is what makes a pass single-flight across both app workers AND the three
+    worker replicas, on SQLite as well as PostgreSQL. It also puts the destructive half of
+    the feature in the worker process, where every other long/destructive operation runs,
+    and gives each pass a job row on /jobs with Live Output and cancel.
+
+    Cadence is read live each iteration so a Settings change takes effect on the next
+    pass without an app restart (same contract as _ci_sweeper_loop).
+    """
+    from .database import SessionLocal
+    from .services import expiry_policy, expiry_reaper
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(expiry_reaper.enqueue_sweep_if_due, db)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("auto-delete sweep enqueue failed: %s", exc)
+        try:
+            interval = expiry_policy.sweep_interval_seconds()
+        except Exception:
+            interval = 30 * 60
+        await asyncio.sleep(interval)
+
+
+# ── Hypervisor inventory sync loop ───────────────────────────────────────────
+
+async def _hypervisor_sync_loop() -> None:
+    """Enqueue one inventory_sync per due agent-bound hypervisor connection.
+
+    Same shape and the same reasoning as _expiry_sweeper_loop: this ONLY enqueues.
+    Under ``gunicorn -w 2`` every task here runs twice, and letting
+    ``agent_service.lease_one``'s ``UPDATE ... WHERE status='queued' AND agent_id=:id``
+    rowcount decide the winner is what makes a pass single-flight across both workers.
+    It is emphatically not a jobs_worker handler — ``agent_hypervisor`` must stay
+    disjoint from HANDLED_TYPES or the local worker would race the agent for the row.
+
+    Always launched, and a no-op when remote agents are off or no connection is bound to
+    one, so flipping the flag in Settings activates the next pass with no restart.
+    """
+    from .database import SessionLocal
+    from .services import hypervisor_sync_service
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                queued = await asyncio.to_thread(
+                    hypervisor_sync_service.enqueue_due_syncs, db)
+                if queued:
+                    logger.info("queued %d hypervisor inventory sync(s)", queued)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("hypervisor sync enqueue failed: %s", exc)
+        try:
+            interval = max(60, int(config_service.get("hypervisor_sync_poll_seconds")
+                                   or 300))
+        except (TypeError, ValueError):
+            interval = 300
+        await asyncio.sleep(interval)
+
+
 # ── Background cache warmers ──────────────────────────────────────────────────
+
+# Every warmer below sources its fetcher AND its cache key from the api module that
+# serves the same key. That is deliberate and load-bearing: a warmer holding its own
+# copy of either one drifts silently. Both failure modes have happened here —
+# a second copy of the AWS instance fetch dropped `region`/`workgroup`/`key_name`
+# and blanked the list for every non-admin on each pass, and the network-options
+# warmers wrote key_global() keys the key_param() readers never look at. Warm what
+# the reader reads, by calling the reader's own code.
+#
+# tests/test_cache_warmer_parity.py pins warmer↔reader agreement.
 
 async def _warm_loop(name: str, fetcher, key_fn, ttl: int) -> None:
     """Fetch → cache → sleep(ttl * 0.8) → repeat forever."""
@@ -211,124 +308,125 @@ async def _warm_loop(name: str, fetcher, key_fn, ttl: int) -> None:
         await asyncio.sleep(interval)
 
 
-async def _warm_cost_summary() -> None:
-    """Pre-populate the cost tile + /costs page (account summary and the
-    dashboard-managed breakdown). Skips the (billable) cloud calls while
-    cost_explorer_enabled is off, so a runtime flag flip activates it on the next
-    pass — and the endpoints self-populate on first load regardless."""
-    from .services import cost_service
-    ttl = cache_service.TTL["cost_summary"]
+async def _warm_scoped_loop(name: str, scope_fn, fetcher, key_fn, ttl: int) -> None:
+    """Like _warm_loop, for caches keyed per region/location.
+
+    Resolves the scope ONCE per pass and hands the same value to both the fetcher
+    and the key builder, so the key can never describe a different region than the
+    data stored under it. Re-resolving each pass is the point: the scope comes from
+    config_service, so a Setup-wizard region change is picked up without a restart.
+    """
     interval = int(ttl * 0.8)
     while True:
         try:
+            scope = scope_fn()
+            data = await fetcher(scope)
+            key = key_fn(scope)
+            await cache_service.set(key, data, ttl)
+            logger.debug("cache warmed key=%s", key)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("cache warmer %s failed: %s", name, exc)
+        await asyncio.sleep(interval)
+
+
+async def _warm_cost_summary() -> None:
+    """Pre-populate the cost tile + /costs page (account summary and the
+    dashboard-managed breakdown). Skips the (billable, rate-limited) cloud calls while
+    cost_explorer_enabled is off, so a runtime flag flip activates it on the next pass —
+    and the endpoints self-populate on first load regardless.
+
+    Calls exactly what /api/costs/{summary,breakdown} call. There is no cache key here
+    and no second fetch path, so there is nothing for a warmer to drift onto — the
+    failure mode the comment block above exists to prevent, closed structurally rather
+    than by sharing a constant.
+
+    Still runs in every gunicorn worker, as every warmer does, and that is now harmless:
+    the first process to claim a cloud queries it and the others read its result out of
+    the table. Before the durable cache this loop was 2 workers x 2 views = 4 Cost
+    Management POSTs against one subscription at every container start."""
+    from .services import cost_cache
+    # De-burst the first pass. Both workers start within milliseconds of each other, and
+    # while the claim lock makes a simultaneous start correct, it makes three of the four
+    # callers wait out the cold-start poll for no reason.
+    await asyncio.sleep(random.uniform(0, 10))
+    while True:
+        try:
             if config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled):
-                summary = await cost_service.get_cost_summary()
-                await cache_service.set(cache_service.key_global("cost_summary"), summary, ttl)
-                breakdown = await cost_service.get_cost_breakdown()
-                await cache_service.set(
-                    cache_service.key_global("cost_breakdown"), breakdown,
-                    cache_service.TTL["cost_breakdown"])
+                await cost_cache.warm()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("cache warmer cost_summary failed: %s", exc)
-        await asyncio.sleep(interval)
+        await asyncio.sleep(cost_cache.warm_interval_seconds())
 
 
 async def _warm_aws_amis() -> None:
-    from .services import aws_service
-    await _warm_loop(
+    from .api import aws as aws_api
+    # Scoped, not flat: an AMI id only resolves in its own region, so this key now
+    # carries the region (aws_api.amis_cache_key) exactly like network-options does.
+    await _warm_scoped_loop(
         "aws_amis",
-        fetcher=lambda: aws_service.list_amis(settings.aws_region),
-        key_fn=lambda: cache_service.key_global("aws_amis"),
-        ttl=cache_service.TTL["aws_amis"],
+        scope_fn=aws_api._aws_region,
+        fetcher=aws_api._fetch_amis,
+        key_fn=aws_api.amis_cache_key,
+        ttl=cache_service.TTL[aws_api.CACHE_KEY_AMIS],
     )
 
 
 async def _warm_aws_network_opts() -> None:
+    from .api import aws as aws_api
     from .services import aws_service
-    await _warm_loop(
+    await _warm_scoped_loop(
         "aws_network_opts",
-        fetcher=lambda: aws_service.get_network_options(settings.aws_region),
-        key_fn=lambda: cache_service.key_global("aws_network_opts"),
-        ttl=cache_service.TTL["aws_network_opts"],
+        scope_fn=aws_api._aws_region,
+        fetcher=aws_service.get_network_options,
+        key_fn=aws_api.network_opts_cache_key,
+        ttl=cache_service.TTL[aws_api.CACHE_KEY_NETWORK_OPTS],
     )
 
 
 async def _warm_aws_instances() -> None:
-    from .database import SessionLocal, Job
-    from .services import aws_service
+    from .api import aws as aws_api
+    from .database import SessionLocal
 
     async def _fetch():
         db = SessionLocal()
         try:
-            deploy_jobs = (
-                db.query(Job)
-                .filter(Job.job_type == "ec2_deploy", Job.status == "completed")
-                .all()
-            )
-            instance_ids = [
-                job.metadata_dict.get("instance_id")
-                for job in deploy_jobs
-                if not job.metadata_dict.get("destroyed")
-                and job.metadata_dict.get("instance_id")
-            ]
-            if not instance_ids:
-                return []
-            live = await aws_service.describe_instances(settings.aws_region, instance_ids)
-            job_by_instance = {
-                job.metadata_dict.get("instance_id"): job
-                for job in deploy_jobs
-                if job.metadata_dict.get("instance_id")
-            }
-            result = []
-            for inst in live:
-                iid = inst.get("instance_id")
-                j = job_by_instance.get(iid)
-                result.append({**inst, "job_id": j.id if j else None, "deployed_by": j.created_by if j else None})
-            return result
+            return await aws_api._fetch_instances(db)
         finally:
             db.close()
 
     await _warm_loop(
         "aws_instances",
         fetcher=_fetch,
-        key_fn=lambda: cache_service.key_global("aws_instances"),
-        ttl=cache_service.TTL["aws_instances"],
+        key_fn=aws_api.instances_cache_key,
+        ttl=cache_service.TTL[aws_api.CACHE_KEY_INSTANCES],
     )
 
 
-def _live_cfg(key: str) -> str:
-    """Return the live config_service value, falling back to startup settings."""
-    from .services import config_service
-    return config_service.get(key) or getattr(settings, key, "")
-
-
 async def _warm_azure_images() -> None:
-    from .services import azure_service
-    await _warm_loop(
+    from .api import azure as azure_api
+    # Scoped, not flat: under azure_region_configs each region resolves its own
+    # gallery, so the key has to name the location the images came from.
+    await _warm_scoped_loop(
         "azure_images",
-        fetcher=lambda: azure_service.list_private_images(
-            _live_cfg("azure_shared_image_gallery"),
-            _live_cfg("azure_gallery_resource_group"),
-            _live_cfg("azure_resource_group"),
-        ),
-        key_fn=lambda: cache_service.key_global("azure_images"),
-        ttl=cache_service.TTL["azure_images"],
+        scope_fn=azure_api._loc,
+        fetcher=azure_api._fetch_private_images,
+        key_fn=azure_api.images_cache_key,
+        ttl=cache_service.TTL[azure_api.CACHE_KEY_IMAGES],
     )
 
 
 async def _warm_azure_network_opts() -> None:
-    from .services import azure_service
-    await _warm_loop(
+    from .api import azure as azure_api
+    await _warm_scoped_loop(
         "azure_network_opts",
-        fetcher=lambda: azure_service.get_network_options(
-            _live_cfg("azure_location"),
-            _live_cfg("azure_vnet_resource_group"),
-            _live_cfg("azure_resource_group"),
-        ),
-        key_fn=lambda: cache_service.key_global("azure_network_opts"),
-        ttl=cache_service.TTL["azure_network_opts"],
+        scope_fn=azure_api._loc,
+        fetcher=azure_api._fetch_network_options,
+        key_fn=azure_api.network_opts_cache_key,
+        ttl=cache_service.TTL[azure_api.CACHE_KEY_NETWORK_OPTS],
     )
 
 
@@ -355,7 +453,18 @@ async def _warm_portainer_containers() -> None:
 
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
-
+#
+# READ THIS BEFORE ASSUMING ANYTHING IS RATE LIMITED. `default_limits` only takes
+# effect through `SlowAPIMiddleware`, which is deliberately NOT added: a blanket
+# 60/minute per address would break the UI, which fires many API calls per page load.
+# There are also no `@limiter.limit` decorators. So this limiter is currently inert and
+# `settings.rate_limit_per_minute` does nothing — the object exists for the exception
+# handler wiring below and for endpoints that opt in later.
+#
+# Brute-force protection on the one endpoint that actually needs it lives in
+# `services/login_guard.py` instead, keyed on the USERNAME rather than the address —
+# `get_remote_address` reads a value derived from X-Forwarded-For, which the default
+# `trusted_proxy_hosts="*"` lets any client spoof and rotate per request.
 limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.rate_limit_per_minute}/minute"])
 
 
@@ -364,7 +473,15 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.rate_
 app = FastAPI(
     title=settings.api_title,
     version=settings.api_version,
-    description="Web-based dashboard for managing VMware Workstation VMs via browser.",
+    description=(
+        "Self-hosted control plane for multi-cloud and on-prem infrastructure. "
+        "Provision and manage cloud VMs, managed databases, containers and "
+        "Kubernetes clusters across AWS, Azure, GCP and OCI — plus VMware, "
+        "Hyper-V, Proxmox and Nutanix on-prem — with image build-and-promote, "
+        "Ansible configuration management, pluggable secrets and storage "
+        "backends, and layered privileged access through PRA, Password Safe "
+        "and Entitle."
+    ),
     lifespan=lifespan,
     # /docs is the repo documentation browser (api/docs_pages.py), so the API
     # explorer lives at /swagger. Both are served by custom routes below:
@@ -377,9 +494,39 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Trust X-Forwarded-Proto/X-Forwarded-For from the Container Apps / reverse proxy.
-# This makes request.url.scheme reflect "https" when accessed through the proxy.
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+# Trust X-Forwarded-Proto/X-Forwarded-For from a reverse proxy, so request.url.scheme
+# reflects "https" when the dashboard is reached through one.
+#
+# Pinned to loopback by default rather than "*". A wildcard lets any client that can
+# reach the socket declare its own source address, and get_remote_address believes it —
+# which is exactly the value the login throttle's per-address cap keys off. Set
+# TRUSTED_PROXY_HOSTS to the proxy's literal IP when you put one in front; it must be a
+# literal, because uvicorn 0.27 compares strings and understands neither hostnames nor
+# CIDR.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts)
+
+_forwarded_auditor = public_url.ForwardedHeaderAuditor(settings.trusted_proxy_hosts)
+
+
+@app.middleware("http")
+async def warn_untrusted_forwarded_headers(request: Request, call_next):
+    """Say something when a proxy header arrives from a peer we do not trust.
+
+    The decision lives in ``public_url.ForwardedHeaderAuditor`` so it is testable
+    without importing this module; all that happens here is plumbing.
+
+    Runs OUTSIDE ProxyHeadersMiddleware. Starlette builds the stack so the
+    most-recently-added middleware is outermost, and ProxyHeaders was added above, so
+    ``request.client`` here is still the real transport peer rather than a rewritten
+    one — which is the whole point, since the peer is what the operator has to name.
+    """
+    warning = _forwarded_auditor.check(
+        request.client.host if request.client else "",
+        "x-forwarded-proto" in request.headers or "x-forwarded-for" in request.headers,
+    )
+    if warning:
+        logger.warning("%s", warning)
+    return await call_next(request)
 
 
 # ── Setup guard middleware ────────────────────────────────────────────────────
@@ -390,12 +537,23 @@ from starlette.responses import RedirectResponse as _Redirect  # noqa: E402
 
 _SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/api/features", "/api/secrets", "/api/storage")
 
+# Machine callers that must never be handed a 302 to an HTML wizard. A remote agent
+# polls this API in a loop with follow_redirects off; a redirect would arrive as an
+# opaque non-JSON response it can only treat as a hard error. 503 + Retry-After says
+# "not yet, come back" in the one vocabulary an HTTP client already understands.
+_SETUP_503_PREFIXES = ("/api/agent",)
+
 @app.middleware("http")
 async def setup_guard(request: Request, call_next):
     path = request.url.path
     if any(path.startswith(p) for p in _SETUP_BYPASS_PREFIXES):
         return await call_next(request)
     if not config_service.is_setup_complete():
+        if any(path.startswith(p) for p in _SETUP_503_PREFIXES):
+            return JSONResponse(
+                {"detail": "Dashboard setup is not complete."},
+                status_code=503, headers={"Retry-After": "60"},
+            )
         return _Redirect("/setup", status_code=302)
     return await call_next(request)
 
@@ -445,7 +603,11 @@ def _feature_flags() -> dict:
         "portainer_enabled":    config_service.get_bool("portainer_enabled",     settings.portainer_enabled),
         "ansible_enabled":      config_service.get_bool("ansible_enabled",       settings.ansible_enabled),
         "entitle_enabled":      config_service.get_bool("entitle_enabled",       settings.entitle_enabled),
-        "beyondtrust_enabled":  config_service.get_bool("beyondtrust_enabled",   settings.beyondtrust_enabled),
+        # The three BeyondTrust products gate independently — a Password Safe-only
+        # deployment should not render Gateway tabs or EPM-L sections it cannot use.
+        "password_safe_enabled": config_service.get_bool("password_safe_enabled", settings.password_safe_enabled),
+        "pra_enabled":          config_service.get_bool("pra_enabled",           settings.pra_enabled),
+        "epml_enabled":         config_service.get_bool("epml_enabled",          settings.epml_enabled),
         "proxmox_enabled":      config_service.get_bool("proxmox_enabled",       settings.proxmox_enabled),
         "vsphere_enabled":      config_service.get_bool("vsphere_enabled",       settings.vsphere_enabled),
         "hyperv_enabled":       config_service.get_bool("hyperv_enabled",        settings.hyperv_enabled),
@@ -457,7 +619,16 @@ def _feature_flags() -> dict:
         "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
         "cloud_functions_enabled": config_service.get_bool("cloud_functions_enabled", settings.cloud_functions_enabled),
         "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
+        "remote_agents_enabled": config_service.get_bool("remote_agents_enabled", settings.remote_agents_enabled),
         "admission_control_enabled": config_service.get_bool("admission_control_enabled", settings.admission_control_enabled),
+        # Auto-delete timer — gates the Expires column on /inventory and the dashboard's
+        # "expiring soon" warning. Deletion has its own second gate
+        # (resource_expiry_enforce), read server-side only.
+        "resource_expiry_enabled": config_service.get_bool("resource_expiry_enabled", settings.resource_expiry_enabled),
+        # Was missing, so Settings → Integrations rendered the Notifications toggle
+        # permanently off: the switch saved fine, but its initial state is read from
+        # /api/features and this key never reached it.
+        "notifications_enabled": config_service.get_bool("notifications_enabled", settings.notifications_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -478,11 +649,17 @@ from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
 from .api import cloud_databases  # noqa: E402
 from .api import cloud_functions as cloud_functions_api  # noqa: E402
+from .api import pra as pra_api  # noqa: E402
 from .api import audit as audit_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
+from .api import gateways as gateways_api  # noqa: E402
+from .api import expiry as expiry_api  # noqa: E402
+from .api import notifications as notifications_api  # noqa: E402
+from .api import agent as agent_api  # noqa: E402
+from .api import worker as worker_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -505,6 +682,7 @@ app.include_router(storage.router)
 app.include_router(images.router)
 app.include_router(auth.router)
 app.include_router(regions_api.router)
+app.include_router(pra_api.router)
 app.include_router(mfa.router)
 app.include_router(tokens.router)
 app.include_router(users.router)
@@ -514,6 +692,10 @@ app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
 app.include_router(audit_api.router)
 app.include_router(docs_pages.router)
+# Remote on-prem agents. Gated: this is the only router that accepts requests from
+# outside the dashboard's own trust domain, so it must be off unless asked for.
+app.include_router(agent_api.router,
+                   dependencies=[_feature_gate("remote_agents_enabled")])
 
 # ── API explorer (/swagger) + authenticated schema ────────────────────────────
 # FastAPI's built-ins are disabled above. The schema is the sensitive part — it
@@ -611,6 +793,15 @@ except ImportError as exc:
     logger.warning("API router 'config_mgmt' not loaded: %s", exc)
 
 
+# Hypervisor connections. NOT behind any single hypervisor's feature gate: the page
+# manages connections for all five kinds, and gating it on one of them would hide the
+# others' connections whenever that one is off.
+try:
+    from .api import connections as connections_api  # noqa: E402
+    app.include_router(connections_api.router)
+except ImportError as exc:
+    logger.warning("API router 'connections' not loaded: %s", exc)
+
 try:
     from .api import proxmox  # noqa: E402
     app.include_router(proxmox.router, dependencies=[_feature_gate("proxmox_enabled")])
@@ -643,9 +834,16 @@ except ImportError as exc:
 
 try:
     from .api import epml  # noqa: E402
-    app.include_router(epml.router, dependencies=[_feature_gate("beyondtrust_enabled")])
+    app.include_router(epml.router, dependencies=[_feature_gate("epml_enabled")])
 except ImportError as exc:
     logger.warning("API router 'epml' not loaded: %s", exc)
+
+# Gateway hosts are a BeyondTrust PRA concept, so the routes follow the PRA flag — with
+# it off there is nothing for a gateway to register with and the Gateways tab stays
+# hidden. Deliberately NOT password_safe_enabled: a PRA-only deployment still needs
+# gateways, and a Password Safe-only one has no use for them.
+app.include_router(gateways_api.router,
+                   dependencies=[_feature_gate("pra_enabled")])
 
 try:
     # Virtual desktop management (Azure pools + PRA brokering). Gated on vdesktops_enabled.
@@ -674,6 +872,20 @@ try:
     app.include_router(inventory.router)
 except ImportError as exc:
     logger.warning("API router 'inventory' not loaded: %s", exc)
+
+# Auto-delete timer (extend/pin + sweeper surface). Not feature-gated at the router:
+# GET /status has to answer "disabled" so the pages can hide the column, and the
+# mutations refuse on their own when the feature is off.
+app.include_router(expiry_api.router)
+
+# Outbound notifications. Not feature-gated at the router either: an admin has to be
+# able to add and test an endpoint *before* switching the feature on, and every route
+# here is admin-only and harmless while it is off.
+app.include_router(notifications_api.router)
+
+# Job-worker concurrency readout. Read-only and admin-only; not feature-gated because the
+# worker has no off switch — it is the process that runs every queued job.
+app.include_router(worker_api.router)
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
@@ -712,28 +924,84 @@ async def vms_page(request: Request):
     return templates.TemplateResponse("vms/list.html", {"request": request, **_feature_flags()})
 
 
+def _hypervisor_page_host(kind: str) -> dict:
+    """The endpoint a hypervisor page is actually talking to, for its header.
+
+    These pages have no connection picker, so they use the default connection — and
+    they used to display the singleton `*_host` config key instead, which on a
+    multi-connection install is simply the wrong host. Resolve the same connection the
+    API will use, and name it, so the header stops disagreeing with the data below it.
+
+    Best-effort: an unconfigured or unreachable-to-resolve kind renders a blank host
+    rather than 500ing a page whose real content loads over the API anyway.
+    """
+    from .database import HypervisorConnection, SessionLocal
+    from .services import hypervisor_connection_service as hcs
+    try:
+        with SessionLocal() as db:
+            conn = hcs.resolve(db, kind)
+        # An agent-bound connection has no host here by design — the agent holds it —
+        # so show the agent-side name rather than an empty span.
+        # last_sync_at drives the "showing the last synced inventory" banner. It lives
+        # on the connection rather than in the VM response so the list endpoints keep a
+        # single shape — see hypervisor_view_service.synced_rows.
+        row = db.query(HypervisorConnection).filter(
+            HypervisorConnection.id == conn.id).first() if conn.id else None
+        synced_at = row.last_sync_at.isoformat() if (row and row.last_sync_at) else ""
+        return {"host": conn.host or conn.agent_connection_name or "",
+                "connection_name": conn.name,
+                "via_agent": conn.via_agent,
+                "synced_at": synced_at}
+    except Exception:  # noqa: BLE001
+        return {"host": "", "connection_name": "", "via_agent": False, "synced_at": ""}
+
+
+@app.get("/connections", response_class=HTMLResponse, include_in_schema=False)
+async def connections_page(request: Request):
+    """Hypervisor connections. Reachable whenever ANY hypervisor integration is on —
+    it is the one place their credentials now live."""
+    flags = _feature_flags()
+    if not any(flags.get(f"{k}_enabled") for k in
+               ("proxmox", "vsphere", "hyperv", "nutanix", "xcpng", "vmware")):
+        raise HTTPException(status_code=404, detail="No hypervisor integration is enabled")
+    return templates.TemplateResponse("connections/index.html", {"request": request, **flags})
+
+
 @app.get("/proxmox", response_class=HTMLResponse, include_in_schema=False)
 async def proxmox_page(request: Request):
     if not config_service.get_bool("proxmox_enabled", settings.proxmox_enabled):
         raise HTTPException(status_code=404, detail="Proxmox integration is disabled")
-    return templates.TemplateResponse("proxmox/index.html", {"request": request, **_feature_flags()})
+    conn = _hypervisor_page_host("proxmox")
+    return templates.TemplateResponse(
+        "proxmox/index.html",
+        {"request": request, "connection_name": conn["connection_name"],
+         "via_agent": conn["via_agent"], "synced_at": conn["synced_at"],
+         **_feature_flags()})
 
 
 @app.get("/vsphere", response_class=HTMLResponse, include_in_schema=False)
 async def vsphere_page(request: Request):
     if not config_service.get_bool("vsphere_enabled", settings.vsphere_enabled):
         raise HTTPException(status_code=404, detail="vSphere integration is disabled")
-    return templates.TemplateResponse("vsphere/index.html", {"request": request, **_feature_flags()})
+    conn = _hypervisor_page_host("vsphere")
+    return templates.TemplateResponse(
+        "vsphere/index.html",
+        {"request": request, "connection_name": conn["connection_name"],
+         "via_agent": conn["via_agent"], "synced_at": conn["synced_at"],
+         **_feature_flags()})
 
 
 @app.get("/hyperv", response_class=HTMLResponse, include_in_schema=False)
 async def hyperv_page(request: Request):
     if not config_service.get_bool("hyperv_enabled", settings.hyperv_enabled):
         raise HTTPException(status_code=404, detail="Hyper-V integration is disabled")
-    host = config_service.get("hyperv_host") or settings.hyperv_host
+    conn = _hypervisor_page_host("hyperv")
     return templates.TemplateResponse(
         "hyperv/index.html",
-        {"request": request, "hyperv_host": host, **_feature_flags()},
+        {"request": request, "hyperv_host": conn["host"],
+         "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         "synced_at": conn["synced_at"],
+         **_feature_flags()},
     )
 
 
@@ -741,10 +1009,13 @@ async def hyperv_page(request: Request):
 async def nutanix_page(request: Request):
     if not config_service.get_bool("nutanix_enabled", settings.nutanix_enabled):
         raise HTTPException(status_code=404, detail="Nutanix integration is disabled")
-    host = config_service.get("nutanix_host") or settings.nutanix_host
+    conn = _hypervisor_page_host("nutanix")
     return templates.TemplateResponse(
         "nutanix/index.html",
-        {"request": request, "nutanix_host": host, **_feature_flags()},
+        {"request": request, "nutanix_host": conn["host"],
+         "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         "synced_at": conn["synced_at"],
+         **_feature_flags()},
     )
 
 
@@ -752,10 +1023,13 @@ async def nutanix_page(request: Request):
 async def xcpng_page(request: Request):
     if not config_service.get_bool("xcpng_enabled", settings.xcpng_enabled):
         raise HTTPException(status_code=404, detail="XCP-ng integration is disabled")
-    host = config_service.get("xcpng_host") or settings.xcpng_host
+    conn = _hypervisor_page_host("xcpng")
     return templates.TemplateResponse(
         "xcpng/index.html",
-        {"request": request, "xcpng_host": host, **_feature_flags()},
+        {"request": request, "xcpng_host": conn["host"],
+         "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         "synced_at": conn["synced_at"],
+         **_feature_flags()},
     )
 
 
@@ -871,6 +1145,13 @@ async def k8s_page(request: Request):
     return templates.TemplateResponse("k8s/index.html", {"request": request, **_feature_flags()})
 
 
+@app.get("/agents", response_class=HTMLResponse, include_in_schema=False)
+async def agents_page(request: Request):
+    """Remote on-prem agents. Nav-gated on remote_agents_enabled (+ admin); the
+    /api/agent router is feature-gated and its operator half is admin-only."""
+    return templates.TemplateResponse("agents/index.html", {"request": request, **_feature_flags()})
+
+
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)
 async def users_page(request: Request):
     return templates.TemplateResponse(
@@ -945,7 +1226,13 @@ async def features():
     )
     return {
         "vmware":       flags["vmware_enabled"],
-        "beyondtrust":  flags["beyondtrust_enabled"],
+        # Named to match the Settings panel keys, so settings.html's flag map needs no
+        # translation layer. There is deliberately no combined "beyondtrust" key: an
+        # OR would tell a caller the integration is on when only one of three products
+        # is, and every consumer wants a specific product.
+        "password_safe": flags["password_safe_enabled"],
+        "pra":          flags["pra_enabled"],
+        "epml":         flags["epml_enabled"],
         "portainer":    flags["portainer_enabled"],
         # Distinct from the enabled toggle: the dashboard tile hides unless
         # Portainer is both enabled AND has a URL configured.
@@ -966,17 +1253,35 @@ async def features():
         "cloud_database": flags["cloud_database_enabled"],
         "k8s_management": flags["k8s_management_enabled"],
         "cloud_functions": flags["cloud_functions_enabled"],
+        "resource_expiry": flags["resource_expiry_enabled"],
+        "remote_agents": flags["remote_agents_enabled"],
+        "notifications": flags["notifications_enabled"],
     }
 
 
 @app.get("/api/cache/status", tags=["health"])
 async def cache_status():
-    """Return metadata for all cached keys (debug / admin)."""
+    """Return metadata for all cached keys (debug / admin).
+
+    Two stores, deliberately: the in-memory one below is per-process and dies with the
+    container, while `cost_cache` rows are shared across every worker and survive a
+    rebuild. Comparing `fetched_at` across replicas is how you confirm the cost cache is
+    actually shared rather than silently per-worker."""
     entries = await cache_service.all_entries()
+    from .services import cost_cache
+    db = SessionLocal()
+    try:
+        cost_rows = cost_cache.snapshot(db)
+    except Exception as exc:  # noqa: BLE001 — a health endpoint must not 500 on a detail
+        logger.warning("cache status: cost cache snapshot failed: %s", exc)
+        cost_rows = []
+    finally:
+        db.close()
     return {
         "cache_type": "in-memory",
         "entry_count": len(entries),
         "entries": entries,
+        "cost_cache": cost_rows,
     }
 
 

@@ -63,10 +63,11 @@ def _resolve_aws_runner_config() -> dict:
     if not execution_role_arn:
         missing.append("promote_runner_ecs_execution_role_arn (or ansible_ecs_execution_role_arn)")
     if not task_role_arn:
-        missing.append("promote_runner_ecs_task_role_arn (S3 write to the staging bucket)")
+        missing.append("promote_runner_ecs_task_role_arn (S3 write to the staging bucket; no fallback)")
     if missing:
         raise PromoteRunnerError(
-            "Promote runner is not configured. Set on /storage: " + ", ".join(missing) + "."
+            "AWS promote runner is not configured. Set on Settings → Remote Worker → "
+            "Image-promote runner → AWS: " + ", ".join(missing) + "."
         )
 
     return {
@@ -90,8 +91,9 @@ def resolve_aws_staging(image_name: str, version: str) -> tuple[str, str]:
     bucket = _cfg("promote_runner_aws_staging_bucket") or _cfg("storage_s3_bucket")
     if not bucket:
         raise PromoteRunnerError(
-            "No S3 staging bucket configured. Set promote_runner_aws_staging_bucket "
-            "or storage_s3_bucket on /storage."
+            "No S3 staging bucket configured. Set promote_runner_aws_staging_bucket on "
+            "Settings → Remote Worker → Image-promote runner → AWS, or storage_s3_bucket "
+            "on /storage."
         )
     prefix = (_cfg("promote_runner_aws_staging_prefix") or "promote-staging").strip("/")
     key = f"{prefix}/{image_name}-{version}.vhd"
@@ -202,13 +204,13 @@ def _resolve_azure_runner_config() -> dict:
 
     missing = []
     if not rg:
-        missing.append("promote_runner_azure_resource_group (or azure_resource_group)")
+        missing.append("promote_runner_azure_resource_group (or azure_resource_group — /setup wizard)")
     if not staging_account:
-        missing.append("promote_runner_azure_staging_account (or storage_azure_account)")
+        missing.append("promote_runner_azure_staging_account (or storage_azure_account — /storage)")
     if missing:
         raise PromoteRunnerError(
-            "Azure promote runner is not configured. Set on /storage: "
-            + ", ".join(missing) + "."
+            "Azure promote runner is not configured. Set on Settings → Remote Worker → "
+            "Image-promote runner → Azure: " + ", ".join(missing) + "."
         )
 
     return {
@@ -342,10 +344,11 @@ def _resolve_oci_runner_config() -> dict:
     if not subnet_ocid:
         missing.append("promote_runner_oci_subnet_ocid (or oci_default_subnet_ocid — the runner VNIC)")
     if not staging_bucket:
-        missing.append("promote_runner_oci_staging_bucket (Object Storage bucket for the QCOW2)")
+        missing.append("promote_runner_oci_staging_bucket (Object Storage bucket for the QCOW2 — must already exist)")
     if missing:
         raise PromoteRunnerError(
-            "OCI promote runner is not configured. Set on /storage: " + ", ".join(missing) + "."
+            "OCI promote runner is not configured. Set on Settings → Remote Worker → "
+            "Image-promote runner → OCI: " + ", ".join(missing) + "."
         )
 
     return {
@@ -461,11 +464,13 @@ def _resolve_gcp_runner_config() -> dict:
     project_id = _cfg("gcp_project_id")
     region = _cfg("promote_runner_gcp_region") or _cfg("gcp_region")
     image = _cfg("promote_runner_image") or "chrweav/dashboard-promote-runner:latest"
-    # 16Gi / 4 vCPU default: the GCP path materialises source.vhd + a full raw +
-    # the tar.gz in Cloud Run's memory-backed /tmp, which OOMs at the old 4Gi
-    # default for any real multi-GB image. Cloud Run requires >=4 vCPU for >8Gi.
-    cpu = _cfg("promote_runner_gcp_cpu") or "4"
-    memory = _cfg("promote_runner_gcp_memory") or "16Gi"
+    # Sizing defaults (4 vCPU / 16Gi) live in config.py — no `or` fallback here,
+    # since the settings default is always truthy and would shadow it. The GCP
+    # path materialises source.vhd + a full raw disk + the tar.gz in Cloud Run's
+    # memory-backed /tmp, which OOMs at 4Gi for any real multi-GB image; Cloud
+    # Run in turn requires >=4 vCPU for anything above 8Gi.
+    cpu = _cfg("promote_runner_gcp_cpu")
+    memory = _cfg("promote_runner_gcp_memory")
     vpc_connector = _cfg("promote_runner_gcp_vpc_connector")
     sa_email = _cfg("promote_runner_gcp_service_account")
 
@@ -474,15 +479,15 @@ def _resolve_gcp_runner_config() -> dict:
 
     missing = []
     if not project_id:
-        missing.append("gcp_project_id")
+        missing.append("gcp_project_id (/setup wizard)")
     if not region:
-        missing.append("promote_runner_gcp_region (or gcp_region)")
+        missing.append("promote_runner_gcp_region (or gcp_region — /setup wizard)")
     if not staging_bucket:
-        missing.append("promote_runner_gcp_staging_bucket (or storage_gcs_bucket)")
+        missing.append("promote_runner_gcp_staging_bucket (or storage_gcs_bucket — /storage)")
     if missing:
         raise PromoteRunnerError(
-            "GCP promote runner is not configured. Set on /storage: "
-            + ", ".join(missing) + "."
+            "GCP promote runner is not configured. Set on Settings → Remote Worker → "
+            "Image-promote runner → GCP: " + ", ".join(missing) + "."
         )
 
     return {

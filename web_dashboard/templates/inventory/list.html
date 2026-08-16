@@ -15,6 +15,23 @@
     </button>
   </div>
 
+  {% if resource_expiry_enabled %}
+  <!-- Auto-delete state. One banner, driven by the server's folded `deleting` flag rather
+       than by recombining four flags here — the page and the sweeper must never disagree
+       about whether anything is actually being destroyed. -->
+  <div x-show="!ttl.deleting" x-cloak
+       class="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+    <span class="font-semibold">Nothing is being auto-deleted.</span>
+    <span x-text="ttlWhyNot()"></span>
+  </div>
+  <div x-show="ttl.deleting" x-cloak
+       class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+    <span class="font-semibold">Auto-delete is live.</span>
+    Resources past their expiry are permanently destroyed on the next sweep. Extend
+    anything you still need.
+  </div>
+  {% endif %}
+
   <!-- Filters -->
   <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-6">
     <div class="flex flex-wrap items-center gap-4">
@@ -52,11 +69,70 @@
     </div>
   </div>
 
+  <!-- Bulk Config Management -->
+  <div x-show="selected.length > 0" x-cloak
+       class="bg-blue-50 rounded-xl border border-blue-200 shadow-sm p-4 mb-6">
+    <div class="flex items-start justify-between gap-4 mb-3">
+      <div>
+        <h2 class="text-sm font-semibold text-blue-900">
+          Run a playbook on <span x-text="selected.length"></span>
+          <span x-text="kindLabel(selectedKind) + (selected.length === 1 ? '' : 's')"></span>
+        </h2>
+        <p class="text-xs text-blue-700 mt-0.5">
+          One job per resource. A bulk run targets one kind at a time — other kinds are
+          locked while this selection is active.
+        </p>
+      </div>
+      <button @click="clearSelection()" class="text-xs text-blue-700 hover:underline shrink-0">Clear</button>
+    </div>
+
+    <div class="flex flex-wrap items-end gap-3">
+      <div class="flex-1 min-w-[240px]">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Playbook</label>
+        <select x-model="runAsset"
+                class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">Select a playbook…</option>
+          <template x-for="a in playbookAssets()" :key="a.backend + '|' + a.name">
+            <option :value="a.backend + '|' + a.name" x-text="a.name + ' (' + a.backend + ')'"></option>
+          </template>
+        </select>
+      </div>
+      <div x-show="selectedKind === 'vm'" class="min-w-[150px]">
+        <label class="block text-xs font-medium text-gray-600 mb-1">SSH user</label>
+        <input x-model="runUser" type="text" placeholder="(default)"
+               class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+      </div>
+      <div class="flex-1 min-w-[200px]">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Extra vars (JSON)</label>
+        <input x-model="runExtraVars" type="text" placeholder="{}"
+               class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono focus:ring-2 focus:ring-blue-500">
+      </div>
+      <button @click="runBulk()" :disabled="!runAsset || running"
+              class="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-2 rounded-lg shadow-sm transition">
+        <span x-text="running ? 'Queueing…' : 'Run'"></span>
+      </button>
+    </div>
+
+    <p class="text-xs text-blue-700 mt-3">
+      Need a Secrets-Management secret or a Password Safe managed account?
+      <button @click="handOffToConfigMgmt()" class="font-medium underline hover:no-underline">
+        Continue on the Config Management page →
+      </button>
+      <span class="text-blue-600">It carries this selection over and adds the secret pickers.</span>
+    </p>
+  </div>
+
   <!-- Inventory table -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <table class="w-full text-sm">
       <thead>
         <tr class="bg-gray-50 border-b border-gray-200 text-left">
+          <th class="px-4 py-3 w-10">
+            <input type="checkbox" @change="toggleAll($event.target.checked)"
+                   :checked="allShownSelected()" :disabled="selectableShown().length === 0"
+                   title="Select all runnable resources shown"
+                   class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30">
+          </th>
           <th class="px-4 py-3 font-semibold text-gray-600">Provider</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Kind</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
@@ -65,18 +141,28 @@
           <th class="px-4 py-3 font-semibold text-gray-600">Workgroup</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Deployed By</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
+          {% if resource_expiry_enabled %}
+          <th class="px-4 py-3 font-semibold text-gray-600">Expires</th>
+          {% endif %}
           <th class="px-4 py-3 font-semibold text-gray-600 text-right">Details</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-50">
+        {# Both colspans must track the Expires column or the loading/empty rows
+           misalign — the easiest thing in this table to get wrong. #}
         <tr x-show="loading">
-          <td colspan="9" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+          <td colspan="{{ 11 if resource_expiry_enabled else 10 }}" class="px-4 py-10 text-center text-gray-400">Loading…</td>
         </tr>
         <tr x-show="!loading && filtered().length === 0">
-          <td colspan="9" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
+          <td colspan="{{ 11 if resource_expiry_enabled else 10 }}" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
         </tr>
         <template x-for="r in filtered()" :key="r.id">
-          <tr class="hover:bg-gray-50 transition">
+          <tr class="group hover:bg-gray-50 transition" :class="isSelected(r) ? 'bg-blue-50' : ''">
+            <td class="px-4 py-3">
+              <input type="checkbox" :checked="isSelected(r)" @change="toggle(r)"
+                     :disabled="!selectable(r)" :title="disabledReason(r)"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30 disabled:cursor-not-allowed">
+            </td>
             <td class="px-4 py-3 font-medium text-gray-800 uppercase" x-text="r.cloud"></td>
             <td class="px-4 py-3 text-gray-600" x-text="kindLabel(r.kind)"></td>
             <td class="px-4 py-3 text-gray-800 max-w-[220px] truncate" x-text="r.name" :title="r.name"></td>
@@ -88,6 +174,17 @@
             <td class="px-4 py-3 text-gray-500" x-text="r.workgroup || '–'"></td>
             <td class="px-4 py-3 text-gray-500" x-text="r.deployed_by || '–'"></td>
             <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(r.created_at)"></td>
+            {% if resource_expiry_enabled %}
+            <td class="px-4 py-3 whitespace-nowrap">
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                    :class="expiryBadge(r)" :title="expiryTitle(r)"
+                    x-text="expiryLabel(r)"></span>
+              <button x-show="r.ttl_capable" @click="openExtend(r)"
+                      class="ml-2 text-blue-500 hover:underline text-xs font-medium opacity-0 group-hover:opacity-100 focus:opacity-100 transition">
+                Extend
+              </button>
+            </td>
+            {% endif %}
             <td class="px-4 py-3 text-right">
               <a :href="r.detail_href"
                  class="text-blue-500 hover:underline text-xs font-medium" x-text="'Open →'"></a>
@@ -97,6 +194,53 @@
       </tbody>
     </table>
   </div>
+
+  {% if resource_expiry_enabled %}
+  <!-- Extend modal. One dialog for the whole feature: it takes a list, so the per-row
+       button (a list of one) and any future multi-row action share one code path. -->
+  <div x-show="extendFor.length > 0" x-cloak
+       class="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"
+       @click.self="extendFor = []">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Change auto-delete timer</h2>
+      <p class="text-sm text-gray-500 mb-4"
+         x-text="extendFor.length === 1 ? extendFor[0].name : extendFor.length + ' resources'"></p>
+
+      <div class="space-y-2 mb-4">
+        <template x-for="opt in extendOptions()" :key="opt.hours">
+          <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+            <input type="radio" name="ttl-extend" :value="opt.hours" x-model.number="extendHours"
+                   class="text-blue-600 focus:ring-blue-500">
+            <span x-text="opt.label"></span>
+          </label>
+        </template>
+        <label x-show="ttl.allow_never && $store.auth.isAdmin"
+               class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+          <input type="radio" name="ttl-extend" value="0" x-model.number="extendHours"
+                 class="text-blue-600 focus:ring-blue-500">
+          <span>Never expires <span class="text-gray-400">(removes the timer)</span></span>
+        </label>
+      </div>
+
+      <p class="text-xs text-gray-500 mb-4">
+        Added to the current expiry, not to now. Capped at
+        <span x-text="ttl.max_total_hours"></span> hours of total lifetime measured from
+        when the resource was created, so repeated extending can't outrun the ceiling.
+      </p>
+
+      <div class="flex justify-end gap-2">
+        <button @click="extendFor = []"
+                class="text-sm px-3 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 font-medium">
+          Cancel
+        </button>
+        <button @click="submitExtend()" :disabled="extending"
+                class="text-sm px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-medium disabled:opacity-50">
+          <span x-text="extending ? 'Saving…' : 'Apply'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
 </div>
 {% endblock %}
@@ -111,9 +255,35 @@
       filterKind: '',
       filterRegion: '',
 
+      // Bulk Config-Management run
+      selected: [],          // inventory ids
+      assets: [],
+      runAsset: '',
+      runUser: '',
+      runExtraVars: '',
+      running: false,
+
+      // Auto-delete timer. `ttl` is the server's feature state (thresholds, arming, the
+      // un-lowerable floors); `now` is a clock tick the expiry helpers reference so a
+      // relative label keeps counting down in a tab nobody has touched.
+      ttl: { enabled: false, dry_run: true, deletion_available: false, warn_hours: 24 },
+      now: Date.now(),
+      extendFor: [],
+      extendHours: 24,
+      extending: false,
+
       async init() {
         requireAuth();
         await this.load();
+        // Arming state, the extend increment and the ceiling live on /status rather than
+        // on the cached listing — they're config-derived, and the listing is 60s stale by
+        // design. Only fetched when the feature is on; the column is Jinja-gated anyway.
+        if ({{ 'true' if resource_expiry_enabled else 'false' }}) {
+          try {
+            this.ttl = { ...this.ttl, ...(await API.get('/api/expiry/status')) };
+          } catch (e) { /* column still renders from the listing's expiry block */ }
+        }
+        setInterval(() => { this.now = Date.now(); }, 30000);
       },
 
       async load() {
@@ -121,10 +291,146 @@
         try {
           const resp = await API.get('/api/inventory');
           this.items = (resp && resp.items) || [];
+          // The listing carries the warn threshold + mode so the badge and the
+          // dashboard's warning read one number; /status adds arming + the floors.
+          if (resp && resp.expiry) this.ttl = { ...this.ttl, ...resp.expiry };
+          // Drop selections for rows that no longer exist, so a refresh can't leave
+          // ids pointing at destroyed resources.
+          const live = new Set(this.items.map(i => i.id));
+          this.selected = this.selected.filter(id => live.has(id));
         } catch (e) {
           toast('Failed to load inventory: ' + e.message, 'error');
         } finally {
           this.loading = false;
+        }
+        if (this.assets.length === 0) {
+          try {
+            this.assets = await API.get('/api/config-mgmt/assets') || [];
+          } catch (e) {
+            this.assets = [];   // bulk run stays unavailable; the table still works
+          }
+        }
+      },
+
+      // ── selection ───────────────────────────────────────────────────────────
+      // `cfg_runnable` / `cfg_reason` come from the server (inventory_service), which
+      // derives them from the same rule the bulk endpoint enforces — so this never
+      // offers a checkbox the server would refuse.
+
+      playbookAssets() {
+        return this.assets.filter(a => /\.ya?ml$/i.test(a.name));
+      },
+
+      get selectedKind() {
+        const first = this.items.find(i => i.id === this.selected[0]);
+        return first ? first.kind : '';
+      },
+
+      selectable(r) {
+        if (!r.cfg_runnable) return false;
+        return !this.selectedKind || r.kind === this.selectedKind;
+      },
+
+      disabledReason(r) {
+        if (!r.cfg_runnable) return r.cfg_reason || 'Not a Config-Management target.';
+        if (this.selectedKind && r.kind !== this.selectedKind) {
+          return `A bulk run targets one kind at a time — ${this.kindLabel(this.selectedKind)}s `
+               + `are selected. Clear the selection to pick ${this.kindLabel(r.kind)}s instead.`;
+        }
+        return '';
+      },
+
+      isSelected(r) { return this.selected.includes(r.id); },
+
+      toggle(r) {
+        if (this.isSelected(r)) this.selected = this.selected.filter(id => id !== r.id);
+        else if (this.selectable(r)) this.selected = [...this.selected, r.id];
+      },
+
+      selectableShown() {
+        return this.filtered().filter(r => this.selectable(r));
+      },
+
+      allShownSelected() {
+        const shown = this.selectableShown();
+        return shown.length > 0 && shown.every(r => this.isSelected(r));
+      },
+
+      toggleAll(checked) {
+        if (!checked) { this.clearSelection(); return; }
+        // With nothing selected yet, "select all" over a mixed table would be
+        // ambiguous — anchor on the first runnable row's kind and take that kind only.
+        const shown = this.filtered().filter(r => r.cfg_runnable);
+        const kind = this.selectedKind || (shown[0] && shown[0].kind);
+        if (!kind) return;
+        const ids = shown.filter(r => r.kind === kind).map(r => r.id);
+        this.selected = [...new Set([...this.selected, ...ids])];
+      },
+
+      clearSelection() { this.selected = []; },
+
+      // Hand the selection to /config-mgmt, which has the secret + managed-account
+      // pickers. sessionStorage rather than a query string (50 ids makes an unusable
+      // URL) and rather than localStorage — a pending fleet run must not survive a
+      // browser restart. The receiving page removes the key as soon as it reads it.
+      handOffToConfigMgmt() {
+        const rows = this.items.filter(i => this.selected.includes(i.id));
+        // A representative host, so the Password Safe account list can be populated
+        // there. Each job still resolves the chosen account name against its own
+        // host — this only supplies the names to choose from.
+        const sample = rows.find(r => r.kind === 'vm' && r.ip) || null;
+        sessionStorage.setItem('cfgmgmt_bulk_selection', JSON.stringify({
+          ids: this.selected,
+          kind: this.selectedKind,
+          names: rows.map(r => r.name),
+          sampleHost: sample ? sample.ip : '',
+          sampleName: sample ? sample.name : '',
+        }));
+        window.location.href = '/config-mgmt';
+      },
+
+      async runBulk() {
+        let extra = {};
+        if (this.runExtraVars.trim()) {
+          try {
+            extra = JSON.parse(this.runExtraVars);
+          } catch (e) {
+            toast('Extra vars must be valid JSON.', 'error');
+            return;
+          }
+        }
+        const [backend, ...rest] = this.runAsset.split('|');
+        const count = this.selected.length;
+        if (!confirm(`Run ${rest.join('|')} on ${count} ${this.kindLabel(this.selectedKind)}`
+                     + `${count === 1 ? '' : 's'}? This queues ${count} job${count === 1 ? '' : 's'}.`)) return;
+        this.running = true;
+        try {
+          const resp = await API.post('/api/config-mgmt/run-bulk', {
+            inventory_ids: this.selected,
+            asset: rest.join('|'),
+            asset_backend: backend,
+            extra_vars: extra,
+            ansible_user: this.runUser,
+          });
+          const failed = resp.failed || [];
+          if (failed.length) {
+            // A target can fail its own validation without the batch being wrong —
+            // several checks depend on the target's cloud. Name them rather than
+            // letting the count quietly disagree with what was selected.
+            toast(`Queued ${resp.count} job(s); ${failed.length} could not run: `
+                  + failed.map(f => `${f.name} (${f.error})`).join('; '), 'error');
+          } else {
+            toast(`Queued ${resp.count} job(s) — batch ${resp.batch_id}`, 'success');
+          }
+          this.clearSelection();
+          this.runExtraVars = '';
+          // Land on the batch, the way a single run lands on its job — otherwise the
+          // only reference to this batch disappears with the toast.
+          window.location.href = '/jobs?batch_id=' + encodeURIComponent(resp.batch_id);
+        } catch (e) {
+          toast('Bulk run failed: ' + e.message, 'error');
+        } finally {
+          this.running = false;
         }
       },
 
@@ -157,7 +463,104 @@
         return 'bg-gray-100 text-gray-600';
       },
 
+      // ── auto-delete timer ───────────────────────────────────────────────────
+      // `expires_at` / `ttl_capable` / `expiry_exempt` come from the server
+      // (inventory_service + expiry_policy.ttl_capable), so a row never offers an
+      // Extend button for something the server would refuse. The "expiring soon"
+      // threshold comes from the server too (ttl.warn_hours) rather than being
+      // hardcoded here, so this badge and the dashboard's warning can't disagree.
+
+      expiryLabel(r) {
+        if (r.expiry_exempt) return 'exempt';
+        if (!r.expires_at) return 'never';
+        // Referencing `now` is what subscribes this to the 30s tick — without it a
+        // long-lived tab would freeze at whatever "in 5m" it first rendered.
+        const _tick = this.now;
+        const label = timeUntil(r.expires_at);
+        if (label !== 'overdue') return label;
+        // `deleting` is the server's own folded answer (both arming clocks + both flags).
+        // Recombining those here is how the page ends up promising a deletion that isn't
+        // happening, or staying quiet about one that is.
+        return this.ttl.deleting ? 'deleting…' : 'overdue';
+      },
+
+      // Why nothing is being destroyed, in the operator's order of "what would I change".
+      ttlWhyNot() {
+        if (!this.ttl.enforce) return 'Deletion is not enabled in Settings.';
+        if (this.ttl.dry_run) return 'Report-only mode is on — timers are tracked but not acted on.';
+        if (!this.ttl.armed) return 'The feature is still arming' +
+          (this.ttl.arms_at ? ' until ' + utcStamp(this.ttl.arms_at) + '.' : '.');
+        if (this.ttl.enforce_arms_at) return 'Deletion was just enabled and arms at '
+          + utcStamp(this.ttl.enforce_arms_at) + '. Extend anything you need before then.';
+        return 'Deletion is arming.';
+      },
+
+      expiryBadge(r) {
+        if (r.expiry_exempt || !r.expires_at) return 'bg-transparent text-gray-400';
+        const _tick = this.now;
+        const secs = (new Date(r.expires_at + (/Z$/.test(r.expires_at) ? '' : 'Z')).getTime()
+                      - Date.now()) / 1000;
+        if (secs <= 3600) return 'bg-red-100 text-red-700';
+        if (secs <= (this.ttl.warn_hours || 24) * 3600) return 'bg-yellow-100 text-yellow-700';
+        return 'bg-transparent text-gray-500';
+      },
+
+      expiryTitle(r) {
+        if (r.expiry_exempt) return r.ttl_reason || 'Exempt from auto-delete';
+        if (!r.expires_at) {
+          return r.ttl_capable
+            ? 'No auto-delete timer — this resource is never deleted automatically'
+            : (r.ttl_reason || 'Not eligible for an auto-delete timer');
+        }
+        return utcStamp(r.expires_at);
+      },
+
+      extendOptions() {
+        const step = this.ttl.extend_hours || 24;
+        return [
+          { hours: step, label: `+${step} hours (default)` },
+          { hours: 72, label: '+3 days' },
+          { hours: 168, label: '+7 days' },
+        ];
+      },
+
+      openExtend(r) {
+        this.extendFor = [r];
+        this.extendHours = this.ttl.extend_hours || 24;
+      },
+
+      async submitExtend() {
+        if (this.extendFor.length === 0) return;
+        this.extending = true;
+        // 0 is the modal's encoding of "never" — the only option that clears a timer
+        // rather than moving it, and the only one the server gates on admin.
+        const never = Number(this.extendHours) === 0;
+        try {
+          const resp = await API.post('/api/expiry/set', {
+            inventory_ids: this.extendFor.map(r => r.id),
+            extend_hours: never ? null : Number(this.extendHours),
+            never,
+          });
+          (resp.failed || []).forEach(f =>
+            toast(`${f.name || f.id}: ${f.error}`, 'error'));
+          const clamped = (resp.updated || []).filter(u => u.clamped).length;
+          if (clamped) {
+            toast(`${clamped} resource(s) were capped at the maximum total lifetime.`, 'info');
+          } else if ((resp.updated || []).length) {
+            toast(never ? 'Timer removed.' : 'Timer extended.', 'success');
+          }
+          this.extendFor = [];
+          await this.load();
+        } catch (e) {
+          toast('Could not change the timer: ' + e.message, 'error');
+        } finally {
+          this.extending = false;
+        }
+      },
+
       timeAgo,
+      timeUntil,
+      utcStamp,
     };
   }
 </script>

@@ -2,8 +2,8 @@
 
 Gated on ``k8s_management_enabled`` (feature-gate dependency). Phase 1
 registers/lists managed clusters via ``k8s_service`` and stores the kubeconfig
-as a backend reference; Phase 2 launches a management plane (Portainer-k8s) into
-a registered cluster. See docs/saas-kubernetes-management-plan.md.
+as a backend reference; Phase 2 launches a management plane (Rancher) into a
+registered cluster. See docs/saas-kubernetes-management-plan.md.
 
   GET    /api/k8s/__phase1__               — health check (router-mounted probe)
   GET    /api/k8s/clusters                 — list managed clusters
@@ -26,8 +26,10 @@ from ..models.k8s import (
     EntitleAgentRequest,
     EntitleClusterRegisterRequest,
     EntraGroupRequest,
+    ImpersonatorRequest,
     K8sProvisionOptions,
     ManagementRequest,
+    PSTokenRegisterRequest,
     SecretDeliveryRequest,
 )
 from ..services import k8s_service, job_service, cache_service, pra_api_service
@@ -48,9 +50,9 @@ def phase1_status() -> dict:
         "note": (
             "Kubernetes management Phase 1 — register/list managed clusters + "
             "kubeconfig-as-reference. Phase 2 launches a management plane "
-            "(Portainer-k8s first, then Rancher), Phase 3 brokers access (native "
-            "PRA tunnel_type=k8s + Entitle-Rancher JIT), Phase 4 installs "
-            "in-cluster Password Safe secret delivery."
+            "(Rancher), Phase 3 brokers access (native PRA tunnel_type=k8s + "
+            "Entitle-Rancher JIT), Phase 4 installs in-cluster Password Safe "
+            "secret delivery."
         ),
     }
 
@@ -107,6 +109,7 @@ async def provision_cluster(
         "authorized_cidrs": payload.authorized_cidrs,
         "zone": payload.zone,
         "enable_ebs_csi": payload.enable_ebs_csi,
+        "register_token_in_passwordsafe": payload.register_token_in_passwordsafe,
     }.items() if v is not None}
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
@@ -215,8 +218,13 @@ async def delete_cluster(
         result = k8s_service.start_decommission(db, cluster_id, created_by=current_user.username)
         return {"status": "decommissioning", **result}
 
-    for _dereg in (k8s_service.deregister_pra_tunnel, k8s_service.deregister_api_tunnel,
-                   k8s_service.unbind_entra_group):
+    # Password Safe registration first, for the same reason as run_decommission: it
+    # clears ps_token_account_id so the tunnel deregister takes its normal
+    # ServiceAccount-revoke path. Without it the two managed systems would be orphaned
+    # in Password Safe, still trying to rotate a cluster the dashboard has forgotten.
+    from ..services import ps_k8s_token_service
+    for _dereg in (ps_k8s_token_service.deregister, k8s_service.deregister_pra_tunnel,
+                   k8s_service.deregister_api_tunnel, k8s_service.unbind_entra_group):
         try:
             await _dereg(db, cluster_id)
         except Exception as e:
@@ -233,8 +241,8 @@ async def cluster_console(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "read")),
 ):
-    """A link to the cluster's management console (Phase 3a). For Portainer-k8s,
-    the brokered Portainer endpoint view; for Rancher/Argo, the management URL."""
+    """A link to the cluster's management console (Phase 3a) — for Rancher, the
+    imported cluster's dashboard URL; for Argo/Headlamp, the management URL."""
     try:
         return k8s_service.console_url(db, cluster_id)
     except K8sError as e:
@@ -439,6 +447,60 @@ async def unbind_entra_group(
             "action": "unbind", "job_id": job.id}
 
 
+@router.post("/clusters/{cluster_id}/impersonator", status_code=202)
+async def apply_impersonator(
+    cluster_id: str,
+    payload: ImpersonatorRequest = ImpersonatorRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Grant the Entra group cluster-wide ``impersonate`` on ``users`` — enqueues a
+    ``k8s_impersonator_binding`` job. This is the fine-grained JIT tier: the group
+    authenticates the user and lets them impersonate, but they have nothing to
+    impersonate as until Entitle's **Kubernetes** integration JIT-binds
+    ``<prefix>:<email>`` → a role on THIS cluster; they then run
+    ``kubectl --as=<prefix>:<email>``. ``group_id`` falls back to entra_rbac_group_id.
+
+    On **GKE** this grants BOTH halves — GKE gates ``impersonate`` in Cloud IAM as well
+    as RBAC, so the group's principalSet is also bound to a project custom role holding
+    only ``container.clusters.impersonate`` (needs ``roles/iam.roleAdmin`` on the
+    dashboard SA; ~1-2 min to propagate). Open the returned job for status."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_impersonator_binding", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "apply",
+                  "group_id": payload.group_id},
+    )
+    return {"ok": True, "status": "applying", "cluster_id": cluster_id,
+            "action": "apply", "job_id": job.id}
+
+
+@router.delete("/clusters/{cluster_id}/impersonator", status_code=202)
+async def remove_impersonator(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "delete")),
+):
+    """Remove the cluster's impersonator ClusterRole + ClusterRoleBinding — enqueues a
+    ``k8s_impersonator_binding`` (action=remove) job. On GKE this also revokes the
+    project-level ``container.clusters.impersonate`` binding, but only when no other GKE
+    cluster still has the same group bound (the grant is project-wide, so an unconditional
+    revoke would break ``--as`` on those). Open the returned job for status."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_impersonator_binding", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "remove"},
+    )
+    return {"ok": True, "status": "removing", "cluster_id": cluster_id,
+            "action": "remove", "job_id": job.id}
+
+
 @router.post("/clusters/{cluster_id}/entra-federation", status_code=202)
 async def enable_entra_federation(
     cluster_id: str,
@@ -493,7 +555,8 @@ async def entra_kubeconfig(
     """Download a token-free kubeconfig for real-identity access over the API tunnel,
     authenticating as the USER's own Entra identity. EKS uses ``kubectl oidc-login``
     (int128 kubelogin) against the shared Entra app; AKS uses the native Azure
-    kubelogin. Connect the API tunnel first, then point ``KUBECONFIG`` at this file."""
+    kubelogin in interactive device-code mode. Both sign in with a device code.
+    Connect the API tunnel first, then point ``KUBECONFIG`` at this file."""
     try:
         content = k8s_service.build_entra_oidc_kubeconfig(db, cluster_id)
         info = k8s_service.get_cluster(db, cluster_id)
@@ -515,10 +578,11 @@ async def launch_management(
     current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Launch a management plane into the cluster (Phase 2). Async — enqueues a
-    ``k8s_management`` job the dedicated worker runs (applies the Portainer Agent via
-    a transient kubectl container, then registers it in the brokered Portainer
-    server). Returns 202 + job_id; poll the cluster status (deploying → managed /
-    failed), or open the job to see the error if it fails."""
+    ``k8s_management`` job the dedicated worker runs (imports the cluster into the
+    central Rancher server and stores the registration manifest). Returns 202 +
+    job_id; poll the cluster status (deploying → managed / failed), or open the job
+    to see the error if it fails. Valid kinds: see ``VALID_MGMT_KINDS`` — only
+    ``rancher`` is wired today."""
     try:
         k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
     except K8sError as e:
@@ -559,6 +623,123 @@ async def setup_secret_delivery(
     )
     return {"ok": True, "status": "installing", "cluster_id": cluster_id,
             "kind": payload.kind, "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/ps-token", status_code=202)
+async def register_ps_token(
+    cluster_id: str,
+    payload: PSTokenRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Register the cluster's PRA ServiceAccount token as a Password Safe managed
+    account (the "Kubernetes Service Account Token" plugin), so it rotates on the
+    tenant's schedule; optionally registers the "PRA Vault Token" mirror so each
+    rotation is pushed into the PRA Vault copy. Async — enqueues a ``k8s_ps_token``
+    job. Idempotent, and doubles as the repair path: an already-registered cluster
+    re-applies the RBAC and re-creates the synced-account link if it is missing, which
+    is the state a cluster is left in when the (fatal) link failed after the managed
+    system was already committed.
+
+    Pre-checks the gates rather than enqueuing a job that will certainly fail —
+    the same courtesy the Rancher Entitle route extends."""
+    from ..services import ps_k8s_token_service
+    if not ps_k8s_token_service.enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="Password Safe token rotation is disabled — enable it in Settings "
+                   "(k8s_ps_token_rotation_enabled)")
+    from ..services import ps_api_service
+    if not ps_api_service.configured():
+        raise HTTPException(
+            status_code=400,
+            detail="Password Safe is not configured — set the pscli_* connection keys")
+    if payload.mode and payload.mode not in ps_k8s_token_service.VALID_PS_TOKEN_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown mode {payload.mode!r} (expected one of "
+                   f"{', '.join(ps_k8s_token_service.VALID_PS_TOKEN_MODES)})")
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    meta = {"cluster_id": cluster_id, "action": "register"}
+    meta.update({k: v for k, v in payload.model_dump().items() if v is not None})
+    job = job_service.create_job(
+        db, job_type="k8s_ps_token", created_by=current_user.username, metadata=meta)
+    return {"ok": True, "status": "registering", "cluster_id": cluster_id,
+            "job_id": job.id}
+
+
+@router.delete("/clusters/{cluster_id}/ps-token", status_code=202)
+async def remove_ps_token(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "delete")),
+):
+    """Off-board both Password Safe managed systems and drop the rotator RBAC.
+    Async — enqueues a ``k8s_ps_token`` job with ``action=deregister``."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_ps_token", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "deregister"})
+    return {"ok": True, "status": "removing", "cluster_id": cluster_id,
+            "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/ps-token/rotate", status_code=202)
+async def rotate_ps_token(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Rotate the token in Password Safe now.
+
+    Password Safe pushes the new value into the synced PRA Vault account as part of the
+    same change, so there is no second step — but the job result says whether the pair
+    is actually still synced, because an unlinked rotation succeeds while silently
+    leaving PRA on the old value."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_ps_token", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "rotate"})
+    return {"ok": True, "status": "rotating", "cluster_id": cluster_id,
+            "job_id": job.id}
+
+
+@router.get("/clusters/{cluster_id}/ps-token/status")
+async def ps_token_status(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "read")),
+):
+    """Password Safe's live view of the token account and its synced PRA Vault account.
+
+    Read live on every open rather than served from the cluster row: the dashboard is
+    not a party to the sync any more, so the only thing it could cache is what was true
+    at registration — and "an admin unlinked it in the Password Safe console" is exactly
+    what an operator opens this to find out."""
+    from ..services import ps_k8s_token_service
+    try:
+        k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        return {"ok": True, **await ps_k8s_token_service.sync_status(db, cluster_id)}
+    except Exception as exc:  # noqa: BLE001 — a status read must not 500 the modal
+        # Log the real error server-side; return a generic reason. A Password Safe error
+        # carries response bodies and tenant detail, and this endpoint is reachable by
+        # any k8s reader — CodeQL py/stack-trace-exposure. Same rule as
+        # api/config_mgmt's managed-account lookup.
+        logger.warning("PS token status for cluster %s failed: %s", cluster_id, exc)
+        return {"ok": False, "registered": False, "linked": False,
+                "error": "Password Safe status read failed — check the server logs."}
 
 
 @router.post("/clusters/{cluster_id}/entitle-agent", status_code=202)

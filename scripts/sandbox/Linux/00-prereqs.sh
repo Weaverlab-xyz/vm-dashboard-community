@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sandbox bootstrappers prereq check (WSL / Linux / macOS).
-# Verifies docker, docker-compose-v2, aws, az, gcloud, jq are available.
+# Verifies docker, docker-compose-v2, aws, az, gcloud, oci, jq are available.
 # Prints platform-appropriate install hints for anything missing.
 
 set -Eeuo pipefail
@@ -31,6 +31,7 @@ install_hint() {
       aws)            echo "brew install awscli" ;;
       az)             echo "brew install azure-cli" ;;
       gcloud)         echo "brew install --cask google-cloud-sdk" ;;
+      oci)            echo "brew install oci-cli" ;;
       *)              echo "" ;;
     esac
   else
@@ -43,12 +44,13 @@ install_hint() {
       aws)            echo "curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip && unzip -q /tmp/awscli.zip -d /tmp && sudo /tmp/aws/install" ;;
       az)             echo "curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash" ;;
       gcloud)         echo "curl -fsSL https://sdk.cloud.google.com | bash && exec -l \$SHELL  # then: gcloud init" ;;
+      oci)            echo "bash -c \"\$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)\"" ;;
       *)              echo "" ;;
     esac
   fi
 }
 
-CHECKS=(docker jq curl unzip aws az gcloud)
+CHECKS=(docker jq curl unzip aws az gcloud oci)
 DOCKER_COMPOSE_OK=0
 MISSING=()
 
@@ -58,6 +60,7 @@ for cmd in "${CHECKS[@]}"; do
       aws)    ok "aws    — $(aws --version 2>&1 | head -n1)";;
       az)     ok "az     — $(az --version 2>&1 | head -n1)";;
       gcloud) ok "gcloud — $(gcloud --version 2>&1 | head -n1)";;
+      oci)    ok "oci    — $(oci --version 2>&1 | head -n1)";;
       docker) ok "docker — $(docker --version)";;
       jq)     ok "jq     — $(jq --version)";;
       *)      ok "$cmd";;
@@ -105,7 +108,7 @@ if (( ${#MISSING[@]} > 0 )); then
 fi
 
 section "All prerequisites satisfied"
-ok "Ready to run setup-aws.sh / setup-azure.sh / setup-gcp.sh"
+ok "Ready to run setup-aws.sh / setup-azure.sh / setup-gcp.sh / setup-oci.sh"
 
 cat <<'EOF'
 
@@ -114,12 +117,14 @@ Next steps — authenticate each CLI you plan to use:
   AWS:    aws configure                       (or: aws sso login)
   Azure:  az login
   GCP:    gcloud auth login && gcloud auth application-default login
+  OCI:    oci setup config
 
 Then:
 
   ./scripts/sandbox/Linux/setup-aws.sh
   ./scripts/sandbox/Linux/setup-azure.sh
   ./scripts/sandbox/Linux/setup-gcp.sh
+  ./scripts/sandbox/Linux/setup-oci.sh
 
 To tear it all down:
 

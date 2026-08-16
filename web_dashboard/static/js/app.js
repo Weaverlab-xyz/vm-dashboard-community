@@ -84,6 +84,14 @@ window.API = {
                 if (detail.missing_scope)      e.missingScope     = detail.missing_scope;
                 if (detail.missing_level)      e.missingLevel     = detail.missing_level;
             }
+            // Hand the Error to toast() out of band, because no call site does: all
+            // ~142 of them pass a STRING built from it (`toast(e.message, 'error')`,
+            // `toast('Deploy failed: ' + e.message, 'error')`), which drops
+            // requestAccessUrl one hop before the renderer. base.html's toast()
+            // re-attaches the link from here — see the adoption rules there. Nulled
+            // on a failure without a link so the stash always reflects the most
+            // recent one. Pinned end to end in tests/toast_request_access_check.js.
+            window.__lastApiError = e.requestAccessUrl ? { error: e, at: Date.now() } : null;
             throw e;
         }
 
@@ -144,6 +152,86 @@ window.secretPickerState = function () {
     };
 };
 
+// ── Deploy count / auto-numbered names ────────────────────────────────────────
+// Every cloud deploy form takes a Count; the server expands the base name into a
+// numbered series and returns the names it used. These helpers only PREVIEW that
+// expansion — services/vm_naming.py is authoritative, and the fixtures both sides
+// must agree on live in tests/test_vm_naming.py and tests/template_helpers_check.js.
+
+// Must match MAX_DEPLOY_COUNT in services/vm_naming.py, or the form lets through a 422.
+window.DEPLOY_COUNT_MAX = 20;
+
+// The length the EXPANDED name must fit in, per provider. Mirrors vm_naming._LIMITS.
+//   aws / oci  255  tag value / display name; effectively unbounded for real names
+//   azure       15  NOT the 64-char ARM limit — azure_service derives the in-guest
+//                   hostname as vm_name[:15], so a series that only differs past
+//                   character 15 gives two VMs the same hostname
+//   gcp         63  RFC1035
+window.NAME_LIMITS = { aws: 255, azure: 15, gcp: 63, oci: 255 };
+
+// Spread into a page component (`...deployNameState()`) to get the Count ceiling and
+// the name preview.
+window.deployNameState = function () {
+    return {
+        countMax: window.DEPLOY_COUNT_MAX,
+
+        // ("web", 3, 63) -> ["web-01","web-02","web-03"]; count <= 1 -> ["web"].
+        // The base is trimmed so base+suffix fits `limit` — never the suffix, which is
+        // what keeps the series unique at Azure's 15 characters.
+        nameSeries(base, count, limit, opts) {
+            const o = opts || {};
+            const cap = limit || 255;
+            const n = Math.max(1, Math.min(parseInt(count, 10) || 1, window.DEPLOY_COUNT_MAX));
+            let b = String(base || '').trim();
+            if (o.lower) b = b.toLowerCase();
+            if (n === 1) return [b];
+            const width = Math.max(2, String(n).length);
+            const stem = b.slice(0, Math.max(1, cap - width - 1)).replace(/[-.]+$/, '');
+            return Array.from({ length: n },
+                (_, i) => stem + '-' + String(i + 1).padStart(width, '0'));
+        },
+
+        // Render-ready preview. `truncated` drives the amber styling.
+        namePreview(base, count, limit, opts) {
+            const names = this.nameSeries(base, count, limit, opts);
+            const n = names.length;
+            if (!String(base || '').trim() || n <= 1) {
+                return { names: names, text: '', truncated: false };
+            }
+            const width = Math.max(2, String(n).length);
+            const stemLen = names[0].length - width - 1;
+            const truncated = String(base).trim().length > stemLen;
+            const text = n <= 4
+                ? 'will create: ' + names.join(', ')
+                : 'will create: ' + names.slice(0, 3).join(', ') + ' … ' + names[n - 1]
+                  + ' (' + n + ' total)';
+            return { names: names, text: text, truncated: truncated };
+        },
+    };
+};
+
+// Deploy endpoints return either a single job ({job_id, …}) or a batch
+// ({batch_id, count, …}). A batch lands on the /jobs rollup, which already polls,
+// counts failures and is bookmarkable.
+//
+// Returns false when there is no batch_id, so each caller keeps its existing
+// single-job path verbatim — that is what makes count == 1 a zero-risk change, and it
+// lets the front end ship before or after the server.
+window.afterDeploy = function (resp, opts) {
+    const o = opts || {};
+    const say = o.notify || ((m, t) => toast(m, t || 'success'));
+    if (resp && resp.batch_id) {
+        const n = resp.count || (resp.job_ids || []).length;
+        say((o.label || 'Deployment') + ': ' + n + ' instance' + (n !== 1 ? 's' : '') + ' queued',
+            'success');
+        setTimeout(() => {
+            window.location.href = '/jobs?batch_id=' + encodeURIComponent(resp.batch_id);
+        }, 400);
+        return true;
+    }
+    return false;
+};
+
 // ── WebSocket job tracker ─────────────────────────────────────────────────────
 class JobTracker {
     constructor(jobId, callbacks = {}) {
@@ -154,7 +242,15 @@ class JobTracker {
 
     connect() {
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        this.ws = new WebSocket(`${protocol}//${location.host}/api/ws/jobs/${this.jobId}`);
+        // The browser WebSocket API cannot set an Authorization header, and a token in
+        // the query string would be logged by every proxy on the path. The subprotocol
+        // list is the one client-settable header that is neither, so the token rides
+        // there and the server echoes `vmdash.bearer` back on accept.
+        const token = localStorage.getItem('vm_cli_token');
+        const url = `${protocol}//${location.host}/api/ws/jobs/${this.jobId}`;
+        this.ws = token
+            ? new WebSocket(url, ['vmdash.bearer', token])
+            : new WebSocket(url);
 
         this.ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
@@ -184,6 +280,8 @@ class JobTracker {
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function statusBadge(status) {
     const map = {
+        // queued = a child row a parent job will drive; the runner never claims it.
+        queued:    'bg-yellow-50 text-yellow-700',
         pending:   'bg-yellow-100 text-yellow-800',
         running:   'bg-blue-100 text-blue-800',
         completed: 'bg-green-100 text-green-800',
@@ -191,6 +289,25 @@ function statusBadge(status) {
         cancelled: 'bg-gray-100 text-gray-800',
     };
     return map[status] || 'bg-gray-100 text-gray-600';
+}
+
+// Display name for a PERMISSION_SCOPES key. The keys are persisted in user/group
+// permission JSON (and bootstrap_entitle_groups.py turns them into Entitle group names),
+// so a scope whose display name has drifted from its key gets an entry here rather than
+// a rename. Anything unmapped falls back to the old behaviour: underscores to spaces,
+// capitalized by CSS.
+function permissionScopeLabel(scope) {
+    const map = {
+        cloud_database: 'Databases',
+        config_mgmt:    'Configuration',
+        k8s:            'Kubernetes',
+        vms:            'VMs',
+        aws:            'AWS',
+        azure:          'Azure',
+        gcp:            'GCP',
+        oci:            'OCI',
+    };
+    return map[scope] || String(scope || '').replace(/_/g, ' ');
 }
 
 function formatDuration(seconds) {
@@ -212,6 +329,37 @@ function timeAgo(isoStr) {
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
     if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
     return new Date(utcStr).toLocaleDateString();
+}
+
+// Forward-looking sibling of timeAgo, for the auto-delete timer. timeAgo cannot be
+// reused: it computes (now - t) and collapses every negative result to 'just now', so a
+// future timestamp — which is what an expiry always is — would render "just now" on every
+// unexpired resource.
+//
+// Returns 'overdue' once the moment has passed, so the caller doesn't have to
+// distinguish "expiring" from "expired" by re-parsing the date. Granularity stops at
+// minutes: seconds churn on every tick and read as false precision on a multi-day timer.
+function timeUntil(isoStr) {
+    if (!isoStr) return 'never';
+    // Server stores datetime.utcnow() without timezone info — treat as UTC
+    const utcStr = /Z$|[+-]\d{2}:\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z';
+    const t = new Date(utcStr).getTime();
+    if (isNaN(t)) return '–';
+    const s = Math.floor((t - Date.now()) / 1000);
+    if (s <= 0) return 'overdue';
+    if (s < 3600) return `in ${Math.max(1, Math.floor(s / 60))}m`;
+    if (s < 172800) return `in ${Math.floor(s / 3600)}h`;   // < 48h → hours
+    return `in ${Math.floor(s / 86400)}d`;
+}
+
+// Absolute UTC form of a timestamp, for the tooltip behind a relative label. An operator
+// about to extend or delete something needs the actual deadline, not "in 6h".
+function utcStamp(isoStr) {
+    if (!isoStr) return '';
+    const utcStr = /Z$|[+-]\d{2}:\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z';
+    const d = new Date(utcStr);
+    if (isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
 }
 
 function requireAuth() {

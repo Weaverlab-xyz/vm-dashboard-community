@@ -4,6 +4,8 @@ Pydantic models for AWS/Terraform API endpoints.
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from ..services.vm_naming import MAX_DEPLOY_COUNT
+
 
 class AMIInfo(BaseModel):
     ami_id: str
@@ -23,6 +25,9 @@ class AMIListResponse(BaseModel):
     amis: List[AMIInfo]
     count: int
     cached_at: Optional[str] = None
+    # The region these AMI ids belong to. An AMI id is region-local, so the deploy
+    # form has to know which region the list it is offering came from.
+    region: Optional[str] = None
 
 
 class EC2InstanceInfo(BaseModel):
@@ -84,12 +89,23 @@ class DeployRequest(BaseModel):
     pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
     # (No per-deploy ECS deploy-key override: community uses a SHARED jumpoint
     # host via jumpoint_host_service, so aws_ecs_docker_deploy_key is global.)
+    count: int = Field(
+        default=1, ge=1, le=MAX_DEPLOY_COUNT,
+        description="Number of identical instances to launch. 1 is a plain single "
+                    "deploy; >1 fans out into a batch and auto-numbers the names "
+                    "(web -> web-01, web-02, …).")
 
 
 class DeployResponse(BaseModel):
-    job_id: str
+    job_id: str          # for a batch (count > 1) this is the PARENT job
     status: str
     message: str
+    # Batch fields, all left at their defaults for a single deploy so a count-1
+    # response is byte-identical to what callers saw before counts existed.
+    count: int = 1
+    batch_id: Optional[str] = None
+    job_ids: List[str] = []   # child job ids, in name order
+    names: List[str] = []     # the expanded names actually used, post-truncation
 
 
 class DestroyResponse(BaseModel):
@@ -141,6 +157,13 @@ class BulkDeployRequest(BaseModel):
     register_in_entitle: bool = Field(default=False, description="Opt in to registering each VM as an Entitle SSH integration (requires entitle_registration_enabled + a provisioned agent)")
     register_in_passwordsafe: bool = Field(default=False, description="Opt in to onboarding each VM into Password Safe as a managed system + account (requires passwordsafe_registration_enabled)")
     ssh_key_secret_override: Optional[str] = Field(default=None, description="Optional Secrets Manager secret name to use for the SSH key instead of the configured default (must be JSON with a public_key)")
+    # PRA/jumpoint overrides, mirroring DeployRequest. The bulk runner resolved these
+    # from config only, so a batch quietly registered every VM against the configured
+    # jump group even when the form said otherwise. Optional, so a client posting the
+    # old shape still falls through to config exactly as before.
+    jump_group: Optional[str] = None             # PRA Jump Group name override (else bt_jump_group_name)
+    jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else bt_jumpoint_name)
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
 
 
 class BulkDeployJobResult(BaseModel):
@@ -153,6 +176,9 @@ class BulkDeployJobResult(BaseModel):
 class BulkDeployResponse(BaseModel):
     jobs: List[BulkDeployJobResult]
     count: int
+    # The endpoint has always minted a batch_id; it just never returned one, so the
+    # page had no way to link to the /jobs?batch_id= rollup that already exists.
+    batch_id: Optional[str] = None
 
 
 class CreateImageRequest(BaseModel):

@@ -15,7 +15,7 @@
   distinct jump client (cloning one installed client produces a "confused entry
   in the rep console"; see KB0017470).
 
-  Access model: PRA agentless Remote RDP jump items reach 3389 from the Jumpoint
+  Access model: PRA agentless Remote RDP jump items reach 3389 from the Gateway
   subnet; pool VMs are private + brokered. (OpenSSH is optional — RDP is primary
   for a desktop.)
 

@@ -1,0 +1,116 @@
+# Join a node to an existing Docker Swarm
+# Target: an on-prem Linux host that already has Docker (run linux/install-docker.yml
+# first). Idempotent — a host that is already an active swarm node is left alone.
+#
+# This is step 2 of 2. Take manager_addr + join_token from swarm-init.yml's output.
+#
+# extra_vars:
+#   manager_addr: 10.0.0.11     # required — the manager's advertised address
+#   join_token:   SWMTKN-1-...  # required unless join_token_secret is set
+#   join_role:    worker        # worker (default) or manager — must match the token
+#   manager_port: 2377          # rarely changed
+#
+# OPTIONAL — fetch the token from BeyondTrust Password Safe instead of passing it in
+# plaintext, by setting a SECRET path (folder/title):
+#   join_token_secret: infra/swarm-worker-token
+# The PASSWORD_SAFE_* credentials are auto-injected into every runner, so nothing else
+# is needed. The lookup runs on the CONTROLLER, so this host needs no Password Safe
+# reachability. See examples/playbooks/password-safe/.
+- name: Join a Docker Swarm
+  hosts: all
+  become: true
+  vars:
+    manager_addr: ""
+    manager_port: 2377
+    join_token: ""
+    join_role: worker
+    # Optional Password Safe source for the token above (blank = don't use it).
+    join_token_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+  tasks:
+    # Fetched into its OWN fact, never onto join_token: extra vars outrank set_fact,
+    # so writing back to that name would be silently ignored when the token was also
+    # supplied as an extra var.
+    - name: Fetch the join token from Password Safe
+      ansible.builtin.set_fact:
+        _ps_join_token: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=join_token_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: join_token_secret | length > 0
+
+    - name: Resolve the effective token (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _token: "{{ _ps_join_token | default(join_token, true) }}"
+      no_log: true
+
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - manager_addr | length > 0
+          - _token | length > 0
+          - join_role in ["worker", "manager"]
+        fail_msg: >-
+          Set manager_addr and join_role (worker|manager), plus a token — either
+          join_token (from swarm-init.yml) or join_token_secret (a Password Safe path).
+
+    - name: Detect swarm state
+      ansible.builtin.command: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Report an already-joined node
+      ansible.builtin.debug:
+        msg: >-
+          This host is already an active swarm node — leaving it untouched.
+          Run swarm-leave.yml first if you need to move it to a different swarm.
+      when: swarm_state.stdout == "active"
+
+    # Fail fast with an actionable message: a closed firewall otherwise surfaces as an
+    # opaque `docker swarm join` timeout well over a minute later.
+    - name: Check the manager's control port is reachable
+      ansible.builtin.wait_for:
+        host: "{{ manager_addr }}"
+        port: "{{ manager_port }}"
+        timeout: 10
+      register: manager_reachable
+      failed_when: false
+      when: swarm_state.stdout != "active"
+
+    - name: Fail with the likely cause
+      ansible.builtin.fail:
+        msg: >-
+          Cannot reach {{ manager_addr }}:{{ manager_port }} from this host. Swarm needs
+          2377/tcp (control), 7946/tcp+udp (gossip) and 4789/udp (overlay) open between
+          nodes — run swarm-open-ports.yml on every node, or open them in your network.
+      when:
+        - swarm_state.stdout != "active"
+        - manager_reachable.failed | default(false)
+
+    # ── Join ─────────────────────────────────────────────────────────────────
+    - name: Join the swarm
+      ansible.builtin.command: >-
+        docker swarm join --token {{ _token }} {{ manager_addr }}:{{ manager_port }}
+      register: swarm_join
+      changed_when: swarm_join.rc == 0
+      no_log: true              # the join token is on the command line
+      when: swarm_state.stdout != "active"
+
+    - name: Confirm membership
+      ansible.builtin.command: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %}'
+      register: swarm_state_after
+      changed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "Swarm state is now '{{ swarm_state_after.stdout }}' (joined as {{ join_role }})."

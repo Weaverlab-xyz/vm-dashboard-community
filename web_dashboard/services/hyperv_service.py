@@ -25,14 +25,10 @@ class HyperVError(Exception):
     pass
 
 
-def _cfg(key: str) -> str:
-    from . import config_service
-    return config_service.get(key) or ""
-
-
-def _cfg_bool(key: str, default: bool = False) -> bool:
-    from . import config_service
-    return config_service.get_bool(key, default)
+# No _cfg here any more. This module used to read the singleton config keys directly,
+# which meant there could only ever be ONE Hyper-V host. It now takes a resolved
+# `Connection` (services/hypervisor_connection_service) as its first argument, and the
+# router is the only layer that chooses which one.
 
 
 def _require_pywinrm():
@@ -42,26 +38,28 @@ def _require_pywinrm():
         raise HyperVError("pywinrm is not installed — run: pip install pywinrm")
 
 
-def _session():
-    """Open a WinRM session to the configured Hyper-V host."""
+def _session(conn):
+    """Open a WinRM session to ONE Hyper-V host."""
     _require_pywinrm()
     import winrm
 
-    host = _cfg("hyperv_host")
+    host = conn.host
     if not host:
-        raise HyperVError("HYPERV_HOST is not configured")
+        raise HyperVError(f"Connection {conn.name!r} has no host configured")
 
-    port      = int(_cfg("hyperv_port") or "5985")
-    username  = _cfg("hyperv_username")
-    password  = _cfg("hyperv_password")
-    use_ssl   = _cfg_bool("hyperv_use_ssl", False)
-    verify_ssl = _cfg_bool("hyperv_verify_ssl", False)
-    transport = _cfg("hyperv_transport") or "ntlm"
+    opts       = conn.options or {}
+    port       = int(conn.port or 5985)
+    username   = conn.username
+    password   = conn.secret
+    use_ssl    = bool(opts.get("use_ssl"))
+    verify_ssl = conn.verify_ssl
+    transport  = opts.get("transport") or "ntlm"
 
     if not username:
-        raise HyperVError("HYPERV_USERNAME is not configured")
+        raise HyperVError(f"Connection {conn.name!r} has no username configured")
     if not password:
-        raise HyperVError("HYPERV_PASSWORD is not configured")
+        raise HyperVError(
+            f"Connection {conn.name!r} has no password. Edit it on the Connections page.")
 
     scheme = "https" if use_ssl else "http"
     target = f"{scheme}://{host}:{port}/wsman"
@@ -171,8 +169,8 @@ def _normalise_vm(raw: dict) -> dict:
     }
 
 
-def _list_vms_sync() -> list[dict]:
-    sess = _session()
+def _list_vms_sync(conn) -> list[dict]:
+    sess = _session(conn)
     output = _run_ps(sess, _LIST_VMS_PS)
     if not output or output.lower() == "null":
         return []
@@ -198,13 +196,13 @@ _POWER_OPS_PS = {
 }
 
 
-def _power_op_sync(vmid: str, name: str, op: str) -> dict:
+def _power_op_sync(conn, vmid: str, name: str, op: str) -> dict:
     if not _UUID_RE.match(vmid):
         raise HyperVError(f"Invalid VMId format: {vmid}")
     if op not in _POWER_OPS_PS:
         raise HyperVError(f"Unknown operation: {op}")
 
-    sess = _session()
+    sess = _session(conn)
     script = f"$ErrorActionPreference = 'Stop'\n{_POWER_OPS_PS[op].format(vmid=vmid)}"
     logger.info("Hyper-V: %s on %s (%s)", op, name or vmid, vmid)
     _run_ps(sess, script)
@@ -213,23 +211,23 @@ def _power_op_sync(vmid: str, name: str, op: str) -> dict:
 
 # ── Async public API ──────────────────────────────────────────────────────────
 
-async def list_vms() -> list[dict]:
+async def list_vms(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_vms_sync)
+        return await asyncio.to_thread(_list_vms_sync, conn)
     except HyperVError:
         raise
     except Exception as e:
         raise HyperVError(f"Failed to list VMs: {e}") from e
 
 
-async def power_op(vmid: str, name: str, op: str) -> dict:
+async def power_op(conn, vmid: str, name: str, op: str) -> dict:
     valid = set(_POWER_OPS_PS)
     if op not in valid:
         raise HyperVError(
             f"Invalid operation '{op}'. Must be one of: {', '.join(sorted(valid))}"
         )
     try:
-        return await asyncio.to_thread(_power_op_sync, vmid, name, op)
+        return await asyncio.to_thread(_power_op_sync, conn, vmid, name, op)
     except HyperVError:
         raise
     except Exception as e:

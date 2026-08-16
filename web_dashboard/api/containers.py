@@ -38,8 +38,12 @@ from ..models.containers import (
     ECSTaskListResponse,
     GCEJumpointInfo,
     GCEJumpointListResponse,
+    PortainerDeployRequest,
     PortainerEndpoint,
     PortainerEndpointList,
+    PortainerNodeInfo,
+    PortainerNodeResponse,
+    RancherDeployRequest,
     RancherImportRequest,
     RancherImportResponse,
     RancherNodeInfo,
@@ -54,6 +58,8 @@ from ..services import (
     container_inventory_service,
     job_service,
     portainer_service,
+    region_catalog,
+    region_config,
     storage_service,
 )
 from ..services.aws_service import AWSError
@@ -758,16 +764,18 @@ async def stop_gce_compose_endpoint(
 
 
 # ── GCP Cloud Run runner jobs (Ansible / promote / k8s) ──────────────────────
-# The runner jobs self-delete on completion, so this is effectively an in-flight
-# view — the GCP analogue of the ECS-tasks / ACI panels. Read-only, 5 most recent.
+# An IN-FLIGHT view — the GCP analogue of the ECS-tasks / ACI panels. Runners whose
+# execution has finished are filtered out in the service (their self-delete is
+# best-effort, so finished jobs linger in the project). Hiding them is not reclaiming
+# them, so the reap action below deletes the strays the listing hides.
 
 @router.get("/gce-cloud-run-jobs", response_model=CloudRunJobListResponse)
 async def list_gce_cloud_run_jobs_endpoint(
     current_user: User = Depends(require_permission("containers", "read")),
 ):
-    """List dashboard-managed Cloud Run runner jobs (Ansible / promote / k8s),
-    newest first and capped at 5. These jobs self-delete when they finish, so the
-    list is effectively the ones currently in flight."""
+    """List the dashboard-managed Cloud Run runner jobs (Ansible / promote / k8s)
+    currently in flight, newest first. Finished runners are excluded, so this is
+    also what the dashboard's Cloud Run Jobs tile counts."""
     from ..services import gcp_service
     from ..services.gcp_service import GCPError
 
@@ -775,7 +783,7 @@ async def list_gce_cloud_run_jobs_endpoint(
     if not project_id:
         raise HTTPException(status_code=503, detail="GCP project not configured.")
     try:
-        raw = await gcp_service.list_cloud_run_jobs(project_id, limit=5)
+        raw = await gcp_service.list_cloud_run_jobs(project_id, limit=20)
         jobs = [
             CloudRunJobInfo(
                 name=j.get("name", ""),
@@ -790,6 +798,40 @@ async def list_gce_cloud_run_jobs_endpoint(
         return CloudRunJobListResponse(jobs=jobs, project_id=project_id, count=len(jobs))
     except GCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@router.post("/gce-cloud-run-jobs/reap", response_model=ContainerActionResponse)
+async def reap_gce_cloud_run_jobs_endpoint(
+    current_user: User = Depends(require_permission("containers", "delete")),
+):
+    """Delete runner jobs stranded in the project by a self-delete that never landed.
+
+    Maintenance action. The listing above already reaps opportunistically; this is
+    the explicit form, for clearing a backlog on demand (and the only form when
+    `gcp_cloud_run_job_reap_enabled` is off). Only finished, dashboard-managed jobs
+    past the age guard are touched — a pending or running runner is never reaped."""
+    from ..services import gcp_service
+    from ..services.gcp_service import GCPError
+
+    project_id = _gcp_project_id()
+    if not project_id:
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    try:
+        outcome = await gcp_service.reap_stranded_cloud_run_jobs(project_id)
+    except GCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    reaped = outcome.get("reaped") or []
+    failed = outcome.get("failed") or 0
+    if not reaped and not failed:
+        return ContainerActionResponse(ok=True, message="No stranded runner jobs to reap")
+    detail = ", ".join(f"{j['name']} ({j['region']})" for j in reaped)
+    message = f"Reaped {len(reaped)} stranded runner job(s)"
+    if detail:
+        message += f": {detail}"
+    if failed:
+        message += f" — {failed} could not be deleted (see logs)"
+    return ContainerActionResponse(ok=True, message=message)
 
 
 # ── Rancher management node (privileged container on GCE COS) ────────────────
@@ -807,6 +849,24 @@ async def get_rancher_node(
     bootstrap = config_service.get("rancher_bootstrap_password")
     configured = bool(project_id and bootstrap)
     server_url = config_service.get("rancher_server_url") or ""
+    # How to log in — shown once the node is bootstrapped. An AUTO-GENERATED admin
+    # password is echoed (the operator has no other way to learn it — accepted
+    # trade-off); an operator-set or bootstrap password is only named, never echoed.
+    login_hint = ""
+    if config_service.get("rancher_api_token"):
+        if config_service.get("rancher_ui_vault_account_id"):
+            grp = config_service.get("rancher_ui_vault_account_group_id") or ""
+            grp_txt = f" (account group {grp})" if grp else ""
+            login_hint = (f"admin credential is stored in the PRA Vault{grp_txt} — open the "
+                          f"'rancher-ui' Web Jump for injected login.")
+        elif config_service.get_bool("rancher_admin_password_generated", False):
+            pw = config_service.get("rancher_admin_password") or ""
+            login_hint = (f"Log in as admin / {pw}  (auto-generated — "
+                          f"change it in Rancher after first login).")
+        elif config_service.get("rancher_admin_password"):
+            login_hint = "Log in as admin with your configured Rancher admin password."
+        else:
+            login_hint = "Log in as admin with your Rancher bootstrap password."
     if not project_id:
         # Not configured yet — return an empty, not-configured shell (no 503, so
         # the tab can render the setup card like Portainer does).
@@ -827,7 +887,8 @@ async def get_rancher_node(
         for i in raw
     ]
     return RancherNodeResponse(nodes=nodes, project_id=project_id, count=len(nodes),
-                               configured=configured, server_url=server_url)
+                               configured=configured, server_url=server_url,
+                               login_hint=login_hint)
 
 
 @router.get("/rancher/firewall")
@@ -843,14 +904,42 @@ async def get_rancher_firewall(
     return rancher_node_service.firewall_status(db)
 
 
+@router.get("/rancher/pra-options")
+async def get_rancher_pra_options(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """Deploy-form options for the Rancher node: selectable GCP regions plus the PRA
+    pickers (Jump Groups, Jumpoints, Vault account groups; best-effort). ``configured``
+    is false when PRA OAuth isn't set, so the form shows a note instead of empty
+    dropdowns. Mirrors ``/api/k8s/clusters/pra-options``."""
+    from ..services import pra_api_service
+    pickers = await pra_api_service.list_pickers()
+    return {
+        "configured": pra_api_service.configured(),
+        "regions": _rancher_deploy_regions(),
+        **pickers,
+    }
+
+
+def _rancher_deploy_regions() -> list[str]:
+    """Regions the Rancher node can be deployed into: the configured default region
+    plus every region that has a per-region config set (`gcp_region_configs`), default
+    first. Restricting to configured regions keeps the operator from picking a region
+    with no subnet (the node's subnet is regional)."""
+    return region_config.deployable_regions("gcp")
+
+
 @router.post("/rancher/deploy", response_model=DeployContainerResponse)
 async def deploy_rancher_node(
+    req: RancherDeployRequest = RancherDeployRequest(),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "write")),
 ):
     """Deploy (or reuse) the Rancher management node. Enqueues a durable
     `rancher_node_deploy` job (VM boot + Rancher bootstrap can take minutes);
-    follow progress at /jobs/{job_id}. The job reads its knobs from Settings."""
+    follow progress at /jobs/{job_id}. Deploy-time PRA choices (Web Jump + Jump
+    Group / Jumpoint / Vault Account Group) ride the job metadata; anything omitted
+    falls back to Settings."""
     from ..services import config_service
 
     if not _gcp_project_id():
@@ -859,8 +948,30 @@ async def deploy_rancher_node(
         raise HTTPException(
             status_code=400,
             detail="Set a Rancher bootstrap password in Settings → Kubernetes before deploying.")
+    # Only carry fields the operator actually set, so blanks fall back to config.
+    meta: dict = {"web_jump_enabled": bool(req.web_jump_enabled)}
+    if req.region:
+        if not region_catalog.validate("gcp", req.region):
+            raise HTTPException(status_code=400, detail=f"Invalid GCP region: {req.region!r}")
+        meta["region"] = region_catalog.normalize("gcp", req.region)
+    if req.zone:
+        if not region_catalog.validate_zone(req.zone):
+            raise HTTPException(status_code=400, detail=f"Invalid GCP zone: {req.zone!r}")
+        zone = region_catalog.normalize("gcp", req.zone)
+        # A zone must sit inside the chosen region (when a region was also given).
+        if meta.get("region") and not region_config.zone_in_region(zone, meta["region"]):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Zone {zone!r} is not in region {meta['region']!r}.")
+        meta["zone"] = zone
+    if req.jump_group:
+        meta["jump_group"] = req.jump_group.strip()
+    if req.jumpoint_name:
+        meta["jumpoint_name"] = req.jumpoint_name.strip()
+    if req.vault_account_group_id:
+        meta["vault_account_group_id"] = int(req.vault_account_group_id)
     job = job_service.create_job(
-        db, job_type="rancher_node_deploy", created_by=current_user.username, metadata={})
+        db, job_type="rancher_node_deploy", created_by=current_user.username, metadata=meta)
     return DeployContainerResponse(
         job_id=job.id, status="pending", message="Deploying the Rancher management node…")
 
@@ -906,3 +1017,154 @@ async def import_cluster_into_rancher(
     return RancherImportResponse(
         cluster_id=cluster_id, manifest_url=manifest_url,
         apply_command=f"kubectl apply -f {manifest_url}")
+
+
+# ── Managed Portainer node (Portainer CE container on GCE COS) ───────────────
+# These are the DEPLOY-side routes for a dashboard-managed Portainer server. The
+# /endpoints, /{container_id} and /stacks routes above talk to whatever Portainer
+# is configured — a managed node once deployed, or the operator's own server.
+# Paths are nested under /portainer/node/ so they can't collide with those.
+
+@router.get("/portainer/node", response_model=PortainerNodeResponse)
+async def get_portainer_node(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """List the managed Portainer server COS instance(s) (labels.purpose=portainer)
+    and report whether a deploy is possible + the pinned server URL."""
+    from ..services import config_service, gcp_service
+    from ..services.gcp_service import GCPError
+
+    project_id = _gcp_project_id()
+    # A deploy needs nothing but a GCP project — unlike Rancher there's no bootstrap
+    # password to pre-set; the admin credential is generated during first-run.
+    configured = bool(project_id)
+    server_url = config_service.get("portainer_url") or ""
+    token_configured = bool(config_service.get("portainer_pat"))
+    # How to log in. An AUTO-GENERATED admin password is echoed (the operator has no
+    # other way to learn it — accepted trade-off, same as Rancher); an operator-set
+    # one is only named, never echoed.
+    login_hint = ""
+    if token_configured:
+        if config_service.get_bool("portainer_admin_password_generated", False):
+            pw = config_service.get("portainer_admin_password") or ""
+            login_hint = (f"Log in as admin / {pw}  (auto-generated — "
+                          f"change it in Portainer after first login).")
+        elif config_service.get("portainer_admin_password"):
+            login_hint = "Log in as admin with your configured Portainer admin password."
+    if not project_id:
+        # Not configured yet — return an empty, not-configured shell (no 503, so the
+        # tab can render the setup card).
+        return PortainerNodeResponse(nodes=[], project_id="", count=0, configured=False,
+                                     server_url=server_url, token_configured=token_configured)
+    try:
+        raw = await gcp_service.list_gce_portainer(project_id)
+    except GCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    nodes = [
+        PortainerNodeInfo(
+            name=i.get("name", ""), zone=i.get("zone", ""),
+            status=i.get("status", "UNKNOWN"), machine_type=i.get("machine_type", ""),
+            image=i.get("image", ""), internal_ip=i.get("internal_ip", ""),
+            external_ip=i.get("external_ip", ""), url=i.get("url", ""),
+            created_at=i.get("created_at"),
+        )
+        for i in raw
+    ]
+    return PortainerNodeResponse(
+        nodes=nodes, project_id=project_id, count=len(nodes), configured=configured,
+        server_url=server_url, token_configured=token_configured, login_hint=login_hint)
+
+
+@router.get("/portainer/node/firewall")
+async def get_portainer_node_firewall(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """Read-only breakdown of the Portainer node's firewall source set: the manual
+    CIDRs, the auto-discovered dashboard egress IP, and the effective merged
+    allow-list (tcp 9443/8000) — so the operator can see which sources reach it."""
+    from ..services import portainer_node_service
+    return portainer_node_service.firewall_status()
+
+
+@router.get("/portainer/node/deploy-options")
+async def get_portainer_node_deploy_options(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """Deploy-form options for the Portainer node: the GCP regions it can be placed in
+    (the default plus every region with a configured subnet — the node's subnet is
+    regional), plus the PRA pickers (Jump Groups, Jumpoints, Vault account groups;
+    best-effort). ``configured`` is false when PRA OAuth isn't set, so the form shows
+    a note instead of empty dropdowns. Same payload shape as
+    /api/containers/rancher/pra-options."""
+    from ..services import pra_api_service
+    pickers = await pra_api_service.list_pickers()
+    return {
+        "configured": pra_api_service.configured(),
+        "regions": _portainer_deploy_regions(),
+        **pickers,
+    }
+
+
+def _portainer_deploy_regions() -> list[str]:
+    """Regions the Portainer node can be deployed into — same rule as
+    :func:`_rancher_deploy_regions` (the node's subnet is regional)."""
+    return region_config.deployable_regions("gcp")
+
+
+@router.post("/portainer/node/deploy", response_model=DeployContainerResponse)
+async def deploy_portainer_node(
+    req: PortainerDeployRequest = PortainerDeployRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Deploy (or reuse) the managed Portainer server. Enqueues a durable
+    `portainer_node_deploy` job (VM boot + first-run bootstrap can take minutes);
+    follow progress at /jobs/{job_id}. On success the job writes portainer_url +
+    portainer_pat, so the Containers tab starts working with no manual setup."""
+    if not _gcp_project_id():
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    # Only carry fields the operator actually set, so blanks fall back to config.
+    meta: dict = {"web_jump_enabled": bool(req.web_jump_enabled)}
+    if req.region:
+        if not region_catalog.validate("gcp", req.region):
+            raise HTTPException(status_code=400, detail=f"Invalid GCP region: {req.region!r}")
+        meta["region"] = region_catalog.normalize("gcp", req.region)
+    if req.zone:
+        if not region_catalog.validate_zone(req.zone):
+            raise HTTPException(status_code=400, detail=f"Invalid GCP zone: {req.zone!r}")
+        zone = region_catalog.normalize("gcp", req.zone)
+        # A zone must sit inside the chosen region (when a region was also given).
+        if meta.get("region") and not region_config.zone_in_region(zone, meta["region"]):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Zone {zone!r} is not in region {meta['region']!r}.")
+        meta["zone"] = zone
+    if req.jump_group:
+        meta["jump_group"] = req.jump_group.strip()
+    if req.jumpoint_name:
+        meta["jumpoint_name"] = req.jumpoint_name.strip()
+    if req.vault_account_group_id:
+        meta["vault_account_group_id"] = int(req.vault_account_group_id)
+    job = job_service.create_job(
+        db, job_type="portainer_node_deploy", created_by=current_user.username, metadata=meta)
+    return DeployContainerResponse(
+        job_id=job.id, status="pending", message="Deploying the managed Portainer server…")
+
+
+@router.post("/portainer/node/{name}/stop", response_model=DeployContainerResponse)
+async def stop_portainer_node(
+    name: str,
+    zone: str = Query("", description="GCE zone (blank → configured Portainer zone)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "delete")),
+):
+    """Tear down the Portainer node (VM + firewall) and clear the URL/token config.
+    Enqueues a durable `portainer_node_teardown` job. The node is EPHEMERAL — this
+    discards all Portainer state (users, environments, settings)."""
+    if not _gcp_project_id():
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    job = job_service.create_job(
+        db, job_type="portainer_node_teardown", created_by=current_user.username,
+        metadata={"name": name, "zone": zone})
+    return DeployContainerResponse(
+        job_id=job.id, status="pending", message=f"Tearing down Portainer node '{name}'…")

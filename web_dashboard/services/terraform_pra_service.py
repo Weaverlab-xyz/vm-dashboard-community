@@ -143,18 +143,38 @@ output "shell_jump_id" {{
 
 def _run_tf(args: list, work_dir: str, timeout: int = 120,
             extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    """Run one terraform subcommand in ``work_dir``.
+
+    ``init`` is serialized on the shared plugin cache. Every caller here works in
+    its own ``TemporaryDirectory``, but they all point TF_PLUGIN_CACHE_DIR at the
+    ONE cache baked into the image (see ``_tf_env``), which is not concurrency-safe:
+    parallel inits race to place the same provider binary and fail with ETXTBSY
+    ("text file busy"). The lock lives in ``terraform.plugin_cache_lock`` so this
+    module and the main terraform path serialize against EACH OTHER, not just each
+    against itself — the app's two gunicorn workers could already race this, and
+    the job worker now runs several jobs at once. Taken here rather than at the
+    nine call sites so a new one cannot forget it; apply/destroy/output don't touch
+    the cache and stay parallel. Imported lazily to keep this module's import graph
+    flat."""
     env = _tf_env()
     if extra_env:
         env.update(extra_env)
-    result = subprocess.run(
-        [_TERRAFORM] + args,
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
-    return result
+
+    def _go() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [_TERRAFORM] + args,
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+
+    if args and args[0] == "init":
+        from .terraform import plugin_cache_lock
+        with plugin_cache_lock():
+            return _go()
+    return _go()
 
 
 def _provision_sync(
@@ -326,15 +346,6 @@ _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
 # SQL*Net has no dedicated PRA type, so it rides a raw TCP tunnel ("tcp").
 _DB_TUNNEL_TYPE = {"sqlserver": "mssql", "oracle": "tcp"}
 
-# jump_item_association `jump_items[].type` enum value per engine — confirmed
-# against the cached provider schema, like the resource names above.
-_DB_JUMP_ITEM_TYPE = {
-    "postgres": "postgresql_tunnel_jump",
-    "mysql": "my_sql_tunnel_jump",   # mirrors the resource (sra_my_sql_tunnel_jump) minus the sra_ prefix
-    "sqlserver": "protocol_tunnel_jump",   # sra_protocol_tunnel_jump minus the sra_ prefix
-    "oracle": "protocol_tunnel_jump",      # same generic protocol-tunnel jump-item type
-}
-
 
 def _generate_db_tunnel_hcl(
     engine: str,
@@ -385,13 +396,21 @@ def _generate_db_tunnel_hcl(
     var_block = ""
     vault_block = ""
     if vault_account_name:
-        jump_item_type = _DB_JUMP_ITEM_TYPE[engine]
         var_block = 'variable "db_password"      { sensitive = true }\n'
         group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
                       if vault_account_group_id else "")
-        # Schema (provider v1.3.0): jump_item_association is a SINGLE nested
-        # attribute (`= { ... }` syntax); jump_items is a set of {id, type};
-        # criteria arrays must be present (empty) or the PRA API 4xxes.
+        # Associate the Vault account to the tunnel jump's Jump GROUP via
+        # criteria.shared_jump_groups — NOT jump_items[].type. The PRA backend
+        # 422s ("jump_items.0.type: The selected value is invalid") for the DB
+        # protocol-tunnel jump-item types (postgresql_tunnel_jump / my_sql_tunnel_jump
+        # / protocol_tunnel_jump), even though the sra provider accepts the string
+        # client-side — so the apply failed and the caller silently fell back to a
+        # tunnel with no vaulted credential. The k8s tunnel path hit the identical
+        # wall; see _generate_k8s_vault_account_hcl / test_pra_k8s_vault. (The VDI
+        # Remote-RDP path keeps jump_items[].type because the backend DOES accept
+        # "remote_rdp".) Group-level association mirrors k8s: the account is reachable
+        # from every jump in the tunnel's group. criteria arrays must all be present
+        # (empty) or the API 4xxes.
         vault_block = f"""
 resource "sra_vault_username_password_account" "db_admin" {{
   name        = {json.dumps(vault_account_name)}
@@ -401,16 +420,13 @@ resource "sra_vault_username_password_account" "db_admin" {{
 {group_line}  jump_item_association = {{
     filter_type = "criteria"
     criteria = {{
-      shared_jump_groups = []
+      shared_jump_groups = [tonumber(data.sra_jump_group_list.jg.items[0].id)]
       host               = []
       name               = []
       tag                = []
       comment            = []
     }}
-    jump_items = [{{
-      id   = tonumber({resource_type}.{safe_name}.id)
-      type = {json.dumps(jump_item_type)}
-    }}]
+    jump_items = []
   }}
 }}
 
@@ -830,17 +846,54 @@ async def remove_api_tunnel(tf_state_json: str) -> None:
 # rep opens it from the PRA representative console. The Rancher node is publicly
 # reachable at its source-restricted server-url, so this isn't required for
 # reachability — it's for brokered/recorded access without adding an operator's IP
-# to the CIDR allowlist. Simpler than the DB tunnel: no credential injection
-# (Rancher does its own login), so no Vault account / no sensitive resource TF_VARs.
+# to the CIDR allowlist. OPTIONALLY vaults the Rancher admin credential (username/
+# password) into a chosen account group so PRA can INJECT it into the Rancher login
+# form — same Vault machinery as the DB tunnel (group-scoped shared_jump_groups
+# association; there is no inject field on sra_web_jump — injection is granted by
+# the Vault account-group ↔ jump-group policy).
 
 def _generate_web_jump_hcl(name: str, url: str, jump_group_name: str,
                            jumpoint_name: str, tag: str = "rancher",
-                           verify_certificate: bool = False) -> str:
-    """HCL for one sra_web_jump. Required: name, url, jump_group_id, jumpoint_id
-    (ids resolved from the jump-group/jumpoint list data sources, same as the DB
-    tunnel). verify_certificate defaults false (Rancher's cert-manager CA is
-    self-signed)."""
+                           verify_certificate: bool = False, *,
+                           vault_account_name: str = "", vault_username: str = "admin",
+                           vault_account_group_id=None) -> str:
+    """HCL for one sra_web_jump (+ an optional sra_vault_username_password_account
+    for credential injection). Required: name, url, jump_group_id, jumpoint_id (ids
+    from the jump-group/jumpoint list data sources). verify_certificate defaults
+    false (Rancher's self-signed cert). When ``vault_account_name`` is given, also
+    emit a Vault account (password via the sensitive TF_VAR ``rancher_password``)
+    associated to this jump's Jump GROUP via criteria.shared_jump_groups — the same
+    workaround the DB path uses (jump_items[].type 422s for non-RDP types)."""
     safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    var_block = ""
+    vault_block = ""
+    if vault_account_name:
+        var_block = 'variable "rancher_password"  { sensitive = true }\n'
+        group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
+                      if vault_account_group_id else "")
+        vault_block = f"""
+resource "sra_vault_username_password_account" "rancher_admin" {{
+  name        = {json.dumps(vault_account_name)}
+  username    = {json.dumps(vault_username)}
+  password    = var.rancher_password
+  description = "Auto-provisioned by Infrastructure Management Dashboard (Rancher management UI)"
+{group_line}  jump_item_association = {{
+    filter_type = "criteria"
+    criteria = {{
+      shared_jump_groups = [tonumber(data.sra_jump_group_list.jg.items[0].id)]
+      host               = []
+      name               = []
+      tag                = []
+      comment            = []
+    }}
+    jump_items = []
+  }}
+}}
+
+output "vault_account_id" {{
+  value = sra_vault_username_password_account.rancher_admin.id
+}}
+"""
     return f"""\
 terraform {{
   required_providers {{
@@ -854,7 +907,7 @@ terraform {{
 variable "bt_host"          {{ sensitive = false }}
 variable "bt_client_id"     {{ sensitive = true }}
 variable "bt_client_secret" {{ sensitive = true }}
-
+{var_block}
 provider "sra" {{
   host          = var.bt_host
   client_id     = var.bt_client_id
@@ -882,35 +935,64 @@ resource "sra_web_jump" {json.dumps(safe_name)} {{
 output "web_jump_id" {{
   value = sra_web_jump.{safe_name}.id
 }}
-"""
+{vault_block}"""
 
 
 def _provision_web_jump_sync(name, url, jump_group_name, jumpoint_name,
-                             tag="rancher", verify_certificate=False, client_secret="") -> dict:
-    _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
+                             tag="rancher", verify_certificate=False, client_secret="",
+                             admin_password="", vault_account_name="",
+                             vault_username="admin", vault_account_group_id=None) -> dict:
+    _cred_env = {}
+    if client_secret:
+        _cred_env["TF_VAR_bt_client_secret"] = client_secret
+    want_vault = bool(admin_password and vault_account_name)
+    if want_vault:
+        _cred_env["TF_VAR_rancher_password"] = admin_password
     with tempfile.TemporaryDirectory(prefix="pra_web_tf_") as work_dir:
-        Path(work_dir, "main.tf").write_text(
-            _generate_web_jump_hcl(name, url, jump_group_name, jumpoint_name, tag, verify_certificate))
+        def _write(with_vault: bool):
+            Path(work_dir, "main.tf").write_text(_generate_web_jump_hcl(
+                name, url, jump_group_name, jumpoint_name, tag, verify_certificate,
+                vault_account_name=vault_account_name if with_vault else "",
+                vault_username=vault_username, vault_account_group_id=vault_account_group_id))
+        _write(want_vault)
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
         apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=_cred_env or None)
+        if apply.returncode != 0 and want_vault:
+            # Best-effort vault: the Web Jump itself may be fine but the Vault
+            # account failed (e.g. the OAuth client lacks Vault Account Management,
+            # or the account group id is wrong). Drop the vault resource and re-apply
+            # web-jump-only so the operator still gets a working (non-injected) jump.
+            logger.warning("Rancher Web Jump: vault account apply failed — retrying without it "
+                           "(the OAuth client likely lacks Vault Account Management). Err: %s",
+                           (apply.stderr or apply.stdout or "").strip()[-300:])
+            _run_tf(["state", "rm", "sra_vault_username_password_account.rancher_admin"],
+                    work_dir, timeout=30)
+            _write(False)
+            want_vault = False
+            apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir, timeout=120,
+                            extra_env=_cred_env or None)
         if apply.returncode != 0:
             _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
             raise TerraformPRAError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
         out = _run_tf(["output", "-json"], work_dir, timeout=30)
         web_jump_id: Optional[str] = None
+        vault_account_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
             try:
-                web_jump_id = str(json.loads(out.stdout).get("web_jump_id", {}).get("value", "")) or None
+                outputs = json.loads(out.stdout)
+                web_jump_id = str(outputs.get("web_jump_id", {}).get("value", "")) or None
+                vault_account_id = str(outputs.get("vault_account_id", {}).get("value", "")) or None
             except (json.JSONDecodeError, AttributeError):
                 pass
         state_path = Path(work_dir, "terraform.tfstate")
         tf_state_json = state_path.read_text() if state_path.exists() else None
         return {
             "web_jump_id": web_jump_id,
+            "vault_account_id": vault_account_id,
             "jump_group_name": jump_group_name,
             "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
         }
@@ -919,13 +1001,18 @@ def _provision_web_jump_sync(name, url, jump_group_name, jumpoint_name,
 async def provision_web_jump(
     *, name: str, url: str, jump_group_name: str, jumpoint_name: str,
     tag: str = "rancher", verify_certificate: bool = False, client_secret: str = "",
+    admin_password: str = "", vault_account_name: str = "", vault_username: str = "admin",
+    vault_account_group_id=None,
 ) -> dict:
     """Provision a PRA Web Jump to a web UI (the central Rancher). The Jump Group +
-    Jumpoint must already exist. Returns {web_jump_id, jump_group_name,
+    Jumpoint must already exist. When ``admin_password`` + ``vault_account_name`` are
+    given, ALSO vault the credential (username/password) into ``vault_account_group_id``
+    for injection. Returns {web_jump_id, vault_account_id, jump_group_name,
     tf_state_json} — stash tf_state_json for remove_web_jump."""
     return await asyncio.to_thread(
         _provision_web_jump_sync, name, url, jump_group_name, jumpoint_name,
-        tag, verify_certificate, client_secret)
+        tag, verify_certificate, client_secret,
+        admin_password, vault_account_name, vault_username, vault_account_group_id)
 
 
 async def remove_web_jump(tf_state_json: str) -> None:

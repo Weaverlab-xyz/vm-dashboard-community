@@ -39,7 +39,7 @@
     <div class="overflow-x-auto">
       <div class="mermaid text-sm">
 flowchart LR
-    build["Packer build<br/>AWS / Azure / GCP"] --> export["Native export to<br/>same-cloud storage"]
+    build["Packer build<br/>AWS / Azure / GCP / OCI"] --> export["Native export to<br/>same-cloud storage"]
     export -- "same-backend as hub<br/>(no copy)" --> hub[("Hub backend<br/>S3 / Blob / GCS")]
     export -- "different cloud<br/>(cross-backend copy)" --> hub
     hub -- "presigned URL" --> runner["Target-cloud runner<br/>ECS / ACI / Cloud Run"]

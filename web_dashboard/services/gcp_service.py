@@ -5,10 +5,10 @@ Credential priority (highest to lowest):
   1. config_service DB (wizard-stored service account JSON)
   2. Application Default Credentials (gcloud auth / Workload Identity)
 
-All blocking SDK calls run in asyncio.to_thread() so the FastAPI event loop
-is never blocked.
+All blocking SDK calls run in _to_thread() — GCP's OWN bounded pool, not the event
+loop's shared default executor — so the FastAPI event loop is never blocked AND a slow
+GCP cannot starve the other providers. See services/cloud_executor.py.
 """
-import asyncio
 import hashlib
 import json
 import logging
@@ -16,11 +16,26 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from . import cloud_executor
+
 logger = logging.getLogger(__name__)
 
 
 class GCPError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking Compute/Storage/Secret-Manager call on GCP's own thread pool.
+
+    Translates the executor's refusals into GCPError so every existing ``except
+    GCPError`` — which is what turns a failure into a 503 or an unavailable tile —
+    keeps working unchanged. Anything the SDK itself raises propagates untouched.
+    """
+    try:
+        return await cloud_executor.run("gcp", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise GCPError(str(exc)) from exc
 
 
 # ── Public image catalog ──────────────────────────────────────────────────────
@@ -119,7 +134,7 @@ def gke_get_token() -> str:
 # workforce group's principalSet the gkehub.gateway* roles. Kubernetes RBAC (the
 # principalSet ClusterRoleBinding) is applied separately by k8s_service. All REST via
 # an AuthorizedSession (google-auth only — gkehub/resourcemanager have no client lib
-# wired here). Synchronous; callers wrap in asyncio.to_thread.
+# wired here). Synchronous; callers wrap in _to_thread.
 
 _GATEWAY_ROLES = ("roles/gkehub.gatewayEditor", "roles/gkehub.viewer")
 
@@ -240,6 +255,103 @@ def _modify_project_iam(member: str, project: str, roles: tuple, *, add: bool) -
         s.post(f"{base}:setIamPolicy", json={"policy": policy}).raise_for_status()
 
 
+# ── GKE impersonation gate (Cloud IAM half of the Entitle fine-grained tier) ──
+#
+# GKE authorizes the `impersonate` verb through Cloud IAM *as well as* Kubernetes
+# RBAC, so k8s_service's `entitle-impersonator` ClusterRole is only half the grant:
+# without `container.clusters.impersonate` the API server refuses with
+#   cannot impersonate resource "users" … requires one of
+#   ["container.clusters.impersonate"] permission(s) in Cloud IAM or a Kubernetes
+#   RBAC role with verb "impersonate" for resource "users"
+# even though the RBAC half matches (confirmed live 2026-07-30 — the same group
+# principalSet grants `view` on the same cluster). No predefined role carries that
+# permission without also carrying broad cluster admin (roles/container.admin), which
+# would hand the group standing admin and defeat the fine-grained JIT story, so we
+# create/reuse a project CUSTOM role holding exactly that one permission.
+#
+# The role is project-scoped and shared by every cluster (GKE clusters have no IAM
+# policy of their own), which is why k8s_service ref-counts the binding on removal.
+#
+# CAVEAT (verified by hand 2026-07-30): the permission IS allowed in a custom role, but
+# Google marks it **TESTING** stage — `gcloud iam roles create` warns "not mature and
+# they can go away in the future … do not use them in production systems". So this whole
+# tier can break on a Google-side change with no action from us. If create/bind starts
+# failing on a permission-not-recognised error, that is the first thing to check.
+
+_IMPERSONATE_PERMISSION = "container.clusters.impersonate"
+_IMPERSONATE_ROLE_ID = "dashboardGkeImpersonator"
+
+
+def impersonate_role_name(project: str = "") -> str:
+    """Full resource name of the custom impersonation role (no API call)."""
+    return f"projects/{project or _gcp_project()}/roles/{_IMPERSONATE_ROLE_ID}"
+
+
+def ensure_impersonate_role(project: str = "") -> str:
+    """Create-or-reuse the project custom role carrying ONLY
+    ``container.clusters.impersonate``; returns its full role name. Idempotent.
+
+    Handles the soft-delete window: GCP keeps a deleted custom role for ~7 days and
+    `create` on it fails ALREADY_EXISTS, so a role marked ``deleted`` is undeleted
+    instead. An existing role missing the permission (hand-edited) is patched.
+    Requires ``roles/iam.roleAdmin`` (or equivalent) on the dashboard SA."""
+    project = project or _gcp_project()
+    s = _authed_session()
+    base = f"https://iam.googleapis.com/v1/projects/{project}/roles"
+    name = impersonate_role_name(project)
+    body = {"title": "Dashboard GKE Impersonator",
+            "description": ("Cloud IAM half of the Entitle fine-grained k8s JIT tier: "
+                            "lets a federated principal use kubectl --as on GKE. "
+                            "Managed by the dashboard."),
+            "includedPermissions": [_IMPERSONATE_PERMISSION],
+            "stage": "GA"}
+    r = s.get(f"https://iam.googleapis.com/v1/{name}")
+    if r.status_code == 200:
+        cur = r.json()
+        if cur.get("deleted"):
+            s.post(f"https://iam.googleapis.com/v1/{name}:undelete", json={}).raise_for_status()
+            cur = {}
+        if _IMPERSONATE_PERMISSION not in (cur.get("includedPermissions") or []):
+            s.patch(f"https://iam.googleapis.com/v1/{name}", json=body).raise_for_status()
+        return name
+    if r.status_code != 404:
+        raise GCPError(f"could not read the GKE impersonation role: {r.status_code} {r.text}")
+    c = s.post(f"{base}?roleId={_IMPERSONATE_ROLE_ID}", json={"role": body})
+    if c.status_code == 403:
+        raise GCPError(
+            "denied creating the GKE impersonation custom role — the dashboard service "
+            "account needs roles/iam.roleAdmin (re-run scripts/sandbox/*/setup-gcp) or "
+            f"an operator can pre-create {name} with the single permission "
+            f"{_IMPERSONATE_PERMISSION}: {c.text}")
+    if c.status_code >= 400:
+        # Surface Google's own message rather than a bare HTTPError — the interesting
+        # case is a 400 saying the permission is not supported in custom roles, whose
+        # only workaround is a predefined role that carries it (roles/container.admin,
+        # which also grants standing cluster admin — an operator decision, not ours).
+        raise GCPError(
+            f"could not create the GKE impersonation custom role {name} "
+            f"({c.status_code}): {c.text}")
+    logger.info("Created the GKE impersonation custom role %s", name)
+    return name
+
+
+def grant_impersonate_iam(principal_set: str, project: str = "") -> None:
+    """Let ``principal_set`` use ``kubectl --as`` on this project's GKE clusters:
+    ensure the custom role exists, then bind it (idempotent). Cloud IAM changes take
+    ~1-2 min to propagate, so the first `--as` right after this may still 403."""
+    project = project or _gcp_project()
+    role = ensure_impersonate_role(project)
+    _modify_project_iam(principal_set, project, (role,), add=True)
+
+
+def revoke_impersonate_iam(principal_set: str, project: str = "") -> None:
+    """Remove ``principal_set``'s impersonation binding (idempotent). The custom role
+    itself is left in place — it is project-wide and other clusters may still bind
+    it (and re-creating it costs an extra permission)."""
+    project = project or _gcp_project()
+    _modify_project_iam(principal_set, project, (impersonate_role_name(project),), add=False)
+
+
 def connect_gateway_server_url(membership_id: str, project: str = "", location: str = "global") -> str:
     """The Connect Gateway kube-apiserver URL for a fleet membership (uses the project
     NUMBER, per the gateway URL scheme)."""
@@ -303,7 +415,7 @@ def _list_custom_images_sync(project_id: str) -> list[dict]:
 
 
 async def list_custom_images(project_id: str) -> list[dict]:
-    return await asyncio.to_thread(_list_custom_images_sync, project_id)
+    return await _to_thread(_list_custom_images_sync, project_id)
 
 
 def _list_public_images_sync(os_filter: str = "all") -> list[dict]:
@@ -346,7 +458,7 @@ def _list_public_images_sync(os_filter: str = "all") -> list[dict]:
 
 
 async def list_public_images(os_filter: str = "all") -> list[dict]:
-    return await asyncio.to_thread(_list_public_images_sync, os_filter)
+    return await _to_thread(_list_public_images_sync, os_filter)
 
 
 def _delete_image_sync(project_id: str, image_name: str) -> None:
@@ -360,7 +472,7 @@ def _delete_image_sync(project_id: str, image_name: str) -> None:
 
 
 async def delete_image(project_id: str, image_name: str) -> None:
-    await asyncio.to_thread(_delete_image_sync, project_id, image_name)
+    await _to_thread(_delete_image_sync, project_id, image_name)
 
 
 def _create_image_from_instance_sync(
@@ -409,7 +521,7 @@ async def create_image_from_instance(
     image_name: str,
     description: str = "",
 ) -> dict:
-    return await asyncio.to_thread(
+    return await _to_thread(
         _create_image_from_instance_sync,
         project_id, zone, instance_name, image_name, description,
     )
@@ -417,15 +529,26 @@ async def create_image_from_instance(
 
 # ── Network options ───────────────────────────────────────────────────────────
 
-def _get_network_options_sync(project_id: str, region: str, zone: str) -> dict:
+def _get_network_options_sync(project_id: str, region: str, zone: str,
+                              zone_regions: Optional[list] = None) -> dict:
     _require_compute()
     from google.cloud import compute_v1
 
     creds = _gcp_creds()
 
-    # Zones in region
+    # Zones — offered across every region the picker should expose: the current
+    # ``region`` plus any additional multi-region regions in ``zone_regions``
+    # (derived from gcp_region_configs). ZonesClient.list returns the whole
+    # project in a single call, so filtering to the wanted set costs nothing
+    # extra and keeps the Zone dropdown complete regardless of which zone is
+    # currently selected (otherwise only the default region's zones show).
+    wanted = {r for r in (zone_regions or []) if r}
+    wanted.add(region)
     zones_client = compute_v1.ZonesClient(credentials=creds)
-    zones = [z.name for z in zones_client.list(project=project_id) if z.region.endswith(f"/{region}")]
+    zones = sorted(
+        z.name for z in zones_client.list(project=project_id)
+        if any(z.region.endswith(f"/{r}") for r in wanted)
+    )
     if not zones:
         zones = [zone]
 
@@ -462,8 +585,69 @@ def _get_network_options_sync(project_id: str, region: str, zone: str) -> dict:
     }
 
 
-async def get_network_options(project_id: str, region: str, zone: str) -> dict:
-    return await asyncio.to_thread(_get_network_options_sync, project_id, region, zone)
+async def get_network_options(project_id: str, region: str, zone: str,
+                              zone_regions: Optional[list] = None) -> dict:
+    return await _to_thread(_get_network_options_sync, project_id, region, zone, zone_regions)
+
+
+def reserved_cidrs(project_id: str = "") -> set:
+    """Every IP range already claimed in the project — subnetworks (all regions,
+    primary + secondary) plus the private control-plane block of every GKE cluster.
+
+    Feeds the GKE master-CIDR allocator (``k8s_service._gke_master_cidr``): GCP
+    rejects a control-plane range that overlaps anything in the VPC the cluster
+    touches, and the check is VPC-wide, so a range in use by a cluster in ANOTHER
+    region still conflicts.
+
+    The **cluster scan is the load-bearing leg**. GCP blames the conflict on the
+    system-managed ``gke-<cluster>-<hash>-pe-subnet`` that backs a private control
+    plane, but that subnet is NOT returned by ``subnetworks.list`` (verified
+    against a live conflict) — only ``privateClusterConfig.masterIpv4CidrBlock``
+    exposes the range, including for clusters this dashboard never provisioned or
+    orphaned from a failed apply. The subnetwork scan is defense in depth: it
+    keeps the allocator off real subnets if the base block is ever pointed at
+    space the sandbox uses.
+
+    Best-effort and project-wide (over-reserving only shifts the allocator to a
+    later slot): each leg is independent and a failure is logged, not raised —
+    the caller still gets whatever the other leg found. Synchronous; the caller
+    is the sync provision path."""
+    project_id = project_id or _gcp_project()
+    out: set = set()
+    if not project_id:
+        return out
+
+    try:
+        _require_compute()
+        from google.cloud import compute_v1
+        client = compute_v1.SubnetworksClient(credentials=_gcp_creds())
+        # aggregated_list yields (scope, SubnetworksScopedList) for every region in
+        # one call — a per-region list would miss the cross-region conflicts.
+        for _scope, scoped in client.aggregated_list(project=project_id, timeout=30):
+            for sn in (scoped.subnetworks or []):
+                if sn.ip_cidr_range:
+                    out.add(sn.ip_cidr_range)
+                for sr in (sn.secondary_ip_ranges or []):
+                    if sr.ip_cidr_range:
+                        out.add(sr.ip_cidr_range)
+    except Exception as exc:
+        logger.warning("GCP reserved_cidrs: subnetwork scan failed (%s)", exc)
+
+    try:
+        session = _authed_session()
+        # locations/- = every zonal and regional cluster in the project.
+        r = session.get(
+            f"https://container.googleapis.com/v1/projects/{project_id}/locations/-/clusters",
+            timeout=30)
+        r.raise_for_status()
+        for cluster in (r.json().get("clusters") or []):
+            block = (cluster.get("privateClusterConfig") or {}).get("masterIpv4CidrBlock")
+            if block:
+                out.add(block)
+    except Exception as exc:
+        logger.warning("GCP reserved_cidrs: GKE cluster scan failed (%s)", exc)
+
+    return out
 
 
 # ── Secret Manager ────────────────────────────────────────────────────────────
@@ -480,7 +664,7 @@ def _get_secret_sync(project_id: str, secret_name: str) -> str:
 
 
 async def get_secret(project_id: str, secret_name: str) -> str:
-    return await asyncio.to_thread(_get_secret_sync, project_id, secret_name)
+    return await _to_thread(_get_secret_sync, project_id, secret_name)
 
 
 def _list_secret_names_sync(project_id: str) -> list:
@@ -495,7 +679,7 @@ def _list_secret_names_sync(project_id: str) -> list:
 async def list_secret_names(project_id: str) -> list:
     """Return every Secret Manager secret id — candidate set for the per-launch
     SSH-key-secret override picker."""
-    return await asyncio.to_thread(_list_secret_names_sync, project_id)
+    return await _to_thread(_list_secret_names_sync, project_id)
 
 
 def _clean_public_key(value: str) -> str:
@@ -564,6 +748,167 @@ async def get_ssh_private_key(project_id: str, secret_name: str) -> str:
 
 # ── Instance operations ───────────────────────────────────────────────────────
 
+def _qualify_subnetwork(subnetwork: str, project_id: str, zone: str) -> str:
+    """Normalize a subnetwork ref for GCE's ``networkInterfaces[].subnetwork``,
+    which wants a partial/full self-link — a bare name (the sandbox emits
+    ``dashboard-sandbox-vm-subnet``) is rejected with "The URL is malformed".
+    Subnets are region-scoped, so the region is derived from the instance zone.
+    Already-qualified values (containing a "/") pass through untouched."""
+    if not subnetwork or "/" in subnetwork:
+        return subnetwork
+    region = zone.rsplit("-", 1)[0]
+    return f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}"
+
+
+def subnetwork_region(subnetwork: str) -> str:
+    """The region baked into a subnetwork ref, or "" when it carries none.
+
+    Reads the ``regions/<region>/subnetworks/<name>`` segment of a full or partial
+    self-link. A bare name has no region (``_qualify_subnetwork`` derives one from the
+    instance zone), so it returns "" — callers must treat that as "no conflict", not
+    as a mismatch.
+
+    Exists so a deploy can be rejected at request time when the picked subnet lives in
+    a different region than the target zone: GCE only reports that as an opaque
+    "Scope of the specified subnetwork doesn't match the scope of the instance" 400
+    once the job is already running, and the sandbox names its subnet identically in
+    every region, so the two are indistinguishable in a picker.
+    """
+    parts = [p for p in (subnetwork or "").split("/") if p]
+    try:
+        return parts[parts.index("regions") + 1]
+    except (ValueError, IndexError):
+        return ""
+
+
+def _qualify_network(network: str) -> str:
+    """Normalize a VPC network ref for GCE's ``networkInterfaces[].network``.
+    A bare name (``dashboard-sandbox-vpc``) is likewise rejected as a malformed
+    URL, so wrap it as a global partial self-link when it isn't already a path."""
+    if not network or "/" in network:
+        return network
+    return f"global/networks/{network}"
+
+
+# Markers of a GCE *server-side* blip on instances.insert — the API returning
+# "503 … Internal error. Please try again or contact Google Support. (Code: …)",
+# a 500/backendError, or the connection dropping mid-request. These clear on
+# their own, so the same zone is worth another try.
+#
+# Capacity is deliberately NOT in here even though a stockout also surfaces as a
+# 503: re-inserting into a zone that just told us it has no room does not help —
+# that one needs a *different* zone (see _is_zone_capacity_error and the sibling
+# ladders in _run_gce_rancher_sync / _export_custom_image_to_vhd_sync).
+_TRANSIENT_INSERT_STATUS = (500, 502, 503, 504)
+
+_TRANSIENT_INSERT_MARKERS = (
+    "internal error",
+    "internal server error",
+    "internalerror",
+    "backenderror",
+    "service unavailable",
+    "serviceunavailable",
+    "deadline exceeded",
+    "connection reset",
+    "connection aborted",
+    "remote end closed",
+)
+
+
+def _is_transient_insert_error(e) -> bool:
+    """True when a GCE insert failed for a reason that a plain retry can fix.
+
+    Order matters: a zone stockout is reported as ``503 SERVICE UNAVAILABLE
+    ZONE_RESOURCE_POOL_EXHAUSTED``, so it would match a 5xx test too — check
+    capacity first and hand those to the zone-rotation logic instead of burning
+    retries in a zone that has no room."""
+    if _is_zone_capacity_error(e):
+        return False
+    # google.api_core exceptions carry the HTTP status on `.code`. Preferred over
+    # a substring hunt for "503", which also matches the digits landing in a URL,
+    # an instance name or a quota limit.
+    if getattr(e, "code", None) in _TRANSIENT_INSERT_STATUS:
+        return True
+    msg = str(e).lower()
+    return any(m in msg for m in _TRANSIENT_INSERT_MARKERS)
+
+
+# A GCE instance that exists and is on its way up. Anything else (TERMINATED,
+# SUSPENDED) is a create that landed badly — not something to adopt silently.
+_INSERT_LIVE_STATES = ("PROVISIONING", "STAGING", "RUNNING", "REPAIRING")
+
+
+def _insert_instance_with_retry(client, project_id: str, zone: str, instance_name: str,
+                                instance, attempts: int = 3, delay: int = 15,
+                                op_timeout: int = 600) -> None:
+    """``instances.insert`` + wait, retried on a transient GCE-side failure.
+
+    Without this a single "503 Internal error. Please try again" — Google's own
+    advice — failed the whole deploy job and left the operator to re-submit the
+    form by hand (observed 2026-08-12 in us-east1-b).
+
+    Before each retry the instance is looked up: a 503 on the POST usually means
+    the insert never happened, but the write can land with the response lost, and
+    re-inserting that name would 409 instead of returning the VM the user asked
+    for. A found instance in a live state is adopted and waited out; a found
+    instance in any other state re-raises, so a genuinely broken create still
+    fails loudly rather than being reported as a success."""
+    from google.api_core.exceptions import NotFound
+
+    for attempt in range(1, attempts + 1):
+        try:
+            op = client.insert(project=project_id, zone=zone, instance_resource=instance)
+            op.result(timeout=op_timeout)
+            return
+        except TimeoutError as e:
+            # op.result() ran out of patience — the operation is very likely still
+            # going, so re-inserting would 409. Raise, but with the context the bare
+            # TimeoutError (empty message) would otherwise cost the job row.
+            raise GCPError(
+                f"GCE insert for '{instance_name}' in {zone} did not complete within "
+                f"{op_timeout}s — check the instance in the console before retrying") from e
+        except Exception as e:
+            if attempt >= attempts or not _is_transient_insert_error(e):
+                raise
+            try:
+                existing = client.get(project=project_id, zone=zone, instance=instance_name)
+            except NotFound:
+                existing = None
+            except Exception as get_err:  # noqa: BLE001 — probe only; fall through to the retry
+                logger.warning("GCP deploy %s: could not check whether the instance "
+                               "already exists (%s); retrying the insert", instance_name, get_err)
+                existing = None
+            if existing is not None:
+                if existing.status not in _INSERT_LIVE_STATES:
+                    raise
+                logger.warning("GCP deploy %s: insert reported %s but the instance exists "
+                               "(status=%s) — adopting it instead of re-inserting",
+                               instance_name, e, existing.status)
+                _wait_for_instance_running(client, project_id, zone, instance_name)
+                return
+            logger.warning("GCP deploy %s: transient GCE error on attempt %d/%d, retrying "
+                           "in %ds: %s", instance_name, attempt, attempts, delay, e)
+            time.sleep(delay)
+
+
+def _wait_for_instance_running(client, project_id: str, zone: str, instance_name: str,
+                               timeout: int = 300, interval: int = 5) -> None:
+    """Poll an adopted instance until it leaves PROVISIONING/STAGING.
+
+    Only used on the adopt path — normally ``op.result()`` has already waited, and
+    the caller reads the instance's IPs straight after, which a still-provisioning
+    VM does not have yet. Best-effort: a timeout logs and returns rather than
+    failing a deploy whose VM is simply slow to boot."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        info = client.get(project=project_id, zone=zone, instance=instance_name)
+        if info.status not in ("PROVISIONING", "STAGING"):
+            return
+        time.sleep(interval)
+    logger.warning("GCP deploy %s: adopted instance still provisioning after %ds — "
+                   "continuing; IPs may be incomplete", instance_name, timeout)
+
+
 def _launch_instance_sync(
     project_id: str,
     zone: str,
@@ -612,7 +957,7 @@ def _launch_instance_sync(
     # Network interface
     nic = compute_v1.NetworkInterface()
     if subnetwork:
-        nic.subnetwork = subnetwork
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, zone)
     else:
         nic.name = "default"
     if create_external_ip:
@@ -637,8 +982,7 @@ def _launch_instance_sync(
     if network_tags:
         instance.tags = compute_v1.Tags(items=network_tags)
 
-    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
-    op.result()
+    _insert_instance_with_retry(client, project_id, zone, instance_name, instance)
 
     # Fetch live IP addresses after boot
     info = client.get(project=project_id, zone=zone, instance=instance_name)
@@ -675,7 +1019,7 @@ async def launch_instance(
     network_tags: Optional[list[str]] = None,
     labels: Optional[dict] = None,
 ) -> dict:
-    return await asyncio.to_thread(
+    return await _to_thread(
         _launch_instance_sync,
         project_id, zone, instance_name, machine_type, image_self_link,
         subnetwork, create_external_ip, ssh_username, ssh_public_key,
@@ -724,7 +1068,7 @@ def _describe_instances_sync(project_id: str, zone: str, instance_names: list[st
 
 
 async def describe_instances(project_id: str, zone: str, instance_names: list[str]) -> list[dict]:
-    return await asyncio.to_thread(_describe_instances_sync, project_id, zone, instance_names)
+    return await _to_thread(_describe_instances_sync, project_id, zone, instance_names)
 
 
 def _set_workgroup_label_sync(project_id: str, zone: str, instance_name: str, workgroup: str) -> None:
@@ -758,7 +1102,7 @@ def _set_workgroup_label_sync(project_id: str, zone: str, instance_name: str, wo
 async def set_workgroup_label(project_id: str, zone: str, instance_name: str, workgroup: str) -> None:
     """Rewrite the `workgroup` label on a GCE instance (preserves other labels).
     Used by the admin reassign endpoint."""
-    await asyncio.to_thread(_set_workgroup_label_sync, project_id, zone, instance_name, workgroup)
+    await _to_thread(_set_workgroup_label_sync, project_id, zone, instance_name, workgroup)
 
 
 def _terminate_instance_sync(project_id: str, zone: str, instance_name: str) -> None:
@@ -772,7 +1116,7 @@ def _terminate_instance_sync(project_id: str, zone: str, instance_name: str) -> 
 
 
 async def terminate_instance(project_id: str, zone: str, instance_name: str) -> None:
-    await asyncio.to_thread(_terminate_instance_sync, project_id, zone, instance_name)
+    await _to_thread(_terminate_instance_sync, project_id, zone, instance_name)
 
 
 # ── BeyondTrust SRA Jumpoint on COS-on-GCE ────────────────────────────────────
@@ -823,45 +1167,76 @@ def _run_gce_jumpoint_sync(
     machine_type: str = "e2-micro",
     cos_image_family: str = "cos-stable",
     create_external_ip: bool = True,
+    region: str = "",
 ) -> dict:
     """Launch a small COS GCE instance running the BT Jumpoint container.
     Idempotent on existence: if an instance with the same name is already
-    RUNNING in the zone, returns its info without re-creating."""
+    RUNNING in the region, returns its info without re-creating.
+
+    On a fresh launch, sibling zones in the same region are tried on
+    ``ZONE_RESOURCE_POOL_EXHAUSTED`` — same as the Portainer/Rancher node launchers.
+    Without it a single capacity-exhausted zone silently leaves the deployment with
+    NO gateway (the ensure path is best-effort for its callers, so the error is only
+    logged), and every Web Jump and tunnel that needs a broker fails."""
     _require_compute()
     from google.cloud import compute_v1
-    from google.api_core.exceptions import NotFound
+    from google.api_core.exceptions import Conflict, NotFound
 
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)
+    region = (region or (zone.rsplit("-", 1)[0] if zone else "")).strip()
 
     # Reuse if already present — but "reused" must mean a LIVE gateway. A name match
     # alone isn't enough: a STOPPED/TERMINATED VM was previously reported reused with a
     # dead jumpoint (no gateway for the tunnel). If it isn't RUNNING, start it — COS
     # re-runs the jumpoint container on boot — and wait for RUNNING before returning.
+    #
+    # Looked up REGION-wide, not in `zone` alone: with the sibling-zone fallback below
+    # an earlier launch may have landed in another zone of the region, and a
+    # zone-scoped get would 404 there and insert a DUPLICATE gateway (GCE names are
+    # unique per zone, not per region).
+    found_zone = _find_instance_zone_in_region(client, project_id, name, region) or zone
     try:
-        existing = client.get(project=project_id, zone=zone, instance=name)
+        if not found_zone:
+            # Nothing to reuse and nowhere to look: a blank zone with no regional match
+            # means this is a first launch. (A get with an empty zone is a 400, not the
+            # NotFound this block is written to absorb.)
+            raise NotFound("no zone to check for an existing gateway")
+        existing = client.get(project=project_id, zone=found_zone, instance=name)
         status = existing.status
         if status != "RUNNING":
             logger.info("GCE Jumpoint '%s' exists but status=%s — starting it for a live gateway",
                         name, status)
             try:
-                start_op = client.start(project=project_id, zone=zone, instance=name)
+                start_op = client.start(project=project_id, zone=found_zone, instance=name)
                 start_op.result(timeout=180)
-                existing = client.get(project=project_id, zone=zone, instance=name)
+                existing = client.get(project=project_id, zone=found_zone, instance=name)
                 status = existing.status
             except Exception as start_err:
                 logger.warning("GCE Jumpoint '%s' start failed (status=%s): %s",
                                name, status, start_err)
         return {
-            "name": name, "zone": zone, "self_link": existing.self_link,
+            "name": name, "zone": found_zone, "self_link": existing.self_link,
             "status": status, "reused": True,
+            # Surface the ephemeral egress IP even on reuse: the Web-Jump firewall
+            # (_jumpoint_cidrs) needs it, and a reclaimed VM's IP may have changed.
+            "external_ip": _external_ip_of(existing),
         }
     except NotFound:
         pass
 
+    # Zones to try, resolved BEFORE the instance is built: the subnet self-link is
+    # region-scoped, so it is qualified once against the region every candidate shares
+    # (and picking a real zone here also handles a blank ``zone``).
+    candidate_zones = [z for z in (_rancher_candidate_zones(project_id, region, zone, creds,
+                                                            log_label="gateway")
+                                   or [zone]) if z]
+    if not candidate_zones:
+        raise GCPError(f"No GCE zone to launch gateway '{name}' in "
+                       f"(region={region!r}, zone={zone!r})")
+
     instance = compute_v1.Instance()
     instance.name = name
-    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
 
     # Boot disk from Container-Optimised OS
     disk = compute_v1.AttachedDisk()
@@ -877,9 +1252,9 @@ def _run_gce_jumpoint_sync(
     # Network
     nic = compute_v1.NetworkInterface()
     if subnetwork:
-        nic.subnetwork = subnetwork
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, candidate_zones[0])
     elif network:
-        nic.network = network
+        nic.network = _qualify_network(network)
     if create_external_ip:
         nic.access_configs = [compute_v1.AccessConfig(
             name="External NAT", type_="ONE_TO_ONE_NAT",
@@ -899,17 +1274,50 @@ def _run_gce_jumpoint_sync(
     # Jumpoint can SSH into VMs in the user-VM subnet.
     instance.tags = compute_v1.Tags(items=[_JUMPOINT_LABEL])
 
-    logger.info(
-        "Starting GCE COS Jumpoint '%s' in %s (image=%s, machine=%s, deploy_key_len=%d)",
-        name, zone, container_image, machine_type, len(deploy_key or ""),
-    )
-    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
-    op.result(timeout=300)
+    # Insert into the first candidate zone with capacity; on
+    # ZONE_RESOURCE_POOL_EXHAUSTED fall through to the region's sibling zones.
+    launch_zone, reused, last_err = "", False, None
+    for cand in candidate_zones:
+        instance.machine_type = f"zones/{cand}/machineTypes/{machine_type}"
+        logger.info(
+            "Starting GCE COS Jumpoint '%s' in %s (image=%s, machine=%s, deploy_key_len=%d)",
+            name, cand, container_image, machine_type, len(deploy_key or ""),
+        )
+        try:
+            op = client.insert(project=project_id, zone=cand, instance_resource=instance)
+            op.result(timeout=300)
+            launch_zone = cand
+            break
+        except Conflict:
+            # Lost a find-or-create race: another worker replica created this instance
+            # between our get() above and this insert. GCE instance names are unique per
+            # zone, so a 409 means the thing we wanted now exists — which is success, not
+            # failure. Returning it (rather than raising into the caller's blanket except,
+            # which would yield None) matters because the shared host is ref-counted on
+            # jumpoint_host_id: a caller that got None would record no reference and let
+            # the host be reclaimed while it still needed it.
+            logger.info("GCE Jumpoint '%s' was created concurrently — reusing it", name)
+            launch_zone, reused = cand, True
+            break
+        except Exception as e:
+            if _should_try_next_zone(e) and cand != candidate_zones[-1]:
+                logger.warning("Gateway zone %s could not take the instance (%s) — trying "
+                               "the next zone in %s", cand, e, region)
+                last_err = e
+                continue
+            raise
+    if not launch_zone:
+        raise GCPError(f"Failed to launch gateway '{name}' in region '{region}': {last_err}")
 
-    info = client.get(project=project_id, zone=zone, instance=name)
+    # Re-fetched after the insert (or after losing the race), so both the status and
+    # the egress IP describe whichever instance actually exists now.
+    info = client.get(project=project_id, zone=launch_zone, instance=name)
     return {
-        "name": name, "zone": zone, "self_link": info.self_link,
-        "status": info.status, "reused": False,
+        "name": name, "zone": launch_zone, "self_link": info.self_link,
+        "status": info.status, "reused": reused,
+        # The Web-Jump firewall (_jumpoint_cidrs) whitelists this /32 so the Jumpoint
+        # host can reach a source-restricted Rancher/Portainer node.
+        "external_ip": _external_ip_of(info),
     }
 
 
@@ -923,13 +1331,15 @@ async def run_gce_jumpoint(
     subnetwork: str = "",
     machine_type: str = "e2-micro",
     create_external_ip: bool = True,
+    region: str = "",
 ) -> dict:
     """Async wrapper for _run_gce_jumpoint_sync."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_gce_jumpoint_sync,
             project_id, zone, name, container_image, deploy_key,
             network, subnetwork, machine_type, "cos-stable", create_external_ip,
+            region,
         )
     except GCPError:
         raise
@@ -940,13 +1350,339 @@ async def run_gce_jumpoint(
 async def stop_gce_jumpoint(project_id: str, zone: str, name: str) -> None:
     """Delete the GCE Jumpoint instance. Quiet no-op if it doesn't exist."""
     try:
-        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+        await _to_thread(_terminate_instance_sync, project_id, zone, name)
     except Exception as e:
         # NotFound is benign; log everything else
         msg = str(e)
         if "404" in msg or "not found" in msg.lower():
             return
         raise GCPError(f"Failed to stop GCE Jumpoint '{name}': {e}") from e
+
+
+# ── On-demand TCP forwarder (COS-on-GCE) for Entitle DB reachability ──────────
+# A private Cloud SQL instance's PSA IP is reachable ONLY from the sandbox VPC,
+# and GCP VPC peering is non-transitive — so the Entitle agent (in its own GKE
+# VPC, one peering hop away) can't route to it. This runs a tiny socat relay in
+# the sandbox VPC that the agent CAN reach over the GKE↔sandbox peering; socat
+# forwards to the Cloud SQL private IP. Driven by entitle_db_proxy_service.
+
+_DB_FORWARDER_LABEL = "bt-db-forwarder"
+
+
+def _socat_container_spec_yaml(image: str, listen_port: int,
+                               target_host: str, target_port: int) -> str:
+    """gce-container-declaration YAML for a one-container socat TCP relay
+    (``listen_port`` → ``target_host:target_port``). COS containers share the host
+    network, so the listener binds the VM's NIC directly. socat is transparent L4 —
+    the DB negotiates TLS/auth end-to-end with the client through it, so no protocol
+    handling is needed here."""
+    import yaml
+    spec = {
+        "spec": {
+            "containers": [{
+                "name": "socat",
+                "image": image,
+                # image ENTRYPOINT is `socat`; args become its CMD.
+                "args": [
+                    "-dd",
+                    f"TCP-LISTEN:{listen_port},fork,reuseaddr",
+                    f"TCP:{target_host}:{target_port}",
+                ],
+                "stdin": False,
+                "tty": False,
+            }],
+            "restartPolicy": "Always",
+        }
+    }
+    return yaml.safe_dump(spec, default_flow_style=False)
+
+
+def _run_gce_db_forwarder_sync(
+    project_id: str, zone: str, name: str,
+    listen_port: int, target_host: str, target_port: int, image: str,
+    network: str = "", subnetwork: str = "", machine_type: str = "e2-micro",
+    cos_image_family: str = "cos-stable", create_external_ip: bool = True,
+) -> dict:
+    """Launch (or reuse) a small COS GCE instance running a socat TCP relay to a
+    private DB. Idempotent on name; returns the instance's internal IP so the caller
+    can point Entitle's connection host at it. Tags: ``bt-jumpoint`` (inherits the
+    sandbox egress-allow to the Cloud SQL PSA range) + ``bt-db-forwarder`` (target of
+    the runtime ingress rule from the GKE agent)."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+
+    def _internal_ip(info) -> str:
+        for nic in info.network_interfaces:
+            if nic.network_i_p:
+                return nic.network_i_p
+        return ""
+
+    # Reuse a RUNNING relay; start a stopped one (COS re-runs the container on boot).
+    try:
+        existing = client.get(project=project_id, zone=zone, instance=name)
+        if existing.status != "RUNNING":
+            try:
+                client.start(project=project_id, zone=zone, instance=name).result(timeout=180)
+                existing = client.get(project=project_id, zone=zone, instance=name)
+            except Exception as start_err:
+                logger.warning("db-forwarder '%s' start failed (status=%s): %s",
+                               name, existing.status, start_err)
+        return {"name": name, "zone": zone, "internal_ip": _internal_ip(existing),
+                "status": existing.status, "reused": True}
+    except NotFound:
+        pass
+
+    instance = compute_v1.Instance()
+    instance.name = name
+    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
+
+    disk = compute_v1.AttachedDisk()
+    disk.boot = True
+    disk.auto_delete = True
+    disk.initialize_params = compute_v1.AttachedDiskInitializeParams()
+    disk.initialize_params.source_image = (
+        f"projects/cos-cloud/global/images/family/{cos_image_family}")
+    disk.initialize_params.disk_size_gb = 10
+    instance.disks = [disk]
+
+    nic = compute_v1.NetworkInterface()
+    if subnetwork:
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, zone)
+    elif network:
+        nic.network = _qualify_network(network)
+    if create_external_ip:
+        nic.access_configs = [compute_v1.AccessConfig(
+            name="External NAT", type_="ONE_TO_ONE_NAT")]
+    instance.network_interfaces = [nic]
+
+    instance.metadata = compute_v1.Metadata(items=[
+        compute_v1.Items(key="gce-container-declaration",
+                         value=_socat_container_spec_yaml(image, listen_port, target_host, target_port)),
+        compute_v1.Items(key="google-logging-enabled", value="true"),
+    ])
+    instance.labels = {"managed-by": "vm-dashboard", "purpose": _DB_FORWARDER_LABEL}
+    instance.tags = compute_v1.Tags(items=[_JUMPOINT_LABEL, _DB_FORWARDER_LABEL])
+
+    logger.info("Starting GCE socat db-forwarder '%s' in %s (%s → %s:%s, image=%s)",
+                name, zone, listen_port, target_host, target_port, image)
+    client.insert(project=project_id, zone=zone, instance_resource=instance).result(timeout=300)
+    info = client.get(project=project_id, zone=zone, instance=name)
+    return {"name": name, "zone": zone, "internal_ip": _internal_ip(info),
+            "status": info.status, "reused": False}
+
+
+async def run_gce_db_forwarder(
+    project_id: str, zone: str, name: str,
+    listen_port: int, target_host: str, target_port: int, image: str,
+    network: str = "", subnetwork: str = "", machine_type: str = "e2-micro",
+    create_external_ip: bool = True,
+) -> dict:
+    """Async wrapper for :func:`_run_gce_db_forwarder_sync`."""
+    try:
+        return await _to_thread(
+            _run_gce_db_forwarder_sync, project_id, zone, name,
+            listen_port, target_host, target_port, image,
+            network, subnetwork, machine_type, "cos-stable", create_external_ip)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to start GCE db-forwarder '{name}': {e}") from e
+
+
+async def stop_gce_db_forwarder(project_id: str, zone: str, name: str) -> None:
+    """Delete the forwarder instance. Quiet no-op if it doesn't exist."""
+    try:
+        await _to_thread(_terminate_instance_sync, project_id, zone, name)
+    except Exception as e:
+        msg = str(e)
+        if "404" in msg or "not found" in msg.lower():
+            return
+        raise GCPError(f"Failed to stop GCE db-forwarder '{name}': {e}") from e
+
+
+def _ensure_firewall_rule_sync(project: str, name: str, network: str,
+                               source_ranges: list, target_tags: list,
+                               protocol: str, ports: list) -> None:
+    """Idempotently create an INGRESS allow firewall rule (leave it if it already
+    exists). ``network`` may be a bare name or a self-link."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.FirewallsClient(credentials=creds)
+    try:
+        client.get(project=project, firewall=name)
+        return  # already present — assume correct
+    except NotFound:
+        pass
+    net = network if "/" in network else f"projects/{project}/global/networks/{network}"
+    rule = compute_v1.Firewall(
+        name=name, network=net, direction="INGRESS",
+        source_ranges=list(source_ranges), target_tags=list(target_tags),
+        allowed=[compute_v1.Allowed(I_p_protocol=protocol, ports=[str(p) for p in ports])],
+        description="dashboard: allow the Entitle agent (GKE) to reach on-demand DB forwarders",
+    )
+    client.insert(project=project, firewall_resource=rule).result(timeout=120)
+
+
+async def ensure_firewall_rule(*, project: str, name: str, network: str,
+                               source_ranges: list, target_tags: list,
+                               protocol: str = "tcp", ports: Optional[list] = None) -> None:
+    """Async wrapper: idempotently ensure an INGRESS allow firewall rule."""
+    try:
+        await _to_thread(_ensure_firewall_rule_sync, project, name, network,
+                                source_ranges, target_tags, protocol, ports or [])
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to ensure firewall rule '{name}': {e}") from e
+
+
+async def delete_firewall_rule(project: str, name: str) -> None:
+    """Delete a firewall rule; quiet no-op if it doesn't exist."""
+    def _sync():
+        _require_compute()
+        from google.cloud import compute_v1
+        client = compute_v1.FirewallsClient(credentials=_gcp_creds())
+        client.delete(project=project, firewall=name).result()
+    try:
+        await _to_thread(_sync)
+    except Exception as e:
+        msg = str(e)
+        if "404" in msg or "not found" in msg.lower():
+            return
+        raise GCPError(f"Failed to delete firewall rule '{name}': {e}") from e
+
+
+# ── On-demand VM egress primitives (Cloud NAT + egress ALLOW; see gcp_nat_service) ──
+#
+# The sandbox deliberately leaves the vm-subnet OFF Cloud NAT and adds a priority-1000
+# EGRESS DENY on the VM network tag (setup-gcp.sh) — two independent gates, so a VM
+# has no outbound internet. These primitives open BOTH on demand and close them again
+# when the last VM goes, so there is no standing egress (or standing cost) for VMs that
+# don't exist. Neither one touches the sandbox's permanent posture: the NAT is a SECOND
+# gateway on the same Cloud Router, and the ALLOW is a separate higher-priority rule.
+
+def nats_excluding(nats, nat_name: str) -> list:
+    """Every Cloud NAT gateway on a router EXCEPT ``nat_name``.
+
+    The one piece of logic both halves depend on, kept pure so it can be tested without
+    the SDK. ``routers.patch`` REPLACES the repeated ``nats`` field wholesale, so the
+    NAT gateways we are not touching (the sandbox's jumpoint-subnet + k8s ones) have to be
+    read back and re-sent verbatim or they are silently dropped — which would cut the PRA
+    Gateway's own egress, i.e. the SSH path to every VM in the sandbox."""
+    return [n for n in nats if getattr(n, "name", None) != nat_name]
+
+
+def _ensure_vm_egress_nat_sync(project: str, region: str, router: str, nat_name: str,
+                               subnetwork: str) -> bool:
+    """Idempotently add a Cloud NAT gateway scoped to ``subnetwork``'s primary range.
+    Returns True if it created one, False if it was already there."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    client = compute_v1.RoutersClient(credentials=_gcp_creds())
+    current = client.get(project=project, region=region, router=router)
+    others = nats_excluding(current.nats, nat_name)
+    if len(others) != len(list(current.nats)):
+        return False  # already present — leave it alone
+
+    sub = subnetwork if "/" in subnetwork else (
+        f"projects/{project}/regions/{region}/subnetworks/{subnetwork}")
+    desired = others + [compute_v1.RouterNat(
+        name=nat_name,
+        nat_ip_allocate_option="AUTO_ONLY",
+        source_subnetwork_ip_ranges_to_nat="LIST_OF_SUBNETWORKS",
+        subnetworks=[compute_v1.RouterNatSubnetworkToNat(
+            name=sub, source_ip_ranges_to_nat=["PRIMARY_IP_RANGE"])],
+    )]
+    client.patch(project=project, region=region, router=router,
+                 router_resource=compute_v1.Router(nats=desired)).result(timeout=300)
+    return True
+
+
+async def ensure_vm_egress_nat(*, project: str, region: str, router: str, nat_name: str,
+                               subnetwork: str) -> bool:
+    """Async wrapper: ensure the on-demand VM Cloud NAT gateway exists."""
+    try:
+        return await _to_thread(_ensure_vm_egress_nat_sync, project, region,
+                                router, nat_name, subnetwork)
+    except Exception as e:
+        raise GCPError(f"Failed to ensure Cloud NAT '{nat_name}' on router "
+                       f"'{router}' ({region}): {e}") from e
+
+
+def _delete_vm_egress_nat_sync(project: str, region: str, router: str, nat_name: str) -> bool:
+    """Remove ONLY ``nat_name`` from the router, preserving every other gateway."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    client = compute_v1.RoutersClient(credentials=_gcp_creds())
+    try:
+        current = client.get(project=project, region=region, router=router)
+    except NotFound:
+        return False  # no router → nothing to reclaim
+    kept = nats_excluding(current.nats, nat_name)
+    if len(kept) == len(list(current.nats)):
+        return False  # already gone
+    client.patch(project=project, region=region, router=router,
+                 router_resource=compute_v1.Router(nats=kept)).result(timeout=300)
+    return True
+
+
+async def delete_vm_egress_nat(*, project: str, region: str, router: str,
+                               nat_name: str) -> bool:
+    """Async wrapper: drop the on-demand VM Cloud NAT gateway. Quiet if absent."""
+    try:
+        return await _to_thread(_delete_vm_egress_nat_sync, project, region,
+                                router, nat_name)
+    except Exception as e:
+        raise GCPError(f"Failed to delete Cloud NAT '{nat_name}' on router "
+                       f"'{router}' ({region}): {e}") from e
+
+
+def _ensure_egress_allow_rule_sync(project: str, name: str, network: str,
+                                   target_tags: list, priority: int,
+                                   destination_ranges: list) -> None:
+    """Idempotently create an EGRESS ALLOW rule that outranks the sandbox's
+    priority-1000 ``*-deny-vm-egress``. Lower number = higher precedence in GCP."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    client = compute_v1.FirewallsClient(credentials=_gcp_creds())
+    try:
+        client.get(project=project, firewall=name)
+        return  # already present — assume correct
+    except NotFound:
+        pass
+    net = network if "/" in network else f"projects/{project}/global/networks/{network}"
+    rule = compute_v1.Firewall(
+        name=name, network=net, direction="EGRESS", priority=priority,
+        target_tags=list(target_tags), destination_ranges=list(destination_ranges),
+        allowed=[compute_v1.Allowed(I_p_protocol="all")],
+        description="dashboard: on-demand VM internet egress (paired with the "
+                    "on-demand Cloud NAT; removed when the last VM is destroyed)",
+    )
+    client.insert(project=project, firewall_resource=rule).result(timeout=180)
+
+
+async def ensure_egress_allow_rule(*, project: str, name: str, network: str,
+                                   target_tags: list, priority: int = 900,
+                                   destination_ranges: Optional[list] = None) -> None:
+    """Async wrapper: idempotently ensure the on-demand EGRESS ALLOW rule."""
+    try:
+        await _to_thread(_ensure_egress_allow_rule_sync, project, name, network,
+                         target_tags, priority,
+                         destination_ranges or ["0.0.0.0/0"])
+    except Exception as e:
+        raise GCPError(f"Failed to ensure egress allow rule '{name}': {e}") from e
 
 
 def _container_image_from_metadata(info) -> str:
@@ -1005,7 +1741,7 @@ def _list_gce_jumpoints_sync(project_id: str) -> list[dict]:
 async def list_gce_jumpoints(project_id: str) -> list[dict]:
     """List the BT Jumpoint container instances (COS on GCE) in the project."""
     try:
-        return await asyncio.to_thread(_list_gce_jumpoints_sync, project_id)
+        return await _to_thread(_list_gce_jumpoints_sync, project_id)
     except GCPError:
         raise
     except Exception as e:
@@ -1094,9 +1830,9 @@ def _deploy_compose_gce_sync(
 
     nic = compute_v1.NetworkInterface()
     if subnetwork:
-        nic.subnetwork = subnetwork
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, zone)
     elif network:
-        nic.network = network
+        nic.network = _qualify_network(network)
     if create_external_ip:
         nic.access_configs = [compute_v1.AccessConfig(
             name="External NAT", type_="ONE_TO_ONE_NAT",
@@ -1136,7 +1872,7 @@ async def deploy_compose_gce(
 ) -> dict:
     """Deploy a parsed compose spec to a new COS GCE instance."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _deploy_compose_gce_sync,
             project_id, zone, name, services, machine_type,
             network, subnetwork, create_external_ip, "cos-stable",
@@ -1187,7 +1923,7 @@ def _list_gce_compose_sync(project_id: str) -> list[dict]:
 async def list_gce_compose(project_id: str) -> list[dict]:
     """List the compose container instances (COS on GCE) in the project."""
     try:
-        return await asyncio.to_thread(_list_gce_compose_sync, project_id)
+        return await _to_thread(_list_gce_compose_sync, project_id)
     except GCPError:
         raise
     except Exception as e:
@@ -1195,10 +1931,15 @@ async def list_gce_compose(project_id: str) -> list[dict]:
 
 
 # ── Cloud Run Jobs listing (Ansible / promote / k8s runners) ─────────────────
-# The runner jobs (labels.managed-by=vm-dashboard) self-delete when their
-# execution finishes, so a live listing is effectively "in-flight jobs" — the
-# GCP analogue of the ECS-tasks / ACI-container-groups panels. Runner jobs are
-# regional, so we sweep every region a runner can target and cap the result.
+# The runner jobs (labels.managed-by=vm-dashboard) delete themselves when their
+# execution finishes, so this panel is meant to be an "in-flight jobs" view — the
+# GCP analogue of the ECS-tasks / ACI-container-groups panels. That self-delete is
+# best-effort though (see the `finally` blocks in the runners below: a worker
+# restart between the execution ending and the delete landing strands the job), so
+# finished runners DO accumulate in the project. They are filtered out here rather
+# than in the UI, so the containers panel and the dashboard tile — which just
+# counts what this returns — agree. Runner jobs are regional, so we sweep every
+# region a runner can target and cap the result.
 
 def _cloud_run_runner_regions() -> list[str]:
     """Distinct regions any Cloud Run runner can target (ansible/promote/k8s)."""
@@ -1226,8 +1967,191 @@ def _cloud_run_job_status(job) -> str:
         return "RUNNING"
 
 
-def _list_cloud_run_jobs_sync(project_id: str, limit: int = 5) -> list[dict]:
-    """List dashboard-managed Cloud Run Jobs (newest first, capped at `limit`)."""
+def _cloud_run_job_row(job, region: str) -> Optional[dict]:
+    """Shape a listed Cloud Run Job into a panel row, or None to hide it.
+
+    Hidden are foreign jobs (not ours to report) and runners whose execution has
+    already finished — this is an in-flight view, and a stranded COMPLETED job is
+    cleanup debris, not work in progress. A job whose state can't be read is KEPT:
+    the fallback in `_cloud_run_job_status` is "RUNNING", and hiding a live runner
+    is the worse error of the two.
+    """
+    labels = dict(job.labels) if job.labels else {}
+    if labels.get("managed-by") != "vm-dashboard":
+        return None
+    status = _cloud_run_job_status(job)
+    if status == "COMPLETED":
+        return None
+    image = ""
+    try:
+        conts = job.template.template.containers
+        if conts:
+            image = conts[0].image
+    except Exception:
+        pass
+    created_at = ""
+    try:
+        if job.create_time:
+            created_at = job.create_time.isoformat()
+    except Exception:
+        pass
+    return {
+        "name":       job.name.split("/")[-1],
+        "region":     region,
+        "purpose":    labels.get("purpose", ""),
+        "image":      image,
+        "status":     status,
+        "created_at": created_at,
+    }
+
+
+# ── Stranded-runner reaper ────────────────────────────────────────────────────
+# `_cloud_run_job_row` HIDES a finished runner; this reaps it. Each runner deletes
+# its own job in a `finally`, but that delete is best-effort — a worker restart (or
+# a delete that itself fails) between the execution ending and the delete landing
+# leaves a COMPLETED job sitting in the project forever. The live project was
+# holding k8s-runner jobs from four separate days that way.
+#
+# Same safety-net shape as ephemeral_gc.sweep() and the Cloud SQL orphan sweep: it
+# only ever touches a resource it can positively identify as ours and finished, it
+# runs opportunistically off a path that is already walking the regions, and every
+# failure is logged rather than raised.
+
+_CLOUD_RUN_REAP_AGE_MIN_DEFAULT = 60
+
+# A runner's own lifetime bounds how recent a job the reaper may touch: the
+# execution times out at 1200s and the poll loop waits up to 120 x 10s on top, then
+# logs are fetched, and only then does the `finally` delete run. Reaping inside that
+# window would pull the job out from under a live runner — its next get_execution
+# would 404 and fail a run whose work had actually succeeded. 30 min is the floor
+# regardless of what the config says.
+_CLOUD_RUN_REAP_AGE_MIN_FLOOR = 30
+
+
+def _cloud_run_reap_enabled() -> bool:
+    """Whether the OPPORTUNISTIC sweep runs. The explicit reap action ignores this."""
+    from . import config_service
+    return config_service.get_bool("gcp_cloud_run_job_reap_enabled", True)
+
+
+def _cloud_run_reap_min_age_s() -> int:
+    """How long a finished runner job must have sat before the reaper may delete it."""
+    raw = _cfg("gcp_cloud_run_job_reap_age_minutes")
+    if not raw:
+        from ..config import settings
+        raw = getattr(settings, "gcp_cloud_run_job_reap_age_minutes",
+                      _CLOUD_RUN_REAP_AGE_MIN_DEFAULT)
+    try:
+        minutes = int(raw)
+    except (TypeError, ValueError):
+        minutes = _CLOUD_RUN_REAP_AGE_MIN_DEFAULT
+    return max(_CLOUD_RUN_REAP_AGE_MIN_FLOOR, minutes) * 60
+
+
+def _cloud_run_job_finished_age_s(job, *, now: Optional[datetime] = None) -> Optional[float]:
+    """Seconds since this job's execution finished, or None when that can't be read.
+
+    Prefers the execution's `completion_time`. Falls back to the job's `create_time`,
+    which OVERSTATES the age by however long the run took — bounded, since the runners
+    cap an execution at 1200s, and harmless against an age guard floored well above a
+    runner's whole lifetime. The fallback matters: it keeps the reaper working across
+    the google-cloud-run field-shape drift that `_cloud_run_job_status` already guards
+    for, instead of silently leaking again.
+
+    None means "don't reap" — the reaper only ever deletes a job it can date.
+    """
+    now = now or datetime.now(timezone.utc)
+
+    def _age(ts) -> Optional[float]:
+        try:
+            if hasattr(ts, "ToDatetime"):  # protobuf Timestamp
+                ts = ts.ToDatetime()       # naive UTC on older protobuf; tz-aware on newer
+            if not isinstance(ts, datetime):
+                return None
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return (now - ts).total_seconds()
+        except Exception:
+            return None
+
+    try:
+        # HasField first: an UNSET protobuf Timestamp reads back as epoch 0, which
+        # would date every job to 1970 and make the age guard meaningless.
+        ref = job._pb.latest_created_execution
+        completion = ref.completion_time if ref.HasField("completion_time") else None
+    except Exception:
+        completion = None
+    if completion is not None:
+        age = _age(completion)
+        if age is not None:
+            return age
+    return _age(getattr(job, "create_time", None))
+
+
+def _cloud_run_reap_target(job, region: str, *, min_age_s: float) -> Optional[dict]:
+    """Describe a job that is safe to reap, or None to leave it alone.
+
+    Three guards, all of which must hold:
+
+      * ``labels.managed-by == vm-dashboard`` — the project holds Cloud Run Jobs we
+        did not create, and the reaper must never delete one of them;
+      * the execution has FINISHED. A PENDING or RUNNING job is live work. Note this
+        guard fails safe by construction: `_cloud_run_job_status` falls back to
+        "RUNNING" when it can't read the fields, so field-shape drift can only ever
+        make the reaper do nothing — never make it delete a running job;
+      * it finished at least ``min_age_s`` ago, so the reaper cannot race the
+        runner's own cleanup (see `_CLOUD_RUN_REAP_AGE_MIN_FLOOR`).
+    """
+    labels = dict(job.labels) if job.labels else {}
+    if labels.get("managed-by") != "vm-dashboard":
+        return None
+    if _cloud_run_job_status(job) != "COMPLETED":
+        return None
+    age = _cloud_run_job_finished_age_s(job)
+    if age is None or age < min_age_s:
+        return None
+    return {
+        "name":      job.name.split("/")[-1],
+        "full_name": job.name,
+        "region":    region,
+        "purpose":   labels.get("purpose", ""),
+        "age_s":     int(age),
+    }
+
+
+def _reap_cloud_run_jobs(jobs_client, targets: list[dict]) -> dict:
+    """Delete each target, best-effort. Returns ``{"reaped": [...], "failed": n}``.
+
+    Deletes are submitted but not waited on. The job is already finished — the LRO is
+    only tidying up — and blocking a containers-page render on N sequential waits is
+    the worse trade. A delete that never lands is simply retried by the next sweep;
+    reaping is idempotent, since a job that did go away is just NotFound next time.
+    """
+    reaped: list[dict] = []
+    failed = 0
+    for t in targets:
+        try:
+            jobs_client.delete_job(name=t["full_name"])
+        except Exception as exc:  # noqa: BLE001 — a 403/404 here must stay non-fatal
+            failed += 1
+            logger.warning("Cloud Run reaper: could not delete %s in %s: %s",
+                           t["name"], t["region"], exc)
+            continue
+        reaped.append(t)
+        logger.info("Cloud Run reaper: deleted stranded %s job %s in %s (finished %s ago)",
+                    t["purpose"] or "runner", t["name"], t["region"],
+                    timedelta(seconds=t["age_s"]))
+    return {"reaped": reaped, "failed": failed}
+
+
+def _list_cloud_run_jobs_sync(project_id: str, limit: int = 20) -> list[dict]:
+    """List in-flight dashboard-managed Cloud Run Jobs (newest first, capped at
+    `limit`). Finished jobs are dropped before the cap, so a backlog of stranded
+    COMPLETED runners can never crowd out a job that is actually running.
+
+    Doubles as the opportunistic reaper: this walk already visits every runner region
+    and already reads each job's state, so reaping what it hides costs no extra list
+    calls. Entirely best-effort — the cleanup can never fail the listing."""
     _require_run()
     from google.cloud import run_v2
 
@@ -1236,35 +2160,23 @@ def _list_cloud_run_jobs_sync(project_id: str, limit: int = 5) -> list[dict]:
 
     results: list[dict] = []
     errors: list[str] = []
+    reap_targets: list[dict] = []
+    reap_age_s = _cloud_run_reap_min_age_s() if _cloud_run_reap_enabled() else None
     regions = _cloud_run_runner_regions()
     for region in regions:
         parent = f"projects/{project_id}/locations/{region}"
         try:
             for job in jobs_client.list_jobs(parent=parent):
-                labels = dict(job.labels) if job.labels else {}
-                if labels.get("managed-by") != "vm-dashboard":
-                    continue
-                image = ""
-                try:
-                    conts = job.template.template.containers
-                    if conts:
-                        image = conts[0].image
-                except Exception:
-                    pass
-                created_at = ""
-                try:
-                    if job.create_time:
-                        created_at = job.create_time.isoformat()
-                except Exception:
-                    pass
-                results.append({
-                    "name":       job.name.split("/")[-1],
-                    "region":     region,
-                    "purpose":    labels.get("purpose", ""),
-                    "image":      image,
-                    "status":     _cloud_run_job_status(job),
-                    "created_at": created_at,
-                })
+                row = _cloud_run_job_row(job, region)
+                if row is not None:
+                    results.append(row)
+                elif reap_age_s is not None:
+                    # Only a HIDDEN job can be debris — anything shown is in flight.
+                    # The reap guards re-check ownership, so a foreign job hidden by
+                    # the row filter is still never a candidate here.
+                    target = _cloud_run_reap_target(job, region, min_age_s=reap_age_s)
+                    if target is not None:
+                        reap_targets.append(target)
         except Exception as e:  # one region being unavailable shouldn't blank the panel
             errors.append(f"{region}: {e}")
             logger.warning("Cloud Run list_jobs failed in %s: %s", region, e)
@@ -1273,18 +2185,88 @@ def _list_cloud_run_jobs_sync(project_id: str, limit: int = 5) -> list[dict]:
     if not results and errors and len(errors) == len(regions):
         raise GCPError("; ".join(errors))
 
+    # Reap AFTER the walk — never delete while paging a list — and behind its own
+    # guard, so a delete that 403s can't blank the panel we are about to return.
+    if reap_targets:
+        try:
+            _reap_cloud_run_jobs(jobs_client, reap_targets)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Cloud Run reaper: opportunistic sweep failed (non-fatal): %s", exc)
+
     results.sort(key=lambda j: j["created_at"] or "", reverse=True)
     return results[:limit]
 
 
-async def list_cloud_run_jobs(project_id: str, limit: int = 5) -> list[dict]:
-    """List dashboard-managed Cloud Run runner jobs (in-flight / most recent)."""
+async def list_cloud_run_jobs(project_id: str, limit: int = 20) -> list[dict]:
+    """List the dashboard-managed Cloud Run runner jobs currently in flight."""
     try:
-        return await asyncio.to_thread(_list_cloud_run_jobs_sync, project_id, limit)
+        return await _to_thread(_list_cloud_run_jobs_sync, project_id, limit)
     except GCPError:
         raise
     except Exception as e:
         raise GCPError(f"Failed to list Cloud Run jobs: {e}") from e
+
+
+def _reap_stranded_cloud_run_jobs_sync(
+    project_id: str, *, min_age_s: Optional[float] = None,
+) -> dict:
+    """Sweep every runner region and delete stranded FINISHED runner jobs.
+
+    The explicit form of the opportunistic sweep in `_list_cloud_run_jobs_sync` —
+    identical guards, identical deletes — for an operator who wants the debris gone
+    now rather than on the next containers-page load, and the way to clear a backlog
+    that accrued while the automatic sweep was disabled. Returns what it reaped.
+
+    ``min_age_s`` overrides the configured guard (tests only; the endpoint does not
+    expose it). Raises :class:`GCPError` only when EVERY region failed to list —
+    unlike the listing path, an operator asking for a reap should hear that it could
+    not run at all. Individual delete failures are counted, not raised."""
+    _require_run()
+    from google.cloud import run_v2
+
+    if min_age_s is None:
+        min_age_s = _cloud_run_reap_min_age_s()
+    creds = _gcp_creds()
+    jobs_client = run_v2.JobsClient(credentials=creds)
+
+    targets: list[dict] = []
+    errors: list[str] = []
+    regions = _cloud_run_runner_regions()
+    for region in regions:
+        parent = f"projects/{project_id}/locations/{region}"
+        try:
+            for job in jobs_client.list_jobs(parent=parent):
+                target = _cloud_run_reap_target(job, region, min_age_s=min_age_s)
+                if target is not None:
+                    targets.append(target)
+        except Exception as e:  # noqa: BLE001 — one bad region shouldn't stop the rest
+            errors.append(f"{region}: {e}")
+            logger.warning("Cloud Run reaper: list_jobs failed in %s: %s", region, e)
+
+    if errors and len(errors) == len(regions):
+        raise GCPError("; ".join(errors))
+
+    outcome = _reap_cloud_run_jobs(jobs_client, targets)
+    logger.info("Cloud Run reaper: swept %s — reaped %d, failed %d",
+                ", ".join(regions) or "no regions",
+                len(outcome["reaped"]), outcome["failed"])
+    return {
+        "reaped":  outcome["reaped"],
+        "failed":  outcome["failed"],
+        "regions": regions,
+        "errors":  errors,
+    }
+
+
+async def reap_stranded_cloud_run_jobs(project_id: str) -> dict:
+    """Delete dashboard-managed Cloud Run runner jobs left behind by a run whose
+    self-delete never landed. Never touches a job that is pending or running."""
+    try:
+        return await _to_thread(_reap_stranded_cloud_run_jobs_sync, project_id)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to reap stranded Cloud Run jobs: {e}") from e
 
 
 # ── Rancher management node on COS-on-GCE ─────────────────────────────────────
@@ -1407,6 +2389,100 @@ def _external_ip_of(info) -> str:
     return ""
 
 
+def _find_instance_zone_in_region(client, project_id: str, name: str, region: str) -> str:
+    """The zone in ``region`` where instance ``name`` lives, or ``""``.
+
+    Needed wherever a launcher has zone fallback: the VM may sit in a sibling zone of
+    the one we'd pick today, and a zone-scoped ``get`` would 404 and create a second
+    copy under the same name (GCE names are unique per zone, not per region).
+    Best-effort — a lookup failure returns ``""``, which just means "insert"."""
+    if not region:
+        return ""
+    try:
+        from google.cloud import compute_v1
+        request = compute_v1.AggregatedListInstancesRequest(
+            project=project_id, filter=f'name = "{name}"')
+        for zone_path, scoped in client.aggregated_list(request=request):
+            for inst in (scoped.instances or []):
+                zone_name = zone_path.split("/")[-1]
+                if inst.name == name and zone_name.rsplit("-", 1)[0] == region:
+                    return zone_name
+    except Exception as e:  # noqa: BLE001 — inventory read; the caller can still insert
+        logger.warning("could not search region %s for instance '%s' (%s)", region, name, e)
+    return ""
+
+
+def _internal_ip_of(info) -> str:
+    """Best-effort: pull the primary internal (VPC) IP off a compute instance —
+    the address in-cloud runners reach it at (VPC-connector egress is
+    private-ranges-only, so the public IP is unroutable from them)."""
+    for nic in (info.network_interfaces or []):
+        if nic.network_i_p:
+            return nic.network_i_p
+    return ""
+
+
+def _is_zone_capacity_error(e) -> bool:
+    """True when a GCE insert failed because the *zone* is out of capacity —
+    ``ZONE_RESOURCE_POOL_EXHAUSTED`` / "does not have enough resources". Anything
+    else (quota, bad subnet, permission) would fail identically elsewhere."""
+    msg = str(e).upper()
+    return ("ZONE_RESOURCE_POOL_EXHAUSTED" in msg
+            or "DOES NOT HAVE ENOUGH RESOURCES" in msg)
+
+
+def _should_try_next_zone(e) -> bool:
+    """True when a failed instance insert is worth re-attempting in a SIBLING zone.
+
+    Two things qualify, and the next zone answers both: it is a different capacity
+    pool *and* a different set of servers. Capacity was the original case; the 503
+    "Internal error. Please try again" that failed a live deploy on 2026-08-12 is
+    the other, and gating only on capacity meant one GCE-side blip took out the
+    shared gateway — and with it every tunnel and Web Jump that needs a broker —
+    while a perfectly good sibling zone sat unused.
+
+    Everything else (quota, a bad subnet, a missing permission) fails identically
+    wherever it runs, so those still raise on the first attempt."""
+    return _is_zone_capacity_error(e) or _is_transient_insert_error(e)
+
+
+def _rancher_candidate_zones(project_id: str, region: str, preferred_zone: str,
+                             creds, limit: int = 8, *, log_label: str = "rancher") -> list:
+    """Ordered UP zones to try for a COS management node, **within one region**.
+
+    The node's subnet is region-scoped, so we never cross regions here (unlike the
+    image-export worker's :func:`_export_candidate_zones`, whose source image is
+    global). Order: the preferred zone first (tried even if not listed UP — a zone
+    can be UP yet capacity-exhausted), then the region's other UP zones sorted. This
+    also picks a valid zone when ``preferred_zone`` is blank, sidestepping the
+    "region has no -a zone" trap (us-east1 starts at -b). Best-effort: falls back to
+    ``[preferred_zone]`` (or ``[]``) if zones can't be enumerated."""
+    pref = (preferred_zone or "").strip()
+    region = (region or "").strip()
+    try:
+        from google.auth.transport.requests import AuthorizedSession
+        session = AuthorizedSession(creds or _gcp_creds())
+        resp = session.get(
+            f"https://compute.googleapis.com/compute/v1/projects/{project_id}/zones",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        up = sorted(z["name"] for z in resp.json().get("items", [])
+                    if z.get("status") == "UP" and z.get("name")
+                    and z["name"].rsplit("-", 1)[0] == region)
+    except Exception as e:
+        logger.warning("%s: could not enumerate zones (%s); no zone fallback", log_label, e)
+        return [pref] if pref else []
+
+    ordered: list = []
+    if pref:
+        ordered.append(pref)
+    for z in up:
+        if z not in ordered:
+            ordered.append(z)
+    return ordered[:limit] or ([pref] if pref else [])
+
+
 def _run_gce_rancher_sync(
     project_id: str,
     zone: str,
@@ -1420,11 +2496,17 @@ def _run_gce_rancher_sync(
     network_tag: str = "rancher",
     cos_image_family: str = "cos-stable",
     create_external_ip: bool = True,
+    region: str = "",
 ) -> dict:
     """Launch (or reuse) a COS GCE instance running the Rancher server container.
     Idempotent on existence: a RUNNING same-named VM is returned as-is; a stopped
     one is started (COS re-runs the container on boot). Returns the public IP +
-    derived https URL so the caller can pin server-url and bootstrap."""
+    derived https URL so the caller can pin server-url and bootstrap.
+
+    ``zone`` may be blank — the launcher then auto-picks a valid zone in ``region``
+    (falling back to ``region_of(zone)`` when only a zone is given). On a fresh
+    launch it tries sibling zones in the same region on ``ZONE_RESOURCE_POOL_EXHAUSTED``
+    so a single capacity-exhausted zone doesn't fail the deploy."""
     if machine_type in _RANCHER_TOO_SMALL:
         raise GCPError(
             f"machine_type '{machine_type}' has <4 GB RAM — Rancher will OOM. "
@@ -1435,33 +2517,43 @@ def _run_gce_rancher_sync(
 
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)
+    region = (region or (zone.rsplit("-", 1)[0] if zone else "")).strip()
 
-    # Reuse a LIVE node. As with the Jumpoint, a name match isn't enough — a
-    # stopped VM has no Rancher listening, so start it and wait for RUNNING.
-    try:
-        existing = client.get(project=project_id, zone=zone, instance=name)
-        status = existing.status
-        if status != "RUNNING":
-            logger.info("GCE Rancher '%s' exists but status=%s — starting it", name, status)
-            try:
-                start_op = client.start(project=project_id, zone=zone, instance=name)
-                start_op.result(timeout=180)
-                existing = client.get(project=project_id, zone=zone, instance=name)
-                status = existing.status
-            except Exception as start_err:
-                logger.warning("GCE Rancher '%s' start failed (status=%s): %s", name, status, start_err)
-        external_ip = _external_ip_of(existing) if create_external_ip else ""
-        return {
-            "name": name, "zone": zone, "self_link": existing.self_link,
-            "status": status, "external_ip": external_ip,
-            "url": f"https://{external_ip}" if external_ip else "", "reused": True,
-        }
-    except NotFound:
-        pass
+    # Reuse a LIVE node when an exact zone is known. As with the Jumpoint, a name
+    # match isn't enough — a stopped VM has no Rancher listening, so start it and
+    # wait for RUNNING. (Skipped for a blank zone: a fresh launch has nothing to
+    # reuse, and the caller relocates any node that lives in a different region.)
+    if zone:
+        try:
+            existing = client.get(project=project_id, zone=zone, instance=name)
+            status = existing.status
+            if status != "RUNNING":
+                logger.info("GCE Rancher '%s' exists but status=%s — starting it", name, status)
+                try:
+                    start_op = client.start(project=project_id, zone=zone, instance=name)
+                    start_op.result(timeout=180)
+                    existing = client.get(project=project_id, zone=zone, instance=name)
+                    status = existing.status
+                except Exception as start_err:
+                    logger.warning("GCE Rancher '%s' start failed (status=%s): %s", name, status, start_err)
+            external_ip = _external_ip_of(existing) if create_external_ip else ""
+            return {
+                "name": name, "zone": zone, "self_link": existing.self_link,
+                "status": status, "external_ip": external_ip,
+                "internal_ip": _internal_ip_of(existing),
+                "url": f"https://{external_ip}" if external_ip else "", "reused": True,
+            }
+        except NotFound:
+            pass
+
+    candidate_zones = _rancher_candidate_zones(project_id, region, zone, creds)
+    if not candidate_zones:
+        raise GCPError(
+            f"No available zone found in region '{region or '(unknown)'}' for the "
+            f"Rancher node — check the region has a configured subnet and UP zones.")
 
     instance = compute_v1.Instance()
     instance.name = name
-    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
 
     # Boot disk from Container-Optimised OS. Ephemeral: auto_delete=True — a VM
     # delete discards /var/lib/rancher (state), matching the disposable posture.
@@ -1480,11 +2572,12 @@ def _run_gce_rancher_sync(
     # (the sandbox emits bare names like 'dashboard-sandbox-vpc'). Normalize them
     # so a custom-mode VPC lands in a valid subnetwork instead of failing with
     # "URL is malformed" — mirrors _ensure_rancher_firewall_sync's network ref.
+    # The subnet is region-scoped and every candidate zone shares one region, so
+    # this is computed once.
     if subnetwork:
         if "/" in subnetwork:
             nic.subnetwork = subnetwork
         else:
-            region = zone.rsplit("-", 1)[0]
             nic.subnetwork = f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}"
     elif network:
         nic.network = network if "/" in network else f"global/networks/{network}"
@@ -1502,16 +2595,35 @@ def _run_gce_rancher_sync(
     instance.labels = {"managed-by": "vm-dashboard", "purpose": _RANCHER_LABEL}
     instance.tags = compute_v1.Tags(items=[network_tag])
 
-    logger.info("Starting GCE COS Rancher '%s' in %s (image=%s, machine=%s)",
-                name, zone, container_image, machine_type)
-    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
-    op.result(timeout=300)
+    # Insert into the first candidate zone with capacity; on
+    # ZONE_RESOURCE_POOL_EXHAUSTED fall through to the region's sibling zones.
+    launch_zone = ""
+    last_err = None
+    for cand in candidate_zones:
+        instance.machine_type = f"zones/{cand}/machineTypes/{machine_type}"
+        logger.info("Starting GCE COS Rancher '%s' in %s (image=%s, machine=%s)",
+                    name, cand, container_image, machine_type)
+        try:
+            op = client.insert(project=project_id, zone=cand, instance_resource=instance)
+            op.result(timeout=300)
+            launch_zone = cand
+            break
+        except Exception as e:
+            if _should_try_next_zone(e) and cand != candidate_zones[-1]:
+                logger.warning("Rancher zone %s could not take the instance (%s) — trying "
+                               "the next zone in %s", cand, e, region)
+                last_err = e
+                continue
+            raise
+    if not launch_zone:
+        raise GCPError(f"Failed to launch Rancher node in region '{region}': {last_err}")
 
-    info = client.get(project=project_id, zone=zone, instance=name)
+    info = client.get(project=project_id, zone=launch_zone, instance=name)
     external_ip = _external_ip_of(info) if create_external_ip else ""
     return {
-        "name": name, "zone": zone, "self_link": info.self_link,
+        "name": name, "zone": launch_zone, "self_link": info.self_link,
         "status": info.status, "external_ip": external_ip,
+        "internal_ip": _internal_ip_of(info),
         "url": f"https://{external_ip}" if external_ip else "", "reused": False,
     }
 
@@ -1528,14 +2640,15 @@ async def run_gce_rancher(
     boot_disk_gb: int = 30,
     network_tag: str = "rancher",
     create_external_ip: bool = True,
+    region: str = "",
 ) -> dict:
     """Async wrapper for _run_gce_rancher_sync."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_gce_rancher_sync,
             project_id, zone, name, container_image, bootstrap_password,
             network, subnetwork, machine_type, boot_disk_gb, network_tag,
-            "cos-stable", create_external_ip,
+            "cos-stable", create_external_ip, region,
         )
     except GCPError:
         raise
@@ -1547,7 +2660,7 @@ async def ensure_rancher_firewall(project_id: str, network: str, tag: str,
                                   source_cidrs: list[str], name: str) -> dict:
     """Async wrapper for _ensure_rancher_firewall_sync."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _ensure_rancher_firewall_sync, project_id, network, tag, source_cidrs, name)
     except GCPError:
         raise
@@ -1560,14 +2673,14 @@ async def stop_gce_rancher(project_id: str, zone: str, name: str, *,
     """Delete the Rancher node VM (quiet no-op if absent). Optionally delete its
     ingress firewall rule too."""
     try:
-        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+        await _to_thread(_terminate_instance_sync, project_id, zone, name)
     except Exception as e:
         msg = str(e)
         if not ("404" in msg or "not found" in msg.lower()):
             raise GCPError(f"Failed to stop GCE Rancher node '{name}': {e}") from e
     if delete_firewall and firewall_name:
         try:
-            await asyncio.to_thread(_delete_rancher_firewall_sync, project_id, firewall_name)
+            await _to_thread(_delete_rancher_firewall_sync, project_id, firewall_name)
         except Exception as e:
             logger.warning("Rancher firewall '%s' delete failed (continuing): %s", firewall_name, e)
 
@@ -1613,11 +2726,402 @@ def _list_gce_rancher_sync(project_id: str) -> list[dict]:
 async def list_gce_rancher(project_id: str) -> list[dict]:
     """List the Rancher management-node container instances (COS on GCE)."""
     try:
-        return await asyncio.to_thread(_list_gce_rancher_sync, project_id)
+        return await _to_thread(_list_gce_rancher_sync, project_id)
     except GCPError:
         raise
     except Exception as e:
         raise GCPError(f"Failed to list GCE Rancher node instances: {e}") from e
+
+
+# ── Portainer CE server on COS-on-GCE ────────────────────────────────────────
+# The managed Portainer server runs as a single container on a COS GCE VM with a
+# PUBLIC (source-restricted) IP — the same konlet mechanism as the Rancher node
+# above, and the direct analogue of the documented docker install
+# (`docker run -d -p 9443:9443 -v portainer_data:/data portainer/portainer-ce`).
+# Unlike Rancher this container is NOT privileged: the server only talks to remote
+# Docker hosts over the API, so it needs neither the host Docker socket nor extra
+# capabilities. COS runs it on the HOST network, so 9443 (HTTPS UI) and 8000 (Edge
+# agent tunnel) bind on the VM and reachability is governed by the firewall.
+#
+# The node is EPHEMERAL like Rancher's: /data lives on the auto-delete boot disk,
+# so a teardown wipes users, endpoints and settings — a disposable-lab posture.
+
+_PORTAINER_LABEL = "portainer"
+
+# Host path backing the container's /data volume (Portainer's whole state dir).
+_PORTAINER_DATA_HOSTPATH = "/var/lib/portainer"
+
+
+def _portainer_container_spec_yaml(container_image: str,
+                                   admin_password_hash: str = "") -> str:
+    """Generate the gce-container-declaration konlet YAML for the Portainer server.
+
+    No ``privileged`` and no Docker-socket mount — the managed server administers
+    REMOTE Docker hosts through the Portainer API, so it needs neither. ``/data`` is
+    bind-mounted to a host path on the boot disk so a container restart (COS re-runs
+    it on every boot) keeps state; a VM delete still discards it. No port block is
+    needed: COS runs the container on the host network, so Portainer binds host
+    9443/8000 directly (firewall-governed).
+
+    ``admin_password_hash`` (bcrypt) is passed as ``--admin-password`` so Portainer
+    creates the admin user AT STARTUP. That is what makes the deploy deterministic:
+    Portainer only accepts ``POST /api/users/admin/init`` for a short window after the
+    container starts and then fences off its whole API with "Administrator
+    initialization timeout" — a window the dashboard was racing (and losing) while it
+    waited for the node to serve, leaving a node nobody could ever log into. Passing
+    the hash up front means there is no window to lose. konlet hands ``args`` straight
+    to the entrypoint (no shell), so the ``$`` in a bcrypt hash needs no escaping."""
+    import yaml
+    spec = {
+        "spec": {
+            "containers": [{
+                "name": "portainer",
+                "image": container_image,
+                "volumeMounts": [{
+                    "name": "portainer-data",
+                    "mountPath": "/data",
+                    "readOnly": False,
+                }],
+                "stdin": False,
+                "tty": False,
+            }],
+            "volumes": [{
+                "name": "portainer-data",
+                "hostPath": {"path": _PORTAINER_DATA_HOSTPATH},
+            }],
+            "restartPolicy": "Always",
+        }
+    }
+    if admin_password_hash:
+        spec["spec"]["containers"][0]["args"] = ["--admin-password", admin_password_hash]
+    return yaml.safe_dump(spec, default_flow_style=False)
+
+
+def _ensure_portainer_firewall_sync(
+    project_id: str,
+    network: str,
+    tag: str,
+    source_cidrs: list[str],
+    name: str,
+) -> dict:
+    """Get-or-create/patch a source-restricted INGRESS firewall (tcp 9443/8000)
+    scoped to the Portainer VM's network ``tag``. Idempotent: patches source_ranges
+    on an existing rule so CIDR edits in Settings take effect on redeploy.
+
+    9443 is the HTTPS UI/API; 8000 is the Edge agent tunnel. The legacy plain-HTTP
+    9000 port is deliberately NOT opened.
+
+    Fail-closed: an EMPTY ``source_cidrs`` opens nothing — if a rule by this name
+    already exists it is DELETED (removing CIDRs closes the node). The caller
+    (portainer_node_service) decides whether an empty list means "closed" or
+    (with gcp_portainer_allow_open) ["0.0.0.0/0"]."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.FirewallsClient(credentials=creds)
+
+    if not source_cidrs:
+        # Fail closed — ensure no rule is left open.
+        try:
+            op = client.delete(project=project_id, firewall=name)
+            op.result(timeout=60)
+            logger.warning("Portainer firewall '%s' deleted — no allowed source CIDRs "
+                           "(node is unreachable)", name)
+        except NotFound:
+            pass
+        return {"name": name, "opened": False}
+
+    fw = compute_v1.Firewall()
+    fw.name = name
+    fw.network = network if "/" in network else f"global/networks/{network or 'default'}"
+    fw.direction = "INGRESS"
+    fw.allowed = [compute_v1.Allowed(I_p_protocol="tcp", ports=["9443", "8000"])]
+    fw.source_ranges = list(source_cidrs)
+    fw.target_tags = [tag]
+
+    try:
+        client.get(project=project_id, firewall=name)
+        op = client.patch(project=project_id, firewall=name, firewall_resource=fw)
+        op.result(timeout=60)
+        created = False
+    except NotFound:
+        op = client.insert(project=project_id, firewall_resource=fw)
+        op.result(timeout=60)
+        created = True
+    logger.info("Portainer firewall '%s' %s (tcp 9443/8000, sources=%s, tag=%s)",
+                name, "created" if created else "updated", source_cidrs, tag)
+    return {"name": name, "opened": True, "created": created}
+
+
+def _delete_portainer_firewall_sync(project_id: str, name: str) -> None:
+    """Delete the Portainer ingress firewall rule (quiet no-op if absent)."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+    creds = _gcp_creds()
+    client = compute_v1.FirewallsClient(credentials=creds)
+    try:
+        op = client.delete(project=project_id, firewall=name)
+        op.result(timeout=60)
+    except NotFound:
+        pass
+
+
+def _portainer_url(external_ip: str) -> str:
+    """The HTTPS UI/API URL for a Portainer node (self-signed cert on :9443)."""
+    return f"https://{external_ip}:9443" if external_ip else ""
+
+
+def _run_gce_portainer_sync(
+    project_id: str,
+    zone: str,
+    name: str,
+    container_image: str,
+    network: str = "",
+    subnetwork: str = "",
+    machine_type: str = "e2-small",
+    boot_disk_gb: int = 20,
+    network_tag: str = "portainer",
+    cos_image_family: str = "cos-stable",
+    create_external_ip: bool = True,
+    region: str = "",
+    admin_password_hash: str = "",
+) -> dict:
+    """Launch (or reuse) a COS GCE instance running the Portainer CE server.
+    Idempotent on existence: a RUNNING same-named VM is returned as-is; a stopped
+    one is started (COS re-runs the container on boot). Returns the public IP +
+    derived https URL so the caller can pin portainer_url and bootstrap.
+
+    ``admin_password_hash`` (bcrypt) initializes the admin user at container start —
+    see :func:`_portainer_container_spec_yaml`. It only applies to a FRESH launch:
+    konlet reads the declaration from instance metadata at boot, so a reused VM keeps
+    whatever it was created with.
+
+    ``zone`` may be blank — the launcher then auto-picks a valid zone in ``region``
+    (falling back to ``region_of(zone)`` when only a zone is given). On a fresh
+    launch it tries sibling zones in the same region on ``ZONE_RESOURCE_POOL_EXHAUSTED``
+    so a single capacity-exhausted zone doesn't fail the deploy."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    region = (region or (zone.rsplit("-", 1)[0] if zone else "")).strip()
+
+    # Reuse a LIVE node when an exact zone is known — a stopped VM has no Portainer
+    # listening, so start it and wait for RUNNING. (Skipped for a blank zone: a fresh
+    # launch has nothing to reuse, and the caller relocates an out-of-region node.)
+    if zone:
+        try:
+            existing = client.get(project=project_id, zone=zone, instance=name)
+            status = existing.status
+            if status != "RUNNING":
+                logger.info("GCE Portainer '%s' exists but status=%s — starting it", name, status)
+                try:
+                    start_op = client.start(project=project_id, zone=zone, instance=name)
+                    start_op.result(timeout=180)
+                    existing = client.get(project=project_id, zone=zone, instance=name)
+                    status = existing.status
+                except Exception as start_err:
+                    logger.warning("GCE Portainer '%s' start failed (status=%s): %s",
+                                   name, status, start_err)
+            external_ip = _external_ip_of(existing) if create_external_ip else ""
+            return {
+                "name": name, "zone": zone, "self_link": existing.self_link,
+                "status": status, "external_ip": external_ip,
+                "internal_ip": _internal_ip_of(existing),
+                "url": _portainer_url(external_ip), "reused": True,
+            }
+        except NotFound:
+            pass
+
+    candidate_zones = _rancher_candidate_zones(project_id, region, zone, creds,
+                                               log_label="portainer")
+    if not candidate_zones:
+        raise GCPError(
+            f"No available zone found in region '{region or '(unknown)'}' for the "
+            f"Portainer node — check the region has a configured subnet and UP zones.")
+
+    instance = compute_v1.Instance()
+    instance.name = name
+
+    # Boot disk from Container-Optimised OS. Ephemeral: auto_delete=True — a VM
+    # delete discards /var/lib/portainer (state), matching the disposable posture.
+    disk = compute_v1.AttachedDisk()
+    disk.boot = True
+    disk.auto_delete = True
+    disk.initialize_params = compute_v1.AttachedDiskInitializeParams()
+    disk.initialize_params.source_image = (
+        f"projects/cos-cloud/global/images/family/{cos_image_family}"
+    )
+    disk.initialize_params.disk_size_gb = boot_disk_gb
+    instance.disks = [disk]
+
+    nic = compute_v1.NetworkInterface()
+    # Bare names must be normalized to partial self-links (see the Rancher launcher).
+    # The subnet is region-scoped and every candidate zone shares one region, so
+    # this is computed once.
+    if subnetwork:
+        if "/" in subnetwork:
+            nic.subnetwork = subnetwork
+        else:
+            nic.subnetwork = f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}"
+    elif network:
+        nic.network = network if "/" in network else f"global/networks/{network}"
+    if create_external_ip:
+        nic.access_configs = [compute_v1.AccessConfig(
+            name="External NAT", type_="ONE_TO_ONE_NAT",
+        )]
+    instance.network_interfaces = [nic]
+
+    container_yaml = _portainer_container_spec_yaml(container_image, admin_password_hash)
+    instance.metadata = compute_v1.Metadata(items=[
+        compute_v1.Items(key="gce-container-declaration", value=container_yaml),
+        compute_v1.Items(key="google-logging-enabled", value="true"),
+    ])
+    instance.labels = {"managed-by": "vm-dashboard", "purpose": _PORTAINER_LABEL}
+    instance.tags = compute_v1.Tags(items=[network_tag])
+
+    # Insert into the first candidate zone with capacity; on
+    # ZONE_RESOURCE_POOL_EXHAUSTED fall through to the region's sibling zones.
+    launch_zone = ""
+    last_err = None
+    for cand in candidate_zones:
+        instance.machine_type = f"zones/{cand}/machineTypes/{machine_type}"
+        logger.info("Starting GCE COS Portainer '%s' in %s (image=%s, machine=%s)",
+                    name, cand, container_image, machine_type)
+        try:
+            op = client.insert(project=project_id, zone=cand, instance_resource=instance)
+            op.result(timeout=300)
+            launch_zone = cand
+            break
+        except Exception as e:
+            if _should_try_next_zone(e) and cand != candidate_zones[-1]:
+                logger.warning("Portainer zone %s could not take the instance (%s) — trying "
+                               "the next zone in %s", cand, e, region)
+                last_err = e
+                continue
+            raise
+    if not launch_zone:
+        raise GCPError(f"Failed to launch Portainer node in region '{region}': {last_err}")
+
+    info = client.get(project=project_id, zone=launch_zone, instance=name)
+    external_ip = _external_ip_of(info) if create_external_ip else ""
+    return {
+        "name": name, "zone": launch_zone, "self_link": info.self_link,
+        "status": info.status, "external_ip": external_ip,
+        "internal_ip": _internal_ip_of(info),
+        "url": _portainer_url(external_ip), "reused": False,
+    }
+
+
+async def run_gce_portainer(
+    project_id: str,
+    zone: str,
+    name: str,
+    container_image: str,
+    network: str = "",
+    subnetwork: str = "",
+    machine_type: str = "e2-small",
+    boot_disk_gb: int = 20,
+    network_tag: str = "portainer",
+    create_external_ip: bool = True,
+    region: str = "",
+    admin_password_hash: str = "",
+) -> dict:
+    """Async wrapper for _run_gce_portainer_sync."""
+    try:
+        return await _to_thread(
+            _run_gce_portainer_sync,
+            project_id, zone, name, container_image,
+            network, subnetwork, machine_type, boot_disk_gb, network_tag,
+            "cos-stable", create_external_ip, region, admin_password_hash,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to start GCE Portainer node '{name}': {e}") from e
+
+
+async def ensure_portainer_firewall(project_id: str, network: str, tag: str,
+                                    source_cidrs: list[str], name: str) -> dict:
+    """Async wrapper for _ensure_portainer_firewall_sync."""
+    try:
+        return await _to_thread(
+            _ensure_portainer_firewall_sync, project_id, network, tag, source_cidrs, name)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to configure Portainer firewall '{name}': {e}") from e
+
+
+async def stop_gce_portainer(project_id: str, zone: str, name: str, *,
+                             delete_firewall: bool = False, firewall_name: str = "") -> None:
+    """Delete the Portainer node VM (quiet no-op if absent). Optionally delete its
+    ingress firewall rule too."""
+    try:
+        await _to_thread(_terminate_instance_sync, project_id, zone, name)
+    except Exception as e:
+        msg = str(e)
+        if not ("404" in msg or "not found" in msg.lower()):
+            raise GCPError(f"Failed to stop GCE Portainer node '{name}': {e}") from e
+    if delete_firewall and firewall_name:
+        try:
+            await _to_thread(_delete_portainer_firewall_sync, project_id, firewall_name)
+        except Exception as e:
+            logger.warning("Portainer firewall '%s' delete failed (continuing): %s",
+                           firewall_name, e)
+
+
+def _list_gce_portainer_sync(project_id: str) -> list[dict]:
+    """List Portainer server COS instances across zones (labels.purpose=portainer)."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    request = compute_v1.AggregatedListInstancesRequest(
+        project=project_id,
+        filter=f'labels.purpose = "{_PORTAINER_LABEL}"',
+    )
+    results = []
+    for zone_path, scoped in client.aggregated_list(request=request):
+        for inst in (scoped.instances or []):
+            labels = dict(inst.labels) if inst.labels else {}
+            if labels.get("purpose") != _PORTAINER_LABEL:
+                continue
+            internal_ip = ""
+            external_ip = ""
+            for nic in inst.network_interfaces:
+                internal_ip = nic.network_i_p or internal_ip
+                for ac in nic.access_configs:
+                    if ac.nat_i_p:
+                        external_ip = ac.nat_i_p
+            results.append({
+                "name":         inst.name,
+                "zone":         zone_path.split("/")[-1],
+                "status":       inst.status,
+                "machine_type": inst.machine_type.split("/")[-1] if inst.machine_type else "",
+                "image":        _container_image_from_metadata(inst),
+                "internal_ip":  internal_ip,
+                "external_ip":  external_ip,
+                "url":          _portainer_url(external_ip),
+                "created_at":   inst.creation_timestamp or "",
+            })
+    return results
+
+
+async def list_gce_portainer(project_id: str) -> list[dict]:
+    """List the managed Portainer server container instances (COS on GCE)."""
+    try:
+        return await _to_thread(_list_gce_portainer_sync, project_id)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to list GCE Portainer node instances: {e}") from e
 
 
 # ── Cloud Run Jobs Ansible runner (mirrors ACI runner in azure_service.py) ───
@@ -1698,12 +3202,22 @@ def _run_cloud_run_ansible_sync(
     target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     vpc_connector: str = "",
+    vpc_network: str = "", vpc_subnetwork: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
     service_account: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
     finish, return (exit_code, log_output), and delete the job.
+
+    VPC reach for a private SSH target (e.g. a sandbox VM's internal IP), two
+    mutually exclusive modes mirroring the k8s runner — **direct VPC egress**
+    (``vpc_network`` / ``vpc_subnetwork``: the task gets a NIC in the subnet;
+    serverless, no standing infra, immune to the Serverless-VPC-Access
+    connector's shared-core zonal stockouts) wins over the legacy **connector**
+    (``vpc_connector`` annotation) when both are set. Either way egress stays
+    private-ranges-only.
     """
     import time
     _require_run()
@@ -1755,7 +3269,10 @@ def _run_cloud_run_ansible_sync(
                 env=[
                     run_v2.EnvVar(name="PLAYBOOK_B64", value=playbook_b64),
                     run_v2.EnvVar(name="SSH_KEY_B64", value=ssh_key_b64),
-                ] + _secret_env,
+                ] + _secret_env
+                # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup —
+                # plain env, same channel as SSH_KEY_B64 (no Secret Manager needed).
+                + [run_v2.EnvVar(name=k, value=v) for k, v in (ps_env or {}).items()],
                 resources=run_v2.ResourceRequirements(
                     limits={"cpu": "1000m", "memory": "512Mi"},
                 ),
@@ -1769,8 +3286,19 @@ def _run_cloud_run_ansible_sync(
         **({"service_account": service_account} if service_account else {}),
     )
 
+    if vpc_network or vpc_subnetwork:
+        ni_kwargs = {}
+        if vpc_network:
+            ni_kwargs["network"] = vpc_network
+        if vpc_subnetwork:
+            ni_kwargs["subnetwork"] = vpc_subnetwork
+        task_template.vpc_access = run_v2.VpcAccess(
+            network_interfaces=[run_v2.VpcAccess.NetworkInterface(**ni_kwargs)],
+            egress=run_v2.VpcAccess.VpcEgress.PRIVATE_RANGES_ONLY,
+        )
+
     exec_template = run_v2.ExecutionTemplate(template=task_template)
-    if vpc_connector:
+    if vpc_connector and not (vpc_network or vpc_subnetwork):
         exec_template.annotations = {
             "run.googleapis.com/vpc-access-connector": vpc_connector,
             "run.googleapis.com/vpc-access-egress": "private-ranges-only",
@@ -1825,22 +3353,27 @@ async def run_cloud_run_ansible_task(
     target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     vpc_connector: str = "",
+    vpc_network: str = "", vpc_subnetwork: str = "",
     service_account: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """
     Run an Ansible playbook via a GCP Cloud Run Job.
-    Returns (exit_code, output_log).
+    Returns (exit_code, output_log). ``vpc_network``/``vpc_subnetwork`` enable
+    direct VPC egress (preferred over the ``vpc_connector`` annotation).
     """
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_cloud_run_ansible_sync,
             project_id, region, image,
             target_ip, ansible_user,
             playbook_b64, ssh_key_b64, job_id,
             vpc_connector,
+            vpc_network, vpc_subnetwork,
             secret_entries, manifest_b64,
             service_account,
+            ps_env,
         )
     except GCPError:
         raise
@@ -1856,7 +3389,7 @@ _K8S_RUNNER_PREFIX = "k8s-runner"
 def _run_cloud_run_k8s_sync(
     project_id: str, region: str, image: str,
     command: str, kubeconfig_b64: str, stdin_b64: str, job_id: str,
-    vpc_connector: str = "",
+    vpc_connector: str = "", vpc_network: str = "", vpc_subnetwork: str = "",
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single kubectl/helm command against a
@@ -1867,6 +3400,13 @@ def _run_cloud_run_k8s_sync(
     cleanup shape. The stock kubectl+helm `image`, the generic shell `command`,
     and the kubeconfig (decoded from the ``KUBECONFIG_B64`` env into
     ``$KUBECONFIG``) are the only differences.
+
+    VPC reach (for private targets, e.g. the Rancher node's internal IP), two
+    mutually exclusive modes — **direct VPC egress** (``vpc_network`` /
+    ``vpc_subnetwork``: the task gets a NIC in the subnet; serverless, no standing
+    infra, immune to the Serverless-VPC-Access connector's shared-core zonal
+    stockouts) wins over the legacy **connector** (``vpc_connector`` annotation)
+    when both are set. Either way egress stays private-ranges-only.
     """
     import time
     _require_run()
@@ -1915,8 +3455,19 @@ def _run_cloud_run_k8s_sync(
         timeout="1200s",
     )
 
+    if vpc_network or vpc_subnetwork:
+        ni_kwargs = {}
+        if vpc_network:
+            ni_kwargs["network"] = vpc_network
+        if vpc_subnetwork:
+            ni_kwargs["subnetwork"] = vpc_subnetwork
+        task_template.vpc_access = run_v2.VpcAccess(
+            network_interfaces=[run_v2.VpcAccess.NetworkInterface(**ni_kwargs)],
+            egress=run_v2.VpcAccess.VpcEgress.PRIVATE_RANGES_ONLY,
+        )
+
     exec_template = run_v2.ExecutionTemplate(template=task_template)
-    if vpc_connector:
+    if vpc_connector and not (vpc_network or vpc_subnetwork):
         exec_template.annotations = {
             "run.googleapis.com/vpc-access-connector": vpc_connector,
             "run.googleapis.com/vpc-access-egress": "private-ranges-only",
@@ -1985,23 +3536,162 @@ async def run_cloud_run_k8s_task(
     *,
     project_id: str, region: str, image: str,
     command: str, kubeconfig_b64: str, stdin_b64: str = "", job_id: str,
-    vpc_connector: str = "",
+    vpc_connector: str = "", vpc_network: str = "", vpc_subnetwork: str = "",
 ) -> tuple:
     """
     Run a kubectl/helm command against a cluster's API via a GCP Cloud Run Job.
-    Returns (exit_code, output_log).
+    Returns (exit_code, output_log). ``vpc_network``/``vpc_subnetwork`` enable
+    direct VPC egress (preferred over the ``vpc_connector`` annotation).
     """
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_cloud_run_k8s_sync,
             project_id, region, image,
             command, kubeconfig_b64, stdin_b64, job_id,
-            vpc_connector,
+            vpc_connector, vpc_network, vpc_subnetwork,
         )
     except GCPError:
         raise
     except Exception as e:
         raise GCPError(f"Failed to run Cloud Run k8s task: {e}") from e
+
+
+# ── Cloud Run Ansible localhost runner (Kubernetes-cluster / cloud-database) ──
+
+def _run_cloud_run_ansible_local_sync(
+    project_id: str, region: str, image: str,
+    playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str, job_id: str,
+    vpc_connector: str = "", service_account: str = "",
+    ps_env: dict | None = None,
+) -> tuple:
+    """Create a Cloud Run Job that runs a **localhost** Ansible play (the k8s/DB
+    path — Ansible reaches OUT to the cluster API / DB endpoint instead of SSHing to
+    a VM), wait for it, return (exit_code, log_output), and delete the job. Mirrors
+    ``_run_cloud_run_ansible_sync``; the command is localhost (no SSH key) and the
+    connection material rides the ephemeral job env. Uses the ansible-cloud image."""
+    import time
+    import uuid
+    _require_run()
+    from google.cloud import run_v2
+    from .ansible_localhost_cmd import build_localhost_command
+
+    creds = _gcp_creds()
+    jobs_client = run_v2.JobsClient(credentials=creds)
+    executions_client = run_v2.ExecutionsClient(credentials=creds)
+
+    _suffix = job_id[:8] if job_id else uuid.uuid4().hex[:8]
+    job_name = f"{_ANSIBLE_RUNNER_PREFIX}-local-{_suffix}"
+    parent = f"projects/{project_id}/locations/{region}"
+    job_resource_name = f"{parent}/jobs/{job_name}"
+
+    cmd = build_localhost_command(
+        with_conn_vars=bool(conn_vars_b64), with_kubeconfig=bool(kubeconfig_b64))
+
+    env = [run_v2.EnvVar(name="PLAYBOOK_B64", value=playbook_b64)]
+    if conn_vars_b64:
+        env.append(run_v2.EnvVar(name="CONN_VARS_B64", value=conn_vars_b64))
+    if kubeconfig_b64:
+        env.append(run_v2.EnvVar(name="KUBECONFIG_B64", value=kubeconfig_b64))
+    # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup — plain env,
+    # same channel as the connection material above.
+    for k, v in (ps_env or {}).items():
+        env.append(run_v2.EnvVar(name=k, value=v))
+
+    task_template = run_v2.TaskTemplate(
+        containers=[
+            run_v2.Container(
+                image=image,
+                command=["sh", "-c", cmd],
+                env=env,
+                resources=run_v2.ResourceRequirements(
+                    limits={"cpu": "1000m", "memory": "512Mi"},
+                ),
+            )
+        ],
+        max_retries=0,
+        timeout="1200s",
+        **({"service_account": service_account} if service_account else {}),
+    )
+
+    exec_template = run_v2.ExecutionTemplate(template=task_template)
+    if vpc_connector:
+        exec_template.annotations = {
+            "run.googleapis.com/vpc-access-connector": vpc_connector,
+            "run.googleapis.com/vpc-access-egress": "private-ranges-only",
+        }
+
+    job = run_v2.Job(
+        template=exec_template,
+        labels={"managed-by": "vm-dashboard", "purpose": "ansible-runner"},
+    )
+
+    # Remove any leftover of the same name first (best-effort; NotFound is normal).
+    try:
+        jobs_client.delete_job(name=job_resource_name).result()
+        logger.info("Cloud Run ansible-local: removed a pre-existing job %s before create", job_name)
+    except Exception as stale_err:
+        logger.debug("Cloud Run ansible-local: no pre-existing job %s to remove (%s)", job_name, stale_err)
+
+    logger.info("Cloud Run ansible-local: creating job %s in %s/%s", job_name, project_id, region)
+    create_op = jobs_client.create_job(parent=parent, job_id=job_name, job=job)
+    create_op.result()
+
+    output = ""
+    exit_code = 1
+    execution_name = None
+
+    try:
+        run_op = jobs_client.run_job(name=job_resource_name)
+        execution = run_op.result()
+        execution_name = execution.name
+
+        for _ in range(120):
+            exec_info = executions_client.get_execution(name=execution_name)
+            if exec_info.completion_time and not exec_info.reconciling:
+                succeeded = exec_info.succeeded_count or 0
+                failed = exec_info.failed_count or 0
+                exit_code = 0 if (succeeded > 0 and failed == 0) else 1
+                break
+            time.sleep(10)
+
+        try:
+            _ct = getattr(execution, "create_time", None)
+            _floor = _ct.isoformat().replace("+00:00", "Z") if hasattr(_ct, "isoformat") else ""
+            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds, start_rfc3339=_floor)
+        except Exception as log_err:
+            logger.warning("Cloud Run ansible-local: could not retrieve logs: %s", log_err)
+
+    finally:
+        try:
+            del_op = jobs_client.delete_job(name=job_resource_name)
+            del_op.result()
+            logger.info("Cloud Run ansible-local: deleted job %s", job_name)
+        except Exception as del_err:
+            logger.warning("Cloud Run ansible-local: could not delete job %s: %s", job_name, del_err)
+
+    return exit_code, output
+
+
+async def run_cloud_run_ansible_local_task(
+    *,
+    project_id: str, region: str, image: str,
+    playbook_b64: str, conn_vars_b64: str = "", kubeconfig_b64: str = "", job_id: str,
+    vpc_connector: str = "", service_account: str = "",
+    ps_env: dict | None = None,
+) -> tuple:
+    """Run a localhost Ansible play (k8s/DB target) via a GCP Cloud Run Job.
+    Returns (exit_code, output_log)."""
+    try:
+        return await _to_thread(
+            _run_cloud_run_ansible_local_sync,
+            project_id, region, image,
+            playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
+            vpc_connector, service_account, ps_env,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to run Cloud Run ansible-local task: {e}") from e
 
 
 # ── Export custom image to VHD on GCS (portable artefact) ─────────────────────
@@ -2287,7 +3977,7 @@ async def export_custom_image_to_vhd(
     except ImportError:
         raise GCPError("google-cloud-build is not installed — run: pip install google-cloud-build")
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _export_custom_image_to_vhd_sync,
             project_id, image_name, dest_bucket, dest_object,
             network, subnet, timeout, progress_cb, zone,
@@ -2380,7 +4070,7 @@ async def create_image_from_gcs(
     {name, self_link, status}. Caller is expected to have already staged
     the tar.gz at `gcs_url` (the promote runner does this)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _create_image_from_gcs_sync,
             project_id, image_name, gcs_url, description, family, progress_cb,
         )
@@ -2532,8 +4222,8 @@ async def run_cloud_run_promote_runner_task(
     image: str,
     runner_args: list,
     job_id: str,
-    cpu: str = "2000m",
-    memory: str = "4Gi",
+    cpu: str = "4",
+    memory: str = "16Gi",
     timeout_seconds: int = 7200,
     vpc_connector: str = "",
     service_account_email: str = "",
@@ -2541,7 +4231,7 @@ async def run_cloud_run_promote_runner_task(
     """Run the promote-runner image as a Cloud Run Job. Returns
     (exit_code, log_output)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_cloud_run_promote_runner_sync,
             project_id, region, image, runner_args, job_id,
             cpu, memory, timeout_seconds, vpc_connector, service_account_email,
@@ -2568,6 +4258,145 @@ async def delete_gcs_object(bucket: str, object_name: str) -> None:
     """Best-effort cleanup of a staged GCS object. Targets an explicit bucket
     so it works even when the staging lives outside `storage_gcs_bucket`."""
     try:
-        await asyncio.to_thread(_delete_gcs_object_sync, bucket, object_name)
+        await _to_thread(_delete_gcs_object_sync, bucket, object_name)
     except Exception as e:
         raise GCPError(f"Failed to delete gs://{bucket}/{object_name}: {e}") from e
+
+
+# ── Cloud SQL orphan sweep (decommission safety net) ──────────────────────────
+#
+# The google provider drops a Cloud SQL instance from Terraform state when the
+# create *operation-wait* errors — it calls d.SetId("") — even though GCP finishes
+# creating the instance asynchronously. A mid-create `terraform apply` failure
+# (e.g. a transient poll error) therefore leaves a RUNNABLE, billable instance that
+# the follow-up `terraform destroy` (running against the now-empty state) silently
+# no-ops over, orphaning a database the dashboard believes it decommissioned.
+# cloud_database_service calls this after destroy as a direct-API safety net: it
+# deletes the instance by its deterministic name, but ONLY when it carries our
+# `clouddb-id` label, so a name collision or a manually-created instance is never
+# touched. (The AWS/Azure providers taint the resource in state on the same error,
+# so their destroy already reclaims it — only GCP needs this.)
+
+_SQLADMIN_BASE = "https://sqladmin.googleapis.com/sql/v1beta4"
+
+
+def _sweep_orphan_sql_instance_sync(
+    project: str, name: str, clouddb_id: str,
+    *, ready_timeout_s: int = 300, delete_timeout_s: int = 300,
+) -> str:
+    """Delete Cloud SQL instance ``name`` in ``project`` iff it exists AND is labeled
+    ``clouddb-id=<clouddb_id>``. An instance still mid-create (``PENDING_CREATE``)
+    rejects deletion, so wait (bounded by ``ready_timeout_s``) for it to leave that
+    state first. Returns ``"not-found"`` (nothing to reclaim — the normal path after
+    a clean destroy), ``"skipped-unlabeled"`` (an instance by this name exists but
+    isn't ours), or ``"deleted"``. Raises :class:`GCPError` on a real delete failure
+    so the caller can surface the orphan rather than hide it. Synchronous; callers
+    wrap in ``_to_thread``."""
+    s = _authed_session()
+    inst_url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{name}"
+
+    r = s.get(inst_url)
+    if r.status_code == 404:
+        return "not-found"
+    r.raise_for_status()
+    body = r.json()
+    labels = (body.get("settings") or {}).get("userLabels") or {}
+    if labels.get("clouddb-id") != clouddb_id:
+        logger.info("gcp sql sweep: %s exists but clouddb-id %r != %r — leaving it",
+                    name, labels.get("clouddb-id"), clouddb_id)
+        return "skipped-unlabeled"
+
+    # A create still in flight can't be deleted; wait (bounded) for it to settle.
+    deadline = time.monotonic() + ready_timeout_s
+    state = body.get("state")
+    while state in ("PENDING_CREATE", "SQL_INSTANCE_STATE_UNSPECIFIED", "MAINTENANCE") \
+            and time.monotonic() < deadline:
+        time.sleep(10)
+        r = s.get(inst_url)
+        if r.status_code == 404:
+            return "not-found"
+        r.raise_for_status()
+        state = r.json().get("state")
+
+    d = s.delete(inst_url)
+    if d.status_code == 404:
+        return "not-found"
+    if not d.ok:
+        raise GCPError(f"delete {name} failed: HTTP {d.status_code} {d.text[:300]}")
+
+    # Poll the delete operation to DONE for a definitive result. A slow delete that
+    # hasn't finished by delete_timeout_s is still counted as swept (it was accepted);
+    # only an explicit operation error is treated as a failure.
+    op_name = (d.json() or {}).get("name")
+    if op_name:
+        op_url = f"{_SQLADMIN_BASE}/projects/{project}/operations/{op_name}"
+        op_deadline = time.monotonic() + delete_timeout_s
+        while time.monotonic() < op_deadline:
+            po = s.get(op_url)
+            po.raise_for_status()
+            oj = po.json()
+            if oj.get("status") == "DONE":
+                errs = (oj.get("error") or {}).get("errors")
+                if errs:
+                    raise GCPError(f"delete {name} operation error: {errs}")
+                break
+            time.sleep(5)
+    logger.info("gcp sql sweep: deleted orphaned instance %s (project=%s)", name, project)
+    return "deleted"
+
+
+async def sweep_orphan_sql_instance(project: str, name: str, clouddb_id: str) -> str:
+    """Async wrapper for :func:`_sweep_orphan_sql_instance_sync`."""
+    return await _to_thread(
+        _sweep_orphan_sql_instance_sync, project, name, clouddb_id)
+
+
+def _wait_sql_instance_runnable_sync(
+    project: str, name: str, clouddb_id: str, *, ready_timeout_s: int = 900,
+) -> Optional[dict]:
+    """Return the Cloud SQL instance body once it is ``RUNNABLE`` and labeled
+    ``clouddb-id=<clouddb_id>``; ``None`` if no such instance exists, it isn't ours,
+    it lands in a terminal non-runnable state (e.g. ``FAILED``), or it doesn't settle
+    within ``ready_timeout_s``.
+
+    This is the read-side companion to :func:`_sweep_orphan_sql_instance_sync`: the
+    google provider drops a mid-create Cloud SQL instance from Terraform state when
+    the create operation-wait errors (``d.SetId("")``) even though GCP finishes the
+    create. The provisioner uses this to detect that the instance came up anyway so
+    it can ``terraform import`` it back rather than orphan it. The label guard means
+    we never adopt an instance we didn't create. Synchronous; callers wrap in
+    ``_to_thread``."""
+    s = _authed_session()
+    inst_url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{name}"
+    deadline = time.monotonic() + ready_timeout_s
+    while True:
+        r = s.get(inst_url)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        body = r.json()
+        labels = (body.get("settings") or {}).get("userLabels") or {}
+        if labels.get("clouddb-id") != clouddb_id:
+            logger.info("gcp sql reclaim: %s exists but clouddb-id %r != %r — not ours",
+                        name, labels.get("clouddb-id"), clouddb_id)
+            return None
+        state = body.get("state")
+        if state == "RUNNABLE":
+            return body
+        if state in ("PENDING_CREATE", "SQL_INSTANCE_STATE_UNSPECIFIED", "MAINTENANCE"):
+            if time.monotonic() >= deadline:
+                logger.warning("gcp sql reclaim: %s still %s after %ss — giving up",
+                               name, state, ready_timeout_s)
+                return None
+            time.sleep(10)
+            continue
+        # Terminal non-runnable (FAILED, SUSPENDED, PENDING_DELETE, …) — not reclaimable.
+        logger.warning("gcp sql reclaim: %s in non-runnable state %s — not reclaiming",
+                       name, state)
+        return None
+
+
+async def wait_sql_instance_runnable(project: str, name: str, clouddb_id: str) -> Optional[dict]:
+    """Async wrapper for :func:`_wait_sql_instance_runnable_sync`."""
+    return await _to_thread(
+        _wait_sql_instance_runnable_sync, project, name, clouddb_id)

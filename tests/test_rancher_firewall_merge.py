@@ -1,7 +1,7 @@
 """Unit test: rancher_node_service.refresh_rancher_firewall must apply the MERGED
 firewall source set — manual CSV CIDRs + dashboard-provisioned cluster egress /32s
-+ the dashboard-managed Web-Jump Jumpoint /32 — deduped and sorted, while staying
-fail-closed and no-op safe.
++ the dashboard-managed Web-Jump Jumpoint /32 + the dashboard's OWN egress /32 —
+deduped and sorted, while staying fail-closed and no-op safe.
 
 This pins the Rancher firewall automation: private clusters egress through a NAT
 whose public IP the operator can't know ahead of time, so the dashboard captures
@@ -15,6 +15,7 @@ needed. Runs under pytest, or standalone:
     python tests/test_rancher_firewall_merge.py
 """
 import asyncio
+import logging
 import os
 import sys
 import types
@@ -156,6 +157,19 @@ def test_merge_dedup_and_sorted():
         "203.0.113.4/32", "10.0.0.0/24", "1.2.3.4/32", "5.6.7.8/32", "9.9.9.9/32"])
 
 
+def test_dashboard_egress_cidr_merged():
+    # The dashboard's own egress IP (bare) is normalized to /32 and merged in, so
+    # the worker can reach the node's public IP to bootstrap + poll it.
+    _reset(rancher_dashboard_egress_cidr="198.51.100.7")
+    _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")])
+    assert _APPLIED["source_cidrs"] == sorted(["198.51.100.7/32", "1.2.3.4/32"])
+
+    # An explicit CIDR is honored as-is (not re-suffixed).
+    _reset(rancher_dashboard_egress_cidr="198.51.100.0/24")
+    _run_refresh(rows=[])
+    assert _APPLIED["source_cidrs"] == ["198.51.100.0/24"]
+
+
 def test_fail_closed_when_empty():
     _reset()  # no manual, no clusters, allow_open off
     _run_refresh(rows=[])
@@ -200,6 +214,122 @@ def test_noop_when_no_project():
     result = _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")])
     assert result.get("skipped")
     assert _APPLIED == {}  # ensure_rancher_firewall NOT called
+
+
+def test_runner_source_cidr_merged_only_when_runner_transport():
+    # transport=runner → the VPC connector's range joins the merge (GCE ingress
+    # rules apply to internal traffic too, so the in-cloud API runner needs it).
+    _reset(rancher_api_transport="runner", rancher_runner_source_cidr="10.8.0.0/28")
+    _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")])
+    assert _APPLIED["source_cidrs"] == sorted(["1.2.3.4/32", "10.8.0.0/28"])
+    # direct transport → the connector range stays out.
+    _reset(rancher_api_transport="direct", rancher_runner_source_cidr="10.8.0.0/28")
+    _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")])
+    assert _APPLIED["source_cidrs"] == ["1.2.3.4/32"]
+
+
+class _LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def _capture_warnings(fn):
+    """Run fn while capturing rancher_node_service log records; return warnings+."""
+    h = _LogCapture()
+    old_level = svc.logger.level
+    svc.logger.addHandler(h)
+    svc.logger.setLevel(logging.DEBUG)
+    try:
+        fn()
+    finally:
+        svc.logger.setLevel(old_level)
+        svc.logger.removeHandler(h)
+    return [r for r in h.records if r.levelno >= logging.WARNING]
+
+
+def test_no_stays_closed_warning_when_merged_nonempty():
+    # Regression: an empty manual CSV used to make _allowed_cidrs() warn
+    # "firewall stays closed" on EVERY refresh, even when the MERGED set
+    # (cluster /32s, Jumpoint, dashboard egress) was non-empty and the firewall
+    # actually opened. The warning must key on the FINAL merged set.
+    _reset()  # manual CSV empty, allow_open off
+    warnings = _capture_warnings(lambda: _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")]))
+    assert _APPLIED["source_cidrs"] == ["1.2.3.4/32"]
+    assert not any("stays closed" in r.getMessage() for r in warnings)
+
+
+def test_stays_closed_warning_when_merged_empty():
+    # The warning still fires when the merged set really IS empty (fail-closed).
+    _reset()
+    warnings = _capture_warnings(lambda: _run_refresh(rows=[]))
+    assert _APPLIED["source_cidrs"] == []
+    assert any("stays closed" in r.getMessage() for r in warnings)
+
+
+def test_world_open_warning_fires_from_refresh():
+    _reset(gcp_rancher_allow_open="1")
+    warnings = _capture_warnings(lambda: _run_refresh(rows=[]))
+    assert _APPLIED["source_cidrs"] == ["0.0.0.0/0"]
+    assert any("0.0.0.0/0" in r.getMessage() for r in warnings)
+
+
+def test_firewall_status_logs_no_warnings():
+    # Read-only status must stay silent (it used to warn via _allowed_cidrs()).
+    _reset()
+    out = {}
+    warnings = _capture_warnings(lambda: out.update(svc.firewall_status(_FakeDB([]))))
+    assert out["merged"] == [] and out["opened"] is False
+    assert not warnings
+
+
+def _run_ensure_egress(detected_ip: str):
+    """Drive _ensure_dashboard_egress_cidr with a stubbed detector."""
+    orig = svc._detect_egress_ip
+
+    async def fake():
+        return detected_ip
+    svc._detect_egress_ip = fake
+    try:
+        return asyncio.run(svc._ensure_dashboard_egress_cidr())
+    finally:
+        svc._detect_egress_ip = orig
+
+
+def test_egress_containment_keeps_operator_pool():
+    # Corp proxies egress from a POOL: an operator-set CIDR that CONTAINS the
+    # detected IP must be kept — clobbering it with this connection's /32 would
+    # drop the next connection (per-destination pool hashing).
+    _reset(rancher_dashboard_egress_cidr="104.28.182.0/24")
+    assert _run_ensure_egress("104.28.182.70") == "104.28.182.0/24"
+    assert _CFG["rancher_dashboard_egress_cidr"] == "104.28.182.0/24"  # unchanged
+
+
+def test_egress_detection_outside_pool_replaces():
+    # A detected IP OUTSIDE the stored CIDR = the egress genuinely moved → track it.
+    _reset(rancher_dashboard_egress_cidr="104.28.182.0/24")
+    assert _run_ensure_egress("9.9.9.9") == "9.9.9.9/32"
+    assert _CFG["rancher_dashboard_egress_cidr"] == "9.9.9.9/32"
+
+
+def test_egress_detection_failure_keeps_existing():
+    _reset(rancher_dashboard_egress_cidr="104.28.182.0/24")
+    assert _run_ensure_egress("") == "104.28.182.0/24"
+    assert _CFG["rancher_dashboard_egress_cidr"] == "104.28.182.0/24"
+
+
+def test_generate_admin_password_strong_and_distinct():
+    # Rancher requires ≥12 chars + forbids reusing the bootstrap password, so the
+    # generated one must be long, mixed-class, and different every call.
+    import string
+    a = svc._generate_admin_password()
+    b = svc._generate_admin_password()
+    assert len(a) >= 12 and a != b
+    assert any(c.islower() for c in a) and any(c.isupper() for c in a)
+    assert any(c.isdigit() for c in a) and any(c in string.punctuation for c in a)
 
 
 if __name__ == "__main__":

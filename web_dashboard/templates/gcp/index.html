@@ -139,6 +139,26 @@
   <!-- ── Custom Images ──────────────────────────────────────────────────── -->
   <div x-show="activeTab === 'custom'">
 
+    <!-- Selection toolbar. Mirrors the AWS/Azure image tables: tick images, deploy one
+         VM per image. For N copies of ONE image, use Count on the deploy form. -->
+    <div x-show="!imagesLoading && customImages.length > 0"
+         class="flex items-center justify-between mb-4">
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+        <input type="checkbox" @change="toggleSelectAllImages($event)"
+               :checked="selectedImages.length > 0 && selectedImages.length === customImages.length"
+               class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+        Select all
+      </label>
+      <div class="flex items-center gap-2" x-show="selectedImages.length > 0" x-cloak>
+        <button @click="selectedImages = []"
+                class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1.5">Clear</button>
+        <button @click="openBulkDeployModal()"
+                class="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Bulk Deploy (<span x-text="selectedImages.length"></span>)
+        </button>
+      </div>
+    </div>
+
     <!-- Loading skeleton -->
     <div x-show="imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <template x-for="i in 4" :key="i">
@@ -151,8 +171,12 @@
 
     <div x-show="!imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <template x-for="img in customImages" :key="img.self_link">
-        <div class="bg-white rounded-xl border border-gray-200 hover:border-blue-300 hover:shadow-sm transition-all p-4 flex flex-col gap-2">
+        <div class="bg-white rounded-xl border hover:shadow-sm transition-all p-4 flex flex-col gap-2"
+             :class="selectedImages.includes(img.self_link) ? 'border-green-400 ring-1 ring-green-200' : 'border-gray-200 hover:border-blue-300'">
           <div class="flex items-start justify-between gap-2">
+            <input type="checkbox" :value="img.self_link" x-model="selectedImages"
+                   @click.stop
+                   class="mt-0.5 rounded border-gray-300 text-green-600 focus:ring-green-500 flex-shrink-0">
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-gray-900 truncate" x-text="img.name"></p>
               <p class="text-xs text-gray-400 mt-0.5" x-text="img.family || 'Custom'"></p>
@@ -333,13 +357,28 @@
           </select>
         </div>
 
-        <!-- Instance name -->
+        <!-- Instance name + count -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
-          <input type="text" x-model="deployForm.instance_name"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 placeholder="my-vm-01">
-          <p class="text-xs text-gray-400 mt-1">Lowercase letters, numbers, and hyphens only.</p>
+          <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
+              <input type="text" x-model="deployForm.instance_name"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="my-vm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Count <span class="text-red-500">*</span></label>
+              <input type="number" min="1" :max="countMax" step="1" x-model.number="deployForm.count"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+          </div>
+          <p class="text-xs text-gray-400 mt-1">
+            Lowercase letters, numbers, and hyphens only. More than one deploys copies of
+            the same image, numbered automatically, behind a shared Gateway.
+          </p>
+          <p x-show="(deployForm.count || 1) > 1" x-cloak class="text-xs font-mono mt-1"
+             :class="namePreviewFor().truncated ? 'text-amber-600' : 'text-gray-500'"
+             x-text="namePreviewFor().text"></p>
         </div>
 
         <!-- Zone -->
@@ -371,8 +410,11 @@
           <select x-model="deployForm.subnetwork"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">— default network —</option>
+            <!-- Region in the label: the sandbox uses ONE subnet name in every region,
+                 so without it two different subnets read identically. -->
             <template x-for="sn in networkOpts.subnetworks" :key="sn.self_link">
-              <option :value="sn.self_link" x-text="sn.name + ' (' + sn.ip_cidr_range + ')'"></option>
+              <option :value="sn.self_link"
+                      x-text="sn.name + ' (' + [sn.ip_cidr_range, networkOpts.region].filter(Boolean).join(', ') + ')'"></option>
             </template>
           </select>
         </div>
@@ -411,11 +453,38 @@
           <p class="mt-1 text-xs text-gray-400">Any Secret Manager secret. Must be JSON with a <code>public_key</code> — validated on launch.</p>
         </div>
 
-        <!-- BeyondTrust Jumpoint deploy key (optional override) -->
-        <div class="pt-1">
+        <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
+        <div class="pt-1 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+            <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+              <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                      class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+              <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.gateways.length"
+                      class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in praPickers.gateways || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
+             class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
           {{ secret_picker("deployForm", "dockerKeyBackend", "docker_deploy_key_ref",
-                           "Jumpoint deploy key",
-                           "Overrides the configured GCE Jumpoint deploy key for this deploy (BeyondTrust only).") }}
+                           "Gateway deploy key",
+                           "Overrides the configured GCE Gateway deploy key. Supplying one gives this VM its own paired Gateway instead of the shared host (BeyondTrust only).") }}
         </div>
 
         {% if entitle_enabled %}
@@ -431,7 +500,7 @@
           </p>
         </div>
         {% endif %}
-        {% if beyondtrust_enabled %}
+        {% if password_safe_enabled %}
         <!-- Password Safe registration opt-in -->
         <div class="pt-1">
           <label class="flex items-center gap-2 text-sm text-gray-700">
@@ -514,6 +583,129 @@
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
           </svg>
           <span x-text="capturing ? 'Capturing…' : 'Capture'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Bulk Deploy modal (one VM per selected image) ─────────────────────── -->
+  <div x-show="bulkModal.open" x-cloak x-transition
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40"
+       @click.self="bulkModal.open = false">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl mx-4 max-h-screen overflow-y-auto">
+      <div class="px-6 py-4 border-t-4 border-green-600">
+        <h2 class="text-lg font-bold text-gray-900">Bulk Deploy GCE Instances</h2>
+        <p class="text-xs text-gray-500 mt-0.5">
+          <span x-text="bulkModal.items.length"></span> image<span x-show="bulkModal.items.length !== 1">s</span>
+          selected — one VM per image. To deploy several copies of a single image, use
+          the Count field on the normal deploy form.
+        </p>
+      </div>
+
+      <div class="px-6 pb-4 space-y-4">
+        <!-- Per-image names -->
+        <div class="space-y-2">
+          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wide">Instance Names</label>
+          <template x-for="(img, idx) in bulkModal.items" :key="img.self_link">
+            <div class="flex items-center gap-3">
+              <span class="text-xs text-gray-500 w-40 truncate" x-text="img.name"></span>
+              <input x-model="bulkModal.names[idx]" type="text"
+                     :placeholder="'vm-' + (idx + 1)"
+                     class="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono">
+            </div>
+          </template>
+          <p class="text-xs text-gray-400">Lowercase letters, numbers and hyphens (RFC1035).</p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(shared)</span> *</label>
+          <select x-model="bulkModal.workgroup"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+            <option value="">— select a workgroup —</option>
+            <template x-for="wg in availableWorkgroups" :key="wg">
+              <option :value="wg" x-text="wg"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Machine Type <span class="text-gray-400 font-normal">(shared)</span></label>
+            <select x-model="bulkModal.machine_type"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+              <template x-for="m in networkOpts.machine_types || []" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400 font-normal">(shared)</span></label>
+            <select x-model="bulkModal.zone" @change="onBulkZoneChange()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+              <option value="">— use default zone —</option>
+              <template x-for="z in networkOpts.zones || []" :key="z">
+                <option :value="z" x-text="z"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Disk Size (GB) <span class="text-gray-400 font-normal">(shared)</span></label>
+            <input type="number" min="10" x-model.number="bulkModal.disk_size_gb"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+          </div>
+          <div class="flex items-end pb-2">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="bulkModal.create_external_ip"
+                     class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+              External IP
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subnetwork <span class="text-gray-400 font-normal">(shared)</span></label>
+          <select x-model="bulkModal.subnetwork"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+            <option value="">— configured default —</option>
+            <template x-for="s in networkOpts.subnetworks || []" :key="s.self_link">
+              <option :value="s.self_link"
+                      x-text="s.name + (networkOpts.region ? ' (' + networkOpts.region + ')' : '')"></option>
+            </template>
+          </select>
+        </div>
+
+        {% if entitle_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.register_in_entitle"
+                 class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+          Register each VM in Entitle for just-in-time SSH access
+        </label>
+        {% endif %}
+        {% if password_safe_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.register_in_passwordsafe"
+                 class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+          Onboard each VM into Password Safe (managed system + account)
+        </label>
+        {% endif %}
+
+        <div x-show="bulkModal.error" x-cloak
+             class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+             x-text="bulkModal.error"></div>
+      </div>
+
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="bulkModal.open = false" class="px-4 py-2 text-sm text-gray-600 font-medium">Cancel</button>
+        <button @click="submitBulkDeploy()"
+                :disabled="bulkModal.submitting || !bulkModal.workgroup"
+                class="px-5 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition">
+          <span x-show="!bulkModal.submitting">
+            Deploy <span x-text="bulkModal.items.length"></span> Instance<span x-show="bulkModal.items.length !== 1">s</span>
+          </span>
+          <span x-show="bulkModal.submitting" x-cloak>Deploying…</span>
         </button>
       </div>
     </div>
@@ -645,6 +837,18 @@
                 <option value="rpm">RPM (.rpm)</option>
               </select>
             </div>
+            <div x-show="gcpPackerForm.bt_epml" x-cloak>
+              <label class="block text-xs font-medium text-gray-600 mb-1">EPM-L package from</label>
+              <select x-model="gcpPackerForm.bt_epml_source" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="beyondtrust">BeyondTrust (always current)</option>
+                <option value="storage">Asset storage (the synced copy)</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Storage pins the version you synced and doesn't need BeyondTrust reachable
+                from the build — sync it first on the Storage page. Not available on
+                local-filesystem storage.
+              </p>
+            </div>
           </div>
           <div>
             <p class="text-[11px] text-gray-400">EPM-L is installed at build; activation runs post-deploy via the EPM-L integration.</p>
@@ -711,6 +915,7 @@
 function gcpDashboard() {
   return {
     ...secretPickerState(),
+    ...deployNameState(),
     // State
     activeTab:       'public',
     projectId:       '',
@@ -726,6 +931,16 @@ function gcpDashboard() {
     // Data
     publicImages:   [],
     customImages:   [],
+    // Multi-select bulk: tick images, deploy one VM per image. The other axis from
+    // deployForm.count, which deploys N copies of ONE image.
+    selectedImages: [],
+    bulkModal: {
+      open: false, items: [], names: [], workgroup: '',
+      machine_type: 'e2-medium', zone: '', subnetwork: '', disk_size_gb: 20,
+      create_external_ip: false,
+      register_in_entitle: false, register_in_passwordsafe: false,
+      submitting: false, error: '',
+    },
     exportingImages: new Set(),
     instances:      [],
     networkOpts:    { zones: [], machine_types: [], subnetworks: [], region: '', ssh_key_configured: false },
@@ -750,8 +965,13 @@ function gcpDashboard() {
     deploying:     false,
     sshKeyPreview: '',
     sshKeyLoading: false,
+    // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form dropdowns
+    // (shared /api/pra/pickers, fetched once). Empty when PRA isn't configured →
+    // dropdowns show only "(configured default)" and the backend falls back.
+    praPickers: { configured: false, jump_groups: [], gateways: [], loaded: false },
     deployForm: {
       instance_name:     '',
+      count:              1,
       machine_type:      'e2-medium',
       zone:              '',
       subnetwork:        '',
@@ -789,6 +1009,7 @@ function gcpDashboard() {
       provisioner_env_vars: [],  // [{name, value, is_secret_ref}] → provisioner environment_vars
       bt_admin_user:     '',  // → BT_ADMIN_USER (bt-ready provisioner)
       bt_epml:           '',  // '' | 'deb' | 'rpm' → BT_EPML_URL (EPM-L install)
+      bt_epml_source:    'beyondtrust',  // 'beyondtrust' | 'storage' → where BT_EPML_URL points
     },
     gcpPackerBuilding:    false,
     gcpPackerError:       '',
@@ -961,8 +1182,16 @@ function gcpDashboard() {
         const q = zone ? '?zone=' + encodeURIComponent(zone) : '';
         const res = await API.get('/api/gcp/network-options' + q);
         this.networkOpts = res;
-        if (res.machine_types?.length && !this.deployForm.machine_type) {
-          this.deployForm.machine_type = res.machine_types.includes('e2-medium') ? 'e2-medium' : res.machine_types[0];
+        // Machine types are zone-scoped like subnets are region-scoped, so a selection
+        // the new zone doesn't offer goes back to the default here — otherwise the form
+        // shows an empty picker and submits a type GCE 400s on. Also seeds the initial
+        // blank, which is all this used to do.
+        const types = res.machine_types || [];
+        if (types.length) {
+          const fallback = types.includes('e2-medium') ? 'e2-medium' : types[0];
+          for (const form of [this.deployForm, this.bulkModal]) {
+            if (form && !types.includes(form.machine_type)) form.machine_type = fallback;
+          }
         }
       } catch (_) {}
     },
@@ -971,6 +1200,27 @@ function gcpDashboard() {
     async onZoneChange() {
       this.deployForm.subnetwork = '';
       await this.loadNetworkOpts(this.deployForm.zone);
+    },
+
+    // Same for the bulk modal's shared Zone. Without this the Subnetwork picker keeps
+    // listing the previous region's subnets — and because the sandbox names its subnet
+    // identically in every region, an operator switching to us-east1-b would send a
+    // us-central1 subnet that looks right and fails every VM in the batch with GCE's
+    // "Scope of the specified subnetwork doesn't match the scope of the instance".
+    async onBulkZoneChange() {
+      this.bulkModal.subnetwork = '';
+      await this.loadNetworkOpts(this.bulkModal.zone);
+    },
+
+    async loadPraPickers() {
+      // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form
+      // dropdowns (shared /api/pra/pickers). Fetched once, best-effort: on any
+      // failure the dropdowns just show "(configured default)".
+      if (this.praPickers.loaded) return;
+      try {
+        const r = await API.get('/api/pra/pickers');
+        if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], gateways: r.jumpoints || [], loaded: true };
+      } catch (e) { /* non-fatal */ }
     },
 
     async openDeployModal(img) {
@@ -983,6 +1233,7 @@ function gcpDashboard() {
       this.deployForm    = {
         image_self_link:    img ? (img.self_link || '') : '',
         instance_name:      '',
+        count:              1,
         machine_type:       this.networkOpts.machine_types?.includes('e2-medium') ? 'e2-medium' : (this.networkOpts.machine_types?.[0] || 'e2-medium'),
         zone:               '',
         subnetwork:         '',
@@ -990,6 +1241,7 @@ function gcpDashboard() {
         disk_size_gb:       Math.max(img?.disk_size_gb || 20, 20),
         network_tags:       [],
         workgroup:          this._defaultWorkgroup(),
+        jump_group: '', jumpoint_name: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
         ssh_key_secret_override: '',
@@ -998,6 +1250,13 @@ function gcpDashboard() {
       this.sshKeyPreview = '';
       this.sshKeyLoading = true;
       this.deployModal   = true;
+      this.loadPraPickers();
+      // The form above reset zone to the configured default, so re-scope the pickers to
+      // its region too — otherwise a previous deploy in another zone leaves the
+      // Subnetwork list pointing at that region and the pair mismatches (the mirror of
+      // the bulk-modal case in onBulkZoneChange). Not awaited: the dropdowns are
+      // reactive and the selection is already blank, so nothing stale can be submitted.
+      this.loadNetworkOpts(this.deployForm.zone);
 
       // Load the SSH-key-secret override candidate list (best-effort)
       API.get('/api/gcp/secrets/ssh-keys')
@@ -1015,9 +1274,84 @@ function gcpDashboard() {
       }
     },
 
+    toggleSelectAllImages(ev) {
+      this.selectedImages = ev.target.checked
+        ? this.customImages.map(i => i.self_link)
+        : [];
+    },
+
+    async openBulkDeployModal() {
+      const items = this.customImages.filter(i => this.selectedImages.includes(i.self_link));
+      this.bulkModal = {
+        open: true,
+        items,
+        // Seed each name from its image, sanitised to RFC1035 so the server's
+        // validate_name doesn't 400 on a default the user never typed.
+        names: items.map(i => (i.name || '')
+          .toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^[^a-z]+/, '').slice(0, 60)),
+        workgroup: this._defaultWorkgroup(),
+        machine_type: this.networkOpts.machine_types?.includes('e2-medium')
+          ? 'e2-medium' : (this.networkOpts.machine_types?.[0] || 'e2-medium'),
+        zone: '', subnetwork: '', disk_size_gb: 20, create_external_ip: false,
+        register_in_entitle: false, register_in_passwordsafe: false,
+        submitting: false, error: '',
+      };
+      // The modal opens on the configured default zone, so the pickers have to be
+      // scoped back to ITS region — a previous deploy may have left networkOpts on
+      // another one. (Unconditional: `zones` is initialised to [], so the old
+      // load-once guard never fired anyway.)
+      await this.loadNetworkOpts(this.bulkModal.zone);
+    },
+
+    async submitBulkDeploy() {
+      const m = this.bulkModal;
+      if (!m.workgroup) { m.error = 'Select a workgroup.'; return; }
+      if (m.names.some(n => !n || !n.trim())) { m.error = 'Every instance needs a name.'; return; }
+      m.submitting = true;
+      m.error = '';
+      try {
+        const res = await API.post('/api/gcp/bulk-deploy', {
+          items: m.items.map((img, idx) => ({
+            image_self_link: img.self_link,
+            image_name: img.name || '',
+            instance_name: m.names[idx].trim().toLowerCase(),
+          })),
+          machine_type: m.machine_type,
+          zone: m.zone,
+          subnetwork: m.subnetwork,
+          create_external_ip: m.create_external_ip,
+          disk_size_gb: m.disk_size_gb,
+          workgroup: m.workgroup,
+          register_in_entitle: m.register_in_entitle,
+          register_in_passwordsafe: m.register_in_passwordsafe,
+        });
+        m.open = false;
+        this.selectedImages = [];
+        if (window.afterDeploy(res, { label: 'GCE bulk deploy',
+                                      notify: (msg, t) => this.showToast(msg, t) })) return;
+        this.showToast(`${res.count} instance(s) queued`);
+      } catch (e) {
+        m.error = e.message || 'Bulk deploy failed';
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // Preview of the names a count > 1 deploy will create. GCE names are RFC1035, so
+    // preview the lowercasing submitDeploy already applies below.
+    namePreviewFor() {
+      return this.namePreview(this.deployForm.instance_name, this.deployForm.count,
+                              window.NAME_LIMITS.gcp, { lower: true });
+    },
+
     async submitDeploy() {
       if (!this.deployForm.instance_name.trim()) {
         this.deployError = 'Instance name is required.';
+        return;
+      }
+      const count = this.deployForm.count || 1;
+      if (!(count >= 1 && count <= this.countMax)) {
+        this.deployError = `Count must be between 1 and ${this.countMax}.`;
         return;
       }
       const imageRef = (this.deployForm.image_self_link || this.selectedImage?.self_link || '').trim();
@@ -1033,6 +1367,7 @@ function gcpDashboard() {
           image_self_link:    imageRef,
           image_name:         imageDisplayName,
           instance_name:      this.deployForm.instance_name.trim().toLowerCase(),
+          count:              count,
           machine_type:       this.deployForm.machine_type,
           zone:               this.deployForm.zone,
           subnetwork:         this.deployForm.subnetwork,
@@ -1040,6 +1375,8 @@ function gcpDashboard() {
           disk_size_gb:       this.deployForm.disk_size_gb,
           network_tags:       this.deployForm.network_tags,
           workgroup:          this.deployForm.workgroup,
+          jump_group:         this.deployForm.jump_group || null,
+          jumpoint_name:      this.deployForm.jumpoint_name || null,
           docker_deploy_key_ref: this.deployForm.docker_deploy_key_ref || null,
           register_in_entitle: this.deployForm.register_in_entitle,
           register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
@@ -1047,6 +1384,9 @@ function gcpDashboard() {
         };
         const res = await API.post('/api/gcp/deploy', body);
         this.deployModal = false;
+        // A batch lands on the /jobs rollup; a single deploy keeps its own path.
+        if (window.afterDeploy(res, { label: 'GCE deploy',
+                                      notify: (m, t) => this.showToast(m, t) })) return;
         this.showToast(`Deployment started — Job ${res.job_id}`);
         window.location.href = '/jobs/' + res.job_id;
       } catch (e) {

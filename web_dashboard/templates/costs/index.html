@@ -7,12 +7,28 @@
   <div class="flex items-center justify-between mb-6">
     <div>
       <h1 class="text-2xl font-bold text-gray-900">Cloud Costs</h1>
-      <p class="text-sm text-gray-500 mt-1">Month-to-date spend. AWS Cost Explorer + Azure Cost Management.</p>
+      <p class="text-sm text-gray-500 mt-1">Month-to-date spend, split into dashboard-provisioned
+        resources and sandbox baseline. AWS Cost Explorer · Azure Cost Management · GCP BigQuery
+        export · OCI Usage API.</p>
     </div>
     <button @click="load(true)" :disabled="loading"
             class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
       Refresh
     </button>
+  </div>
+
+  <!-- ── Stale-figure banner ───────────────────────────────────────────────────
+       A throttled or unreachable cloud keeps its last known figure rather than
+       blanking, so the page has to say which numbers are old and when it will try
+       again — otherwise a stale figure is indistinguishable from a fresh one. -->
+  <div x-show="staleClouds().length"
+       class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+    <p class="text-sm font-medium text-amber-800">Showing last known figures</p>
+    <ul class="mt-1 space-y-0.5">
+      <template x-for="c in staleClouds()" :key="'stale-' + c.cloud">
+        <li class="text-xs text-amber-700" x-text="c.note"></li>
+      </template>
+    </ul>
   </div>
 
   <!-- ── Monthly budget ────────────────────────────────────────────────────── -->
@@ -47,7 +63,15 @@
           <p class="text-xs font-semibold text-gray-500 uppercase" x-text="c.cloud"></p>
           <p class="text-lg font-bold mt-0.5"
              x-text="c.status === 'ok' ? money(c.amount, c.currency) : 'unavailable'"
-             :class="c.status === 'ok' ? 'text-gray-900' : 'text-gray-400'"></p>
+             :class="c.status !== 'ok' ? 'text-gray-400' : (c.stale ? 'text-amber-700' : 'text-gray-900')"></p>
+          <!-- Three states, not two: fresh, stale-but-known, and never-known.
+               `unavailable` now means the narrow thing it says — this cloud has never
+               returned a figure — so `detail` is worth showing when it appears. -->
+          <p class="text-[11px] text-gray-400 mt-1"
+             x-show="c.status === 'ok' && !c.stale && c.as_of"
+             x-text="'as of ' + asOf(c.as_of)"></p>
+          <p class="text-[11px] text-amber-600 mt-1" x-show="c.status === 'ok' && c.stale"
+             :title="c.note" x-text="'last known · ' + asOf(c.as_of)"></p>
           <p class="text-xs text-gray-400 mt-1" x-show="c.status !== 'ok'" x-text="c.detail"></p>
           <p class="mt-1" x-show="c.budget">
             <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium"
@@ -59,13 +83,20 @@
     </div>
   </div>
 
-  <!-- ── Dashboard-managed breakdown ───────────────────────────────────────── -->
+  <!-- ── Attributed breakdown (dashboard vs sandbox) ────────────────────────── -->
   <div class="flex items-baseline justify-between mb-3">
-    <h2 class="font-semibold text-gray-800">Dashboard-managed spend (MTD)</h2>
+    <h2 class="font-semibold text-gray-800">Attributed spend (MTD)</h2>
     <span class="text-sm text-gray-500">
-      tagged <code class="text-xs bg-gray-100 px-1 py-0.5 rounded">managed-by=vm-dashboard</code> ·
-      <span class="font-semibold text-gray-700"
-            x-text="breakdown.grand_total == null ? '–' : money(breakdown.grand_total, breakdown.currency)"></span>
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-indigo-100 text-indigo-700">
+        dashboard
+        <span class="ml-1 font-semibold" x-text="money(breakdown.dashboard_total, breakdown.currency)"></span>
+      </span>
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-100 text-amber-700 ml-1">
+        sandbox
+        <span class="ml-1 font-semibold" x-text="money(breakdown.sandbox_total, breakdown.currency)"></span>
+      </span>
+      · <span class="font-semibold text-gray-700"
+              x-text="breakdown.grand_total == null ? '–' : money(breakdown.grand_total, breakdown.currency)"></span>
     </span>
   </div>
 
@@ -74,37 +105,74 @@
       <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         <div class="flex items-baseline justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
           <span class="text-xs font-semibold text-gray-600 uppercase" x-text="c.cloud"></span>
-          <span class="text-sm font-bold text-gray-900"
+          <span class="text-sm font-bold" :class="c.stale ? 'text-amber-700' : 'text-gray-900'"
                 x-show="c.status === 'ok'" x-text="money(c.total, c.currency)"></span>
         </div>
-        <!-- unavailable -->
+        <!-- stale: real figures, just not current ones -->
+        <div x-show="c.status === 'ok' && c.stale"
+             class="px-4 py-1.5 bg-amber-50 border-b border-amber-100">
+          <p class="text-[11px] text-amber-700" x-text="'last known · ' + asOf(c.as_of)"></p>
+          <p class="text-[11px] text-amber-600" x-show="c.note" x-text="c.note"></p>
+        </div>
+        <!-- unavailable: this cloud has never returned a figure -->
         <div x-show="c.status !== 'ok'" class="px-4 py-6 text-center">
           <p class="text-sm text-gray-400">unavailable</p>
           <p class="text-xs text-gray-400 mt-1" x-text="c.detail"></p>
         </div>
-        <!-- service rows -->
-        <table x-show="c.status === 'ok'" class="w-full text-sm">
-          <tbody class="divide-y divide-gray-50">
-            <tr x-show="c.services.length === 0">
-              <td class="px-4 py-4 text-center text-gray-400 text-xs">No managed spend this month.</td>
-            </tr>
-            <template x-for="s in c.services" :key="s.service">
-              <tr class="hover:bg-gray-50">
-                <td class="px-4 py-2 text-gray-700 truncate max-w-[180px]" x-text="s.service" :title="s.service"></td>
-                <td class="px-4 py-2 text-right text-gray-900 font-medium whitespace-nowrap"
-                    x-text="money(s.amount, c.currency)"></td>
-              </tr>
+        <!-- per-scope service rows -->
+        <div x-show="c.status === 'ok'">
+          <template x-for="sc in ['dashboard', 'sandbox']" :key="sc">
+            <div x-show="scopeRows(c, sc).length || scopeTotal(c, sc) != null">
+              <div class="flex items-baseline justify-between px-4 py-1.5 bg-gray-50/60 border-b border-gray-100">
+                <span class="text-[11px] font-semibold uppercase tracking-wide"
+                      :class="sc === 'sandbox' ? 'text-amber-700' : 'text-indigo-700'"
+                      x-text="sc" :title="c.scope_basis?.[sc] || ''"></span>
+                <span class="text-xs font-semibold text-gray-700"
+                      x-text="scopeTotal(c, sc) == null ? 'not measurable' : money(scopeTotal(c, sc), c.currency)"></span>
+              </div>
+              <table class="w-full text-sm">
+                <tbody class="divide-y divide-gray-50">
+                  <tr x-show="scopeRows(c, sc).length === 0">
+                    <td class="px-4 py-2 text-center text-gray-400 text-xs"
+                        x-text="scopeTotal(c, sc) == null ? 'this cloud cannot attribute it — see note' : 'no ' + sc + ' spend this month'"></td>
+                  </tr>
+                  <template x-for="s in scopeRows(c, sc)" :key="sc + '/' + s.service">
+                    <tr class="hover:bg-gray-50">
+                      <td class="px-4 py-2 text-gray-700 truncate max-w-[180px]" x-text="s.service" :title="s.service"></td>
+                      <td class="px-4 py-2 text-right text-gray-900 font-medium whitespace-nowrap"
+                          x-text="money(s.amount, c.currency)"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+          <!-- spend no tag can reach (untagged children, unlabellable services) -->
+          <div class="flex items-baseline justify-between px-4 py-2 border-t border-gray-200 bg-gray-50/40"
+               x-show="unattributed(c) != null">
+            <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">unattributed</span>
+            <span class="text-xs font-medium text-gray-600" x-text="money(unattributed(c), c.currency)"></span>
+          </div>
+          <ul class="px-4 py-2 space-y-1" x-show="(c.notes || []).length">
+            <template x-for="n in (c.notes || [])" :key="n">
+              <li class="text-[11px] text-gray-400 leading-snug" x-text="n"></li>
             </template>
-          </tbody>
-        </table>
+          </ul>
+        </div>
       </div>
     </template>
   </div>
 
   <p class="text-xs text-gray-400 mt-6">
-    AWS breakdown requires the <code class="bg-gray-100 px-1 rounded">managed-by</code> cost-allocation tag
-    to be activated in the Billing console (forward-only; ~24h to populate). Only resources tagged after the
-    tag normalization carry <code class="bg-gray-100 px-1 rounded">managed-by=vm-dashboard</code>.
+    Both scopes share the <code class="bg-gray-100 px-1 rounded">managed-by</code> tag key
+    (<code class="bg-gray-100 px-1 rounded">vm-dashboard</code> for resources the dashboard provisioned,
+    <code class="bg-gray-100 px-1 rounded">dashboard-sandbox</code> for the sandbox baseline). AWS requires
+    that key activated as a cost-allocation tag in the Billing console (forward-only; ~24h to populate) —
+    activation is per key, so one activation covers both scopes.
+    <strong>Unattributed</strong> is spend no tag can reach: GCP Cloud Router/NAT accept no labels, Azure
+    tags don't inherit to disks/NICs/ACI (enable Cost Management tag inheritance to fix), and the OCI Usage
+    API ignores freeform tags — OCI is scoped by compartment instead, so its sandbox figure includes
+    dashboard-provisioned resources in the same compartment.
   </p>
 
 </div>
@@ -125,23 +193,48 @@
 
       async load(force = false) {
         this.loading = true;
-        // The Refresh button forces a cache-busting requery (?refresh=true); the
-        // initial page load (force=false) reads the shared cache so navigation
-        // stays cheap and doesn't re-run the billable Cost Explorer queries.
+        // The Refresh button forces a live requery (?refresh=true) — non-destructively,
+        // and a cloud in throttle cooldown is skipped server-side. The initial page load
+        // (force=false) reads the shared cache so navigation stays cheap and doesn't
+        // re-run the billable Cost Explorer queries.
         const q = force ? '?refresh=true' : '';
+        const before = this.asOfSignature();
         try {
-          const [s, b] = await Promise.all([
-            API.get('/api/costs/summary' + q).catch(() => ({})),
-            API.get('/api/costs/breakdown' + q).catch(() => ({})),
-          ]);
-          this.summary = s || {};
-          this.breakdown = b || {};
+          // SEQUENTIAL, not Promise.all. These are two separate HTTP requests, so
+          // Promise.all opens two connections and gunicorn -w 2 can accept them in
+          // DIFFERENT workers — two simultaneous Cost Management queries against the same
+          // Azure subscription, which is what Cost Management rate-limits on. The server
+          // paces per-cloud queries anyway; asking in order means the common case never
+          // has to wait out that pacer.
+          this.summary = (await API.get('/api/costs/summary' + q).catch(() => ({}))) || {};
+          this.breakdown = (await API.get('/api/costs/breakdown' + q).catch(() => ({}))) || {};
+          if (force && this.asOfSignature() === before) {
+            toast('Costs were refreshed recently — showing cached figures.', 'info');
+          }
         } catch (e) {
           toast('Failed to load costs: ' + e.message, 'error');
         } finally {
           this.loading = false;
         }
       },
+
+      // Every cloud's as_of, joined. Unchanged after a forced refresh means the server
+      // declined every requery (min interval or cooldown) — worth saying out loud, or the
+      // button looks broken.
+      asOfSignature() {
+        return (this.summary.clouds || []).map(c => c.cloud + '=' + (c.as_of || '')).join(',');
+      },
+
+      // Local short time for an "as of" label. The value is UTC ISO from the server.
+      asOf(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleString([], { month: 'short', day: 'numeric',
+                                                     hour: '2-digit', minute: '2-digit' });
+      },
+
+      // Clouds serving a last-known-good figure rather than a fresh one.
+      staleClouds() { return (this.summary.clouds || []).filter(c => c.stale && c.note); },
 
       budgetBadge(s) {
         return ({ over: 'bg-red-100 text-red-700', approaching: 'bg-yellow-100 text-yellow-700',
@@ -150,6 +243,22 @@
 
       budgetBar(s) {
         return ({ over: 'bg-red-500', approaching: 'bg-yellow-400', ok: 'bg-green-500' })[s] || 'bg-gray-400';
+      },
+
+      scopeRows(c, sc) { return (c.scopes && c.scopes[sc] && c.scopes[sc].services) || []; },
+
+      // null means "this cloud can't measure this scope" (rendered as "not
+      // measurable"); 0 means "measured, and it's zero". Don't collapse the two.
+      scopeTotal(c, sc) { return (c.scopes && c.scopes[sc]) ? c.scopes[sc].total : null; },
+
+      // Prefer the cloud's own measured remainder. Otherwise derive it from that same
+      // cloud's account total — same currency by construction. Tag-filtered clouds
+      // (AWS/Azure) can't measure it, so this is where their untagged spend surfaces.
+      unattributed(c) {
+        if (c.unattributed_total != null) return c.unattributed_total;
+        const acct = (this.summary.clouds || []).find(s => s.cloud === c.cloud);
+        if (!acct || acct.status !== 'ok' || acct.amount == null || c.total == null) return null;
+        return Math.round((acct.amount - c.total) * 100) / 100;
       },
 
       money(amount, currency) {

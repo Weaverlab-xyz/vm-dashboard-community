@@ -71,6 +71,23 @@ variable "node_count" {
   description = "Node count for the default node pool"
 }
 
+# AKS's own default is 128 GiB, and because Standard_B2s is premium-capable that
+# lands on Premium_LRS — a P10 per node. Measured, not assumed: every AKS node
+# resource group in this subscription billed the "P10 LRS Disk" meter and nothing
+# else. 32 GiB is the smallest disk that clears the AKS 30 GiB floor and still
+# fits the P4 tier, roughly a third the price per node, and leaves ~15 GiB of
+# containerd image cache after the node image — ample for demo clusters.
+# os_disk_type is deliberately left unset (Managed): Ephemeral needs the VM's
+# cache disk >= os_disk_size_gb and B2s only has ~8 GiB, so it can't be used
+# without moving to a larger vm_size that costs more in compute than the disk
+# saves. Sizing default_node_pool is ForceNew, which is safe only because
+# provisions are apply-once (k8s_service applies once per cluster, then destroys).
+variable "os_disk_size_gb" {
+  type        = number
+  default     = 32
+  description = "Node OS disk size (GiB). AKS minimum is 30; 32 keeps it in the P4 tier."
+}
+
 variable "vnet_cidr" {
   type        = string
   default     = "10.96.0.0/16"
@@ -81,6 +98,33 @@ variable "subnet_cidr" {
   type        = string
   default     = "10.96.0.0/22"
   description = "Subnet for the cluster nodes + (Azure CNI) pods — /22 gives ~1k IPs"
+}
+
+# ── Optional VNet peering back to the sandbox VNet (Azure parity with aws_eks/gcp_gke) ──
+# Blank sandbox_vnet_id → the cluster stays fully isolated (Entitle/PRA still
+# broker access). When set, the module peers this cluster's VNet to the sandbox
+# VNet (both directions) so an in-cluster agent (Entitle SSH ephemeral) can reach
+# the private lab VMs. vnet_cidr must NOT overlap the sandbox VNet (10.99.0.0/16);
+# the default 10.96.0.0/16 is clean. No NSG rule is needed: the sandbox vm-subnet
+# NSG already allows the VirtualNetwork service tag, which auto-expands to peered
+# address space, and classic Azure CNI gives pods VNet-routable IPs from the node
+# subnet (no node-vs-pod range juggling).
+variable "sandbox_vnet_id" {
+  type        = string
+  default     = ""
+  description = "ARM id of the sandbox VNet to peer with; blank to skip peering."
+}
+
+variable "sandbox_vnet_name" {
+  type        = string
+  default     = ""
+  description = "Name of the sandbox VNet (reverse peering leg). Empty = derive from sandbox_vnet_id's last path segment."
+}
+
+variable "sandbox_vnet_rg" {
+  type        = string
+  default     = ""
+  description = "Resource group of the sandbox VNet (reverse peering leg). Empty = this cluster's resource group."
 }
 
 # Public API endpoint restricted to these CIDRs. Empty = open to all (AKS does
@@ -154,11 +198,49 @@ resource "azurerm_subnet" "nodes" {
   address_prefixes     = [var.subnet_cidr]
 }
 
-# Deterministic egress: a user-assigned NAT gateway with a static public IP gives
-# the nodes a single, stable, knowable outbound address. The dashboard whitelists
-# it in the Rancher node firewall (a /32) so the imported cluster's cattle-cluster-
-# agent can dial out. The default loadBalancer outbound SNAT hands out managed IPs
-# in the opaque MC_ node RG that can rotate — unusable for a firewall allowlist.
+# ── VNet peering back to the sandbox VNet (optional; Azure parity with EKS/GKE) ──
+# Peering is directional → both legs. Azure auto-programs system routes for peered
+# address spaces (no route resources), and the two legs sit on DIFFERENT VNets, so
+# there's no same-VNet concurrency to serialize. No NSG rule: the sandbox
+# vm-subnet's VirtualNetwork-tag allow rule auto-covers the peered AKS space, and
+# classic Azure CNI pods are VNet-routable (real IPs from the node subnet).
+locals {
+  sandbox_peer_name = var.sandbox_vnet_name != "" ? var.sandbox_vnet_name : element(reverse(split("/", var.sandbox_vnet_id)), 0)
+  sandbox_peer_rg   = var.sandbox_vnet_rg != "" ? var.sandbox_vnet_rg : local.rg_name
+}
+
+resource "azurerm_virtual_network_peering" "aks_to_sandbox" {
+  count                     = var.sandbox_vnet_id == "" ? 0 : 1
+  name                      = "${var.cluster_name}-to-sandbox"
+  resource_group_name       = local.rg_name
+  virtual_network_name      = azurerm_virtual_network.this.name
+  remote_virtual_network_id = var.sandbox_vnet_id
+}
+
+resource "azurerm_virtual_network_peering" "sandbox_to_aks" {
+  count                     = var.sandbox_vnet_id == "" ? 0 : 1
+  name                      = "sandbox-to-${var.cluster_name}"
+  resource_group_name       = local.sandbox_peer_rg
+  virtual_network_name      = local.sandbox_peer_name
+  remote_virtual_network_id = azurerm_virtual_network.this.id
+}
+
+# Deterministic egress: this static IP is the SOLE outbound frontend of the AKS
+# cluster's managed load balancer (see network_profile below), so the nodes share a
+# single, stable, knowable outbound address. The dashboard whitelists it in the
+# Rancher node firewall (a /32) so the imported cluster's cattle-cluster-agent can
+# dial out. AKS's own managed outbound IPs are unusable for that: they live in the
+# opaque MC_ node RG (which the RG-scoped SP can't even read) and can rotate.
+#
+# Standard SKU + Static are both mandatory — a Standard LB frontend cannot take a
+# Basic or Dynamic IP. Keep it in local.rg_name; it must NOT go in the MC_ node RG,
+# which doesn't exist until the cluster is created.
+#
+# The `-nat-pip` name and the `nat` resource address are HISTORICAL: this used to
+# front a user-assigned NAT gateway (~$0.045/hr + $0.045/GB), replaced by the
+# cluster LB's outbound rule (~$0.025/hr + $0.005/GB) for the same /32 contract.
+# Do not rename either — clusters provisioned before that change hold these exact
+# addresses in their remote state, and `terraform destroy` matches on them.
 resource "azurerm_public_ip" "nat" {
   name                = "${var.cluster_name}-nat-pip"
   location            = var.location
@@ -167,25 +249,6 @@ resource "azurerm_public_ip" "nat" {
   sku                 = "Standard"
   tags                = var.tags
   depends_on          = [azurerm_resource_group.this]
-}
-
-resource "azurerm_nat_gateway" "nat" {
-  name                = "${var.cluster_name}-nat"
-  location            = var.location
-  resource_group_name = local.rg_name
-  sku_name            = "Standard"
-  tags                = var.tags
-  depends_on          = [azurerm_resource_group.this]
-}
-
-resource "azurerm_nat_gateway_public_ip_association" "nat" {
-  nat_gateway_id       = azurerm_nat_gateway.nat.id
-  public_ip_address_id = azurerm_public_ip.nat.id
-}
-
-resource "azurerm_subnet_nat_gateway_association" "nat" {
-  subnet_id      = azurerm_subnet.nodes.id
-  nat_gateway_id = azurerm_nat_gateway.nat.id
 }
 
 # ── AKS cluster ──────────────────────────────────────────────────────────────
@@ -205,22 +268,40 @@ resource "azurerm_kubernetes_cluster" "this" {
   workload_identity_enabled = true
 
   default_node_pool {
-    name           = "default"
-    node_count     = var.node_count
-    vm_size        = var.vm_size
-    vnet_subnet_id = azurerm_subnet.nodes.id
+    name            = "default"
+    node_count      = var.node_count
+    vm_size         = var.vm_size
+    vnet_subnet_id  = azurerm_subnet.nodes.id
+    os_disk_size_gb = var.os_disk_size_gb # see the variable — AKS's 128 GiB default is a P10 per node
   }
 
   identity {
     type = "SystemAssigned"
   }
 
-  # Azure CNI with a user-assigned NAT gateway for egress (see azurerm_nat_gateway
-  # above) so the cluster's outbound IP is a single static address we can whitelist
-  # in the Rancher firewall. The subnet↔NAT-gateway association wires the data path.
+  # Azure CNI. Egress goes through the AKS-managed outbound load balancer, but with
+  # OUR static public IP (above) as its only outbound frontend — so the cluster's
+  # SNAT address is a single /32 we know before the cluster exists, which is the
+  # Rancher firewall contract. Supplying outbound_ip_address_ids REPLACES the
+  # managed outbound IP (AKS's outbound IP options are mutually exclusive), so AKS
+  # never adds one of its own. Inbound Services of type LoadBalancer add frontends
+  # but not egress: Azure's outbound precedence puts an explicit outbound rule above
+  # default SNAT via an inbound frontend.
+  #
+  # load_balancer_sku must be "standard" for load_balancer_profile. It's also the
+  # azurerm 3.x default — set explicitly so a future pin bump can't silently drop it.
   network_profile {
-    network_plugin = "azure"
-    outbound_type  = "userAssignedNATGateway"
+    network_plugin    = "azure"
+    load_balancer_sku = "standard"
+    outbound_type     = "loadBalancer"
+
+    # Leave managed_outbound_ip_count / outbound_ip_prefix_ids unset — they are
+    # mutually exclusive with this. outbound_ports_allocated stays unset too (0 =
+    # automatic, ~1024 SNAT ports/node against 64k on one IP; fine to ~50 nodes,
+    # past which add a second IP rather than going back to a NAT gateway).
+    load_balancer_profile {
+      outbound_ip_address_ids = [azurerm_public_ip.nat.id]
+    }
   }
 
   # AAD-integrated, Azure RBAC for Kubernetes — the dashboard authenticates with
@@ -238,9 +319,9 @@ resource "azurerm_kubernetes_cluster" "this" {
     }
   }
 
-  # userAssignedNATGateway requires the subnet to already have the NAT gateway
-  # associated before the node pool is created.
-  depends_on = [azurerm_resource_group.this, azurerm_subnet_nat_gateway_association.nat]
+  # The egress IP dependency is implicit through load_balancer_profile, and the node
+  # subnet's through vnet_subnet_id — only the RG needs spelling out.
+  depends_on = [azurerm_resource_group.this]
 }
 
 # Grant the dashboard's service principal cluster-admin via Azure RBAC so its
@@ -339,7 +420,9 @@ output "agent_identity_tenant_id" {
   description = "Tenant id for the agent pod (Helm platform.azure.tenantId)"
 }
 
+# The output NAME is load-bearing: k8s_service captures it into K8sCluster.egress_ip,
+# which the Rancher node firewall is built from. Don't rename it.
 output "nat_public_ip" {
   value       = azurerm_public_ip.nat.ip_address
-  description = "Static NAT gateway egress IP (added to the Rancher node firewall as a /32)"
+  description = "Static egress IP — the cluster load balancer's sole outbound frontend (added to the Rancher node firewall as a /32)"
 }

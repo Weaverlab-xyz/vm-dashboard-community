@@ -17,7 +17,7 @@ _PLAYBOOKS = sorted(glob.glob(os.path.join(_ROOT, "examples", "playbooks", "**",
 
 
 def _check_play_list(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         doc = yaml.safe_load(f)
     rel = os.path.relpath(path, _ROOT)
     assert isinstance(doc, list) and doc, f"{rel}: not a non-empty play list"
@@ -27,7 +27,7 @@ def _check_play_list(path):
         assert play.get("tasks") or play.get("roles"), f"{rel}: a play has no tasks/roles"
     # Windows samples must declare a WinRM connection (in vars).
     if os.sep + "windows" + os.sep in path:
-        text = open(path).read()
+        text = open(path, encoding="utf-8").read()
         assert "ansible_connection: winrm" in text, f"{rel}: windows play missing winrm connection"
 
 

@@ -132,6 +132,12 @@ selector writes a per-cloud key; the global keys remain as a fallback (see
 | _(fallback)_ Ansible runner | `ansible_runner` | `ANSIBLE_RUNNER` | `local` | Global default used when a per-cloud key above is blank: `local` \| `ecs` \| `aci` \| `gcp`. |
 | _(fallback)_ Kubernetes runner | `k8s_runner` | `K8S_RUNNER` | `local` | Global default used when a per-cloud key above is blank. |
 
+> **There is no `ansible_runner_local`.** A Config-Management run against an on-prem
+> Kubernetes cluster (`cloud = local`) always uses the local runner — it is the only
+> backend with a route to your LAN — so there is no key to set, and a stray one is
+> ignored rather than honored. See
+> [Kubernetes-cluster and database targets](#kubernetes-cluster-and-database-targets-localhost-runs).
+
 ### Shared cloud infrastructure — AWS / ECS
 
 These knobs are reused by the Ansible runner, the Kubernetes runner, **and**
@@ -139,7 +145,7 @@ the image-promote runner (see [Shared cloud infrastructure](#shared-cloud-infras
 
 | Panel label | Config key | Env var | Default | Meaning |
 |---|---|---|---|---|
-| ECS cluster | `ansible_ecs_cluster` | `ANSIBLE_ECS_CLUSTER` | `bt-jumpoint` | ECS cluster the Fargate task lands in. Shares the cluster with the BT Jumpoint by default. |
+| ECS cluster | `ansible_ecs_cluster` | `ANSIBLE_ECS_CLUSTER` | `bt-jumpoint` | ECS cluster the Fargate task lands in. Shares the cluster with the BT Gateway by default. |
 | ECS task family | `ansible_ecs_task_family` | `ANSIBLE_ECS_TASK_FAMILY` | `ansible-config-mgmt` | Task-definition family for the **Ansible** task (the k8s task uses its own `k8s-runner` family). Auto-registered on first run. |
 | ECS subnet ID | `ansible_ecs_subnet_id` | `ANSIBLE_ECS_SUBNET_ID` | _(empty)_ | Fargate task subnet. A VPC private subnet is recommended; it must have egress to the target. |
 | ECS security group IDs | `ansible_ecs_security_group_ids` | `ANSIBLE_ECS_SECURITY_GROUP_IDS` | _(empty)_ | Comma-separated security-group IDs (optional). |
@@ -154,7 +160,7 @@ the image-promote runner (see [Shared cloud infrastructure](#shared-cloud-infras
 
 | Panel label | Config key | Env var | Default | Meaning |
 |---|---|---|---|---|
-| ACI subnet ID | `ansible_aci_subnet_id` | `ANSIBLE_ACI_SUBNET_ID` | _(empty)_ | Subnet ARM ID for ACI VNet injection (so the container group can reach private targets). When unset, falls back to the jumpoint's subnet (`azure_aci_subnet_id`). **If neither is set the container group is public and cannot reach private VM/cluster IPs.** Must be delegated to `Microsoft.ContainerInstance/containerGroups` and have routing + NSG to the target subnet on the required port; reusing the jumpoint's subnet is the simplest proven choice. |
+| ACI subnet ID | `ansible_aci_subnet_id` | `ANSIBLE_ACI_SUBNET_ID` | _(empty)_ | Subnet ARM ID for ACI VNet injection (so the container group can reach private targets). When unset, falls back to the gateway's subnet (`azure_aci_subnet_id`). **If neither is set the container group is public and cannot reach private VM/cluster IPs.** Must be delegated to `Microsoft.ContainerInstance/containerGroups` and have routing + NSG to the target subnet on the required port; reusing the gateway's subnet is the simplest proven choice. |
 | ACR server | `ansible_aci_acr_server` | `ANSIBLE_ACI_ACR_SERVER` | _(empty)_ | Private ACR login server (e.g. `myregistry.azurecr.io`). Only needed when the runner image is hosted in a private ACR. |
 | ACR username | `ansible_aci_acr_username` | `ANSIBLE_ACI_ACR_USERNAME` | _(empty)_ | ACR username / service-principal appId for the image pull. |
 | ACR password | `ansible_aci_acr_password` | `ANSIBLE_ACI_ACR_PASSWORD` | _(empty)_ | ACR password / SP secret (encrypted at rest). |
@@ -309,7 +315,7 @@ backends need nothing beyond the Docker socket (Ansible) or in-container
 ### AWS (ECS Fargate)
 
 - **ECS Fargate cluster** the dashboard can `run-task` against
-  (`ansible_ecs_cluster`; reuses the BT Jumpoint cluster by default).
+  (`ansible_ecs_cluster`; reuses the BT Gateway cluster by default).
 - **Task execution role** (`ansible_ecs_execution_role_arn`) with
   `service-role/AmazonECSTaskExecutionRolePolicy` — this is what ECS uses to
   **pull the image** (from a private ECR) and **write CloudWatch logs**. It
@@ -357,16 +363,32 @@ backends need nothing beyond the Docker socket (Ansible) or in-container
   | `roles/logging.viewer` | Retrieve job output from Cloud Logging |
   | `roles/iam.serviceAccountUser` | Act as a service account when submitting jobs |
 
-- **VPC connector** (`gcp_ansible_vpc_connector`) when the job must reach
-  private RFC-1918 targets — Cloud Run Jobs run in a Google-managed VPC by
-  default and can't reach private addresses without one. Create one with:
+- **VPC reach** when the job must SSH to a private RFC-1918 target — Cloud Run
+  Jobs run in a Google-managed VPC by default and can't reach private addresses
+  without one of the two modes below (otherwise SSH times out and the play fails
+  `UNREACHABLE`, container exit code 4). Direct VPC egress wins when both are set.
 
-  ```bash
-  gcloud compute networks vpc-access connectors create ansible-runner \
-    --region us-central1 --network default --range 10.8.0.0/28
-  ```
+  - **Direct VPC egress (preferred — no standing infra):** set both
+    `gcp_run_network` (VPC name) and `gcp_run_subnetwork` (a subnet in the Cloud
+    Run region). The job's NIC lands straight in the subnet — no connector to
+    provision or pay for, and immune to the connector's shared-core zonal
+    stockouts. Egress stays private-ranges-only. Ensure a firewall rule allows
+    `tcp:22` from the subnet range to the target VM.
 
-  then set `gcp_ansible_vpc_connector=projects/PROJECT_ID/locations/us-central1/connectors/ansible-runner`.
+    ```
+    gcp_run_network=dashboard-sandbox-vpc
+    gcp_run_subnetwork=dashboard-sandbox-vm-subnet
+    ```
+
+  - **VPC connector (legacy):** create a Serverless VPC Access connector and set
+    `gcp_ansible_vpc_connector`:
+
+    ```bash
+    gcloud compute networks vpc-access connectors create ansible-runner \
+      --region us-central1 --network default --range 10.8.0.0/28
+    ```
+
+    then set `gcp_ansible_vpc_connector=projects/PROJECT_ID/locations/us-central1/connectors/ansible-runner`.
 
 ---
 
@@ -437,7 +459,7 @@ secret always rides the existing `SSH_KEY_B64` channel and needs no migration.
 
 ### Managed-account checkout (BeyondTrust Password Safe)
 
-When **BeyondTrust is enabled** (`beyondtrust_enabled`), a run can also use a
+When **Password Safe is enabled** (`password_safe_enabled`), a run can also use a
 Password Safe **managed account** as the login identity — instead of referencing a
 *stored* secret, the operator picks an account from a **live list** and the
 dashboard checks out its credential **just-in-time** at run time. The operator
@@ -457,6 +479,32 @@ picker (each tagged **[SSH key]** or **[password]**). Selecting one:
 - optionally, a **second** managed account can be picked for the become/sudo
   password (`ansible_become_password`).
 
+**Across many hosts (bulk runs).** The picker above pins `system_id` **and**
+`account_id`, and both belong to one managed system — so the same reference cannot be
+reused across a fleet: it would check out a *single machine's* credential and connect
+to every host with it. Correct only if the account happens to be domain-linked, wrong
+for a local account, and nothing would report which. A [bulk run](#bulk-runs-one-asset-many-targets)
+therefore sends the account **name**, and each job resolves it against the host it is
+actually configuring before checking anything out. Consequences:
+
+- Each host checks out **its own** credential. Because the resolved reference replaces
+  the submitted one wholesale, that host's own **[SSH key] / [password]** nature
+  decides the checkout mode — the sample host's flag is never trusted.
+- A host with no account by that name fails **only its own job**, with a message
+  naming the host and the account.
+- Matching accepts the `{user};{suffix}` form that cloud-native onboarding registers
+  (the AWS Systems Manager plugin appends a scope suffix), so picking `svc-ansible`
+  matches `svc-ansible;local`. Domain-linked accounts resolve too.
+- The account list you choose from is read from one selected target as a **sample** —
+  it supplies the names, not the ids.
+
+**Not available for Kubernetes / database batches.** Those run a `localhost` play with
+no SSH connection to authenticate, and the run path silently ignores the
+connection-identity fields. A single run can absorb that quietly; a batch would leave
+you believing a credential had been applied to every cluster — so `managed_account`,
+`managed_become`, `secret_ssh_key_source` and `secret_become_source` are **refused**
+outright for a non-VM batch. Named `secret_vars` are honored there and stay available.
+
 **Local and Azure (ACI) runners** inject the credential inline — the local runner
 via a `0600` vars file, ACI via `secure_value` — so a checked-out managed account
 works on either out of the box.
@@ -472,6 +520,112 @@ SSH-password targets require `sshpass` in the runner image (already true for the
 built-in on-prem SSH path). The lookup and checkout go through `ps-cli`,
 authenticated by the configured Password Safe OAuth client (`pscli_api_url` /
 `pscli_client_id` / `pscli_client_secret`).
+
+### In-playbook Password Safe lookup (`beyondtrust.secrets_safe`)
+
+The managed-account checkout above is **out-of-band**: the dashboard fetches the
+credential and injects it. The **complementary** pattern is an *in-playbook* lookup —
+the play fetches its own secrets from Password Safe at runtime via the
+[`beyondtrust.secrets_safe`](https://galaxy.ansible.com/ui/repo/published/beyondtrust/secrets_safe/)
+Galaxy collection's `secrets_safe_lookup` plugin (and the `beyondtrust.password_safe`
+management modules). Use it for **app** secrets, API tokens, or DB credentials a task
+consumes — as opposed to the **connection** credential, which the checkout path handles.
+
+Ready-to-run starters live in
+[`examples/playbooks/password-safe/`](../../examples/playbooks/password-safe/).
+
+**Several shipped samples support this optionally.** Rather than only living in the
+dedicated demos, the plays that consume an app secret each declare an optional
+`…_secret` var — set it to a SECRET path (`folder/title`) and the value is fetched
+mid-run; leave it blank and the play behaves exactly as before:
+
+| Playbook | Optional var |
+|---|---|
+| `windows/win-create-local-admin.yml` | `new_admin_password_secret` |
+| `database/postgres-create-role.yml` | `target_role_password_secret` |
+| `database/mysql-create-user.yml` | `target_user_password_secret` |
+| `portainer/*.yml` | `portainer_pat_secret` |
+
+Two implementation notes that matter if you adapt the pattern:
+
+- The fetch writes to a private `_ps_*` fact and is resolved at the use site, **never**
+  back onto the caller-supplied variable. Ansible extra vars outrank `set_fact`, so
+  writing back would be *silently ignored* whenever the value was also supplied via an
+  extra var or a "Use a secret" binding — the play would quietly use the wrong one.
+  When both are set, the Password Safe path wins.
+- Connection credentials (`ansible_password`, become, SSH keys) deliberately stay with
+  the run-form panel, which covers cases a lookup can't (SSH keys, `sshpass`, ephemeral
+  cloud secrets). `tests/test_playbook_ps_lookup.py` pins these invariants across the
+  samples.
+
+**Auto-injected credentials.** The lookup runs on the Ansible controller (the runner
+container) and reads `PASSWORD_SAFE_API_URL` / `PASSWORD_SAFE_CLIENT_ID` /
+`PASSWORD_SAFE_CLIENT_SECRET`. When **Password Safe is enabled** (`password_safe_enabled`)
+and the ps-cli OAuth client is configured, the dashboard **auto-injects** those three env
+vars into **every** runner (Local, ECS, ACI, Cloud Run) — reusing the same
+`pscli_api_url` / `pscli_client_id` / `pscli_client_secret` config as the checkout path,
+so there's nothing extra to set per run.
+
+- The client secret rides the **same per-run env channel each runner already uses for the
+  SSH private key** — the ECS `runTask` override (not the task-def revision history), the
+  Cloud Run job env, an ACI `secure_value`, or a `0600` `--env-file` locally — never on a
+  command line, and scrubbed from job output. **No `ansible_cloud_ephemeral_secrets_enabled`
+  gate is required** (that gate is only for the checked-out managed-account path).
+- Both runner images (`chrweav/ansible-winrm`, `chrweav/ansible-cloud`) ship the two
+  collections (via `beyondtrust-bips-library`), so the lookup resolves on either — rebuild
+  + push them before relying on it.
+- The OAuth client needs the usual API-registration permissions (Secrets → Read,
+  Requests → Create, Credentials → Read, plus scope for the paths the play touches).
+
+---
+
+## Bulk runs (one asset, many targets)
+
+`/config-mgmt` runs one asset against one target. To apply a playbook across a fleet,
+select rows on the **Inventory** page (`/inventory`) — filter to what you want, tick
+them, and a run panel appears. Each selected resource becomes its **own job**, all
+tagged with a shared `batch_id`, dispatched through the ordinary run path so every
+permission check, secret-store validation and runner decision behaves exactly as it
+does for a single run. Queueing lands you on `/jobs?batch_id=…` — the batch filtered
+out of the job list, with a status rollup across all of it.
+
+Every run is claimed from the `jobs` table by the **job runner** (the `worker` service
+in the compose files), the same way Kubernetes and database runs are. A batch
+therefore survives a dashboard restart, and its jobs execute concurrently across
+`WORKER_REPLICAS` (default 3) rather than one at a time — that number is the ceiling
+on how many hosts a batch touches simultaneously.
+
+**One kind per run.** Selecting a VM locks the checkboxes on Kubernetes clusters and
+databases, and vice versa. The kinds aren't interchangeable at any level: a VM run
+SSHes to a host, while k8s/database runs are `localhost` plays reaching *out* over a
+kubeconfig or DB login — different request fields, a different runner, and a playbook
+written for one is meaningless against the other.
+
+Rows that can never be a target are disabled with the reason on hover: **virtual
+desktops** (no Ansible target exists behind a seat), **Proxmox / Nutanix VMs** (their
+deploy records a node + VMID rather than an address — target them through their
+hypervisor *group* instead), and databases whose engine or cloud has no runner. Those
+reasons are computed server-side by the same rule the endpoint enforces, so the page
+can't offer a checkbox the API would reject.
+
+Two limits worth knowing:
+
+- **50 targets per batch.** Each is a job, so an unbounded "select all" against a
+  large estate would fan out unbounded work.
+- **Selection problems refuse the whole request; per-target failures don't.** A mixed
+  selection or an untargetable row is caught before any job exists. But several checks
+  in the run path turn on the *target's cloud*, so a mixed-cloud VM batch can be valid
+  for one host and not another — those come back in the response's `failed` list and
+  are named in the toast, while the rest still run.
+
+**Secrets and managed accounts.** The inventory panel covers asset / SSH user / extra
+vars. For a run needing a Secrets-Management secret or a Password Safe managed
+account, use **Continue on the Config Management page →**, which carries the selection
+over and applies the full run form to it — see [Managed-account
+checkout](#managed-account-checkout-beyondtrust-password-safe) for how an account is
+matched across many hosts.
+
+Full treatment in [docs/config-management.md](../config-management.md#bulk-runs-from-the-inventory).
 
 ---
 
@@ -744,10 +898,88 @@ Ready-to-adapt starters for Linux and Windows cloud VMs live in
 admin-user creation, Docker, node_exporter, nginx (Linux); Windows updates,
 firewall, Chocolatey, local admin, and IIS (Windows). See
 [examples/playbooks/README.md](../../examples/playbooks/README.md) for how to run
-each. **Linux** samples run via the cloud or local runner; **Windows** (WinRM)
+each. There are also two **cluster-building** sets for on-prem hosts — **Docker Swarm**
+([`examples/playbooks/swarm/`](../../examples/playbooks/swarm/)): init, join, open
+ports, stack deploy, status, leave; and **k3s**
+([`examples/playbooks/k3s/`](../../examples/playbooks/k3s/)): server-init, join, open
+ports, kubeconfig, status, uninstall. Both work the same way: because a run targets one
+host at a time, the cluster is built node-by-node with the join token relayed between
+runs, so they need the **local runner** (see that README for the walkthrough and the
+token-visibility caveat — either token can be routed through Password Safe instead of
+job output).
+
+The k3s set closes the loop with the section below: `k3s-kubeconfig.yml` rewrites k3s's
+loopback API address to the node's real one and prints a registration-ready payload, so
+the cluster you just built can be registered (`cloud = local`) and then become a
+Config-Management target itself.
+
+**Linux** samples run via the cloud or local runner;
+**Windows** (WinRM)
 samples run via the **local runner**, which forwards the `ansible_password` extra
 var the WinRM connection needs (the cloud runner is SSH-only and doesn't forward
 extra vars).
+
+---
+
+## Kubernetes-cluster and database targets (localhost runs)
+
+Registered or provisioned Kubernetes clusters and databases are selectable
+Config-Management targets too, but they don't SSH anywhere — Ansible's
+`kubernetes.core` and `community.postgresql`/`mysql`/`general` modules run a
+`hosts: localhost, connection: local` play and connect *out* to the API server
+(via a kubeconfig) or the DB endpoint (via login vars).
+
+- **Dedicated runner image.** These runs use `chrweav/ansible-cloud` (config key
+  `ansible_cloud_image`) — Debian-based, carrying `kubernetes.core`,
+  `community.postgresql`, `community.mysql`, `community.general`, the `helm`/`kubectl`
+  binaries, and `psycopg2`/`PyMySQL`/`pymssql`. Build/push it from
+  [`runners/ansible-cloud/`](../../runners/ansible-cloud/) (multi-arch recommended)
+  and, if you don't use public Docker Hub, mirror it to ECR/ACR/Artifact Registry.
+  The winrm VM image is never used for these targets.
+- **The runner follows line-of-sight to the endpoint.** Not a preference — the two
+  cases point in opposite directions:
+  - **Cloud-hosted (aws / azure / gcp).** The control plane / DB endpoint is private
+    to its VPC, so the run executes on a transient ECS / ACI / Cloud Run task
+    in-subnet, reusing the same `ansible_ecs_subnet_id` / `ansible_aci_subnet_id` /
+    `gcp_ansible_vpc_connector` network config as the VM cloud runner. The local
+    runner can't reach those RFC1918 endpoints and its egress hits the corporate TLS
+    proxy, so an `ansible_runner_<cloud>: local` override is **rejected**. The
+    backend is `ansible_runner_<cloud>`, defaulting to that cloud's native runner.
+  - **On-prem (`cloud = local`).** A **registered** resource on your LAN, where an
+    in-cloud task has **no route at all**: a Kubernetes cluster registered from a
+    kubeconfig — see [`examples/playbooks/k3s/`](../../examples/playbooks/k3s/) for
+    building one — or a database registered against a Password Safe managed account, see
+    [Databases → Registering an existing database](../databases.md#registering-an-existing-database).
+    Those runs execute in a sibling container **on the dashboard host**, which is the only
+    thing that can reach them: same `ansible_cloud_image`, same localhost play, same
+    scrubbing. Two consequences — the dashboard host needs a working `docker` CLI and
+    network reach to the endpoint (a dashboard deployed *in* a cloud has
+    neither, and the run is refused with a message saying so), and local filesystem
+    assets work fine, because the "move it to S3 first" rule exists only for the
+    in-cloud runners that can't read this host's disk.
+
+  Databases follow the same split. A **provisioned** database is always cloud-hosted; a
+  **registered** one may be either — `cloud = local` for an on-premises database, or the
+  cloud it already lives in. Registered **OCI** is the one gap: it can be registered, but
+  no runner resolves for `oci`, so it is refused as a target.
+- **Auto-injected, scrubbed connection material.** The kubeconfig is token-prepped
+  server-side (a short-lived bearer token replaces the cloud exec-auth block) and
+  delivered via `K8S_AUTH_KUBECONFIG`/`KUBECONFIG`. The DB admin credential comes from one
+  of two places, following the row's source: a **provisioned** database's is read from its
+  provisioning job plus the encrypted config store, while a **registered** one has no
+  provisioning job — its Password Safe **managed account** is checked out just-in-time at
+  launch and never persisted. Either way it arrives as `db_login_*` extra-vars.
+  Both ride the runner task's ephemeral env and are redacted from job output. An
+  operator can still bind extra Secrets-Management **named vars** (e.g. a new role's
+  password) via **Use a secret**; SSH-only options (become password, SSH key,
+  managed-account) don't apply.
+- **Durability.** Dispatched by the job worker as an `ansible_cloud_run` job (it
+  launches a cloud task that can outlive a request worker's recycle).
+
+Starters: [`examples/playbooks/k8s/`](../../examples/playbooks/k8s/) and
+[`examples/playbooks/database/`](../../examples/playbooks/database/). Smoke-test the
+image directly with `docker run … chrweav/ansible-cloud ansible-playbook -i 'localhost,'
+-c local …` against a kind/k3d cluster or a throwaway Postgres/MySQL container.
 
 ---
 
@@ -838,15 +1070,20 @@ gcloud projects add-iam-policy-binding PROJECT_ID \
   --role="roles/logging.viewer"
 ```
 
-**GCP: Cloud Run job can't reach target host** — set `gcp_ansible_vpc_connector`
-to a Serverless VPC Access connector in the same region as your GCE instances.
+**GCP: Cloud Run job can't reach target host** (play fails `UNREACHABLE`, "ssh:
+connect to host … port 22: Operation timed out", container exit code 4) — give
+the runner VPC reach: set `gcp_run_network` + `gcp_run_subnetwork` for direct VPC
+egress (preferred, no standing infra), or `gcp_ansible_vpc_connector` for a
+Serverless VPC Access connector — matching the Cloud Run region to the target's
+region. Also confirm a firewall rule permits `tcp:22` from the runner's subnet
+range to the VM.
 
 **Azure: ACI runner UNREACHABLE / `ssh: connect to host <ip> port 22: Operation
 timed out`** — the ACI container has no route to the target VM's private IP. Set
 `ansible_aci_subnet_id` to a VNet-delegated subnet with line-of-sight to the target
-subnet; when unset it now falls back to the jumpoint's `azure_aci_subnet_id`. With no
+subnet; when unset it now falls back to the gateway's `azure_aci_subnet_id`. With no
 subnet the container group is public and cannot reach private targets. (A working PRA
-Shell Jump to the same VM confirms the jumpoint's subnet reaches it — reuse that subnet.)
+Shell Jump to the same VM confirms the gateway's subnet reaches it — reuse that subnet.)
 
 ### Kubernetes runner
 

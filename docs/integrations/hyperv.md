@@ -241,3 +241,48 @@ Add-LocalGroupMember -Group "Hyper-V Administrators" -Member "dashboard-svc"
 **Slow VM list** — each refresh opens a WinRM connection and runs a PowerShell
 script. On hosts with many VMs (50+), the list script may take 5–10 seconds.
 The dashboard shows a spinner during the load.
+
+## Multiple connections
+
+Connection details used to live in Settings as a single set of fields, so there could
+only ever be one Hyper-V host. They now live in the **Connections** page (`/connections`),
+which holds as many as you like — a second Hyper-V host at another site, or the same one
+under a read-only and a privileged service account.
+
+* The **default** connection is what every page and API call uses when not told
+  otherwise. The first connection of a kind becomes the default automatically.
+* Pass `?connection_id=<id>` to any `/api/hyperv` endpoint to target a specific one.
+* Job-backed operations (deploys, power verbs) record the connection at **enqueue**, so
+  changing the default while one is queued cannot redirect it.
+
+Your existing Settings values were copied into the first connection on upgrade. The old
+panel is still there, read-only, with a banner pointing here — editing it no longer
+changes what the dashboard connects to. It is kept so that rolling back to a previous
+image still works.
+
+## Over a remote agent
+
+**Hyper-V is not available over a remote agent.** WinRM is SOAP with NTLM/Negotiate, and
+a real authentication stack is the one transport the agent's deliberately minimal
+dependency set cannot provide — it installs `requests`, `PyYAML` and `cryptography` and
+nothing else, which two audit tests enforce because that restraint *is* the security
+argument.
+
+So a Hyper-V host has to be somewhere the dashboard can reach. Every other hypervisor
+here can go through an agent; see
+[remote agents](../remote-agents.md#hypervisor-connections).
+
+A remote agent's discovery scan *will* report WinRM on 5985/5986, but marked **possible
+only**: nearly every domain-joined Windows Server answers there and the overwhelming
+majority are not hypervisors. Only credentials can tell you which is which.
+
+### When the connection is reached through an agent
+
+The dashboard has no route to an agent-bound connection — that is the point of binding it
+to an agent — so this page cannot query it live. It shows the **last synced inventory**
+instead, with a banner saying so and how old it is. Live-only figures (CPU usage, uptime,
+disk) are blank there rather than zero: they were never measured, and a fabricated 0 is
+worse than an empty cell.
+
+Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
+with Live Output, exactly like a discovery scan.

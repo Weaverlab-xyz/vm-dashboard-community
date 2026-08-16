@@ -13,6 +13,13 @@ class VMInfo(BaseModel):
     last_seen_running_at: Optional[str] = None
     is_online: Optional[bool] = None
     last_online_check_at: Optional[str] = None
+    # Where this row came from. "local" is the PowerShell scan of this host; anything
+    # else is the name of the remote agent that synced it. Defaulted so every existing
+    # caller and every stored row keeps working unchanged.
+    source: str = "local"
+    # vmrest's opaque id, for agent-synced rows only. The local path addresses a VM by
+    # its VMX file; vmrest addresses it by this, and a power verb needs it.
+    vm_id: Optional[str] = None
 
 
 class VMListResponse(BaseModel):

@@ -297,7 +297,7 @@
           gridClass: 'grid grid-cols-1 sm:grid-cols-2 gap-4',
           refreshable: true,
           tiles: [
-            { key: 'cloud_databases', title: 'Cloud Databases',     href: '/databases', flag: 'cloud_database',  description: 'managed DB instances' },
+            { key: 'cloud_databases', title: 'Databases',           href: '/databases', flag: 'cloud_database',  description: 'provisioned + registered' },
             { key: 'k8s_clusters',    title: 'Kubernetes Clusters', href: '/k8s',       flag: 'k8s_management',  description: 'managed clusters' },
           ],
         },
@@ -317,12 +317,17 @@
         {
           id: 'containers',
           label: 'Containers',
-          gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
+          gridClass: 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4',
           refreshable: true,
           tiles: [
             { key: 'portainer_endpoints', title: 'Portainer Endpoints', href: '/containers',       flag: 'portainer_configured', secondaryLabel: 'online' },
             { key: 'ecs_tasks',           title: 'ECS Tasks',           href: '/containers#cloud', flag: 'aws',       description: 'running tasks' },
             { key: 'aci_containers',      title: 'ACI Containers',      href: '/containers#cloud', flag: 'azure',     secondaryLabel: 'running' },
+            { key: 'gce_containers',      title: 'GCE Containers',      href: '/containers#cloud', flag: 'gcp',       secondaryLabel: 'running' },
+            { key: 'cloud_run_jobs',      title: 'Cloud Run Jobs',      href: '/containers#cloud', flag: 'gcp',       description: 'in-flight jobs' },
+            { key: 'rancher_nodes',       title: 'Rancher Node',        href: '/containers#rancher', flag: 'k8s_management', secondaryLabel: 'running' },
+            { key: 'portainer_node',      title: 'Portainer Server',    href: '/containers#portainer', flag: 'gcp',            secondaryLabel: 'running' },
+            { key: 'gateways',            title: 'Gateways',            href: '/containers#gateways',  flag: 'pra',            secondaryLabel: 'running' },
           ],
         },
       ],
@@ -409,7 +414,7 @@
         if (f.oci)     t.push({ label: 'OCI instance', href: '/oci' });
         if (f.proxmox) t.push({ label: 'Proxmox VM',   href: '/proxmox' });
         if (f.nutanix) t.push({ label: 'Nutanix VM',   href: '/nutanix' });
-        if (f.cloud_database) t.push({ label: 'Cloud database',     href: '/databases' });
+        if (f.cloud_database) t.push({ label: 'Database',           href: '/databases' });
         if (f.k8s_management) t.push({ label: 'Kubernetes cluster', href: '/k8s' });
         return t;
       },
@@ -446,6 +451,53 @@
           out.push({ id: i.id, severity: 'error', title: i.name + ' (' + i.kind + ') — ' + i.state,
                      detail: (i.cloud || '') + (i.region ? ' · ' + i.region : ''),
                      time: i.created_at, href: i.detail_href || '/inventory' });
+        }
+        // Resources whose auto-delete timer is inside the warning window. This is the
+        // only warning an operator who never configures anything gets, so it has to be
+        // legible. Outbound notifications (services/notify_policy.py) can also fire a
+        // `resource.expiring` message per endpoint — but that is off by default, and it
+        // is deliberately independent of this item: the server-side warning fires once
+        // and is latched on `expiry_warned_at`, while this one is derived fresh on every
+        // poll and has its own per-browser dismissal.
+        //
+        // Note the 'expiry:' id prefix. The failed-state item above uses a bare i.id, so
+        // without it dismissing one would silently hide the other for the same resource.
+        const ttl = inv?.expiry;
+        if (ttl?.enabled) {
+          const warnMs = (ttl.warn_hours || 24) * 3600 * 1000;
+          const soon = (inv?.items || []).filter(i => {
+            if (!i.expires_at || i.expiry_exempt) return false;
+            const t = new Date(i.expires_at + (/Z$/.test(i.expires_at) ? '' : 'Z')).getTime();
+            return !isNaN(t) && (t - Date.now()) < warnMs;
+          }).sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
+          // One server-computed flag, not a recombination of the four settings: a warning
+          // that says "will be deleted" when nothing is, or stays mild when deletion is
+          // live, is worse than no warning.
+          const verb = ttl.deleting ? 'auto-deletes' : 'would auto-delete';
+          const fix = ttl.deleting
+            ? 'extend it on the Inventory page to keep it'
+            : 'nothing is being deleted yet — see Inventory';
+          // Roll up past three: the list is capped at 8 items, and a big expiring batch
+          // would otherwise bury the failed jobs.
+          if (soon.length > 3) {
+            out.push({
+              id: 'expiry:rollup', severity: 'warn',
+              title: soon.length + ' resources ' + verb + ' within ' + (ttl.warn_hours || 24) + 'h',
+              detail: 'soonest: ' + soon[0].name + ' ' + timeUntil(soon[0].expires_at)
+                      + ' — ' + fix,
+              time: null, href: '/inventory',
+            });
+          } else {
+            for (const i of soon) {
+              const hot = (new Date(i.expires_at + (/Z$/.test(i.expires_at) ? '' : 'Z')).getTime()
+                           - Date.now()) < 3600 * 1000;
+              out.push({
+                id: 'expiry:' + i.id, severity: hot ? 'error' : 'warn',
+                title: i.name + ' (' + i.kind + ') ' + verb + ' ' + timeUntil(i.expires_at),
+                detail: fix, time: null, href: '/inventory',
+              });
+            }
+          }
         }
         // Budget alerts — overall + per-cloud (cost is null for non-admins).
         const budgetItem = (bdg, label, idSuffix) => {
@@ -615,6 +667,14 @@
         if (k === 'portainer_endpoints') return this._fetchPortainer();
         if (k === 'ecs_tasks')        return this._fetchListCount('/api/containers/ecs-tasks',  'tasks');
         if (k === 'aci_containers')   return this._fetchListCount('/api/containers/aci-containers', 'containers', c => c.state === 'Running');
+        if (k === 'gce_containers')   return this._fetchGceInstances();
+        if (k === 'cloud_run_jobs')   return this._fetchListCount('/api/containers/gce-cloud-run-jobs', 'jobs');
+        if (k === 'rancher_nodes')    return this._fetchListCount('/api/containers/rancher', 'nodes', n => (n.status || '').toUpperCase() === 'RUNNING');
+        if (k === 'portainer_node')   return this._fetchListCount('/api/containers/portainer/node', 'nodes', n => (n.status || '').toUpperCase() === 'RUNNING');
+        // Both kinds in one count — the auto-managed gateway per cloud and the ones
+        // operators deploy. The registry already omits deleted rows, so the total is
+        // what exists; `running` excludes provisioning/deleting/errored hosts.
+        if (k === 'gateways')         return this._fetchListCount('/api/gateways', 'gateways', g => g.status === 'running');
         // Managed services (creator-scoped server-side; no count field → list.length)
         if (k === 'cloud_databases')  return this._fetchListCount('/api/databases',    'databases');
         if (k === 'k8s_clusters')     return this._fetchListCount('/api/k8s/clusters',  'clusters');
@@ -633,6 +693,13 @@
           const parts = (r.clouds || [])
             .filter(c => c.status === 'ok' && c.amount != null)
             .map(c => c.cloud + ' ' + fmt(c.amount));
+          // A cloud that is throttled or unreachable keeps serving its last known figure,
+          // so the tile has to say the total is not current — otherwise it reads as fresh.
+          if (r.stale && r.oldest_as_of) {
+            const d = new Date(r.oldest_as_of);
+            if (!isNaN(d)) parts.push('as of ' + d.toLocaleTimeString([], { hour: '2-digit',
+                                                                           minute: '2-digit' }));
+          }
           return { value: fmt(r.total_mtd), secondary: parts.join(' · ') };
         } catch (e) {
           return { value: -1 };
@@ -659,6 +726,25 @@
           const out = { value: r.count ?? list.length };
           if (runningPredicate) out.secondary = list.filter(runningPredicate).length;
           return out;
+        } catch (e) {
+          return { value: -1 };
+        }
+      },
+
+      async _fetchGceInstances() {
+        // GCE COS instances = gateways + compose (mirrors the merged
+        // "GCE Container Instances" table on the Containers page).
+        try {
+          const [jp, cp] = await Promise.all([
+            API.get('/api/containers/gce-jumpoints').catch(() => null),
+            API.get('/api/containers/gce-compose').catch(() => null),
+          ]);
+          if (!jp && !cp) return { value: -1 };
+          const all = [...(jp?.instances || []), ...(cp?.instances || [])];
+          return {
+            value: all.length,
+            secondary: all.filter(i => (i.status || '').toUpperCase() === 'RUNNING').length,
+          };
         } catch (e) {
           return { value: -1 };
         }

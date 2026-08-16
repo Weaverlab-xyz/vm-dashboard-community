@@ -113,10 +113,20 @@
                       title="Direct kubectl-to-API TCP tunnel + downloadable cloud-login (token-free) kubeconfig; supports kubectl --as impersonation for Entitle grants"
                       class="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded font-medium"
                       x-text="c.api_tunnel_jump ? 'API tunnel ✓' : 'API tunnel'"></button>
+              {% if password_safe_enabled %}
+              <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openPsToken(c)"
+                      title="Manage the PRA-injected ServiceAccount token in Password Safe so it ROTATES on schedule — Password Safe keeps the PRA Vault copy in step"
+                      class="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-medium"
+                      x-text="c.ps_token_managed ? 'Token rotation ✓' : 'Token rotation'"></button>
+              {% endif %}
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraGroup(c)"
                       title="Bind an Entra (AAD) group to a ClusterRole — members get real-identity JIT access when Entitle's Entra-ID integration grants them membership (no impersonation)"
                       class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
                       x-text="c.entra_group_bound ? 'Entra group ✓' : 'Entra group'"></button>
+              <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openImpersonator(c)"
+                      title="Grant the Entra group cluster-wide impersonate on users (fine-grained JIT): the group authenticates + can impersonate, but has nothing to impersonate until Entitle's Kubernetes integration JIT-binds entitle:<email> → a role on THIS cluster; the user then runs kubectl --as=<prefix>:<email> — with the email as ENTITLE sanitized it (@ becomes -), so read the entk8s-* clusterrolebinding for the exact subject"
+                      class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium"
+                      x-text="c.impersonator_bound ? 'Impersonation ✓' : 'Impersonation access'"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraFed(c)"
                       title="Make the cluster TRUST Entra as an OIDC identity provider so users authenticate as themselves (EKS via associate-identity-provider-config; AKS is native). Pairs with the Entra group binding + the API tunnel."
                       class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium"
@@ -156,6 +166,14 @@
         <button @click="showRegister = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-5 space-y-4">
+        <div x-show="discoveredApiServer" x-cloak
+             class="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+          <p class="text-xs text-blue-800">
+            From a discovery scan: <span class="font-mono" x-text="discoveredApiServer"></span>.
+            Paste a kubeconfig whose <span class="font-mono">server:</span> matches it —
+            the agent identified the cluster but never authenticated to it.
+          </p>
+        </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
@@ -213,8 +231,11 @@
         <p class="text-xs text-gray-500">
           Stands up a managed cluster with Terraform, stores its kubeconfig as a secrets-backend
           reference, and registers it — then launch a plane / broker access / install secrets as usual.
-          <strong>EKS</strong>, <strong>AKS</strong>, and <strong>GKE</strong> are supported. AKS/GKE
-          create their own network with internet egress; EKS uses the sandbox's private k8s subnets.
+          <strong>EKS</strong>, <strong>AKS</strong>, and <strong>GKE</strong> are supported;
+          <strong>OKE</strong> is experimental (no Entra federation, in-process kubectl, not yet
+          live-validated). Every cluster builds its own network with internet egress — no shared
+          sandbox subnets; EKS additionally peers its VPC back to the sandbox so in-cluster agents
+          can reach the private VMs/DBs directly.
         </p>
         <div class="grid grid-cols-2 gap-3">
           <div>
@@ -280,8 +301,8 @@
         <div x-show="provForm.cloud === 'gcp'" x-cloak>
           <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
           <input type="text" x-model="provForm.zone"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(region)-a">
-          <p class="text-[11px] text-gray-400 mt-1">Zonal cluster (cheaper than regional). Blank uses <code>&lt;region&gt;-a</code>.</p>
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-central1-a">
+          <p class="text-[11px] text-gray-400 mt-1">Zonal cluster (cheaper than regional). Blank uses the region's configured zone (Settings → Multi-region), else the region's first available zone.</p>
         </div>
         <!-- API endpoint exposure (all clouds) -->
         <div>
@@ -290,12 +311,19 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(blank = open to all)">
           <p class="text-[11px] text-gray-400 mt-1">Restricts the <strong>public</strong> API endpoint. Blank = open (0.0.0.0/0). The dashboard runner must be able to reach it.</p>
         </div>
-        <!-- AWS only — the EKS build creates + peers its OWN VPC; optional CIDR override -->
-        <div x-show="provForm.cloud === 'aws'" x-cloak>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Cluster VPC CIDR <span class="text-gray-400">(the EKS build creates + peers its own VPC)</span></label>
+        <!-- AWS / OCI — the build creates its OWN cluster network; optional CIDR override.
+             Both clouds send the same `vpc_cidr` request field (OKE maps it to vcn_cidr). -->
+        <div x-show="provForm.cloud === 'aws' || provForm.cloud === 'oci'" x-cloak>
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            <span x-text="provForm.cloud === 'oci' ? 'Cluster VCN CIDR' : 'Cluster VPC CIDR'"></span>
+            <span class="text-gray-400"
+                  x-text="provForm.cloud === 'oci' ? '(the OKE build creates its own VCN)' : '(the EKS build creates + peers its own VPC)'"></span>
+          </label>
           <input type="text" x-model="provForm.vpc_cidr"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="10.97.0.0/16">
-          <p class="text-[11px] text-gray-400 mt-1">Blank = default <code>10.97.0.0/16</code>. Must not overlap the sandbox VPC (<code>10.99.0.0/16</code>); give each concurrent cluster a distinct block.</p>
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                 :placeholder="provForm.cloud === 'oci' ? '10.96.0.0/16' : '10.97.0.0/16'">
+          <p x-show="provForm.cloud === 'aws'" class="text-[11px] text-gray-400 mt-1">Blank = default <code>10.97.0.0/16</code>. Must not overlap the sandbox VPC (<code>10.99.0.0/16</code>); give each concurrent cluster a distinct block.</p>
+          <p x-show="provForm.cloud === 'oci'" class="text-[11px] text-gray-400 mt-1">Blank = default <code>10.96.0.0/16</code>. Must not overlap the sandbox VCN (<code>10.98.0.0/16</code>); give each concurrent cluster a distinct block.</p>
         </div>
         <!-- AWS only — EBS CSI driver (dynamic PVCs); off by default, opt in for stateful workloads -->
         <div x-show="provForm.cloud === 'aws'" x-cloak class="flex items-start gap-2">
@@ -305,6 +333,16 @@
             <span class="block text-[11px] text-gray-400">Leave off for federation/JIT demos (no storage). Tick it only for stateful workloads (e.g. a Rancher management plane) — it adds a slower, occasionally flaky addon step.</span>
           </label>
         </div>
+        {% if password_safe_enabled %}
+        <!-- Password Safe token-rotation opt-in (chained after the provision completes) -->
+        <div class="flex items-start gap-2">
+          <input type="checkbox" id="ps_token_reg" x-model="provForm.register_token_in_passwordsafe" class="mt-0.5">
+          <label for="ps_token_reg" class="text-sm text-gray-700">
+            Register the ServiceAccount token in Password Safe <span class="text-gray-400">(rotatable)</span>
+            <span class="block text-[11px] text-gray-400">Onboards <code>pra-access/pra-access</code> as a managed account on the Kubernetes Service Account Token plugin and applies the in-cluster rotator RBAC. The Password Safe functional account must already exist.</span>
+          </label>
+        </div>
+        {% endif %}
         <p class="text-[11px] text-gray-400">
           Provisioning takes ~5–15 min; the row shows <span class="font-mono">provisioning → registered</span>.
           AKS/GKE nodes get internet egress (managed outbound / Cloud NAT) so an installed Entitle agent can reach its SaaS.
@@ -340,7 +378,7 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name override — the "separate jumpoint")</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Gateway <span class="text-gray-400">(name override — the "separate gateway")</span></label>
           <input type="text" x-model="brokerForm.jumpoint_name" placeholder="(configured default)"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
         </div>
@@ -404,10 +442,10 @@
           </select>
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(the "separate jumpoint" the tunnel routes through)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Gateway <span class="text-gray-400">(the "separate gateway" the tunnel routes through)</span></label>
           <select x-model="tunnelForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">(configured default)</option>
-            <template x-for="j in tunnelOpts.jumpoints" :key="j.id">
+            <template x-for="j in tunnelOpts.gateways" :key="j.id">
               <option :value="j.name" x-text="j.name"></option>
             </template>
           </select>
@@ -486,10 +524,10 @@
           </select>
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(the jumpoint the tunnel routes through)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Gateway <span class="text-gray-400">(the gateway the tunnel routes through)</span></label>
           <select x-model="apiTunnelForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">(configured default)</option>
-            <template x-for="j in tunnelOpts.jumpoints" :key="j.id">
+            <template x-for="j in tunnelOpts.gateways" :key="j.id">
               <option :value="j.name" x-text="j.name"></option>
             </template>
           </select>
@@ -559,6 +597,62 @@
                   class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
             <span x-show="!entraBusy" x-text="entraTarget && entraTarget.entra_group_bound ? 'Re-bind' : 'Bind group'"></span>
             <span x-show="entraBusy" x-cloak>Working…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Impersonation access modal (fine-grained per-cluster JIT) -->
+  <div x-show="showImpersonator" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showImpersonator = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Impersonation access<span x-show="imperTarget" class="text-gray-400 font-normal"> — <span x-text="imperTarget && imperTarget.name"></span></span></h3>
+        <button @click="showImpersonator = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Grants the Entra group cluster-wide <strong>impersonate</strong> on <strong>users</strong> (never groups —
+          <code>system:masters</code> stays blocked). This is the fine-grained tier: a group member authenticates as
+          themselves <em>and</em> can impersonate, but has <strong>nothing to impersonate as</strong> until Entitle's
+          <strong>Kubernetes</strong> integration JIT-binds <code>&lt;prefix&gt;:&lt;email&gt;</code> → a role on
+          <strong>this</strong> cluster. They then run <code>kubectl --as=&lt;prefix&gt;:&lt;email&gt;</code> over the
+          <strong>API tunnel</strong> (never the k8s tunnel — that proxy strips impersonation headers; on GKE with a
+          workforce identity it's <strong>Connect Gateway</strong>, which does forward them). Reuses the Entra group
+          configured on Settings → Kubernetes; leave blank for that default.
+        </p>
+        <p class="text-xs text-gray-500">
+          <strong>On GKE this also grants Cloud IAM</strong> — GKE gates <code>impersonate</code> in Cloud IAM as well as
+          RBAC, so the group's <code>principalSet</code> is bound to a project custom role holding only
+          <code>container.clusters.impersonate</code> (needs <code>roles/iam.roleAdmin</code> on the dashboard SA).
+          Allow <strong>1–2 min for IAM to propagate</strong> — a <code>--as</code> before then is still
+          <code>Forbidden</code> and looks exactly like a missing grant. The binding is project-wide, so removing it here
+          is ref-counted against other GKE clusters using the same group.
+        </p>
+        <p class="text-xs text-gray-500">
+          <strong>The subject is not the raw email</strong> — Entitle sanitizes it when it creates the binding
+          (<code>a.b@corp.com</code> → <code>&lt;prefix&gt;:a.b-corp.com</code>) even though the credential it shows the
+          user keeps the <code>@</code>. Impersonating the raw email hits an identity with no bindings. Read the exact
+          subject off the cluster: <code>kubectl get clusterrolebinding -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECT:.subjects[*].name</code>
+          (Entitle's are <code>entk8s-*</code>).
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Entra group Object ID <span class="text-gray-400">(blank = Settings default)</span></label>
+          <input type="text" x-model="imperForm.group_id"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono"
+                 placeholder="(configured default)">
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-3">
+        <button x-show="imperTarget && imperTarget.impersonator_bound" x-cloak @click="removeImpersonator()" :disabled="imperBusy"
+                class="px-4 py-2 text-sm border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-lg">Remove</button>
+        <div class="flex justify-end gap-3 ml-auto">
+          <button @click="showImpersonator = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <button @click="submitImpersonator()" :disabled="imperBusy"
+                  class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+            <span x-show="!imperBusy" x-text="imperTarget && imperTarget.impersonator_bound ? 'Re-apply' : 'Grant impersonation'"></span>
+            <span x-show="imperBusy" x-cloak>Working…</span>
           </button>
         </div>
       </div>
@@ -685,6 +779,130 @@ gcloud auth login --login-config=login.json</pre>
       </div>
     </div>
   </div>
+
+  {% if password_safe_enabled %}
+  <!-- Password Safe token rotation modal -->
+  <div x-show="showPsToken" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showPsToken = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Password Safe token rotation<span x-show="psTokenTarget" class="text-gray-400 font-normal"> — <span x-text="psTokenTarget && psTokenTarget.name"></span></span></h3>
+        <button @click="showPsToken = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Onboards the PRA-injected ServiceAccount token (<span class="font-mono">pra-access/pra-access</span>) as a
+          Password Safe managed account on the <span class="font-mono">Kubernetes Service Account Token</span> plugin
+          and applies the in-cluster rotator RBAC. The PRA Vault copy is registered on the
+          <span class="font-mono">PRA Vault Token</span> plugin and <em>synced</em> to it in Password Safe, so every
+          rotation reaches PRA and the k8s tunnel keeps working. The functional
+          account must already exist in Password Safe — see the
+          <a href="/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
+          for the plugin import, functional accounts and access policy.
+        </p>
+        <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
+          <div class="text-xs space-y-1 bg-gray-50 rounded-lg p-3">
+            <p><span class="text-gray-500">Managed account id:</span> <span class="font-mono" x-text="psTokenTarget.ps_token_account_id"></span>
+               <span class="text-gray-500 ml-2">PRA Vault account id:</span> <span class="font-mono" x-text="psTokenTarget.ps_pra_vault_account_id || 'none'"></span></p>
+            <p x-show="psTokenStatus === null" class="text-gray-400">Reading the sync state from Password Safe…</p>
+            <template x-if="psTokenStatus">
+              <div class="space-y-1">
+                <p><span class="text-gray-500">Synced in Password Safe:</span>
+                   <span :class="psTokenStatus.linked ? 'font-mono text-green-700' : 'font-mono text-red-600'"
+                         x-text="psTokenStatus.linked ? 'yes' : 'no'"></span>
+                   <span class="text-gray-400" x-show="psTokenStatus.linked"> — Password Safe pushes every rotation into PRA</span></p>
+                <p><span class="text-gray-500">Token last changed:</span> <span class="font-mono" x-text="psTokenStatus.parent_last_change || '—'"></span>
+                   <span class="text-gray-500 ml-2">next</span> <span class="font-mono" x-text="psTokenStatus.parent_next_change || '—'"></span></p>
+                <p x-show="psTokenStatus.linked"><span class="text-gray-500">PRA copy last changed:</span>
+                   <span class="font-mono" x-text="psTokenStatus.subscriber_last_change || '—'"></span></p>
+                <p x-show="psTokenStatus.note" class="text-amber-600" x-text="psTokenStatus.note"></p>
+                <p x-show="psTokenStatus.error" class="text-red-600" x-text="psTokenStatus.error"></p>
+                <p x-show="psTokenStatus.registered && psTokenStatus.pravault_account_id && !psTokenStatus.linked && !psTokenStatus.error"
+                   class="text-red-600">
+                  The PRA Vault account is not synced to the token account, so rotations will NOT reach PRA.
+                  Use <span class="font-medium">Repair sync</span> below — it re-creates the link and touches
+                  nothing in the cluster. If it fails with a permission error, grant the API identity
+                  Password Safe Account Management (Full control) and try again.
+                </p>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="!(psTokenTarget && psTokenTarget.ps_token_managed)">
+          <div class="space-y-3">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Token mode</label>
+                <select x-model="psTokenForm.mode" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                  <option value="">(configured default)</option>
+                  <option value="longlived">LongLived — rotation revokes</option>
+                  <option value="bound">Bound — no revoke, TTL expiry</option>
+                </select>
+              </div>
+              <div x-show="psTokenForm.mode === 'bound'">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Bound TTL (seconds)</label>
+                <input type="number" x-model="psTokenForm.ttl_seconds" min="600" placeholder="3600"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3" x-show="psTokenTarget && psTokenTarget.source === 'registered'">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Cloud cluster name <span class="text-gray-400">(registered rows only)</span></label>
+                <input type="text" x-model="psTokenForm.cluster_name" placeholder="(defaults to the row name)"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+              </div>
+              <div x-show="psTokenTarget && psTokenTarget.cloud === 'azure'">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Resource group <span class="text-gray-400">(AKS)</span></label>
+                <input type="text" x-model="psTokenForm.resource_group" placeholder="rg-aks-prod"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+              </div>
+            </div>
+            <p class="text-[11px] text-gray-400">
+              Registration seeds Password Safe with the live token, syncs the PRA Vault account to it, rotates once to
+              prove the path, then deletes the dashboard-minted Secret (the plugin's sweep never touches it).
+              From then on Password Safe delivers every rotation to PRA on its own.
+            </p>
+          </div>
+        </template>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-between gap-3">
+        <div class="flex gap-2">
+          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
+            <button @click="rotatePsToken()" :disabled="psTokenBusy"
+                    class="px-3 py-2 text-sm border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-50 disabled:opacity-50">Rotate now</button>
+          </template>
+          <!-- Only offered when Password Safe says the pair is unlinked. Registration
+               commits the token account two steps before it links the pair, so a failure
+               at the link (a 403 on the sync grant, most likely) leaves a row that reads
+               as registered next to a pair that syncs nothing — and the register form
+               above is hidden from then on. This re-runs the register, which reconciles
+               the missing link and touches nothing in the cluster. -->
+          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed && psTokenStatus
+                          && psTokenStatus.registered && psTokenStatus.pravault_account_id
+                          && !psTokenStatus.linked && !psTokenStatus.error">
+            <button @click="repairPsTokenSync()" :disabled="psTokenBusy"
+                    class="px-3 py-2 text-sm border border-red-300 text-red-700 rounded-lg hover:bg-red-50 disabled:opacity-50">Repair sync</button>
+          </template>
+        </div>
+        <div class="flex gap-3">
+          <button @click="showPsToken = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
+            <button @click="removePsToken()" :disabled="psTokenBusy"
+                    class="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+              <span x-show="!psTokenBusy">Remove</span><span x-show="psTokenBusy" x-cloak>Working…</span>
+            </button>
+          </template>
+          <template x-if="!(psTokenTarget && psTokenTarget.ps_token_managed)">
+            <button @click="submitPsToken()" :disabled="psTokenBusy"
+                    class="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+              <span x-show="!psTokenBusy">Register</span><span x-show="psTokenBusy" x-cloak>Working…</span>
+            </button>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 </div>
 {% endblock %}
 
@@ -697,23 +915,52 @@ function k8sPage() {
     filterRegion: '',
     showRegister: false, saving: false,
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
+    // Set when a discovery finding sent us here — shown as a hint so the operator can
+    // confirm the kubeconfig they paste points at the cluster the agent actually found.
+    discoveredApiServer: '',
     showProvision: false, provBusy: false,
-    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false },
+    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false, register_token_in_passwordsafe: false },
     provOptions: { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] },
     loadingProvOpts: false, provOptsError: '',
     showBroker: false, brokering: false, brokerTarget: null,
     brokerForm: { jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
     showSecrets: false, secretsBusy: false, secretsTarget: null, secretsKind: 'eso',
+    showPsToken: false, psTokenBusy: false, psTokenTarget: null,
+    // null = the Password Safe read is still in flight (the modal says so); an object
+    // once it resolves, including on failure, where it carries `error`.
+    psTokenStatus: null,
+    psTokenForm: { mode: '', ttl_seconds: '', cluster_name: '', resource_group: '' },
     showTunnel: false, tunneling: false, tunnelTarget: null,
     tunnelForm: { jump_group: '', jumpoint_name: '', tunnelCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
-    tunnelOpts: { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] },
+    tunnelOpts: { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] },
     showApiTunnel: false, apiTunneling: false, apiTunnelTarget: null,
     apiTunnelForm: { jump_group: '', jumpoint_name: '', apiTunnelCredBackend: '', pra_credential_ref: '' },
     showEntraGroup: false, entraBusy: false, entraTarget: null,
     entraForm: { group_id: '', role: '' },
+    showImpersonator: false, imperBusy: false, imperTarget: null,
+    imperForm: { group_id: '' },
     showEntraFed: false, fedBusy: false, fedTarget: null,
 
-    async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
+    async init() {
+      requireAuth();
+      this.loadSecretBackends();
+      await this.refresh();
+      this.openFromQuery();
+    },
+
+    // ?register=1&name=…&api_server=… prefill for this form.
+    //
+    // Agent discovery no longer produces Kubernetes findings — it scans for hypervisor
+    // management endpoints now, and Password Safe is the source for databases. See
+    // docs/remote-agents.md. This handler stays because the link still works if someone
+    // has one bookmarked or builds it by hand, and it costs ten lines.
+    openFromQuery() {
+      const q = new URLSearchParams(window.location.search);
+      if (!q.get('register')) return;
+      this.openRegister();
+      this.form.name = q.get('name') || '';
+      this.discoveredApiServer = q.get('api_server') || '';
+    },
 
     async refresh() {
       this.loading = true;
@@ -737,6 +984,7 @@ function k8sPage() {
 
     openRegister() {
       this.form = { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' };
+      this.discoveredApiServer = '';
       this.showRegister = true;
     },
 
@@ -810,7 +1058,8 @@ function k8sPage() {
         if (f.k8s_version) body.k8s_version = f.k8s_version;
         if (f.node_instance_type) body.node_instance_type = f.node_instance_type;
         if (f.node_count) body.node_count = Number(f.node_count);
-        if (f.cloud === 'aws' && f.vpc_cidr && f.vpc_cidr.trim()) {
+        // Shared field: the EKS VPC CIDR for aws, the OKE VCN CIDR for oci.
+        if ((f.cloud === 'aws' || f.cloud === 'oci') && f.vpc_cidr && f.vpc_cidr.trim()) {
           body.vpc_cidr = f.vpc_cidr.trim();
         }
         if (f.authorized_cidrs && f.authorized_cidrs.trim()) {
@@ -818,6 +1067,7 @@ function k8sPage() {
         }
         if (f.cloud === 'gcp' && f.zone && f.zone.trim()) body.zone = f.zone.trim();
         if (f.cloud === 'aws' && f.enable_ebs_csi) body.enable_ebs_csi = true;
+        if (f.register_token_in_passwordsafe) body.register_token_in_passwordsafe = true;
         const r = await API.post('/api/k8s/clusters/provision', body);
         this.showProvision = false;
         this.flash('Provisioning cluster… (takes ~10–15 min; watch the status)');
@@ -920,7 +1170,7 @@ function k8sPage() {
         const r = await API.post(`/api/k8s/clusters/${this.brokerTarget.id}/access`, body);
         let msg;
         if (r.access === 'pra_tunnel') {
-          msg = `PRA tunnel ready (jump ${r.pra && r.pra.tunnel_jump_id || '—'}, jumpoint ${r.pra && r.pra.jumpoint || '—'}) — connect via the BeyondTrust representative console.`;
+          msg = `PRA tunnel ready (jump ${r.pra && r.pra.tunnel_jump_id || '—'}, gateway ${r.pra && r.pra.jumpoint || '—'}) — connect via the BeyondTrust representative console.`;
         } else if (r.access === 'ingress' && r.url) {
           window.open(r.url, '_blank', 'noopener');
           msg = 'Opened the brokered management ingress.';
@@ -950,10 +1200,19 @@ function k8sPage() {
         tunnelCredBackend: '', pra_credential_ref: c.pra_credential_ref || '',
         vault_inject: false, vault_account_group_id: null,
       };
-      this.tunnelOpts = { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] };
+      this.tunnelOpts = { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] };
       this.showTunnel = true;
       try {
-        this.tunnelOpts = await API.get('/api/k8s/clusters/pra-options');
+        // The endpoint answers with `r.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        const r = await API.get('/api/k8s/clusters/pra-options');
+        this.tunnelOpts = {
+          configured: !!r.configured,
+          jump_groups: r.jump_groups || [],
+          gateways: r.jumpoints || [],
+          vault_account_groups: r.vault_account_groups || [],
+        };
       } catch (e) {
         this.flash(e.message || 'Could not load PRA options.', 'error');
       }
@@ -1004,10 +1263,19 @@ function k8sPage() {
         jumpoint_name: c.jumpoint_name || '',
         apiTunnelCredBackend: '', pra_credential_ref: c.pra_credential_ref || '',
       };
-      this.tunnelOpts = { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] };
+      this.tunnelOpts = { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] };
       this.showApiTunnel = true;
       try {
-        this.tunnelOpts = await API.get('/api/k8s/clusters/pra-options');
+        // The endpoint answers with `r.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        const r = await API.get('/api/k8s/clusters/pra-options');
+        this.tunnelOpts = {
+          configured: !!r.configured,
+          jump_groups: r.jump_groups || [],
+          gateways: r.jumpoints || [],
+          vault_account_groups: r.vault_account_groups || [],
+        };
       } catch (e) {
         this.flash(e.message || 'Could not load PRA options.', 'error');
       }
@@ -1108,6 +1376,44 @@ function k8sPage() {
       }
     },
 
+    openImpersonator(c) {
+      this.imperTarget = c;
+      this.imperForm = { group_id: '' };
+      this.showImpersonator = true;
+    },
+
+    async submitImpersonator() {
+      this.imperBusy = true;
+      try {
+        const body = { group_id: this.imperForm.group_id || null };
+        const r = await API.post(`/api/k8s/clusters/${this.imperTarget.id}/impersonator`, body);
+        this.showImpersonator = false;
+        this.flash('Impersonation-access job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Impersonation-access grant failed.', 'error');
+      } finally {
+        this.imperBusy = false;
+      }
+    },
+
+    async removeImpersonator() {
+      if (!confirm(`Remove impersonation access from "${this.imperTarget.name}"? This deletes the impersonator ClusterRole + binding, and on GKE also revokes the project-level container.clusters.impersonate IAM binding unless another GKE cluster still uses the same group.`)) return;
+      this.imperBusy = true;
+      try {
+        const r = await API.del(`/api/k8s/clusters/${this.imperTarget.id}/impersonator`);
+        this.showImpersonator = false;
+        this.flash('Impersonation-access removal job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Impersonation-access removal failed.', 'error');
+      } finally {
+        this.imperBusy = false;
+      }
+    },
+
     openEntraFed(c) {
       this.fedTarget = c;
       this.showEntraFed = true;
@@ -1152,7 +1458,13 @@ function k8sPage() {
         const resp = await fetch(`/api/k8s/clusters/${c.id}/entra-kubeconfig`, {
           headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
         });
-        if (!resp.ok) { this.flash(`kubeconfig download failed (HTTP ${resp.status}).`, 'error'); return; }
+        if (!resp.ok) {
+          // Surface the server's reason (e.g. azure_tenant_id unset) — a bare HTTP code
+          // is unactionable for a config gap.
+          const detail = await resp.json().then(j => j && j.detail).catch(() => '');
+          this.flash(detail || `kubeconfig download failed (HTTP ${resp.status}).`, 'error');
+          return;
+        }
         const text = await resp.text();
         const url = URL.createObjectURL(new Blob([text], { type: 'application/yaml' }));
         const a = document.createElement('a');
@@ -1162,7 +1474,8 @@ function k8sPage() {
         URL.revokeObjectURL(url);
         this.flash(c.cloud === 'gcp'
           ? 'Connect Gateway kubeconfig downloaded — run "gcloud auth login --login-config" first, then point KUBECONFIG at it.'
-          : 'Entra kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it (EKS uses device-code sign-in).');
+          : 'Entra kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it. '
+            + 'The first kubectl prints a device code to sign in as yourself.');
       } catch (e) {
         this.flash(e.message || 'kubeconfig download failed.', 'error');
       }
@@ -1187,6 +1500,94 @@ function k8sPage() {
         this.flash(e.message || 'Secret-delivery setup failed.', 'error');
       } finally {
         this.secretsBusy = false;
+      }
+    },
+
+    openPsToken(c) {
+      this.psTokenTarget = c;
+      this.psTokenForm = { mode: '', ttl_seconds: '', cluster_name: '', resource_group: '' };
+      this.psTokenStatus = null;
+      this.showPsToken = true;
+      // Read the sync state from Password Safe rather than from the cluster row: the
+      // dashboard is not a party to the sync, so a cached answer could only describe
+      // registration time — and "someone unlinked it in the PS console" is the case
+      // this panel exists to surface. Never blocks opening the modal.
+      if (c.ps_token_managed) this.loadPsTokenStatus(c.id);
+    },
+
+    async loadPsTokenStatus(clusterId) {
+      try {
+        this.psTokenStatus = await API.get(`/api/k8s/clusters/${clusterId}/ps-token/status`);
+      } catch (e) {
+        this.psTokenStatus = { linked: false, error: (e && e.message) || 'status read failed' };
+      }
+    },
+
+    async submitPsToken() {
+      this.psTokenBusy = true;
+      try {
+        const f = this.psTokenForm;
+        const body = {};
+        if (f.mode) body.mode = f.mode;
+        if (f.mode === 'bound' && f.ttl_seconds) body.ttl_seconds = Number(f.ttl_seconds);
+        if (f.cluster_name && f.cluster_name.trim()) body.cluster_name = f.cluster_name.trim();
+        if (f.resource_group && f.resource_group.trim()) body.resource_group = f.resource_group.trim();
+        const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token`, body);
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        this.showPsToken = false;
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Password Safe registration failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
+      }
+    },
+
+    // Re-runs the register on an already-registered cluster. That path re-applies the
+    // rotator RBAC and re-creates the SyncedAccounts link if it is missing; it creates no
+    // managed systems, checks out nothing and does not rotate, so the cluster's current
+    // token keeps working either way.
+    async repairPsTokenSync() {
+      this.psTokenBusy = true;
+      try {
+        const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token`, {});
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.loadPsTokenStatus(this.psTokenTarget.id);
+      } catch (e) {
+        this.flash(e.message || 'Repairing the Password Safe sync failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
+      }
+    },
+
+    async removePsToken() {
+      if (!confirm(`Remove the Password Safe registration for "${this.psTokenTarget.name}"? ` +
+                   'This off-boards both managed systems — the current token stays valid but stops rotating.')) return;
+      this.psTokenBusy = true;
+      try {
+        const r = await API.del(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token`);
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        this.showPsToken = false;
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Password Safe removal failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
+      }
+    },
+
+    async rotatePsToken() {
+      if (!confirm('Rotate the ServiceAccount token in Password Safe now? In LongLived mode the old ' +
+                   'token is revoked once the rotation completes; Password Safe delivers the new one ' +
+                   'to PRA as part of the same change.')) return;
+      this.psTokenBusy = true;
+      try {
+        const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token/rotate`, {});
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+      } catch (e) {
+        this.flash(e.message || 'Rotation failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
       }
     },
 

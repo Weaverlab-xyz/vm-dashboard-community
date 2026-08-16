@@ -468,3 +468,168 @@ async def deploy_stack(
             _raise(resp, f"deploy_stack({name})")
     logger.info("Deployed stack %s on endpoint %d", name, endpoint_id)
     return resp.json()
+
+
+# ── First-run bootstrap for a dashboard-DEPLOYED node ────────────────────────
+# These helpers target a specific base_url and do NOT go through _client() /
+# _resolve_connection(): a freshly launched node has no PAT yet — minting one is
+# the whole point. They are used only by ``portainer_node_service.run_deploy``;
+# the configured-server functions above are untouched.
+#
+# The server presents a SELF-SIGNED cert on :9443, so these default to
+# verify=False. That is safe here in a way it wouldn't be generally: the node was
+# just created by us, and the firewall restricts who can reach it.
+
+
+class PortainerAlreadyInitialized(PortainerError):
+    """The node already has an admin user, so first-run init is closed.
+
+    Portainer only allows ``POST /api/users/admin/init`` while no admin exists. Hit
+    when redeploying onto a reused VM — recoverable by supplying an existing PAT in
+    Settings, so the caller reports it rather than failing the deploy."""
+
+
+class PortainerInitWindowClosed(PortainerError):
+    """Portainer fenced off its API with "Administrator initialization timeout".
+
+    A DIFFERENT failure from :class:`PortainerAlreadyInitialized`, and the two were
+    conflated: Portainer shuts the admin-init window a short time after the container
+    starts, and once it does, EVERY endpoint answers with this error and no admin
+    exists — so there is no password to log in with and no PAT to mint. The node is
+    unusable until the container restarts, which is not something a new PAT in
+    Settings can fix, so the caller must not report it as a benign note."""
+
+
+async def wait_ready(base_url: str, timeout_s: int = 300, poll_s: int = 5,
+                     verify: bool = False) -> bool:
+    """Poll ``GET /api/system/status`` until the node serves, or the timeout lapses.
+
+    Returns True when Portainer answered. Connection errors are expected while the
+    VM boots and COS pulls the image, so they're swallowed until the deadline.
+
+    Raises :class:`PortainerInitWindowClosed` as soon as the node reports its
+    administrator-initialization timeout: it is serving, but has fenced off its whole
+    API, so polling to the deadline would only turn a diagnosable state into a
+    misleading "did not start serving"."""
+    import asyncio as _asyncio
+    import time as _time
+
+    deadline = _time.monotonic() + max(1, timeout_s)
+    url = base_url.rstrip("/")
+    attempt = 0
+    while _time.monotonic() < deadline:
+        attempt += 1
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=verify) as client:
+                resp = await client.get(f"{url}/api/system/status")
+                if resp.is_success:
+                    logger.info("Portainer at %s is serving (after %d attempt(s))", url, attempt)
+                    return True
+                if _is_init_timeout(resp):
+                    raise PortainerInitWindowClosed(
+                        f"Portainer at {url} is running but locked: its administrator-"
+                        f"initialization window closed with no admin user, so the whole API "
+                        f"answers 'administrator initialization timeout'. The container has "
+                        f"to restart before anyone can log in.")
+        except httpx.HTTPError:
+            pass  # still booting
+        await _asyncio.sleep(poll_s)
+    logger.warning("Portainer at %s did not become ready within %ss", url, timeout_s)
+    return False
+
+
+@_wrap_transport_errors
+async def init_admin(base_url: str, username: str, password: str,
+                     verify: bool = False) -> None:
+    """Create the initial admin user (POST /api/users/admin/init).
+
+    Distinguishes the two ways this can be refused, because they need opposite
+    handling: an existing admin (409, or a 403 that isn't the timeout) is benign and
+    raises :class:`PortainerAlreadyInitialized`; a closed init window raises
+    :class:`PortainerInitWindowClosed`, which means nobody can log in at all. Portainer
+    reports the latter as "Administrator initialization timeout" — on the init endpoint
+    and, from then on, on every other one too."""
+    url = base_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+        resp = await client.post(
+            f"{url}/api/users/admin/init",
+            json={"Username": username, "Password": password},
+        )
+        if _is_init_timeout(resp):
+            raise PortainerInitWindowClosed(
+                f"Portainer at {url} closed its administrator-initialization window "
+                f"before the deploy could create the admin user (HTTP "
+                f"{resp.status_code}: administrator initialization timeout). No admin "
+                f"exists and the API is fenced off until the container restarts.")
+        if resp.status_code in (403, 409):
+            raise PortainerAlreadyInitialized(
+                f"Portainer at {url} already has an admin user (HTTP {resp.status_code}) — "
+                f"first-run initialization is closed.")
+        if not resp.is_success:
+            _raise(resp, "init_admin")
+    logger.info("Portainer admin user '%s' initialized at %s", username, url)
+
+
+def _is_init_timeout(resp) -> bool:
+    """True when a response is Portainer's "Administrator initialization timeout".
+
+    Matched on the message rather than the status code: Portainer serves it as 403 from
+    the init endpoint and as a 303 redirect from everything else, so the code alone
+    can't tell it apart from an ordinary refusal."""
+    try:
+        body = (resp.text or "")[:400].lower()
+    except Exception:  # noqa: BLE001 — a body we can't read is not a timeout
+        return False
+    return "administrator initialization timeout" in body or "admin init timeout" in body
+
+
+@_wrap_transport_errors
+async def login(base_url: str, username: str, password: str,
+                verify: bool = False) -> str:
+    """Authenticate and return a short-lived JWT (POST /api/auth)."""
+    url = base_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+        resp = await client.post(
+            f"{url}/api/auth",
+            json={"Username": username, "Password": password},
+        )
+        if not resp.is_success:
+            _raise(resp, "login")
+        jwt = (resp.json() or {}).get("jwt") or ""
+    if not jwt:
+        raise PortainerError("Portainer login succeeded but returned no JWT")
+    return jwt
+
+
+@_wrap_transport_errors
+async def create_access_token(base_url: str, jwt: str, password: str,
+                              description: str = "vm-dashboard",
+                              verify: bool = False) -> str:
+    """Mint a personal API access token for the authenticated admin.
+
+    Resolves the caller's own user id via ``GET /api/users/me`` and then
+    ``POST /api/users/{id}/tokens`` (Portainer re-checks the password). Returns the
+    RAW key — Portainer shows it exactly once, so the caller must persist it."""
+    url = base_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {jwt}"}
+    async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+        me = await client.get(f"{url}/api/users/me", headers=headers)
+        if not me.is_success:
+            _raise(me, "create_access_token(whoami)")
+        user_id = (me.json() or {}).get("Id")
+        if user_id is None:
+            raise PortainerError("Portainer /api/users/me returned no user Id")
+
+        resp = await client.post(
+            f"{url}/api/users/{user_id}/tokens", headers=headers,
+            json={"description": description, "password": password},
+        )
+        if not resp.is_success:
+            _raise(resp, "create_access_token")
+        body = resp.json() or {}
+    raw = body.get("rawAPIKey") or body.get("rawApiKey") or ""
+    if not raw:
+        raise PortainerError("Portainer token creation returned no rawAPIKey")
+    logger.info("Portainer API token '%s' minted for user %s at %s",
+                description, user_id, url)
+    return raw

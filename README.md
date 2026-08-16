@@ -19,7 +19,7 @@ the dashboard deploys resources into **your** accounts.
 
 ## How the dashboard thinks
 
-Before you spin it up, the four reference docs below explain the
+Before you spin it up, the reference docs below explain the
 opinions baked into the codebase — what the dashboard does *for* you,
 and what discipline it expects from you. Read them in order if you're
 new to the tool; skim if you already know how this kind of platform
@@ -32,8 +32,16 @@ works:
 | [Config Management](docs/config-management.md) | Why one-shot ephemeral runners are the security argument, the .yml/.sh/.ps1/.rpm/.deb wrap rules, on-prem vs cloud target paths; ready-to-adapt Linux + Windows playbooks in [`examples/playbooks/`](examples/playbooks/). | You're about to run an Ansible job and want to know how the runner handles secrets and isolation. |
 | [Secrets Management](docs/secrets-management.md) | Tier 1 (encrypted DB) → Tier 2 (external vault) → Tier 3 (vault-backed runtime checkout); migration UI; why the JWT root key can't move. | You're deciding where to store cloud credentials and how to evolve that over time. |
 | [Storage Management](docs/storage-management.md) | Four backends (S3, Azure Blob, GCS, Local/UNC); migration; why backends are a deployment-level concern, not a per-feature one. | You're about to enable the Ansible feature flag — storage is a prerequisite. |
-| [Cloud Compose](docs/integrations/cloud-compose.md) | Deploy a stored Docker Compose file to ECS / ACI / GCE; the supported subset; ready-to-adapt app starters in [`examples/compose/`](examples/compose/). | You want to run a containerized app (Guacamole, Trivy, OPA, …) on a cloud runtime without Portainer. |
+| [Cloud VMs](docs/cloud-vms.md) | Deploy EC2 / Azure VM / GCE / OCI Compute; the provisioning + PRA / Password Safe / Entitle layer model; per-cloud prerequisites and config keys. | You're deploying cloud VMs and want the full access/onboarding story. |
+| [Databases](docs/databases.md) | Provision private Postgres / MySQL / SQL Server (AWS/Azure/GCP) + Oracle (OCI) — PRA tunnel, optional Password Safe rotation + Entitle JIT — or register a database you already run, on-premises included, as a Configuration Management target. | You're standing up a managed database and need the per-cloud prerequisites, or you want to manage one that already exists. |
+| [Cloud Containers](docs/cloud-containers.md) | Deploy a stored Docker Compose file to ECS / ACI / GCE-COS; the supported subset; app starters in [`examples/compose/`](examples/compose/); monitoring the container fleet. | You want to run a containerized app (Guacamole, Trivy, OPA, …) on a cloud runtime without Portainer. |
 | [Cloud Functions](docs/integrations/cloud-functions.md) *(preview)* | One Python handler deployed unchanged as an AWS Lambda / Azure Function App / GCP Cloud Run function, optionally VPC-attached; layered auth; workload templates in [`examples/functions/`](examples/functions/). | You need a stable HTTPS endpoint that external systems can call to act *inside* your network — the case a one-shot container can't serve. |
+| [Kubernetes](docs/kubernetes.md) | Provision/import EKS / AKS / GKE; Rancher / Portainer / ESO management plane; PRA tunnels, Password Safe rotation of the injected ServiceAccount token, Entra→RBAC federation, Entitle JIT. | You're managing Kubernetes clusters and their privileged access. |
+| [Generic OIDC (SSO)](docs/integrations/oidc.md) | Discovery-driven OpenID Connect login for any IdP (Okta, Entra, Keycloak, Google, …); PKCE, group→workgroup mapping, admin Settings panel. | You want single sign-on for the dashboard instead of local passwords. |
+| [Auto-delete Timer](docs/auto-delete-timer.md) | Give provisioned VMs, databases and clusters an expiry, then run the same teardown the Destroy button runs. The four gates, the two one-hour arming clocks, extending and pinning. | You want lab resources to clean themselves up — read it *before* enabling, because it deletes infrastructure. |
+| [Notifications](docs/notifications.md) | Outbound webhooks — Slack, Microsoft Teams (Power Automate Workflows), or a signed JSON envelope you point at anything. Auto-delete warnings, job failures, budget/secret/drift alerts. | You've turned on the auto-delete timer and want to hear about it without opening the dashboard. |
+| [Cloud Hosting](docs/cloud-hosting.md) | Running the dashboard itself on Azure Container Apps / Cloud Run / ECS instead of Compose: the gateway sidecar that splits the agent endpoint from the UI, why an unset `DATABASE_URL` or `JWT_SECRET_KEY` fails silently, and what on-premises capability you give up. | You want the dashboard reachable from outside your LAN, or fronting remote agents. |
+| [Config Migration](docs/config-migration.md) | Moving Settings configuration between two instances. Why `pg_dump` of the config table restores unreadable ciphertext without erroring, and what deliberately stays behind. | You're standing up a second instance and don't want to re-type months of configuration. |
 
 Together they're the philosophy of the tool: **declarative,
 version-controlled, idempotent, ephemeral where it should be and
@@ -139,7 +147,8 @@ after first login — only if you have the backing infrastructure:
   runner is one-shot — see [docs/config-management.md](docs/config-management.md)
   for the security argument. Integration setup in
   [docs/integrations/ansible.md](docs/integrations/ansible.md).
-- **BeyondTrust Password Safe and/or PRA** — secret retrieval and session recording
+- **BeyondTrust Password Safe** — on-demand checkout of SSH keys and passwords, plus onboarding of the VMs, databases and Kubernetes tokens the dashboard builds as managed systems + accounts. See [docs/integrations/password-safe.md](docs/integrations/password-safe.md).
+- **BeyondTrust Privileged Remote Access** — Shell Jump, Web Jump, Remote RDP and protocol-tunnel jump items plus PRA Vault accounts, and the Gateway hosts they broker through. See [docs/integrations/privileged-remote-access.md](docs/integrations/privileged-remote-access.md).
 - **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/epml.md](docs/integrations/epml.md).
 - **Portainer CE** — on-prem Docker host management
 - **Entitle** — approval-workflow integration
@@ -156,6 +165,7 @@ on release:
 |---|---|
 | [`chrweav/infra-dashboard`](https://hub.docker.com/r/chrweav/infra-dashboard) | The dashboard application container (pulled by `docker-compose.hub.yml`). |
 | [`chrweav/ansible-winrm`](https://hub.docker.com/r/chrweav/ansible-winrm) | Default Ansible config-management runner — upstream `willhallonline/ansible` **+ `pywinrm`**, so both Linux SSH and Windows WinRM targets work out of the box. Built from [`runners/ansible-winrm/`](runners/ansible-winrm/). |
+| [`chrweav/ansible-cloud`](https://hub.docker.com/r/chrweav/ansible-cloud) | Ansible runner for **Kubernetes cluster / database** targets — `kubernetes.core` + the helm CLI + the DB collections and client libs, for `hosts: localhost` plays on an in-cloud runner or — for on-prem targets — a sibling container on the dashboard host. Built from [`runners/ansible-cloud/`](runners/ansible-cloud/). |
 | [`chrweav/dashboard-promote-runner`](https://hub.docker.com/r/chrweav/dashboard-promote-runner) | One-shot cross-cloud image-promote runner (ECS / ACI / Cloud Run). Built from [`runners/promote/`](runners/promote/). |
 
 ## License

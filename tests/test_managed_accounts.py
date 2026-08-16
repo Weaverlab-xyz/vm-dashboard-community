@@ -170,6 +170,82 @@ def test_requires_ephemeral_store_false_when_not_adhoc_or_not_playbook():
     assert not ma.requires_ephemeral_store(True, "ecs", True, False)
 
 
+# ── find_account_by_name (per-host resolution for bulk runs) ────────────────────
+
+def _systems(*specs):
+    """normalize_managed_systems-shaped input. Each spec is (system_id, [accounts])
+    where an account is (account_id, name) or (account_id, name, uses_ssh_key)."""
+    out = []
+    for sid, accounts in specs:
+        out.append({
+            "system_id": sid, "name": f"sys-{sid}", "ip": f"10.0.0.{sid}",
+            "accounts": [
+                {"account_id": a[0], "name": a[1], "domain": "",
+                 "uses_ssh_key": (a[2] if len(a) > 2 else False),
+                 "change_after_release": None}
+                for a in accounts
+            ],
+        })
+    return out
+
+
+def test_find_account_by_exact_name():
+    systems = _systems((7, [(1, "root"), (2, "svc-ansible")]))
+    ref = ma.find_account_by_name(systems, "svc-ansible")
+    assert ref == {"system_id": 7, "account_id": 2,
+                   "account_name": "svc-ansible", "uses_ssh_key": False}
+
+
+def test_find_account_matches_the_cloud_plugin_suffix_form():
+    """AWS Systems Manager registers `{user};{suffix}`. An operator picking
+    'adminuser' for a fleet must still match it."""
+    systems = _systems((3, [(9, "adminuser;local")]))
+    ref = ma.find_account_by_name(systems, "adminuser")
+    assert ref is not None and ref["account_id"] == 9
+    # The account's OWN name is returned — it becomes ansible_user, where the
+    # suffix still has to be stripped by ssh_login_user at connection time.
+    assert ref["account_name"] == "adminuser;local"
+
+
+def test_find_account_is_case_insensitive():
+    systems = _systems((1, [(4, "SVC-Ansible")]))
+    assert ma.find_account_by_name(systems, "svc-ansible")["account_id"] == 4
+
+
+def test_find_account_searches_every_system_for_the_host():
+    """A host can resolve to more than one managed system (e.g. an IP match and a
+    domain-linked one); the account may live on either."""
+    systems = _systems((1, [(1, "root")]), (2, [(5, "svc-ansible")]))
+    ref = ma.find_account_by_name(systems, "svc-ansible")
+    assert ref["system_id"] == 2 and ref["account_id"] == 5
+
+
+def test_find_account_carries_the_ssh_key_flag():
+    """uses_ssh_key routes the checkout to -t dsskey and the credential to
+    SSH_KEY_B64 instead of a password var — losing it breaks the connection."""
+    systems = _systems((1, [(2, "svc-ansible", True)]))
+    assert ma.find_account_by_name(systems, "svc-ansible")["uses_ssh_key"] is True
+
+
+def test_find_account_returns_none_when_the_host_lacks_it():
+    """This is the per-host failure the design accepts: that job fails, the rest of
+    the batch is unaffected."""
+    systems = _systems((1, [(1, "root")]))
+    assert ma.find_account_by_name(systems, "svc-ansible") is None
+
+
+def test_find_account_returns_none_for_a_blank_name_or_no_systems():
+    assert ma.find_account_by_name(_systems((1, [(1, "root")])), "") is None
+    assert ma.find_account_by_name(_systems((1, [(1, "root")])), "   ") is None
+    assert ma.find_account_by_name([], "root") is None
+    assert ma.find_account_by_name(None, "root") is None
+
+
+def test_find_account_tolerates_a_system_with_no_accounts():
+    systems = _systems((1, []), (2, [(3, "root")]))
+    assert ma.find_account_by_name(systems, "root")["system_id"] == 2
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

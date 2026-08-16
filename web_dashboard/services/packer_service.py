@@ -1,10 +1,11 @@
 """
 Packer subprocess wrapper for cloud image building.
 
-Supports three builders:
+Supports four builders:
   - amazon-ebs   (AWS AMI)
   - azure-arm    (Azure Managed Image)
   - googlecompute (GCP Custom Image)
+  - oracle-oci   (OCI Custom Image)
 
 Credentials are injected via environment variables so they never appear
 in command-line arguments or on-disk templates.
@@ -74,6 +75,14 @@ def _safe_azure_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._\-]", "-", name)[:74]
 
 
+def _safe_oci_name(name: str) -> str:
+    """OCI image display names permit up to 255 characters and are far more liberal
+    than the other three, but Oracle asks that they carry no confidential info and
+    the console renders long names poorly. Normalise to the same conservative set
+    the Azure sanitizer uses and leave room for the -{{timestamp}} suffix."""
+    return re.sub(r"[^a-zA-Z0-9._\-]", "-", name)[:200]
+
+
 # ── HCL2 template generators ──────────────────────────────────────────────────
 
 def _hcl_escape(value: str) -> str:
@@ -87,15 +96,15 @@ def _hcl_escape(value: str) -> str:
     )
 
 
-def _provisioner_env_block(env: dict, secret_vars: dict = None, indent: str = "    ") -> str:
+def _provisioner_env_block(env: dict, sensitive_var_names: dict = None, indent: str = "    ") -> str:
     """An ``environment_vars = [...]`` line for a shell provisioner, or "" when
     there's nothing to set.
 
     ``env`` holds literal values, each inlined as a "KEY=VALUE" array element
-    (empty/None dropped, HCL-escaped). ``secret_vars`` maps an env-var name to a
-    Packer *sensitive* variable name; each becomes "KEY=${var.<name>}" so the
-    actual secret value — supplied at runtime via PKR_VAR_<name> — never appears
-    in the template or the archived copy."""
+    (empty/None dropped, HCL-escaped). ``sensitive_var_names`` maps an env-var
+    name to a Packer *sensitive* variable NAME — never a value; each becomes
+    "KEY=${var.<name>}" so the actual secret, supplied at runtime via
+    PKR_VAR_<name>, never appears in the template or the archived copy."""
     items = [
         '"%s=%s"' % (k, _hcl_escape(str(v)))
         for k, v in (env or {}).items()
@@ -103,22 +112,28 @@ def _provisioner_env_block(env: dict, secret_vars: dict = None, indent: str = " 
     ]
     items += [
         '"%s=${var.%s}"' % (name, var)
-        for name, var in (secret_vars or {}).items()
+        for name, var in (sensitive_var_names or {}).items()
     ]
     if not items:
         return ""
     return indent + "environment_vars = [" + ", ".join(items) + "]\n"
 
 
-def _secret_var_decls(secret_vars: dict = None) -> str:
+def _sensitive_var_decls(sensitive_var_names: dict = None) -> str:
     """HCL ``variable`` declarations (marked ``sensitive``) for each secret env
-    var, or "" when there are none. Values are supplied at build time via
-    PKR_VAR_<name> in the subprocess env, so only the declarations — never the
-    secret values — are written to the template."""
-    if not secret_vars:
+    var, or "" when there are none.
+
+    ``sensitive_var_names`` maps an env-var name to a Packer variable NAME (e.g.
+    ``{"TOKEN": "penv_0"}``) — it never carries a value. The values are supplied
+    at build time via PKR_VAR_<name> in the subprocess env, so only the
+    declarations, never the secrets, are written to the template. The parameter
+    is named for what it holds: a dict called ``secret_vars`` reads as though the
+    secrets themselves flow into the generated file, which is the opposite of the
+    design (and is what static analysis concluded when it was called that)."""
+    if not sensitive_var_names:
         return ""
     out = ""
-    for var in secret_vars.values():
+    for var in sensitive_var_names.values():
         out += (
             'variable "%s" {\n'
             '  type      = string\n'
@@ -140,7 +155,7 @@ def generate_aws_template(
 ) -> str:
     safe = _safe_ami_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    decls = _sensitive_var_decls(provisioner_secret_vars)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     return (
         'packer {\n'
@@ -207,7 +222,7 @@ def generate_azure_template(
 ) -> str:
     safe = _safe_azure_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    decls = _sensitive_var_decls(provisioner_secret_vars)
     # Azure requires waagent deprovision to generalize the image
     prov = (
         '\n  provisioner "shell" {\n'
@@ -280,7 +295,7 @@ def generate_azure_linux_gallery_template(
     PKR_VAR_gallery_* vars. Mirrors generate_azure_template otherwise (same shell
     provisioner + waagent generalize)."""
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    decls = _sensitive_var_decls(provisioner_secret_vars)
     prov = (
         '\n  provisioner "shell" {\n'
         '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
@@ -524,7 +539,7 @@ def generate_gcp_template(
 ) -> str:
     safe = _safe_gcp_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    decls = _sensitive_var_decls(provisioner_secret_vars)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     # Boot disk. The googlecompute builder defaults to pd-standard (a spinning
     # HDD): low IOPS, which drags out unpacking hundreds of RPMs/debs during a
@@ -566,6 +581,145 @@ def generate_gcp_template(
         'build {\n'
         '  name    = "vm-dashboard"\n'
         '  sources = ["source.googlecompute.build"]\n'
+        + prov +
+        '}\n'
+    )
+
+
+# API-key auth for the oracle-oci builder. Like azure-arm (and unlike amazon-ebs)
+# the plugin reads no OCI_* environment variables — its only fallback is
+# $HOME/.oci/config, which does not exist in the worker container, so an
+# unconfigured build fails in Prepare() with "'key_file' must be correctly
+# specified" regardless of which field was actually missing. The credentials are
+# therefore wired into the source block as Packer variables fed by PKR_VAR_* on
+# the subprocess env; the signing key and its passphrase are marked sensitive so
+# neither ever lands in the template file or the archived copy.
+#
+# This is deliberately NOT the googlecompute pattern (write credentials.json into
+# the build dir, unlink in `finally`): the OCI signing key is a *tenancy-wide*
+# credential covering compute, Vault, Object Storage and OKE, and the cancel path
+# escalates to SIGKILL — which skips `finally` and would leave the PEM on disk.
+#
+# `type = string` is load-bearing, not decoration: Packer takes a PKR_VAR_ value
+# literally only for string/number variables. For any other (or inferred) type it
+# parses the value as an HCL expression, and a multi-line PEM is not one.
+#
+# `key` (inline PEM) requires plugin >= 1.1.2 — v1.1.1 and earlier only accept
+# `key_file`, a path. If the pinned version ever has to drop below that, swap the
+# `key` line for `key_file = "oci_api_key.pem"` and have the runner write/unlink
+# that file the way _run_gcp_build does with credentials.json.
+_OCI_AUTH_VAR_DECLS = (
+    'variable "tenancy_ocid" { default = "" }\n'
+    'variable "user_ocid"    { default = "" }\n'
+    'variable "fingerprint"  { default = "" }\n'
+    'variable "region"       { default = "us-ashburn-1" }\n'
+    'variable "oci_key" {\n'
+    '  type      = string\n'
+    '  sensitive = true\n'
+    '  default   = ""\n'
+    '}\n'
+    'variable "oci_pass" {\n'
+    '  type      = string\n'
+    '  sensitive = true\n'
+    '  default   = ""\n'
+    '}\n'
+)
+_OCI_AUTH_SOURCE_FIELDS = (
+    '  tenancy_ocid = var.tenancy_ocid\n'
+    '  user_ocid    = var.user_ocid\n'
+    '  fingerprint  = var.fingerprint\n'
+    '  key          = var.oci_key\n'
+    '  pass_phrase  = var.oci_pass\n'
+    '  region       = var.region\n\n'
+)
+
+
+def generate_oci_template(
+    base_image_ocid: str,
+    shape: str,
+    availability_domain: str,
+    compartment_ocid: str,
+    subnet_ocid: str,
+    ssh_username: str,
+    image_name: str,
+    has_provisioner: bool,
+    provisioner_env: dict = None,
+    # Env-var name → Packer variable NAME. Never a secret value: those reach the
+    # build only as PKR_VAR_* on the subprocess env. See _sensitive_var_decls.
+    provisioner_sensitive_var_names: dict = None,
+    ocpus: Optional[float] = None,
+    memory_gb: Optional[float] = None,
+    boot_volume_gb: Optional[int] = None,
+) -> str:
+    safe = _safe_oci_name(image_name)
+    envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
+    decls = _sensitive_var_decls(provisioner_sensitive_var_names)
+    prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
+
+    # Flex shapes (A1.Flex, E4.Flex …) carry no built-in size and the builder
+    # rejects them without a shape_config; fixed shapes reject one that's present.
+    shape_cfg = ""
+    if ocpus:
+        shape_cfg = (
+            '  shape_config {\n'
+            '    ocpus = ' + str(float(ocpus)) + '\n'
+        )
+        if memory_gb:
+            shape_cfg += '    memory_in_gbs = ' + str(float(memory_gb)) + '\n'
+        shape_cfg += '  }\n\n'
+
+    # Boot volume for the transient build instance. The builder spells this
+    # `disk_size` (the Go field is BootVolumeSizeInGBs, the HCL option is not).
+    # Only emitted when the operator asked for more than the image default; OCI's
+    # floor is 50 GB and a value under the source image's size fails the build.
+    boot_vol = ''
+    if boot_volume_gb and int(boot_volume_gb) > 0:
+        boot_vol = '  disk_size           = ' + str(int(boot_volume_gb)) + '\n'
+
+    return (
+        'packer {\n'
+        '  required_plugins {\n'
+        '    oracle = {\n'
+        '      version = ">= 1.1.2"\n'
+        '      source  = "github.com/hashicorp/oracle"\n'
+        '    }\n'
+        '  }\n'
+        '}\n\n'
+        + _OCI_AUTH_VAR_DECLS + '\n'
+        + decls +
+        'source "oracle-oci" "build" {\n'
+        + _OCI_AUTH_SOURCE_FIELDS +
+        '  availability_domain = "' + _hcl_escape(availability_domain) + '"\n'
+        '  compartment_ocid    = "' + _hcl_escape(compartment_ocid) + '"\n'
+        '  subnet_ocid         = "' + _hcl_escape(subnet_ocid) + '"\n'
+        '  shape               = "' + _hcl_escape(shape) + '"\n'
+        '  base_image_ocid     = "' + _hcl_escape(base_image_ocid) + '"\n'
+        '  image_name          = "' + safe + '-{{timestamp}}"\n'
+        '  ssh_username        = "' + _hcl_escape(ssh_username) + '"\n'
+        + boot_vol + '\n'
+        + shape_cfg +
+        # Packer runs inside the worker container, outside the tenancy's VCN, so it
+        # reaches the transient build instance over the public internet. Without a
+        # public IP the build hangs at "Waiting for SSH" until it times out. The
+        # subnet must also permit ingress on 22 from the dashboard's egress address
+        # — see docs/image-management.md.
+        '  create_vnic_details {\n'
+        '    assign_public_ip = true\n'
+        '  }\n\n'
+        '  tags = {\n'
+        '    built-by = "vm-dashboard"\n'
+        '  }\n'
+        # Freeform tags on the *transient build instance* (tags above land on the
+        # resulting image). If a hard kill ever outruns packer's own cleanup, this
+        # is what makes the orphan findable in the console.
+        '  instance_tags = {\n'
+        '    built-by = "vm-dashboard"\n'
+        '    purpose  = "packer-build"\n'
+        '  }\n'
+        '}\n\n'
+        'build {\n'
+        '  name    = "vm-dashboard"\n'
+        '  sources = ["source.oracle-oci.build"]\n'
         + prov +
         '}\n'
     )
@@ -869,3 +1023,30 @@ async def archive_to_gcs(
         return f"gs://{bucket}/{object_name}"
 
     return await asyncio.to_thread(_upload)
+
+
+async def archive_to_oci(
+    template_path: Path,
+    job_id: str,
+    image_name: str,
+    bucket: str,
+    namespace: str = "",
+) -> str:
+    """Upload the Packer template to OCI Object Storage. Returns an oci:// URI.
+
+    Unlike the other three archivers this takes no credentials dict — OCI's are
+    already centralised in oci_service._oci_config(), and duplicating that build
+    here would mean a second place to get the key-content handling wrong."""
+    from . import oci_service
+
+    object_name = f"packer-templates/{job_id}/{image_name}.pkr.hcl"
+
+    def _upload(ns: str) -> str:
+        import oci
+        client = oci.object_storage.ObjectStorageClient(oci_service._oci_config())
+        client.put_object(ns, bucket, object_name, template_path.read_bytes(),
+                          content_type="text/plain")
+        return f"oci://{ns}/{bucket}/{object_name}"
+
+    ns = namespace or await oci_service.object_storage_namespace()
+    return await asyncio.to_thread(_upload, ns)

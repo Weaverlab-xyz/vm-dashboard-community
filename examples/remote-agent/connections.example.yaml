@@ -1,0 +1,145 @@
+# Hypervisor connections — YOUR file, not the dashboard's.
+#
+# This is where hypervisor credentials live when a connection is reached through an
+# agent. The dashboard stores the connection's NAME and nothing else: no host, no
+# username, no password. A job says "run inventory_sync on dc1-vcenter" and the agent
+# resolves the rest from here.
+#
+# That is deliberate, and it is the difference between this design and a proxy. If the
+# dashboard shipped credentials in the job envelope, a standing vCenter administrator
+# password would sit in its database, in every job payload, in this agent's memory —
+# and, because envelopes are signed rather than encrypted, in the logs of any
+# TLS-inspecting corporate proxy between the two. The whole feature is sold on the
+# opposite property.
+#
+# Mount it read-only, with the SELinux relabel:
+#   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"      # bash
+#   -v "${PWD}/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"    # PowerShell
+#
+# The `,Z` is not optional on Fedora, RHEL, CentOS, Rocky or Alma — without it the
+# agent cannot read this file whatever its mode bits say. Same reasoning as policy.yaml.
+# On a Windows host it is inert and harmless; see docs/remote-agents.md, "Running on
+# Windows".
+#
+# Nothing here grants anything on its own. Three separate parties must agree before a
+# verb runs:
+#   1. the dashboard grants this agent the `agent_hypervisor` job type (Agents page);
+#   2. policy.yaml grants that verb on this connection name;
+#   3. this file defines the name, with a credential.
+# Withhold any one and nothing happens.
+
+connections:
+  # ── VMware vCenter ─────────────────────────────────────────────────────────
+  # vCenter, NOT a bare ESXi host: the agent uses the vSphere Automation REST API
+  # (7.0U2+), which ESXi does not serve. Point an ESXi host at the dashboard directly.
+  - name: dc1-vcenter
+    kind: vsphere
+    host: vcenter.lab.internal
+    port: 443
+    username: svc-dashboard@vsphere.local
+    # `password_file` wins over `password`, so a Docker/Podman secret can be mounted
+    # instead of putting the value in a YAML file. Prefer it.
+    password_file: /run/secrets/vcenter
+    verify_ssl: true
+
+  # ── Proxmox VE ─────────────────────────────────────────────────────────────
+  # API-token auth only. A password login would mean posting credentials to
+  # /access/ticket and juggling a CSRF token — more surface, no gain.
+  # Create the token in Proxmox under Datacenter → Permissions → API Tokens.
+  - name: lab-proxmox
+    kind: proxmox
+    host: 10.20.0.5
+    port: 8006
+    username: root@pam
+    token_id: dashboard          # the token NAME; the secret goes in `password`
+    password: "REPLACE-WITH-THE-TOKEN-SECRET"
+    verify_ssl: false
+
+  # ── Nutanix Prism Central ──────────────────────────────────────────────────
+  # Inventory sync only in this build. Power verbs are refused: a v3 power change is a
+  # full spec PUT carrying a metadata version, not a simple action, and getting that
+  # wrong writes to the VM rather than failing.
+  # - name: hq-prism
+  #   kind: nutanix
+  #   host: prism.lab.internal
+  #   port: 9440
+  #   username: svc-dashboard
+  #   password_file: /run/secrets/prism
+  #   verify_ssl: true
+
+  # ── XCP-ng / XenServer ─────────────────────────────────────────────────────
+  # - name: lab-xcpng
+  #   kind: xcpng
+  #   host: 10.20.0.9
+  #   port: 443
+  #   username: root
+  #   password_file: /run/secrets/xcpng
+  #   verify_ssl: false
+
+  # ── Password Safe, instead of a stored credential ──────────────────────────
+  # The end state: this agent holds NO hypervisor credential at all, only a Password
+  # Safe OAuth client whose single power is to ask. Each job checks a credential out
+  # and checks it back in, so every use is subject to Password Safe's own policy,
+  # approval workflow and session recording.
+  #
+  # `ps_managed_account` wins over `password_file` and `password` if you leave one
+  # below it — an operator who has moved a connection to Password Safe should not
+  # silently keep authenticating with the stale secret.
+  #
+  # Mount the client alongside this file (see passwordsafe.example.yaml):
+  #   -v "$PWD/passwordsafe.yaml:/etc/dashboard-agent/passwordsafe.yaml:ro,Z"      # bash
+  #   -v "${PWD}/passwordsafe.yaml:/etc/dashboard-agent/passwordsafe.yaml:ro,Z"    # PowerShell
+  #
+  # - name: dc2-vcenter
+  #   kind: vsphere
+  #   host: vcenter2.lab.internal
+  #   username: svc-dashboard@vsphere.local
+  #   ps_managed_account: 4821        # the Password Safe ManagedAccountID
+  #   ps_duration_minutes: 30
+  #   verify_ssl: true
+
+  # ── VMware Workstation Pro (co-located) ────────────────────────────────────
+  # The agent runs ON the Workstation host and talks to `vmrest`, Workstation Pro's
+  # REST daemon. No container and no extra dependency — it is plain JSON over HTTP.
+  #
+  # Set it up once on that host:
+  #   vmrest -C          # sets the API credentials; use them below
+  #   vmrest             # runs the daemon on 127.0.0.1:8697
+  #
+  # vmrest binds LOOPBACK, which the agent refuses by default — so this connection also
+  # needs `allow_loopback: true` in policy.yaml. That deny exists to stop a discovery
+  # sweep probing the agent's own container, and it stays in force everywhere else.
+  #
+  # Inventory plus power on/off. vmrest has no reset, reboot or snapshot API, and the
+  # agent refuses those rather than quietly substituting `shutdown`.
+  #
+  # - name: my-workstation
+  #   kind: workstation
+  #   host: 127.0.0.1
+  #   port: 8697
+  #   username: dashboard          # the user you set with `vmrest -C`
+  #   password_file: /run/secrets/vmrest
+  #   verify_ssl: false            # vmrest is plain HTTP unless you ran `vmrest -c`
+
+  # ── Hyper-V and BARE ESXi: via the sibling runner ──────────────────────────
+  # These two need a container, because WinRM needs a real NTLM stack and a standalone
+  # ESXi host serves only SOAP. Enable `sibling:` in policy.yaml and apply
+  # docker-compose.sibling.yml — that mounts the Docker socket, which is root on this
+  # host, so read that file before you do.
+  #
+  # `kind: esxi` means a BARE host. A vCenter is `kind: vsphere` and needs none of this.
+  #
+  # - name: hq-hyperv
+  #   kind: hyperv
+  #   host: hv01.corp.internal
+  #   port: 5985
+  #   username: CORP\svc-dashboard
+  #   password_file: /run/secrets/hyperv
+  #   transport: ntlm
+  #
+  # - name: edge-esxi
+  #   kind: esxi
+  #   host: 10.20.0.30
+  #   username: root
+  #   password_file: /run/secrets/esxi
+  #   verify_ssl: false

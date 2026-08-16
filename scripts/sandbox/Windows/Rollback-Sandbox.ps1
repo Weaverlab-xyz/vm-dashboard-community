@@ -87,6 +87,26 @@ function Invoke-AwsRollback {
             else { Write-Warn "Could not delete DB subnet group $g (a DB may still be provisioned — decommission it first)" }
         }
 
+        # Interface VPC endpoints (SSM: ssm/ssmmessages/ec2messages). Created on-demand
+        # by the dashboard (or by older setup scripts). Each holds an ENI in the private
+        # subnet and references the ssm-vpce SG, so they MUST go before the SG and subnet
+        # sweeps or those deletes fail — and each keeps billing (~$7/mo) if left behind.
+        $vpces = (aws ec2 describe-vpc-endpoints --region $region `
+            --filters "Name=vpc-id,Values=$vpcId" `
+            --query 'VpcEndpoints[].VpcEndpointId' --output text 2>$null).Trim()
+        if ($vpces -and $vpces -ne 'None') {
+            $vpceIds = $vpces.Split()
+            & aws ec2 delete-vpc-endpoints --region $region --vpc-endpoint-ids $vpceIds *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Deleting VPC endpoints $vpces (waiting for ENIs to detach…)" }
+            else { Write-Warn "Could not delete VPC endpoints $vpces" }
+            for ($i = 0; $i -lt 24; $i++) {  # ~60s budget; no AWS waiter for endpoints
+                $left = (aws ec2 describe-vpc-endpoints --region $region --vpc-endpoint-ids $vpceIds `
+                    --query "VpcEndpoints[?State!='deleted'].VpcEndpointId" --output text 2>$null)
+                if (-not $left -or $left.Trim() -eq '' -or $left.Trim() -eq 'None') { break }
+                Start-Sleep -Milliseconds 2500
+            }
+        }
+
         # Security groups (skip default).
         $sgs = (aws ec2 describe-security-groups --region $region `
             --filters $filter "Name=vpc-id,Values=$vpcId" `
@@ -319,64 +339,125 @@ function Invoke-GcpRollback {
     $projectId = if ($env:GCP_PROJECT_ID) { $env:GCP_PROJECT_ID } else {
         (gcloud config get-value project 2>$null).Trim()
     }
-    $region = if ($env:GCP_REGION) { $env:GCP_REGION } else { 'us-central1' }
     if (-not $projectId -or $projectId -eq '(unset)') { Write-Die 'No GCP project set.' }
 
-    Write-Section "GCP rollback in $projectId, region $region"
+    Write-Section "GCP rollback in $projectId (all regions on the shared sandbox VPC)"
     if (-not $Yes) {
-        if (-not (Confirm-Action "Delete GCP sandbox network, NAT, firewall rules, SA, secret in $projectId?")) { return }
+        if (-not (Confirm-Action "Delete the GCP sandbox VPC across ALL regions — subnets, routers/NAT, firewall rules (incl. orphaned rancher/GKE rules), serverless egress IPs, PSA range + peering, SA, secret in $projectId?")) { return }
     }
 
-    $prefix   = $Script:SandboxNamePrefix
-    $vpc      = "$prefix-vpc"
-    $jpSubnet = "$prefix-jumpoint-subnet"
-    $vmSubnet = "$prefix-vm-subnet"
-    $router   = "$prefix-router"
-    $nat      = "$prefix-nat"
+    $prefix = $Script:SandboxNamePrefix
+    $vpc    = "$prefix-vpc"
+    $router = "$prefix-router"
+    $nat    = "$prefix-nat"
+
+    # Guard: a LIVE Rancher management node (VM tagged `rancher` / named rancher-server)
+    # owns firewall rules on this VPC. Refuse rather than force-delete under a running
+    # node — tear it down via the dashboard first (AWS-parity active-owner guard).
+    $rancherNodes = @(gcloud compute instances list --project $projectId `
+        --filter="tags.items=rancher OR name=rancher-server" --format='value(name)' 2>$null) | Where-Object { $_ }
+    if ($rancherNodes) {
+        Write-Warn "Rancher management node(s) present: $($rancherNodes -join ', ')"
+        Write-Warn 'Tear the Rancher node down via the dashboard (Kubernetes -> Rancher) first, then re-run rollback. Aborting.'
+        return
+    }
+
+    # Guard: an ACTIVE GKE<->sandbox VPC peering (a non-co-located cluster lives in its
+    # own VPC and only the peering touches this one). servicenetworking is ours (below).
+    $gkePeers = @(gcloud compute networks peerings list --network $vpc --project $projectId `
+        --format='value(name)' 2>$null) | Where-Object { $_ -and $_ -ne 'servicenetworking-googleapis-com' }
+    if ($gkePeers) {
+        Write-Warn "Active non-servicenetworking VPC peering(s) on $vpc : $($gkePeers -join ', ')"
+        Write-Warn 'A GKE cluster is still peered to this VPC. Decommission it via the dashboard first, then re-run rollback. Aborting.'
+        return
+    }
 
     # Refuse if user VMs are still in the VPC.
-    $instances = (gcloud compute instances list --project $projectId `
-        --filter "networkInterfaces.network:$vpc" --format='value(name)' 2>$null).Trim()
+    $instances = @(gcloud compute instances list --project $projectId `
+        --filter "networkInterfaces.network:$vpc" --format='value(name)' 2>$null) | Where-Object { $_ }
     if ($instances) {
-        Write-Warn "Instances still running in $vpc : $instances"
+        Write-Warn "Instances still running in $vpc : $($instances -join ', ')"
         Write-Warn 'Terminate them via the dashboard first, then re-run rollback. Aborting.'
         return
     }
 
-    # 1. NAT + Router.
-    & gcloud compute routers nats delete $nat --router $router --router-region $region `
-        --project $projectId --quiet *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted NAT $nat" }
-    & gcloud compute routers delete $router --region $region --project $projectId --quiet *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted router $router" }
+    # Every region that still has a sandbox subnet or router on the shared VPC. The VPC
+    # is global but subnets/router/NAT are regional (same fixed names in each region), so
+    # a multi-region sandbox must be torn down per region or the shared-VPC delete blocks.
+    $regions = @(
+        (gcloud compute networks subnets list --project $projectId --filter="network~/$vpc`$" --format='value(region.basename())' 2>$null)
+        (gcloud compute routers list          --project $projectId --filter="network~/$vpc`$" --format='value(region.basename())' 2>$null)
+    ) | Where-Object { $_ } | Sort-Object -Unique
 
-    # 2. Firewall rules.
-    $rulesText = (gcloud compute firewall-rules list --project $projectId `
-        --filter "name~^$prefix-" --format='value(name)').Trim()
-    foreach ($r in $rulesText.Split([Environment]::NewLine, [StringSplitOptions]::RemoveEmptyEntries)) {
-        gcloud compute firewall-rules delete $r --project $projectId --quiet | Out-Null
-        Write-Ok "Deleted firewall rule $r"
+    # 1. Release Cloud Run direct-VPC-egress serverless IPs (purpose=SERVERLESS). GCP
+    # auto-reserves these in the jumpoint subnet on each ansible/k8s run and never frees
+    # them, so they pin the subnet unless released before the subnet delete.
+    $addrRows = @(gcloud compute addresses list --project $projectId `
+        --filter="purpose=SERVERLESS AND subnetwork~/$prefix-" `
+        --format='csv[no-heading](name,region.basename())' 2>$null) | Where-Object { $_ }
+    foreach ($row in $addrRows) {
+        $parts = $row.Split(','); $addr = $parts[0]; $areg = $parts[1]
+        & gcloud compute addresses delete $addr --region $areg --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Released serverless egress IP $addr ($areg)" }
+        else { Write-Warn "Could not release serverless egress IP $addr ($areg)" }
     }
 
-    # 3. Subnets, then VPC.
-    foreach ($sn in @($jpSubnet, $vmSubnet)) {
-        & gcloud compute networks subnets describe $sn --region $region --project $projectId *> $null
-        if ($LASTEXITCODE -eq 0) {
-            gcloud compute networks subnets delete $sn --region $region --project $projectId --quiet | Out-Null
-            Write-Ok "Deleted subnet $sn"
-        }
+    # 2. NAT + Router per region (deleting the router also removes its child Cloud NAT).
+    foreach ($reg in $regions) {
+        & gcloud compute routers nats delete $nat --router $router --router-region $reg `
+            --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted NAT $nat ($reg)" }
+        & gcloud compute routers delete $router --region $reg --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted router $router ($reg)" }
     }
+
+    # 3. Firewall rules: sandbox-owned (name prefix) then any rule still on the VPC —
+    # the guards above already refused under a live owner, so what remains (e.g.
+    # rancher-server-allow-mgmt, <cluster>-allow-ssh-from-k8s) is orphaned.
+    $rulesText = @(gcloud compute firewall-rules list --project $projectId `
+        --filter "name~^$prefix-" --format='value(name)' 2>$null) | Where-Object { $_ }
+    foreach ($r in $rulesText) {
+        & gcloud compute firewall-rules delete $r --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted firewall rule $r" }
+    }
+    $vpcRules = @(gcloud compute firewall-rules list --project $projectId `
+        --filter="network~/$vpc`$" --format='value(name)' 2>$null) | Where-Object { $_ }
+    foreach ($r in $vpcRules) {
+        & gcloud compute firewall-rules delete $r --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted orphaned firewall rule $r" }
+    }
+
+    # 4. Subnets — every sandbox subnet (jumpoint/vm/k8s) across every region on the VPC.
+    $subnetRows = @(gcloud compute networks subnets list --project $projectId `
+        --filter="network~/$vpc`$" --format='csv[no-heading](name,region.basename())' 2>$null) | Where-Object { $_ }
+    foreach ($row in $subnetRows) {
+        $parts = $row.Split(','); $sn = $parts[0]; $sreg = $parts[1]
+        & gcloud compute networks subnets delete $sn --region $sreg --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted subnet $sn ($sreg)" }
+        else { Write-Warn "Could not delete subnet $sn ($sreg)" }
+    }
+
+    # 5. servicenetworking peering + reserved PSA range (Cloud SQL private-IP path) —
+    # both are VPC-scoped and pin the network delete.
+    & gcloud compute networks peerings delete servicenetworking-googleapis-com `
+        --network $vpc --project $projectId --quiet *> $null
+    if ($LASTEXITCODE -eq 0) { Write-Ok "Removed servicenetworking peering on $vpc" }
+    & gcloud compute addresses delete "$prefix-psa-range" --global --project $projectId --quiet *> $null
+    if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted PSA range $prefix-psa-range" }
+
+    # 6. VPC.
     & gcloud compute networks describe $vpc --project $projectId *> $null
     if ($LASTEXITCODE -eq 0) {
-        gcloud compute networks delete $vpc --project $projectId --quiet | Out-Null
-        Write-Ok "Deleted VPC $vpc"
+        & gcloud compute networks delete $vpc --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted VPC $vpc" }
+        else { Write-Warn "Could not delete VPC $vpc (check for lingering attachments)" }
     }
 
-    # 4. Secret.
+    # 7. Secret.
     & gcloud secrets delete "$prefix-ssh-keypair" --project $projectId --quiet *> $null
     if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted secret $prefix-ssh-keypair" }
 
-    # 5. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
+    # 8. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
     # IAM bindings go with the bucket; no separate cleanup step needed.)
     $storageBucket = "$projectId-$prefix-storage"
     & gcloud storage buckets describe "gs://$storageBucket" --project $projectId *> $null
@@ -386,7 +467,7 @@ function Invoke-GcpRollback {
         else { Write-Warn "Could not delete bucket gs://$storageBucket (may have retained objects)" }
     }
 
-    # 6. Service account.
+    # 9. Service account.
     $saEmail = "$prefix-sa@$projectId.iam.gserviceaccount.com"
     & gcloud iam service-accounts describe $saEmail --project $projectId *> $null
     if ($LASTEXITCODE -eq 0) {
@@ -407,11 +488,10 @@ function Invoke-GcpRollback {
 # ── OCI rollback ─────────────────────────────────────────────────────────────
 function Invoke-OciRollback {
     Assert-Command oci
-    $ociProfile    = if ($env:OCI_PROFILE) { $env:OCI_PROFILE } else { 'DEFAULT' }
+    $ociProfile = if ($env:OCI_PROFILE) { $env:OCI_PROFILE } else { 'DEFAULT' }
     $configFile = if ($env:OCI_CLI_CONFIG_FILE) { $env:OCI_CLI_CONFIG_FILE } else { Join-Path $HOME '.oci/config' }
-    Assert-LoggedIn 'oci' { oci iam region list --profile $ociProfile } 'Run: oci setup config'
 
-    # Tenancy/region from state or the CLI config (to locate the compartment).
+    # Read a single key from the [$ociProfile] INI section (tenancy/region/token).
     function Get-OciCfg { param([string]$Key)
         if (-not (Test-Path $configFile)) { return '' }
         $inSection = $false
@@ -421,12 +501,22 @@ function Invoke-OciRollback {
         }
         return ''
     }
+
+    # A browser/SSO login (oci session authenticate) writes a security_token_file
+    # and needs --auth security_token on every call; an API-key profile does not.
+    $sectok   = Get-OciCfg 'security_token_file'
+    $authArgs = @(); if ($sectok) { $authArgs = @('--auth', 'security_token') }
+    Assert-LoggedIn 'oci' { oci @authArgs iam region list --profile $ociProfile } 'Run: oci session authenticate  or  oci setup config'
+
+    # Tenancy/region from state or the CLI config (to locate the compartment).
     $tenancy = if ($env:OCI_TENANCY_OCID) { $env:OCI_TENANCY_OCID } else { Get-OciCfg 'tenancy' }
     $region  = if ($env:OCI_REGION) { $env:OCI_REGION } else { Get-OciCfg 'region' }
     $oci = @('--profile', $ociProfile); if ($region) { $oci += @('--region', $region) }
+    if ($sectok) { $oci += @('--auth', 'security_token') }
 
-    function Get-Id { param([string[]]$OciArgs)
-        $out = (& oci @oci @OciArgs 2>$null); if ($out) { $out = "$out".Trim() }
+    function Get-Id { param([string[]]$OciArgs, [string[]]$Base)
+        if (-not $Base) { $Base = $oci }
+        $out = (& oci @Base @OciArgs 2>$null); if ($out) { $out = "$out".Trim() }
         if (-not $out -or $out -eq 'null') { return '' } else { return $out }
     }
 
@@ -440,7 +530,7 @@ function Invoke-OciRollback {
 
     Write-Section "OCI rollback in compartment $($compartment.Substring(0,[Math]::Min(20,$compartment.Length)))… (region $region)"
     if (-not $Yes) {
-        if (-not (Confirm-Action 'Delete OCI sandbox VCN, subnets, gateways, security list in this compartment?')) { return }
+        if (-not (Confirm-Action 'Delete OCI sandbox VCN/subnets/gateways/security list + the dashboard IAM user, group & policy?')) { return }
     }
 
     $running = Get-Id @('compute','instance','list','--compartment-id',$compartment,'--all','--query',"data[?`"lifecycle-state`"=='RUNNING'].`"display-name`"",'--raw-output')
@@ -476,6 +566,67 @@ function Invoke-OciRollback {
 
     $vault = (Get-StateValue oci vault).Trim()
     if ($vault) { Write-Warn "Vault $vault + its SSH secret persist — schedule their deletion in the OCI console (KMS -> Vaults) if you want them gone." }
+
+    # ── Dedicated dashboard IAM user + group + policy (tenancy root) ─────────────
+    # These live at the tenancy root, not in the compartment, so they don't block
+    # the compartment delete — but we remove them here (children before parent) and
+    # only when they carry our managed-by tag. IAM writes must target the home
+    # region, and IAM identity deletes are synchronous (no --wait-for-state), so we
+    # can't reuse the network Find-Id/Remove-Res helpers.
+    if ($tenancy) {
+        $homeRegion = Get-Id @('iam','region-subscription','list',
+            '--query',"data[?`"is-home-region`"]|[0].`"region-name`"",'--raw-output')
+        if (-not $homeRegion) { $homeRegion = $region }
+        $ociIam = @('--profile', $ociProfile); if ($homeRegion) { $ociIam += @('--region', $homeRegion) }
+        if ($sectok) { $ociIam += @('--auth', 'security_token') }
+
+        $duName = "$prefix-app"; $dgName = "$prefix-app-group"; $dpName = "$prefix-app-policy"
+
+        # Helper: is this identity resource ours? (carries the managed-by tag)
+        function Test-OciIamOurs { param([string]$Sub, [string]$IdFlag, [string]$Id)
+            $tag = Get-Id (($Sub -split ' ') + @('get',$IdFlag,$Id,'--query','data."freeform-tags"."managed-by"','--raw-output')) -Base $ociIam
+            return ($tag -eq 'dashboard-sandbox')
+        }
+
+        # User: delete its API keys, drop group membership, then the user itself.
+        $duId = (Get-StateValue oci dashboard_user).Trim()
+        if (-not $duId) { $duId = Get-Id @('iam','user','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$duName']|[0].id",'--raw-output') -Base $ociIam }
+        if ($duId) {
+            if (Test-OciIamOurs 'iam user' '--user-id' $duId) {
+                $fpsJson = & oci @ociIam iam user api-key list --user-id $duId 2>$null
+                $fps = @()
+                if ($fpsJson) { try { $fps = @(($fpsJson | ConvertFrom-Json).data.fingerprint) } catch { $fps = @() } }
+                foreach ($fp in $fps) {
+                    if ($fp) { & oci @ociIam iam user api-key delete --user-id $duId --fingerprint $fp --force *> $null }
+                }
+                $dgId = (Get-StateValue oci dashboard_group).Trim()
+                if (-not $dgId) { $dgId = Get-Id @('iam','group','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$dgName']|[0].id",'--raw-output') -Base $ociIam }
+                if ($dgId) { & oci @ociIam iam group remove-user --user-id $duId --group-id $dgId --force *> $null }
+                & oci @ociIam iam user delete --user-id $duId --force *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM user $duName" } else { Write-Warn "Could not delete IAM user $duName" }
+            } else { Write-Warn "IAM user $duName lacks the managed-by tag — leaving it untouched." }
+        }
+
+        # Policy (root-level).
+        $dpId = (Get-StateValue oci dashboard_policy).Trim()
+        if (-not $dpId) { $dpId = Get-Id @('iam','policy','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$dpName']|[0].id",'--raw-output') -Base $ociIam }
+        if ($dpId) {
+            if (Test-OciIamOurs 'iam policy' '--policy-id' $dpId) {
+                & oci @ociIam iam policy delete --policy-id $dpId --force *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM policy $dpName" } else { Write-Warn "Could not delete IAM policy $dpName" }
+            } else { Write-Warn "IAM policy $dpName lacks the managed-by tag — leaving it untouched." }
+        }
+
+        # Group (after its members + policy are gone).
+        $dgId2 = (Get-StateValue oci dashboard_group).Trim()
+        if (-not $dgId2) { $dgId2 = Get-Id @('iam','group','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$dgName']|[0].id",'--raw-output') -Base $ociIam }
+        if ($dgId2) {
+            if (Test-OciIamOurs 'iam group' '--group-id' $dgId2) {
+                & oci @ociIam iam group delete --group-id $dgId2 --force *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM group $dgName" } else { Write-Warn "Could not delete IAM group $dgName" }
+            } else { Write-Warn "IAM group $dgName lacks the managed-by tag — leaving it untouched." }
+        }
+    }
 
     # Delete the sandbox compartment we created (best-effort; async + slow).
     if (-not $env:OCI_COMPARTMENT_OCID) {

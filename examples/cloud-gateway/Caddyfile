@@ -1,0 +1,114 @@
+# Gateway sidecar for a cloud-hosted dashboard.
+#
+# This runs as a SECOND CONTAINER IN THE SAME TASK/POD as the dashboard — an Azure
+# Container Apps sidecar, a Cloud Run sidecar, a second container in an ECS task —
+# and it exists for two reasons.
+#
+# 1. IT SPLITS THE VHOSTS. Remote agents dial in from private networks anywhere,
+#    so their endpoint must be public. Nothing else should be. Serving
+#    /api/agent/* on one hostname and the UI on another means the
+#    internet-facing surface is one prefix with no HTML, no login form, no
+#    session cookies, no OAuth callbacks and no /setup wizard — every route on it
+#    authenticates with an Ed25519 signature or returns 401.
+#
+# 2. IT KEEPS `TRUSTED_PROXY_HOSTS` HONEST. This is the subtle one. The app only
+#    believes X-Forwarded-* from peers listed in `trusted_proxy_hosts`, which
+#    defaults to 127.0.0.1. Because this proxy is a sidecar, it reaches the app
+#    over loopback — so the default is already correct and there is nothing to
+#    configure. Put the proxy in a *separate* service and the peer address
+#    becomes some platform-assigned IP that changes on redeploy, and uvicorn
+#    0.27 compares those as plain strings (no CIDR until 0.31). See SECURITY.md.
+#
+# TLS is terminated by the platform's own ingress, not here — hence
+# `auto_https off` below. Turning Caddy loose on ACME inside a container whose
+# hostname it does not own is a reliable way to get a service that never starts
+# serving.
+#
+# Build and push:
+#   docker build -t <registry>/dash-gateway:1 examples/cloud-gateway
+#   docker push  <registry>/dash-gateway:1
+#
+# See docs/cloud-hosting.md for how to wire it up per platform.
+{
+	# The platform's ingress already holds the certificate. Without this Caddy
+	# would try to provision its own, fail the challenge, and serve nothing.
+	auto_https off
+
+	# Not needed here, and binding an admin API inside a container that
+	# terminates public traffic is free attack surface.
+	admin off
+
+	servers {
+		# The platform ingress is the peer Caddy actually sees, so the real
+		# client address is in X-Forwarded-For. Declaring the ingress trusted is
+		# what makes the `client_ip` matcher below read that header instead of
+		# the hop in front of it. Without this, an allow-list written in real
+		# client addresses matches nothing and locks everyone out.
+		trusted_proxies static private_ranges
+	}
+}
+
+# ── Agent endpoint — public, machine-only ────────────────────────────────────
+:80 {
+	# The `.invalid` defaults are load-bearing, not placeholders. An unset
+	# hostname would otherwise expand to an empty matcher, which Caddy rejects
+	# outright — and if it did not, the safe reading of "no hostname configured"
+	# is "match nothing", not "serve the UI on every name the platform answers
+	# to". `.invalid` is reserved by RFC 2606 and can never resolve.
+	@agent host {$AGENT_HOSTNAME:agents.invalid}
+	handle @agent {
+		handle /api/agent* {
+			reverse_proxy localhost:8000 {
+				# An agent holds its lease poll open for up to ~50s. The default
+				# would cut it, and the agent would look like it was flapping.
+				transport http {
+					read_timeout 120s
+				}
+			}
+		}
+		# One answer for every other path, so this hostname is not an oracle
+		# for which dashboard routes exist.
+		handle {
+			respond "Not found" 404
+		}
+	}
+
+	# ── Dashboard UI — everything, optionally address-restricted ──────────
+	#
+	# UI_ALLOWED_CIDR defaults to "allow all" so a first deploy works before you
+	# know your egress address. Narrow it once you do: this hostname carries the
+	# login form, the setup wizard and every OAuth callback.
+	@ui host {$UI_HOSTNAME:ui.invalid} {$UI_HOSTNAME_ALT:ui-alt.invalid}
+	handle @ui {
+		@blocked not client_ip {$UI_ALLOWED_CIDR:0.0.0.0/0 ::/0}
+		handle @blocked {
+			respond "Not found" 404
+		}
+		reverse_proxy localhost:8000 {
+			# Job-progress WebSockets outlive a provision, and the image's own
+			# gunicorn timeout is 1800s. Anything shorter here would close the
+			# job page mid-run.
+			transport http {
+				read_timeout 1800s
+			}
+		}
+	}
+
+	# Requests arriving on neither hostname — a platform health probe, a scanner
+	# hitting the default *.azurecontainerapps.io name, a stale DNS entry.
+	handle {
+		respond "Not found" 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

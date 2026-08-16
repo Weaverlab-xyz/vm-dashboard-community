@@ -1,0 +1,128 @@
+# Join a node to an existing k3s cluster
+# Target: an on-prem Linux host. Idempotent — a host already running k3s is left alone.
+#
+# This is step 2 of 2. Take server_url + node_token from k3s-server-init.yml's output.
+#
+# NEEDS EGRESS to get.k3s.io — the official install script is fetched over HTTPS.
+#
+# extra_vars:
+#   server_url: https://10.0.0.11:6443   # required — the control-plane address
+#   node_token: K10abc...::server:...    # required unless node_token_secret is set
+#   node_role:  agent                    # agent (default) or server (control plane)
+#   k3s_version: v1.30.5+k3s1            # pin the release; blank = latest stable
+#   node_args:  ""                       # extra flags, e.g. "--node-label zone=a"
+#
+# OPTIONAL — read the token from BeyondTrust Password Safe instead of passing it in
+# plaintext, using the SAME path k3s-server-init.yml wrote it to:
+#   node_token_secret: infra/k3s-node-token
+#
+# Joining as a SERVER requires the cluster to have been started with cluster_init:
+# true (embedded etcd), otherwise the first server is a single-node control plane and
+# only agents can join.
+- name: Join a k3s cluster
+  hosts: all
+  become: true
+  vars:
+    server_url: ""
+    node_token: ""
+    node_role: agent
+    k3s_version: ""
+    node_args: ""
+    # Optional Password Safe source for the token above (blank = don't use it).
+    node_token_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+  tasks:
+    # Fetched into its OWN fact, never onto node_token: extra vars outrank set_fact,
+    # so writing back to that name would be silently ignored when the token was also
+    # supplied as an extra var.
+    - name: Fetch the node token from Password Safe
+      ansible.builtin.set_fact:
+        _ps_node_token: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=node_token_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: node_token_secret | length > 0
+
+    - name: Resolve the effective token (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _token: "{{ _ps_node_token | default(node_token, true) }}"
+      no_log: true
+
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - server_url | length > 0
+          - _token | length > 0
+          - node_role in ["agent", "server"]
+        fail_msg: >-
+          Set server_url and node_role (agent|server), plus a token — either node_token
+          (from k3s-server-init.yml) or node_token_secret (a Password Safe path).
+
+    - name: Detect k3s
+      ansible.builtin.command: systemctl is-active {{ 'k3s' if node_role == 'server' else 'k3s-agent' }}
+      register: k3s_state
+      changed_when: false
+      failed_when: false
+
+    - name: Report an existing installation
+      ansible.builtin.debug:
+        msg: >-
+          k3s is already active here — leaving it untouched. Run k3s-uninstall.yml
+          first if you need to move this node to a different cluster.
+      when: k3s_state.stdout == "active"
+
+    # Fail fast with an actionable message: a closed firewall otherwise surfaces as an
+    # opaque installer failure well into the run.
+    - name: Check the control plane is reachable
+      ansible.builtin.wait_for:
+        host: "{{ server_url | regex_replace('^https?://', '') | regex_replace(':.*$', '') }}"
+        port: "{{ server_url.split(':') | last | int }}"
+        timeout: 10
+      register: server_reachable
+      failed_when: false
+      when: k3s_state.stdout != "active"
+
+    - name: Fail with the likely cause
+      ansible.builtin.fail:
+        msg: >-
+          Cannot reach {{ server_url }} from this host. k3s needs 6443/tcp (API),
+          8472/udp (flannel VXLAN) and 10250/tcp (kubelet) open between nodes — run
+          k3s-open-ports.yml on every node, or open them in your network.
+      when:
+        - k3s_state.stdout != "active"
+        - server_reachable.failed | default(false)
+
+    # ── Join ─────────────────────────────────────────────────────────────────
+    - name: Install k3s and join the cluster
+      ansible.builtin.shell:
+        cmd: "curl -sfL https://get.k3s.io | sh -s - {{ node_role }} {{ node_args }}"
+      environment:
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+        K3S_URL: "{{ server_url }}"
+        K3S_TOKEN: "{{ _token }}"
+      register: k3s_join
+      changed_when: k3s_join.rc == 0
+      no_log: true              # the token is in the environment
+      when: k3s_state.stdout != "active"
+
+    - name: Confirm the service is running
+      ansible.builtin.command: systemctl is-active {{ 'k3s' if node_role == 'server' else 'k3s-agent' }}
+      register: k3s_state_after
+      changed_when: false
+      failed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          k3s {{ node_role }} service is '{{ k3s_state_after.stdout }}'.
+          Run k3s-status.yml on a SERVER node to confirm this node registered.

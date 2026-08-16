@@ -1,0 +1,128 @@
+# Remote agent policy — YOUR file, not the dashboard's.
+#
+# This is the boundary that makes it safe to run a dashboard-controlled process inside
+# your network. Nothing in the dashboard API can read, write or override it; the agent
+# reports only its sha256 so you can see on the Agents page whether it has changed.
+#
+# It fails CLOSED. If this file is missing, unreadable, or not valid YAML, the agent
+# refuses every job and exits with a message saying so. There is no permissive default.
+#
+# Mount it read-only:
+#   -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z"        # bash
+#   -v "${PWD}/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z"      # PowerShell
+#
+# Two details in that line are not decoration. `$PWD` because `docker run -v` rejects a
+# relative source path outright — PowerShell spells it `${PWD}`, and continues lines with a
+# backtick rather than a `\`. `,Z` because on an SELinux-enforcing host — Fedora, RHEL,
+# CentOS, Rocky, Alma — a file in your home directory is labelled `user_home_t`, which the
+# container is not allowed to read no matter how permissive its mode bits are; without the
+# relabel the agent exits 2 on `Permission denied` reading this file, before it has made a
+# single network call. Docker and Podman ignore `z`/`Z` where SELinux is absent, so the
+# flag is safe on every host. Check with `ls -lZ policy.yaml`.
+#
+# On a Windows host none of the SELinux half applies — the flag is inert and bind mounts
+# arrive with permissive ownership, so an unreadable file means Docker Desktop file sharing
+# rather than a label. The Agents page emits both flavours; pick the shell with the toggle.
+# See docs/remote-agents.md, "Running on Windows".
+
+# ── What may be touched ───────────────────────────────────────────────────────
+# The agent refuses any address:port not matched here. Matching happens on the
+# RESOLVED IP at connect time, not on the hostname the dashboard asked for, so a name
+# that resolves inside the range when checked and elsewhere when connected is refused.
+#
+# Omit `ports` to allow any port within the range. Naming ports is better: it is the
+# difference between "the agent may look for databases on this subnet" and "the agent
+# may reach anything on this subnet".
+# 443 vCenter/ESXi and XCP-ng XAPI, 8006 Proxmox VE, 9440 Nutanix Prism,
+# 5985/5986 WinRM. Trim this to the products you actually run.
+targets:
+  - cidr: 10.20.0.0/24
+    ports: [443, 8006, 9440, 5985, 5986]
+
+  # A single host, resolved once at startup and pinned to the resulting addresses.
+  # - fqdn: vcenter.lab.internal
+  #   ports: [443]
+
+# ── What may never be touched ─────────────────────────────────────────────────
+# Cloud instance metadata (169.254.0.0/16) and loopback are denied unconditionally —
+# they are re-added even if you replace this list, because an operator who writes a
+# wide CIDR has not decided to expose their metadata endpoint, they have just written
+# a wide CIDR. Add your own ranges here to carve holes out of `targets` above.
+deny:
+  - 169.254.0.0/16
+  - 127.0.0.0/8
+  # - 10.20.0.240/28      # e.g. the production DB row you never want probed
+
+# ── What the agent will run ───────────────────────────────────────────────────
+# A closed list. A job type absent from here is refused before its payload is read,
+# even if the dashboard signed it correctly.
+job_types:
+  - agent_discover
+  # Uncomment to let this agent broker hypervisor operations. It is not enough on its
+  # own — each connection below must also grant the individual verbs.
+  # - agent_hypervisor
+
+# ── What may be done to each hypervisor ───────────────────────────────────────
+# Per-connection verb grants. YOU decide what may be done to each target; the
+# dashboard can only ask. A connection absent from this list, or present without the
+# verb, is refused however correctly the job was signed.
+#
+# `name` must match the `name:` of an entry in your connections.yaml AND the
+# "Name in the agent's connections.yaml" field on the dashboard's Connections page.
+# The dashboard never holds the credential — that string is the whole join.
+#
+# connections:
+#   - name: dc1-vcenter
+#     verbs: [inventory_sync]                                  # read-only
+#   - name: lab-proxmox
+#     verbs: [inventory_sync, power_on, power_off, restart, snapshot]
+#
+#   # VMware Workstation on THIS host. `allow_loopback` is what lets the agent reach
+#   # vmrest on 127.0.0.1 — see below.
+#   - name: my-workstation
+#     verbs: [inventory_sync, power_on, power_off]
+#     allow_loopback: true
+#
+# `snapshot` creates a snapshot named dash-<job id>. The name is GENERATED, never
+# supplied — there is no field anywhere in the protocol through which an operator
+# string could reach a hypervisor. Grant it only where you want snapshots piling up.
+
+# ── allow_loopback ────────────────────────────────────────────────────────────
+# Loopback and cloud-metadata addresses are denied unconditionally, and that deny is
+# re-added even if you delete it from the list above — an operator who writes a wide
+# CIDR has not decided to expose their own container.
+#
+# One case genuinely needs an exception: VMware Workstation's `vmrest` binds 127.0.0.1,
+# so a co-located agent cannot reach it any other way. Setting `allow_loopback: true` on
+# a connection exempts THAT connection, for the port its connections.yaml entry names,
+# and nothing else. A discovery scan still refuses loopback however this is set — the
+# exception applies only where you have already written down the name, host and port.
+#
+# If you can make vmrest listen on a routable address instead, do that and leave this
+# alone. It is not needed for anything but a same-host connection.
+
+# ── The sibling runner (OFF, and it needs the Docker socket) ──────────────────
+# Hyper-V and BARE ESXi are the only two the agent cannot talk to itself: WinRM needs a
+# real NTLM stack and a standalone ESXi host serves only the SOAP API. Both run in a
+# one-shot container the agent launches and then deletes.
+#
+# That needs the Docker socket, which is ROOT ON THIS HOST. It is not mounted by the
+# default deployment; applying examples/remote-agent/docker-compose.sibling.yml is a
+# separate, deliberate act, and prefer the rootless or Podman socket. If you do not run
+# Hyper-V or standalone ESXi, leave this alone — vCenter, Proxmox, Prism and XCP-ng need
+# none of it.
+#
+# The image comes from HERE and never from a job, so a compromised dashboard cannot
+# choose what runs on your host. Pull it yourself; the agent will not.
+#
+# sibling:
+#   enabled: true
+#   image: chrweav/hypervisor-runner:latest
+#   network: bridge
+
+# ── Ceilings ──────────────────────────────────────────────────────────────────
+# Applied on top of whatever the dashboard requested; the smaller number always wins.
+# These bound a scan even if someone with dashboard access asks for something silly.
+limits:
+  max_hosts: 1024
+  max_concurrency: 64

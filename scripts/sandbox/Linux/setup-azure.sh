@@ -587,6 +587,7 @@ _cfg=(
   "# flat azure_* keys above stay as the default region for backward-compat."
   "azure_region.$LOCATION.resource_group=$RG"
   "azure_region.$LOCATION.vnet_resource_group=$RG"
+  "azure_region.$LOCATION.default_subnet_id=$VM_SUBNET_ID"
   "azure_region.$LOCATION.desktops_subnet_id=$DESKTOPS_SUBNET_ID"
   "azure_region.$LOCATION.db_subnet_id=$DB_SUBNET_ID"
   "azure_region.$LOCATION.db_mysql_subnet_id=$DB_MYSQL_SUBNET_ID"

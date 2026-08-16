@@ -1,7 +1,9 @@
 """
 Azure service wrapper.
-All blocking SDK calls are run via asyncio.to_thread() to keep the FastAPI
-event loop free — same pattern as services/aws_service.py.
+All blocking SDK calls are run via _to_thread() — Azure's OWN bounded pool, not the
+event loop's shared default executor — to keep the FastAPI event loop free AND stop a
+slow Azure starving the other providers. Same pattern as services/aws_service.py; see
+services/cloud_executor.py.
 
 Azure credentials (Client ID, Client Secret, Tenant ID, Subscription ID) are
 fetched from BeyondTrust Password Safe at runtime via btapi_service.get_ps_secret().
@@ -9,15 +11,15 @@ Credentials are cached in memory after the first successful fetch so Password
 Safe is only called once per server lifetime. Call invalidate_credentials() to
 force a refresh (e.g. after credential rotation).
 """
-import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Optional
 
-from . import region_catalog
+from . import cloud_executor, region_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +30,7 @@ try:
         VirtualMachine, HardwareProfile, StorageProfile, ImageReference,
         OSDisk, DiskCreateOptionTypes, OSProfile, LinuxConfiguration,
         SshConfiguration, SshPublicKey, NetworkProfile, NetworkInterfaceReference,
-        WindowsConfiguration, SecurityProfile, UefiSettings,
+        WindowsConfiguration, SecurityProfile, UefiSettings, RunCommandInput,
     )
     from azure.mgmt.network import NetworkManagementClient
     from azure.mgmt.network.models import (
@@ -60,6 +62,19 @@ except ImportError as e:
 
 class AzureError(Exception):
     """Raised when an Azure operation fails."""
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking Azure SDK call on Azure's own thread pool.
+
+    Translates the executor's refusals into AzureError so every existing ``except
+    AzureError`` — which is what turns a failure into a 503 or an unavailable tile —
+    keeps working unchanged. Anything the SDK itself raises propagates untouched.
+    """
+    try:
+        return await cloud_executor.run("azure", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise AzureError(str(exc)) from exc
 
 
 def _os_type_str(val) -> str:
@@ -104,7 +119,7 @@ async def _ensure_creds() -> tuple:
 
         if client_id and client_secret and tenant_id and sub_id:
             source = "config store / env vars"
-        elif settings.beyondtrust_enabled:
+        elif settings.password_safe_enabled:
             from . import btapi_service
             try:
                 client_id     = await btapi_service.get_ps_secret(settings.azure_client_id_secret_title)
@@ -147,6 +162,11 @@ def invalidate_credentials() -> None:
 # kubelogin requests a token for `<server-id>/.default`. This is the default when
 # the kubeconfig's exec block doesn't carry an explicit --server-id.
 AKS_AAD_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
+
+# The well-known AAD *client* application kubelogin uses for interactive (device-code
+# / browser) AKS sign-in as a real person. First-party and present in every tenant —
+# `az aks get-credentials` writes this same id into the exec block.
+AKS_AAD_CLIENT_APP_ID = "80faf920-1908-4b52-b5ef-a8e7bedfc67a"
 
 
 def aks_get_token(server_id: str = AKS_AAD_SERVER_APP_ID) -> str:
@@ -250,7 +270,7 @@ async def get_ssh_key_from_vault(vault_url: str, secret_name: str) -> str:
     """Retrieve the SSH public key from Azure Key Vault using the cached credential."""
     try:
         cred, _ = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _get_ssh_key_from_vault_sync, cred, vault_url, secret_name
         )
     except AzureError:
@@ -271,7 +291,7 @@ async def list_kv_secret_names(vault_url: str) -> list:
     SSH-key-secret override picker."""
     try:
         cred, _ = await _ensure_creds()
-        return await asyncio.to_thread(_list_kv_secret_names_sync, cred, vault_url)
+        return await _to_thread(_list_kv_secret_names_sync, cred, vault_url)
     except AzureError:
         raise
     except Exception as e:
@@ -329,7 +349,7 @@ async def get_ssh_keypair_from_vault(vault_url: str, secret_name: str) -> dict:
     """
     try:
         cred, _ = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _get_ssh_keypair_from_vault_sync, cred, vault_url, secret_name
         )
     except AzureError:
@@ -580,7 +600,7 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
 async def list_private_images(gallery: str, gallery_rg: str, rg: str) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(_list_private_images_sync, cred, sub_id, gallery, gallery_rg, rg)
+        return await _to_thread(_list_private_images_sync, cred, sub_id, gallery, gallery_rg, rg)
     except AzureError:
         raise
     except Exception as e:
@@ -639,7 +659,7 @@ async def list_marketplace_images(location: str, os_filter: str = "all") -> list
         logger.info("Fetching marketplace images for location=%s, filter=%s", location, os_filter)
         cred, sub_id = await _ensure_creds()
         logger.info("Credentials loaded, calling _list_marketplace_images_sync")
-        result = await asyncio.to_thread(_list_marketplace_images_sync, cred, sub_id, location, os_filter)
+        result = await _to_thread(_list_marketplace_images_sync, cred, sub_id, location, os_filter)
         logger.info("Successfully fetched %d marketplace images", len(result))
         return result
     except AzureError as e:
@@ -658,7 +678,7 @@ def _delete_image_sync(cred, sub_id: str, rg: str, image_name: str) -> None:
 async def delete_image(rg: str, image_name: str) -> None:
     try:
         cred, sub_id = await _ensure_creds()
-        await asyncio.to_thread(_delete_image_sync, cred, sub_id, rg, image_name)
+        await _to_thread(_delete_image_sync, cred, sub_id, rg, image_name)
     except AzureError:
         raise
     except Exception as e:
@@ -696,7 +716,7 @@ async def check_vm_quota(location: str, vm_size: str) -> None:
     """Async wrapper — raises AzureError if quota would be exceeded."""
     try:
         cred, sub_id = await _ensure_creds()
-        await asyncio.to_thread(_check_quota_sync, cred, sub_id, location, vm_size)
+        await _to_thread(_check_quota_sync, cred, sub_id, location, vm_size)
     except AzureError:
         raise
     except Exception as e:
@@ -796,6 +816,43 @@ def _resource_region_from_id(network, resource_id: str, kind: str):
     except Exception as e:
         logger.warning("region lookup failed for %s (%s): %s", resource_id, kind, e)
     return None
+
+
+def _resource_locations_sync(cred, sub_id: str, resource_ids: list) -> dict:
+    network = _get_network(cred, sub_id)
+    out: dict[str, str] = {}
+    for rid in resource_ids:
+        kind = ("subnet" if "/subnets/" in rid
+                else "nsg" if "/networkSecurityGroups/" in rid else "")
+        out[rid] = (_resource_region_from_id(network, rid, kind) or "") if kind else ""
+    return out
+
+
+async def resource_locations(resource_ids) -> dict:
+    """Map each subnet / NSG ARM id to the region it lives in, "" when undeterminable.
+
+    An ARM id carries the VNet's *resource group* but not its region, so this is a
+    lookup (the VNet's / NSG's own ``location``) rather than a parse — unlike GCP,
+    where the region is a segment of the subnetwork self-link. An id that can't be
+    resolved (no creds, no Reader on that resource group, a malformed id) maps to ""
+    so callers fail open, exactly as ``_validate_deploy_consistency`` does below.
+
+    Exists so the deploy routes can reject a cross-region pick at REQUEST time. The
+    same check already runs in ``_validate_deploy_consistency``, but that is per VM
+    inside the runner: on a bulk deploy it fires once all N child job rows exist and
+    fails the whole batch.
+    """
+    ids = [str(r) for r in (resource_ids or []) if r and str(r).strip()]
+    if not ids:
+        return {}
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_resource_locations_sync, cred, sub_id, ids)
+    except Exception as e:
+        # Fail open: a lookup we couldn't perform must not block an otherwise valid
+        # deploy. The runner-side check still stands behind this.
+        logger.warning("region lookup for %d resource(s) failed: %s", len(ids), e)
+        return {}
 
 
 def _sku_trusted_launch_capable(compute, location: str, vm_size: str):
@@ -1047,7 +1104,7 @@ async def deploy_vm(
 ) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _deploy_vm_sync,
             cred, sub_id, rg, location, vm_name, vm_size,
             image_id, subnet_id, nsg_ids, create_public_ip,
@@ -1080,7 +1137,7 @@ def _ensure_gallery_sync(cred, sub_id: str, rg: str, location: str, gallery_name
 async def ensure_gallery(rg: str, location: str, gallery_name: str):
     """Create the Azure Compute Gallery if missing (idempotent)."""
     cred, sub_id = await _ensure_creds()
-    return await asyncio.to_thread(_ensure_gallery_sync, cred, sub_id, rg, location, gallery_name)
+    return await _to_thread(_ensure_gallery_sync, cred, sub_id, rg, location, gallery_name)
 
 
 def _ensure_tl_image_def_sync(cred, sub_id: str, rg: str, gallery_name: str,
@@ -1110,7 +1167,7 @@ async def ensure_trusted_launch_image_definition(rg: str, gallery_name: str,
     """Create a Gen2 / TrustedLaunch / Generalized Windows image definition if
     missing (idempotent). Packer publishes a version into it."""
     cred, sub_id = await _ensure_creds()
-    return await asyncio.to_thread(
+    return await _to_thread(
         _ensure_tl_image_def_sync, cred, sub_id, rg, gallery_name, image_def_name, location,
     )
 
@@ -1144,7 +1201,7 @@ async def ensure_linux_image_definition(rg: str, gallery_name: str,
     Packer publishes a version into it. ``hyper_v_generation`` (V1/V2) must match
     the built VM's generation, which follows the source marketplace SKU."""
     cred, sub_id = await _ensure_creds()
-    return await asyncio.to_thread(
+    return await _to_thread(
         _ensure_linux_image_def_sync, cred, sub_id, rg, gallery_name, image_def_name,
         location, hyper_v_generation,
     )
@@ -1164,7 +1221,7 @@ async def set_workgroup_tag(rg: str, vm_name: str, workgroup: str) -> None:
     by the admin reassign endpoint."""
     try:
         cred, sub_id = await _ensure_creds()
-        await asyncio.to_thread(_set_workgroup_tag_sync, cred, sub_id, rg, vm_name, workgroup)
+        await _to_thread(_set_workgroup_tag_sync, cred, sub_id, rg, vm_name, workgroup)
     except AzureError:
         raise
     except Exception as e:
@@ -1186,7 +1243,7 @@ async def set_desktop_pool_tag(rg: str, vm_name: str, pool_name: str) -> None:
     ``dashboard:desktop_pool``; preserves other tags."""
     try:
         cred, sub_id = await _ensure_creds()
-        await asyncio.to_thread(_set_tag_sync, cred, sub_id, rg, vm_name, "dashboard:desktop_pool", pool_name)
+        await _to_thread(_set_tag_sync, cred, sub_id, rg, vm_name, "dashboard:desktop_pool", pool_name)
     except AzureError:
         raise
     except Exception as e:
@@ -1260,7 +1317,7 @@ def _describe_vms_sync(cred, sub_id: str, rg: str) -> list:
 async def describe_vms(rg: str) -> list:
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(_describe_vms_sync, cred, sub_id, rg)
+        return await _to_thread(_describe_vms_sync, cred, sub_id, rg)
     except AzureError:
         raise
     except Exception as e:
@@ -1324,7 +1381,7 @@ async def get_vm(rg: str, vm_name: str) -> Optional[dict]:
     """Fetch a single VM by name (no tag filter). Returns None if not found."""
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(_get_vm_sync, cred, sub_id, rg, vm_name)
+        return await _to_thread(_get_vm_sync, cred, sub_id, rg, vm_name)
     except AzureError:
         raise
     except Exception as e:
@@ -1368,7 +1425,7 @@ def _terminate_vm_sync(cred, sub_id: str, rg: str, vm_name: str) -> None:
 async def terminate_vm(rg: str, vm_name: str) -> None:
     try:
         cred, sub_id = await _ensure_creds()
-        await asyncio.to_thread(_terminate_vm_sync, cred, sub_id, rg, vm_name)
+        await _to_thread(_terminate_vm_sync, cred, sub_id, rg, vm_name)
     except AzureError:
         raise
     except Exception as e:
@@ -1382,30 +1439,48 @@ async def terminate_vm(rg: str, vm_name: str) -> None:
 # the Jumpoint runs as a PRIVILEGED container on a real Azure VM (cloud-init runs
 # `docker run --privileged --device /dev/net/tun …`). One shared, ref-counted VM.
 
-def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str) -> str:
+def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str,
+                            install_db_clients: bool = False) -> str:
     """Base64 cloud-init: install Docker, then run the BT Jumpoint container
     privileged with /dev/net/tun (the caps a protocol tunnel needs). The deploy
-    key is an opaque token, single-quoted for the shell."""
+    key is an opaque token, single-quoted for the shell.
+
+    When ``install_db_clients`` is set (for the Password Safe Azure cloud-DB
+    onboarding) it also installs the native DB clients the "{engine} Azure Run
+    Command Plugin" invokes on this VM at rotation time: psql (/usr/bin/psql),
+    mysql (/usr/bin/mysql) and sqlcmd (/opt/mssql-tools18/bin/sqlcmd, from the
+    Microsoft apt repo). This is a fresh-VM head start — the onboarding also
+    ensures the clients idempotently over Run Command, covering a reused VM."""
     import base64
-    cloud_init = (
-        "#cloud-config\n"
-        "package_update: true\n"
-        "packages:\n"
-        "  - docker.io\n"
-        "runcmd:\n"
-        "  - modprobe tun || true\n"
-        "  - systemctl enable --now docker\n"
-        "  - [ sh, -c, \"docker run -d --restart always --name jumpoint "
+    packages = ["docker.io"]
+    runcmd = ["modprobe tun || true", "systemctl enable --now docker"]
+    if install_db_clients:
+        packages += ["postgresql-client", "mysql-client", "curl",
+                     "gnupg", "apt-transport-https"]
+        runcmd += [
+            "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc "
+            "-o /etc/apt/trusted.gpg.d/microsoft.asc",
+            "curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list "
+            "-o /etc/apt/sources.list.d/mssql-release.list",
+            "apt-get update",
+            "ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev",
+        ]
+    runcmd.append(
+        "docker run -d --restart always --name jumpoint "
         "--privileged --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW "
-        f"-e DEPLOY_KEY='{deploy_key}' {container_image}\" ]\n"
-    )
+        f"-e DEPLOY_KEY='{deploy_key}' {container_image}")
+    lines = ["#cloud-config", "package_update: true", "packages:"]
+    lines += [f"  - {p}" for p in packages]
+    lines.append("runcmd:")
+    lines += [f"  - [ sh, -c, {json.dumps(c)} ]" for c in runcmd]
+    cloud_init = "\n".join(lines) + "\n"
     return base64.b64encode(cloud_init.encode()).decode()
 
 
 def _run_vm_jumpoint_sync(
     cred, sub_id: str, rg: str, location: str, subnet_id: str, name: str,
     container_image: str, deploy_key: str, vm_size: str,
-    admin_username: str, admin_password: str,
+    admin_username: str, admin_password: str, install_db_clients: bool = False,
 ) -> dict:
     """Find-or-create an Azure VM running the BT Jumpoint container. Idempotent on
     name: returns ``reused=True`` when it already exists. The NIC carries a
@@ -1456,7 +1531,7 @@ def _run_vm_jumpoint_sync(
         admin_username=admin_username,
         admin_password=admin_password,
         linux_configuration=LinuxConfiguration(disable_password_authentication=False),
-        custom_data=_vm_jumpoint_cloud_init(container_image, deploy_key),
+        custom_data=_vm_jumpoint_cloud_init(container_image, deploy_key, install_db_clients),
     )
     vm_params = VirtualMachine(
         location=location, tags=tags,
@@ -1479,16 +1554,19 @@ async def run_vm_jumpoint(
     rg: str, location: str, subnet_id: str, name: str,
     container_image: str, deploy_key: str, vm_size: str = "Standard_B1s",
     admin_username: str = "jpadmin", admin_password: str = "",
+    install_db_clients: bool = False,
 ) -> dict:
     """Ensure an Azure VM Jumpoint (idempotent on name). The VM egresses via a
     Standard, secure-by-default (no inbound) public IP on its NIC, returned as
     ``public_ip`` so callers can whitelist that stable egress address; it phones
-    home to PRA over egress."""
+    home to PRA over egress. ``install_db_clients`` bakes the native DB clients
+    into the VM for the Password Safe cloud-DB Run Command plugin (fresh-VM only)."""
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_vm_jumpoint_sync, cred, sub_id, rg, location, subnet_id, name,
             container_image, deploy_key, vm_size, admin_username, admin_password,
+            install_db_clients,
         )
     except AzureError:
         raise
@@ -1500,11 +1578,86 @@ async def stop_vm_jumpoint(rg: str, name: str) -> None:
     """Delete the Jumpoint VM (+ its NIC). Best-effort."""
     try:
         cred, sub_id = await _ensure_creds()
-        await asyncio.to_thread(_terminate_vm_sync, cred, sub_id, rg, name)
+        await _to_thread(_terminate_vm_sync, cred, sub_id, rg, name)
     except AzureError:
         raise
     except Exception as e:
         raise AzureError(f"Failed to stop Azure VM Jumpoint {name}: {e}") from e
+
+
+# ── Azure VM Run Command (in-guest shell over the control plane) ──────────────
+# The control-plane analog of aws_service.ssm_send_command: run a shell script in
+# a VM's guest via the Azure VM agent (waagent) without any inbound path to the
+# VM. Used to run the DB client on the shared jump VM for the Password Safe
+# cloud-DB onboarding (managed-user creation + plugin key material).
+
+_RUN_CMD_MARKER = "__PSRC__"
+
+
+def _parse_run_command_output(result) -> tuple:
+    """Pull (stdout, stderr) out of a RunCommandResult's InstanceViewStatus list."""
+    stdout = stderr = ""
+    for st in (getattr(result, "value", None) or []):
+        code = (getattr(st, "code", "") or "").lower()
+        msg = getattr(st, "message", "") or ""
+        if "stdout" in code:
+            stdout = msg
+        elif "stderr" in code:
+            stderr = msg
+    return stdout, stderr
+
+
+def _run_command_script(commands: list) -> list:
+    """Wrap the caller's commands so the in-guest shell surfaces the real exit code
+    despite Azure reporting ARM-level success even when the script fails: ``set -e``
+    aborts on the first failure (marker never prints → response_code stays -1); on
+    full success the trailing marker prints the exit status."""
+    return ["set -e"] + list(commands) + [f'echo "{_RUN_CMD_MARKER}=$?"']
+
+
+def _finalize_run_result(stdout: str, stderr: str) -> dict:
+    """Turn parsed (stdout, stderr) into the ssm_send_command-shaped result: pull the
+    exit-code marker out of stdout so callers get a real {status, response_code} and
+    treat both clouds identically."""
+    response_code = -1
+    m = re.search(rf"{_RUN_CMD_MARKER}=(\d+)", stdout or "")
+    if m:
+        response_code = int(m.group(1))
+        stdout = stdout.replace(m.group(0), "").rstrip()
+    return {
+        "status": "Success" if response_code == 0 else "Failed",
+        "response_code": response_code,
+        "stdout": stdout,
+        "stderr": stderr or "",
+    }
+
+
+def _run_vm_command_sync(cred, sub_id: str, rg: str, vm_name: str,
+                         commands: list, timeout: int) -> dict:
+    compute = _get_compute(cred, sub_id)
+    poller = compute.virtual_machines.begin_run_command(
+        rg, vm_name, RunCommandInput(command_id="RunShellScript",
+                                     script=_run_command_script(commands)))
+    result = poller.result(timeout=timeout)
+    stdout, stderr = _parse_run_command_output(result)
+    return _finalize_run_result(stdout, stderr)
+
+
+async def vm_run_command(rg: str, vm_name: str, commands: list, *,
+                         timeout: int = 300) -> dict:
+    """Run shell ``commands`` in a VM's guest via Azure VM Run Command and wait for
+    the result. Returns ``{status, response_code, stdout, stderr}`` — the same shape
+    as :func:`aws_service.ssm_send_command`: a non-Success status (or non-zero
+    response_code) is surfaced to the caller rather than raised, so callers decide
+    whether an in-guest failure is fatal. Only a transport/SDK error raises."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(
+            _run_vm_command_sync, cred, sub_id, rg, vm_name, commands, timeout)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Azure VM Run Command on {vm_name} failed: {e}") from e
 
 
 def _create_image_from_vm_sync(cred, sub_id: str, rg: str, vm_name: str, image_name: str, generalize: bool) -> dict:
@@ -1528,7 +1681,7 @@ def _create_image_from_vm_sync(cred, sub_id: str, rg: str, vm_name: str, image_n
 async def create_image_from_vm(rg: str, vm_name: str, image_name: str, generalize: bool) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _create_image_from_vm_sync, cred, sub_id, rg, vm_name, image_name, generalize
         )
     except AzureError:
@@ -1651,7 +1804,7 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
 async def get_network_options(location: str, vnet_rg: str, rg: str) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(_get_network_options_sync, cred, sub_id, location, vnet_rg, rg)
+        return await _to_thread(_get_network_options_sync, cred, sub_id, location, vnet_rg, rg)
     except AzureError:
         raise
     except Exception as e:
@@ -1756,7 +1909,7 @@ async def run_aci_jumpoint_task(
             # block the jumpoint itself (the critical Shell Jump broker). Fetch the
             # key best-effort: on failure, log and start without the mount.
             try:
-                storage_key = await asyncio.to_thread(
+                storage_key = await _to_thread(
                     _get_storage_account_key_sync, cred, sub_id,
                     storage_account_rg or rg, storage_account
                 )
@@ -1765,7 +1918,7 @@ async def run_aci_jumpoint_task(
                     "ACI jumpoint: storage-key fetch for /jpt persistence failed "
                     "(%s) — starting jumpoint without persistence", e)
                 storage_account = ""  # skip the mount in _run_aci_jumpoint_sync
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_aci_jumpoint_sync,
             cred, sub_id, rg, location, subnet_id, image, cpu, memory, deploy_key,
             acr_server, acr_username, acr_password,
@@ -1788,7 +1941,7 @@ def _stop_aci_jumpoint_sync(cred, sub_id: str, rg: str, group_name: str) -> None
 async def stop_aci_jumpoint_task(rg: str, group_name: str) -> None:
     try:
         cred, sub_id = await _ensure_creds()
-        await asyncio.to_thread(_stop_aci_jumpoint_sync, cred, sub_id, rg, group_name)
+        await _to_thread(_stop_aci_jumpoint_sync, cred, sub_id, rg, group_name)
     except AzureError:
         raise
     except Exception as e:
@@ -1815,7 +1968,7 @@ def _list_aci_tasks_sync(cred, sub_id: str, rg: str) -> list:
 async def list_aci_tasks(rg: str) -> list:
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(_list_aci_tasks_sync, cred, sub_id, rg)
+        return await _to_thread(_list_aci_tasks_sync, cred, sub_id, rg)
     except Exception as e:
         raise AzureError(f"Failed to list ACI tasks: {e}") from e
 
@@ -1831,6 +1984,7 @@ def _run_aci_ansible_sync(
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """
     Create an ACI container group that runs a single Ansible playbook, wait for
@@ -1877,6 +2031,9 @@ def _run_aci_ansible_sync(
                if manifest_b64 else [])
             + [EnvironmentVariable(name=e["env"], secure_value=e["value"])
                for e in (secret_entries or [])]
+            # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup — all
+            # passed as secure_value (hidden from the portal); harmless for URL/ID.
+            + [EnvironmentVariable(name=k, secure_value=v) for k, v in (ps_env or {}).items()]
         ),
     )
 
@@ -1954,6 +2111,7 @@ async def run_aci_ansible_task(
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """
     Run an Ansible playbook inside the Azure VNet via ACI.
@@ -1961,12 +2119,12 @@ async def run_aci_ansible_task(
     """
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_aci_ansible_sync,
             cred, sub_id, rg, location, subnet_id, image,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
             acr_server, acr_username, acr_password,
-            secret_entries, manifest_b64,
+            secret_entries, manifest_b64, ps_env,
         )
     except AzureError:
         raise
@@ -2101,7 +2259,7 @@ async def run_aci_k8s_task(
     """
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_aci_k8s_sync,
             cred, sub_id, rg, location, subnet_id, image,
             command, kubeconfig_b64, stdin_b64, job_id,
@@ -2111,6 +2269,131 @@ async def run_aci_k8s_task(
         raise
     except Exception as e:
         raise AzureError(f"Failed to run ACI k8s task: {e}") from e
+
+
+# ── ACI Ansible localhost runner (Kubernetes-cluster / cloud-database targets) ──
+
+def _run_aci_ansible_local_sync(
+    cred, sub_id: str, rg: str, location: str, subnet_id: str,
+    image: str, playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str,
+    job_id: str,
+    acr_server: str = "", acr_username: str = "", acr_password: str = "",
+    ps_env: dict | None = None,
+) -> tuple:
+    """Create an ACI container group that runs a **localhost** Ansible play (the
+    k8s/DB path — Ansible reaches OUT to the cluster API / DB endpoint instead of
+    SSHing to a VM), wait for it, return (exit_code, log_output), and delete the
+    group. Mirrors ``_run_aci_ansible_sync``; the command is localhost (no SSH key)
+    and the connection material rides ``secure_value`` env vars (hidden in the
+    portal). Uses the ansible-cloud image (k8s/DB collections + client libs)."""
+    import time
+    from .ansible_localhost_cmd import build_localhost_command
+
+    aci = _get_aci(cred, sub_id)
+    group_name = f"{_ANSIBLE_RUNNER_PREFIX}-{job_id[:8]}" if job_id else f"{_ANSIBLE_RUNNER_PREFIX}-adhoc"
+
+    cmd = build_localhost_command(
+        with_conn_vars=bool(conn_vars_b64), with_kubeconfig=bool(kubeconfig_b64))
+
+    env_vars = [EnvironmentVariable(name="PLAYBOOK_B64", value=playbook_b64)]
+    if conn_vars_b64:
+        env_vars.append(EnvironmentVariable(name="CONN_VARS_B64", secure_value=conn_vars_b64))
+    if kubeconfig_b64:
+        env_vars.append(EnvironmentVariable(name="KUBECONFIG_B64", secure_value=kubeconfig_b64))
+    # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup — secure_value.
+    for k, v in (ps_env or {}).items():
+        env_vars.append(EnvironmentVariable(name=k, secure_value=v))
+
+    container = Container(
+        name="ansible",
+        image=image,
+        resources=ResourceRequirements(requests=ResourceRequests(cpu=1.0, memory_in_gb=1.0)),
+        command=["sh", "-c", cmd],
+        environment_variables=env_vars,
+    )
+
+    group_params = ContainerGroup(
+        location=location,
+        containers=[container],
+        os_type=OperatingSystemTypes.LINUX,
+        restart_policy="Never",
+        tags={"managed-by": "vm-dashboard", "Purpose": "ansible-runner"},
+    )
+
+    if subnet_id:
+        from azure.mgmt.containerinstance.models import ContainerGroupSubnetId
+        group_params.subnet_ids = [ContainerGroupSubnetId(id=subnet_id)]
+
+    if acr_server and acr_username and acr_password:
+        from azure.mgmt.containerinstance.models import ImageRegistryCredential
+        group_params.image_registry_credentials = [
+            ImageRegistryCredential(server=acr_server, username=acr_username, password=acr_password)
+        ]
+
+    output = ""
+    exit_code = 1
+    state = ""
+    try:
+        logger.info("ACI ansible-local: creating container group %s in %s", group_name, rg)
+        aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
+
+        for _ in range(120):
+            cg = aci.container_groups.get(rg, group_name)
+            state = (cg.instance_view.state if cg.instance_view else "") or ""
+            if state in ("Succeeded", "Failed", "Stopped"):
+                break
+            time.sleep(10)
+
+        try:
+            log_resp = aci.containers.list_logs(rg, group_name, "ansible")
+            output = log_resp.content or ""
+        except Exception as log_err:
+            logger.warning("ACI ansible-local: could not retrieve logs: %s", log_err)
+
+        try:
+            cg = aci.container_groups.get(rg, group_name)
+            for c in (cg.containers or []):
+                if c.name == "ansible" and c.instance_view and c.instance_view.current_state:
+                    ec = c.instance_view.current_state.exit_code
+                    exit_code = ec if ec is not None else (0 if state == "Succeeded" else 1)
+                    break
+            else:
+                exit_code = 0 if state == "Succeeded" else 1
+        except Exception as ec_err:
+            logger.warning("ACI ansible-local: could not get exit code: %s", ec_err)
+            exit_code = 0 if state == "Succeeded" else 1
+
+    finally:
+        try:
+            aci.container_groups.begin_delete(rg, group_name).result()
+            logger.info("ACI ansible-local: deleted container group %s", group_name)
+        except Exception as del_err:
+            logger.warning("ACI ansible-local: could not delete group %s: %s", group_name, del_err)
+
+    return exit_code, output
+
+
+async def run_aci_ansible_local_task(
+    *,
+    rg: str, location: str, subnet_id: str, image: str,
+    playbook_b64: str, conn_vars_b64: str = "", kubeconfig_b64: str = "", job_id: str,
+    acr_server: str = "", acr_username: str = "", acr_password: str = "",
+    ps_env: dict | None = None,
+) -> tuple:
+    """Run a localhost Ansible play (k8s/DB target) inside the Azure VNet via ACI.
+    Returns (exit_code, output_log)."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(
+            _run_aci_ansible_local_sync,
+            cred, sub_id, rg, location, subnet_id, image,
+            playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
+            acr_server, acr_username, acr_password, ps_env,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to run ACI ansible-local task: {e}") from e
 
 
 # ── Generic Docker Compose → ACI container group ─────────────────────────────
@@ -2211,7 +2494,7 @@ async def deploy_compose_aci(
     """Deploy a parsed compose spec to a new ACI container group."""
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _deploy_compose_aci_sync,
             cred, sub_id, rg, location, name, services,
             subnet_id, acr_server, acr_username, acr_password,
@@ -2267,7 +2550,7 @@ async def list_aci_container_instances(rg: str) -> list:
     """List all ACI container instances in resource group."""
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(_list_aci_container_instances_sync, cred, sub_id, rg)
+        return await _to_thread(_list_aci_container_instances_sync, cred, sub_id, rg)
     except AzureError:
         raise
     except Exception as e:
@@ -2288,7 +2571,7 @@ async def stop_aci_container_group(rg: str, container_group_name: str) -> None:
     """Stop (delete) an ACI container group."""
     try:
         cred, sub_id = await _ensure_creds()
-        await asyncio.to_thread(_stop_aci_container_group_sync, cred, sub_id, rg, container_group_name)
+        await _to_thread(_stop_aci_container_group_sync, cred, sub_id, rg, container_group_name)
     except AzureError:
         raise
     except Exception as e:
@@ -2478,7 +2761,7 @@ async def export_managed_image_to_vhd(
     """
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _export_managed_image_to_vhd_sync,
             cred, sub_id, image_rg, image_name,
             dest_storage_account, dest_container, dest_blob_name,
@@ -2586,7 +2869,7 @@ async def create_image_from_blob(
     dashboard SP has read on the source storage account)."""
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _create_image_from_blob_sync,
             cred, sub_id, target_rg, location, image_name, blob_uri,
             os_type, hyper_v_generation, storage_account_id, progress_cb,
@@ -2744,7 +3027,7 @@ async def run_aci_promote_runner_task(
     Returns (exit_code, log_output)."""
     try:
         cred, sub_id = await _ensure_creds()
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_aci_promote_runner_sync,
             cred, sub_id, rg, location, subnet_id, image, cpu, memory_gb,
             runner_args, azure_env, job_id, acr_server, acr_username,
@@ -2778,7 +3061,7 @@ async def delete_staged_blob(storage_account: str, container: str, blob_name: st
     explicit account/container instead of the configured hub container."""
     try:
         cred, _sub_id = await _ensure_creds()
-        await asyncio.to_thread(
+        await _to_thread(
             _delete_staged_blob_sync, cred, storage_account, container, blob_name,
         )
     except Exception as e:

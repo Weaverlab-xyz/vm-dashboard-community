@@ -18,7 +18,7 @@ Same shape in both files, divergent only where the package manager / unit names 
 1. **OS-family gate** — abort if run on the wrong family (Debian script refuses RPM systems and vice-versa).
 2. **Resolve the BT target user** — `$BT_TARGET_USER` env override, else autodetect the cloud-default user from a known list (`ubuntu`/`debian`/`admin` on Debian-family, `ec2-user`/`rocky`/`centos`/`almalinux`/`cloud-user` on RPM-family), else fall back to `$SUDO_USER`.
 3. **System updates** — `apt-get dist-upgrade` (Debian) / `dnf --security upgrade` (RPM). Skippable with `BT_SKIP_UPDATES=1`.
-4. **sshd hardening for PRA Shell Jump** — writes `/etc/ssh/sshd_config.d/99-bt-ready.conf` enforcing key-only auth, no root password login, sensible client-alive timers. Validated with `sshd -t` before exit.
+4. **sshd hardening for PRA Shell Jump** — writes `/etc/ssh/sshd_config.d/00-bt-ready.conf` enforcing key-only auth, no root password login, sensible client-alive timers. Validated with `sshd -t` before exit. (`00-`, not `99-`: sshd is first-occurrence-wins, so loading lex-first is what makes these directives beat a later compliance drop-in — see **Precedence** below. On OpenSSH < 8.2, which has no `Include` for `sshd_config.d`, they go into `/etc/ssh/sshd_config` instead.)
 5. **Sudoers** — writes `/etc/sudoers.d/90-bt-ready` granting the resolved user passwordless sudo. Validated with `visudo -c` before keeping.
 6. **Time sync** — `systemd-timesyncd` (Debian) / `chronyd` (RPM). BeyondTrust auth fails on skewed clocks.
 7. **Baseline hygiene** — persistent journald; opt-in unattended security updates via `BT_AUTOPATCH=1`.
@@ -88,9 +88,9 @@ Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
 The Windows script prepares a **Windows Server 2022** image (including **Server Core**) for PRA access. It's the Windows analogue of the `*.sh` scripts but differs in important ways:
 
 - **PowerShell, not sh**, and **Azure-only** for now (the dashboard's Windows Packer builder is Azure; AWS/GCP Windows builds are a later follow-up). Select a **Windows Server 2022** or **2022 Core** preset on the Build Image tab (`os_type=Windows`); the build runs the script as Packer's `powershell` provisioner before the `windows-restart` + Sysprep `/generalize` finisher.
-- **Build connects over WinRM; the image is reached over SSH.** Marketplace Windows base images have no SSH at first boot, so Packer uses WinRM during the build. The script installs **OpenSSH Server** (in-box Feature-on-Demand, with a Win32-OpenSSH MSI fallback) into the *output* image, so VMs deployed from it are reachable with `ssh` — "not all that different than how Linux cloud VMs are accessed today" — plus **agentless RDP** through the PRA Jumpoint (RDP + NLA + firewall are enabled).
+- **Build connects over WinRM; the image is reached over SSH.** Marketplace Windows base images have no SSH at first boot, so Packer uses WinRM during the build. The script installs **OpenSSH Server** (in-box Feature-on-Demand, with a Win32-OpenSSH MSI fallback) into the *output* image, so VMs deployed from it are reachable with `ssh` — "not all that different than how Linux cloud VMs are accessed today" — plus **agentless RDP** through the PRA Gateway (RDP + NLA + firewall are enabled).
 - **The SSH key is baked into the image, by necessity.** Azure cannot inject SSH public keys into Windows VMs at deploy time (that's Linux-only — `WindowsConfiguration` has no SSH field). So set `$AuthorizedKey` at the top of the script to the **public** half of the keypair the dashboard keeps in Key Vault (`azure_ssh_keypair_secret_name`); the matching private key is then retrievable from the VMs tab / `ssh-key` endpoint exactly like Linux. Leave it blank and password-auth SSH still works using the admin password the deploy generates and vaults (**Azure → VMs → Password**). The `$env:BT_*` reads in the script are for CLI/Packer use — the dashboard's PowerShell provisioner does not forward `environment_vars` yet, so when driving it through the GUI, edit the inline values.
-- **Access model after deploy:** retrieve the vaulted admin password (**Azure → VMs → Password**) → `ssh azureuser@<ip>` (password), or use your Key Vault private key if you baked the public key → or RDP via the Jumpoint. The OpenSSH default shell is set to PowerShell so `ssh` lands in a familiar prompt.
+- **Access model after deploy:** retrieve the vaulted admin password (**Azure → VMs → Password**) → `ssh azureuser@<ip>` (password), or use your Key Vault private key if you baked the public key → or RDP via the Gateway. The OpenSSH default shell is set to PowerShell so `ssh` lands in a familiar prompt.
 - **No image-reuse cleanup step.** On Windows, Sysprep `/generalize` (the build template's finisher) owns generalization — the script deliberately does *not* strip host keys / SIDs / logs the way the `*.sh` cleanup step does.
 - **Optional toggles** (set as `$env:BT_*` for CLI builds, or edit inline): `BT_AUTHORIZED_KEY`, `BT_ADMIN_USER` (default `azureuser`), `BT_SSH_KEY_ONLY=1` (harden sshd to key-only), `BT_ENABLE_RDP=0` (skip RDP).
 
@@ -100,7 +100,7 @@ The Linux-centric sections below (`adminuser` / EPM-L, CIS via OpenSCAP, the cro
 
 The VDI analogue of `bt-ready-windows.ps1`, for the **Windows 11 multi-session (24H2 AVD)** build preset (which publishes a Trusted Launch Compute Gallery image). A desktop, not a server — so it's **RDP-first**, multi-session-capable, lightly VDI-optimized, and stages the RS jump client for **first-boot** install:
 
-- **Multi-session + RDP.** Sets `fSingleSessionPerUser=0` (concurrent sessions), enables RDP + NLA + the Remote Desktop firewall group + time-zone redirection. Agentless **Remote RDP** jump items reach 3389 from the Jumpoint subnet; pool VMs are private + brokered. The multi-session SKU provides multi-*user* concurrency without an RDSH role — but the dashboard does **not** install the AVD agent or register an AVD host pool, so VMs are used **1-per-seat over PRA-RDP** and the multi-session capability is latent.
+- **Multi-session + RDP.** Sets `fSingleSessionPerUser=0` (concurrent sessions), enables RDP + NLA + the Remote Desktop firewall group + time-zone redirection. Agentless **Remote RDP** jump items reach 3389 from the Gateway subnet; pool VMs are private + brokered. The multi-session SKU provides multi-*user* concurrency without an RDSH role — but the dashboard does **not** install the AVD agent or register an AVD host pool, so VMs are used **1-per-seat over PRA-RDP** and the multi-session capability is latent.
 - **Conservative VDI optimizations.** Disables hibernation, telemetry, Windows consumer features, and Store auto-update — a safe subset. For heavier tuning, run Microsoft's [Virtual Desktop Optimization Tool (VDOT)](https://github.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool) as your provisioner instead.
 - **RS jump client at FIRST BOOT, never baked installed.** Set `$JumpClientUrl` (or `BT_JUMP_CLIENT_URL`) to the RS **mass-deployment installer** (`.msi`) URL. The script stages it into the image and writes `C:\Windows\Setup\Scripts\SetupComplete.cmd`, which runs `msiexec /i … /quiet` **once per clone** after Sysprep OOBE (as SYSTEM, before logon) — so each VDI VM registers a **distinct** jump client. Baking an *installed* client into a golden image makes every clone phone home with the same identity → a "confused entry in the rep console" (KB0017470). Optional `BT_JUMP_GROUP` / `BT_JUMP_TAG` map to `jc_jump_group` / `jc_tag`. **Caveats:** mass-deploy installers **expire** and are **invalidated by appliance upgrades** — rebuild the image after appliance updates; and the deployed (private) VM needs **outbound 443 to the appliance** to register at first boot.
 - **Optional OpenSSH.** Off by default (RDP is primary). `BT_INSTALL_OPENSSH=1` installs OpenSSH Server and authorizes `BT_AUTHORIZED_KEY` for admin SSH, the same as `bt-ready-windows.ps1`.
@@ -244,12 +244,12 @@ The first end-to-end run. Repeat the equivalent on Azure and GCP afterward — t
    ```sh
    sudo -n true                              # passwordless sudo
    sudo cat /etc/sudoers.d/90-bt-ready       # the NOPASSWD line for ubuntu
-   sudo cat /etc/ssh/sshd_config.d/99-bt-ready.conf
+   sudo cat /etc/ssh/sshd_config.d/00-bt-ready.conf
    systemctl is-active ssh                   # active
    timedatectl                               # System clock synchronized: yes
    sudo journalctl --list-boots | head       # persistent journald
    ```
-6. (Optional, needs PRA console access) Register the instance under your Jumpoint as a Shell Jump host. Connect through PRA. Confirm sudo escalation works through the PRA session.
+6. (Optional, needs PRA console access) Register the instance under your Gateway as a Shell Jump host. Connect through PRA. Confirm sudo escalation works through the PRA session.
 
 ## Iteration loop
 

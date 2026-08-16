@@ -6,7 +6,9 @@ this playbook than what's in storage?". Passive and read-only — no target-side
 action (the active ``--check`` reconciler is deliberately out of scope).
 
 ``content_hash`` / ``inputs_hash`` / ``evaluate`` are pure (unit-tested without a
-DB); ``record_apply`` does the upsert.
+DB); ``record_apply`` does the upsert and ``collect`` gathers the inputs ``evaluate``
+needs. Both keep their imports function-local — ``tests/test_config_drift.py`` loads
+this file by path with no package context, so module-level imports must stay stdlib.
 """
 import hashlib
 import json
@@ -91,3 +93,40 @@ def record_apply(db, target: str, playbook_ref: str, content_hash: str,
             target=target, playbook_ref=playbook_ref, content_hash=content_hash,
             inputs_hash=inputs_hash, applied_at=now, job_id=job_id))
     db.commit()
+
+
+async def collect(db) -> dict:
+    """Gather the apply-state rows and current asset hashes, then :func:`evaluate`.
+
+    Async because re-hashing a playbook means fetching it from storage. Lives here
+    rather than in ``api/config_mgmt.py`` so the worker-side notification scanner can
+    call it — a service may not import from ``..api``.
+    """
+    import base64
+    from . import config_service as cs, storage_service
+    from ..config import settings
+    from ..database import ConfigApplyState
+
+    try:
+        stale_days = int(cs.get("config_drift_stale_days")
+                         or getattr(settings, "config_drift_stale_days", 14) or 14)
+    except (TypeError, ValueError):
+        stale_days = 14
+
+    rows = db.query(ConfigApplyState).all()
+    row_dicts = [{
+        "target": r.target, "playbook_ref": r.playbook_ref,
+        "content_hash": r.content_hash, "applied_at": r.applied_at, "job_id": r.job_id,
+    } for r in rows]
+
+    # Current content hash per distinct playbook (for change detection). Best-effort
+    # — an asset that's since been deleted/unreadable just yields no change signal.
+    current: dict = {}
+    for ref in {r.playbook_ref for r in rows}:
+        try:
+            b64 = await storage_service.fetch_asset_b64(ref)
+            current[ref] = content_hash(base64.b64decode(b64))
+        except Exception:
+            pass
+
+    return evaluate(row_dicts, current, stale_days)

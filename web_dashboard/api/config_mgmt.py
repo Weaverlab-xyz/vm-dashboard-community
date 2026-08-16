@@ -1,9 +1,13 @@
 """
-Config Management API — Ansible playbook / asset runner (local Docker path).
+Config Management API — routes, validation and job enqueue.
 
-All endpoints require authentication.  Runs are dispatched as background jobs;
-the client gets a job_id immediately and can poll /api/jobs/{id} for progress
-and final output.
+All endpoints require authentication. A run is **queued**, not executed here: the
+endpoint validates the request, persists the run's parameters on the job (see
+``services.ansible_run_meta``) and returns a job_id the client polls at
+/api/jobs/{id}. Execution belongs to the job runner —
+``services.ansible_local_run_service`` for VM (SSH/WinRM) targets, and
+``services.ansible_cloud_run_service`` for the Kubernetes / cloud-database localhost
+plays.
 
 Asset types supported:
     .yml / .yaml  — Ansible playbooks (run as-is)
@@ -16,9 +20,10 @@ Target types:
     Bare IP / hostname     — ad-hoc; cloud field determines SSH key source
 """
 import logging
+import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
@@ -27,6 +32,7 @@ from ..services import job_service
 from ..services import storage_service
 from ..services.storage_service import StorageError
 from ..services import ansible_local_service
+from ..services import ansible_run_meta
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/config-mgmt", tags=["config-mgmt"])
@@ -89,7 +95,8 @@ async def upload_asset(
 # ── Inventory ─────────────────────────────────────────────────────────────────
 
 @router.get("/inventory")
-async def get_inventory(current_user: User = Depends(get_current_user)):
+async def get_inventory(db: Session = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
     """
     Return the dynamic Ansible inventory.
 
@@ -99,8 +106,8 @@ async def get_inventory(current_user: User = Depends(get_current_user)):
       inventory — full Ansible JSON inventory (groups + hostvars)
     """
     return {
-        "targets":   ansible_local_service.get_configured_targets(),
-        "inventory": ansible_local_service.build_inventory(),
+        "targets":   ansible_local_service.get_configured_targets(db),
+        "inventory": ansible_local_service.build_inventory(db),
     }
 
 
@@ -182,23 +189,89 @@ async def get_cloud_targets(
     }
 
 
+# ── Localhost targets (Kubernetes clusters + databases) ─────────────────────────
+
+@router.get("/localhost-targets")
+async def get_localhost_targets(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Kubernetes clusters + databases selectable as **localhost** Ansible
+    targets (the run reaches out via kubeconfig / DB login vars). Ids + display fields
+    only — never a secret. Parallels ``/cloud-targets`` for VMs, and is served here so
+    the Config-Management page doesn't need the separate k8s / cloud_database feature
+    permissions just to populate its picker.
+
+    Only resources an Ansible runner can actually reach + configure appear: aws/azure/gcp
+    (in-cloud runner), plus — for both clusters and databases — those registered with
+    cloud="local", which run on the dashboard's local runner. See ``K8S_TARGET_CLOUDS``
+    and ``DB_TARGET_CLOUDS`` for the two lists.
+
+    Response shape:
+        {"k8s": [{id, name, cloud, status}, …],
+         "databases": [{id, engine, cloud, status}, …]}
+    """
+    from ..database import K8sCluster, CloudDatabase
+    from ..services import ansible_cloud_run_service as acr
+
+    clusters = []
+    for c in db.query(K8sCluster).order_by(K8sCluster.created_at.desc()).all():
+        if (c.cloud or "").lower() in acr.K8S_TARGET_CLOUDS:
+            clusters.append({"id": c.id, "name": c.name, "cloud": c.cloud,
+                             "status": c.status})
+    databases = []
+    for d in db.query(CloudDatabase).order_by(CloudDatabase.created_at.desc()).all():
+        if (d.cloud or "").lower() in acr.DB_TARGET_CLOUDS and d.engine in acr.ANSIBLE_DB_ENGINES:
+            databases.append({"id": d.id, "engine": d.engine, "cloud": d.cloud,
+                              "status": d.status})
+    return {"k8s": clusters, "databases": databases}
+
+
 # ── Playbook / asset run ───────────────────────────────────────────────────────
 
 class ManagedAccountRef(BaseModel):
-    """A BeyondTrust Password Safe managed account the operator picked from the
-    live list. The ids drive the just-in-time credential checkout; the name is
-    non-secret and becomes ``ansible_user``. Never carries a credential."""
-    system_id: int
-    account_id: int
+    """A BeyondTrust Password Safe managed account. Never carries a credential.
+
+    Two forms, because a single run and a bulk run identify an account differently:
+
+    * PINNED — ``system_id`` + ``account_id``, picked from the live list for one
+      host. Drives the just-in-time checkout directly.
+    * BY NAME — ``account_name`` only, used by a bulk run. Both ids are specific to
+      one managed system, so a pinned ref cannot be reused across a fleet: it would
+      check out one machine's credential and connect to every host with it. A
+      name-only ref is instead resolved against each job's OWN target host at run
+      time (see ``services.ansible_local_run_service._resolve_managed_ref``).
+
+    ``account_name`` is non-secret and becomes ``ansible_user``.
+    """
+    system_id: int | None = None
+    account_id: int | None = None
     account_name: str = ""
     uses_ssh_key: bool = False   # DSSAutoManagementFlag → checkout as -t dsskey
+
+    @model_validator(mode="after")
+    def _pinned_or_named(self):
+        if self.account_id is not None and self.system_id is not None:
+            return self
+        if (self.account_name or "").strip():
+            return self
+        raise ValueError(
+            "a managed account needs either both system_id and account_id (a pinned "
+            "account for one host) or an account_name (resolved per host at run time)")
 
 
 class RunRequest(BaseModel):
     asset: str           # filename of any supported type (.yml, .sh, .deb, .rpm)
-    target: str          # on-prem group key OR bare IP/hostname for cloud/ad-hoc
+    target: str = ""     # on-prem group key OR bare IP/hostname for cloud/ad-hoc (unused for k8s/database)
     cloud: str = ""      # "" | "aws" | "azure" | "gcp" — drives SSH key retrieval
     ansible_user: str = ""  # SSH user for cloud runner targets; falls back to ansible_default_user
+    # Target family. "vm" (default) = the SSH/WinRM path below (target is an IP/host
+    # or on-prem group key). "k8s"/"database" = a Kubernetes cluster / cloud database:
+    # a localhost play whose connection material is auto-injected server-side and which
+    # ALWAYS runs on the in-cloud transient runner (see ansible_cloud_run_service). For
+    # those, target/cloud/ansible_user/secret_ssh_key_source/managed_account are ignored.
+    target_kind: str = "vm"  # "vm" | "k8s" | "database"
+    target_id: str = ""      # K8sCluster.id / CloudDatabase.id when target_kind != "vm"
     extra_vars: dict = {}
     # Use Secrets-Management secrets in the run WITHOUT ever seeing the value.
     # Requires the `secrets:use` permission (admins bypass). A "source" is a
@@ -212,6 +285,14 @@ class RunRequest(BaseModel):
     # passes the backend explicitly because the same asset name may exist on
     # multiple backends.
     asset_backend: str = ""
+    # Bind a freshly-minted BeyondTrust EPM-L installation token to this Ansible
+    # variable. The NAME only — the token is minted server-side at run time and rides
+    # the scrubbed secret channel, so it never reaches the browser or job metadata.
+    epml_token_var: str = ""
+    # Groups the jobs of one bulk run (see /run-bulk). A descriptive label only —
+    # nothing authorizes off it — stored on the job's indexed `batch_id` column so
+    # /jobs can filter to the batch and roll up its status.
+    batch_id: str = ""
     # BeyondTrust Password Safe managed-account checkout (LOCAL runner only). The
     # credential is checked out just-in-time at run time — the operator never sees
     # it. managed_account is the connection identity; managed_become is an optional
@@ -221,79 +302,12 @@ class RunRequest(BaseModel):
 
 
 def _cfg(key: str) -> str:
+    # Same two-line delegator the run service keeps; both resolve through
+    # ansible_local_service._cfg, so there is no logic to drift.
     return ansible_local_service._cfg(key)
 
 
-# Deploy job type + the config key holding the SSH keypair secret the deploy used,
-# per cloud. A dashboard-built VM's own keypair (the one cloud-init injected) lives
-# in that secret; a per-launch override is recorded on the deploy job metadata as
-# ``ssh_key_secret_override``. This is the key the VM actually trusts — the global
-# ``ansible_ssh_key_sm_name`` is only a fallback for externally-built hosts.
-_CLOUD_DEPLOY_JOB_TYPE = {"aws": "ec2_deploy", "azure": "azure_deploy", "gcp": "gce_deploy"}
-_VM_BUILD_KEY_DEFAULT_CFG = {
-    "aws":   "ec2_ssh_key_secret",
-    "gcp":   "gcp_ssh_key_secret_name",
-    "azure": "azure_ssh_keypair_secret_name",
-}
 
-
-def _find_cloud_deploy_meta(db, cloud: str, ip: str) -> dict:
-    """Metadata of the most-recent, non-destroyed deploy job for the cloud VM at
-    ``ip`` — mirrors how /cloud-targets enumerates targets. Empty dict when none
-    matches (externally-created VM, or a manually-typed cloud IP)."""
-    job_type = _CLOUD_DEPLOY_JOB_TYPE.get(cloud)
-    if not job_type or not ip:
-        return {}
-    jobs = (
-        db.query(Job)
-        .filter(Job.job_type == job_type, Job.status == "completed")
-        .order_by(Job.created_at.desc())
-        .all()
-    )
-    for job in jobs:
-        meta = job.metadata_dict
-        if meta.get("destroyed"):
-            continue
-        if (meta.get("public_ip") or meta.get("private_ip")) == ip:
-            return meta
-    return {}
-
-
-def _vm_build_key_secret(cloud: str, meta: dict) -> str:
-    """The secret name holding the keypair the VM was built with: the per-launch
-    override recorded on the deploy job, else the cloud's configured deploy default."""
-    override = (meta.get("ssh_key_secret_override") or "").strip()
-    return override or _cfg(_VM_BUILD_KEY_DEFAULT_CFG.get(cloud, ""))
-
-
-async def _resolve_cloud_ssh_key(db, cloud: str, ip: str) -> str | None:
-    """Best SSH private key for a cloud VM run: the keypair the VM was actually
-    built with (resolved from its deploy metadata) first, then the per-cloud global
-    Ansible key as a fallback. Never raises — a retrieval error yields the fallback
-    (and ultimately None), matching the prior "proceed without key" behaviour."""
-    build_secret = _vm_build_key_secret(cloud, _find_cloud_deploy_meta(db, cloud, ip))
-    if build_secret:
-        try:
-            pem = await ansible_local_service.fetch_ssh_key(cloud, secret_name=build_secret)
-            if pem:
-                return pem
-        except Exception as exc:
-            logger.warning("VM build-key retrieval failed (%s) — trying the global key: %s",
-                           cloud, exc)
-    return await ansible_local_service.fetch_ssh_key(cloud)
-
-
-def _scrub_secrets(text: str, values: list) -> str:
-    """Redact resolved secret values from run output before it's stored/shown —
-    defense in depth so a ``debug`` in a playbook can't leak an injected secret to
-    the job log. Values shorter than 4 chars are skipped to avoid over-redaction."""
-    if not text or not values:
-        return text
-    for v in values:
-        v = str(v)
-        if len(v) >= 4:
-            text = text.replace(v, "***")
-    return text
 
 
 def _can_use_secrets(user) -> bool:
@@ -334,463 +348,103 @@ def _validate_cloud_secret_stores(runner: str, secret_vars: dict | None,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-def _resolve_cloud_secrets(runner: str, secret_vars: dict | None,
-                           secret_become_source: str) -> tuple:
-    """Build ``(secret_entries, manifest_b64, inline_values)`` for a cloud run —
-    ECS ``{env, arn}`` / GCP ``{env, secret_name}`` / ACI ``{env, value}``.
-    ``inline_values`` (ACI only) feed the output scrub set."""
-    from ..services import (config_service as cs, cloud_ansible_secrets as _cas,
-                            secrets_backend_service as sbs)
-    try:
-        return _cas.resolve_entries(
-            runner, secret_vars, secret_become_source,
-            is_reference=cs.is_reference, get=cs.get, get_raw=cs.get_raw,
-            resolve_reference=cs.resolve_reference, parse_ref=cs._parse_ref,
-            aws_sm_arn=sbs.aws_sm_arn)
-    except _cas.StoreMismatch as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
-def _add_ephemeral_managed_entries(runner: str, entries: list, manifest_b64: str,
-                                   managed_cred_vars: dict, job_id: str) -> tuple:
-    """Materialise managed-account credential vars as short-lived, RBAC-locked cloud
-    store secrets (ECS → AWS SM, GCP → GCP SM) and extend the (entries, manifest)
-    with them, continuing the env-index numbering. Returns
-    ``(entries, manifest_b64, cleanup)`` where ``cleanup`` is ``[(provider, id)]``
-    to force-delete after the run. A JIT credential can't reference a pre-existing
-    store secret (#217), so we create one per run and reap it."""
-    import base64 as _b64, json as _json
-    from ..services import (cloud_ansible_secrets as _cas, ephemeral_secrets as _eph,
-                            secrets_backend_service as sbs)
-    if not managed_cred_vars:
-        return entries, manifest_b64, []
-    entries = list(entries)
-    manifest = _json.loads(_b64.b64decode(manifest_b64)) if manifest_b64 else []
-    cleanup = []
-    start = len(entries)
-    for i, (var, value) in enumerate(managed_cred_vars.items()):
-        env = _cas.env_name(start + i)
-        if runner == "ecs":
-            name = _eph.aws_secret_name(job_id, start + i)
-            arn = sbs.write_aws_sm_ephemeral(
-                name, value, exec_role_arn=_cfg("ansible_ecs_execution_role_arn"),
-                kms_key_id=_cfg("ansible_ephemeral_kms_key_id"))
-            entries.append({"env": env, "arn": arn})
-            cleanup.append(("aws", name))
-        else:  # gcp
-            sid = _eph.gcp_secret_id(job_id, start + i)
-            sbs.write_gcp_sm_ephemeral(
-                sid, value, runner_sa=_cfg("gcp_ansible_runner_service_account"))
-            entries.append({"env": env, "secret_name": sid})
-            cleanup.append(("gcp", sid))
-        manifest.append({"env": env, "var": var})
-    manifest_b64 = _b64.b64encode(_json.dumps(manifest).encode()).decode()
-    return entries, manifest_b64, cleanup
+async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
+    """Enqueue a Kubernetes-cluster / cloud-database Config-Management run.
 
+    These are localhost plays that reach out via a kubeconfig / DB login vars, so
+    the SSH-oriented request fields are ignored. Connection material is resolved
+    server-side at launch (never here, never stored on the job). The run executes on
+    the in-cloud transient runner, or — for a cloud="local" Kubernetes cluster, which
+    only this host can reach — the local sibling container (jobs_worker →
+    ansible_cloud_run_service.resolve_runner).
+    Returns ``{job_id, status: "queued"}``; the client polls /api/jobs/{id}."""
+    from ..services import (k8s_service, cloud_database_service,
+                            ansible_cloud_run_service as acr)
 
-def _delete_ephemeral(cleanup: list) -> None:
-    """Best-effort force-delete of the ephemeral store secrets created for a run.
-    A failure here is non-fatal — the GC sweeper reaps anything left behind."""
-    if not cleanup:
-        return
-    from ..services import secrets_backend_service as sbs
-    for provider, sid in cleanup:
+    kind = payload.target_kind
+    if not payload.target_id:
+        raise HTTPException(status_code=400, detail=f"target_id is required for a {kind} run.")
+
+    # A localhost play must be a real playbook — no auto-wrapped script/rpm/deb.
+    if ansible_local_service.asset_type(payload.asset) != "playbook":
+        raise HTTPException(
+            status_code=400,
+            detail=f"{kind} targets run a localhost play — supply a .yml/.yaml playbook.")
+
+    # Resolve the target row (→ 404) and derive its cloud.
+    if kind == "k8s":
         try:
-            (sbs.delete_aws_sm if provider == "aws" else sbs.delete_gcp_sm)(sid)
-        except Exception:
-            # Static message + traceback only, no interpolated data. Everything
-            # unpacked from `cleanup` — even the "aws"/"gcp" provider literal — is
-            # tainted by CodeQL because the list is built in the credential-handling
-            # loop, so logging any of it trips py/clear-text-logging. The traceback
-            # still names the failing delete call; the GC sweeper reaps by tag.
-            logger.warning("an ephemeral secret cleanup failed (GC will reap it)",
-                           exc_info=True)
-
-
-async def _run_job(
-    job_id: str,
-    asset: str,
-    target: str,
-    cloud: str,
-    ansible_user: str,
-    extra_vars: dict,
-    asset_backend: str = "",
-    secret_vars: dict | None = None,
-    secret_become_source: str = "",
-    secret_ssh_key_source: str = "",
-    managed_account: dict | None = None,
-    managed_become: dict | None = None,
-) -> None:
-    import base64
-    from ..database import SessionLocal
-    db = SessionLocal()
-    try:
-        # Flip to 'running' up front so this in-process BackgroundTask is visible to
-        # reconcile_stale_jobs. It only reconciles 'running' jobs; a config-mgmt run
-        # left at 'pending' after an app restart orphaned its task would otherwise
-        # hang forever at partial progress instead of being failed on next startup.
-        job_service.set_running(db, job_id)
-        job_service.update_progress(db, job_id, 5, f"Fetching asset '{asset}'…")
+            cluster = k8s_service.get_cluster(db, payload.target_id)
+        except k8s_service.K8sError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        cloud = (cluster.get("cloud") or "").lower()
+        target_label = cluster.get("name") or payload.target_id[:8]
+    else:  # database
         try:
-            if asset_backend:
-                raw = await storage_service.fetch_asset_in(asset_backend, asset)
-                asset_b64 = base64.b64encode(raw).decode()
-            else:
-                # Back-compat: caller didn't specify a backend → fall back to
-                # the active backend's copy.
-                asset_b64 = await storage_service.fetch_asset_b64(asset)
-        except StorageError as e:
-            job_service.set_failed(db, job_id, f"Asset storage error: {e}")
-            return
+            info = cloud_database_service.connection_info(db, payload.target_id)
+        except cloud_database_service.CloudDatabaseError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        cloud = (info.get("cloud") or "").lower()
+        engine = info.get("engine")
+        if engine not in acr.ANSIBLE_DB_ENGINES:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"engine {engine!r} is not supported for Ansible runs "
+                        f"(supported: {', '.join(acr.ANSIBLE_DB_ENGINES)})."))
+        if not info.get("private_host"):
+            raise HTTPException(
+                status_code=400,
+                detail="database has no endpoint yet — wait for provisioning to finish.")
+        target_label = f"{engine}/{payload.target_id[:8]}"
 
-        # Resolve requested Secrets-Management secrets ONCE, just-in-time — never
-        # stored on the job, never on the command line; values are scrubbed from
-        # output below. Named vars + become password apply to the local runner;
-        # the SSH-key secret applies to both (used as the connection key).
-        secret_extra_vars: dict = {}
-        secret_ssh_pem = None
-        secret_values: list = []
-        if secret_vars or secret_become_source or secret_ssh_key_source:
-            from ..services import ansible_secrets, config_service as cs
+    # Targetable cloud + reachable asset storage. Both conditions turn on where the
+    # runner executes, so they're resolved together in the service (unit-tested there).
+    asset_backend = payload.asset_backend or storage_service.active_backend()
+    problem = acr.check_target(kind, cloud, asset_backend, payload.asset)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
 
-            def _resolve_source(src: str) -> str:
-                src = (src or "").strip()
-                if not src:
-                    return ""
-                return cs.resolve_reference(src) if cs.is_reference(src) else cs.get(src)
+    # Only operator-picked named secret_vars apply to a localhost play (no SSH key /
+    # become / managed-account). Using one requires the secrets:use permission.
+    wants_secret = bool(payload.secret_vars)
+    if wants_secret and not _can_use_secrets(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
 
-            secret_extra_vars = ansible_secrets.resolve_secret_vars(
-                secret_vars, get=cs.get, resolve_reference=cs.resolve_reference,
-                is_reference=cs.is_reference)
-            if secret_become_source:
-                _bp = _resolve_source(secret_become_source)
-                if _bp:
-                    secret_extra_vars["ansible_become_password"] = _bp
-            if secret_ssh_key_source:
-                secret_ssh_pem = _resolve_source(secret_ssh_key_source) or None
-            secret_values = [v for v in list(secret_extra_vars.values())
-                             + ([secret_ssh_pem] if secret_ssh_pem else []) if v]
-
-        # Managed-account checkout (BeyondTrust Password Safe) — check out the
-        # credential just-in-time. The account is the connection identity;
-        # managed_become is an optional separate account for the sudo/become
-        # password. Tracked separately so each runner can route it correctly:
-        #   • local / ACI → inline (merged into secret_extra_vars below)
-        #   • ECS / GCP   → the password vars become ephemeral store secrets, the
-        #                   SSH key rides SSH_KEY_B64, ansible_user is a plain var.
-        managed_cred_vars: dict = {}   # cred vars needing a secure channel on cloud
-        managed_plain_vars: dict = {}    # non-secret vars (ansible_user)
-        managed_request_ids: list = []   # PS request ids — checked in (rotate-on-release) after a cloud run
-        if managed_account or managed_become:
-            from ..services import btapi_service, managed_accounts as ma
-            # Long enough that the request is still open after the run for the
-            # rotate-on-check-in + check-in below (best-effort mitigation).
-            _req_dur = int(_cfg("ansible_managed_request_duration_min") or 60)
-            try:
-                if managed_account:
-                    req_id, cred = await btapi_service.get_ps_credential_with_request(
-                        managed_account["system_id"], managed_account["account_id"],
-                        duration_min=_req_dur,
-                        uses_ssh_key=managed_account.get("uses_ssh_key", False))
-                    managed_request_ids.append(req_id)
-                    # The account is the login identity → ansible_user. Strip any
-                    # cloud-plugin scope suffix (e.g. AWS Systems Manager's
-                    # ``adminuser;local``) so the SSH connection uses the real OS user.
-                    _login = ma.ssh_login_user(managed_account.get("account_name", ""))
-                    if _login:
-                        managed_plain_vars["ansible_user"] = _login
-                    # The credential is an SSH private key when the account is
-                    # DSS-managed (uses_ssh_key) OR the AWS Systems Manager Custom
-                    # Plugin — whose account "password" IS the minted private key,
-                    # WITHOUT the DSS flag set. Detect by content so the key is used
-                    # as the connection key (SSH_KEY_B64), not a password: password
-                    # routing would send it down the ECS ephemeral-store path and
-                    # Ubuntu rejects password SSH anyway. Normalize so OpenSSH
-                    # accepts it (trailing newline).
-                    if managed_account.get("uses_ssh_key") or "PRIVATE KEY" in (cred or ""):
-                        secret_ssh_pem = ansible_local_service._normalize_key(cred)  # connection key
-                    else:
-                        managed_cred_vars["ansible_ssh_pass"] = cred  # SSH password (sshpass)
-                        managed_cred_vars["ansible_password"] = cred  # WinRM targets
-                    secret_values.append(cred)
-                if managed_become:
-                    breq_id, bcred = await btapi_service.get_ps_credential_with_request(
-                        managed_become["system_id"], managed_become["account_id"],
-                        duration_min=_req_dur, uses_ssh_key=False)
-                    managed_request_ids.append(breq_id)
-                    managed_cred_vars["ansible_become_password"] = bcred
-                    secret_values.append(bcred)
-            except btapi_service.BTAPIError as e:
-                job_service.set_failed(db, job_id, f"Password Safe checkout failed: {e}")
-                return
-            # Local / ACI runners consume everything inline via secret_extra_vars.
-            secret_extra_vars.update(managed_cred_vars)
-            secret_extra_vars.update(managed_plain_vars)
-
-        # Per-target-cloud runner backend: an AWS-target job uses
-        # ansible_runner_aws, Azure → ansible_runner_azure, GCP → ansible_runner_gcp,
-        # each falling back to the global ansible_runner. The target cloud is the
-        # run request's `cloud` field (operator-set for cloud targets; "" on-prem).
-        runner = _cfg("ansible_runner") or "local"
-        if cloud in ("aws", "azure", "gcp"):
-            runner = _cfg(f"ansible_runner_{cloud}") or runner
-        is_adhoc = "." in target or ":" in target
-        is_playbook = ansible_local_service.asset_type(asset) == "playbook"
-
-        # Cloud runners only support bare-IP targets and .yml playbooks.
-        # Fall back to local for group targets or non-playbook assets.
-        if runner != "local" and is_adhoc and is_playbook:
-            # key_cloud is the target cloud (drives SSH key + user lookup). The
-            # run request's `cloud` wins; fall back to inferring it from the
-            # runner backend for the legacy global path (no `cloud` supplied).
-            key_cloud = cloud or {"ecs": "aws", "aci": "azure", "gcp": "gcp"}.get(runner, runner)
-
-            # SSH user: explicit ansible_user from the run request wins,
-            # else the per-cloud config key, else the global fallback.
-            cloud_user_keys = {
-                "aws":   "ansible_aws_user",
-                "azure": "ansible_azure_user",
-                "gcp":   "ansible_gcp_user",
-            }
-            cloud_default = {
-                "aws":   "ec2-user",
-                "azure": "azureuser",
-                "gcp":   "gcp-user",
-            }.get(key_cloud, "ec2-user")
-            resolved_user = (
-                ansible_user
-                or _cfg(cloud_user_keys.get(key_cloud, ""))
-                or _cfg("ansible_default_user")
-                or cloud_default
-            )
-            # A managed account is the login identity — its name wins as the SSH user.
-            if managed_plain_vars.get("ansible_user"):
-                resolved_user = managed_plain_vars["ansible_user"]
-
-            # A Secrets-Management SSH-key secret (if supplied) overrides the
-            # configured key — this is the only secret kind the cloud runner takes.
-            ssh_key_pem: str | None = secret_ssh_pem
-            if ssh_key_pem is None:
-                job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {key_cloud.upper()}…")
-                try:
-                    ssh_key_pem = await _resolve_cloud_ssh_key(db, key_cloud, target)
-                except Exception as exc:
-                    logger.warning("SSH key retrieval failed (%s) — proceeding without key: %s", key_cloud, exc)
-
-            ssh_key_b64 = base64.b64encode(ssh_key_pem.encode()).decode() if ssh_key_pem else ""
-
-            # Secret injection → per-provider secret channel. ACI injects inline
-            # (secure_value), so it carries local semantics: deliver the full
-            # resolved var set — #216/#217 named vars + become AND any managed-
-            # account credential (already merged into secret_extra_vars above) — as
-            # inline vars. The SSH key rides SSH_KEY_B64 (above). ECS/Cloud Run
-            # reference a store secret, so they resolve per-provider store refs and
-            # a managed-account run never reaches here (rejected at the endpoint).
-            from ..services import cloud_ansible_secrets as _cas
-            ephemeral_cleanup: list = []
-            if runner == "aci":
-                cloud_secret_entries, cloud_manifest_b64 = _cas.inline_entries(secret_extra_vars)
-            else:
-                cloud_secret_entries, cloud_manifest_b64, cloud_inline_values = (
-                    _resolve_cloud_secrets(runner, secret_vars, secret_become_source))
-                for _v in cloud_inline_values:
-                    if _v and _v not in secret_values:
-                        secret_values.append(_v)
-                # Managed-account creds → ephemeral, RBAC-locked store secrets (the
-                # ECS/GCP secret channel references a store secret; a JIT credential
-                # has none, so we mint one per run and reap it). Sweep leaked ones
-                # first (belt-and-braces with the startup GC).
-                if managed_cred_vars:
-                    try:
-                        from ..services import ephemeral_gc
-                        ephemeral_gc.sweep()
-                    except Exception:
-                        logger.warning("ephemeral GC pre-sweep failed (non-fatal)", exc_info=True)
-                    cloud_secret_entries, cloud_manifest_b64, ephemeral_cleanup = (
-                        _add_ephemeral_managed_entries(
-                            runner, cloud_secret_entries, cloud_manifest_b64,
-                            managed_cred_vars, job_id))
-                    # Best-effort: flag the PS requests to rotate on check-in, so the
-                    # copied-to-store credential is rotated (dead) once we check in
-                    # below — even if the store cleanup is missed. Not enforceable
-                    # (rotation depends on the account being auto-managed).
-                    from ..services import btapi_service as _bt
-                    for _rid in managed_request_ids:
-                        await _bt.rotate_ps_request_on_checkin(_rid)
-
-            job_service.update_progress(db, job_id, 20, f"Launching {runner.upper()} runner for {asset}…")
-            try:
-                exit_code, output = await _dispatch_cloud_runner(
-                    runner=runner,
-                    target_ip=target,
-                    ansible_user=resolved_user,
-                    playbook_b64=asset_b64,
-                    ssh_key_b64=ssh_key_b64,
-                    job_id=job_id,
-                    secret_entries=cloud_secret_entries,
-                    manifest_b64=cloud_manifest_b64,
-                )
-            finally:
-                # Value already fetched by the task identity at launch — safe to reap
-                # the store copy and check the PS requests in (rotates on release when
-                # flagged above). Both best-effort; the GC sweeper backstops leaks.
-                _delete_ephemeral(ephemeral_cleanup)
-                if ephemeral_cleanup and managed_request_ids:
-                    from ..services import btapi_service as _bt
-                    for _rid in managed_request_ids:
-                        await _bt.checkin_ps_request(_rid)
-
-            output = _scrub_secrets(output, secret_values)
-            if exit_code == 0:
-                job_service.set_completed(db, job_id, {"output": output, "returncode": exit_code})
-            else:
-                job_service.set_failed(db, job_id, f"ansible-playbook exited {exit_code}:\n{output}")
-            return
-
-        # ── Local Docker runner (original path) ───────────────────────────────
-        if runner != "local" and not is_adhoc:
-            logger.debug("ansible_runner=%s ignored for group target %r — using local runner", runner, target)
-        if runner != "local" and not is_playbook:
-            logger.debug("ansible_runner=%s ignored for non-playbook asset %r — using local runner", runner, asset)
-
-        # A Secrets-Management SSH-key secret (if supplied) overrides the key.
-        ssh_key_pem = secret_ssh_pem
-        if ssh_key_pem is None and cloud in ("aws", "gcp", "azure"):
-            job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {cloud.upper()}…")
-            try:
-                ssh_key_pem = await _resolve_cloud_ssh_key(db, cloud, target)
-                if not ssh_key_pem:
-                    logger.warning("No SSH key resolved for %s — proceeding without key", cloud)
-            except Exception as exc:
-                logger.warning("Failed to retrieve SSH key for %s: %s — proceeding without key", cloud, exc)
-
-        job_service.update_progress(db, job_id, 20, f"Running {asset} against {target}…")
-        output, rc = await ansible_local_service.run_playbook(
-            asset_b64=asset_b64,
-            target=target,
-            extra_vars=extra_vars or None,
-            asset_name=asset,
-            ssh_key_pem=ssh_key_pem,
-            secret_extra_vars=secret_extra_vars or None,
-        )
-
-        output = _scrub_secrets(output, secret_values)
-        if rc == 0:
-            job_service.set_completed(db, job_id, {"output": output, "returncode": rc})
-            # Config-drift: record the per-target fingerprint of this apply (passive,
-            # best-effort — never let a tracking hiccup fail the job).
-            try:
-                from ..services import config_drift, config_service as cs
-                if cs.get_bool("config_drift_tracking_enabled", True):
-                    content = base64.b64decode(asset_b64) if asset_b64 else b""
-                    config_drift.record_apply(
-                        db, target=target, playbook_ref=asset,
-                        content_hash=config_drift.content_hash(content),
-                        inputs_hash=config_drift.inputs_hash(extra_vars),
-                        job_id=job_id)
-            except Exception:
-                logger.warning("config-drift record failed for job %s", job_id, exc_info=True)
-        else:
-            job_service.set_failed(db, job_id, f"ansible-playbook exited {rc}:\n{output}")
-    except Exception as e:
-        logger.exception("ansible job %s failed: %s", job_id, e)
-        job_service.set_failed(db, job_id, str(e))
-    finally:
-        db.close()
-
-
-async def _dispatch_cloud_runner(
-    runner: str,
-    target_ip: str,
-    ansible_user: str,
-    playbook_b64: str,
-    ssh_key_b64: str,
-    job_id: str,
-    secret_entries: list | None = None,
-    manifest_b64: str = "",
-) -> tuple:
-    """Route to the configured cloud Ansible runner. Returns (exit_code, output).
-
-    secret_entries/manifest_b64 (when present) carry per-provider secret refs — the
-    runner injects each via the provider's secret channel and the container builds a
-    0600 vars file from the manifest before running ansible-playbook."""
-    if runner == "ecs":
-        from ..services import aws_service
-        region = _cfg("aws_region") or "us-east-1"
-        sg_raw = _cfg("ansible_ecs_security_group_ids") or ""
-        sg_ids = [s.strip() for s in sg_raw.split(",") if s.strip()]
-        return await aws_service.run_ecs_ansible_task(
-            region=region,
-            cluster=_cfg("ansible_ecs_cluster") or "bt-jumpoint",
-            task_family=_cfg("ansible_ecs_task_family") or "ansible-config-mgmt",
-            image=_cfg("ansible_ecs_image") or "chrweav/ansible-winrm:latest",
-            cpu=_cfg("ansible_ecs_cpu") or "256",
-            memory=_cfg("ansible_ecs_memory") or "512",
-            subnet_id=_cfg("ansible_ecs_subnet_id") or "",
-            security_group_ids=sg_ids,
-            execution_role_arn=_cfg("ansible_ecs_execution_role_arn") or "",
-            target_ip=target_ip,
-            ansible_user=ansible_user,
-            playbook_b64=playbook_b64,
-            ssh_key_b64=ssh_key_b64,
-            job_id=job_id,
-            secret_entries=secret_entries,
-            manifest_b64=manifest_b64,
-        )
-
-    if runner == "aci":
-        from ..services import azure_service
-        from ..services import config_service as cs
-        from ..config import settings
-        rg = cs.get("azure_resource_group") or settings.azure_resource_group
-        location = cs.get("azure_location") or settings.azure_location
-        return await azure_service.run_aci_ansible_task(
-            rg=rg,
-            location=location,
-            # Fall back to the jumpoint's VNet-delegated subnet (azure_aci_subnet_id)
-            # when the runner's own subnet is unset: it already has line-of-sight to
-            # the target VM subnet and outbound egress for the image pull. With no
-            # subnet at all the container group is public and can't reach private IPs
-            # (SSH to the VM times out → UNREACHABLE).
-            subnet_id=_cfg("ansible_aci_subnet_id") or _cfg("azure_aci_subnet_id") or "",
-            image=_cfg("ansible_aci_image") or "chrweav/ansible-winrm:latest",
-            target_ip=target_ip,
-            ansible_user=ansible_user,
-            playbook_b64=playbook_b64,
-            ssh_key_b64=ssh_key_b64,
-            job_id=job_id,
-            acr_server=_cfg("ansible_aci_acr_server") or "",
-            acr_username=_cfg("ansible_aci_acr_username") or "",
-            acr_password=_cfg("ansible_aci_acr_password") or "",
-            secret_entries=secret_entries,
-            manifest_b64=manifest_b64,
-        )
-
-    if runner == "gcp":
-        from ..services import gcp_service
-        region = _cfg("gcp_ansible_cloud_run_region") or _cfg("gcp_region") or ""
-        return await gcp_service.run_cloud_run_ansible_task(
-            project_id=_cfg("gcp_project_id"),
-            region=region,
-            image=_cfg("gcp_ansible_image") or "chrweav/ansible-winrm:latest",
-            target_ip=target_ip,
-            ansible_user=ansible_user,
-            playbook_b64=playbook_b64,
-            ssh_key_b64=ssh_key_b64,
-            job_id=job_id,
-            vpc_connector=_cfg("gcp_ansible_vpc_connector") or "",
-            service_account=_cfg("gcp_ansible_runner_service_account") or "",
-            secret_entries=secret_entries,
-            manifest_b64=manifest_b64,
-        )
-
-    raise ValueError(f"Unknown ansible_runner: {runner!r}")
+    description = f"Ansible ({kind}): {payload.asset} → {target_label}"
+    job = job_service.create_job(
+        db,
+        job_type="ansible_cloud_run",
+        created_by=current_user.username,
+        workgroup="ansible",
+        # Refs only — no resolved credential is ever written to job metadata.
+        metadata={
+            "description": description,
+            "target_kind": kind,
+            "target_id": payload.target_id,
+            "cloud": cloud,
+            "asset": payload.asset,
+            "asset_backend": asset_backend,
+            "extra_vars": payload.extra_vars or {},
+            "secret_vars": payload.secret_vars or {},
+        },
+        batch_id=payload.batch_id,
+    )
+    if wants_secret:
+        job_service.log_audit(
+            db, current_user.username, "ansible_secret_use",
+            details={"kinds": [f"{len(payload.secret_vars)} var(s)"],
+                     "vars": sorted(payload.secret_vars.keys()),
+                     "asset": payload.asset, "target": f"{kind}:{payload.target_id}"})
+    return {"job_id": job.id, "status": "queued"}
 
 
 @router.post("/run")
 async def run_playbook(
     payload: RunRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -800,8 +454,15 @@ async def run_playbook(
     target must be one of the configured hypervisor group keys returned by
     /api/config-mgmt/inventory, or a bare IP / hostname for ad-hoc cloud runs.
     For cloud targets, set cloud="aws"|"azure"|"gcp" to enable SSH key retrieval.
+
+    When target_kind is "k8s" or "database", target_id selects a managed Kubernetes
+    cluster / cloud database; the run is a localhost play on the in-cloud runner and
+    the SSH-oriented fields are ignored (see _run_cloud_localhost).
     """
-    targets = ansible_local_service.get_configured_targets()
+    if payload.target_kind in ("k8s", "database"):
+        return await _run_cloud_localhost(payload, db, current_user)
+
+    targets = ansible_local_service.get_configured_targets(db)
     valid_keys = {t["key"] for t in targets}
 
     # Bare IP/hostname targets (contain a dot or colon) are allowed ad-hoc.
@@ -851,7 +512,7 @@ async def run_playbook(
     # A managed-account checkout needs BeyondTrust Password Safe enabled.
     if has_managed:
         from ..services import config_service as cs
-        if not cs.get_bool("beyondtrust_enabled"):
+        if not cs.get_bool("password_safe_enabled"):
             raise HTTPException(
                 status_code=400,
                 detail="Managed-account checkout requires BeyondTrust Password Safe to be enabled in Settings.")
@@ -891,12 +552,16 @@ async def run_playbook(
                         "secret is locked to it."))
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
+    # Everything the run needs, persisted so the durable runner can reconstruct it.
+    # Refs and ids only — see services/ansible_run_meta for what may go in here.
     job = job_service.create_job(
         db,
         job_type="ansible_local",
         created_by=current_user.username,
         workgroup="ansible",
-        metadata={"description": description},
+        metadata=ansible_run_meta.run_meta(
+            payload, description=description, asset_backend=asset_backend),
+        batch_id=payload.batch_id,
     )
     if wants_secret:
         # Audit the use — kinds + var names only, never the source refs or values.
@@ -924,14 +589,123 @@ async def run_playbook(
             details={"kinds": kinds, "vars": sorted(payload.secret_vars.keys()),
                      "managed_accounts": managed_accts,
                      "asset": payload.asset, "target": payload.target})
-    background_tasks.add_task(
-        _run_job, job.id, payload.asset, payload.target, payload.cloud,
-        payload.ansible_user, payload.extra_vars, asset_backend, payload.secret_vars,
-        payload.secret_become_source, payload.secret_ssh_key_source,
-        payload.managed_account.model_dump() if payload.managed_account else None,
-        payload.managed_become.model_dump() if payload.managed_become else None,
-    )
+    # No background task: the job is a queued row now, claimed by jobs_worker. Its
+    # parameters live in the metadata written above, so a worker restart resumes it
+    # instead of stranding it — see services/ansible_run_meta.py.
     return {"job_id": job.id, "status": "queued"}
+
+
+class BulkRunRequest(BaseModel):
+    """A run against several inventory rows at once. The targets are named by
+    INVENTORY ID (``job:…`` / ``k8s:…`` / ``clouddb:…``), never by address — the
+    server resolves each one from its own records, so a client cannot point a run at
+    a host it doesn't own by supplying an IP."""
+    inventory_ids: list[str] = []
+    asset: str
+    asset_backend: str = ""
+    extra_vars: dict = {}
+    secret_vars: dict = {}
+    # VM-only connection fields; ignored for k8s/database rows (localhost plays).
+    ansible_user: str = ""
+    secret_become_source: str = ""
+    secret_ssh_key_source: str = ""
+    managed_account: ManagedAccountRef | None = None
+    managed_become: ManagedAccountRef | None = None
+
+
+@router.post("/run-bulk")
+async def run_playbook_bulk(
+    payload: BulkRunRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run one asset against several inventory resources — one job per target.
+
+    Validation happens at two levels, and they fail differently on purpose:
+
+    * SELECTION problems — mixed kinds, a kind with no Config-Management path, a row
+      that isn't individually targetable, an id the caller can't see — are checked
+      before any job exists and refuse the whole request with a 400.
+    * PER-TARGET problems are found only when a target is dispatched, and they do not
+      necessarily apply to the rest of the batch: several checks in ``/run`` turn on
+      the target's cloud (``_effective_runner`` and everything downstream of it), so
+      a mixed-cloud VM selection can be fine for one host and not another. Those
+      targets are reported in ``failed`` and the remaining ones still run, rather
+      than being silently dropped or aborting a batch that is already part-queued.
+
+    Each target is dispatched through the ordinary ``/run`` path, so every permission
+    check, secret-store validation and runner decision behaves exactly as it does for
+    a single run — this endpoint adds selection, not a second code path. Jobs share a
+    ``batch_id``, so /jobs can filter to the batch and roll up how it is going.
+
+    Returns ``{batch_id, kind, count, jobs: [...], failed: [...]}``; 400 if every
+    target failed.
+    """
+    from ..services import inventory_service
+
+    # Resolved from a FRESH collect(), not the page's cache: this enqueues work, so
+    # it must not act on a resource that was destroyed since the page loaded. The
+    # RBAC filter is the inventory page's own — an id outside what this user can see
+    # comes back as "unknown" rather than as a target.
+    accessible = inventory_service.accessible_workgroups(current_user)
+    visible = [i for i in inventory_service.collect(db)
+               if inventory_service.visible_to(i, accessible, current_user.username)]
+    try:
+        plan = inventory_service.plan_bulk_run(visible, payload.inventory_ids)
+    except inventory_service.BulkSelectionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # A k8s/database run is a localhost play with no SSH connection; the run path
+    # silently ignores the connection-identity fields. Across a batch that silence
+    # would be misleading, so refuse instead.
+    wrong_fields = inventory_service.reject_connection_fields(plan["kind"], {
+        "secret_ssh_key_source": payload.secret_ssh_key_source,
+        "secret_become_source": payload.secret_become_source,
+        "managed_account": payload.managed_account,
+        "managed_become": payload.managed_become,
+    })
+    if wrong_fields:
+        raise HTTPException(status_code=400, detail=wrong_fields)
+
+    batch_id = uuid.uuid4().hex[:12]
+    jobs, failed = [], []
+    for target in plan["targets"]:
+        req = RunRequest(
+            asset=payload.asset,
+            asset_backend=payload.asset_backend,
+            extra_vars=payload.extra_vars,
+            secret_vars=payload.secret_vars,
+            ansible_user=payload.ansible_user,
+            secret_become_source=payload.secret_become_source,
+            secret_ssh_key_source=payload.secret_ssh_key_source,
+            managed_account=payload.managed_account,
+            managed_become=payload.managed_become,
+            batch_id=batch_id,
+            **target["spec"],
+        )
+        try:
+            result = await run_playbook(req, db, current_user)
+        except HTTPException as e:
+            failed.append({"inventory_id": target["id"], "name": target["name"],
+                           "error": str(e.detail)})
+            continue
+        jobs.append({"inventory_id": target["id"], "name": target["name"],
+                     "job_id": result["job_id"]})
+
+    if not jobs:
+        # Nothing queued — surface the first reason rather than a misleading success.
+        detail = failed[0]["error"] if failed else "No targets could be run."
+        raise HTTPException(
+            status_code=400,
+            detail=f"No jobs were queued. First target failed with: {detail}")
+
+    job_service.log_audit(
+        db, current_user.username, "ansible_bulk_run",
+        details={"batch_id": batch_id, "kind": plan["kind"], "asset": payload.asset,
+                 "count": len(jobs), "targets": [j["name"] for j in jobs],
+                 "failed": [f["name"] for f in failed]})
+    return {"batch_id": batch_id, "kind": plan["kind"], "count": len(jobs),
+            "jobs": jobs, "failed": failed}
 
 
 @router.get("/secret-options")
@@ -981,7 +755,7 @@ async def list_managed_accounts(
     # ephemeral_enabled tells the UI that managed accounts can run on ECS/GCP (via
     # the ephemeral store copy) and to nudge on change-after-release for those.
     ephemeral_enabled = cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")
-    if not cs.get_bool("beyondtrust_enabled"):
+    if not cs.get_bool("password_safe_enabled"):
         return {"enabled": False, "ephemeral_enabled": ephemeral_enabled, "systems": []}
 
     host = (host or "").strip()
@@ -1018,31 +792,6 @@ async def config_drift_report(
     (last apply older than ``config_drift_stale_days``) and **changed** (the
     stored playbook's current content differs from what was applied). Read-only —
     computed from the ``config_apply_state`` rows recorded on each successful run."""
-    import base64
-    from ..services import config_drift, config_service as cs
-    from ..config import settings
-    from ..database import ConfigApplyState
+    from ..services import config_drift
 
-    try:
-        stale_days = int(cs.get("config_drift_stale_days")
-                         or getattr(settings, "config_drift_stale_days", 14) or 14)
-    except (TypeError, ValueError):
-        stale_days = 14
-
-    rows = db.query(ConfigApplyState).all()
-    row_dicts = [{
-        "target": r.target, "playbook_ref": r.playbook_ref,
-        "content_hash": r.content_hash, "applied_at": r.applied_at, "job_id": r.job_id,
-    } for r in rows]
-
-    # Current content hash per distinct playbook (for change detection). Best-effort
-    # — an asset that's since been deleted/unreadable just yields no change signal.
-    current: dict = {}
-    for ref in {r.playbook_ref for r in rows}:
-        try:
-            b64 = await storage_service.fetch_asset_b64(ref)
-            current[ref] = config_drift.content_hash(base64.b64decode(b64))
-        except Exception:
-            pass
-
-    return config_drift.evaluate(row_dicts, current, stale_days)
+    return await config_drift.collect(db)

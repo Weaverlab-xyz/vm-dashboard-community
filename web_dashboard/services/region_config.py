@@ -63,10 +63,14 @@ _SPECS: dict[str, _Spec] = {
         field_fallbacks={
             "resource_group":         "azure_resource_group",
             "vnet_resource_group":    "azure_vnet_resource_group",
+            "default_subnet_id":      "azure_default_subnet_id",
             "desktops_subnet_id":     "azure_desktops_subnet_id",
             "db_subnet_id":           "azure_db_subnet_id",
             "db_mysql_subnet_id":     "azure_db_mysql_subnet_id",
             "db_private_dns_zone_id": "azure_db_private_dns_zone_id",
+            # Gateway hosts are per-region like every other subnet here; AWS and GCP
+            # already carried this field and Azure was the only cloud without it.
+            "jumpoint_subnet_id":     "azure_jumpoint_subnet_id",
             "gallery_name":           "azure_shared_image_gallery",
             "gallery_resource_group": "azure_gallery_resource_group",
             "default_vm_size":        "azure_desktops_vm_size",
@@ -123,6 +127,13 @@ _SPECS: dict[str, _Spec] = {
             "ecs_subnetwork":       "gcp_runner_subnetwork",
             "router_name":          "gcp_router_name",
             "nat_name":             "gcp_nat_name",
+            # GKE co-location (provision the cluster IN the sandbox VPC so the
+            # in-cluster Entitle agent reaches VMs + Cloud SQL). Blank k8s_subnetwork
+            # → self-contained-VPC + peering (unchanged). See docs / setup-gcp.sh.
+            "k8s_subnetwork":       "gcp_k8s_subnetwork",
+            "k8s_pods_range":       "gcp_k8s_pods_range_name",
+            "k8s_services_range":   "gcp_k8s_services_range_name",
+            "k8s_node_tag":         "gcp_k8s_node_tag",
         },
         # Historical: jumpoint subnet inherits the VM subnet; DB network the network.
         secondary_fallbacks={
@@ -288,6 +299,63 @@ def resolve_region(cloud: str, region: Optional[str]) -> dict:
         else:
             resolved[fld] = _flat(cloud, fld)
     return resolved
+
+
+# ── What the UI may offer (deploy-form region pickers) ────────────────────────
+
+def deployable_regions(cloud: str) -> list[str]:
+    """Regions a *regional* resource may be placed in on ``cloud``: the configured
+    default region first, then every region that has a per-region config set.
+
+    This is the source for the deploy forms' region pickers. Offering the full
+    ``region_catalog`` there invites a deploy into a region with no subnet, security
+    group or SSH secret of its own — :func:`resolve_region` falls each of those back
+    to the flat keys, so the resource would quietly come up on the *default* region's
+    network. Restricting the picker to configured regions makes "the region I picked"
+    and "the region it lands in" the same thing.
+
+    Clouds with no per-region config sets (OCI) yield just the default region, and a
+    single-region install yields exactly one entry — the region it deploys to today.
+    """
+    c = (cloud or "").strip().lower()
+    # default_region() raises for a cloud that carries no region dimension.
+    default = region_catalog.normalize(c, region_catalog.default_region(c))
+    out = [default] if default else []
+    if c in _SPECS:
+        for region in sorted(load_region_configs(c)):
+            if region and region not in out:
+                out.append(region)
+    return out
+
+
+# ── GCP zone placement (GCE takes a zone, so a region choice implies one) ─────
+
+def zone_in_region(zone: Optional[str], region: Optional[str]) -> bool:
+    """True when ``zone`` is a well-formed GCP zone that sits inside ``region``."""
+    z, r = _norm("gcp", zone), _norm("gcp", region)
+    if not z or not r or not region_catalog.validate_zone(z):
+        return False
+    return z.rsplit("-", 1)[0] == r
+
+
+def resolve_zone_for_region(region: Optional[str]) -> str:
+    """The GCP zone to place a zonal resource in for ``region``.
+
+    The region entry's ``zone`` wins; the flat ``gcp_zone`` is honoured only when it
+    actually sits in ``region``, because GCE takes a zone rather than a region — a
+    zone from elsewhere silently relocates the resource, and with it anything derived
+    from the zone (a regional subnet self-link, say). Otherwise the conventional
+    ``<region>-b``, which every multi-zone region has (unlike ``-a``, which some,
+    e.g. us-east1, do not).
+
+    A blank region keeps the historical answer: the configured default zone.
+    """
+    r = _norm("gcp", region)
+    if not r:
+        return region_catalog.default_zone()
+    # Region entry's zone → flat gcp_zone (resolve_region's own fallback chain).
+    zone = resolve_region("gcp", r)["zone"]
+    return zone if zone_in_region(zone, r) else f"{r}-b"
 
 
 # ── Azure back-compat shims (unchanged public surface) ────────────────────────

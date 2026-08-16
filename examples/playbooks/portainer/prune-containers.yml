@@ -1,0 +1,115 @@
+# Reclaim disk on a Docker host: prune stopped containers, and optionally dangling
+# images and unused volumes, through Portainer's Docker API proxy.
+#
+# Target: any target — this is a `hosts: localhost` play that reaches OUT to the
+# Portainer REST API. Nothing is installed on the target.
+#
+# OPTIONAL — fetch the PAT from BeyondTrust Password Safe instead of the injected one
+# by setting a SECRET path (folder/title):
+#   portainer_pat_secret: app-secrets/portainer-pat
+#
+# Connection is auto-injected when Portainer is configured (PORTAINER_URL /
+# PORTAINER_PAT / PORTAINER_VERIFY_SSL); override with extra vars to use another server.
+#
+# DESTRUCTIVE: pruning removes stopped containers permanently, and prune_volumes
+# removes any volume not attached to a container — that is real data. Volumes are
+# OFF by default for that reason; turn them on deliberately.
+#
+# extra_vars:
+#   endpoint_id:    1      # required — see list-endpoints.yml
+#   prune_images:   true   # also remove dangling images
+#   prune_volumes:  false  # also remove unused volumes (DATA LOSS — opt in)
+- name: Prune a Docker host through Portainer
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    # Optional: fetch the PAT from BeyondTrust Password Safe instead of using the
+    # injected one — set a SECRET path (folder/title). Blank = use PORTAINER_PAT.
+    portainer_pat_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+    endpoint_id: ""
+    prune_images: true
+    prune_volumes: false
+  tasks:
+    # Fetched into its OWN fact, never onto portainer_pat: extra vars outrank set_fact,
+    # so writing back to that name would be silently ignored when the PAT was also
+    # supplied as an extra var.
+    - name: Fetch the Portainer API token from Password Safe
+      ansible.builtin.set_fact:
+        _ps_portainer_pat: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=portainer_pat_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: portainer_pat_secret | length > 0
+
+    - name: Resolve the effective token (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _pat: "{{ _ps_portainer_pat | default(portainer_pat, true) }}"
+      no_log: true
+
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - _pat | length > 0
+          - endpoint_id | string | length > 0
+        fail_msg: >-
+          Set endpoint_id, and make sure a Portainer connection is configured
+          (or passed as extra vars).
+
+    - name: Prune stopped containers
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ endpoint_id }}/docker/containers/prune"
+        method: POST
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: containers_pruned
+      no_log: true              # the API token rides the request headers
+
+    - name: Prune dangling images
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ endpoint_id }}/docker/images/prune"
+        method: POST
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: images_pruned
+      when: prune_images | bool
+      no_log: true              # the API token rides the request headers
+
+    - name: Prune unused volumes
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ endpoint_id }}/docker/volumes/prune"
+        method: POST
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: volumes_pruned
+      when: prune_volumes | bool
+      no_log: true              # the API token rides the request headers
+
+    - name: Reclaimed
+      ansible.builtin.debug:
+        msg: >-
+          containers: {{ (containers_pruned.json.ContainersDeleted | default([]) | length) }} removed,
+          {{ (containers_pruned.json.SpaceReclaimed | default(0) / 1048576) | round(1) }} MiB —
+          images: {{ ((images_pruned.json.SpaceReclaimed | default(0)) / 1048576) | round(1) }} MiB —
+          volumes: {{ ((volumes_pruned.json.SpaceReclaimed | default(0)) / 1048576) | round(1) }} MiB

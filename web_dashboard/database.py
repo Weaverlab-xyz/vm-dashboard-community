@@ -14,19 +14,59 @@ import bcrypt as _bcrypt
 from .config import settings
 
 # Create database engine.
-# For SQLite we use NullPool: connections are just file handles so pooling
-# adds no benefit, and the default QueuePool (5 + 10 overflow = 15 max) is
-# exhausted when several long-running background jobs hold sessions open
-# simultaneously (each job + each broadcast_progress call takes one slot).
-# NullPool creates and closes a fresh connection on every Session open/close,
-# eliminating the timeout entirely.
+#
+# SQLite → NullPool: connections are just file handles so pooling adds no benefit, and
+# a bounded pool is exhausted when several long-running background jobs hold sessions
+# open simultaneously (each job + each broadcast_progress call takes one slot). NullPool
+# creates and closes a fresh connection per Session, eliminating the timeout entirely.
+#
+# Postgres → QueuePool, EXPLICITLY sized. The library defaults (pool_size=5,
+# max_overflow=10 = 15 max) were adequate only while the job worker ran ONE job at a time
+# and the concurrency lived in `replicas`, each replica being its own process with its own
+# pool. jobs_worker now runs several jobs in ONE pool, and a job is not one connection:
+# _dispatch holds a session for the job's whole duration, several services open their own
+# (aws_vm_service, azure_vm_service, gcp_vm_service, oci_vm_service, packer_build_service,
+# ansible_local_run_service, vdesktop_service, image_promote_service), and every heartbeat
+# beat, every job_service.cancel_check and every streamed terraform output line via
+# api.websocket.broadcast_progress opens a transient one.
+#
+# pool_pre_ping / pool_recycle are not about concurrency and are worth having on their own:
+# Azure Postgres Flexible Server and the load balancer in front of it close idle
+# connections after minutes, and a pooled-but-dead connection surfaces as an InterfaceError
+# in the middle of a job rather than at checkout. A two-hour image-export poller is exposed
+# to that at concurrency 1.
+#
+# Budget, per PROCESS: pool_size + max_overflow. The app runs `gunicorn -w 2` → 2 pools;
+# the worker → 1 per replica. So one deployment can hold 3 x (size + overflow) — 30 at the
+# defaults — and that whole figure multiplies by the replica count. Keep it under
+# (max_connections - 20), the 20 covering the server's management sessions plus
+# superuser_reserved_connections. Verify with `SHOW max_connections;`: Azure Burstable
+# B1ms is 50, which is why the defaults are 5 + 5 and jobs_worker._limits clamps
+# concurrency to 3 there; B2s and every General Purpose tier are 429+.
 _is_sqlite = "sqlite" in settings.database_url
+_pool_kwargs = {} if _is_sqlite else {
+    "pool_size":     settings.db_pool_size,
+    "max_overflow":  settings.db_max_overflow,
+    "pool_timeout":  settings.db_pool_timeout_s,
+    "pool_pre_ping": True,
+    "pool_recycle":  settings.db_pool_recycle_s,
+}
 engine = create_engine(
     settings.database_url,
     connect_args={"check_same_thread": False} if _is_sqlite else {},
     poolclass=NullPool if _is_sqlite else QueuePool,
     echo=False,
+    **_pool_kwargs,
 )
+
+
+def pool_capacity() -> int:
+    """Max connections this process's pool can hand out — what jobs_worker._limits clamps
+    concurrency against. 0 for SQLite's NullPool, which is unbounded (a fresh connection
+    per Session), so the caller treats 0 as "don't clamp"."""
+    if _is_sqlite:
+        return 0
+    return settings.db_pool_size + settings.db_max_overflow
 
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -194,6 +234,294 @@ class PersonalAccessToken(Base):
     user = relationship("User", back_populates="personal_access_tokens")
 
 
+class LoginAttempt(Base):
+    """One FAILED password login. Successes are not recorded here — a successful login
+    deletes the username's rows, so the table only ever holds the evidence of failure.
+
+    In the database rather than in a process, because gunicorn runs two workers: an
+    in-memory counter would give an attacker double the allowance and reset it on every
+    redeploy. Same reasoning as the job claim and the notification outbox.
+
+    Doubles as the only record that a brute-force attempt happened at all — before this
+    existed, a failed login left no trace anywhere in the system.
+    """
+    __tablename__ = "login_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Case-folded by login_guard.normalize_username, so `Admin` and `admin` cannot each
+    # get their own budget. Recorded whether or not the account exists — a throttle that
+    # engaged only for real users would answer "does this user exist?".
+    username = Column(String(150), nullable=False, index=True)
+    ip = Column(String(45), nullable=False, default="", index=True)
+    # Indexed because every query is a range scan on it, in both the check and the sweep.
+    attempted_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class EphemeralState(Base):
+    """One short-lived, single-use, opaque server-side value: a FIDO2/WebAuthn
+    ceremony challenge, or an OAuth/OIDC CSRF ``state`` (with its PKCE verifier).
+
+    In the database for the same reason as :class:`LoginAttempt` above, and it is
+    the same bug that motivated that one. This started life as a module-level dict
+    in ``services/fido2_service`` guarded by a ``threading.Lock`` — which is the
+    correct guard for the wrong hazard. The app runs ``gunicorn -w 2``, so a lock
+    makes the dict safe against the *threads* of one worker while leaving the two
+    worker **processes** with a private copy each.
+
+    Every ceremony this holds state for is split across two requests — begin/complete
+    for FIDO2, login/callback for OAuth — and nothing pins a browser to a worker. So
+    the second leg landed on the process that had never stored the state roughly half
+    the time, and the user got ``/login?error=invalid_state`` or "Invalid or expired
+    FIDO2 challenge" with nothing wrong on either side. More replicas, worse odds.
+
+    **Rows are deleted on read, and the delete is the lock.** These values are
+    single-use by definition: a CSRF state that survives its first presentation is
+    not a CSRF defence. Concurrent consumers race on ``DELETE ... WHERE key = ?``
+    and only the one whose rowcount is 1 gets the value — the same portable
+    atomic-claim the job queue uses, no ``SKIP LOCKED``.
+    """
+    __tablename__ = "ephemeral_state"
+
+    # Opaque and namespaced by the service that owns it (`vmcli:oauth:state:<uuid>`,
+    # `vmcli:fido2:challenge:<uuid>`), so one table serves both ceremonies without
+    # either being able to consume the other's rows.
+    key = Column(String(200), primary_key=True)
+    # Text, not String(n): the OIDC entry packs the redirect URI and the PKCE
+    # verifier together, and a FIDO2 entry is a serialised state dict.
+    value = Column(Text, nullable=False, default="")
+    # Wall clock, not time.monotonic() as the dict used — monotonic is per-process
+    # and meaningless to a reader that did not start the same process.
+    # Indexed because the sweep is a range scan on it.
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+
+class RemoteAgent(Base):
+    """A containerised agent running inside a private network that polls this
+    dashboard for work — the inverse of every other execution path, which dials out
+    from the dashboard and therefore cannot reach a network the dashboard is not on.
+
+    Deliberately NOT a ``PersonalAccessToken`` and deliberately not tied to a ``User``.
+    A PAT resolves to its owner and carries that owner's full authority with no scope
+    (see ``api/auth.py:_get_user_from_pat``), which is a defensible default for a human
+    and a dangerous one for a machine principal sitting on someone else's network. An
+    agent is its own principal, authorized by a closed allow-list in ``agent_service``,
+    and never passes through ``require_permission`` — whose "empty permissions means
+    unrestricted" backward-compat rule would silently grant it everything.
+
+    Identity is an **Ed25519 public key**, not a shared secret. The agent generates the
+    keypair at enrolment and the private half never leaves its host, so no replayable
+    credential ever crosses the wire — which is what makes this safe to run through a
+    corporate TLS-inspecting proxy, where an ``Authorization`` header would land in the
+    proxy's log in the clear.
+    """
+    __tablename__ = "remote_agents"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # 64 not 100: job rows record the actor as `agent:{name}` in Job.created_by,
+    # which is String(100).
+    name = Column(String(64), nullable=False, unique=True, index=True)
+    site = Column(String(64), index=True)          # routing label, e.g. "dc1"
+    description = Column(Text)
+
+    # Enrolment: a single-use short-lived code, sha256 at rest exactly like a PAT.
+    # NULLed the moment it is redeemed, which is what makes it single-use.
+    enroll_code_hash = Column(String(64), unique=True, index=True, nullable=True)
+    enroll_expires_at = Column(DateTime, nullable=True)
+
+    # Base64 raw Ed25519 public key (32 bytes -> 44 chars). NULL until enrolled.
+    public_key = Column(String(64), nullable=True)
+    # sha256 of the agent's local policy.yaml, self-reported on every poll. The
+    # dashboard cannot change the policy — it can only show the operator that the hash
+    # moved, which is the point: the file is the customer's, not ours.
+    policy_hash = Column(String(64), nullable=True)
+
+    allowed_job_types = Column(Text)               # JSON list; empty/NULL = the default set
+    agent_version = Column(String(32))
+    # What the agent said it can run, on its last lease: the intersection of its
+    # HANDLERS table and its own policy.yaml. Distinct from allowed_job_types, which is
+    # what the DASHBOARD permits — one is capability, the other is trust, and the UI
+    # needs both to say "granted, but this agent's policy refuses it".
+    reported_job_types = Column(Text)              # JSON list
+    enrolled_at = Column(DateTime, nullable=True)
+    last_seen_at = Column(DateTime, nullable=True, index=True)
+    last_seen_ip = Column(String(45))              # 45 = max INET6_ADDRSTRLEN
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100))
+
+    # No `status` column on purpose. Status is derived from is_active / public_key /
+    # last_seen_at freshness, because a stored status is how you end up with a row
+    # that still reads "online" three weeks after the container died.
+
+    @property
+    def allowed_job_types_list(self) -> list:
+        return _json_list(self.allowed_job_types)
+
+    @property
+    def reported_job_types_list(self) -> list:
+        return _json_list(self.reported_job_types)
+
+
+def _json_list(raw) -> list:
+    """A JSON list column, read defensively. A corrupt value must not break a listing."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, list) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+class AgentNonce(Base):
+    """Replay guard for signed agent requests.
+
+    A timestamp window alone only narrows the replay opportunity to the width of the
+    window; remembering the nonce is what closes it. There is no Redis in this
+    deployment and a swept table is entirely adequate at this request rate — the row
+    count is bounded by (agents x requests per window), not by uptime.
+    """
+    __tablename__ = "agent_nonces"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id = Column(String(36), nullable=False, index=True)
+    nonce = Column(String(64), nullable=False)
+    # Indexed because the sweeper's only query is a range delete on this column.
+    seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    # The uniqueness IS the guard: the second insert of a nonce raises IntegrityError,
+    # and that is what rejects the replay. Scoped per agent so two agents cannot
+    # collide with each other's random values.
+    __table_args__ = (UniqueConstraint("agent_id", "nonce", name="uq_agent_nonce"),)
+
+
+class AgentEnrollAttempt(Base):
+    """One FAILED agent enrolment attempt, for the throttle in ``agent_guard``.
+
+    ``POST /api/agent/enroll`` is the only unauthenticated route on the only vhost this
+    dashboard deliberately exposes to a hostile network, and it does a database lookup
+    per call. Guessing a code is infeasible (256 bits), so this table is not really
+    brute-force protection — it is what stops an unauthenticated flood from writing rows
+    and burning query budget indefinitely.
+
+    Successes are not recorded, so the table only ever holds evidence of failure, and it
+    is empty in normal operation. Same storage reasoning as ``LoginAttempt``: in the
+    database because gunicorn runs two workers, and an in-process counter would give an
+    attacker double the allowance and reset it on redeploy.
+    """
+    __tablename__ = "agent_enroll_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Empty string when the peer is unknown, exactly like LoginAttempt.ip — a missing
+    # address must still be recorded, or it would be the one free lane.
+    ip = Column(String(45), nullable=False, default="", index=True)
+    # Indexed because every query is a range scan on it, in both the check and the sweep.
+    attempted_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class HypervisorConnection(Base):
+    """One reachable hypervisor management endpoint.
+
+    Replaces the singleton ``proxmox_host`` / ``vsphere_host`` / … config keys, which
+    made "N sites x M hypervisors" inexpressible — there was exactly one of each, so a
+    second vCenter, or the same product at a second site, had nowhere to live.
+
+    Two rows exist for the same reason a `Job` row does: something has to be the record.
+    Every integration resolves one of these instead of reading ``settings``, and
+    ``agent_id`` is what makes a connection the dashboard *cannot dial* still usable —
+    a remote agent on that network does the talking.
+
+    Credentials: exactly one of ``secret_enc`` (Fernet, via ``config_service``) or
+    ``secret_ref`` (an external backend reference) is set. For an **agent-bound**
+    connection both are NULL and so are ``host``/``username`` — the credential lives in
+    the agent's own connections.yaml, and ``agent_connection_name`` is the whole join.
+    That is deliberate: a dashboard compromise then yields a verb and a name, not a
+    vCenter administrator password.
+    """
+    __tablename__ = "hypervisor_connections"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind = Column(String(16), nullable=False, index=True)   # vsphere|proxmox|nutanix|xcpng|hyperv
+    name = Column(String(64), nullable=False)               # operator label
+    host = Column(String(255), nullable=False, default="")
+    port = Column(Integer)
+    username = Column(String(255))
+
+    secret_enc = Column(Text)              # Fernet ciphertext (config_service.encrypt_value)
+    secret_ref = Column(String(256))       # aws_sm:// | azure_kv:// | gcp_sm:// | bt_safe://
+    verify_ssl = Column(Boolean, default=False, nullable=False)
+    # Per-kind NON-SECRET extras, JSON: vsphere datacenter, hyperv transport/use_ssl,
+    # proxmox token_id, sync_interval_minutes. Allowlisted per kind by the service.
+    options = Column(Text)
+
+    # NULL = the dashboard dials this endpoint itself (the behaviour before this table).
+    agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
+                      index=True, nullable=True)
+    # The name this connection has in that agent's own connections.yaml. The dashboard
+    # never learns the credential; this string is the entire join between the two.
+    agent_connection_name = Column(String(64))
+
+    # Grouping and display only — routing is the agent_id FK. A site join would mean
+    # "any agent here can service this", but only the agent that actually holds the
+    # credential can, so it would lease cleanly and then refuse.
+    site = Column(String(64), index=True)
+
+    is_default = Column(Boolean, default=False, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    last_ok_at = Column(DateTime)
+    last_error = Column(Text)
+    last_sync_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100))
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    # Unique on (kind, name), NOT on name alone: "dc1" is a reasonable label for both a
+    # vSphere and a Proxmox connection. Deliberately NOT unique on (kind, host, port)
+    # either — two connections to one vCenter under different service accounts (a
+    # read-only sync account and a privileged deploy account) is a legitimate setup.
+    #
+    # `is_default` is a plain boolean with a service-enforced "at most one per kind"
+    # rule rather than a partial unique index: SQLite's partial-index support is not
+    # something to bet the startup path on.
+    __table_args__ = (UniqueConstraint("kind", "name", name="uq_hypervisor_connection_name"),)
+
+    @property
+    def options_dict(self) -> dict:
+        if not self.options:
+            return {}
+        try:
+            value = json.loads(self.options)
+            return value if isinstance(value, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+
+class HypervisorVMCache(Base):
+    """VMs an agent reported for one connection.
+
+    Not ``VMStateCache``: that table's identity is a VMX path on the dashboard host,
+    which has no meaning for a VM on a customer's vCenter. Identity here is
+    ``(connection_id, vm_id)`` — the hypervisor's own opaque id.
+
+    A read-through cache, never a source of truth. ``synced_at`` is what makes deletion
+    detectable: the last page of a sync prunes rows older than the pass that started it,
+    the same trick ``populate_db_from_ps`` uses.
+    """
+    __tablename__ = "hypervisor_vm_cache"
+
+    connection_id = Column(String(36), primary_key=True)
+    vm_id = Column(String(128), primary_key=True)
+    name = Column(String(256))
+    power_state = Column(String(32))
+    vcpus = Column(Integer)
+    mem_mib = Column(Integer)
+    ip_addresses = Column(Text)     # JSON list
+    scope = Column(String(128))     # node / cluster / datacenter
+    vm_type = Column(String(16))
+    tags = Column(Text)             # JSON list
+    synced_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 class Job(Base):
     """Job model for tracking long-running operations"""
     __tablename__ = "jobs"
@@ -206,6 +534,37 @@ class Job(Base):
     # cloud-deploy jobs. Indexed so the reassign endpoints can find the originating
     # Job row when an admin rewrites a resource's Workgroup tag/label.
     cloud_resource_id = Column(String(255), index=True, nullable=True)
+    # Groups the jobs of one bulk Config-Management run (api/config_mgmt.run_playbook_bulk
+    # fans a single asset out to N targets, one job each). A column rather than a key in
+    # extra_data for the same reason as cloud_resource_id above: extra_data is a Text
+    # column holding a JSON string, so there is no operator that filters it portably
+    # across SQLite and PostgreSQL — only a LIKE scan.
+    batch_id = Column(String(32), index=True, nullable=True)
+    # The enrolled remote agent that owns this row's execution, or NULL for the local
+    # job runner. A real indexed column for the same reason as batch_id above: the
+    # lease query is `WHERE status='queued' AND agent_id=:id` on every poll, and
+    # extra_data cannot be filtered portably.
+    #
+    # Setting this forces status='queued' in job_service.create_job, which is what
+    # keeps jobs_worker._claim_one (status='pending') from racing the agent for the row.
+    agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
+                      index=True, nullable=True)
+    # Auto-delete timer. Meaningful ONLY on the cloud VM deploy types
+    # (expiry_policy.REAPABLE_VM_JOB_TYPES) — a VM has no inventory table of its own,
+    # so its deploy Job row IS its record of existence, which is why `job:<id>` is
+    # already its inventory id. NULL and ignored on every other job row.
+    #
+    # NULL means "no expiry, never auto-deleted" — NOT "inherit the global default".
+    # Same meaning PersonalAccessToken.expires_at already carries. That is the
+    # load-bearing safety property of the whole feature: every row that predates the
+    # column is NULL, so enabling auto-delete on an existing fleet selects nothing,
+    # by construction rather than by a guard.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    # Set by the sweeper before it records an impending-deletion warning, so a warning
+    # fires once. Read only by the server-side warning channels — deliberately NOT by
+    # the dashboard's "Needs attention" item, which is derived client-side on every
+    # poll and has its own per-browser dismissal.
+    expiry_warned_at = Column(DateTime, nullable=True)
     status = Column(String(20), nullable=False, default="pending", index=True)  # pending, running, completed, failed, cancelled
     progress_pct = Column(Integer, default=0)
     progress_message = Column(Text)
@@ -259,6 +618,119 @@ class JobLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (UniqueConstraint("job_id", "seq", name="uq_job_log_seq"),)
+
+
+class NotificationEndpoint(Base):
+    """One outbound webhook sink: a URL plus the payload shape to POST to it.
+
+    Transport is always HTTP POST; `fmt` picks the body. `slack` and `teams` exist
+    because those endpoints reject anything that isn't their own shape — a Slack
+    incoming webhook wants {"text": ...} and a Teams Power Automate Workflows URL
+    wants the Adaptive Card envelope. `custom` is the signed generic envelope, which
+    is how email gets delivered here: point it at a Flow / automation platform and
+    let that fan out. There is deliberately no SMTP client in this codebase.
+
+    `url` and `secret` are Fernet-encrypted with the same key as app_config, because
+    a Slack or Teams webhook URL *is* a bearer credential — anyone holding it can post
+    to the channel. They are never returned by the API; the endpoints router hands out
+    a scheme+host hint instead.
+    """
+    __tablename__ = "notification_endpoints"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(100), nullable=False)
+    url = Column(Text, nullable=False)              # Fernet-encrypted
+    fmt = Column(String(16), nullable=False, default="custom")   # custom | slack | teams
+    secret = Column(Text)                           # Fernet-encrypted; HMAC key, custom only
+    enabled = Column(Boolean, default=True, nullable=False)
+    # CSV override of notify_event_types. Empty/NULL = inherit the global list, which
+    # is what almost every endpoint wants — the per-endpoint filter exists so one noisy
+    # sink can be narrowed without narrowing everyone.
+    event_types = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100))
+    last_success_at = Column(DateTime)
+    # The verbatim transport error from the most recent failure. Kept on the endpoint
+    # (not just on the delivery rows) so the Settings panel can show "this sink is
+    # broken" without joining.
+    last_error = Column(Text)
+
+
+class NotificationDelivery(Base):
+    """One outbound message attempt: one event × one endpoint.
+
+    This table is simultaneously the outbox, the dedupe latch, the retry state, and
+    the operator's record of what was sent — each of which alone would justify
+    persisting it.
+
+    The UNIQUE on `dedupe_key` is the only correct dedupe here: the app runs under
+    `gunicorn -w 2` and the worker at `replicas: 3`, so an in-process set would be
+    worthless across five processes. job_service.log_audit already absorbs an
+    IntegrityError on a unique index the same way.
+
+    Delivery is at-least-once, not exactly-once: a worker killed after the POST but
+    before the `sent` write re-sends on the next reclaim. A duplicate alert beats
+    silence, and pretending otherwise is how these systems rot.
+    """
+    __tablename__ = "notification_deliveries"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    # ── the event (denormalised: fan-out is a handful of rows, so a join buys nothing) ──
+    event_type = Column(String(64), nullable=False, index=True)   # "resource.expiring"
+    severity = Column(String(16), nullable=False, default="info")
+    # inventory_service's id scheme ("job:<uuid>" / "clouddb:<id>" / "k8s:<id>"), so
+    # expiry_reaper._resolve_row can already map a delivery back to its resource.
+    resource_id = Column(String(128), index=True)
+    resource_kind = Column(String(24))
+    resource_name = Column(String(255))
+    cloud = Column(String(24))
+    region = Column(String(40))
+    workgroup = Column(String(64), index=True)
+    url = Column(Text)                              # deep link
+
+    # ── routing ──
+    endpoint_id = Column(String(36), index=True)
+    channel = Column(String(32))                    # the fmt used; free-form on purpose
+    # JSON. Phase 1 always writes {"route": "global_sink"}. Owner routing or a rules
+    # engine writes {"route": "owner", ...} / {"route": "rule", "rule_id": ...} into
+    # this same column with no schema change — which is why it beats a nullable FK to
+    # a table that does not exist yet.
+    reason = Column(Text)
+
+    # ── what was sent ──
+    subject = Column(Text)
+    body = Column(Text)
+    payload = Column(Text)                          # exact JSON posted (never holds the secret)
+
+    # ── delivery state ──
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    # pending | sending | sent | failed | dry_run | suppressed
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, index=True)
+    # Exists solely so a row stuck in `sending` (worker SIGKILLed mid-POST) can be
+    # reclaimed. Without it that notification is silently lost forever.
+    claimed_at = Column(DateTime)
+    sent_at = Column(DateTime)
+    error = Column(Text)
+
+    dedupe_key = Column(String(200), nullable=False)
+
+    __table_args__ = (UniqueConstraint("dedupe_key", name="uq_notification_dedupe"),)
+
+    @property
+    def reason_dict(self) -> dict:
+        if not self.reason:
+            return {}
+        try:
+            return json.loads(self.reason)
+        except Exception:
+            return {}
+
+    @reason_dict.setter
+    def reason_dict(self, value: dict):
+        self.reason = json.dumps(value)
 
 
 class AuditLog(Base):
@@ -531,6 +1003,63 @@ class ContainerStateCache(Base):
     last_updated = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class CloudCostCache(Base):
+    """Last-known-good month-to-date cost for one (cloud, view), plus the throttle
+    state that decides whether we are allowed to ask that cloud again.
+
+    In the database rather than in ``services/cache_service`` for three reasons, each
+    sufficient on its own. The app runs ``gunicorn -w 2``, so a process-local dict gives
+    each worker its own throttle budget and its own 429 — the same hazard that put
+    :class:`EphemeralState` and :class:`LoginAttempt` here. ``jobs_worker`` is a third
+    process that warms nothing, so the budget-alert scan could only ever read an empty
+    dict there. And Azure Cost Management rate-limits per SUBSCRIPTION, which is a
+    property of the account, not of a process — so "we were just throttled" has to
+    outlive a redeploy, or every image rebuild re-earns the 429.
+
+    ``payload`` is written ONLY when a cloud returned ``status="ok"``. A failure writes
+    the error and cooldown columns and leaves ``payload``/``fetched_at`` untouched. That
+    asymmetry is the whole reason this table exists: a 429 must never be able to replace
+    a working number. The row is therefore not a cache entry with a TTL — it is a
+    last-known-good value plus an expiry *opinion*.
+    """
+    __tablename__ = "cloud_cost_cache"
+
+    # PK is (cloud, view) and deliberately EXCLUDES the month: throttle state is a
+    # property of the API, not of the calendar, so it has to survive a rollover.
+    # `period` guards the payload instead — see cost_cache._is_usable.
+    cloud = Column(String(16), primary_key=True)   # aws | azure | gcp | oci
+    view = Column(String(16), primary_key=True)    # summary | breakdown
+
+    # ── last-known-good (written only on status="ok") ────────────────────────
+    payload = Column(Text, nullable=True)                      # JSON: one cloud's entry
+    payload_version = Column(Integer, nullable=False, default=0)
+    period = Column(String(7), nullable=True)                  # "2026-08"; MTD is month-scoped
+    fetched_at = Column(DateTime, nullable=True, index=True)
+    # Set by a Setup save. Read as "not fresh" while the payload is still SERVED, so
+    # fixing a credential re-queries without blanking the page in the meantime.
+    stale = Column(Boolean, nullable=False, default=False)
+
+    # ── failure / throttle (written only on a failed attempt) ────────────────
+    last_attempt_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    # Hard gate: while this is in the future NOTHING queries this cloud, including an
+    # explicit ?refresh=true. Set from the provider's Retry-After when it gave one.
+    cooldown_until = Column(DateTime, nullable=True, index=True)
+
+    # ── single-flight ────────────────────────────────────────────────────────
+    # A liveness bound, not a mutex: a process that dies mid-fetch releases its claim by
+    # expiry. The advisory lock only makes the claim's read-modify-write atomic; it is
+    # never held across the network call.
+    lease_until = Column(DateTime, nullable=True)
+    lease_owner = Column(String(64), nullable=True)   # "host:pid" — diagnostics only
+    # Per-CLOUD pacing, written to every row of the cloud: Cost Management throttles per
+    # subscription, so this cloud's summary and breakdown queries must not overlap.
+    next_query_allowed_at = Column(DateTime, nullable=True)
+
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RegisteredImage(Base):
     """Operator-registered image artefacts. The dashboard's source-of-truth
     record for "this image exists, here's where the artefact lives, here's
@@ -629,12 +1158,21 @@ class CloudDatabase(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     engine = Column(String(20), nullable=False)            # postgres | mysql | sqlserver
     provider = Column(String(40), nullable=True)           # e.g. rds | azure_flexible | cloud_sql
-    cloud = Column(String(20), nullable=False)             # aws | azure | gcp
+    cloud = Column(String(20), nullable=False)             # aws | azure | gcp | local
     region = Column(String(64), nullable=True)
+    # Mirrors K8sCluster.source. A `registered` row is a database that already existed —
+    # on-prem (cloud='local') or one the dashboard didn't provision — recorded so it can
+    # be a Config Management target. It has no Terraform state and no provisioning job,
+    # so delete deregisters it rather than destroying it, and its admin credential comes
+    # from a Password Safe managed account instead of the job's tf_variables.
+    source = Column(String(16), nullable=False, default="provisioned")  # provisioned | registered
 
     instance_id = Column(String(255), nullable=True)       # cloud resource id (filled on apply)
     private_host = Column(String(255), nullable=True)      # private endpoint host (no public endpoint)
     port = Column(Integer, nullable=True)
+    # Only a registered row needs this: a provisioned one reads its database name from
+    # the provisioning job's tf_variables, which a registered row does not have.
+    db_name = Column(String(128), nullable=True)
     status = Column(String(32), nullable=False, default="provisioning", index=True)
 
     credentials_ref = Column(Text, nullable=True)          # backend-agnostic ref (resolved via config_service)
@@ -647,6 +1185,12 @@ class CloudDatabase(Base):
 
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
+    # `provisioned` row: "deleting" a registered database merely deregisters it, and a
+    # timer that silently forgets somebody's registered production database is worse
+    # than no timer at all.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
 
 
 class CloudFunction(Base):
@@ -742,6 +1286,60 @@ class K8sCluster(Base):
     jumpoint_name = Column(String(128), nullable=True)     # PRA Jumpoint name override (else bt_jumpoint_name) — the "separate jumpoint"
     pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override (else config)
     secrets_delivery_kind = Column(String(20), nullable=True)  # eso | secrets_agent (Phase 4)
+    # Password-Safe-managed ServiceAccount token rotation. ps_token_account_id being
+    # SET is the discriminator that stops the dashboard minting a second token: the
+    # rotation plugin sweeps only Secrets carrying ITS labels, so a dashboard-minted
+    # Secret alongside a managed one is a cluster-admin credential nothing ever rotates.
+    ps_token_account_id = Column(String(64), nullable=True)      # PS ManagedAccount id of <ns>/<sa>
+    ps_pra_vault_account_id = Column(String(64), nullable=True)  # PS ManagedAccount id of the "PRA Vault Token" mirror
+    pra_vault_account_id = Column(String(64), nullable=True)     # sra_vault_token_account id the rotation is mirrored into
+
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
+    # `provisioned` row, for the same reason as CloudDatabase.expires_at: deleting a
+    # registered cluster only drops the dashboard's record of it.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
+
+
+class Gateway(Base):
+    """Inventory of dashboard-deployed BeyondTrust Gateway hosts.
+
+    Until now a gateway was found, not tracked: the dashboard auto-ensured exactly
+    one per cloud by a fixed name tag and reference-counted it against the resources
+    using it. That answers "is there a gateway?" but not "what gateways do we have",
+    which is the question an operator running several for session load actually has.
+
+    Two kinds of row, distinguished by ``managed``:
+
+      * ``managed=True`` — the auto-ensured shared gateway. Still reference-counted
+        and still torn down when idle; the row is a record of it, not the control.
+        Adopted on first ensure, so a gateway that already exists gets registered
+        rather than duplicated.
+      * ``managed=False`` — deployed on request from the Gateways tab. Never
+        reference-counted, never auto-torn-down, no cap: three in us-central1 and
+        two in us-east-2 is a normal configuration. Removed only when asked.
+
+    ``name`` is the cloud resource name (EC2 ``Name`` tag / GCE instance / Azure VM)
+    and is what keeps the two kinds apart in the cloud itself — the managed teardown
+    acts on the managed name alone, so it can never reach a user-deployed host.
+    """
+    __tablename__ = "gateways"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    cloud = Column(String(20), nullable=False, index=True)   # aws | azure | gcp
+    region = Column(String(40), nullable=True, index=True)
+    zone = Column(String(40), nullable=True)                 # GCP/Azure placement
+    name = Column(String(200), nullable=False, index=True)   # cloud resource name
+    status = Column(String(32), nullable=False, default="provisioning", index=True)
+    # provisioning | running | error | deleting | deleted
+    managed = Column(Boolean, nullable=False, default=False, index=True)
+
+    host_id = Column(String(128), nullable=True)             # EC2 instance id / VM name
+    egress_ip = Column(String(45), nullable=True)            # what a node firewall allows
+    deploy_job_id = Column(String(36), nullable=True)
+    error = Column(Text, nullable=True)
 
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -828,6 +1426,12 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN egress_ip VARCHAR(45)",
             # Job heartbeat — drives the startup reconcile of restart-orphaned jobs.
             "ALTER TABLE jobs ADD COLUMN updated_at TIMESTAMP",
+            # Registered vs dashboard-provisioned databases. Every pre-existing row was
+            # provisioned by Terraform, so that is the backfill value — the opposite of
+            # k8s_clusters, whose rows all predate provisioning and default to
+            # 'registered'.
+            "ALTER TABLE cloud_databases ADD COLUMN source VARCHAR(16) DEFAULT 'provisioned'",
+            "ALTER TABLE cloud_databases ADD COLUMN db_name VARCHAR(128)",
             # Cloud-db per-DB PRA broker overrides (config defaults as fallback).
             "ALTER TABLE cloud_databases ADD COLUMN jump_group VARCHAR(128)",
             "ALTER TABLE cloud_databases ADD COLUMN jumpoint_name VARCHAR(128)",
@@ -842,6 +1446,62 @@ def init_db():
             # cloud_identity_service._new_activation_row has always passed
             # tenant_id=; without the column every elevation raised TypeError.
             "ALTER TABLE entitle_activations ADD COLUMN tenant_id VARCHAR(64)",
+            # Bulk Config-Management runs: group the N jobs of one run so the jobs
+            # page can filter to a batch and roll up its status.
+            "ALTER TABLE jobs ADD COLUMN batch_id VARCHAR(32)",
+            "CREATE INDEX ix_jobs_batch_id ON jobs(batch_id)",
+            # Auto-delete timer (resource expiry). Real indexed columns rather than
+            # keys in extra_data, for exactly the reason given on batch_id above:
+            # extra_data is a Text column holding a JSON string, so no operator
+            # filters it portably across SQLite and PostgreSQL — and the sweeper's
+            # whole job is `WHERE expires_at <= :cutoff`.
+            #
+            # Every pre-existing row backfills to NULL, which means "never expires".
+            # That is deliberate and load-bearing: turning the feature on cannot
+            # select a single resource that already existed.
+            "ALTER TABLE jobs ADD COLUMN expires_at TIMESTAMP",
+            "ALTER TABLE jobs ADD COLUMN expiry_warned_at TIMESTAMP",
+            "CREATE INDEX ix_jobs_expires_at ON jobs(expires_at)",
+            "ALTER TABLE cloud_databases ADD COLUMN expires_at TIMESTAMP",
+            "ALTER TABLE cloud_databases ADD COLUMN expiry_warned_at TIMESTAMP",
+            "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
+            "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
+            "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",
+            "CREATE INDEX ix_k8s_clusters_expires_at ON k8s_clusters(expires_at)",
+            # Remote on-prem agent: which enrolled agent owns this job's execution.
+            # The `remote_agents` and `agent_nonces` tables need no entry here —
+            # create_all makes new tables; only new columns on existing tables do.
+            #
+            # No FK in the raw DDL, matching every entry above: SQLite cannot add a
+            # constraint to an existing table, and nothing reads jobs through one. The
+            # relationship is declared on the model for the ORM's benefit only.
+            "ALTER TABLE jobs ADD COLUMN agent_id VARCHAR(36)",
+            "CREATE INDEX ix_jobs_agent_id ON jobs(agent_id)",
+            # What the agent reports it can run, refreshed on every lease. Existing rows
+            # read NULL until their agent next polls, which is the correct answer — the
+            # dashboard genuinely does not know yet.
+            "ALTER TABLE remote_agents ADD COLUMN reported_job_types TEXT",
+            # `hypervisor_connections` needs no entry: create_all makes new tables.
+            # Nor does `ephemeral_state` (FIDO2 challenges + OAuth/OIDC CSRF state),
+            # for the same reason. Nothing backfills that one either — every row it
+            # will ever hold expires within five minutes of being written.
+            #
+            # Password-Safe-managed k8s ServiceAccount token rotation. Two Password Safe
+            # managed-account ids (the token account, and the "PRA Vault Token" mirror the
+            # rotation is pushed through), plus the PRA Vault account id — which the tunnel
+            # registration already computed and threw away, so only pra_tunnel_state held it.
+            # Columns rather than config keys because ps_token_account_id is a WHERE clause:
+            # the sync sweep selects the registered clusters, and the mint path checks it on
+            # every tunnel register. NULL backfills to "not Password Safe managed", which is
+            # the right answer — enabling the feature cannot capture a cluster nobody bound.
+            "ALTER TABLE k8s_clusters ADD COLUMN ps_token_account_id VARCHAR(64)",
+            "ALTER TABLE k8s_clusters ADD COLUMN ps_pra_vault_account_id VARCHAR(64)",
+            "ALTER TABLE k8s_clusters ADD COLUMN pra_vault_account_id VARCHAR(64)",
+            "CREATE INDEX ix_k8s_clusters_ps_token_account_id "
+            "ON k8s_clusters(ps_token_account_id)",
+            # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
+            # backfills it either — an empty table is exactly "no cloud has reported a
+            # cost yet", which is what the first warmer pass fixes.
         ]
         for stmt in _migrations:
             if _is_sqlite:
@@ -869,6 +1529,29 @@ def init_db():
     from .services import workgroup_service
     with SessionLocal() as _seed_db:
         workgroup_service.seed_if_empty(_seed_db)
+        # Copy the legacy singleton hypervisor config into hypervisor_connections.
+        # Here and not in the migration block above on purpose: this is a data seed,
+        # not DDL, and it must stay OUTSIDE the advisory-locked transaction — a
+        # session-level lock around it is the QueuePool leak that hung cold
+        # app+worker co-deploys. The unique constraint arbitrates the race instead.
+        try:
+            from .services import hypervisor_connection_service
+            hypervisor_connection_service.seed_from_settings(_seed_db)
+        except Exception:  # noqa: BLE001 — a seed must never stop the app booting
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "hypervisor connection seed skipped", exc_info=True)
+        # Translate the retired `beyondtrust_enabled` flag into the three product flags
+        # that replaced it. Writes app_config only, so it takes no db session — it lives
+        # here because this is the block that runs after the schema is ready and outside
+        # the advisory lock.
+        try:
+            from .services import feature_flag_migration
+            feature_flag_migration.seed_beyondtrust_split()
+        except Exception:  # noqa: BLE001 — a seed must never stop the app booting
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "BeyondTrust flag split seed skipped", exc_info=True)
 
     # One-time: chain any pre-existing (pre-upgrade) audit rows so the whole
     # history is tamper-evident, not just entries written after this upgrade.

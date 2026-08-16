@@ -26,6 +26,21 @@ def registration_enabled() -> bool:
     return config_service.get_bool("entitle_registration_enabled", False)
 
 
+def _normalize_private_key(pk: str) -> str:
+    """Normalize an SSH private key to LF line endings with a single trailing newline.
+
+    OpenSSH refuses a key file whose lines end in CRLF or that lacks a trailing
+    newline: ``ssh`` fails to load it with ``error in libcrypto`` and then presents
+    no key at all, so the server answers ``Permission denied (publickey)`` and Entitle
+    reports ``login attempt ... failed``. Cloud secret stores populated by Windows
+    tooling (and hand-rotated secrets) routinely carry CRLF, so scrub it here — the
+    single point every cloud's key funnels through — before the key reaches Entitle.
+    Empty stays empty so the caller's fallback chain still works."""
+    if not pk:
+        return pk
+    return pk.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+
+
 def resolve_ssh_private_key(ref: str) -> str:
     """Resolve the Entitle SSH private key from a config ref or an inline PEM."""
     if not ref:
@@ -95,9 +110,10 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
     ``entitle_registration_tf_state`` onto ``result`` (the latter is stored in job
     metadata for teardown). Non-fatal."""
     from . import entitle_registration_service as ent, job_service
-    pk = (private_key
-          or await _resolve_vm_private_key(tag, ssh_key_secret)
-          or resolve_ssh_private_key(_cfg("entitle_ssh_private_key_ref")))
+    pk = _normalize_private_key(
+        private_key
+        or await _resolve_vm_private_key(tag, ssh_key_secret)
+        or resolve_ssh_private_key(_cfg("entitle_ssh_private_key_ref")))
     su = sudo_user or _cfg("entitle_ssh_sudo_user")
     try:
         r = await ent.register_ssh_host(

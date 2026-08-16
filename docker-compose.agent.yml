@@ -1,0 +1,93 @@
+# TLS terminator for the remote-agent API.
+#
+# The base stack publishes gunicorn on 8001 in plain HTTP with nothing in front, which
+# is fine while every client is on the same host. A remote agent is not: it dials in
+# from a private network, across whatever sits between, so its traffic must be
+# encrypted. Signing the requests gives integrity and replay protection but NOT
+# confidentiality — no signature scheme stops someone reading a job payload off the
+# wire. TLS is not optional here.
+#
+# What this overlay does, and the part worth understanding:
+#
+#   agents.example.com  ->  ONLY /api/agent/*        (public, machine-only)
+#   dashboard.internal  ->  everything               (keep this internal)
+#
+# Splitting the vhosts is a large, cheap win. The internet-facing surface becomes one
+# prefix with no HTML, no login form, no session cookies, no OAuth callbacks and no
+# /setup wizard — every route on it authenticates with an Ed25519 signature or gets a
+# 401. It also makes the pen-test scope about a page long.
+#
+# Usage:
+#   AGENT_HOSTNAME=agents.example.com \
+#   docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml up -d
+#
+# Publish 443 (and 80, for the ACME HTTP-01 challenge) to the internet or to whatever
+# network your agents live on.
+#
+# One thing this overlay CANNOT do for you: the base stack publishes the app on
+# 8001, and compose merges port lists rather than replacing them, so that binding
+# survives. Bind it to loopback (`127.0.0.1:8001:8000`) or firewall it — otherwise the
+# plain-HTTP dashboard is still reachable beside the TLS vhost and the split above
+# buys you nothing.
+
+services:
+  agent-gateway:
+    image: caddy:2-alpine
+    container_name: vmdash-agent-gateway
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"       # ACME HTTP-01 only; Caddy redirects everything else to 443
+      - "443:443"
+    environment:
+      AGENT_HOSTNAME: ${AGENT_HOSTNAME:?set AGENT_HOSTNAME, e.g. agents.example.com}
+      # Let's Encrypt emails expiry warnings here. Optional but wanted.
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      # Set AGENT_TLS_INTERNAL=1 when AGENT_HOSTNAME is an internal name that can never
+      # satisfy an ACME challenge — a lab LAN, a split-horizon domain. Caddy then issues
+      # from its own CA instead of retrying Let's Encrypt forever and serving nothing.
+      #
+      # The `:+` form yields the replacement only when the variable is set and non-empty,
+      # so unset leaves this blank and the default public-ACME behaviour stands.
+      # Agents must then trust that CA — export the root and point AGENT_CA_BUNDLE at it:
+      #
+      #   docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml \
+      #     cp agent-gateway:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+      AGENT_TLS_DIRECTIVE: ${AGENT_TLS_INTERNAL:+tls internal}
+    volumes:
+      - ./examples/remote-agent/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # certificates and ACME account — persist or you WILL
+      - caddy_config:/config      # hit Let's Encrypt rate limits on every redeploy
+    networks:
+      default:
+        # A FIXED address, because the app has to name this peer literally — see below.
+        ipv4_address: 172.29.7.2
+
+  app:
+    environment:
+      # Which peer may set X-Forwarded-For / X-Forwarded-Proto. The app defaults to
+      # loopback, which is not this gateway, so it has to be named explicitly.
+      #
+      # It has to be a literal IP. uvicorn 0.27's ProxyHeadersMiddleware does a plain
+      # string comparison against the peer address — it does not resolve service names
+      # and does not understand CIDR (that arrived in uvicorn 0.31). Hence the static
+      # address on the gateway above and the pinned subnet below; a service name here
+      # would silently never match, leaving X-Forwarded-For untrusted and every client
+      # appearing to come from the gateway.
+      - TRUSTED_PROXY_HOSTS=172.29.7.2
+      # The origin the world reaches this dashboard at. Belt and braces alongside the
+      # line above: it makes the OAuth callback URIs and the remote-agent signing
+      # audience correct even if the proxy address changes and the line above goes
+      # stale, because they stop being derived from the request scheme at all.
+      - PUBLIC_BASE_URL=https://${AGENT_HOSTNAME}
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.7.0/24
+
+volumes:
+  caddy_data:
+  caddy_config:

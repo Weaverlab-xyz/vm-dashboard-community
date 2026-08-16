@@ -1,0 +1,153 @@
+# Create-or-update a standalone Docker Compose stack on a Portainer environment.
+# Idempotent: an existing stack of the same name is UPDATED in place, otherwise a
+# new one is created. Pairs with the compose files in examples/compose/.
+#
+# Target: any target — this is a `hosts: localhost` play that reaches OUT to the
+# Portainer REST API. Nothing is installed on the target.
+#
+# OPTIONAL — fetch the PAT from BeyondTrust Password Safe instead of the injected one
+# by setting a SECRET path (folder/title):
+#   portainer_pat_secret: app-secrets/portainer-pat
+#
+# Connection is auto-injected when Portainer is configured (PORTAINER_URL /
+# PORTAINER_PAT / PORTAINER_VERIFY_SSL); override with extra vars to use another server.
+#
+# The compose content comes from EITHER stack_file (a path readable by the runner)
+# or stack_content (an inline string). Anything sensitive inside it should come from
+# the run form's "Use a secret" panel rather than being written in plaintext here.
+#
+# extra_vars:
+#   stack_name:   my-stack             # required
+#   endpoint_id:  1                    # required — see list-endpoints.yml
+#   stack_file:   /path/to/compose.yml # either this…
+#   stack_content: "services: {...}"   # …or this
+#   stack_env:    {KEY: value}         # optional env for the stack
+#   prune:        false                # remove services no longer in the compose file
+- name: Deploy or update a Portainer stack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    # Optional: fetch the PAT from BeyondTrust Password Safe instead of using the
+    # injected one — set a SECRET path (folder/title). Blank = use PORTAINER_PAT.
+    portainer_pat_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+    stack_name: ""
+    endpoint_id: ""
+    stack_file: ""
+    stack_content: ""
+    stack_env: {}
+    prune: false
+  tasks:
+    # Fetched into its OWN fact, never onto portainer_pat: extra vars outrank set_fact,
+    # so writing back to that name would be silently ignored when the PAT was also
+    # supplied as an extra var.
+    - name: Fetch the Portainer API token from Password Safe
+      ansible.builtin.set_fact:
+        _ps_portainer_pat: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=portainer_pat_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: portainer_pat_secret | length > 0
+
+    - name: Resolve the effective token (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _pat: "{{ _ps_portainer_pat | default(portainer_pat, true) }}"
+      no_log: true
+
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - _pat | length > 0
+          - stack_name | length > 0
+          - endpoint_id | string | length > 0
+          - (stack_file | length > 0) or (stack_content | length > 0)
+        fail_msg: >-
+          Set stack_name, endpoint_id and one of stack_file / stack_content, and make
+          sure a Portainer connection is configured (or passed as extra vars).
+
+    - name: Read the compose file
+      ansible.builtin.slurp:
+        src: "{{ stack_file }}"
+      register: compose_raw
+      when: stack_file | length > 0
+
+    - name: Resolve the compose content
+      ansible.builtin.set_fact:
+        compose_body: >-
+          {{ (compose_raw.content | b64decode) if (stack_file | length > 0) else stack_content }}
+
+    - name: List existing stacks
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/stacks"
+        method: GET
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: stacks
+      no_log: true              # the API token rides the request headers
+
+    - name: Find this stack
+      ansible.builtin.set_fact:
+        existing: "{{ (stacks.json | selectattr('Name', 'equalto', stack_name) | list | first) | default({}, true) }}"
+
+    # Portainer wants env as a list of {name, value} pairs.
+    - name: Shape the stack env
+      ansible.builtin.set_fact:
+        env_pairs: "{{ stack_env | dict2items(key_name='name', value_name='value') }}"
+
+    - name: Create the stack
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/stacks/create/standalone/string?endpointId={{ endpoint_id }}"
+        method: POST
+        headers:
+          X-API-Key: "{{ _pat }}"
+        body_format: json
+        body:
+          name: "{{ stack_name }}"
+          stackFileContent: "{{ compose_body }}"
+          env: "{{ env_pairs }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: [200, 201]
+      register: created
+      when: not existing
+      no_log: true              # the API token rides the request headers
+
+    - name: Update the stack
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/stacks/{{ existing.Id }}?endpointId={{ endpoint_id }}"
+        method: PUT
+        headers:
+          X-API-Key: "{{ _pat }}"
+        body_format: json
+        body:
+          stackFileContent: "{{ compose_body }}"
+          env: "{{ env_pairs }}"
+          prune: "{{ prune | bool }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: updated
+      when: existing | length > 0
+      no_log: true              # the API token rides the request headers
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          Stack '{{ stack_name }}'
+          {{ 'updated (id=' ~ existing.Id ~ ')' if existing else 'created' }}
+          on endpoint {{ endpoint_id }}.

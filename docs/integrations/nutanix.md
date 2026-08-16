@@ -95,3 +95,50 @@ docker exec -it vm-dashboard curl -sk https://<prism-host>:9440/api/nutanix/v3/u
 ```
 
 A successful response contains `"kind": "user"` in the result.
+
+## Multiple connections
+
+Connection details used to live in Settings as a single set of fields, so there could
+only ever be one Prism Central. They now live in the **Connections** page (`/connections`),
+which holds as many as you like — a second Prism Central at another site, or the same one
+under a read-only and a privileged service account.
+
+* The **default** connection is what every page and API call uses when not told
+  otherwise. The first connection of a kind becomes the default automatically.
+* Pass `?connection_id=<id>` to any `/api/nutanix` endpoint to target a specific one.
+* Job-backed operations (deploys, power verbs) record the connection at **enqueue**, so
+  changing the default while one is queued cannot redirect it.
+
+Your existing Settings values were copied into the first connection on upgrade. The old
+panel is still there, read-only, with a banner pointing here — editing it no longer
+changes what the dashboard connects to. It is kept so that rolling back to a previous
+image still works.
+
+## Over a remote agent
+
+A Prism Central the dashboard has no network route to can be reached through a
+[remote agent](../remote-agents.md#hypervisor-connections) instead. Tick *Reached
+through a remote agent* when adding the connection and give it the name that connection
+has in the agent's own `connections.yaml`.
+
+The dashboard then stores **no host and no credential** for it — only the name. The
+agent uses the Prism v3 REST API, which needs no dependency the agent does not already have.
+
+Three separate grants must line up: the dashboard grants the agent the
+`agent_hypervisor` job type, your `policy.yaml` grants the individual verbs on that
+connection, and your `connections.yaml` defines it. Withhold any one and nothing runs.
+
+Inventory sync only. Power verbs are refused by the agent: a v3 power
+change is a full spec PUT carrying a metadata version rather than a simple
+action, and getting that wrong writes to the VM instead of failing.
+
+### When the connection is reached through an agent
+
+The dashboard has no route to an agent-bound connection — that is the point of binding it
+to an agent — so this page cannot query it live. It shows the **last synced inventory**
+instead, with a banner saying so and how old it is. Live-only figures (CPU usage, uptime,
+disk) are blank there rather than zero: they were never measured, and a fabricated 0 is
+worse than an empty cell.
+
+Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
+with Live Output, exactly like a discovery scan.

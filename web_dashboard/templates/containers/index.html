@@ -11,8 +11,8 @@
       <p class="text-sm text-gray-500 mt-1">Manage Docker containers and cloud workloads</p>
     </div>
     <div class="flex items-center gap-2 flex-wrap">
-      <!-- Show all / running only toggle (on-prem only) -->
-      <label x-show="activeTab === 'onprem'"
+      <!-- Show all / running only toggle (Portainer tab only) -->
+      <label x-show="activeTab === 'portainer'"
              class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
         <input type="checkbox" x-model="showAll" @change="loadContainers()"
                class="rounded text-blue-600 focus:ring-blue-500">
@@ -25,7 +25,7 @@
     </div>
   </div>
 
-  <!-- ── Top-level tabs: Cloud | On-Premises ───────────────────────────── -->
+  <!-- ── Top-level tabs: Cloud | Portainer | Kubernetes (Rancher) ──────── -->
   <div class="mb-6 border-b border-gray-200">
     <nav class="flex gap-1 -mb-px">
       <button @click="activeTab = 'cloud'"
@@ -36,12 +36,12 @@
         Cloud
       </button>
       {% if portainer_enabled %}
-      <button @click="activeTab = 'onprem'"
-              :class="activeTab === 'onprem'
+      <button @click="activeTab = 'portainer'"
+              :class="activeTab === 'portainer'
                 ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
                 : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="px-4 py-2 text-sm transition whitespace-nowrap">
-        On-Premises
+        Portainer
       </button>
       {% endif %}
       {% if k8s_management_enabled %}
@@ -53,21 +53,352 @@
         Kubernetes (Rancher)
       </button>
       {% endif %}
+      {% if pra_enabled %}
+      <button @click="activeTab = 'gateways'; loadGateways()"
+              :class="activeTab === 'gateways'
+                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+                : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="px-4 py-2 text-sm transition whitespace-nowrap">
+        Gateways
+      </button>
+      {% endif %}
     </nav>
   </div>
 
+  {% if pra_enabled %}
+  <!-- ── BeyondTrust Gateways ────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'gateways'" x-cloak>
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-800">BeyondTrust Gateways</h2>
+          <p class="text-sm text-gray-500 mt-1 max-w-3xl">
+            The dashboard always keeps one gateway per cloud for its own tunnels and jumps,
+            and removes it once nothing is using it. Add your own to carry session traffic —
+            as many as you want, in whatever regions you want. They join the same PRA Gateway
+            as additional cluster nodes, so nothing needs repointing.
+          </p>
+        </div>
+        <button @click="loadGateways()" :disabled="gatewaysLoading"
+                class="shrink-0 text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition disabled:opacity-50">
+          Refresh
+        </button>
+      </div>
 
-  <!-- ── Indeterminate progress bar (any on-prem loading) ────────────────── -->
-  <div x-show="activeTab === 'onprem' && (endpointsLoading || loading)" x-cloak
+      <!-- Deploy form -->
+      <div class="mt-5 pt-5 border-t border-gray-100">
+        <div class="flex flex-wrap items-end gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
+            <select x-model="gwForm.cloud" @change="gwCloudChanged()"
+                    class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+              <option value="aws">AWS</option>
+              <option value="azure">Azure</option>
+              <option value="gcp">GCP</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
+            <!-- Configured regions only (Settings → Multi-region), not the whole
+                 catalog: a gateway needs that region's own subnet. -->
+            <select x-model="gwForm.region" @change="gwRegionChanged()"
+                    :disabled="gwRegionsLoading"
+                    class="text-sm font-mono border border-gray-300 rounded-lg px-2 py-1.5 w-44 focus:ring-2 focus:ring-blue-500 disabled:opacity-50">
+              <!-- The default region is preselected; blank stays available so the
+                   form still works if the region list can't be fetched. -->
+              <option value="">(configured default)</option>
+              <template x-for="r in gwRegions" :key="r">
+                <option :value="r" x-text="r"></option>
+              </template>
+            </select>
+          </div>
+          <div x-show="gwForm.cloud === 'gcp'">
+            <label class="block text-xs font-medium text-gray-600 mb-1">
+              Zone <span class="text-gray-400">(optional)</span>
+            </label>
+            <input type="text" x-model="gwForm.zone"
+                   :placeholder="gwZoneHints[gwForm.region] || 'us-central1-b'"
+                   class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 w-40 focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+            <input type="text" x-model="gwForm.name" placeholder="gw-us-east-2-01"
+                   class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 w-56 focus:ring-2 focus:ring-blue-500">
+          </div>
+          <button @click="deployGateway()" :disabled="gwDeploying || !gwForm.cloud"
+                  class="text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition disabled:opacity-50">
+            <span x-show="!gwDeploying">Deploy gateway</span>
+            <span x-show="gwDeploying" x-cloak>Queueing…</span>
+          </button>
+        </div>
+        <p class="mt-2 text-[11px] text-gray-400">
+          Only regions with a per-region config set are listed — add one under
+          <a href="/settings" class="underline">Settings → Multi-region</a>
+          to deploy elsewhere. A region without its own subnet would put the gateway on the
+          default region's network.
+          <span x-show="gwForm.cloud === 'gcp'" x-cloak>
+            Blank zone uses <span class="font-mono" x-text="gwZoneHints[gwForm.region] || '(the region default)'"></span>.
+          </span>
+        </p>
+        <div x-show="gwError" x-cloak
+             class="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
+             x-text="gwError"></div>
+      </div>
+    </div>
+
+    <!-- Gateway list -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-200 text-left">
+            <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Cloud</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Region</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Host</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Created by</th>
+            <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          <tr x-show="gatewaysLoading">
+            <td colspan="7" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+          </tr>
+          <tr x-show="!gatewaysLoading && gateways.length === 0">
+            <td colspan="7" class="px-4 py-10 text-center text-gray-400">
+              No gateways yet. The managed one appears here the first time the dashboard needs it.
+            </td>
+          </tr>
+          <template x-for="g in gateways" :key="g.id">
+            <tr class="hover:bg-gray-50 transition">
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                      :class="statusBadge(g.status)" x-text="g.status"></span>
+              </td>
+              <td class="px-4 py-3 font-medium text-gray-800">
+                <span x-text="g.name"></span>
+                <!-- The managed gateway is reference-counted; it isn't the operator's to remove. -->
+                <span x-show="g.managed" x-cloak
+                      class="ml-2 align-middle inline-flex items-center px-1.5 py-0.5 rounded
+                             bg-gray-100 text-gray-600 text-[10px] font-medium"
+                      title="Created and removed automatically as resources need it">managed</span>
+              </td>
+              <td class="px-4 py-3 text-gray-500" x-text="g.cloud"></td>
+              <td class="px-4 py-3 text-gray-500" x-text="g.region || '–'"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs font-mono" x-text="g.host_id || '–'"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="g.created_by || '–'"></td>
+              <td class="px-4 py-3 text-right">
+                <a x-show="g.deploy_job_id" :href="'/jobs/' + g.deploy_job_id" x-cloak
+                   class="text-blue-500 hover:underline text-xs font-medium mr-2">Job</a>
+                <button x-show="!g.managed" @click="destroyGateway(g)"
+                        class="text-red-500 hover:text-red-700 text-xs font-medium">Remove</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+    <p x-show="gateways.some(g => g.error)" x-cloak class="mt-3 text-xs text-gray-500">
+      A gateway in <span class="font-medium">error</span> kept its row so the reason stays
+      visible — open its job for the detail.
+    </p>
+  </div>
+  {% endif %}
+
+
+  <!-- ── Indeterminate progress bar (any Portainer loading) ─────────────── -->
+  <div x-show="activeTab === 'portainer' && (endpointsLoading || loading)" x-cloak
        class="fixed top-0 left-0 right-0 z-50 h-0.5 bg-gray-200 overflow-hidden">
     <div class="h-full bg-blue-500 animate-[loading-bar_1.4s_ease-in-out_infinite]"
          style="width: 40%"></div>
   </div>
 
   <!-- ══════════════════════════════════════════════════════════════════════ -->
-  <!-- ON-PREMISES PANEL                                                     -->
+  <!-- PORTAINER PANEL                                                       -->
   <!-- ══════════════════════════════════════════════════════════════════════ -->
-  <div x-show="activeTab === 'onprem'">
+  <div x-show="activeTab === 'portainer'">
+
+    {% if portainer_enabled %}
+    <!-- ── Managed Portainer server (Portainer CE container on GCE COS) ──── -->
+    <!-- Jinja-gated as well as Alpine-hidden: with the feature off the deploy
+         surface must not render at all, even though the surrounding Portainer
+         panel can still be reached via the #portainer hash. -->
+    <div class="mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-800">Managed Portainer server</h2>
+          <p class="text-sm text-gray-500 mt-1">
+            Let the dashboard run Portainer CE for you — a single container on a public
+            Container-Optimized-OS GCE VM, firewalled to your allowed sources. A successful
+            deploy fills in the URL and API token below automatically. This node is
+            <strong>ephemeral</strong>: tearing it down wipes its users, environments and settings.
+          </p>
+        </div>
+        <div class="flex items-center gap-2 flex-shrink-0 ml-4">
+          <button @click="loadPortainerNode()" :disabled="portainerNodeLoading"
+                  class="px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-300 hover:bg-gray-50 rounded-lg transition">
+            Refresh
+          </button>
+          <button @click="deployPortainerNode()"
+                  :disabled="portainerNodeDeploying || !portainerNodeConfigured"
+                  class="px-3 py-1.5 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition">
+            <span x-show="!portainerNodeDeploying"
+                  x-text="portainerNodes.length ? 'Redeploy' : 'Deploy Portainer server'"></span>
+            <span x-show="portainerNodeDeploying">Deploying…</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Not deployable yet (no GCP project) -->
+      <div x-show="!portainerNodeLoading && !portainerNodeConfigured" x-cloak
+           class="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm">
+        <p class="text-amber-800 font-medium">A managed Portainer server can't be deployed yet.</p>
+        <p class="text-amber-700 mt-1">
+          Set a GCP project (and the allowed source CIDRs) in
+          <a href="/settings" class="underline font-medium">Settings → Containers</a>.
+          You can still connect your own Portainer server instead.
+        </p>
+      </div>
+
+      <div x-show="portainerNodeError" x-cloak
+           class="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700"
+           x-text="portainerNodeError"></div>
+
+      <div x-show="!portainerNodeLoading && portainerNodeConfigured" x-cloak>
+        <!-- Placement: where the single node runs. Redeploying elsewhere relocates it. -->
+        <div class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
+              <select x-model="portainerDeployForm.region"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+                <option value="">(current / default)</option>
+                <template x-for="r in portainerRegions" :key="r">
+                  <option :value="r" x-text="r"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
+              <input type="text" x-model="portainerDeployForm.zone"
+                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono" placeholder="us-east1-b">
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-400 mt-1">
+            Blank region keeps the node's current region (or the configured default). Blank zone uses the region's
+            first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.
+            Only regions with a configured subnet are listed. Redeploying to a different region <strong>relocates</strong> the node.
+          </p>
+        </div>
+
+        <!-- PRA access (chosen at deploy/redeploy, like the Rancher node) -->
+        <div x-show="portainerDeployOpts.configured" x-cloak
+             class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+          <label class="flex items-center gap-2 font-medium text-gray-700">
+            <input type="checkbox" x-model="portainerDeployForm.web_jump_enabled" class="rounded border-gray-300">
+            Broker the Portainer UI via a PRA Web Jump
+          </label>
+          <p class="text-[11px] text-gray-400 mt-1 ml-6">
+            Creates a <code>portainer-ui</code> Web Jump and stores the generated admin credential in the chosen
+            PRA Vault account group for injected login — the password never appears here. The Gateway's egress IP
+            is auto-added to the node firewall. Applied on Deploy/Redeploy.
+          </p>
+          <div x-show="portainerDeployForm.web_jump_enabled" x-cloak class="grid grid-cols-3 gap-3 mt-3 ml-6">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump Group</label>
+              <select x-model="portainerDeployForm.jump_group"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in portainerDeployOpts.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+              <select x-model="portainerDeployForm.jumpoint_name"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in portainerDeployOpts.gateways || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Vault Account Group</label>
+              <select x-model.number="portainerDeployForm.vault_account_group_id"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option :value="null">(none — show password instead)</option>
+                <template x-for="v in portainerDeployOpts.vault_account_groups || []" :key="v.id">
+                  <option :value="v.id" x-text="v.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div x-show="portainerNodes.length === 0"
+             class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
+          No managed Portainer server running. Click <strong>Deploy Portainer server</strong> to stand one up.
+        </div>
+
+        <div x-show="portainerNodes.length > 0"
+             class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
+          <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Zone</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Machine</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">URL</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Status</th>
+                <th class="px-4 py-3 text-right text-xs font-semibold uppercase text-gray-500">Actions</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <template x-for="n in portainerNodes" :key="n.name">
+                <tr class="hover:bg-gray-50">
+                  <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="n.name"></td>
+                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.zone"></td>
+                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.machine_type || '—'"></td>
+                  <td class="px-4 py-3 text-sm">
+                    <a x-show="n.url" :href="n.url" target="_blank"
+                       class="text-blue-600 hover:underline font-mono break-all" x-text="n.url"></a>
+                    <span x-show="!n.url" class="text-gray-400">—</span>
+                  </td>
+                  <td class="px-4 py-3 text-sm">
+                    <span :class="n.status === 'RUNNING'
+                      ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
+                      : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
+                          class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium">
+                      <span x-text="n.status"></span>
+                    </span>
+                  </td>
+                  <td class="px-4 py-3 text-sm text-right">
+                    <button @click="stopPortainerNode(n)"
+                            :disabled="portainerNodeActionPending === n.name"
+                            class="text-red-600 hover:underline disabled:opacity-40">Stop</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+        <p x-show="portainerNodeLoginHint" class="mt-2 text-xs text-gray-600" x-cloak>
+          <span class="font-medium text-gray-700">Access:</span> <span x-text="portainerNodeLoginHint"></span>
+        </p>
+        <p x-show="portainerNodes.length > 0 && !portainerNodeTokenConfigured" x-cloak
+           class="mt-2 text-xs text-amber-700">
+          No API token is stored for this node, so the environments below can't be listed yet.
+          Add one in <a href="/settings" class="underline font-medium">Settings → Containers</a>.
+        </p>
+        <p class="mt-2 text-xs text-gray-400">
+          Reachability is governed by the <code>portainer_allowed_source_cidrs</code> firewall rule
+          (tcp 9443/8000; Settings). Stop deletes the VM + firewall and clears the node's runtime config.
+        </p>
+      </div>
+    </div>
+    {% endif %}
 
     <!-- ── Portainer Endpoint Tabs ─────────────────────────────────────── -->
     <div class="mb-6 border-b border-gray-200">
@@ -109,14 +440,25 @@
       </svg>
       <p class="text-base font-semibold text-gray-800 mb-1">Portainer is not configured</p>
       <p class="text-sm text-gray-500 max-w-md mx-auto mb-4">
-        Connect a Portainer CE instance to manage on-prem Docker containers from this page.
-        Set the Portainer URL and API token in
-        <span class="font-medium text-gray-700">Settings → Integrations → Portainer CE</span>.
+        Manage Docker hosts — cloud or on-prem — from this page by either deploying a
+        managed Portainer CE server above, or connecting one you already run — set its URL
+        and API token in <span class="font-medium text-gray-700">Settings → Integrations → Portainer CE</span>.
       </p>
-      <a href="/settings"
-         class="inline-block text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition shadow-sm">
-        Open Settings
-      </a>
+      <div class="flex items-center justify-center gap-2">
+        {% if portainer_enabled %}
+        <button @click="deployPortainerNode()"
+                x-show="portainerNodeConfigured && portainerNodes.length === 0"
+                :disabled="portainerNodeDeploying"
+                class="text-sm bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg font-medium transition shadow-sm">
+          <span x-show="!portainerNodeDeploying">Deploy a managed Portainer server</span>
+          <span x-show="portainerNodeDeploying">Deploying…</span>
+        </button>
+        {% endif %}
+        <a href="/settings"
+           class="inline-block text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition shadow-sm">
+          Open Settings
+        </a>
+      </div>
     </div>
 
     <!-- ── Error banner ──────────────────────────────────────────────────── -->
@@ -281,7 +623,7 @@
       </div>
     </div>
 
-  </div><!-- /On-Premises panel -->
+  </div><!-- /Portainer panel -->
 
 
   <!-- ══════════════════════════════════════════════════════════════════════ -->
@@ -476,7 +818,7 @@
       </div>
     </div>
 
-    <!-- ── GCE Container Instances (COS on GCE — Jumpoints + Compose) ─────── -->
+    <!-- ── GCE Container Instances (COS on GCE — Gateways + Compose) ─────── -->
     <div class="mb-8">
       <div class="flex items-center justify-between mb-3">
         <h2 class="text-lg font-semibold text-gray-800">
@@ -523,7 +865,7 @@
               <tr class="hover:bg-gray-50">
                 <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="i.name"></td>
                 <td class="px-4 py-3 text-sm">
-                  <span :class="i.purpose === 'Jumpoint'
+                  <span :class="i.purpose === 'Gateway'
                     ? 'bg-indigo-100 text-indigo-700'
                     : 'bg-teal-100 text-teal-700'"
                         class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
@@ -554,7 +896,7 @@
 
       <p class="mt-2 text-xs text-gray-400">
         Both run as containers on Container-Optimised OS GCE instances.
-        <span class="font-medium">Jumpoints</span> are recreated automatically on the next VM deploy;
+        <span class="font-medium">Gateways</span> are recreated automatically on the next VM deploy;
         <span class="font-medium">Compose</span> instances are deployed via <em>+ Deploy Compose</em>.
         Stop / Delete removes the COS instance.
       </p>
@@ -566,7 +908,7 @@
         <h2 class="text-lg font-semibold text-gray-800">
           GCP Cloud Run Jobs
           <span class="ml-2 text-sm font-normal text-gray-400"
-                x-text="cloudRunJobs.length ? cloudRunJobs.length + ' jobs' : ''"></span>
+                x-text="cloudRunJobs.length ? cloudRunJobs.length + ' in flight' : ''"></span>
         </h2>
         <button @click="loadCloudRunJobs()" :disabled="cloudRunLoading"
                 class="px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-300 hover:bg-gray-50 rounded-lg transition">
@@ -614,7 +956,7 @@
 
       <p class="mt-2 text-xs text-gray-400">
         Ansible, image-promote, and Kubernetes runners execute as ephemeral Cloud Run Jobs and are
-        removed when they finish — this shows the 5 most recent (typically the ones in flight).
+        removed when they finish — only the ones still in flight are listed here.
       </p>
     </div>
 
@@ -670,6 +1012,78 @@
           </div>
         </div>
 
+        <!-- Placement (multi-region): where the single node runs. Redeploying to a
+             different region relocates it. -->
+        <div class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
+              <select x-model="deployForm.region"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+                <option value="">(current / default)</option>
+                <template x-for="r in praOpts.regions || []" :key="r">
+                  <option :value="r" x-text="r"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
+              <input type="text" x-model="deployForm.zone"
+                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono" placeholder="us-east1-b">
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-400 mt-1">
+            Blank region keeps the node's current region (or the configured default). Blank zone uses the region's
+            first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.
+            Only regions with a configured subnet are listed. Redeploying to a different region <strong>relocates</strong> the node.
+          </p>
+        </div>
+
+        <!-- PRA access (chosen at deploy/redeploy, like DB/VM deploys) -->
+        <div x-show="praOpts.configured" x-cloak
+             class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+          <label class="flex items-center gap-2 font-medium text-gray-700">
+            <input type="checkbox" x-model="deployForm.web_jump_enabled" class="rounded border-gray-300">
+            Broker the Rancher UI via a PRA Web Jump
+          </label>
+          <p class="text-[11px] text-gray-400 mt-1 ml-6">
+            Creates a <code>rancher-ui</code> Web Jump and stores the generated admin credential in the chosen
+            PRA Vault account group for injected login — the password never appears here. Applied on Deploy/Redeploy.
+          </p>
+          <div x-show="deployForm.web_jump_enabled" x-cloak class="grid grid-cols-3 gap-3 mt-3 ml-6">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump Group</label>
+              <select x-model="deployForm.jump_group"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in praOpts.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+              <select x-model="deployForm.jumpoint_name"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in praOpts.gateways || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Vault Account Group</label>
+              <select x-model.number="deployForm.vault_account_group_id"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option :value="null">(none — show password instead)</option>
+                <template x-for="v in praOpts.vault_account_groups || []" :key="v.id">
+                  <option :value="v.id" x-text="v.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+        </div>
+
         <div x-show="rancherNodes.length === 0"
              class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
           No Rancher node running. Click <strong>Deploy Rancher node</strong> to stand one up.
@@ -717,6 +1131,9 @@
             </tbody>
           </table>
         </div>
+        <p x-show="rancherLoginHint" class="mt-2 text-xs text-gray-600" x-cloak>
+          <span class="font-medium text-gray-700">Access:</span> <span x-text="rancherLoginHint"></span>
+        </p>
         <p class="mt-2 text-xs text-gray-400">
           Reachability is governed by the <code>rancher_allowed_source_cidrs</code> firewall rule (Settings).
           Stop deletes the VM + firewall and clears the node's runtime config.
@@ -1070,8 +1487,20 @@
 <script>
 function containersDashboard() {
   return {
-    // Top-level tab — Cloud is the primary view; On-Premises needs Portainer
-    activeTab: 'cloud',  // 'cloud' | 'onprem'
+    // Top-level tab — Cloud is the primary view; the Portainer tab needs Portainer
+    activeTab: 'cloud',  // 'cloud' | 'portainer' | 'rancher' | 'gateways'
+
+    // BeyondTrust Gateways
+    gateways: [],
+    gatewaysLoading: false,
+    gwDeploying: false,
+    gwError: null,
+    gwForm: { cloud: 'aws', region: '', zone: '', name: '' },
+    // Region picker for the selected cloud: the regions that carry a per-region
+    // config set (default first), plus the zone each one places a GCP host in.
+    gwRegions: [],
+    gwZoneHints: {},
+    gwRegionsLoading: false,
 
     // Portainer state
     endpoints: [],
@@ -1138,7 +1567,7 @@ function containersDashboard() {
     aciLoading: false,
     aciError: null,
 
-    // GCP Jumpoint container instances (COS on GCE)
+    // GCP Gateway container instances (COS on GCE)
     gceJumpoints: [],
     gceProject: '',
     gceLoading: false,
@@ -1160,7 +1589,7 @@ function containersDashboard() {
     // Merged view of the two COS instance kinds, tagged by purpose.
     get gceInstances() {
       return [
-        ...this.gceJumpoints.map(i => ({ ...i, purpose: 'Jumpoint' })),
+        ...this.gceJumpoints.map(i => ({ ...i, purpose: 'Gateway' })),
         ...this.gceCompose.map(i => ({ ...i, purpose: 'Compose' })),
       ];
     },
@@ -1169,20 +1598,46 @@ function containersDashboard() {
     rancherConfigured: false,
     rancherNodes: [],
     rancherServerUrl: '',
+    rancherLoginHint: '',
     rancherLoading: false,
     rancherError: null,
     rancherDeploying: false,
+    // Deploy-time region + PRA picks (parity with DB/VM deploys)
+    praOpts: { configured: false, regions: [], jump_groups: [], gateways: [], vault_account_groups: [] },
+    deployForm: { region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
     rancherActionPending: null,
     rancherImportName: '',
     rancherManifestCmd: '',
     rancherImporting: false,
 
+    // Managed Portainer server (Portainer CE container on GCE COS)
+    portainerNodeConfigured: false,
+    portainerNodes: [],
+    portainerNodeServerUrl: '',
+    portainerNodeLoginHint: '',
+    portainerNodeTokenConfigured: false,
+    portainerNodeLoading: false,
+    portainerNodeError: null,
+    portainerNodeDeploying: false,
+    portainerNodeActionPending: null,
+    portainerRegions: [],
+    // Deploy-form options: regions + the PRA pickers (same shape as praOpts).
+    portainerDeployOpts: { configured: false, regions: [], jump_groups: [], gateways: [], vault_account_groups: [] },
+    portainerDeployForm: { region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
+
     // ── Lifecycle ──────────────────────────────────────────────────────────
     async init() {
       requireAuth();
       const hash = window.location.hash.slice(1);
-      if (['onprem', 'cloud', 'rancher'].includes(hash)) {
-        this.activeTab = hash;
+      // 'onprem' is this tab's former id — kept as an alias so older links and
+      // bookmarks still land on the Portainer tab.
+      const tab = hash === 'onprem' ? 'portainer' : hash;
+      // 'gateways' is Jinja-gated below, panel and all — unlike #portainer, whose panel
+      // renders either way — so honouring it with the feature off would show a blank
+      // page. The dashboard's Gateways tile links here.
+      const tabs = ['portainer', 'cloud', 'rancher'{% if pra_enabled %}, 'gateways'{% endif %}];
+      if (tabs.includes(tab)) {
+        this.activeTab = tab;
       }
       const tasks = [
         this.loadEcsTasks(),
@@ -1193,15 +1648,21 @@ function containersDashboard() {
       ];
       {% if portainer_enabled %}
       tasks.push(this.loadEndpoints());
+      tasks.push(this.loadPortainerNode());
       {% endif %}
       {% if k8s_management_enabled %}
       tasks.push(this.loadRancher());
+      {% endif %}
+      {% if pra_enabled %}
+      // Stays lazy — the tab button loads on click. Landing here from the dashboard
+      // tile skips that click, so fetch it now or the table renders empty.
+      if (this.activeTab === 'gateways') tasks.push(this.loadGateways());
       {% endif %}
       await Promise.all(tasks);
     },
 
     async refresh() {
-      if (this.activeTab === 'onprem') {
+      if (this.activeTab === 'portainer') {
         await this.loadEndpoints();
         if (this.selectedEndpointId) {
           await Promise.all([this.loadContainers(), this.loadStacks()]);
@@ -1505,7 +1966,7 @@ function containersDashboard() {
       }
     },
 
-    // ── GCP Jumpoint container instances (COS on GCE) ──────────────────────
+    // ── GCP Gateway container instances (COS on GCE) ──────────────────────
     async loadGceJumpoints() {
       this.gceLoading = true;
       this.gceError = null;
@@ -1522,7 +1983,7 @@ function containersDashboard() {
     },
 
     async stopGceJumpoint(i) {
-      if (!confirm(`Stop Jumpoint instance "${i.name}"? The instance is deleted and recreated on the next VM deploy.`)) return;
+      if (!confirm(`Stop Gateway instance "${i.name}"? The instance is deleted and recreated on the next VM deploy.`)) return;
       this.gceActionPending = i.name;
       try {
         await API.post(`/api/containers/gce-jumpoints/${encodeURIComponent(i.name)}/stop?zone=${encodeURIComponent(i.zone)}`);
@@ -1588,18 +2049,35 @@ function containersDashboard() {
         this.rancherConfigured = !!data.configured;
         this.rancherNodes = data.nodes || [];
         this.rancherServerUrl = data.server_url || '';
+        this.rancherLoginHint = data.login_hint || '';
       } catch (e) {
         this.rancherError = e.message;
         this.rancherNodes = [];
       } finally {
         this.rancherLoading = false;
       }
+      // PRA pickers for the deploy form (best-effort; empty when PRA unconfigured).
+      try {
+        // The endpoint answers with `o.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        const o = await API.get('/api/containers/rancher/pra-options');
+        this.praOpts = { ...o, gateways: o.jumpoints || [] };
+      } catch (e) { /* leave defaults — the fieldset just stays hidden */ }
     },
 
     async deployRancher() {
       this.rancherDeploying = true;
       try {
-        const resp = await API.post('/api/containers/rancher/deploy', {});
+        const body = { web_jump_enabled: this.deployForm.web_jump_enabled };
+        if (this.deployForm.region) body.region = this.deployForm.region;
+        if ((this.deployForm.zone || '').trim()) body.zone = this.deployForm.zone.trim();
+        if (this.deployForm.web_jump_enabled) {
+          if (this.deployForm.jump_group) body.jump_group = this.deployForm.jump_group;
+          if (this.deployForm.jumpoint_name) body.jumpoint_name = this.deployForm.jumpoint_name;
+          if (this.deployForm.vault_account_group_id) body.vault_account_group_id = this.deployForm.vault_account_group_id;
+        }
+        const resp = await API.post('/api/containers/rancher/deploy', body);
         window.location.href = `/jobs/${resp.job_id}`;
       } catch (e) {
         toast(e.message, 'error');
@@ -1641,6 +2119,158 @@ function containersDashboard() {
       }
     },
 
+    // ── Managed Portainer server ─────────────────────────────────────────────
+    // ── BeyondTrust Gateways ───────────────────────────────────────────────
+    async loadGateways() {
+      this.gatewaysLoading = true;
+      this.gwError = null;
+      try {
+        const data = await API.get('/api/gateways');
+        this.gateways = data.gateways || [];
+      } catch (e) {
+        this.gwError = e.message;
+        this.gateways = [];
+      } finally {
+        this.gatewaysLoading = false;
+      }
+      // Regions first, so the suggested name carries the region it will deploy to.
+      if (!this.gwRegions.length) await this.gwLoadRegions();
+      if (!this.gwForm.name) this.gwSuggestName();
+    },
+
+    async gwLoadRegions() {
+      // The picker offers what the dashboard can actually place a gateway in: the
+      // configured default region plus every region with a config set of its own.
+      this.gwRegionsLoading = true;
+      try {
+        const data = await API.get('/api/regions?cloud=' + encodeURIComponent(this.gwForm.cloud));
+        this.gwRegions = data.configured || [];
+        this.gwZoneHints = data.zones || {};
+      } catch (e) {
+        // Leave the picker empty — its "(configured default)" option still deploys.
+        this.gwRegions = []; this.gwZoneHints = {};
+      } finally {
+        this.gwRegionsLoading = false;
+      }
+      if (!this.gwRegions.includes(this.gwForm.region)) {
+        this.gwForm.region = this.gwRegions[0] || '';
+      }
+      this.gwForm.zone = '';
+    },
+
+    async gwCloudChanged() {
+      // Regions are per-cloud, so the list and the chosen region both have to move.
+      await this.gwLoadRegions();
+      this.gwSuggestName();
+    },
+
+    gwRegionChanged() {
+      // The zone hint follows the region; a zone left over from the previous one
+      // would place the host outside the region that was just picked.
+      this.gwForm.zone = '';
+      this.gwSuggestName();
+    },
+
+    async gwSuggestName() {
+      // Best-effort convenience: a blank name is a validation error server-side, so
+      // prefill a free one. A failure here just leaves the field for the operator.
+      try {
+        const q = new URLSearchParams({ cloud: this.gwForm.cloud, region: this.gwForm.region || '' });
+        const data = await API.get('/api/gateways/suggest-name?' + q.toString());
+        this.gwForm.name = data.name || '';
+      } catch (e) { /* leave the field as the operator left it */ }
+    },
+
+    async deployGateway() {
+      this.gwDeploying = true;
+      this.gwError = null;
+      try {
+        const body = {
+          cloud: this.gwForm.cloud,
+          region: this.gwForm.region || '',
+          zone: this.gwForm.cloud === 'gcp' ? (this.gwForm.zone || '') : '',
+          name: this.gwForm.name || '',
+        };
+        await API.post('/api/gateways/deploy', body);
+        this.gwForm.name = '';
+        await this.loadGateways();
+      } catch (e) {
+        this.gwError = e.message;
+      } finally {
+        this.gwDeploying = false;
+      }
+    },
+
+    async destroyGateway(g) {
+      if (!confirm(`Remove gateway "${g.name}"? Sessions routed through it will drop.`)) return;
+      this.gwError = null;
+      try {
+        await API.del('/api/gateways/' + g.id);
+        await this.loadGateways();
+      } catch (e) {
+        this.gwError = e.message;
+      }
+    },
+
+    async loadPortainerNode() {
+      this.portainerNodeLoading = true;
+      this.portainerNodeError = null;
+      try {
+        const data = await API.get('/api/containers/portainer/node');
+        this.portainerNodeConfigured = !!data.configured;
+        this.portainerNodes = data.nodes || [];
+        this.portainerNodeServerUrl = data.server_url || '';
+        this.portainerNodeLoginHint = data.login_hint || '';
+        this.portainerNodeTokenConfigured = !!data.token_configured;
+      } catch (e) {
+        this.portainerNodeError = e.message;
+        this.portainerNodes = [];
+      } finally {
+        this.portainerNodeLoading = false;
+      }
+      // Regions + PRA pickers for the deploy form (best-effort; empty just leaves the
+      // defaults and keeps the PRA fieldset hidden).
+      try {
+        const opts = await API.get('/api/containers/portainer/node/deploy-options');
+        // The endpoint answers with `opts.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        this.portainerDeployOpts = { ...opts, gateways: opts.jumpoints || [] };
+        this.portainerRegions = opts.regions || [];
+      } catch (e) { /* leave defaults — the select still offers "(current / default)" */ }
+    },
+
+    async deployPortainerNode() {
+      this.portainerNodeDeploying = true;
+      try {
+        const body = { web_jump_enabled: this.portainerDeployForm.web_jump_enabled };
+        if (this.portainerDeployForm.region) body.region = this.portainerDeployForm.region;
+        if ((this.portainerDeployForm.zone || '').trim()) body.zone = this.portainerDeployForm.zone.trim();
+        if (this.portainerDeployForm.web_jump_enabled) {
+          if (this.portainerDeployForm.jump_group) body.jump_group = this.portainerDeployForm.jump_group;
+          if (this.portainerDeployForm.jumpoint_name) body.jumpoint_name = this.portainerDeployForm.jumpoint_name;
+          if (this.portainerDeployForm.vault_account_group_id) body.vault_account_group_id = this.portainerDeployForm.vault_account_group_id;
+        }
+        const resp = await API.post('/api/containers/portainer/node/deploy', body);
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message, 'error');
+        this.portainerNodeDeploying = false;
+      }
+    },
+
+    async stopPortainerNode(n) {
+      if (!confirm(`Tear down Portainer server "${n.name}"? This deletes the VM + firewall and clears its URL/token. The node is ephemeral, so its users, environments and settings are lost.`)) return;
+      this.portainerNodeActionPending = n.name;
+      try {
+        const resp = await API.post(`/api/containers/portainer/node/${encodeURIComponent(n.name)}/stop?zone=${encodeURIComponent(n.zone)}`);
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message, 'error');
+        this.portainerNodeActionPending = null;
+      }
+    },
+
     // ── UI helpers ─────────────────────────────────────────────────────────
     stateBadge(state) {
       if (state === 'running') return 'bg-green-100 text-green-700';
@@ -1656,9 +2286,9 @@ function containersDashboard() {
       return 'bg-blue-100 text-blue-600';
     },
 
+    // Only in-flight jobs reach this table — the API filters COMPLETED out.
     cloudRunStatusBadge(status) {
       if (status === 'RUNNING')   return 'bg-green-100 text-green-700';
-      if (status === 'COMPLETED') return 'bg-gray-100 text-gray-500';
       if (status === 'PENDING')   return 'bg-yellow-100 text-yellow-700';
       return 'bg-blue-100 text-blue-600';
     },

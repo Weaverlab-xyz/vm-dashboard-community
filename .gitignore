@@ -35,6 +35,13 @@ docker-compose.override.windows.yml
 *.p12
 *.pfx
 
+# Config migration bundles — plaintext credentials read out of one instance to
+# be written into another. scripts/migrate-config.sh defaults them to
+# ~/.dashboard-migrate/ (outside the repo, mode 0600); this covers --out paths
+# pointed somewhere inside a checkout.
+bundle-*.json
+config-bundle*.json
+
 # Local SQLite fallback (production uses Postgres via Docker Compose)
 *.db
 *.sqlite3

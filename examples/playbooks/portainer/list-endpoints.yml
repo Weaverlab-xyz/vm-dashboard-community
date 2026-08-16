@@ -1,0 +1,92 @@
+# Read-only smoke test: list the environments (Docker hosts) your Portainer server
+# manages, with their online/offline status.
+#
+# Target: any target — this is a `hosts: localhost` play that reaches OUT to the
+# Portainer REST API. Nothing is installed on the target.
+#
+# OPTIONAL — fetch the PAT from BeyondTrust Password Safe instead of the injected one
+# by setting a SECRET path (folder/title):
+#   portainer_pat_secret: app-secrets/portainer-pat
+#
+# Connection is auto-injected when Portainer is configured (Settings → Integrations →
+# Portainer CE, or a managed-node deploy): PORTAINER_URL / PORTAINER_PAT /
+# PORTAINER_VERIFY_SSL arrive as environment variables, so you supply nothing. To
+# point at a DIFFERENT server, override portainer_url / portainer_pat as extra vars.
+#
+# extra_vars (all optional):
+#   portainer_url: https://1.2.3.4:9443
+#   portainer_pat: <api token>
+- name: List Portainer environments
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    # Optional: fetch the PAT from BeyondTrust Password Safe instead of using the
+    # injected one — set a SECRET path (folder/title). Blank = use PORTAINER_PAT.
+    portainer_pat_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+    # A dashboard-deployed node serves a self-signed cert on :9443, so the deploy
+    # turns verification off. Honour that rather than hard-coding `true`.
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+  tasks:
+    # Fetched into its OWN fact, never onto portainer_pat: extra vars outrank set_fact,
+    # so writing back to that name would be silently ignored when the PAT was also
+    # supplied as an extra var.
+    - name: Fetch the Portainer API token from Password Safe
+      ansible.builtin.set_fact:
+        _ps_portainer_pat: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=portainer_pat_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: portainer_pat_secret | length > 0
+
+    - name: Resolve the effective token (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _pat: "{{ _ps_portainer_pat | default(portainer_pat, true) }}"
+      no_log: true
+
+    - name: Validate connection
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - _pat | length > 0
+        fail_msg: >-
+          No Portainer connection. Configure one in Settings → Integrations → Portainer CE
+          (or deploy a managed server), or pass portainer_url / portainer_pat as extra vars.
+
+    - name: GET /api/endpoints
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints"
+        method: GET
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        return_content: true
+        status_code: 200
+      register: endpoints
+      no_log: true              # the API token rides the request headers
+
+    - name: Show environments
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.Name }} (id={{ item.Id }}) —
+          {{ 'up' if item.Status | default(0) == 1 else 'down' }}
+      loop: "{{ endpoints.json }}"
+      loop_control:
+        label: "{{ item.Name }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: "{{ endpoints.json | length }} environment(s); online: {{ endpoints.json | selectattr('Status', 'equalto', 1) | list | length }}"

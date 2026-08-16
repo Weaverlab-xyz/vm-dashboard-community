@@ -13,9 +13,10 @@ Azure API endpoints:
 """
 import asyncio
 import logging
+import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import Job, User, VirtualDesktop, get_db
 from ..models.azure import (
+    AzureBulkDeployItem,
     AzureBulkDeployRequest,
     AzureBulkDeployResponse,
     AzureCreateImageRequest,
@@ -36,10 +38,10 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..services import (azure_service, azure_listing, job_service, cache_service,
-                        cloud_stats, region_catalog, workgroup_service)
+from ..services import (azure_service, azure_listing, deploy_batch, job_service,
+                        cache_service, cloud_stats, region_catalog, workgroup_service)
 from ..services.azure_service import AzureError
-from .auth import get_current_user, require_admin, require_permission
+from .auth import require_admin, require_permission
 
 router = APIRouter(prefix="/api/azure", tags=["azure"])
 
@@ -68,60 +70,8 @@ def _cfg(key: str, fallback: str = "") -> str:
     return config_service.get(key) or getattr(settings, key, fallback)
 
 
-async def _resolve_azure_aci_deploy_key() -> str:
-    """Return the BeyondTrust Jumpoint Docker deploy key for Azure ACI launches.
-
-    Resolution order:
-      1. Direct DB field `azure_aci_docker_deploy_key` (preferred, backend-neutral
-         — config_service resolves through whichever secrets backend the user
-         picked on /secrets).
-      2. Legacy Password-Safe-only fallback via `azure_aci_ps_deploy_key_title`.
-    Returns empty string if neither is configured (caller decides if that's fatal).
-    """
-    direct = _cfg("azure_aci_docker_deploy_key")
-    if direct:
-        return direct
-    title = _cfg("azure_aci_ps_deploy_key_title")
-    if title:
-        from ..services import btapi_service
-        try:
-            return await btapi_service.get_ps_secret(title)
-        except Exception as e:
-            logger.warning("Azure ACI deploy key fetch from Password Safe failed (%s)", e)
-    return ""
 
 
-async def _resolve_acr_credentials() -> tuple:
-    """Return (acr_server, acr_username, acr_password) for the ACI Ansible runner.
-
-    Resolution order:
-      1. Direct DB fields `azure_acr_username` / `azure_acr_password` (preferred,
-         backend-neutral; whichever secrets backend the user selected on /secrets
-         resolves them transparently via config_service).
-      2. Legacy Password-Safe-only fallback via `azure_acr_*_secret_title` →
-         `btapi_service.get_ps_secret(...)`.
-
-    If `azure_acr_server` is unset, returns ("", "", "") so callers fall back to
-    an unauthenticated Docker Hub pull.
-    """
-    server = _cfg("azure_acr_server")
-    if not server:
-        return "", "", ""
-    username = _cfg("azure_acr_username")
-    password = _cfg("azure_acr_password")
-    if username and password:
-        return server, username, password
-    user_title = _cfg("azure_acr_username_secret_title")
-    pass_title = _cfg("azure_acr_password_secret_title")
-    if user_title and pass_title:
-        from ..services import btapi_service
-        try:
-            username = await btapi_service.get_ps_secret(user_title)
-            password = await btapi_service.get_ps_secret(pass_title)
-            return server, username, password
-        except Exception as e:
-            logger.warning("ACR credential fetch from Password Safe failed (%s) — pulling without auth", e)
-    return server, "", ""
 
 
 def _rg():
@@ -154,8 +104,40 @@ def _resolve_location(location: Optional[str]) -> str:
     return loc
 
 
-def _aci_rg():
-    return _cfg("azure_aci_resource_group") or _rg()
+
+
+async def _reject_cross_region_network(subnet_id: str, nsg_ids, location: str) -> None:
+    """400 when a picked subnet/NSG lives in a region other than ``location``.
+
+    Azure catches this itself — ``azure_service._validate_deploy_consistency`` raises
+    before any resource is created — but that runs in the RUNNER, per VM: on a bulk
+    deploy it fires once the N child job rows already exist and fails every one of
+    them. Rejecting the request instead keeps the mismatch in front of the operator,
+    where it is fixable, and creates no jobs.
+
+    The mismatch is easy to submit because a subnet's ARM id embeds the VNet's
+    resource group, not its region, so a stale picker selection reads as plausible:
+    the sandbox names its VNet/subnet identically in every region it is run in.
+
+    Ids whose region can't be resolved are left alone (see ``resource_locations``) —
+    the runner-side check is still behind this.
+    """
+    ids = [i for i in [subnet_id, *(nsg_ids or [])] if i and str(i).strip()]
+    if not ids:
+        return
+    want = region_catalog.normalize("azure", location)
+    found = await azure_service.resource_locations(ids)
+    for rid in ids:
+        actual = found.get(rid) or ""
+        if not actual or region_catalog.normalize("azure", actual) == want:
+            continue
+        kind = "subnet" if "/subnets/" in rid else "NSG"
+        raise HTTPException(
+            status_code=400,
+            detail=(f"The selected {kind} '{rid.rsplit('/', 1)[-1]}' is in {actual}, but "
+                    f"the deploy location is {location}. Azure VNets and NSGs are "
+                    f"regional — pick a {kind} in {location}, or deploy into {actual}."),
+        )
 
 
 async def _validate_ssh_key_override(override) -> None:
@@ -171,44 +153,60 @@ async def _validate_ssh_key_override(override) -> None:
         raise HTTPException(status_code=400, detail=f"SSH key secret '{override}' is invalid: {e}")
 
 
-async def _effective_ssh_public_key(req) -> str:
-    """Public key to inject at launch: from the per-launch override secret when set,
-    else the key the form already resolved (``req.ssh_public_key``). Keeps the injected
-    key in sync with the secret Entitle registration reads the private key from."""
-    override = getattr(req, "ssh_key_secret_override", None)
-    if not override:
-        return req.ssh_public_key
-    try:
-        return await azure_service.resolve_azure_ssh_public_key(_cfg("azure_key_vault_url"), override, "")
-    except AzureError:
-        return req.ssh_public_key
 
 
 # ── Private images (gallery + managed) ───────────────────────────────────────
 
+CACHE_KEY_IMAGES = "azure_images"
+
+
+def images_cache_key(location: str) -> str:
+    """Cache key for the private-image list, scoped per location — the one place this
+    key is built.
+
+    This does not read one fixed gallery: ``_fetch_private_images`` resolves
+    ``gallery_name`` / ``gallery_resource_group`` / ``resource_group`` per region
+    through ``azure_region_configs``. A single ``key_global`` key therefore let
+    whichever region loaded first own the list for the whole TTL, and the Images tab
+    showed another region's gallery. Same per-region keying as
+    ``network_opts_cache_key`` below."""
+    return cache_service.key_param(CACHE_KEY_IMAGES, location=location)
+
+
+async def _fetch_private_images(location: str) -> dict:
+    """Shared Image Gallery images + standalone Managed Images for ``location``.
+    Shared by /images, /dashboard-stats and the startup warmer in main.py, so all
+    three agree on the key AND on how the gallery is resolved.
+
+    Gallery defaults resolve through the per-region config sets (PR3). With no
+    region map configured this returns the flat azure_shared_image_gallery /
+    azure_gallery_resource_group / azure_resource_group values verbatim — which is
+    all the warmer used to read, so on a multi-region setup its pass overwrote the
+    correctly-resolved payload with one built from the flat defaults."""
+    from ..services.region_config import resolve_azure_region
+    region = resolve_azure_region(location)
+    return await azure_service.list_private_images(
+        region["gallery_name"],
+        region["gallery_resource_group"],
+        region["resource_group"] or "vm-cli-rg",
+    )
+
+
 @router.get("/images")
 async def list_images(
+    location: Optional[str] = None,
     current_user: User = Depends(require_permission("azure", "read")),
 ):
-    """List private images: Shared Image Gallery images + standalone Managed Images. Served from cache (5 min)."""
-    cache_key = cache_service.key_global("azure_images")
-    ttl = cache_service.TTL["azure_images"]
-
-    # Gallery defaults resolve through the per-region config sets (PR3). With no
-    # region map configured this returns the flat azure_shared_image_gallery /
-    # azure_gallery_resource_group / azure_resource_group values verbatim.
-    from ..services.region_config import resolve_azure_region
-    region = resolve_azure_region(_loc())
-
-    async def _fetch():
-        return await azure_service.list_private_images(
-            region["gallery_name"],
-            region["gallery_resource_group"],
-            region["resource_group"] or "vm-cli-rg",
-        )
+    """List private images: Shared Image Gallery images + standalone Managed Images.
+    ``?location=`` scopes the lookup to a specific region (defaults to the configured
+    ``azure_location``); served from a per-region cache (5 min)."""
+    loc = _resolve_location(location)
+    cache_key = images_cache_key(loc)
+    ttl = cache_service.TTL[CACHE_KEY_IMAGES]
 
     try:
-        payload, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        payload, cached_at = await cache_service.get_or_refresh(
+            cache_key, ttl, lambda: _fetch_private_images(loc))
         images = payload.get("images", [])
         warnings = payload.get("warnings", [])
         return {
@@ -216,6 +214,7 @@ async def list_images(
             "count": len(images),
             "cached_at": cached_at,
             "warnings": warnings,
+            "location": loc,
         }
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -251,6 +250,26 @@ async def list_marketplace_images(
 
 # ── Network options for deploy form ──────────────────────────────────────────
 
+# Cache identity for the per-location network options. Exported as a builder so the
+# startup warmer in main.py produces the byte-identical key this route reads — the
+# warmer used to write key_global("azure_network_opts") against this route's
+# key_param(location=...), warming a key nobody read.
+CACHE_KEY_NETWORK_OPTS = "azure_network_opts"
+
+
+def network_opts_cache_key(location: str) -> str:
+    """Cache key for `location`'s network options — the one place this key is built."""
+    return cache_service.key_param(CACHE_KEY_NETWORK_OPTS, location=location)
+
+
+async def _fetch_network_options(location: str) -> dict:
+    """Locations, VM sizes, subnets, NSGs for `location`. Shared by /network-options
+    and the startup warmer so both resolve the resource groups the same way."""
+    return await azure_service.get_network_options(
+        location, _cfg("azure_vnet_resource_group"), _rg()
+    )
+
+
 @router.get("/network-options", response_model=AzureNetworkOptions)
 async def network_options(
     location: Optional[str] = None,
@@ -261,18 +280,14 @@ async def network_options(
     ``location`` (default: the configured ``azure_location``); pass ?location= to
     target another region. Served from a per-region cache (10 min); ?bust=true forces a refresh."""
     loc = _resolve_location(location)
-    cache_key = cache_service.key_param("azure_network_opts", location=loc)
-    ttl = cache_service.TTL["azure_network_opts"]
-
-    async def _fetch():
-        return await azure_service.get_network_options(
-            loc, _cfg("azure_vnet_resource_group"), _rg()
-        )
+    cache_key = network_opts_cache_key(loc)
+    ttl = cache_service.TTL[CACHE_KEY_NETWORK_OPTS]
 
     try:
         if bust:
             await cache_service.invalidate(cache_key)
-        opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        opts, cached_at = await cache_service.get_or_refresh(
+            cache_key, ttl, lambda: _fetch_network_options(loc))
         return AzureNetworkOptions(
             location=opts.get("location", ""),
             locations=opts["locations"],
@@ -581,14 +596,11 @@ async def azure_dashboard_stats(
     except AzureError:
         pass
     try:
-        from ..services.region_config import resolve_azure_region
-        region = resolve_azure_region(_loc())
+        loc = _loc()
         payload, _ = await cache_service.get_or_refresh(
-            cache_service.key_global("azure_images"),
-            cache_service.TTL["azure_images"],
-            lambda: azure_service.list_private_images(
-                region["gallery_name"], region["gallery_resource_group"],
-                region["resource_group"] or "vm-cli-rg"))
+            images_cache_key(loc),
+            cache_service.TTL[CACHE_KEY_IMAGES],
+            lambda: _fetch_private_images(loc))
         out["images"] = {"total": len(payload.get("images", []))}
     except AzureError:
         pass
@@ -640,16 +652,112 @@ async def list_vms(
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
+async def _fan_out_batch(
+    req: AzureDeployRequest, db: Session, current_user: User,
+    *, loc: str, rg: str, workgroup: str,
+) -> AzureDeployResponse:
+    """Fan a ``count > 1`` deploy out into one ``azure_bulk_deploy`` parent plus N
+    ``queued`` ``azure_deploy`` children — the same parent type the multi-select bulk
+    route uses, with every child built from the one image.
+
+    A separate module-level function, NOT an ``if`` inside ``deploy_vm``:
+    ``test_worker_dispatch``'s children-are-unclaimable rule walks the AST per
+    function, so a ``children``-carrying create_job in the same function as the single
+    deploy's ``pending`` one reads as a violation whatever the runtime branch does.
+    """
+    names = deploy_batch.expand_names(req.vm_name, req.count, "azure")
+    deploy_batch.reject_name_collisions(db, "azure_deploy", names)
+    await deploy_batch.enforce_admission(
+        "azure:vm:deploy",
+        requests=deploy_batch.batch_request_docs(
+            {"region": loc, "instance_type": req.vm_size, "image": req.image_id},
+            names),
+        actor=current_user, db=db,
+    )
+
+    # The runner reconstructs an AzureBulkDeployRequest from the parent, so build one
+    # here from the single request. Fields the bulk model doesn't declare (vm_name,
+    # count) are dropped; everything it shares — including the PRA overrides — carries.
+    bulk = AzureBulkDeployRequest(
+        items=[AzureBulkDeployItem(vm_name=n) for n in names],
+        **{k: v for k, v in req.model_dump().items()
+           if k in AzureBulkDeployRequest.model_fields and k != "items"},
+    )
+
+    batch_id = uuid.uuid4().hex[:12]
+    children = []
+    for name in names:
+        job = job_service.create_job(
+            db,
+            job_type="azure_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be created a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "image_id": req.image_id,
+                "vm_name": name,
+                "vm_size": req.vm_size,
+                "location": loc,
+                "resource_group": rg,
+                "subnet_id": req.subnet_id,
+                "nsg_ids": req.nsg_ids,
+                "create_public_ip": req.create_public_ip,
+                "os_type": req.os_type,
+                "trusted_launch": req.trusted_launch,
+                "ssh_username": req.ssh_username,
+                "workgroup": workgroup,
+                "bulk": True,
+                "register_in_entitle": req.register_in_entitle,
+                "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ssh_key_secret_override": req.ssh_key_secret_override,
+            },
+        )
+        job_service.set_cloud_resource_id(db, job.id, name)
+        job_service.log_audit(
+            db, current_user.username, "azure_deploy",
+            details={"image_id": req.image_id, "vm_name": name,
+                     "workgroup": workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "vm_name": name})
+
+    parent = job_service.create_job(
+        db,
+        job_type="azure_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={
+            "location": loc,
+            "resource_group": rg,
+            "workgroup": workgroup,
+            "req": bulk.model_dump(),
+            "children": children,
+        },
+    )
+    return AzureDeployResponse(
+        job_id=parent.id,
+        vm_name=names[0],
+        message=f"Azure deployment queued for {len(names)} VMs ({names[0]} … {names[-1]})",
+        count=len(names),
+        batch_id=batch_id,
+        job_ids=[c["job_id"] for c in children],
+        names=names,
+    )
+
+
 @router.post("/deploy", response_model=AzureDeployResponse)
 async def deploy_vm(
     req: AzureDeployRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "write")),
 ):
     """
-    Deploy an Azure VM from a private image (gallery, managed, or marketplace).
-    Returns a job_id trackable at /api/jobs/{job_id} or /ws/jobs/{job_id}.
+    Deploy one or more Azure VMs from a private image (gallery, managed, or
+    marketplace). Returns a job_id trackable at /api/jobs/{job_id} or /ws/jobs/{job_id}.
+    ``count > 1`` fans out into a batch (see ``_fan_out_batch``).
     """
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
         raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
@@ -659,16 +767,22 @@ async def deploy_vm(
     # deploy in a non-default region lands in that region's RG; falls back to the
     # flat azure_resource_group for single-region setups.
     rg = req.resource_group or _rg_for(loc)
+    await _reject_cross_region_network(req.subnet_id, req.nsg_ids, loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)
+
+    if req.count > 1:
+        return await _fan_out_batch(req, db, current_user,
+                                    loc=loc, rg=rg, workgroup=workgroup)
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
     admission_service.enforce(
         "azure:vm:deploy",
         request={"region": loc, "instance_type": req.vm_size,
-                 "image": req.image_id, "name": req.vm_name},
+                 "image": req.image_id, "name": req.vm_name,
+                 "count": 1, "batch": False},
         actor=current_user, db=db,
     )
 
@@ -694,6 +808,10 @@ async def deploy_vm(
             "trusted_launch": req.trusted_launch,
             "ssh_username": req.ssh_username,  # so /vms/{name}/ssh-key + /admin-password can echo the right user
             "workgroup": workgroup,
+            # Full request so the runner can rebuild the deploy call. Only secret
+            # *references* live on it, resolved at deploy time — same shape as the
+            # OCI and Packer jobs.
+            "req": req.model_dump(),
         },
     )
     job_service.set_cloud_resource_id(db, job.id, req.vm_name)
@@ -702,8 +820,6 @@ async def deploy_vm(
         db, current_user.username, "azure_deploy",
         details={"image_id": req.image_id, "vm_name": req.vm_name, "workgroup": workgroup},
     )
-
-    background_tasks.add_task(_run_deploy, job.id, req, rg, loc)
 
     return AzureDeployResponse(
         job_id=job.id,
@@ -717,7 +833,6 @@ async def deploy_vm(
 @router.post("/bulk-deploy", response_model=AzureBulkDeployResponse)
 async def bulk_deploy_vms(
     req: AzureBulkDeployRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "write")),
 ):
@@ -734,19 +849,67 @@ async def bulk_deploy_vms(
     req.location = loc            # normalise so the runner uses the resolved location
     # Region-aware RG resolution (PR3) — see deploy_vm above.
     rg = req.resource_group or _rg_for(loc)
+    await _reject_cross_region_network(req.subnet_id, req.nsg_ids, loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
-    job_items = []
+    # Bulk means one VM per selected IMAGE, so every item has to resolve to one —
+    # either its own or the batch-level default.
     for item in req.items:
+        if not (item.image_id or req.image_id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"VM '{item.vm_name}' has no image: set image_id on the item "
+                       "or supply a request-level image_id.")
+
+    # Names here are hand-typed per row in the bulk modal, so unlike the count path
+    # they can genuinely repeat. Checked before anything is created.
+    deploy_batch.reject_name_collisions(
+        db, "azure_deploy", [i.vm_name for i in req.items])
+
+    # Policy gate every item BEFORE the first create_job. This route had no gate at
+    # all, so allowed_regions / instance_size_caps / prod_window silently did not
+    # apply to batches. Per item because each carries its own image.
+    await deploy_batch.enforce_admission(
+        "azure:vm:deploy",
+        requests=[{"region": loc, "instance_type": req.vm_size,
+                   "image": item.image_id or req.image_id, "name": item.vm_name,
+                   "count": len(req.items), "batch": True}
+                  for item in req.items],
+        actor=current_user, db=db,
+    )
+
+    # One job row per VM so callers get all job IDs immediately.
+    #
+    # Created ``queued``, not ``pending``: the parent azure_bulk_deploy job below drives
+    # them, and the runner claims on `status='pending' AND job_type IN HANDLED_TYPES`.
+    # Left pending they would be claimed and deployed a second time, concurrently with
+    # the parent — every VM created twice.
+    batch_id = uuid.uuid4().hex[:12]
+    job_items = []
+    children = []
+    for item in req.items:
+        # Resolve the per-item image once, here, so the runner never has to re-derive
+        # the fallback and the child row records what was actually used.
+        resolved = {
+            "image_id":        item.image_id or req.image_id,
+            "image_publisher": item.image_publisher if item.image_publisher is not None else req.image_publisher,
+            "image_offer":     item.image_offer if item.image_offer is not None else req.image_offer,
+            "image_sku":       item.image_sku if item.image_sku is not None else req.image_sku,
+            "image_version":   item.image_version if item.image_version is not None else req.image_version,
+            "os_type":         item.os_type or req.os_type,
+            "trusted_launch":  req.trusted_launch if item.trusted_launch is None else item.trusted_launch,
+        }
         job = job_service.create_job(
             db,
             job_type="azure_deploy",
             created_by=current_user.username,
             workgroup=workgroup,
+            status="queued",
+            batch_id=batch_id,
             metadata={
-                "image_id": req.image_id,
+                "image_id": resolved["image_id"],
                 "vm_name": item.vm_name,
                 "vm_size": req.vm_size,
                 "location": loc,
@@ -754,24 +917,48 @@ async def bulk_deploy_vms(
                 "subnet_id": req.subnet_id,
                 "nsg_ids": req.nsg_ids,
                 "create_public_ip": req.create_public_ip,
-                "os_type": req.os_type,
-                "trusted_launch": req.trusted_launch,
+                "os_type": resolved["os_type"],
+                "trusted_launch": resolved["trusted_launch"],
                 "ssh_username": req.ssh_username,
                 "workgroup": workgroup,
                 "bulk": True,
+                # Parity with the AWS children. The runner reads these off the parent's
+                # req blob today, so this changes no behaviour — it is what the jobs UI
+                # and any future per-child rerun would read.
+                "register_in_entitle": req.register_in_entitle,
+                "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ssh_key_secret_override": req.ssh_key_secret_override,
             },
         )
         job_service.set_cloud_resource_id(db, job.id, item.vm_name)
         job_service.log_audit(
             db, current_user.username, "azure_deploy",
-            details={"image_id": req.image_id, "vm_name": item.vm_name, "workgroup": workgroup, "bulk": True},
+            details={"image_id": resolved["image_id"], "vm_name": item.vm_name,
+                     "workgroup": workgroup, "bulk": True},
         )
         job_items.append((job.id, item.vm_name))
+        children.append({"job_id": job.id, "vm_name": item.vm_name, **resolved})
 
-    background_tasks.add_task(_run_bulk_deploy, job_items, req, rg, loc)
+    # One parent job for the whole batch — the runner claims this, and it drives the
+    # queued children above, sharing a single ACI Jumpoint container across them.
+    job_service.create_job(
+        db,
+        job_type="azure_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={
+            "location": loc,
+            "resource_group": rg,
+            "workgroup": workgroup,
+            "req": req.model_dump(),
+            "children": children,
+        },
+    )
 
     return AzureBulkDeployResponse(
-        jobs=[AzureDeployResponse(job_id=jid, vm_name=vn) for jid, vn in job_items]
+        jobs=[AzureDeployResponse(job_id=jid, vm_name=vn) for jid, vn in job_items],
+        batch_id=batch_id,
     )
 
 
@@ -827,7 +1014,6 @@ async def reassign_vm_workgroup(
 @router.delete("/vms/{vm_name}")
 async def destroy_vm(
     vm_name: str,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "delete")),
 ):
@@ -851,13 +1037,18 @@ async def destroy_vm(
             break
 
     if not deploy_job:
-        return await _destroy_without_deploy_job(vm_name, db, current_user, background_tasks)
+        return await _destroy_without_deploy_job(vm_name, db, current_user)
+
+    # Resolve the resource group here and persist it: the runner rebuilds the call from
+    # metadata, and re-deriving it there would read whatever `azure_resource_group` is
+    # configured at run time rather than the group the VM was actually deployed into.
+    rg = deploy_job.metadata_dict.get("resource_group") or _rg()
 
     destroy_job = job_service.create_job(
         db,
         job_type="azure_destroy",
         created_by=current_user.username,
-        metadata={"vm_name": vm_name, "deploy_job_id": deploy_job.id},
+        metadata={"vm_name": vm_name, "deploy_job_id": deploy_job.id, "resource_group": rg},
     )
 
     job_service.log_audit(
@@ -865,14 +1056,11 @@ async def destroy_vm(
         details={"vm_name": vm_name},
     )
 
-    rg = deploy_job.metadata_dict.get("resource_group") or _rg()
-    background_tasks.add_task(_run_destroy, destroy_job.id, deploy_job.id, vm_name, rg)
-
     return {"job_id": destroy_job.id, "status": "pending", "message": f"Azure VM '{vm_name}' termination queued"}
 
 
 async def _destroy_without_deploy_job(
-    vm_name: str, db: Session, current_user: User, background_tasks: BackgroundTasks,
+    vm_name: str, db: Session, current_user: User,
 ) -> dict:
     """Fallback destroy for VMs that have no completed ``azure_deploy`` job — VDI
     pool seats and cloud-recovered ("unknown") VMs.
@@ -930,7 +1118,6 @@ async def _destroy_without_deploy_job(
     )
     # No deploy job to fetch/mark-destroyed: _run_destroy treats a missing
     # deploy_job_id as "nothing extra to clean up" and still terminates the VM.
-    background_tasks.add_task(_run_destroy, destroy_job.id, "", vm_name, rg)
     return {"job_id": destroy_job.id, "status": "pending", "message": f"Azure VM '{vm_name}' termination queued"}
 
 
@@ -940,7 +1127,6 @@ async def _destroy_without_deploy_job(
 async def create_image_from_vm(
     vm_name: str,
     req: AzureCreateImageRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "write")),
 ):
@@ -978,8 +1164,6 @@ async def create_image_from_vm(
         details={"vm_name": vm_name, "image_name": req.name, "generalize": req.generalize},
     )
 
-    background_tasks.add_task(_run_create_image, job.id, vm_name, rg, req)
-
     return {"job_id": job.id, "status": "pending", "message": f"Image capture queued for VM '{vm_name}'"}
 
 
@@ -1001,7 +1185,6 @@ class ExportImageResponse(BaseModel):
 async def export_managed_image(
     image_name: str,
     req: ExportImageRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "write")),
 ):
@@ -1049,538 +1232,19 @@ async def delete_image(
         db, current_user.username, "azure_delete_image",
         details={"image_name": image_name},
     )
-    await cache_service.invalidate(cache_service.key_global("azure_images"))
+    # By prefix, not by key: the image list is cached per location now, so an
+    # exact-key invalidate would silently clear nothing.
+    await cache_service.invalidate_prefix(CACHE_KEY_IMAGES)
     return {"deleted": True, "image_name": image_name}
 
 
 # ── Background task helpers ───────────────────────────────────────────────────
 
-def _get_db_session():
-    from ..database import SessionLocal
-    return SessionLocal()
 
 
-async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
-    db = _get_db_session()
-    result = {}
-    is_windows = req.os_type.lower() == "windows"
-    try:
-        job_service.set_running(db, job_id)
-
-        # Windows: generate + vault the admin password before any cloud
-        # resources exist — a VM whose password can't be retrieved is useless.
-        admin_password = ""
-        if is_windows:
-            job_service.update_progress(db, job_id, 5, "Generating Windows admin password…")
-            admin_password = azure_service.generate_windows_admin_password()
-            backend, ref = await asyncio.to_thread(
-                azure_service.store_windows_admin_password, req.vm_name, job_id[:8], admin_password,
-            )
-            # Reference only — job metadata is visible via the jobs API.
-            result["admin_username"] = req.ssh_username
-            result["admin_password_backend"] = backend
-            result["admin_password_ref"] = ref
-
-        # Step 0: Quota check — fail fast before any resources are created
-        job_service.update_progress(db, job_id, 10, f"Checking Azure quota in {loc}…")
-        await azure_service.check_vm_quota(loc, req.vm_size)
-
-        # Step 1: Start ACI Jumpoint container (BeyondTrust only)
-        deploy_key_note = ""
-        if settings.beyondtrust_enabled:
-            from ..services import btapi_service
-            job_service.update_progress(db, job_id, 15, "Starting BeyondTrust ACI Jumpoint container…")
-            try:
-                try:
-                    if getattr(req, "docker_deploy_key_ref", None):
-                        from ..services import config_service as _cs
-                        deploy_key = _cs.resolve_reference(req.docker_deploy_key_ref.strip())
-                    else:
-                        deploy_key = await _resolve_azure_aci_deploy_key()
-                except Exception as key_err:
-                    logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
-                    deploy_key = ""
-                    deploy_key_note = f" [deploy key fetch failed: {key_err}]"
-                # Fetch ACR credentials if configured (backend-neutral resolution).
-                acr_server, acr_username, acr_password = await _resolve_acr_credentials()
-                aci_group_name = await azure_service.run_aci_jumpoint_task(
-                    rg=_aci_rg(),
-                    location=loc,
-                    # ACI jumpoint params come from config_service (the wizard /
-                    # sandbox write them to the DB) — NOT the Pydantic settings
-                    # object, whose env-var defaults are empty here. An empty
-                    # subnet_id creates the jumpoint OUTSIDE the VNet, so it has no
-                    # route to the VM's private IP and the SSH Shell Jump times out
-                    # (credential rotation still works — that's the control plane).
-                    # Same fix class as the jump-group/jumpoint-name resolution below.
-                    subnet_id=_cfg("azure_aci_subnet_id") or settings.azure_aci_subnet_id,
-                    image=_cfg("azure_aci_jumpoint_image"),
-                    cpu=float(_cfg("azure_aci_cpu") or settings.azure_aci_cpu),
-                    memory=float(_cfg("azure_aci_memory") or settings.azure_aci_memory),
-                    deploy_key=deploy_key,
-                    acr_server=acr_server,
-                    acr_username=acr_username,
-                    acr_password=acr_password,
-                    storage_account=_cfg("azure_aci_storage_account") or settings.azure_aci_storage_account,
-                    storage_account_rg=_cfg("azure_aci_storage_account_rg") or settings.azure_aci_storage_account_rg,
-                    file_share=_cfg("azure_aci_file_share") or settings.azure_aci_file_share,
-                )
-                result["aci_group_name"] = aci_group_name
-                job_service.update_progress(
-                    db, job_id, 30,
-                    f"ACI Jumpoint started ({aci_group_name}){deploy_key_note}, deploying VM…"
-                )
-            except Exception as e:
-                result["aci_error"] = str(e)
-                job_service.update_progress(
-                    db, job_id, 30,
-                    f"ACI Jumpoint failed (non-fatal): {e}{deploy_key_note} — continuing with VM deploy…"
-                )
-        else:
-            job_service.update_progress(db, job_id, 30, "Preparing Azure VM deploy…")
-
-        # Step 2: Deploy Azure VM (3-step: PIP → NIC → VM)
-        job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{req.vm_name}'…")
-        try:
-            vm_result = await azure_service.deploy_vm(
-                rg=rg,
-                location=loc,
-                vm_name=req.vm_name,
-                vm_size=req.vm_size,
-                image_id=req.image_id,
-                subnet_id=req.subnet_id,
-                nsg_ids=req.nsg_ids,
-                create_public_ip=req.create_public_ip,
-                ssh_username=req.ssh_username,
-                ssh_public_key=await _effective_ssh_public_key(req),
-                image_publisher=req.image_publisher,
-                image_offer=req.image_offer,
-                image_sku=req.image_sku,
-                image_version=req.image_version,
-                workgroup=getattr(req, "workgroup", "") or "",
-                os_type=req.os_type,
-                admin_password=admin_password,
-                trusted_launch=getattr(req, "trusted_launch", False),
-            )
-            result.update(vm_result)
-        except AzureError as e:
-            if result.get("aci_group_name"):
-                try:
-                    await azure_service.stop_aci_jumpoint_task(_aci_rg(), result["aci_group_name"])
-                except Exception:
-                    pass
-            raise
-
-        hostname = result.get("private_ip") or result.get("public_ip") or req.vm_name
-        job_service.update_progress(
-            db, job_id, 70,
-            f"VM '{req.vm_name}' created ({hostname})"
-            + ("…" if is_windows else ", provisioning Shell Jump…")
-        )
-
-        # Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only)
-        if settings.beyondtrust_enabled and is_windows:
-            job_service.update_progress(
-                db, job_id, 90,
-                "Windows VM deployed — Shell Jump (SSH) skipped; broker access with an "
-                "RDP jump item on the Jumpoint. Password: Azure → VMs → Password."
-            )
-        elif settings.beyondtrust_enabled:
-            from ..services import terraform_pra_service
-            # Resolve from config_service (wizard/DB) first, then env-var defaults.
-            # Azure-specific keys override the shared bt_* keys.
-            from ..services import config_service as _cs
-            jump_group = (getattr(req, "jump_group", None) or "").strip() or _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
-            jumpoint_name = (getattr(req, "jumpoint_name", None) or "").strip() or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
-            _cred = getattr(req, "pra_credential_ref", None)
-            _client_secret = _cs.resolve_reference(_cred.strip()) if _cred else ""
-            aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
-                f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
-            )
-            try:
-                bt_result = await terraform_pra_service.provision_jump(
-                    vm_name=req.vm_name,
-                    hostname=hostname,
-                    jump_group_name=jump_group,
-                    jumpoint_name=jumpoint_name,
-                    tag="Azure",
-                    client_secret=_client_secret,
-                )
-                result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
-                result["bt_jump_group_name"] = bt_result.get("jump_group_name")
-                result["bt_tf_state"] = bt_result.get("tf_state_json")
-                job_service.update_progress(
-                    db, job_id, 90,
-                    f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
-                    f"group: {jump_group}){aci_note}"
-                )
-            except Exception as e:
-                result["bt_error"] = str(e)
-                job_service.update_progress(
-                    db, job_id, 90,
-                    f"VM deployed but Shell Jump provisioning failed: {e}{aci_note}"
-                )
-        else:
-            job_service.update_progress(db, job_id, 90, "VM deployed.")
-
-        # Step 4: Entitle — register as SSH ephemeral-accounts integration (Linux
-        # only; per-build opt-in). Public VM → no agent; private → shared agent.
-        from ..services import entitle_vm_hook
-        if (getattr(req, "register_in_entitle", False) and not is_windows
-                and entitle_vm_hook.registration_enabled()):
-            await entitle_vm_hook.register(db, job_id, req.vm_name, hostname,
-                                           private=not req.create_public_ip,
-                                           result=result, tag="Azure",
-                                           sudo_user=req.ssh_username,
-                                           ssh_key_secret=req.ssh_key_secret_override or "")
-
-        # Step 5: Password Safe — onboard as a managed system + account (Linux only).
-        from ..services import ps_vm_hook
-        if (getattr(req, "register_in_passwordsafe", False) and not is_windows
-                and ps_vm_hook.registration_enabled()):
-            await ps_vm_hook.register(db, job_id, req.vm_name, hostname,
-                                      result=result, tag="Azure",
-                                      ssh_key_secret=req.ssh_key_secret_override or "",
-                                      resource_group=rg)
-
-        job_service.set_completed(db, job_id, result)
-        await cache_service.invalidate(cache_service.key_global("azure_vms"))
-
-    except AzureError as e:
-        job_service.set_failed(db, job_id, str(e))
-    except Exception as e:
-        job_service.set_failed(db, job_id, f"Unexpected error: {e}")
-    finally:
-        db.close()
 
 
-async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str, loc: str):
-    """Start ONE ACI Jumpoint for the batch, then deploy each VM sequentially."""
-    db = _get_db_session()
-    aci_group_name = None
-    is_windows = req.os_type.lower() == "windows"
-    try:
-        for job_id, _ in job_items:
-            job_service.set_running(db, job_id)
-
-        first_job_id = job_items[0][0]
-
-        # Step 0: Quota check — fail fast before any resources are created
-        job_service.update_progress(db, first_job_id, 5, f"Checking Azure quota in {loc}…")
-        await azure_service.check_vm_quota(loc, req.vm_size)
-
-        aci_error = None
-        deploy_key_note = ""
-        if settings.beyondtrust_enabled:
-            from ..services import btapi_service
-            job_service.update_progress(
-                db, first_job_id, 10,
-                f"Starting ACI Jumpoint for {len(job_items)}-VM batch…"
-            )
-            try:
-                try:
-                    deploy_key = await _resolve_azure_aci_deploy_key()
-                except Exception as key_err:
-                    logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
-                    deploy_key = ""
-                    deploy_key_note = f" [deploy key fetch failed: {key_err}]"
-                # Fetch ACR credentials if configured (backend-neutral resolution).
-                acr_server, acr_username, acr_password = await _resolve_acr_credentials()
-                aci_group_name = await azure_service.run_aci_jumpoint_task(
-                    rg=_aci_rg(),
-                    location=loc,
-                    # ACI jumpoint params come from config_service (the wizard /
-                    # sandbox write them to the DB) — NOT the Pydantic settings
-                    # object, whose env-var defaults are empty here. An empty
-                    # subnet_id creates the jumpoint OUTSIDE the VNet, so it has no
-                    # route to the VM's private IP and the SSH Shell Jump times out
-                    # (credential rotation still works — that's the control plane).
-                    # Same fix class as the jump-group/jumpoint-name resolution below.
-                    subnet_id=_cfg("azure_aci_subnet_id") or settings.azure_aci_subnet_id,
-                    image=_cfg("azure_aci_jumpoint_image"),
-                    cpu=float(_cfg("azure_aci_cpu") or settings.azure_aci_cpu),
-                    memory=float(_cfg("azure_aci_memory") or settings.azure_aci_memory),
-                    deploy_key=deploy_key,
-                    acr_server=acr_server,
-                    acr_username=acr_username,
-                    acr_password=acr_password,
-                    storage_account=_cfg("azure_aci_storage_account") or settings.azure_aci_storage_account,
-                    storage_account_rg=_cfg("azure_aci_storage_account_rg") or settings.azure_aci_storage_account_rg,
-                    file_share=_cfg("azure_aci_file_share") or settings.azure_aci_file_share,
-                )
-            except Exception as e:
-                aci_error = str(e)
-                aci_group_name = None
-        else:
-            job_service.update_progress(
-                db, first_job_id, 10,
-                f"Preparing {len(job_items)}-VM batch…"
-            )
-
-        for job_id, vm_name in job_items:
-            result: dict = {}
-            if aci_group_name:
-                result["aci_group_name"] = aci_group_name
-            elif aci_error:
-                result["aci_error"] = aci_error
-
-            try:
-                # Windows: per-VM password, vaulted before that VM is created.
-                admin_password = ""
-                if is_windows:
-                    job_service.update_progress(db, job_id, 30, "Generating Windows admin password…")
-                    admin_password = azure_service.generate_windows_admin_password()
-                    backend, ref = await asyncio.to_thread(
-                        azure_service.store_windows_admin_password, vm_name, job_id[:8], admin_password,
-                    )
-                    result["admin_username"] = req.ssh_username
-                    result["admin_password_backend"] = backend
-                    result["admin_password_ref"] = ref
-
-                job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{vm_name}'…")
-                vm_result = await azure_service.deploy_vm(
-                    rg=rg,
-                    location=loc,
-                    vm_name=vm_name,
-                    vm_size=req.vm_size,
-                    image_id=req.image_id,
-                    subnet_id=req.subnet_id,
-                    nsg_ids=req.nsg_ids,
-                    create_public_ip=req.create_public_ip,
-                    ssh_username=req.ssh_username,
-                    ssh_public_key=await _effective_ssh_public_key(req),
-                    image_publisher=req.image_publisher,
-                    image_offer=req.image_offer,
-                    image_sku=req.image_sku,
-                    image_version=req.image_version,
-                    workgroup=getattr(req, "workgroup", "") or "",
-                    os_type=req.os_type,
-                    admin_password=admin_password,
-                    trusted_launch=getattr(req, "trusted_launch", False),
-                )
-                result.update(vm_result)
-
-                hostname = result.get("private_ip") or result.get("public_ip") or vm_name
-                job_service.update_progress(
-                    db, job_id, 70,
-                    f"VM '{vm_name}' created ({hostname})"
-                    + ("…" if is_windows else ", provisioning Shell Jump…")
-                )
-
-                if settings.beyondtrust_enabled and is_windows:
-                    job_service.update_progress(
-                        db, job_id, 90,
-                        "Windows VM deployed — Shell Jump (SSH) skipped; broker access with an "
-                        "RDP jump item on the Jumpoint. Password: Azure → VMs → Password."
-                    )
-                elif settings.beyondtrust_enabled:
-                    from ..services import terraform_pra_service
-                    jump_group = _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
-                    jumpoint_name = _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
-                    aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
-                        f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
-                    )
-                    try:
-                        bt_result = await terraform_pra_service.provision_jump(
-                            vm_name=vm_name,
-                            hostname=hostname,
-                            jump_group_name=jump_group,
-                            jumpoint_name=jumpoint_name,
-                            tag="Azure",
-                        )
-                        result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
-                        result["bt_jump_group_name"] = bt_result.get("jump_group_name")
-                        result["bt_tf_state"] = bt_result.get("tf_state_json")
-                        job_service.update_progress(
-                            db, job_id, 90,
-                            f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
-                            f"group: {jump_group}){aci_note}"
-                        )
-                    except Exception as e:
-                        result["bt_error"] = str(e)
-                        job_service.update_progress(
-                            db, job_id, 90, f"VM deployed but Shell Jump failed: {e}{aci_note}"
-                        )
-                else:
-                    job_service.update_progress(db, job_id, 90, "VM deployed.")
-
-                # Step 4: Entitle — register as SSH integration (Linux only; opt-in).
-                from ..services import entitle_vm_hook
-                if (getattr(req, "register_in_entitle", False) and not is_windows
-                        and entitle_vm_hook.registration_enabled()):
-                    await entitle_vm_hook.register(db, job_id, vm_name, hostname,
-                                                   private=not req.create_public_ip,
-                                                   result=result, tag="Azure",
-                                                   sudo_user=req.ssh_username,
-                                                   ssh_key_secret=req.ssh_key_secret_override or "")
-
-                # Step 5: Password Safe — onboard as a managed system + account.
-                from ..services import ps_vm_hook
-                if (getattr(req, "register_in_passwordsafe", False) and not is_windows
-                        and ps_vm_hook.registration_enabled()):
-                    await ps_vm_hook.register(db, job_id, vm_name, hostname,
-                                              result=result, tag="Azure",
-                                              ssh_key_secret=req.ssh_key_secret_override or "",
-                                              resource_group=rg)
-
-                job_service.set_completed(db, job_id, result)
-
-            except AzureError as e:
-                job_service.set_failed(db, job_id, str(e))
-            except Exception as e:
-                job_service.set_failed(db, job_id, f"Unexpected error: {e}")
-
-        await cache_service.invalidate(cache_service.key_global("azure_vms"))
-
-    except Exception as e:
-        for job_id, _ in job_items:
-            job_service.set_failed(db, job_id, f"Bulk deploy error: {e}")
-    finally:
-        db.close()
 
 
-async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg: str):
-    db = _get_db_session()
-    try:
-        job_service.set_running(db, destroy_job_id)
-        job_service.update_progress(db, destroy_job_id, 20, f"Terminating Azure VM '{vm_name}'…")
-
-        await azure_service.terminate_vm(rg, vm_name)
-
-        result = {"vm_name": vm_name, "terminated": True}
-        deploy_job = job_service.get_job(db, deploy_job_id)
-        if deploy_job:
-            meta = deploy_job.metadata_dict
-
-            # Stop ACI Jumpoint — only if no other active VMs share this container group
-            aci_group_name = meta.get("aci_group_name")
-            active_sibling_jobs = [
-                j for j in db.query(Job)
-                .filter(Job.job_type == "azure_deploy", Job.status == "completed")
-                .all()
-                if j.id != deploy_job_id
-                and not j.metadata_dict.get("destroyed")
-            ]
-            if aci_group_name:
-                sibling_count = sum(
-                    1 for j in active_sibling_jobs
-                    if j.metadata_dict.get("aci_group_name") == aci_group_name
-                )
-                if sibling_count == 0:
-                    job_service.update_progress(
-                        db, destroy_job_id, 50, "Stopping Jumpoint ACI container…"
-                    )
-                    try:
-                        await azure_service.stop_aci_jumpoint_task(_aci_rg(), aci_group_name)
-                        result["aci_group_stopped"] = aci_group_name
-                    except AzureError as e:
-                        result["aci_error"] = str(e)
-                else:
-                    job_service.update_progress(
-                        db, destroy_job_id, 50,
-                        f"ACI Jumpoint shared with {sibling_count} other active VM(s) — leaving running…"
-                    )
-                    result["aci_group_shared"] = aci_group_name
-
-            # Fallback: if no metadata-tracked ACI and no other active VMs remain,
-            # enumerate and stop all dashboard ACI jumpoints (covers untracked containers)
-            if not aci_group_name and not active_sibling_jobs:
-                job_service.update_progress(
-                    db, destroy_job_id, 50, "No active VMs remain — checking for orphaned ACI Jumpoints…"
-                )
-                try:
-                    running_acis = await azure_service.list_aci_tasks(_aci_rg())
-                    stopped_acis = []
-                    for aci in running_acis:
-                        try:
-                            await azure_service.stop_aci_jumpoint_task(_aci_rg(), aci["group_name"])
-                            stopped_acis.append(aci["group_name"])
-                        except AzureError as e:
-                            result.setdefault("aci_errors", []).append(f"{aci['group_name']}: {e}")
-                    if stopped_acis:
-                        result["aci_groups_stopped"] = stopped_acis
-                except AzureError as e:
-                    result["aci_error"] = str(e)
-
-            # Remove BeyondTrust Shell Jump if this deploy provisioned one.
-            bt_shell_jump_id = meta.get("bt_shell_jump_id")
-            if bt_shell_jump_id:
-                job_service.update_progress(
-                    db, destroy_job_id, 70,
-                    f"Removing BeyondTrust Shell Jump {bt_shell_jump_id}…"
-                )
-                try:
-                    tf_state = meta.get("bt_tf_state")
-                    if tf_state:
-                        from ..services import terraform_pra_service
-                        await terraform_pra_service.remove_jump(tf_state)
-                        result["bt_shell_jump_removed"] = bt_shell_jump_id
-                        job_service.update_progress(
-                            db, destroy_job_id, 85,
-                            f"Shell Jump {bt_shell_jump_id} removed from PRA."
-                        )
-                    else:
-                        msg = (
-                            f"Shell Jump {bt_shell_jump_id} requires manual removal from PRA "
-                            "(provisioned before Terraform migration — no tf_state stored)"
-                        )
-                        logger.warning(msg)
-                        result["bt_error"] = msg
-                        job_service.update_progress(db, destroy_job_id, 85, msg)
-                except Exception as e:
-                    err = f"Shell Jump removal failed: {e}"
-                    logger.error("bt_shell_jump_id=%s destroy error: %s", bt_shell_jump_id, e)
-                    result["bt_error"] = err
-                    job_service.update_progress(db, destroy_job_id, 85, err)
-
-            # Remove the Entitle SSH integration if this deploy registered one.
-            if meta.get("entitle_registration_tf_state"):
-                from ..services import entitle_vm_hook
-                await entitle_vm_hook.deregister(meta, result)
-
-            # Off-board the Password Safe managed system if this deploy registered one.
-            if meta.get("ps_registration_tf_state"):
-                from ..services import ps_vm_hook
-                await ps_vm_hook.deregister(meta, result)
-
-            # Mark original deploy job as destroyed (mirrors AWS pattern)
-            meta["destroyed"] = True
-            job_service.set_completed(db, deploy_job_id, meta)
-
-        job_service.set_completed(db, destroy_job_id, result)
-        await cache_service.invalidate(cache_service.key_global("azure_vms"))
-
-    except AzureError as e:
-        job_service.set_failed(db, destroy_job_id, str(e))
-    except Exception as e:
-        job_service.set_failed(db, destroy_job_id, f"Unexpected error: {e}")
-    finally:
-        db.close()
 
 
-async def _run_create_image(
-    job_id: str, vm_name: str, rg: str, req: AzureCreateImageRequest
-):
-    db = _get_db_session()
-    try:
-        job_service.set_running(db, job_id)
-        if req.generalize:
-            job_service.update_progress(
-                db, job_id, 20,
-                f"Deallocating and generalizing VM '{vm_name}' (VM will be unusable after this)…"
-            )
-        else:
-            job_service.update_progress(db, job_id, 20, f"Capturing image from VM '{vm_name}'…")
-
-        result = await azure_service.create_image_from_vm(rg, vm_name, req.name, req.generalize)
-
-        job_service.update_progress(db, job_id, 90, f"Image '{req.name}' created successfully.")
-        job_service.set_completed(db, job_id, result)
-        await cache_service.invalidate(cache_service.key_global("azure_images"))
-
-    except AzureError as e:
-        job_service.set_failed(db, job_id, str(e))
-    except Exception as e:
-        job_service.set_failed(db, job_id, f"Unexpected error: {e}")
-    finally:
-        db.close()

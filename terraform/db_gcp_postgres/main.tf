@@ -94,6 +94,14 @@ locals {
   # the caller already passed a path/URL (contains "/"), use it as-is; otherwise
   # qualify the bare name (the common sandbox config) with this module's project.
   private_network_id = can(regex("/", var.private_network)) ? var.private_network : "projects/${var.project}/global/networks/${var.private_network}"
+
+  # Every Cloud SQL Postgres instance ships with these built-in databases. Asking
+  # google_sql_database to CREATE one fails with `pq: database "..." already
+  # exists` and aborts the apply (e.g. a DB the dashboard named "postgres"). When
+  # db_name collides with a built-in, skip creating it — the database already
+  # exists and the PRA tunnel can target it as-is.
+  reserved_db_names = ["postgres", "template0", "template1", "cloudsqladmin"]
+  create_database   = !contains(local.reserved_db_names, lower(var.db_name))
 }
 
 # ── Resource — always private (no public IP) ─────────────────────────────────
@@ -126,6 +134,7 @@ resource "google_sql_database_instance" "this" {
 }
 
 resource "google_sql_database" "this" {
+  count    = local.create_database ? 1 : 0
   name     = var.db_name
   project  = var.project
   instance = google_sql_database_instance.this.name

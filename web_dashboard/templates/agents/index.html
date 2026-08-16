@@ -1,0 +1,675 @@
+{% extends "base.html" %}
+
+{% block title %}Remote Agents – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="agentsPage()" x-init="init()">
+
+  <h1 class="text-2xl font-bold text-gray-800 mb-1">Remote Agents</h1>
+  <p class="text-sm text-gray-500 mb-8">
+    Containerised agents that run inside a private network and poll <em>out</em> to this
+    dashboard for work — so on-premises hypervisors can be discovered and managed
+    without opening a single inbound firewall rule. Each agent authenticates with an Ed25519
+    key it generates itself; no reusable credential ever crosses the wire.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- Blocked mint: the pinned signing audience contradicts Public base URL, so a new
+       enrolment code would emit the stale one. Sticky rather than a toast — the remedy names
+       two hostnames and a settings panel, and it outlives the 4 seconds a toast gets. -->
+  <div x-show="audienceBlock" x-cloak
+       class="mb-6 border border-red-200 bg-red-50 rounded-lg px-4 py-3">
+    <div class="flex items-start justify-between gap-4">
+      <div>
+        <p class="text-sm font-semibold text-red-800 mb-1">Enrolment codes are blocked</p>
+        <p class="text-sm text-red-700" x-text="audienceBlock"></p>
+        <p class="text-xs text-red-600 mt-2">
+          Fix it in
+          <a href="/settings" class="underline">Settings → Integrations → Remote Agents</a>,
+          which shows the pinned audience and offers a reset.
+        </p>
+      </div>
+      <button @click="audienceBlock = ''" class="text-red-400 hover:text-red-600 text-lg leading-none">&times;</button>
+    </div>
+  </div>
+
+  <!-- Feature off. The page itself is not gated (matching /k8s and the other feature
+       pages), so without this the operator gets a generic red "Failed to load agents:
+       404" toast and no idea that a switch exists. -->
+  <div x-show="notEnabled" x-cloak
+       class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
+    <h2 class="text-base font-semibold text-gray-700 mb-2">Remote agents are not enabled</h2>
+    <p class="text-sm text-gray-500 max-w-xl mx-auto">
+      Turn them on in
+      <a href="/settings" class="text-blue-600 hover:underline">Settings → Integrations → Remote Agents</a>.
+      Enabling publishes <code class="font-mono text-xs">/api/agent</code> for agents to reach,
+      so terminate TLS in front of the dashboard first — see
+      <a href="/docs/remote-agents" class="text-blue-600 hover:underline">the remote agent docs</a>.
+    </p>
+  </div>
+
+  <div x-show="!notEnabled" x-cloak class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-base font-semibold text-gray-700">Enrolled Agents</h2>
+      <div class="flex items-center gap-4">
+        <label class="flex items-center gap-1.5 text-xs text-gray-500 select-none">
+          <input type="checkbox" x-model="hideRevoked" class="rounded border-gray-300"/>
+          Hide revoked
+          <span x-show="revokedCount > 0" class="text-gray-400"
+                x-text="'(' + revokedCount + ')'"></span>
+        </label>
+        <button @click="openCreate()"
+                class="flex items-center gap-1.5 text-sm bg-blue-700 hover:bg-blue-800
+                       text-white px-3 py-1.5 rounded-lg font-medium transition">
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+          </svg>
+          Register Agent
+        </button>
+      </div>
+    </div>
+
+    <div x-show="loading" class="py-6 text-center text-gray-400 text-sm">Loading…</div>
+
+    <div x-show="!loading && agents.length === 0" class="py-8 text-center text-gray-400 text-sm">
+      No agents yet. Click "Register Agent" to get an enrolment code and a run command.
+    </div>
+
+    <div x-show="!loading && agents.length > 0 && visibleAgents.length === 0"
+         class="py-8 text-center text-gray-400 text-sm">
+      Every agent is revoked. Untick "Hide revoked" to see them.
+    </div>
+
+    <div x-show="!loading && visibleAgents.length > 0" class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
+            <th class="pb-2 pr-2 w-4"></th>
+            <th class="pb-2 pr-4">Name</th>
+            <th class="pb-2 pr-4">Site</th>
+            <th class="pb-2 pr-4">Status</th>
+            <th class="pb-2 pr-4">Registered by</th>
+            <th class="pb-2 pr-4">Source IP</th>
+            <th class="pb-2 pr-4">Version</th>
+            <th class="pb-2 pr-4">Last seen</th>
+            <th class="pb-2 pr-4">Running</th>
+            <th class="pb-2"></th>
+          </tr>
+        </thead>
+        <!-- One row-group PER AGENT, not one for the whole table. An Alpine x-for
+             template may contain exactly one root element, and each agent needs two
+             rows: the summary and its detail panel. A table is allowed any number of
+             sibling row-groups, so the group element is the natural root. Nesting one
+             row-group inside another to get the same effect is invalid markup, and the
+             browser un-nests it silently — which drops the detail row. -->
+        <template x-for="a in visibleAgents" :key="a.id">
+          <tbody>
+              <tr class="border-b border-gray-50 hover:bg-gray-50"
+                  :class="a.status === 'revoked' ? 'opacity-50' : ''">
+                <td class="py-2.5 pr-2 align-top">
+                  <button @click="toggleDetail(a.id)"
+                          class="text-gray-400 hover:text-gray-700 transition"
+                          :aria-expanded="expanded === a.id"
+                          :aria-label="expanded === a.id ? 'Hide details' : 'Show details'">
+                    <svg class="h-4 w-4 transition-transform" :class="expanded === a.id ? 'rotate-90' : ''"
+                         fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                    </svg>
+                  </button>
+                </td>
+                <td class="py-2.5 pr-4 font-medium text-gray-800">
+                  <span x-text="a.name"></span>
+                  <div class="text-xs text-gray-400" x-text="a.description || ''"></div>
+                </td>
+                <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="a.site || '—'"></td>
+                <td class="py-2.5 pr-4">
+                  <span :class="statusClass(a.status)"
+                        class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                        x-text="a.status"></span>
+                </td>
+                <!-- The direct answer to "did I register this?". Highlighted when it was
+                     somebody else, which is the whole reason the column exists. -->
+                <td class="py-2.5 pr-4 text-xs"
+                    :class="a.created_by && a.created_by !== $store.auth.username
+                            ? 'text-amber-700 font-medium' : 'text-gray-500'"
+                    x-text="a.created_by || '—'"></td>
+                <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="a.last_seen_ip || '—'"></td>
+                <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="a.agent_version || '—'"></td>
+                <td class="py-2.5 pr-4 text-xs text-gray-500" x-text="a.last_seen_at ? fmt(a.last_seen_at) : 'never'"></td>
+                <td class="py-2.5 pr-4 text-xs text-gray-700" x-text="a.running_jobs"></td>
+                <td class="py-2.5 text-right whitespace-nowrap">
+                  <button @click="openDiscover(a)"
+                          :disabled="a.status !== 'online'"
+                          :class="a.status === 'online' ? 'text-blue-600 hover:text-blue-800' : 'text-gray-300 cursor-not-allowed'"
+                          class="text-xs font-medium transition mr-2">
+                    Discover
+                  </button>
+                  <button @click="reissue(a)"
+                          :disabled="a.status === 'revoked'"
+                          :class="a.status === 'revoked' ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-800'"
+                          class="text-xs font-medium transition mr-2">
+                    Re-enrol
+                  </button>
+                  <button x-show="a.status !== 'revoked'" @click="revoke(a)"
+                          class="text-xs font-medium transition text-red-500 hover:text-red-700">
+                    Revoke
+                  </button>
+                  <!-- Only after revoking. Two steps on purpose: revoke is the safety
+                       action, remove is the tidy-up that frees the name. -->
+                  <button x-show="a.status === 'revoked'" @click="removeRecord(a)"
+                          class="text-xs font-medium transition text-red-500 hover:text-red-700">
+                    Remove
+                  </button>
+                </td>
+              </tr>
+              <tr x-show="expanded === a.id" x-cloak class="border-b border-gray-50 bg-gray-50/60">
+                <td></td>
+                <td colspan="9" class="py-3 pr-4">
+                  <dl class="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-2 text-xs">
+                    <div>
+                      <dt class="text-gray-400 uppercase tracking-wide">Agent id</dt>
+                      <dd class="font-mono text-gray-700 break-all" x-text="a.id"></dd>
+                    </div>
+                    <div>
+                      <dt class="text-gray-400 uppercase tracking-wide">Registered</dt>
+                      <dd class="text-gray-700"
+                          x-text="(a.created_at ? fmt(a.created_at) : '—') + (a.created_by ? ' by ' + a.created_by : '')"></dd>
+                    </div>
+                    <div>
+                      <dt class="text-gray-400 uppercase tracking-wide">Enrolled</dt>
+                      <dd class="text-gray-700" x-text="a.enrolled_at ? fmt(a.enrolled_at) : 'not yet'"></dd>
+                    </div>
+                    <div>
+                      <!-- Self-reported by the agent on every poll. The dashboard cannot
+                           change it; a value that moves means the file on the agent host
+                           was edited, which is the only signal that a compromised host
+                           swapped its own allow-list. -->
+                      <dt class="text-gray-400 uppercase tracking-wide">Policy hash</dt>
+                      <dd class="font-mono text-gray-700" :title="a.policy_hash || ''"
+                          x-text="a.policy_hash ? a.policy_hash.slice(0, 12) + '…' : '—'"></dd>
+                    </div>
+                    <div x-show="a.status === 'enrolling'" class="col-span-2">
+                      <dt class="text-gray-400 uppercase tracking-wide">Enrolment code expires</dt>
+                      <dd class="text-gray-700"
+                          x-text="a.enroll_expires_at ? fmt(a.enroll_expires_at) : '—'"></dd>
+                    </div>
+                    <div x-show="a.description" class="col-span-2">
+                      <dt class="text-gray-400 uppercase tracking-wide">Description</dt>
+                      <dd class="text-gray-700" x-text="a.description"></dd>
+                    </div>
+                  </dl>
+                </td>
+              </tr>
+          </tbody>
+        </template>
+      </table>
+    </div>
+  </div>
+
+  <!-- Register modal -->
+  <div x-show="createOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <h3 class="text-lg font-semibold text-gray-800 mb-4">Register Agent</h3>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+          <input type="text" x-model="form.name" placeholder="lab-dc1"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Site <span class="text-gray-400">(optional)</span></label>
+          <input type="text" x-model="form.site" placeholder="dc1"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Description <span class="text-gray-400">(optional)</span></label>
+          <input type="text" x-model="form.description" placeholder="Primary lab network"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="createOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+        <button @click="create()"
+                class="text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Register
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enrolment code modal — shown ONCE -->
+  <div x-show="enrolOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Enrolment code for <span x-text="enrol.name"></span></h3>
+      <p class="text-sm text-red-600 mb-4">
+        Shown once. It expires in 15 minutes and can only be redeemed a single time.
+      </p>
+      <div class="mb-4">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Code</label>
+        <div class="flex gap-2">
+          <input type="text" readonly :value="enrol.code"
+                 class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono bg-gray-50"/>
+          <button @click="copy(enrol.code)"
+                  class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">Copy</button>
+        </div>
+      </div>
+      <!-- Audience warnings, above the command rather than below it: the whole point is to
+           be read before the command is copied. The dashboard URL baked into it comes from
+           the write-once signing audience, and if that was pinned to a hostname which does
+           not serve /api/agent the agent will never enrol — it sits at 'enrolling' with
+           Last seen: never and no request ever reaches the log. -->
+      <template x-for="w in (enrol.warnings || [])" :key="w">
+        <div class="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+          <p class="text-xs text-amber-800" x-text="w"></p>
+        </div>
+      </template>
+      <div>
+        <div class="flex items-center justify-between mb-1">
+          <label class="block text-xs font-medium text-gray-600">Run this inside the private network</label>
+          <!-- Same container either way; this picks the shell you are pasting into. Hidden
+               against an API that predates the PowerShell forms, so a stale build shows
+               exactly the UI it can actually back. -->
+          <div class="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit" x-show="enrol.docker_run_powershell">
+            <button @click="shell = 'bash'"
+                    :class="shell === 'bash'
+                      ? 'bg-white shadow text-gray-900 font-semibold'
+                      : 'text-gray-500 hover:text-gray-700'"
+                    class="px-2.5 py-1 rounded-md text-xs transition">
+              Linux / macOS
+            </button>
+            <button @click="shell = 'powershell'"
+                    :class="shell === 'powershell'
+                      ? 'bg-white shadow text-gray-900 font-semibold'
+                      : 'text-gray-500 hover:text-gray-700'"
+                    class="px-2.5 py-1 rounded-md text-xs transition">
+              Windows (PowerShell)
+            </button>
+          </div>
+        </div>
+        <pre class="bg-gray-900 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto whitespace-pre" x-text="runCmd()"></pre>
+        <button @click="copy(runCmd())"
+                class="mt-2 text-xs px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">
+          Copy command
+        </button>
+        <p x-show="isPowershell()" class="text-xs text-gray-500 mt-2">
+          The agent image is Linux; on Windows it runs in Docker Desktop's Linux VM, so keep
+          Docker Desktop in <strong>Linux containers</strong> mode. See
+          <a href="/docs/remote-agents#running-on-windows" class="text-blue-600 hover:underline">Running on Windows</a>.
+        </p>
+      </div>
+
+      <!-- The env-var form above puts the code in the container's config, where
+           `docker inspect` keeps it long after the code has been spent. Offered as an
+           alternative rather than the default because it costs an extra file and a
+           cleanup step, and the code is single-use with a 15-minute TTL. -->
+      <details class="mt-4" x-show="codeFileCmd()">
+        <summary class="text-xs font-medium text-gray-600 cursor-pointer hover:text-gray-800">
+          Alternative: keep the code out of <code class="font-mono">docker inspect</code>
+        </summary>
+        <p class="text-xs text-gray-500 mt-2">
+          Mounts the code as a file instead of an environment variable, so nothing durable in
+          Docker's metadata holds it. Follows the toggle above. To keep the code out of your
+          shell history too, create <code class="font-mono">agent-enroll-code</code> with an
+          editor — just the code, on one line — and paste only the
+          <code class="font-mono">docker run</code> that follows.
+        </p>
+        <!-- The editor route bypasses the `-Encoding ascii` that makes the emitted line safe,
+             so on Windows it has to carry that constraint itself. A UTF-16 file fails to
+             decode; a UTF-8 BOM is worse, because it survives the agent's .strip() and the
+             code is simply rejected as wrong with nothing pointing at why. -->
+        <p x-show="isPowershell()" class="text-xs text-gray-500 mt-2">
+          Save it as plain ASCII or UTF-8 <em>without</em> a byte-order mark — Notepad's
+          "Unicode" and "UTF-8 with BOM" options both produce a file the agent cannot read.
+          PowerShell also writes its history to disk as you type, so an editor is the only way
+          to keep the code out of it.
+        </p>
+        <pre class="bg-gray-900 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto whitespace-pre mt-2"
+             x-text="codeFileCmd()"></pre>
+        <button @click="copy(codeFileCmd())"
+                class="mt-2 text-xs px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">
+          Copy command
+        </button>
+      </details>
+      <p class="text-xs text-gray-500 mt-4">
+        The agent needs a <code class="font-mono">policy.yaml</code> naming the networks it may
+        scan — it refuses all work without one. See
+        <a href="/docs/remote-agents" class="text-blue-600 hover:underline">the remote agent docs</a>
+        for a starting file.
+      </p>
+      <div class="flex justify-end mt-6">
+        <button @click="enrolOpen = false"
+                class="text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Done
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Discover modal -->
+  <div x-show="discoverOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Discover via <span x-text="discover.agentName"></span></h3>
+      <p class="text-sm text-gray-500 mb-4">
+        Unauthenticated probes only — a TCP connect and a protocol banner. Nothing ever
+        attempts a login. The agent will refuse any target outside its own policy file.
+      </p>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Look for</label>
+          <select x-model="discover.scan_kind"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="all">Every supported hypervisor</option>
+            <option value="vmware">VMware vCenter / ESXi only (443)</option>
+            <option value="proxmox">Proxmox VE only (8006)</option>
+            <option value="nutanix">Nutanix Prism only (9440)</option>
+            <option value="xcpng">XCP-ng / XenServer only (443)</option>
+            <option value="winrm">WinRM / possible Hyper-V only (5985-6)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            Networks <span class="text-gray-400">(comma-separated CIDRs; blank = the agent's own subnet)</span>
+          </label>
+          <input type="text" x-model="discover.cidrs" placeholder="10.20.0.0/24, 10.20.1.0/24"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            Hosts <span class="text-gray-400">(optional, comma-separated)</span>
+          </label>
+          <input type="text" x-model="discover.hostnames" placeholder="pg01.lab.local"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+        <p class="text-xs text-gray-400">
+          Probes never authenticate, so a WinRM answer identifies Windows &mdash; not
+          necessarily a Hyper-V host. Those findings are marked <em>possible only</em>.
+        </p>
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="discoverOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+        <button @click="runDiscover()"
+                class="text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Start scan
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Which command flavour to show first. Only a default — the toggle is always there, and a
+// wrong guess costs one click.
+//
+// `navigator.platform` is deprecated but is still the only thing every browser implements;
+// `userAgentData` is Chromium-only. Try the modern one, fall back to platform, then to the
+// UA string, and treat anything unreadable as bash: that is the historical behaviour and
+// the larger population of agent hosts. Wrapped because a hardened browser can make any of
+// these accessors throw.
+//
+// Takes the navigator as an argument so a test can pass a fake — in Node `navigator` is a
+// getter-only global, so assigning to it silently does nothing.
+function detectShell(nav) {
+  try {
+    const n = nav || (typeof navigator === 'undefined' ? {} : navigator);
+    const hint = n.userAgentData && n.userAgentData.platform;
+    const p = hint || n.platform || n.userAgent || '';
+    return /win/i.test(p) ? 'powershell' : 'bash';
+  } catch (e) {
+    return 'bash';
+  }
+}
+
+function agentsPage() {
+  return {
+    agents: [],
+    loading: true,
+    notEnabled: false,
+    hideRevoked: true,
+    expanded: null,
+    toast: '',
+    toastType: 'success',
+    createOpen: false,
+    enrolOpen: false,
+    discoverOpen: false,
+    audienceBlock: '',   // the 409 explaining why a mint was refused; sticky until dismissed
+    form: {name: '', site: '', description: ''},
+    enrol: {name: '', code: '', docker_run: '', docker_run_code_file: '',
+            docker_run_powershell: '', docker_run_code_file_powershell: '', warnings: []},
+    discover: {agentId: '', agentName: '', scan_kind: 'all', cidrs: '', hostnames: ''},
+    // Which shell the copy-paste command is written for. The image is Linux either way —
+    // it runs under Docker Desktop's Linux VM on Windows — so this picks a *shell*, not a
+    // platform. Pre-selected from the browser because an operator on Windows pasting the
+    // POSIX form gets no useful error: a trailing `\` is not a line continuation there, so
+    // each line runs as its own command and the first one fails on its own.
+    shell: detectShell(),
+    _timer: null,
+
+    get visibleAgents() {
+      return this.hideRevoked
+        ? this.agents.filter(a => a.status !== 'revoked')
+        : this.agents;
+    },
+
+    get revokedCount() {
+      return this.agents.filter(a => a.status === 'revoked').length;
+    },
+
+    // One accessor per command rather than two copies of the markup, so Copy cannot get
+    // out of step with what is on screen.
+    //
+    // Both fall back to the POSIX form when the PowerShell one is absent, which is what an
+    // API older than this page returns. Without that a Windows browser — where the toggle
+    // defaults to PowerShell — would render an empty command block and give the operator
+    // nothing to paste, a worse failure than showing the form they have to adapt.
+    // "PowerShell is selected *and* this API can produce it" — the condition every piece of
+    // Windows-specific copy keys off, so prose can never contradict the command shown.
+    //
+    // Methods rather than getters, which is not a style choice: `extract()` in
+    // tests/template_helpers_check.js anchors on a method-shaped definition and cannot see
+    // past a `get ` prefix, which is exactly why `visibleAgents` and `revokedCount` above
+    // have no coverage. The invariant here — Copy copies what is on screen — is worth
+    // testing, so it is written in the shape the harness can reach.
+    isPowershell() {
+      return this.shell === 'powershell' && !!this.enrol.docker_run_powershell;
+    },
+
+    runCmd() {
+      return this.isPowershell() ? this.enrol.docker_run_powershell : this.enrol.docker_run;
+    },
+
+    codeFileCmd() {
+      return this.isPowershell()
+        ? this.enrol.docker_run_code_file_powershell
+        : this.enrol.docker_run_code_file;
+    },
+
+    async init() {
+      requireAuth();
+      await this.load();
+      // Status is derived from last_seen_at, so it only changes as the agent polls.
+      this._timer = setInterval(() => this.load(true), 15000);
+    },
+
+    async load(quiet) {
+      if (!quiet) this.loading = true;
+      try {
+        const r = await API.get('/api/agent');
+        this.agents = r.agents || [];
+        this.notEnabled = false;
+      } catch (e) {
+        // The router is behind _feature_gate, which 404s the whole prefix when the
+        // feature is off. Distinguish that from a real failure: it is a configuration
+        // state with a specific fix, not an error, and reporting it as "Failed to load
+        // agents: This integration is not enabled" told the operator nothing about
+        // where the switch lives.
+        if (this.isFeatureOff(e)) {
+          this.notEnabled = true;
+          if (this._timer) { clearInterval(this._timer); this._timer = null; }
+        } else if (!quiet) {
+          this.flash('Failed to load agents: ' + (e.message || e), 'error');
+        }
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    isFeatureOff(e) {
+      return /not enabled/i.test((e && e.message) || '');
+    },
+
+    toggleDetail(id) {
+      this.expanded = this.expanded === id ? null : id;
+    },
+
+    statusClass(s) {
+      return {
+        online:    'bg-green-100 text-green-800',
+        offline:   'bg-gray-100 text-gray-600',
+        enrolling: 'bg-yellow-100 text-yellow-800',
+        revoked:   'bg-red-100 text-red-700',
+      }[s] || 'bg-gray-100 text-gray-600';
+    },
+
+    fmt(ts) {
+      try { return new Date(ts + 'Z').toLocaleString(); } catch (e) { return ts; }
+    },
+
+    openCreate() {
+      this.form = {name: '', site: '', description: ''};
+      this.createOpen = true;
+    },
+
+    async create(ackAudience) {
+      try {
+        const r = await API.post('/api/agent' + (ackAudience ? '?acknowledge_audience=true' : ''), {
+          name: this.form.name.trim(),
+          site: this.form.site.trim(),
+          description: this.form.description.trim(),
+        });
+        this.createOpen = false;
+        this.showEnrol(r);
+        await this.load();
+      } catch (e) {
+        // Refused before the row was created, so retrying is safe — the name is still free.
+        // Only once: the override cannot itself be refused, so a second conflict would mean
+        // something else is wrong and must not spin.
+        if (!ackAudience && this.audienceConflict(e)) { return this.create(true); }
+        if (e.code === 'agent_audience_conflict') { this.createOpen = false; return; }
+        this.flash('Register failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    // The mint refused because the pinned signing audience contradicts Public base URL.
+    // Nothing was mutated — the guard runs first — so the caller may simply ask again with
+    // the override. Returns true only if the operator wants that retry.
+    //
+    // Not always a mistake: public_base_url is also the OAuth callback origin, so on a
+    // split-vhost install the two values legitimately differ and this is the only way to
+    // register an agent at all. The explanation stays on the page either way.
+    audienceConflict(e) {
+      if (!e || e.code !== 'agent_audience_conflict') return false;
+      this.audienceBlock = e.message;
+      return confirm(`${e.message}\n\nIssue the code anyway, built from the pinned audience?\n\nThe agent will have to reach this dashboard at that URL. Cancel to fix the configuration first.`);
+    },
+
+    showEnrol(r) {
+      const install = r.install || {};
+      this.enrol = {name: r.name, code: r.enrollment_code,
+                    docker_run: install.docker_run || '',
+                    docker_run_code_file: install.docker_run_code_file || '',
+                    docker_run_powershell: install.docker_run_powershell || '',
+                    docker_run_code_file_powershell: install.docker_run_code_file_powershell || '',
+                    warnings: install.warnings || []};
+      this.enrolOpen = true;
+    },
+
+    async reissue(a, ackAudience) {
+      if (!ackAudience && !confirm(`Issue a new enrolment code for '${a.name}'?\n\nThe currently running container will stop being able to claim work immediately.`)) return;
+      try {
+        const q = ackAudience ? '?acknowledge_audience=true' : '';
+        this.showEnrol(await API.post(`/api/agent/${encodeURIComponent(a.id)}/enrollment-code${q}`, {}));
+        await this.load();
+      } catch (e) {
+        // Refused before reissue_enroll_code ran, so this agent's key is intact and its
+        // container is still working — which is what makes the retry safe.
+        if (!ackAudience && this.audienceConflict(e)) return this.reissue(a, true);
+        if (e.code === 'agent_audience_conflict') return;
+        this.flash('Could not re-issue: ' + (e.message || e), 'error');
+      }
+    },
+
+    async revoke(a) {
+      if (!confirm(`Revoke agent '${a.name}'?\n\nAny job it is running will be marked failed.`)) return;
+      try {
+        const r = await API.delete('/api/agent/' + encodeURIComponent(a.id));
+        this.flash(r.detail || 'Agent revoked.', 'success');
+        await this.load();
+      } catch (e) {
+        this.flash('Revoke failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    async removeRecord(a) {
+      if (!confirm(
+        `Permanently remove the record for '${a.name}'?\n\n` +
+        `This frees the name so it can be registered again. Its job history is kept ` +
+        `(the jobs simply stop naming an agent), and the audit log is untouched.`)) return;
+      try {
+        const r = await API.delete(`/api/agent/${encodeURIComponent(a.id)}/record`);
+        this.flash(r.detail || 'Agent record removed.', 'success');
+        if (this.expanded === a.id) this.expanded = null;
+        await this.load();
+      } catch (e) {
+        this.flash('Remove failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    openDiscover(a) {
+      this.discover = {agentId: a.id, agentName: a.name, scan_kind: 'all',
+                       cidrs: '', hostnames: ''};
+      this.discoverOpen = true;
+    },
+
+    _list(s) {
+      return (s || '').split(',').map(v => v.trim()).filter(Boolean);
+    },
+
+    async runDiscover() {
+      try {
+        const r = await API.post(`/api/agent/${encodeURIComponent(this.discover.agentId)}/discover`, {
+          scan_kind: this.discover.scan_kind,
+          cidrs: this._list(this.discover.cidrs),
+          hostnames: this._list(this.discover.hostnames),
+        });
+        this.discoverOpen = false;
+        // The job page streams the agent's output through the existing Live Output pane.
+        window.location.href = '/jobs/' + r.job_id;
+      } catch (e) {
+        this.flash('Could not start the scan: ' + (e.message || e), 'error');
+      }
+    },
+
+    copy(text) {
+      navigator.clipboard.writeText(text)
+        .then(() => this.flash('Copied.', 'success'))
+        .catch(() => this.flash('Copy failed — select and copy manually.', 'error'));
+    },
+
+    flash(msg, type) {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 4000);
+    },
+  };
+}
+</script>
+{% endblock %}

@@ -83,6 +83,18 @@ resource "aws_instance" "vm" {
   vpc_security_group_ids = var.security_group_ids
   iam_instance_profile   = aws_iam_instance_profile.ssm_profile.name
 
+  # Own the root disk explicitly so a rollback reliably reclaims it. Some custom
+  # Packer AMIs ship delete_on_termination=false on the root device, which
+  # otherwise leaves an untagged "available" volume behind after a destroy. The
+  # tags make any future orphan traceable back to the dashboard.
+  root_block_device {
+    delete_on_termination = true
+    tags = {
+      Name         = "${var.instance_name}-root"
+      "managed-by" = "vm-dashboard"
+    }
+  }
+
   tags = {
     Name      = var.instance_name
     "managed-by" = "vm-dashboard"

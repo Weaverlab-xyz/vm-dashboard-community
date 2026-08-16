@@ -213,11 +213,16 @@ the next things queued for QA.
 
 - **What community does:** community already dispatches **ephemeral
   remote runners** (ECS / ACI / Cloud Run) for Ansible, Kubernetes, and
-  image-promote runs — but those run **cloud-side** and are torn down after
-  each job. What community has no concept of is a **persistent,
-  customer-hosted worker with access to on-prem/local resources** — a spoke
-  the dashboard can reach into the customer's own network (e.g. to a
-  local OVA artefact) rather than acting only cloud-side.
+  image-promote runs — those run **cloud-side** and are torn down after
+  each job. Community now *also* owns the hub-and-spoke primitive itself:
+  [remote agents](remote-agents.md) are containerised, customer-hosted spokes
+  that poll out to the dashboard, enrol with a short-lived code, and
+  authenticate with an Ed25519 key they generate themselves. Community
+  scopes them to **discovery** of on-prem Kubernetes clusters and databases,
+  so no credential crosses the boundary; agent-executed Ansible and Password
+  Safe JIT checkout are the next slices. Note the naming: community calls
+  them **agents**, because `worker` already means the local `jobs_worker`
+  process and the compose service of that name.
 - **What the hosted topology does today:** that on-prem worker lives on a
   customer-owned machine the customer enrols by hand, installing every
   job prerequisite (the cloud provider CLIs/SDKs, `qemu-img`, etc.)
@@ -240,7 +245,11 @@ the next things queued for QA.
   handshake + short token expiry need a QA tenant.
 - **Why it matters for SaaS:** removes the highest-friction step in
   worker onboarding — packaging it as pull-and-run shortens onboarding
-  from days to minutes.
+  from days to minutes. With the primitive now in community, what SaaS
+  adds on top is **per-tenant scoping** — an agent belongs to a tenant,
+  and a job can never be leased across that line — plus the heavier job
+  types (image promotion from a local OVA) that need the cloud CLIs the
+  community agent deliberately omits.
 
 ### Continuous CVE scanning per image version
 

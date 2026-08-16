@@ -1,0 +1,25 @@
+# Ensure a namespace exists.
+# Target: a Kubernetes cluster. Kubeconfig is auto-injected (K8S_AUTH_KUBECONFIG).
+#
+# extra_vars:
+#   k8s_namespace: my-team   # the namespace to create (required)
+- name: Ensure a Kubernetes namespace
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    k8s_namespace: ""
+  tasks:
+    - name: Fail if k8s_namespace was not supplied
+      ansible.builtin.assert:
+        that: k8s_namespace | length > 0
+        fail_msg: "Set k8s_namespace via extra vars (e.g. k8s_namespace=my-team)."
+
+    - name: Create/ensure the namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ k8s_namespace }}"

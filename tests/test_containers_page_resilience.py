@@ -151,6 +151,109 @@ def test_gce_endpoints_503_when_project_missing():
         containers._gcp_project_id = saved["proj"]
 
 
+def _patch_config_service(saved):
+    """Stub config_service reads used by the Portainer-node routes.
+
+    ``get_portainer_node`` reads portainer_url / portainer_pat BEFORE the project
+    check, and ``firewall_status`` reads the CIDR keys — both would hit an
+    uninitialised DB here and turn a handled path into a 500. Same reason this file
+    stubs ``_aci_rg`` above."""
+    from web_dashboard.services import config_service
+    saved["cfg_get"] = config_service.get
+    saved["cfg_get_bool"] = config_service.get_bool
+    config_service.get = lambda key, default=None: ""
+    config_service.get_bool = lambda key, default=False: False
+
+
+def _restore_config_service(saved):
+    from web_dashboard.services import config_service
+    config_service.get = saved["cfg_get"]
+    config_service.get_bool = saved["cfg_get_bool"]
+
+
+_PORTAINER_NODE_ENDPOINTS = [
+    "/api/containers/portainer/node",
+    "/api/containers/portainer/node/firewall",
+    "/api/containers/portainer/node/deploy-options",
+]
+
+
+def test_portainer_node_endpoints_handled_when_gcp_unreachable():
+    """A configured project whose GCE list blows up must surface as a handled 503
+    (or a clean 200 for the routes that make no cloud call) — never a 500."""
+    client = _make_client()
+    saved = {}
+    _patch_config_service(saved)
+
+    from web_dashboard.services import gcp_service
+    saved["list_portainer"] = gcp_service.list_gce_portainer
+    saved["proj"] = containers._gcp_project_id
+
+    async def gcp_boom(*a, **k):
+        raise GCPError("GCP not reachable.")
+
+    gcp_service.list_gce_portainer = gcp_boom
+    containers._gcp_project_id = lambda: "test-project"
+    try:
+        for path in _PORTAINER_NODE_ENDPOINTS:
+            r = client.get(path)
+            assert r.status_code in (200, 503), f"{path} → {r.status_code} (expected 200 or handled 503)"
+            assert r.status_code != 500, f"{path} returned an unhandled 500"
+        # The listing route is the one that touches GCE, so it must be the 503.
+        assert client.get("/api/containers/portainer/node").status_code == 503
+    finally:
+        gcp_service.list_gce_portainer = saved["list_portainer"]
+        containers._gcp_project_id = saved["proj"]
+        _restore_config_service(saved)
+
+
+def test_portainer_node_returns_shell_when_project_missing():
+    """Deliberate contract: with no GCP project the listing route returns 200 with
+    configured=false (NOT 503), so the Containers tab can render its setup card."""
+    client = _make_client()
+    saved = {}
+    _patch_config_service(saved)
+    saved["proj"] = containers._gcp_project_id
+    containers._gcp_project_id = lambda: ""
+    try:
+        r = client.get("/api/containers/portainer/node")
+        assert r.status_code == 200, f"{r.status_code} (expected the not-configured shell)"
+        body = r.json()
+        assert body["configured"] is False, body
+        assert body["nodes"] == [] and body["count"] == 0, body
+        # The other two make no cloud call, so they stay clean too.
+        for path in _PORTAINER_NODE_ENDPOINTS[1:]:
+            assert client.get(path).status_code in (200, 503)
+    finally:
+        containers._gcp_project_id = saved["proj"]
+        _restore_config_service(saved)
+
+
+def test_portainer_node_ok_when_configured():
+    client = _make_client()
+    saved = {}
+    _patch_config_service(saved)
+
+    from web_dashboard.services import gcp_service
+    saved["list_portainer"] = gcp_service.list_gce_portainer
+    saved["proj"] = containers._gcp_project_id
+
+    async def ok_list(*a, **k):
+        return []
+
+    gcp_service.list_gce_portainer = ok_list
+    containers._gcp_project_id = lambda: "test-project"
+    try:
+        r = client.get("/api/containers/portainer/node")
+        assert r.status_code == 200, r.status_code
+        body = r.json()
+        assert body["count"] == 0 and body["configured"] is True, body
+    finally:
+        gcp_service.list_gce_portainer = saved["list_portainer"]
+        containers._gcp_project_id = saved["proj"]
+        _restore_config_service(saved)
+
+
 def test_deploy_compose_validation():
     client = _make_client()
     # bad provider → 400 (before any DB/job work)

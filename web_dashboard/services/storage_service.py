@@ -45,7 +45,23 @@ _TYPE_MAP = {
     ".deb":  "deb",
 }
 
-BACKENDS = ("s3", "azure_blob", "gcs", "local")
+BACKENDS = ("s3", "azure_blob", "gcs", "oci_object_storage", "local")
+
+# Backends that may NOT be selected as the *active* backend, with the reason shown
+# to the operator. The active backend also decides where Terraform state lives
+# (services/terraform.py maps it to a Terraform state backend and falls through to
+# local for anything it doesn't recognise), and Terraform ships no first-party OCI
+# state backend — so an OCI selection would silently strand every deployment's
+# state on the container's ephemeral disk, taking `destroy` with it.
+# OCI is still perfectly usable as the image-registry hub; api/storage.py enforces
+# this on the config PATCH.
+ACTIVE_BACKEND_EXCLUSIONS = {
+    "oci_object_storage": (
+        "OCI Object Storage can host the image-registry hub but not the active "
+        "backend — Terraform has no OCI state backend, so deployment state would "
+        "be stranded on ephemeral container storage. Pick s3, azure_blob, gcs or local."
+    ),
+}
 
 
 def _asset_type(name: str) -> str:
@@ -84,6 +100,8 @@ def _backend_configured(backend: str) -> bool:
         return bool(_cfg("storage_azure_account"))
     if backend == "gcs":
         return bool(_cfg("storage_gcs_bucket"))
+    if backend == "oci_object_storage":
+        return bool(_cfg("storage_oci_bucket"))
     if backend == "local":
         return bool(_cfg("storage_local_path"))
     return False
@@ -98,11 +116,14 @@ def active_backend() -> str:
     `configured_backends()` list. If the selection is missing required
     config or unset, returns "" so callers can render a useful error."""
     chosen = _cfg("storage_active_backend")
-    if chosen and chosen in BACKENDS and _backend_configured(chosen):
+    if (chosen and chosen in BACKENDS and _backend_configured(chosen)
+            and chosen not in ACTIVE_BACKEND_EXCLUSIONS):
         return chosen
     # Fall back to the first configured backend so existing setups that
-    # never set storage_active_backend still work.
-    cfgd = configured_backends()
+    # never set storage_active_backend still work. Excluded backends are skipped
+    # here too — an install whose only configured backend is OCI has no active
+    # backend, which is the honest answer rather than a silently-local one.
+    cfgd = [b for b in configured_backends() if b not in ACTIVE_BACKEND_EXCLUSIONS]
     return cfgd[0] if cfgd else ""
 
 
@@ -275,6 +296,87 @@ def _gcs_delete_sync(name: str) -> None:
     blob.delete()
 
 
+# ── OCI Object Storage backend ───────────────────────────────────────────────
+# Credentials are NOT duplicated here — oci_service._oci_config() already builds
+# and validates the SDK config from the wizard-stored API-key fields, and a second
+# copy of that (key_content, passphrase, validate_config) is a second place to get
+# it wrong.
+#
+# Usable as the image-registry *hub*, but deliberately NOT selectable as the
+# *active* backend: services/terraform.py maps the active backend to a Terraform
+# state backend and silently falls through to local for anything it doesn't
+# recognise. Terraform has no first-party OCI state backend, so allowing that
+# selection would strand every deployment's state on the container's ephemeral
+# disk. api/storage.py enforces the restriction; see docs/image-management.md.
+
+def _oci_os_client():
+    from . import oci_service
+    oci_service._require_oci()
+    import oci
+    return oci.object_storage.ObjectStorageClient(oci_service._oci_config())
+
+
+# The Object Storage namespace is per-tenancy and immutable, but get_namespace()
+# is a network round-trip — memoised so a list/copy loop doesn't re-fetch it.
+_OCI_NAMESPACE_CACHE: dict = {}
+
+
+def _oci_namespace() -> str:
+    configured = _cfg("storage_oci_namespace")
+    if configured:
+        return configured
+    tenancy = _cfg("oci_tenancy_ocid")
+    if tenancy in _OCI_NAMESPACE_CACHE:
+        return _OCI_NAMESPACE_CACHE[tenancy]
+    ns = _oci_os_client().get_namespace().data
+    _OCI_NAMESPACE_CACHE[tenancy] = ns
+    return ns
+
+
+def _oci_bucket() -> str:
+    bucket = _cfg("storage_oci_bucket")
+    if not bucket:
+        raise StorageError("storage_oci_bucket is not set — configure it on the Storage page.")
+    return bucket
+
+
+def _oci_prefix() -> str:
+    return (_cfg("storage_oci_prefix") or "config-mgmt").rstrip("/")
+
+
+def _oci_list_sync() -> list[dict]:
+    client = _oci_os_client()
+    ns, bucket, prefix = _oci_namespace(), _oci_bucket(), _oci_prefix()
+    assets = []
+    start = None
+    while True:
+        resp = client.list_objects(ns, bucket, prefix=prefix + "/", fields="size", start=start).data
+        for obj in resp.objects:
+            name = obj.name[len(prefix) + 1:]
+            if name and any(name.endswith(ext) for ext in _ASSET_EXTENSIONS):
+                assets.append({"name": name, "type": _asset_type(name), "size": obj.size or 0})
+        start = getattr(resp, "next_start_with", None)
+        if not start:
+            break
+    return sorted(assets, key=lambda x: x["name"])
+
+
+def _oci_fetch_sync(name: str) -> bytes:
+    client = _oci_os_client()
+    resp = client.get_object(_oci_namespace(), _oci_bucket(), f"{_oci_prefix()}/{name}")
+    return resp.data.content
+
+
+def _oci_upload_sync(name: str, data: bytes) -> None:
+    client = _oci_os_client()
+    client.put_object(_oci_namespace(), _oci_bucket(), f"{_oci_prefix()}/{name}", data)
+
+
+def _oci_delete_sync(name: str) -> None:
+    client = _oci_os_client()
+    client.delete_object(_oci_namespace(), _oci_bucket(), f"{_oci_prefix()}/{name}")
+
+
 # ── Local filesystem / SMB UNC backend ───────────────────────────────────────
 # Path may be either a normal filesystem path (anything not starting with
 # `\\` or `//`) or a UNC `\\server\share[\subpath]`. UNC paths are read via
@@ -420,6 +522,7 @@ _BACKEND_OPS = {
     "s3":         {"list": _s3_list_sync,    "fetch": _s3_fetch_sync,    "upload": _s3_upload_sync,    "delete": _s3_delete_sync},
     "azure_blob": {"list": _azure_list_sync, "fetch": _azure_fetch_sync, "upload": _azure_upload_sync, "delete": _azure_delete_sync},
     "gcs":        {"list": _gcs_list_sync,   "fetch": _gcs_fetch_sync,   "upload": _gcs_upload_sync,   "delete": _gcs_delete_sync},
+    "oci_object_storage": {"list": _oci_list_sync, "fetch": _oci_fetch_sync, "upload": _oci_upload_sync, "delete": _oci_delete_sync},
     "local":      {"list": _local_list_sync, "fetch": _local_fetch_sync, "upload": _local_upload_sync, "delete": _local_delete_sync},
 }
 
@@ -571,7 +674,7 @@ async def list_all_assets() -> list[dict]:
 # of the dashboard host and is NOT reachable from cloud runners — the
 # Config Mgmt page surfaces a warning when a user picks a local asset for
 # a cloud target. See issue #16.
-CLOUD_BACKENDS = ("s3", "azure_blob", "gcs")
+CLOUD_BACKENDS = ("s3", "azure_blob", "gcs", "oci_object_storage")
 
 
 def is_cloud_backend(backend: str) -> bool:
@@ -806,6 +909,11 @@ def image_key(backend: str, image_name: str, ext: str = "vhd", ts: Optional[str]
     if backend == "s3":
         prefix = (_cfg("storage_s3_prefix") or "config-mgmt").rstrip("/")
         return f"{prefix}/{blob}" if prefix else blob
+    if backend == "oci_object_storage":
+        # Like S3, one bucket doubles as the asset store, so images live under
+        # the same configured prefix rather than at the bucket root.
+        prefix = _oci_prefix()
+        return f"{prefix}/{blob}" if prefix else blob
     return blob
 
 
@@ -821,6 +929,10 @@ def image_url(backend: str, key: str) -> str:
         return f"https://{account}.blob.core.windows.net/{container}/{key}"
     if backend == "gcs":
         return f"gs://{_cfg('storage_gcs_bucket')}/{key}"
+    if backend == "oci_object_storage":
+        # oci://<namespace>/<bucket>/<key> — the shape the promote paths already
+        # log. image_registry_service._parse_hub_url reads it back.
+        return f"oci://{_oci_namespace()}/{_cfg('storage_oci_bucket')}/{key}"
     if backend == "local":
         base = _cfg("storage_local_path").rstrip("/").rstrip("\\")
         return f"file://{base}/{key.lstrip('/')}"
@@ -1056,6 +1168,108 @@ def _gcs_presigned_url_sync(key: str, expiry_seconds: int, method: str) -> str:
     )
 
 
+def _oci_upload_image_sync(key: str, fileobj) -> None:
+    from . import oci_service
+    oci_service._require_oci()
+    import oci
+    if hasattr(fileobj, "seek"):
+        try:
+            fileobj.seek(0)
+        except OSError:
+            pass
+    # UploadManager splits anything over its threshold into parallel multipart
+    # uploads — put_object would have to hold a multi-GB VHD in one request.
+    manager = oci.object_storage.UploadManager(_oci_os_client(), allow_multipart_uploads=True)
+    manager.upload_stream(_oci_namespace(), _oci_bucket(), key, fileobj)
+
+
+def _oci_download_image_sync(key: str, fileobj) -> None:
+    resp = _oci_os_client().get_object(_oci_namespace(), _oci_bucket(), key)
+    # .data.raw.stream() yields the body in chunks; reading .content would
+    # materialise the whole image in memory.
+    for chunk in resp.data.raw.stream(1024 * 1024, decode_content=False):
+        fileobj.write(chunk)
+
+
+def _oci_delete_image_sync(key: str) -> None:
+    _oci_os_client().delete_object(_oci_namespace(), _oci_bucket(), key)
+
+
+def _oci_head_image_sync(key: str) -> Optional[dict]:
+    try:
+        resp = _oci_os_client().head_object(_oci_namespace(), _oci_bucket(), key)
+    except Exception as exc:  # noqa: BLE001 — ServiceError(404) is the "absent" signal
+        if getattr(exc, "status", None) == 404 or "404" in str(exc):
+            return None
+        raise
+    h = resp.headers
+    return {
+        "size": int(h.get("content-length") or 0),
+        "etag": (h.get("etag") or "").strip('"'),
+        "content_type": h.get("content-type") or "",
+        "last_modified": h.get("last-modified") or None,
+    }
+
+
+def _oci_copy_same_sync(src_key: str, dst_key: str) -> None:
+    import time
+    from . import oci_service
+    oci_service._require_oci()
+    import oci
+    client = _oci_os_client()
+    ns, bucket = _oci_namespace(), _oci_bucket()
+    region = _cfg("oci_region") or "us-ashburn-1"
+    # OCI's copy is server-side but *asynchronous* — it hands back a work request
+    # rather than completing inline, so the bytes never flow through this process
+    # (the point of a same-backend copy) but the call has to be waited on.
+    details = oci.object_storage.models.CopyObjectDetails(
+        source_object_name=src_key,
+        destination_region=region,
+        destination_namespace=ns,
+        destination_bucket=bucket,
+        destination_object_name=dst_key,
+    )
+    resp = client.copy_object(ns, bucket, details)
+    wr_id = resp.headers.get("opc-work-request-id")
+    if not wr_id:
+        return
+    deadline = time.monotonic() + 3600
+    while time.monotonic() < deadline:
+        wr = client.get_work_request(wr_id).data
+        status = (getattr(wr, "status", "") or "").upper()
+        if status in ("COMPLETED", "COMPLETE"):
+            return
+        if status in ("FAILED", "CANCELED", "CANCELLED"):
+            raise StorageError(f"OCI copy {src_key} → {dst_key} failed (work request {wr_id}: {status})")
+        time.sleep(5)
+    raise StorageError(f"OCI copy {src_key} → {dst_key} did not finish within 3600s")
+
+
+def _oci_presigned_url_sync(key: str, expiry_seconds: int, method: str) -> str:
+    from datetime import datetime, timedelta, timezone
+    from . import oci_service
+    oci_service._require_oci()
+    import oci
+    m = method.upper()
+    if m not in ("GET", "PUT"):
+        raise StorageError(f"Unsupported presigned URL method '{method}' for OCI Object Storage.")
+    models = oci.object_storage.models
+    access = (models.CreatePreauthenticatedRequestDetails.ACCESS_TYPE_OBJECT_READ if m == "GET"
+              else models.CreatePreauthenticatedRequestDetails.ACCESS_TYPE_OBJECT_WRITE)
+    ns, bucket = _oci_namespace(), _oci_bucket()
+    details = models.CreatePreauthenticatedRequestDetails(
+        name=f"vm-dashboard-{m.lower()}-{int(datetime.now(timezone.utc).timestamp())}",
+        object_name=key,
+        access_type=access,
+        time_expires=datetime.now(timezone.utc) + timedelta(seconds=expiry_seconds),
+    )
+    par = _oci_os_client().create_preauthenticated_request(ns, bucket, details).data
+    # access_uri is a PATH fragment ("/p/<token>/n/<ns>/b/<bucket>/o/<key>"), not a
+    # URL — unlike an S3/GCS signature it has to be joined to the regional endpoint.
+    region = _cfg("oci_region") or "us-ashburn-1"
+    return f"https://objectstorage.{region}.oraclecloud.com{par.access_uri}"
+
+
 def _local_upload_image_sync(key: str, fileobj) -> None:
     target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
     if _is_unc(target):
@@ -1181,6 +1395,14 @@ _IMAGE_OPS = {
         "copy":     _gcs_copy_same_sync,
         "presign":  _gcs_presigned_url_sync,
     },
+    "oci_object_storage": {
+        "upload":   _oci_upload_image_sync,
+        "download": _oci_download_image_sync,
+        "delete":   _oci_delete_image_sync,
+        "head":     _oci_head_image_sync,
+        "copy":     _oci_copy_same_sync,
+        "presign":  _oci_presigned_url_sync,
+    },
     "local": {
         "upload":   _local_upload_image_sync,
         "download": _local_download_image_sync,
@@ -1248,6 +1470,33 @@ async def head_image_in(backend: str, key: str) -> Optional[dict]:
         raise
     except Exception as e:
         raise StorageError(f"Failed to head image '{key}' on {backend}: {e}") from e
+
+
+# Per-backend prefix an ASSET is stored under. presigned_url() takes a raw key, so a
+# caller wanting to presign an asset has to address it by the same key upload_asset
+# wrote — guessing it produces a URL that 404s at fetch time, which is invisible until
+# something downstream tries to use it.
+_ASSET_PREFIX_FN = {
+    "s3":         _s3_prefix,
+    "azure_blob": _azure_prefix,
+    "gcs":        _gcs_prefix,
+    "oci_object_storage": _oci_prefix,
+}
+
+
+def asset_key(backend: str, name: str) -> str:
+    """The storage key ``upload_asset`` writes ``name`` to on ``backend``.
+
+    Pair with :func:`presigned_url` to hand an asset's URL to something outside the
+    dashboard — e.g. a Packer build installing an EPM-L package it can't otherwise
+    reach. Raises for ``local``, which has no presignable key space."""
+    _validate_backend(backend)
+    fn = _ASSET_PREFIX_FN.get(backend)
+    if fn is None:
+        raise StorageError(
+            f"Backend '{backend}' stores assets on a filesystem, not under a "
+            f"presignable key. Use a cloud backend (S3 / Azure Blob / GCS / OCI) for this.")
+    return f"{fn()}/{name}"
 
 
 async def presigned_url(

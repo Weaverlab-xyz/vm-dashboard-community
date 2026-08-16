@@ -171,6 +171,69 @@ def test_deploy_rejects_invalid_zone():
     assert "metadata" not in _CAPTURED, "no job should be created for a bad zone"
 
 
+# ── Cross-region subnetwork guard ─────────────────────────────────────────────
+# Subnetworks are regional. Pairing one with a zone in another region is only caught
+# by GCE at insert time, as an opaque 'Scope of the specified subnetwork doesn't match
+# the scope of the instance' that names neither region — and on the bulk route that
+# arrives after N children exist, so it fails the whole batch. Both routes reject it up
+# front instead. Regression: a bulk deploy into us-east1-b shipped the us-central1
+# subnet because the picker still listed the previous region's, and the sandbox names
+# its subnet identically in every region.
+
+_CENTRAL_SUBNET = ("https://www.googleapis.com/compute/v1/projects/proj-1"
+                   "/regions/us-central1/subnetworks/dashboard-sandbox-vm-subnet")
+
+
+def test_deploy_rejects_subnetwork_from_another_region():
+    _install_stubs()
+    _CAPTURED.clear()
+    client = _make_client()
+    r = client.post("/api/gcp/deploy",
+                    json=_deploy_body(zone="us-east1-b", subnetwork=_CENTRAL_SUBNET))
+    assert r.status_code == 400, (r.status_code, r.text)
+    # Both regions must be named — that is the whole point over GCE's own message.
+    detail = r.json()["detail"]
+    assert "us-central1" in detail and "us-east1" in detail, detail
+    assert "metadata" not in _CAPTURED, "no job should be created for a mismatched subnet"
+
+
+def test_deploy_accepts_matching_or_unqualified_subnetwork():
+    _install_stubs()
+    client = _make_client()
+    # Same region as the zone.
+    _CAPTURED.clear()
+    r = client.post("/api/gcp/deploy",
+                    json=_deploy_body(zone="us-central1-a", subnetwork=_CENTRAL_SUBNET))
+    assert r.status_code == 200, (r.status_code, r.text)
+    assert _CAPTURED["metadata"]["req"]["subnetwork"] == _CENTRAL_SUBNET
+    # A bare name carries no region — it is qualified from the zone downstream, so the
+    # guard must not reject it (this is what the sandbox stores in gcp_subnetwork).
+    _CAPTURED.clear()
+    r = client.post("/api/gcp/deploy",
+                    json=_deploy_body(zone="us-east1-b",
+                                      subnetwork="dashboard-sandbox-vm-subnet"))
+    assert r.status_code == 200, (r.status_code, r.text)
+
+
+def test_bulk_deploy_rejects_subnetwork_from_another_region():
+    _install_stubs()
+    _CAPTURED.clear()
+    client = _make_client()
+    r = client.post("/api/gcp/bulk-deploy", json={
+        "items": [{"image_self_link": "projects/x/global/images/img-1",
+                   "instance_name": f"vm{i}"} for i in (1, 2, 3)],
+        "workgroup": "eng",
+        "zone": "us-east1-b",
+        "subnetwork": _CENTRAL_SUBNET,
+    })
+    assert r.status_code == 400, (r.status_code, r.text)
+    detail = r.json()["detail"]
+    assert "us-central1" in detail and "us-east1" in detail, detail
+    # The batch must be rejected before any child row exists — three queued children
+    # that GCE then rejects one by one is exactly the failure this replaces.
+    assert "metadata" not in _CAPTURED, "no child job should be created for the batch"
+
+
 # ── _build_gcp_instances region tagging ──────────────────────────────────────
 
 class _FakeQuery:

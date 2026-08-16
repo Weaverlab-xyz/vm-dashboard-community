@@ -166,13 +166,25 @@ better fit, but the IAM/role shapes below are the same either way.
 
 ## Configuration
 
-Every key below lives in the same `config_service` store as the rest of
-the dashboard's settings. Set them on `/storage` (the page hosts a
-generic `PATCH /api/storage/config` form) or via env var override.
+the dashboard's settings. Every `promote_runner_*` key has a form field in
+**Settings → Remote Worker → Image-promote runner** — one bordered sub-card
+per target cloud. Each field's placeholder shows the default and its hint
+names the fallback key, so a blank field means "inherit". Env var override
+and `PATCH /api/storage/config` write the same keys if you'd rather script
+it. (`aws_vmimport_role_name` is the one exception — no form field and not on
+the storage API, so override it with an env var if you renamed the role. The
+`/storage` page also round-trips every `promote_runner_*` key on save but
+renders no inputs for them, so it isn't where you set them either.)
+
+Fallbacks are resolved in
+`promote_runner_service._resolve_{aws,azure,gcp,oci}_runner_config`; where a
+key falls back, the fallback is whatever you already configured in the
+`/setup` wizard or on `/storage`. A single-account install typically only
+needs the staging bucket and — on AWS — the task role.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `promote_runner_image` | `chrweav/dashboard-promote-runner:latest` | Container image to launch for the runner task. Override to a private registry path. |
+| `promote_runner_image` | `chrweav/dashboard-promote-runner:latest` | Container image to launch for the runner task. Override to a private registry path. Shared by all four target clouds. |
 
 ### AWS-target
 
@@ -210,13 +222,32 @@ generic `PATCH /api/storage/config` form) or via env var override.
 | Key | Fallback | Purpose |
 |---|---|---|
 | `promote_runner_gcp_region` | `gcp_region` | Region the Cloud Run Job runs in. |
-| `promote_runner_gcp_cpu` | `2000m` | Cloud Run container CPU. |
-| `promote_runner_gcp_memory` | `4Gi` | Cloud Run container memory. |
+| `promote_runner_gcp_cpu` | `4` | Cloud Run container CPU. Jobs take integer vCPU only (`1`, `2`, `4`, `6`, `8`) — not millicpu. |
+| `promote_runner_gcp_memory` | `16Gi` | Cloud Run container memory. `/tmp` is memory-backed and holds the VHD + the raw disk + the tar.gz, so multi-GB images OOM at 4Gi. |
 | `promote_runner_gcp_vpc_connector` | _(optional)_ | Serverless VPC Access connector for private egress. |
 | `promote_runner_gcp_service_account` | _(optional)_ | Workload-identity SA email for the runner. |
 | `promote_runner_gcp_staging_bucket` | `storage_gcs_bucket` | GCS bucket for the staged tar.gz. |
 | `promote_runner_gcp_staging_prefix` | `promote-staging` | Object prefix. |
 | `promote_runner_gcp_image_family` | _(optional)_ | Family label on the resulting custom image. |
+
+CPU and memory are paired — Cloud Run rejects a job whose memory exceeds what
+its vCPU count allows, so raise both together: 2 vCPU tops out at 8Gi, 4 vCPU at
+16Gi, 6 vCPU at 24Gi, 8 vCPU at 32Gi (the ceiling).
+
+### OCI-target
+
+OCI has no Ansible/Kubernetes runner to inherit network plumbing from, so
+these keys fall back to the primary `oci_*` configuration instead.
+
+| Key | Fallback | Purpose |
+|---|---|---|
+| `promote_runner_oci_compartment` | `oci_compartment_ocid`, then `oci_tenancy_ocid` | Compartment the Container Instance runs in. |
+| `promote_runner_oci_subnet_ocid` | `oci_default_subnet_ocid` | Subnet for the runner VNIC. Needs egress to the presigned source URL. |
+| `promote_runner_oci_availability_domain` | _(first AD in the compartment)_ | AD the Container Instance is placed in. |
+| `promote_runner_oci_ocpus` | `2` | Container OCPUs (CI.Standard.E4.Flex). |
+| `promote_runner_oci_memory_gbs` | `16` | Container memory (GB). |
+| `promote_runner_oci_staging_bucket` | _(none — required)_ | Object Storage bucket for the staged QCOW2. |
+| `promote_runner_oci_staging_prefix` | `promote-staging` | Object name prefix. |
 
 ## Inputs
 

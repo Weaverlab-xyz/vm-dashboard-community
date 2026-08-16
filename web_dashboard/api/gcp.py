@@ -8,9 +8,10 @@ Mirrors the AWS and Azure router patterns:
 """
 import json
 import logging
+import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,10 @@ from ..config import settings
 from ..database import Job, User, get_db
 from ..models.gcp import (
     GCPCreateImageRequest,
+    GCPBulkDeployItem,
+    GCPBulkDeployJobResult,
+    GCPBulkDeployRequest,
+    GCPBulkDeployResponse,
     GCPDeployRequest,
     GCPDeployResponse,
     GCPImageListResponse,
@@ -25,7 +30,7 @@ from ..models.gcp import (
     GCPNetworkOptions,
     GCPSSHKeyDetail,
 )
-from ..services import cache_service, cloud_stats, job_service, region_catalog, workgroup_service
+from ..services import cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
 from ..services import gcp_service
 from .auth import require_admin, require_permission
 
@@ -58,6 +63,37 @@ def _gcp_region() -> str:
     return parts[0] if len(parts) == 2 else zone
 
 
+# Cache identities for the two project-scoped GCP caches. Exported as builders so
+# every reader and writer produces a byte-identical key — same convention as
+# api/aws.py and api/azure.py. GCP has no startup warmer, but the read/write split
+# inside this module is enough to make a drifted key a silent permanent miss.
+CACHE_KEY_INSTANCES = "gcp_instances"
+CACHE_KEY_CUSTOM_IMAGES = "gcp_custom_images"
+
+
+def instances_cache_key(project_id: str) -> str:
+    """Cache key for the dashboard GCE inventory, scoped to the project it was read
+    from. Three call sites share it (`_build_gcp_instances` writes, `list_instances`
+    and `_gcp_instances_unfiltered` read) and a write/read key that disagree is a
+    silent permanent miss, so they resolve it here rather than each spelling it out.
+
+    Project, not region: `_build_gcp_instances` already iterates every zone a deploy
+    job recorded, so the payload spans regions by construction. What it does *not*
+    span is projects — `gcp_project_id` is operator-changeable in Settings, and the
+    cached payload literally embeds the `project_id` it was built for, so after a
+    switch the page kept reporting the old project's instances under its old id."""
+    return cache_service.key_param(CACHE_KEY_INSTANCES, project=project_id)
+
+
+def custom_images_cache_key(project_id: str) -> str:
+    """Cache key for the custom (private) image list, scoped per project.
+
+    A custom image lives in the project that owns it, and the payload echoes the
+    `project_id` back. GCE images are global *within* a project, so project is the
+    only dimension needed here — not region."""
+    return cache_service.key_param(CACHE_KEY_CUSTOM_IMAGES, project=project_id)
+
+
 def _resolve_zone(zone: Optional[str]) -> str:
     """Resolve the effective GCE zone for a request. Format validation is delegated
     to the shared region catalog; a blank/None zone falls back to the configured
@@ -81,32 +117,40 @@ def _region_from_zone(zone: str) -> str:
     return _gcp_region()
 
 
-def _jumpoint_name(vm_name: str) -> str:
-    """Deterministic Jumpoint VM name. Each user VM gets its own paired
-    Jumpoint, mirroring the AWS ECS pattern. GCE names cap at 63 chars."""
-    base = f"bt-jumpoint-{vm_name}".lower()
-    return base[:63]
+def _reject_cross_region_subnetwork(subnetwork: str, zone: str, region: str) -> None:
+    """400 when an explicitly-picked subnetwork lives in another region than ``zone``.
 
+    GCE catches this itself, but only at insert time and only as::
 
-async def _resolve_gcp_jumpoint_deploy_key() -> str:
-    """Return the BeyondTrust SRA Jumpoint deploy key for GCP launches.
-    Resolves through whichever secrets backend the user picked on /secrets;
-    `gcp_cloud_run_docker_deploy_key` is the historical key name."""
-    from ..services import config_service
-    return (
-        config_service.get("gcp_cloud_run_docker_deploy_key")
-        or config_service.get("gcp_jumpoint_docker_deploy_key")
-        or ""
+        Invalid value for field 'resource.networkInterfaces[0].subnetwork': …
+        Scope of the specified subnetwork doesn't match the scope of the instance
+
+    — which names neither region, and arrives after the job rows exist (a bulk deploy
+    creates N children and fails all of them). Rejecting the request instead keeps the
+    mismatch in front of the operator, where it is fixable.
+
+    Blank subnets and bare names are left alone: those are region-qualified from the
+    instance zone downstream (``gcp_service._qualify_subnetwork``) and cannot conflict.
+    """
+    sn_region = gcp_service.subnetwork_region(subnetwork)
+    if not sn_region or sn_region == region:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(f"Subnetwork is in {sn_region} but zone {zone} is in {region}. "
+                f"GCP subnetworks are regional — pick a {region} subnetwork, or a zone "
+                f"in {sn_region}."),
     )
+
+
+
+
 
 
 def _gcp_ssh_secret() -> str:
     return _gcp_cfg("gcp_ssh_key_secret_name")
 
 
-def _get_db_session():
-    from ..database import SessionLocal
-    return SessionLocal()
 
 
 def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
@@ -163,7 +207,12 @@ async def list_custom_images(
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
 
-    cache_key = cache_service.key_global("gcp_custom_images")
+    # Keyed per project: a custom image lives in the project that owns it, and
+    # `gcp_project_id` is operator-changeable in Settings. Under a single global key
+    # the old project's images (and the `project_id` echoed in this very payload)
+    # were served for the whole TTL after the switch. GCE images are global within a
+    # project, so project is the only dimension needed here — not region.
+    cache_key = custom_images_cache_key(project_id)
     cached = await cache_service.get(cache_key)
     if cached:
         return cached["data"]
@@ -200,6 +249,15 @@ async def network_options(
         _zone = _gcp_zone()
         _region = _gcp_region()
 
+    # The Zone dropdown must offer zones across every configured region, not just
+    # the current one — otherwise multi-region setups (gcp_region_configs) can't
+    # deploy outside the default region. Collect the default region plus every
+    # per-region config set so the returned zone list spans all of them.
+    from ..services import region_config
+    _zone_regions = set(region_config.load_region_configs("gcp").keys())
+    _zone_regions.add(_gcp_region())
+    _zone_regions.add(_region)
+
     cache_key = cache_service.key_param("gcp_network_opts", region=_region)
     if not bust:
         cached = await cache_service.get(cache_key)
@@ -215,6 +273,7 @@ async def network_options(
             project_id=project_id,
             region=_region,
             zone=_zone,
+            zone_regions=sorted(_zone_regions),
         )
     except gcp_service.GCPError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -272,14 +331,14 @@ async def _build_gcp_instances(db, project_id: str) -> list:
             instances.append(inst)
 
     full = GCPInstanceListResponse(instances=instances, project_id=project_id, zone=_gcp_zone())
-    await cache_service.set(cache_service.key_global("gcp_instances"), full.model_dump(), ttl=60)
+    await cache_service.set(instances_cache_key(project_id), full.model_dump(), ttl=60)
     return instances
 
 
 async def _gcp_instances_unfiltered(db, project_id: str) -> list:
     """Full dashboard GCE instances, cache-aware (reads the gcp_instances cache,
     builds + caches on miss)."""
-    cached = await cache_service.get(cache_service.key_global("gcp_instances"))
+    cached = await cache_service.get(instances_cache_key(project_id))
     if cached:
         return (cached.get("data") or {}).get("instances") or []
     return await _build_gcp_instances(db, project_id)
@@ -306,7 +365,8 @@ async def gcp_dashboard_stats(
     except gcp_service.GCPError:
         pass
     try:
-        cached = await cache_service.get(cache_service.key_global("gcp_custom_images"))
+        cached = await cache_service.get(
+            custom_images_cache_key(project_id))
         if cached:
             imgs = (cached.get("data") or {}).get("images") or []
         else:
@@ -339,7 +399,7 @@ async def list_instances(
         if accessible is not None and canonical not in accessible:
             raise HTTPException(status_code=403, detail=f"No access to workgroup '{canonical}'")
 
-    cache_key = cache_service.key_global("gcp_instances")
+    cache_key = instances_cache_key(project_id)
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
@@ -410,14 +470,251 @@ async def list_ssh_key_secret_names(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+async def _validate_gcp_ssh_override(project_id: str, payload: GCPDeployRequest) -> None:
+    """Validate an optional per-launch SSH-key-secret override: must be a JSON object
+    carrying a public_key, else the VM would be unreachable. Shared by the single and
+    batch paths so a batch can't skip a check the single deploy makes."""
+    if not payload.ssh_key_secret_override:
+        return
+    from ..services import ssh_key_secret
+    try:
+        raw = await gcp_service.get_secret(project_id, payload.ssh_key_secret_override)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"SSH key secret '{payload.ssh_key_secret_override}' could not be read: {e}")
+    try:
+        ssh_key_secret.validate_public_key_secret(raw, secret_name=payload.ssh_key_secret_override)
+    except ssh_key_secret.SshKeySecretError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+async def _fan_out_batch(
+    payload: GCPDeployRequest, db: Session, current_user: User,
+    *, project_id: str, zone: str, region: str,
+) -> GCPDeployResponse:
+    """Fan a ``count > 1`` deploy out into one ``gce_bulk_deploy`` parent plus N
+    ``queued`` ``gce_deploy`` children sharing a batch_id.
+
+    A separate module-level function, NOT an ``if`` inside ``deploy_instance``, and
+    that is load-bearing rather than stylistic: ``test_worker_dispatch``'s
+    children-are-unclaimable rule walks the AST **per function**, so a create_job with
+    ``children`` in its metadata sitting in the same function as the single deploy's
+    ``pending`` create_job reads as a violation — the runtime branch that keeps them
+    apart is invisible to a static walk. Nested defs don't help either; ast.walk
+    descends into them.
+    """
+    names = deploy_batch.expand_names(payload.instance_name, payload.count, "gcp")
+    deploy_batch.reject_name_collisions(db, "gce_deploy", names)
+    # Policy gate every VM in the batch before creating a single row — a denial partway
+    # through would strand queued children that nothing can claim or reconcile.
+    await deploy_batch.enforce_admission(
+        "gcp:gce:deploy",
+        requests=deploy_batch.batch_request_docs(
+            {"region": region, "zone": zone, "instance_type": payload.machine_type,
+             "image": payload.image_self_link},
+            names),
+        actor=current_user, db=db,
+    )
+    await _validate_gcp_ssh_override(project_id, payload)
+
+    batch_id = uuid.uuid4().hex[:12]
+    children = []
+    for name in names:
+        # Each child carries its own complete request, with count reset to 1 so the
+        # runner rebuilds a plain single deploy from it.
+        child_req = payload.model_copy(update={"instance_name": name, "count": 1})
+        job = job_service.create_job(
+            db,
+            job_type="gce_deploy",
+            created_by=current_user.username,
+            workgroup=payload.workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be deployed a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "project_id":      project_id,
+                "zone":            zone,
+                "region":          region,
+                "instance_name":   name,
+                "machine_type":    payload.machine_type,
+                "image_self_link": payload.image_self_link,
+                "image_name":      payload.image_name,
+                "workgroup":       payload.workgroup,
+                "bulk":            True,
+                "req":             child_req.model_dump(),
+            },
+        )
+        job_service.set_cloud_resource_id(db, job.id, name)
+        job_service.log_audit(
+            db, current_user.username, "gce_deploy",
+            details={"instance_name": name, "zone": zone,
+                     "machine_type": payload.machine_type,
+                     "workgroup": payload.workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "instance_name": name,
+                         "req": child_req.model_dump()})
+
+    # One parent for the batch — this is the row the runner claims, and it drives the
+    # queued children above behind a single shared Jumpoint.
+    parent = job_service.create_job(
+        db,
+        job_type="gce_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=payload.workgroup,
+        batch_id=batch_id,
+        metadata={
+            "project_id": project_id,
+            "zone":       zone,
+            "region":     region,
+            "workgroup":  payload.workgroup,
+            "children":   children,
+        },
+    )
+    return GCPDeployResponse(
+        job_id=parent.id,
+        status="pending",
+        message=f"Deploying {len(names)} instances ({names[0]} … {names[-1]})…",
+        count=len(names),
+        batch_id=batch_id,
+        job_ids=[c["job_id"] for c in children],
+        names=names,
+    )
+
+
+# ── Bulk Deploy (multi-select: one VM per selected image) ─────────────────────
+
+@router.post("/bulk-deploy", response_model=GCPBulkDeployResponse)
+async def bulk_deploy_instances(
+    req: GCPBulkDeployRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("gcp", "write")),
+):
+    """Deploy one GCE instance per selected image, sharing one Jumpoint for the batch.
+
+    The other axis from the deploy form's Count: that launches N copies of one image,
+    this launches one VM per image the operator ticked.
+
+    The runner needs no changes for this — ``gce_bulk_deploy`` already rebuilds a full
+    ``GCPDeployRequest`` per child from ``children[].req``, so a per-child image is
+    simply a different value in a field it already reads.
+    """
+    if not req.items:
+        raise HTTPException(status_code=400, detail="At least one image is required.")
+
+    project_id = _gcp_project()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
+
+    zone = _resolve_zone(req.zone)
+    region = _region_from_zone(zone)
+    _reject_cross_region_subnetwork(req.subnetwork, zone, region)
+    workgroup = _validate_workgroup(db, current_user, req.workgroup)
+
+    # Names here are typed per row in the bulk modal, so unlike the count path they can
+    # genuinely repeat. Both checks run before anything is created.
+    names = [i.instance_name for i in req.items]
+    for name in names:
+        deploy_batch.validate_name(name, "gcp")
+    deploy_batch.reject_name_collisions(db, "gce_deploy", names)
+
+    # Policy gate every VM before the first create_job — a denial partway through would
+    # strand queued children that nothing can claim or reconcile. Per item because each
+    # carries its own image.
+    await deploy_batch.enforce_admission(
+        "gcp:gce:deploy",
+        requests=[{"region": region, "zone": zone,
+                   "instance_type": req.machine_type, "image": item.image_self_link,
+                   "name": item.instance_name,
+                   "count": len(req.items), "batch": True}
+                  for item in req.items],
+        actor=current_user, db=db,
+    )
+
+    batch_id = uuid.uuid4().hex[:12]
+    children, results = [], []
+    for item in req.items:
+        # Each child carries a complete single-deploy request — its own image, count 1.
+        child_req = GCPDeployRequest(
+            image_self_link=item.image_self_link,
+            image_name=item.image_name,
+            instance_name=item.instance_name,
+            machine_type=req.machine_type,
+            zone=zone,
+            subnetwork=req.subnetwork,
+            create_external_ip=req.create_external_ip,
+            ssh_username=req.ssh_username,
+            disk_size_gb=req.disk_size_gb,
+            network_tags=req.network_tags,
+            workgroup=workgroup,
+            register_in_entitle=req.register_in_entitle,
+            register_in_passwordsafe=req.register_in_passwordsafe,
+            ssh_key_secret_override=req.ssh_key_secret_override,
+            jump_group=req.jump_group,
+            jumpoint_name=req.jumpoint_name,
+            docker_deploy_key_ref=req.docker_deploy_key_ref,
+            count=1,
+        )
+        job = job_service.create_job(
+            db,
+            job_type="gce_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be deployed a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "project_id":      project_id,
+                "zone":            zone,
+                "region":          region,
+                "instance_name":   item.instance_name,
+                "machine_type":    req.machine_type,
+                "image_self_link": item.image_self_link,
+                "image_name":      item.image_name,
+                "workgroup":       workgroup,
+                "bulk":            True,
+                "req":             child_req.model_dump(),
+            },
+        )
+        job_service.set_cloud_resource_id(db, job.id, item.instance_name)
+        job_service.log_audit(
+            db, current_user.username, "gce_deploy",
+            details={"instance_name": item.instance_name, "zone": zone,
+                     "machine_type": req.machine_type,
+                     "workgroup": workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "instance_name": item.instance_name,
+                         "req": child_req.model_dump()})
+        results.append(GCPBulkDeployJobResult(
+            image_self_link=item.image_self_link,
+            instance_name=item.instance_name,
+            job_id=job.id, status="queued"))
+
+    job_service.create_job(
+        db,
+        job_type="gce_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={
+            "project_id": project_id,
+            "zone":       zone,
+            "region":     region,
+            "workgroup":  workgroup,
+            "children":   children,
+        },
+    )
+    return GCPBulkDeployResponse(jobs=results, count=len(results), batch_id=batch_id)
+
+
 @router.post("/deploy", response_model=GCPDeployResponse)
 async def deploy_instance(
     payload: GCPDeployRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_permission("gcp", "write")),
     db: Session = Depends(get_db),
 ):
-    """Deploy a GCE instance from an image. Runs in background; returns job ID immediately."""
+    """Deploy one or more GCE instances from an image. Runs in background; returns the
+    job ID immediately. ``count > 1`` fans out into a batch (see ``_fan_out_batch``)."""
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
@@ -425,8 +722,13 @@ async def deploy_instance(
     zone = _resolve_zone(payload.zone)
     payload.zone = zone            # normalise so the runner uses the resolved zone
     region = _region_from_zone(zone)
+    _reject_cross_region_subnetwork(payload.subnetwork, zone, region)
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
+
+    if payload.count > 1:
+        return await _fan_out_batch(payload, db, current_user,
+                                    project_id=project_id, zone=zone, region=region)
 
     # Pre-action policy gate (inert unless enabled + this action is gated). The
     # region must come from the *requested* zone so the allowed-regions guardrail
@@ -436,22 +738,11 @@ async def deploy_instance(
         "gcp:gce:deploy",
         request={"region": region, "zone": zone,
                  "instance_type": payload.machine_type, "image": payload.image_self_link,
-                 "name": payload.instance_name},
+                 "name": payload.instance_name, "count": 1, "batch": False},
         actor=current_user, db=db,
     )
 
-    # Validate an optional per-launch SSH-key-secret override: must be a JSON object
-    # carrying a public_key, else the VM would be unreachable.
-    if payload.ssh_key_secret_override:
-        from ..services import ssh_key_secret
-        try:
-            raw = await gcp_service.get_secret(project_id, payload.ssh_key_secret_override)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail=f"SSH key secret '{payload.ssh_key_secret_override}' could not be read: {e}")
-        try:
-            ssh_key_secret.validate_public_key_secret(raw, secret_name=payload.ssh_key_secret_override)
-        except ssh_key_secret.SshKeySecretError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+    await _validate_gcp_ssh_override(project_id, payload)
 
     job = job_service.create_job(
         db,
@@ -467,6 +758,9 @@ async def deploy_instance(
             "image_self_link":  payload.image_self_link,
             "image_name":       payload.image_name,
             "workgroup":        workgroup,
+            # Full request so the runner can rebuild the deploy call. Only secret
+            # *references* live on it, resolved at deploy time.
+            "req":              payload.model_dump(),
         },
     )
     job_service.set_cloud_resource_id(db, job.id, payload.instance_name)
@@ -477,177 +771,9 @@ async def deploy_instance(
         details={"instance_name": payload.instance_name, "zone": zone, "machine_type": payload.machine_type, "workgroup": workgroup},
     )
 
-    background_tasks.add_task(_run_deploy, job.id, payload, project_id, zone)
     return GCPDeployResponse(job_id=job.id, status="pending", message=f"Deploying {payload.instance_name}…")
 
 
-async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, zone: str) -> None:
-    from ..services import config_service as _cfg_svc
-    from ..services.region_config import resolve_region
-    db = _get_db_session()
-    # Per-region SSH key secret + default network tag (blank fields / the default
-    # region fall back to the flat gcp_* config keys).
-    _rc = resolve_region("gcp", _region_from_zone(zone))
-    bt_enabled = _cfg_svc.get_bool("beyondtrust_enabled")
-    jumpoint_name = ""
-    jumpoint_zone = zone
-    jumpoint_meta: dict = {}
-    try:
-        job_service.set_running(db, job_id)
-
-        # ── Step 1: Start BT Jumpoint on COS-on-GCE first (BeyondTrust only) ──
-        if bt_enabled:
-            jumpoint_name = _jumpoint_name(payload.instance_name)
-            jumpoint_image = _cfg_svc.get("gcp_jumpoint_image") or "beyondtrust/sra-jumpoint:latest"
-            jumpoint_machine = _cfg_svc.get("gcp_jumpoint_machine_type") or "e2-micro"
-            jumpoint_zone = _cfg_svc.get("gcp_jumpoint_zone") or zone
-            job_service.update_progress(db, job_id, 5, f"Starting BeyondTrust Jumpoint {jumpoint_name}…")
-            try:
-                if getattr(payload, "docker_deploy_key_ref", None):
-                    deploy_key = _cfg_svc.resolve_reference(payload.docker_deploy_key_ref.strip())
-                else:
-                    deploy_key = await _resolve_gcp_jumpoint_deploy_key()
-                if not deploy_key:
-                    raise RuntimeError(
-                        "Jumpoint deploy key not configured "
-                        "(gcp_cloud_run_docker_deploy_key) — set it in the wizard."
-                    )
-                jumpoint_meta = await gcp_service.run_gce_jumpoint(
-                    project_id=project_id,
-                    zone=jumpoint_zone,
-                    name=jumpoint_name,
-                    container_image=jumpoint_image,
-                    deploy_key=deploy_key,
-                    subnetwork=payload.subnetwork or "",
-                    machine_type=jumpoint_machine,
-                    create_external_ip=True,
-                )
-                job_service.update_progress(
-                    db, job_id, 15,
-                    f"Jumpoint {jumpoint_name} {'reused' if jumpoint_meta.get('reused') else 'started'}, launching VM…"
-                )
-            except Exception as e:
-                # Non-fatal — continue to VM launch; user may already have a Jumpoint elsewhere.
-                jumpoint_meta = {"error": str(e)}
-                logger.warning("GCP Jumpoint provisioning failed (non-fatal): %s", e)
-                job_service.update_progress(
-                    db, job_id, 15,
-                    f"Jumpoint provisioning failed (non-fatal): {e} — continuing with VM launch…"
-                )
-
-        # Retrieve SSH public key (per-launch override wins over the region default)
-        secret_name = getattr(payload, "ssh_key_secret_override", None) or _rc["ssh_key_secret"]
-        ssh_username = _cfg_svc.get("gcp_ssh_username") or payload.ssh_username or "gcp-user"
-        ssh_public_key = ""
-        if secret_name:
-            job_service.update_progress(db, job_id, 18, "Retrieving SSH public key from Secret Manager…")
-            try:
-                ssh_public_key = await gcp_service.get_ssh_public_key(
-                    project_id=project_id, secret_name=secret_name
-                )
-            except Exception as exc:
-                logger.warning("Could not fetch SSH key from Secret Manager: %s", exc)
-
-        job_service.update_progress(db, job_id, 20, "Launching Compute Engine instance…")
-
-        # Merge config-driven default network tags (used by sandbox firewall
-        # rules) with any tags the user supplied on the deploy form.
-        default_tag_csv = _rc["default_network_tag"]
-        default_tags = [t.strip() for t in default_tag_csv.split(",") if t.strip()]
-        merged_tags = list(dict.fromkeys((payload.network_tags or []) + default_tags))
-
-        wg = getattr(payload, "workgroup", "") or ""
-        result = await gcp_service.launch_instance(
-            project_id=project_id,
-            zone=zone,
-            instance_name=payload.instance_name,
-            machine_type=payload.machine_type,
-            image_self_link=payload.image_self_link,
-            subnetwork=payload.subnetwork,
-            create_external_ip=payload.create_external_ip,
-            ssh_username=ssh_username,
-            ssh_public_key=ssh_public_key,
-            disk_size_gb=payload.disk_size_gb,
-            network_tags=merged_tags,
-            labels={"workgroup": wg} if wg else None,
-        )
-
-        hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
-
-        final_meta = {
-            "instance_name": result["instance_name"],
-            "zone":          result["zone"],
-            "machine_type":  result["machine_type"],
-            "status":        result["status"],
-            "public_ip":     result.get("public_ip"),
-            "private_ip":    result.get("private_ip"),
-            "self_link":     result.get("self_link", ""),
-            "image_self_link": payload.image_self_link,
-            "image_name":    payload.image_name,
-        }
-        if bt_enabled:
-            if jumpoint_meta.get("error"):
-                final_meta["jumpoint_error"] = jumpoint_meta["error"]
-            elif jumpoint_meta.get("name"):
-                final_meta["jumpoint_name"] = jumpoint_meta["name"]
-                final_meta["jumpoint_zone"] = jumpoint_meta.get("zone", jumpoint_zone)
-
-        # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
-        if _cfg_svc.get_bool("beyondtrust_enabled"):
-            from ..services import terraform_pra_service
-            jump_group = _cfg_svc.get("gcp_bt_jump_group_name") or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name
-            jumpoint_name = _cfg_svc.get("gcp_jumpoint_name") or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name
-            job_service.update_progress(db, job_id, 90, f"Instance launched ({hostname}), provisioning Shell Jump…")
-            try:
-                bt_result = await terraform_pra_service.provision_jump(
-                    vm_name=payload.instance_name,
-                    hostname=hostname,
-                    jump_group_name=jump_group,
-                    jumpoint_name=jumpoint_name,
-                    tag="GCP",
-                )
-                final_meta["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
-                final_meta["bt_jump_group_name"] = bt_result.get("jump_group_name")
-                final_meta["bt_tf_state"] = bt_result.get("tf_state_json")
-                job_service.update_progress(
-                    db, job_id, 95,
-                    f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, group: {jump_group})"
-                )
-            except Exception as bt_exc:
-                final_meta["bt_error"] = str(bt_exc)
-                job_service.update_progress(
-                    db, job_id, 95,
-                    f"Instance deployed but Shell Jump provisioning failed: {bt_exc}"
-                )
-        else:
-            job_service.update_progress(db, job_id, 95, "Instance launched.")
-
-        # Entitle — register as SSH ephemeral-accounts integration (per-build opt-in).
-        from ..services import entitle_vm_hook
-        if getattr(payload, "register_in_entitle", False) and entitle_vm_hook.registration_enabled():
-            await entitle_vm_hook.register(db, job_id, payload.instance_name, hostname,
-                                           private=not payload.create_external_ip,
-                                           result=final_meta, tag="GCP",
-                                           sudo_user=payload.ssh_username,
-                                           ssh_key_secret=secret_name)
-
-        # Password Safe — onboard as a managed system + account (per-build opt-in).
-        # GCP defaults to the cloud-native "GCP VM SSH Rotation" plugin (managed system
-        # address = projectId/zone/instanceName), so pass the project + zone.
-        from ..services import ps_vm_hook
-        if getattr(payload, "register_in_passwordsafe", False) and ps_vm_hook.registration_enabled():
-            await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
-                                      result=final_meta, tag="GCP", ssh_key_secret=secret_name,
-                                      project=_gcp_project(), zone=result["zone"])
-
-        job_service.set_completed(db, job_id, final_meta)
-        await cache_service.invalidate(cache_service.key_global("gcp_instances"))
-
-    except Exception as exc:
-        logger.error("GCE deploy failed for job %s: %s", job_id, exc)
-        job_service.set_failed(db, job_id, str(exc))
-    finally:
-        db.close()
 
 
 class _WorkgroupReassignRequest(BaseModel):
@@ -697,7 +823,7 @@ async def reassign_instance_workgroup(
             job.cloud_resource_id = instance_name
         db.commit()
 
-    await cache_service.invalidate(cache_service.key_global("gcp_instances"))
+    await cache_service.invalidate_prefix(CACHE_KEY_INSTANCES)
     return {"instance_name": instance_name, "workgroup": canonical, "job_id": job.id if job else None}
 
 
@@ -705,7 +831,6 @@ async def reassign_instance_workgroup(
 async def create_image_from_instance(
     instance_name: str,
     payload: GCPCreateImageRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_permission("gcp", "write")),
     db: Session = Depends(get_db),
 ):
@@ -719,10 +844,16 @@ async def create_image_from_instance(
         db,
         job_type="gce_capture_image",
         created_by=current_user.username,
-        metadata={"instance_name": instance_name, "image_name": payload.image_name},
-    )
-    background_tasks.add_task(
-        _run_capture, job.id, project_id, zone, instance_name, payload.image_name, payload.description
+        # project_id and zone are resolved here and persisted, not re-derived in the
+        # runner: _gcp_project()/_gcp_zone() return whatever is configured at run time,
+        # which would capture from the wrong project if the default changed.
+        metadata={
+            "instance_name": instance_name,
+            "image_name": payload.image_name,
+            "description": payload.description,
+            "project_id": project_id,
+            "zone": zone,
+        },
     )
     return GCPDeployResponse(
         job_id=job.id, status="pending",
@@ -730,36 +861,12 @@ async def create_image_from_instance(
     )
 
 
-async def _run_capture(
-    job_id: str,
-    project_id: str,
-    zone: str,
-    instance_name: str,
-    image_name: str,
-    description: str,
-) -> None:
-    db = _get_db_session()
-    try:
-        job_service.set_running(db, job_id)
-        job_service.update_progress(db, job_id, 20, "Creating image from instance disk…")
-        result = await gcp_service.create_image_from_instance(
-            project_id=project_id, zone=zone,
-            instance_name=instance_name, image_name=image_name, description=description,
-        )
-        job_service.set_completed(db, job_id, result)
-        await cache_service.invalidate(cache_service.key_global("gcp_custom_images"))
-    except Exception as exc:
-        logger.error("GCE image capture failed for job %s: %s", job_id, exc)
-        job_service.set_failed(db, job_id, str(exc))
-    finally:
-        db.close()
 
 
 @router.delete("/instances/{instance_name}")
 async def destroy_instance(
     instance_name: str,
     zone: str = Query("", description="Zone the instance is in; defaults to configured zone"),
-    background_tasks: BackgroundTasks = None,
     current_user: User = Depends(require_permission("gcp", "delete")),
     db: Session = Depends(get_db),
 ):
@@ -790,123 +897,18 @@ async def destroy_instance(
             "instance_name": instance_name,
             "zone": resolved_zone,
             "deploy_job_id": deploy_job.id if deploy_job else None,
+            # Persisted rather than re-derived in the runner — see create-image above.
+            # A destroy aimed at the wrong project is the worst version of this bug.
+            "project_id": project_id,
         },
     )
     job_service.log_audit(
         db, current_user.username, "gce_destroy",
         details={"instance_name": instance_name, "zone": resolved_zone},
     )
-    background_tasks.add_task(
-        _run_destroy, job.id, project_id, resolved_zone, instance_name,
-        deploy_job.id if deploy_job else None,
-    )
     return {"job_id": job.id, "status": "pending", "message": f"Terminating {instance_name}…"}
 
 
-async def _run_destroy(
-    job_id: str, project_id: str, zone: str, instance_name: str,
-    deploy_job_id: Optional[str] = None,
-) -> None:
-    db = _get_db_session()
-    try:
-        job_service.set_running(db, job_id)
-        result = {"instance_name": instance_name, "zone": zone}
-
-        # Remove BeyondTrust Shell Jump before terminating the instance
-        deploy_meta = {}
-        if deploy_job_id:
-            deploy_job = job_service.get_job(db, deploy_job_id)
-            if deploy_job:
-                deploy_meta = deploy_job.metadata_dict
-
-        bt_shell_jump_id = deploy_meta.get("bt_shell_jump_id")
-        if bt_shell_jump_id:
-            job_service.update_progress(
-                db, job_id, 20,
-                f"Removing BeyondTrust Shell Jump {bt_shell_jump_id}…"
-            )
-            try:
-                tf_state = deploy_meta.get("bt_tf_state")
-                if tf_state:
-                    from ..services import terraform_pra_service
-                    await terraform_pra_service.remove_jump(tf_state)
-                    result["bt_shell_jump_removed"] = bt_shell_jump_id
-                    job_service.update_progress(
-                        db, job_id, 35,
-                        f"Shell Jump {bt_shell_jump_id} removed from PRA."
-                    )
-                else:
-                    msg = (
-                        f"Shell Jump {bt_shell_jump_id} requires manual removal from PRA "
-                        "(provisioned before Terraform migration — no tf_state stored)"
-                    )
-                    logger.warning(msg)
-                    result["bt_error"] = msg
-                    job_service.update_progress(db, job_id, 35, msg)
-            except Exception as e:
-                err = f"Shell Jump removal failed: {e}"
-                logger.error("bt_shell_jump_id=%s destroy error: %s", bt_shell_jump_id, e)
-                result["bt_error"] = err
-                job_service.update_progress(db, job_id, 35, err)
-
-        # Remove the Entitle SSH integration if this deploy registered one.
-        if deploy_meta.get("entitle_registration_tf_state"):
-            from ..services import entitle_vm_hook
-            await entitle_vm_hook.deregister(deploy_meta, result)
-
-        # Off-board the Password Safe managed system if this deploy registered one.
-        if deploy_meta.get("ps_registration_tf_state"):
-            from ..services import ps_vm_hook
-            await ps_vm_hook.deregister(deploy_meta, result)
-
-        job_service.update_progress(db, job_id, 50, f"Deleting instance {instance_name}…")
-        await gcp_service.terminate_instance(project_id=project_id, zone=zone, instance_name=instance_name)
-
-        # Clean up paired Jumpoint VM, but only if no other live deploy still references it
-        # (multiple VMs may share the same Jumpoint via deploy_key — sibling-aware cleanup).
-        jumpoint_name = deploy_meta.get("jumpoint_name") if deploy_job_id else None
-        if jumpoint_name:
-            sibling_count = sum(
-                1 for j in db.query(Job).filter(
-                    Job.job_type == "gce_deploy", Job.status == "completed"
-                ).all()
-                if j.id != deploy_job_id
-                and not j.metadata_dict.get("destroyed")
-                and j.metadata_dict.get("jumpoint_name") == jumpoint_name
-            )
-            if sibling_count == 0:
-                jumpoint_zone = deploy_meta.get("jumpoint_zone", zone)
-                job_service.update_progress(
-                    db, job_id, 75, f"Stopping paired Jumpoint {jumpoint_name}…"
-                )
-                try:
-                    await gcp_service.stop_gce_jumpoint(
-                        project_id=project_id, zone=jumpoint_zone, name=jumpoint_name
-                    )
-                    result["jumpoint_stopped"] = jumpoint_name
-                except Exception as e:
-                    logger.warning("Jumpoint cleanup failed for %s: %s", jumpoint_name, e)
-                    result["jumpoint_error"] = f"cleanup failed: {e}"
-            else:
-                result["jumpoint_shared"] = jumpoint_name
-                logger.info(
-                    "Leaving Jumpoint %s running — %d other active deploy(s) reference it",
-                    jumpoint_name, sibling_count,
-                )
-
-        if deploy_job_id:
-            deploy_meta["destroyed"] = True
-            deploy_job = job_service.get_job(db, deploy_job_id)
-            if deploy_job:
-                job_service.set_completed(db, deploy_job_id, deploy_meta)
-
-        job_service.set_completed(db, job_id, result)
-        await cache_service.invalidate(cache_service.key_global("gcp_instances"))
-    except Exception as exc:
-        logger.error("GCE destroy failed for job %s: %s", job_id, exc)
-        job_service.set_failed(db, job_id, str(exc))
-    finally:
-        db.close()
 
 
 # ── Export custom image to portable VHD on hub backend ───────────────────────
@@ -925,7 +927,6 @@ class ExportImageResponse(BaseModel):
 async def export_custom_image(
     image_name: str,
     req: ExportImageRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("gcp", "write")),
 ):
@@ -972,5 +973,5 @@ async def delete_image(
     except gcp_service.GCPError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     job_service.log_audit(db, current_user.username, "gce_delete_image", details={"image_name": image_name})
-    await cache_service.invalidate(cache_service.key_global("gcp_custom_images"))
+    await cache_service.invalidate_prefix(CACHE_KEY_CUSTOM_IMAGES)
     return {"ok": True, "image_name": image_name}

@@ -38,6 +38,7 @@ from ..services.fido2_service import (
     b64url_encode,
     b64url_decode,
 )
+from ..services import login_guard, public_url
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -193,11 +194,14 @@ def require_permission(scope: str, level: str):
             try:
                 deep_link = _build_request_access_link(scope, level)
             except Exception:
-                # The link is a nicety; never let it turn a 403 into a 500. Logged
-                # because a silent swallow here is exactly what hid a NameError
-                # (config_service was only imported inside _oauth_cfg) long enough
-                # for the link to never render at all.
-                logger.debug("request-access deep link unavailable", exc_info=True)
+                # Deliberately broad: a malformed deep-link config (bad JSON,
+                # an unreachable secrets backend) must never turn a clean 403
+                # into a 500 on the permission check itself. But log it —
+                # this branch silently hid a NameError in the builder for the
+                # entire life of the feature, so failures have to be visible.
+                logger.warning(
+                    "request-access deep link unavailable for %s:%s", scope, level, exc_info=True
+                )
                 deep_link = None
             if deep_link:
                 detail = {
@@ -219,6 +223,9 @@ def _build_request_access_link(scope: str, level: str):
 
     See docs/design/entitle-user-jit.md §Phase 4 for resolution shape.
     """
+    # Imported locally, matching _oauth_cfg below and the sibling api/ modules.
+    from ..services import config_service
+
     if not config_service.get_bool("entitle_user_jit_enabled", default=False):
         return None
     portal = (config_service.get("entitle_request_portal_url", "") or "").rstrip("/")
@@ -253,8 +260,35 @@ def require_workgroup_access(workgroup: str):
 
 # ── Login (step 1: password) ──────────────────────────────────────────────────
 
+def _client_ip(request: Optional[Request]) -> str:
+    return request.client.host if (request and request.client) else ""
+
+
+def _enforce_login_throttle(db: Session, username: str, ip: str) -> None:
+    """Refuse early if this username or address is over its failure budget.
+
+    Runs before the password is checked, so a throttled request never reaches bcrypt —
+    which stops the throttle from doubling as a CPU amplifier.
+
+    The 429 says nothing about *why*: the same response has to come back whether the
+    username exists, does not exist, or is real and simply being guessed at, or the
+    throttle becomes the enumeration oracle it is meant to slow down.
+    """
+    try:
+        login_guard.check(db, username=username, ip=ip)
+    except login_guard.LoginThrottled as exc:
+        logger.warning("login throttled (%s) for %r from %s",
+                       exc.scope, login_guard.normalize_username(username), ip or "?")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-in attempts. Try again shortly.",
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+
+
 @router.post("/login")
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
@@ -265,11 +299,17 @@ async def login(
     - If the user has FIDO2 keys registered: returns a pre_auth_token (HTTP 202)
       and the client must complete the FIDO2 step at POST /api/auth/login/mfa.
     - OAuth-only users (auth_provider != 'local') cannot use this endpoint.
+
+    Throttled per username and per source address — see services/login_guard.
     """
+    ip = _client_ip(request)
+    _enforce_login_throttle(db, form_data.username, ip)
+
     user = db.query(User).filter(User.username == form_data.username).first()
 
     # Block OAuth-only users from password login
     if user and user.auth_provider != "local":
+        login_guard.record_failure(db, username=form_data.username, ip=ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="This account uses Microsoft login. Use 'Sign in with Microsoft' instead.",
@@ -277,15 +317,22 @@ async def login(
         )
 
     if not user or not verify_password(form_data.password, user.hashed_password):
+        login_guard.record_failure(db, username=form_data.username, ip=ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
     if not user.is_active:
+        # Counted like any other non-token outcome. The password may well have been
+        # right, but a disabled account is not a way to keep probing for free.
+        login_guard.record_failure(db, username=form_data.username, ip=ip)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
 
-    # If MFA is enforced → return pre-auth token and signal the FIDO2 step
+    # If MFA is enforced → return pre-auth token and signal the FIDO2 step.
+    # Failures are NOT cleared yet: the password was right, but this login is only half
+    # done, and clearing here would let a stolen password reset the budget indefinitely
+    # while the second factor is attacked.
     if user.mfa_required:
         pre_auth = _create_pre_auth_token(user.id)
         return Response(
@@ -294,6 +341,7 @@ async def login(
             media_type="application/json",
         )
 
+    login_guard.clear(db, username=user.username)
     token = create_access_token({"sub": user.username})
     return TokenResponse(
         access_token=token,
@@ -306,24 +354,31 @@ async def login(
 
 @router.post("/login/mfa", response_model=TokenResponse)
 async def login_mfa(
+    request: Request,
     body: MfaLoginRequest,
     db: Session = Depends(get_db),
 ):
     """
     Complete login by verifying a FIDO2 assertion.
     Requires the pre_auth_token issued in step 1.
+
+    Shares the username's failure budget with step 1, so an attacker holding a stolen
+    password cannot get an unlimited number of attempts at the second factor.
     """
     user_id = _decode_pre_auth_token(body.pre_auth_token)
     user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
+    ip = _client_ip(request)
+    _enforce_login_throttle(db, user.username, ip)
+
     # Fetch the challenge stored during webauthn/login/begin
     challenge_token = body.assertion_response.get("challenge_token")
     if not challenge_token:
         raise HTTPException(status_code=400, detail="Missing challenge_token in assertion_response")
 
-    stored = fetch_fido2_challenge(challenge_token)
+    stored = fetch_fido2_challenge(db, challenge_token)
     if not stored or stored.get("user_id") != user_id:
         raise HTTPException(status_code=400, detail="Invalid or expired FIDO2 challenge")
 
@@ -353,6 +408,7 @@ async def login_mfa(
             response=authentication,
         )
     except Exception as exc:
+        login_guard.record_failure(db, username=user.username, ip=ip)
         raise HTTPException(status_code=400, detail=f"FIDO2 authentication failed: {exc}")
 
     # Update sign_count (anti-cloning measure) and last_used_at
@@ -364,6 +420,8 @@ async def login_mfa(
             db.commit()
             break
 
+    # Both factors are now satisfied — this is the point the budget resets.
+    login_guard.clear(db, username=user.username)
     token = create_access_token({"sub": user.username})
     return TokenResponse(
         access_token=token,
@@ -376,13 +434,20 @@ async def login_mfa(
 
 @router.get("/webauthn/login/begin", response_model=Fido2AuthBeginResponse)
 async def webauthn_login_begin(
+    request: Request,
     username: str,
     db: Session = Depends(get_db),
 ):
     """
     Generate a WebAuthn authentication challenge for the given username.
     Called by the frontend before invoking navigator.credentials.get().
+
+    Unauthenticated, and it answers 404 for an unknown user — so it is a username
+    oracle. It shares the throttle counters rather than having its own: once a username
+    is over budget, every pre-auth surface for it is closed, and the oracle can only be
+    read at the throttled rate.
     """
+    _enforce_login_throttle(db, username, _client_ip(request))
     user = db.query(User).filter(User.username == username, User.is_active == True).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -405,7 +470,7 @@ async def webauthn_login_begin(
         user_verification="preferred",
     )
 
-    challenge_token = store_fido2_challenge({"state": state, "user_id": user.id})
+    challenge_token = store_fido2_challenge(db, {"state": state, "user_id": user.id})
 
     return Fido2AuthBeginResponse(
         challenge_token=challenge_token,
@@ -558,19 +623,25 @@ def _oauth_cfg() -> tuple:
 
 def _build_redirect_uri(request: Request) -> str:
     """
-    Derive the OAuth callback URI from the incoming request so that the flow
-    works regardless of whether the user accessed via localhost, an IP, or a
-    hostname.  Falls back to the configured static value if unavailable.
+    The Entra OAuth callback URI.
+
+    Prefers the configured ``public_base_url``, falling back to deriving it from the
+    incoming request so the flow still works via localhost, an IP or a hostname without
+    reconfiguration. The preference order matters behind a reverse proxy: a derived URI
+    is only ``https`` because ProxyHeadersMiddleware rewrote the scheme from
+    ``X-Forwarded-Proto``, so a proxy missing from ``trusted_proxy_hosts`` would produce
+    an ``http://`` callback that Entra rejects as a redirect-URI mismatch. Stating the
+    origin once removes that dependency entirely.
     """
     try:
-        base = f"{request.url.scheme}://{request.url.netloc}"
-        return f"{base}/api/auth/oauth/azure/callback"
+        return (public_url.join("/api/auth/oauth/azure/callback", request)
+                or settings.azure_oauth_redirect_uri)
     except Exception:
         return settings.azure_oauth_redirect_uri
 
 
 @router.get("/oauth/azure/login")
-async def oauth_azure_login(request: Request):
+async def oauth_azure_login(request: Request, db: Session = Depends(get_db)):
     """Redirect the browser to Azure AD for OAuth login."""
     client_id, _, tenant_id = _oauth_cfg()
     if not client_id or not tenant_id:
@@ -581,7 +652,7 @@ async def oauth_azure_login(request: Request):
 
     redirect_uri = _build_redirect_uri(request)
     state = str(uuid.uuid4())
-    store_oauth_state(state, redirect_uri)
+    store_oauth_state(db, state, redirect_uri)
 
     import msal  # noqa: F401 (unused var `app` removed)
     # Build the authorization URL manually so we can include the state parameter
@@ -610,11 +681,11 @@ async def oauth_azure_callback(
     """Handle the OAuth callback from Azure AD."""
     if error:
         return RedirectResponse(
-            url=f"/login?error=oauth_error&detail={error_description or error}",
+            url="/login?" + urlencode({"error": "oauth_error", "detail": error_description or error}),
             status_code=302,
         )
 
-    stored_redirect_uri = verify_and_consume_oauth_state(state) if state else None
+    stored_redirect_uri = verify_and_consume_oauth_state(db, state) if state else None
     if stored_redirect_uri is None:
         return RedirectResponse(url="/login?error=invalid_state", status_code=302)
 
@@ -641,7 +712,7 @@ async def oauth_azure_callback(
 
     if "error" in result:
         return RedirectResponse(
-            url=f"/login?error=token_error&detail={result.get('error_description', '')}",
+            url="/login?" + urlencode({"error": "token_error", "detail": result.get("error_description", "")}),
             status_code=302,
         )
 
@@ -673,13 +744,14 @@ async def oauth_azure_callback(
 # Google Workspace, JumpCloud, Ping, GitLab. See services/oidc_service.py.
 
 def _oidc_redirect_uri(request: Request) -> str:
-    """Derive the callback from the incoming request, matching the Entra path, so
-    the flow works via localhost, an IP, or a hostname without reconfiguration."""
-    return f"{request.url.scheme}://{request.url.netloc}/api/auth/oauth/oidc/callback"
+    """The OIDC callback, resolved exactly like the Entra one above — configured
+    ``public_base_url`` first, request-derived as the fallback."""
+    return (public_url.join("/api/auth/oauth/oidc/callback", request)
+            or f"{request.url.scheme}://{request.url.netloc}/api/auth/oauth/oidc/callback")
 
 
 @router.get("/oauth/oidc/login")
-async def oauth_oidc_login(request: Request):
+async def oauth_oidc_login(request: Request, db: Session = Depends(get_db)):
     """Redirect to the configured OIDC provider (authorization code + PKCE)."""
     from ..services import oidc_service
     if not oidc_service.is_configured():
@@ -693,7 +765,7 @@ async def oauth_oidc_login(request: Request):
         hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     # The state store holds one string, so pack the verifier alongside the URI.
     # It never leaves the server and is consumed atomically on callback.
-    store_oauth_state(state, f"{redirect_uri}|{verifier}")
+    store_oauth_state(db, state, f"{redirect_uri}|{verifier}")
 
     try:
         return RedirectResponse(url=oidc_service.authorization_url(redirect_uri, state, challenge),
@@ -716,9 +788,10 @@ async def oauth_oidc_callback(
 
     if error:
         return RedirectResponse(
-            url=f"/login?error=oauth_error&detail={error_description or error}", status_code=302)
+            url="/login?" + urlencode({"error": "oauth_error", "detail": error_description or error}),
+            status_code=302)
 
-    stored = verify_and_consume_oauth_state(state) if state else None
+    stored = verify_and_consume_oauth_state(db, state) if state else None
     if not stored:
         return RedirectResponse(url="/login?error=invalid_state", status_code=302)
     if not code:

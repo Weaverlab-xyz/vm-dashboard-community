@@ -21,7 +21,14 @@ class Settings(BaseSettings):
     # explicit opt-in. The community edition's .env.example ships all of
     # these set to false; users turn on what they have infra for.
     vmware_enabled: bool = True         # VMs router + /vms page + VM cache warmers + VMware inventory scans
-    beyondtrust_enabled: bool = True    # Password Safe secret lookups (btapi_service)
+    # The three BeyondTrust products the dashboard drives are gated independently —
+    # customers routinely license one or two, not all three. They replaced a single
+    # `beyondtrust_enabled` flag; feature_flag_migration.seed_beyondtrust_split copies
+    # an existing install's stored value into all three on first boot after the upgrade,
+    # which is why these default True (matching the old flag's default).
+    password_safe_enabled: bool = True  # Secret + managed-account checkout, VM/DB/K8s onboarding, rotation
+    pra_enabled: bool = True            # Shell Jump / tunnel / Web Jump provisioning + Gateway hosts
+    epml_enabled: bool = True           # EPM for Linux package builds + activation tokens
     portainer_enabled: bool = True      # Containers router + /containers page + portainer warmer
     ansible_enabled: bool = True        # Config-mgmt router + /config-mgmt page
     entitle_enabled: bool = True        # Entitle integration: Settings panel + user-JIT nav link
@@ -34,6 +41,11 @@ class Settings(BaseSettings):
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
     k8s_management_enabled: bool = False  # /api/k8s router — provision/register/manage Kubernetes clusters
     cloud_functions_enabled: bool = False  # /api/functions router — Lambda / Function App / Cloud Run function lifecycle
+    # /api/agent router + /agents page — containerised agents inside private networks
+    # that poll OUT to this dashboard for work. Off by default and deliberately so:
+    # it is the only router that serves callers outside the dashboard's trust domain,
+    # and enabling it means publishing an endpoint those agents can reach.
+    remote_agents_enabled: bool = False
     cost_explorer_enabled: bool = False   # /api/costs router + dashboard spend tile (AWS Cost Explorer + Azure Cost Mgmt)
     cost_monthly_budget: float = 0.0      # overall monthly cloud-spend budget for alerts (account currency); 0 = disabled
     cost_budget_aws: float = 0.0          # optional per-cloud monthly budgets; 0 = disabled
@@ -41,6 +53,14 @@ class Settings(BaseSettings):
     cost_budget_gcp: float = 0.0
     cost_budget_oci: float = 0.0
     gcp_billing_export_table: str = ""    # BigQuery billing-export table for GCP cost (project.dataset.table); blank = GCP cost off
+    # Durable cost cache (services/cost_cache.py). Env/config.py only — deliberately not
+    # on the Setup panel: they are throttle-safety knobs, not features, and a panel field
+    # that isn't bound both ways is discarded on save without an error.
+    cost_cache_ttl_seconds: int = 21600           # 6 h — how old a good figure may get
+    cost_refresh_min_interval_seconds: int = 300  # floor between two forced requeries
+    cost_query_lease_seconds: int = 120           # single-flight claim expiry
+    cost_query_gap_seconds: int = 2               # min spacing between queries to ONE cloud
+    cost_cold_wait_seconds: int = 5               # cold-miss wait for the claim winner
     # Action-level policy guardrails (pre-action admission control via OPA). Master
     # flag; when off, admission_service.enforce() is a no-op. Which actions are gated
     # is the list `admission_gated_actions` (default none). The caps below are injected
@@ -76,6 +96,9 @@ class Settings(BaseSettings):
     rancher_server_url: str = ""              # Rancher server-url = https://<node public IP> (set by the deploy job)
     rancher_api_token: str = ""               # Rancher API bearer token minted at bootstrap; encrypted at rest
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap password; encrypted at rest
+    rancher_admin_password: str = ""          # admin UI password set during auto first-run. Rancher FORBIDS reusing the bootstrap password, so blank = auto-generate a distinct one (persisted here + surfaced in the Containers panel + job result). ≥12 chars. encrypted at rest
+    rancher_admin_password_generated: bool = False  # marker: rancher_admin_password was auto-generated (→ echo it in the login hint; cleared on teardown)
+    rancher_auto_first_run: bool = True        # on a FRESH deploy, auto-complete Rancher's first-run wizard (change admin password from bootstrap + accept EULA + telemetry-opt out) so the operator lands on a logged-in UI; off = leave the manual "Welcome" wizard
     rancher_verify_tls: bool = False          # verify the Rancher TLS cert on direct-HTTPS API calls; False = accept the node's self-signed cert
     rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's PUBLIC-IP GCE firewall (source_ranges, tcp 80/443). Dashboard-provisioned clusters' egress IPs AND (when the Web Jump is enabled) the dashboard-managed Jumpoint's egress IP are auto-added; use this only for extra operator/human IPs + pre-existing operator Jumpoints. Fully empty (no manual + no auto) = firewall NOT opened (fail closed) unless gcp_rancher_allow_open.
     # Rancher UI PRA web-broker (OPT-IN): an sra_web_jump to the node's HTTPS so
@@ -87,11 +110,23 @@ class Settings(BaseSettings):
     rancher_ui_verify_certificate: bool = False  # sra_web_jump verify_certificate (False for the node's self-signed cert)
     rancher_ui_jump_group: str = ""           # "" = bt_jump_group_name
     rancher_ui_jumpoint_name: str = ""        # "" = bt_jumpoint_name
-    rancher_ui_local_port: int = 443          # local listen port (match Rancher 443 for SNI/cert)
+    rancher_ui_local_port: int = 443          # UNUSED — read by nothing. An sra_web_jump has no local listen port (that's a protocol-tunnel jump; see k8s_api_tunnel_local_port). Kept so an existing RANCHER_UI_LOCAL_PORT env doesn't break; deliberately NOT on the Settings panel
     rancher_ui_web_jump_id: str = ""          # PRA Web Jump id for the central Rancher UI (runtime-set)
     rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
+    rancher_ui_vault_account_group_id: str = ""  # PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; chosen at deploy. "" = no vault (fall back to bt_vault_account_group_id, else surface the password)
+    rancher_ui_vault_account_id: str = ""     # PRA Vault account id created for the Rancher admin credential (runtime-set; cleared on teardown)
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
     rancher_ui_jumpoint_egress_ip: str = ""   # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
+    rancher_dashboard_egress_cidr: str = ""   # the DASHBOARD's own public egress IP/CIDR — the source the worker uses to bootstrap + poll the node over its PUBLIC IP, so it MUST be in the firewall or the deploy can't reach its own node. Auto-detected + persisted on deploy (best-effort IP-echo); a manually-set CIDR that CONTAINS the detected IP is kept (corp proxies egress from an IP pool — set the pool's CIDR, e.g. 104.28.182.0/24). Bare IP → /32.
+    # Dashboard→Rancher API transport. Corp networks that TLS-inspect (e.g.
+    # Cloudflare Gateway) reject the node's self-signed cert IN TRANSIT, killing
+    # every direct HTTPS call (readiness, bootstrap, import API) — verify=False
+    # can't bypass a proxy-side block. "runner" executes each call as curl in a
+    # one-shot GCP Cloud Run job targeting the node's INTERNAL IP via the VPC
+    # connector (reuses the k8s runner's gcp_region / gcp_ansible_vpc_connector).
+    rancher_api_transport: str = "direct"     # direct | runner
+    rancher_internal_url: str = ""            # https://<node internal IP> (runtime-set at deploy; what the runner dials)
+    rancher_runner_source_cidr: str = ""      # the VPC connector's /28 — auto-added to the node firewall when transport=runner (GCE ingress rules apply to internal traffic too)
     # Entitle Rancher connector registration. The application slug is
     # tenant/connector-specific — confirm against the entitle_applications catalog
     # before use (default is best-effort). With the PUBLIC source-restricted node,
@@ -146,6 +181,11 @@ class Settings(BaseSettings):
     xcpng_password: str = ""            # encrypted at rest
     xcpng_verify_ssl: bool = False      # set True for a valid TLS cert
 
+    # Agent-brokered hypervisor inventory sync. The connections themselves live in the
+    # `hypervisor_connections` table, not here — these two only set the cadence.
+    hypervisor_sync_interval_minutes: int = 30   # per-connection override: options.sync_interval_minutes
+    hypervisor_sync_poll_seconds: int = 300      # how often the loop checks for due syncs
+
     # Hyper-V connection (WinRM to Windows host running Hyper-V)
     hyperv_host: str = ""               # hostname or IP of the Hyper-V host
     hyperv_port: int = 5985             # 5985 = HTTP (default), 5986 = HTTPS
@@ -195,6 +235,32 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: List[str] = ["http://localhost:8001", "http://localhost:3000"]
+
+    # The absolute origin this dashboard is reached at, e.g. https://dash.example.com.
+    # Blank = derive it from each request, which is right for a laptop install reached
+    # over localhost, an IP and a hostname on different days.
+    #
+    # Set it whenever a reverse proxy is involved. It is what decouples the OAuth
+    # callback URIs from proxy-header trust: derived URIs are only https because
+    # ProxyHeadersMiddleware rewrote the scheme from X-Forwarded-Proto, so a proxy
+    # that isn't in trusted_proxy_hosts below would silently produce http:// callbacks
+    # that the identity provider rejects. See services/public_url.py.
+    public_base_url: str = ""
+
+    # Which peers may set X-Forwarded-For / X-Forwarded-Proto.
+    #
+    # Defaults to loopback (uvicorn's own default), NOT "*". A wildcard means any
+    # client that can reach the socket may declare its own source address, and
+    # get_remote_address — which the login throttle's per-address cap and any future
+    # rate limiting key off — believes it. Rotating one header per request then walks
+    # straight past the cap.
+    #
+    # Behind a proxy, set this to the proxy's literal IP (comma-separated for several).
+    # It must be a literal: uvicorn 0.27's ProxyHeadersMiddleware does plain string
+    # comparison against the peer address and understands neither hostnames nor CIDR
+    # (CIDR arrived in uvicorn 0.31). Getting it wrong is not silent — the app logs a
+    # warning naming the peer that sent the untrusted header. See main.py.
+    trusted_proxy_hosts: str = "127.0.0.1"
 
     # PowerShell
     vm_cli_wrapper_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\vm_cli_api_wrapper.ps1"
@@ -251,6 +317,12 @@ class Settings(BaseSettings):
     gcp_gke_k8s_version: str = ""
     gcp_gke_machine_type: str = ""
     gcp_gke_authorized_cidrs: str = ""
+    # Pool the per-cluster GKE private control-plane /28 is carved from. GCP treats
+    # that range as a subnetwork of the cluster's VPC and rejects any overlap
+    # VPC-wide (other regions included), so every cluster needs its own slot —
+    # k8s_service._gke_master_cidr picks the lowest free one. Must not overlap the
+    # sandbox subnets (10.x) or any peered network; a /16 gives 4096 clusters.
+    gcp_gke_master_cidr_base: str = "172.16.0.0/16"
     # Managed-Kubernetes (OKE) provisioning. Self-contained VCN (own CIDR, distinct
     # from the sandbox 10.98/16); BASIC cluster = free control plane; the node pool
     # defaults to a single Always-Free A1.Flex node (2 OCPU / 12 GB). Empty version /
@@ -340,6 +412,17 @@ class Settings(BaseSettings):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Import from Password Safe (/databases → "Import from Password Safe"). Reads only —
+    # nothing in Password Safe is created or changed. Password Safe already runs a
+    # discovery scanner with managed credentials, so it knows a database's platform,
+    # port and requestable accounts authoritatively; these four tune what the import
+    # list shows. All optional: the feature is already gated on cloud_database_enabled
+    # + password_safe_enabled, so a third on/off switch would only be a third thing to
+    # forget. See docs/databases.md "Importing from Password Safe".
+    clouddb_ps_import_workgroup: str = ""          # blank → everything the API identity can see
+    clouddb_ps_import_default_cloud: str = "local"  # Location preselected in the modal
+    clouddb_ps_import_max_systems: int = 500       # cap on candidates returned
+    clouddb_ps_import_platform_map: str = ""       # JSON {"Percona Server": "mysql"} overrides
     # DB-client container images run on the jump host (override for a mirrored registry).
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
@@ -381,6 +464,31 @@ class Settings(BaseSettings):
     aws_functions_security_group_ids: str = ""      # CSV; blank → falls back to aws_db_security_group_id
     azure_functions_subnet_id: str = ""             # MUST be delegated to Microsoft.Web/serverFarms
     gcp_functions_vpc_connector: str = ""           # existing Serverless VPC Access connector name/self_link
+    # ── Azure cloud-DATABASE Password Safe onboarding (Run Command plugins) ───
+    # The Azure counterpart of the SSM path above: when enabled, provisioning an
+    # AZURE DB onboards it onto the "{engine} Azure Run Command Plugin", whose
+    # custom plugin reaches the private DB by running the DB client on the shared
+    # clouddb-jumpoint VM via Azure VM Run Command. Unlike SSM, the functional
+    # account is a PRIVILEGED DB login (the minted admin) bundled with an Azure
+    # service principal — "SP:<admin>" / "clientId:clientSecret:adminPassword" —
+    # which rotates a dedicated managed DB user. The three plugins + the RSA
+    # keypair are one-time MANUAL setup (see docs); the platform names below are
+    # how the dashboard finds them. Default method when enabled; "off" disables it.
+    passwordsafe_azure_db_registration_method: str = "runcommand"  # runcommand | off
+    clouddb_ps_platform_azure_postgres: str = "PostgreSQL Azure Run Command Plugin"
+    clouddb_ps_platform_azure_mysql: str = "MySQL Azure Run Command Plugin"
+    clouddb_ps_platform_azure_sqlserver: str = "MSSQL Azure Run Command Plugin"
+    clouddb_ps_azure_auth_mode: str = "SP"          # SP (service principal) | MSI (managed identity)
+    clouddb_ps_azure_cert_path: str = r"C:\BeyondTrust\certs\public_cert.cer"  # address field 7: public cert path on the Resource Broker
+    clouddb_ps_azure_ssl: bool = True               # address field 8: sslTRUE (Azure flex servers require TLS) | sslFALSE
+    # Azure SP for the DB functional account (blank → reuse azure_client_id/secret).
+    clouddb_ps_azure_sp_client_id: str = ""
+    clouddb_ps_azure_sp_client_secret: str = ""     # encrypted at rest
+    # Plugin RSA key material the dashboard drops onto clouddb-jumpoint (/root/psplugin)
+    # so the plugin can decrypt the RSA-wrapped login password; the matching public
+    # cert lives on the Resource Broker at clouddb_ps_azure_cert_path.
+    clouddb_ps_azure_plugin_private_key: str = ""   # PEM, encrypted at rest
+    clouddb_ps_azure_plugin_passphrase: str = ""    # encrypted at rest
 
     # EPM for Linux (EPM-L) — Pathfinder public API gateway.
     # The gateway base is api.beyondtrust.io (NOT app.beyondtrust.io — that host
@@ -453,6 +561,18 @@ class Settings(BaseSettings):
     aws_nat_subnet_id: str = ""
     aws_nat_ami_id: str = ""
 
+    # Shared, on-demand SSM interface VPC endpoints (ssm, ssmmessages, ec2messages)
+    # for the private-subnet SSM path (Password Safe SSM VM onboarding, cloud-DB
+    # dbssm). When enabled, the dashboard creates the three interface endpoints
+    # (private DNS) in the sandbox private subnet on the first EC2 deploy / AWS
+    # cloud-DB provision and deletes them when the last such resource is
+    # decommissioned — so private-subnet SSM works with zero standing cost (each
+    # interface endpoint bills ~$7/mo while up). Set by scripts/sandbox/Linux/
+    # setup-aws.sh. See services/ssm_endpoint_service.py. Blank SG → find-or-create
+    # dashboard-sandbox-ssm-vpce-sg.
+    aws_ssm_endpoints_enabled: bool = False
+    aws_ssm_vpce_security_group_id: str = ""
+
     # Portainer CE integration — a single connection, configured via
     # Settings → Integrations → Portainer CE (config_service); these env vars
     # are the fallback for compose-file-driven installs.
@@ -460,9 +580,36 @@ class Settings(BaseSettings):
     portainer_pat: str = ""                          # API token; Settings stores it encrypted in the DB
     portainer_pat_secret_title: str = "Portainer_PAT"  # legacy fallback: BeyondTrust Password Safe secret title
     portainer_verify_ssl: bool = True                # Set False for self-signed certs
-    portainer_agent_image: str = "portainer/agent:latest"
-    portainer_agent_port: int = 9001
+    # Managed Portainer node (deploy/teardown lifecycle; see gcp_portainer_* below).
+    # A successful deploy writes portainer_url / portainer_pat / portainer_verify_ssl
+    # above, so the integration wires itself up. Read live via config_service.
+    portainer_allowed_source_cidrs: str = ""   # CSV of manual firewall source ranges; empty = rely on the auto-detected dashboard egress CIDR (fail closed unless gcp_portainer_allow_open)
+    portainer_dashboard_egress_cidr: str = ""  # the dashboard's own public egress CIDR (auto-detected + persisted on deploy); the worker bootstraps the node over its public IP
+    portainer_admin_password: str = ""         # first-run admin password; auto-generated when unset
+    portainer_admin_password_generated: bool = False  # marks the password above as dashboard-generated (so it can be surfaced once)
+    portainer_ready_timeout_s: int = 300       # how long the deploy waits for Portainer to serve after the VM boots (cold image pull); raise for slow disks
+    # Managed Portainer node — optional PRA Web Jump brokering its UI (mirrors the
+    # rancher_ui_* block above). Opt-in: lets an operator whose IP isn't in
+    # portainer_allowed_source_cidrs reach the UI from the PRA representative console
+    # (brokered + recorded, no CIDR change), with the admin credential injected from
+    # the PRA Vault instead of being shown.
+    portainer_ui_web_jump_enabled: bool = False   # gate the sra_web_jump broker; False = use the direct public URL
+    portainer_ui_verify_certificate: bool = False # sra_web_jump verify_certificate (False for the node's self-signed cert on :9443)
+    portainer_ui_jump_group: str = ""             # "" = bt_jump_group_name
+    portainer_ui_jumpoint_name: str = ""          # "" = bt_jumpoint_name
+    portainer_ui_web_jump_id: str = ""            # PRA Web Jump id for the Portainer UI (runtime-set)
+    portainer_ui_web_jump_tfstate: str = ""       # terraform state for the Web Jump (for teardown)
+    portainer_ui_vault_account_group_id: str = "" # PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; chosen at deploy. "" = no vault (fall back to bt_vault_account_group_id, else surface the password)
+    portainer_ui_vault_account_id: str = ""       # PRA Vault account id created for the Portainer admin credential (runtime-set; cleared on teardown)
+    portainer_ui_jumpoint_cloud: str = "gcp"      # which dashboard-managed Jumpoint host brokers the Portainer UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
+    portainer_ui_jumpoint_egress_ip: str = ""     # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
     ansible_local_image: str = "chrweav/ansible-winrm:latest"
+    # Ansible runner image for Kubernetes-cluster / cloud-database config-management
+    # targets (localhost plays that reach out via kubeconfig / DB login vars). Carries
+    # kubernetes.core + community.postgresql/mysql/general and their client libs; see
+    # runners/ansible-cloud/. Used for ALL cloud runners (ECS/ACI/Cloud Run) on k8s/DB
+    # targets — never the winrm image (it lacks these collections).
+    ansible_cloud_image: str = "chrweav/ansible-cloud:latest"
 
     # Azure resource-management credentials.
     # Preferred: set the four direct env vars below (community edition / simple
@@ -504,6 +651,11 @@ class Settings(BaseSettings):
     azure_image_storage_account: str = ""         # Storage account for temp VHD upload during OVA→Azure image import
     azure_aci_file_share: str = "jpt"             # Azure File Share name for /jpt mount
     azure_jumpoint_name: str = ""                 # name of the pre-existing Jumpoint for Azure Shell Jumps
+    # How a SINGLE Azure VM deploy reaches its Jumpoint. "shared" (default) borrows the
+    # ref-counted clouddb-jumpoint VM — tunnel-capable, and no shared /jpt identity store
+    # to corrupt. "aci" starts a dedicated ACI container group per deploy (Shell Jump
+    # only; ACI cannot protocol-tunnel). Batches always share one ACI group.
+    azure_vm_jumpoint_mode: str = "shared"        # "shared" | "aci"
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
     # transparently resolved through the chosen secrets backend (PS / AWS SM /
@@ -520,6 +672,7 @@ class Settings(BaseSettings):
     azure_ssh_keypair_secret_name: str = "azureVM-ssh-keypair"  # Unified secret: JSON {public_key, private_key}
     azure_ssh_key_secret_name: str = ""               # Legacy: separate public-key secret (fallback)
     azure_ssh_private_key_secret_name: str = ""       # Legacy: separate private-key secret (fallback)
+    azure_ssh_username: str = "azureuser"             # Cloud-default login user (Entitle SSH-ephemeral registration; admin override)
 
     # Azure Automation (Hybrid Runbook Worker — set by Container App env vars from Terraform)
     azure_automation_account_name: str = ""
@@ -595,16 +748,18 @@ class Settings(BaseSettings):
 
     # Cloud object storage. Originally introduced for Ansible playbooks; now
     # exposed as its own /storage page so future features can reuse the same
-    # backend abstraction. Three backends supported — S3, Azure Blob, GCS —
-    # configured independently. The active backend is the one selected via
-    # storage_active_backend; others can be configured-but-idle for migration.
-    storage_active_backend: str = ""           # "s3" | "azure_blob" | "gcs"
+    # backend abstraction. Four cloud backends supported — S3, Azure Blob, GCS,
+    # OCI Object Storage — configured independently. The active backend is the one
+    # selected via storage_active_backend; others can be configured-but-idle for
+    # migration. OCI is hub-only (see storage_hub_backend): the active backend also
+    # decides where Terraform state lives and Terraform has no OCI state backend.
+    storage_active_backend: str = ""           # "s3" | "azure_blob" | "gcs" | "local"
     # Image-registry hub backend — the single backend that holds the canonical
     # VHD/raw artefact for every registered image regardless of build cloud.
     # When unset, falls back to storage_active_backend so single-backend installs
     # Just Work. Used by the Packer export+register flow and the (upcoming)
     # per-target-cloud promote runners.
-    storage_hub_backend: str = ""              # "" | "s3" | "azure_blob" | "gcs"
+    storage_hub_backend: str = ""              # "" | "s3" | "azure_blob" | "gcs" | "oci_object_storage"
     storage_s3_bucket: str = ""                # e.g. "infra-asset-store"
     storage_s3_region: str = ""                # defaults to aws_region if blank
     storage_s3_prefix: str = "config-mgmt"
@@ -613,6 +768,12 @@ class Settings(BaseSettings):
     storage_azure_prefix: str = "config-mgmt"
     storage_gcs_bucket: str = ""
     storage_gcs_prefix: str = "config-mgmt"
+    # OCI Object Storage. Credentials come from the oci_* API-key block below —
+    # only the bucket is storage-specific. The namespace is per-tenancy and
+    # auto-detected via the Object Storage API when left blank.
+    storage_oci_bucket: str = ""
+    storage_oci_namespace: str = ""            # blank → looked up from the tenancy
+    storage_oci_prefix: str = "config-mgmt"
     # Local filesystem / SMB UNC backend. Path can be either a normal
     # filesystem path inside the container (e.g. a bind-mounted host dir)
     # or a UNC \\server\share[\subpath]. UNC paths are read via the
@@ -675,8 +836,8 @@ class Settings(BaseSettings):
     # documented in runners/promote/README.md). Falls back to existing
     # gcp_* / storage_gcs_* keys for single-tenant installs.
     promote_runner_gcp_region: str = ""                  # fallback: gcp_region
-    promote_runner_gcp_cpu: str = "2000m"                # qemu-img headroom
-    promote_runner_gcp_memory: str = "4Gi"               # ~4 GiB for multi-GB VHDs + tar wrap
+    promote_runner_gcp_cpu: str = "4"                    # Cloud Run requires >=4 vCPU above 8Gi
+    promote_runner_gcp_memory: str = "16Gi"              # memory-backed /tmp: VHD + raw disk + tar.gz
     promote_runner_gcp_vpc_connector: str = ""           # optional, for private-network egress
     promote_runner_gcp_service_account: str = ""         # optional: workload-identity SA email for the runner
     promote_runner_gcp_staging_bucket: str = ""          # fallback: storage_gcs_bucket
@@ -729,6 +890,151 @@ class Settings(BaseSettings):
     gcp_ansible_cloud_run_region: str = ""   # defaults to gcp_region if blank
     gcp_ansible_image: str = "chrweav/ansible-winrm:latest"
     gcp_ansible_vpc_connector: str = ""      # e.g. "projects/proj/locations/region/connectors/name" (optional, for private host access)
+    # Direct VPC egress for Cloud Run runner jobs — the job's NIC lands straight in
+    # the subnet (no Serverless-VPC-Access connector: no standing cost, and immune
+    # to the connector's shared-core zonal stockouts). Set BOTH; wins over
+    # gcp_ansible_vpc_connector when set. Egress stays private-ranges-only.
+    gcp_run_network: str = ""                # VPC name, e.g. "dashboard-sandbox-vpc"
+    gcp_run_subnetwork: str = ""             # subnet in the runner's region, e.g. "dashboard-sandbox-jumpoint-subnet"
+    # Stranded-runner reaper. Each runner deletes its own Cloud Run Job in a `finally`;
+    # a worker restart between the execution ending and that delete landing strands the
+    # job in the project. The reaper is the safety net (see gcp_service). Disabling it
+    # only stops the automatic sweep — the Containers reap action still works.
+    gcp_cloud_run_job_reap_enabled: bool = True
+    gcp_cloud_run_job_reap_age_minutes: int = 60   # must exceed a runner's whole lifetime
+
+    # ── Auto-delete timer (resource expiry) ──────────────────────────────────
+    # Gives dashboard-provisioned cloud VMs, databases and k8s clusters an expiry,
+    # then destroys them when it passes — the same teardown the Destroy button runs.
+    # See services/expiry_policy.py for the guards and services/expiry_reaper.py for
+    # the sweep.
+    #
+    # OFF is not the only brake, because this feature deletes infrastructure:
+    #   * a resource with expires_at NULL is never touched, and every resource that
+    #     predates the feature is NULL — so enabling it acts on nothing;
+    #   * resource_expiry_default_hours=0 means new deploys aren't stamped either, so
+    #     flipping only the master switch still changes nothing;
+    #   * resource_expiry_dry_run=True means even a stamped, overdue fleet is only
+    #     REPORTED;
+    #   * resource_expiry_enforce=False is a second, separate gate on deletion.
+    # Floors an operator cannot lower (minimum lifetime, reap grace, arming delay,
+    # per-pass cap) are module constants in expiry_policy, not keys here.
+    resource_expiry_enabled: bool = False
+    resource_expiry_enforce: bool = False          # deletion gate; on-but-inert until set
+    resource_expiry_dry_run: bool = True           # report only, enqueue nothing
+    resource_expiry_default_hours: int = 0         # 0 = don't stamp new deployments
+    resource_expiry_extend_hours: int = 24         # what one Extend click adds
+    resource_expiry_max_total_hours: int = 720     # 30d ceiling, counted from created_at
+    resource_expiry_warn_hours: int = 24           # "expiring soon" window
+    resource_expiry_grace_minutes: int = 30        # floored at REAP_GRACE_MIN_FLOOR
+    resource_expiry_sweep_interval_minutes: int = 30
+    # How long a COMPLETED sweep row survives on /jobs. 0 = keep forever. The sweep is the
+    # only job type written on a timer whether or not it had work — 48 rows/day at the
+    # default interval — and nothing else prunes `jobs`. Failed passes never expire.
+    resource_expiry_sweep_retention_days: int = 7
+    resource_expiry_max_per_pass: int = 10         # capped at MAX_PER_PASS_CEILING
+    resource_expiry_allow_never: bool = False      # may an admin clear a timer outright
+    resource_expiry_exempt_workgroups: str = ""    # CSV; mirrors the admission_* lists
+
+    # ── Background job worker concurrency ────────────────────────────────────
+    # How many jobs the dedicated worker (web_dashboard.jobs_worker) runs at once. It
+    # used to run exactly ONE, and "run more" meant more docker-compose replicas — a
+    # lever a PaaS host doesn't give you per-worker, and one that costs a whole DB
+    # connection pool per replica. These caps put the concurrency inside one process.
+    # Replicas still MULTIPLY them (the queue claim is atomic), so total = replicas x caps.
+    #
+    # Tiered because the jobs are not alike (jobs_worker.HEAVY/MEDIUM/LIGHT_TYPES):
+    #   heavy  — a long LOCAL subprocess streamed line by line (terraform apply, packer
+    #            build, `docker run`). One JobLog INSERT per output line.
+    #   medium — cloud SDK plus a SHORT local process: a PRA/Entitle/Password-Safe
+    #            terraform in a tempdir, or kubectl/helm at k8s_runner=local (default).
+    #   light  — start a cloud operation, then poll its API. Image exports/promotes/
+    #            copies, gateways, epml_sync, expiry_sweep. Hours of near-pure waiting;
+    #            these are the ones that used to queue behind a Packer build.
+    #
+    # These are the BOOTSTRAP defaults. The normal way to change them is Settings →
+    # Job Worker, which stores them in app_config and takes effect within ~5s with no
+    # restart. Ceilings an operator cannot raise live in worker_policy, not here.
+    worker_heavy_concurrency: int = 2
+    worker_medium_concurrency: int = 1
+    worker_light_concurrency: int = 3
+    # Aggregate ceiling across the tiers, and what the pools are sized from — the tier
+    # caps deliberately sum higher, since they bound COMPOSITION and this bounds TOTAL.
+    # Clamped down at startup if the DB pool can't serve it (jobs_worker._limits).
+    worker_max_concurrency: int = 3
+    worker_executor_threads: int = 0               # 0 = derive from the caps above
+    worker_drain_timeout_s: int = 20               # SIGTERM grace; see the pool note below
+
+    # ── Database connection pool ─────────────────────────────────────────────
+    # ENV-ONLY, and it cannot be otherwise: create_engine runs at import in database.py,
+    # before any connection exists, so the pool that connects to the database can't be
+    # sized from a value stored in that database. This is why the worker caps above are
+    # clamped to the pool at runtime rather than the pool being grown to fit them.
+    #
+    # Budget, per PROCESS: db_pool_size + db_max_overflow. The app runs `gunicorn -w 2`
+    # (2 pools) and the worker 1 per replica, so one deployment holds
+    # 3 x (size + overflow) — 30 at the defaults. Keep it under (max_connections - 20),
+    # the 20 covering the server's own management and superuser-reserved sessions.
+    # Check with `SHOW max_connections;`. Azure Postgres Flexible Server Burstable B1ms
+    # is 50 (so 5+5 is the ceiling there, and the worker clamps concurrency to 3); B2s
+    # and every General Purpose tier are 429+ and can take much more.
+    #
+    # App and worker are separate deployments, so they can carry DIFFERENT values for
+    # these under the same names — giving the worker a bigger pool than the request path
+    # buys concurrency at no extra connection cost.
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    db_pool_timeout_s: int = 30                    # checkout wait before QueuePool raises
+    # Under any server-side idle timeout. Azure's load balancer drops idle TCP after
+    # minutes, which without this surfaces as an InterfaceError mid-job on a long
+    # poller's first query after a quiet gap — reachable today at concurrency 1.
+    db_pool_recycle_s: int = 1800
+
+    # ── Blocking cloud SDK calls (services/cloud_executor.py) ────────────────
+    # Threads PER PROVIDER, and the deadline on one blocking call. Every cloud SDK call
+    # used to share the event loop's default executor — min(32, os.cpu_count() + 4),
+    # which in a container is computed from the HOST's CPU count and came out at 8. The
+    # home page fans out ~8 per-cloud reads, so one slow provider parked every thread in
+    # the process and the whole dashboard hung until it was restarted (2026-08-12).
+    #
+    # A pool per provider is what bounds that: a wedged provider exhausts its own threads
+    # and AWS, Azure and the pure-DB routes keep serving. Sizing is read once per
+    # provider at first use — a live pool cannot be resized safely — so a change here
+    # needs a restart, unlike the worker_* knobs.
+    cloud_pool_size: int = 8
+    # Request path. Far above a healthy read (~1s) and far below the 240s the ingress
+    # allowed while the site was wedged.
+    cloud_call_timeout_s: int = 60
+    # Job path, applied only in jobs_worker (cloud_executor.use_worker_defaults). Above
+    # the longest poller — a GCP image export runs to 7200s inside ONE to_thread call —
+    # so this bounds runaway work without capping legitimate work.
+    cloud_worker_call_timeout_s: int = 14400
+
+    # ── Outbound notifications ───────────────────────────────────────────────
+    # Sends dashboard events to webhook endpoints (Slack, Microsoft Teams via a Power
+    # Automate Workflows URL, or a signed generic envelope you point at whatever you
+    # like — that last one is how email is delivered; there is no SMTP client here).
+    # Endpoints themselves are rows in `notification_endpoints`, not keys, because
+    # their URLs are credentials and there can be several. See docs/notifications.md.
+    #
+    # Two brakes, because this sends messages to people:
+    #   * notifications_enabled off means nothing is emitted, drained or scanned;
+    #   * notify_dry_run=True — still the default once ON — records what WOULD be sent
+    #     and sends nothing, so the first pass against a live estate fills a log rather
+    #     than a channel.
+    notifications_enabled: bool = False
+    notify_dry_run: bool = True
+    notify_event_types: str = ("resource.expiring,resource.reaped,job.failed,"
+                               "cost.budget_exceeded,secret.stale,config.drift")
+    notify_min_severity: str = "warning"           # info | warning | critical
+    notify_base_url: str = ""                      # absolute origin for deep links
+    notify_http_timeout_s: int = 10
+    notify_flush_interval_s: int = 30              # drain cadence, re-read every pass
+    notify_scan_interval_s: int = 3600             # cost / secret / drift condition scan
+    notify_max_attempts: int = 4                   # then the delivery is terminal-failed
+    notify_max_per_flush: int = 50
+    notify_max_queue: int = 500                    # above this, emit() suppresses
+    notify_retention_days: int = 30                # 0 = keep delivery rows forever
 
     # Ephemeral cloud secrets for managed-account checkout on the ECS / Cloud Run
     # runners. OFF by default: a checked-out Password Safe credential is written to
@@ -801,13 +1107,42 @@ class Settings(BaseSettings):
     gcp_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
     gcp_jumpoint_machine_type: str = "e2-micro"
     gcp_jumpoint_zone: str = ""          # blank → use the deploy zone
+    # Which Jumpoint a SINGLE GCP VM deploy gets. "shared" (default) borrows the
+    # ref-counted host that cloud databases, k8s tunnels and VDI seats already use;
+    # "paired" gives every VM its own bt-jumpoint-<vm> e2-micro, the pre-2026-07
+    # behaviour. Batches always share. A deploy carrying its own docker_deploy_key_ref
+    # is forced to "paired" regardless, since the shared host resolves its key globally.
+    gcp_vm_jumpoint_mode: str = "shared"  # "shared" | "paired"
     # Network tag(s) automatically attached to every dashboard-deployed user
     # VM. Comma-separated. Used to scope sandbox firewall rules (e.g. the
     # egress-deny rule on the sandbox VM subnet keys off this tag). Set to
     # `dashboard-sandbox-vm` when paired with scripts/sandbox/setup-gcp.sh.
     gcp_default_network_tag: str = ""
+    # On-demand outbound internet for sandbox VMs (the GCP analog of
+    # aws_nat_instance_enabled). The sandbox leaves the vm-subnet off Cloud NAT AND
+    # adds a priority-1000 egress deny on the tag above, so a VM has no internet —
+    # `dnf update` / config-mgmt playbooks time out. When enabled, the dashboard adds a
+    # SECOND Cloud NAT gateway on the sandbox's existing Cloud Router (scoped to the
+    # vm-subnet) plus a higher-priority egress ALLOW on the first VM deploy, and removes
+    # both when the last VM in that region is destroyed — so VMs get egress with zero
+    # standing cost and the sandbox's own NAT + deny rule are never modified. No-ops
+    # when the region has no Cloud Router. See services/gcp_nat_service.py.
+    gcp_vm_nat_enabled: bool = True
+    gcp_vm_nat_name: str = "dashboard-sandbox-vm-nat"
+    gcp_vm_egress_rule_name: str = "dashboard-sandbox-vm-egress-ondemand"
+    gcp_vm_egress_rule_priority: int = 900  # must beat the sandbox deny at 1000
     gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
     gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
+    # On-demand Entitle DB forwarder (GCP-only). A private Cloud SQL PSA IP is
+    # unreachable from the Entitle agent's own GKE VPC (non-transitive peering);
+    # when a GCP DB is registered in Entitle the dashboard stands up a tiny socat
+    # relay (COS-on-GCE) in the sandbox VPC that the agent CAN reach over the
+    # GKE↔sandbox peering, and tears it down on deregister/decommission. OFF by
+    # default. See services/entitle_db_proxy_service.py.
+    gcp_entitle_db_proxy_enabled: bool = False
+    gcp_entitle_db_proxy_source_ranges: str = "10.98.0.0/22,10.100.0.0/16"  # GKE agent node+pod ranges allowed into the forwarder (terraform/k8s_cluster/gcp_gke defaults)
+    gcp_entitle_db_proxy_image: str = "alpine/socat:latest"                 # socat relay container image (pulled over Cloud NAT)
+    gcp_entitle_db_proxy_machine_type: str = "e2-micro"                     # forwarder VM size (free-tier eligible in us-central1)
     # Rancher management node — a single privileged Rancher container on a
     # Container-Optimized-OS GCE VM with a PUBLIC (source-restricted) IP. Same
     # COS/konlet mechanism as the Jumpoint. The node is treated as EPHEMERAL: a
@@ -821,6 +1156,19 @@ class Settings(BaseSettings):
     gcp_rancher_boot_disk_gb: int = 30    # COS boot disk (holds /var/lib/rancher; auto-deletes on stop)
     gcp_rancher_network_tag: str = "rancher"  # network tag on the VM = firewall target tag
     gcp_rancher_allow_open: bool = False  # opt-in to open 0.0.0.0/0 when rancher_allowed_source_cidrs is empty; otherwise empty = firewall NOT opened (fail closed)
+    rancher_ready_timeout_s: int = 360    # how long the deploy waits for Rancher to serve after the VM boots (cold rancher/rancher pull + bootstrap); raise for slow disks/large images
+    # Managed Portainer CE server — a single (unprivileged) Portainer container on a
+    # Container-Optimized-OS GCE VM with a PUBLIC (source-restricted) IP. Same
+    # COS/konlet mechanism as the Rancher node above, and equally EPHEMERAL: the boot
+    # disk auto-deletes, so a teardown/recreate wipes /var/lib/portainer (users,
+    # environments, settings). Serves 9443 (HTTPS UI/API) + 8000 (Edge agent tunnel).
+    gcp_portainer_image: str = "portainer/portainer-ce:latest"  # Portainer server container image
+    gcp_portainer_machine_type: str = "e2-small"   # Portainer is light; e2-small is ample
+    gcp_portainer_zone: str = ""          # blank → gcp_zone / auto-picked in the region
+    gcp_portainer_name: str = "portainer-server"
+    gcp_portainer_boot_disk_gb: int = 20  # COS boot disk (holds /var/lib/portainer; auto-deletes on delete)
+    gcp_portainer_network_tag: str = "portainer"  # network tag on the VM = firewall target tag
+    gcp_portainer_allow_open: bool = False  # opt-in to open 0.0.0.0/0 when portainer_allowed_source_cidrs is empty; otherwise empty = firewall NOT opened (fail closed)
 
     # ── Oracle Cloud Infrastructure (OCI) ─────────────────────────────────────
     # The fourth cloud provider. Compute VM CRUD is SDK-based (the `oci` Python
@@ -841,6 +1189,7 @@ class Settings(BaseSettings):
     oci_vcn_ocid: str = ""                # VCN the VM subnets live in
     oci_default_subnet_ocid: str = ""     # subnet for deployed VM VNICs
     oci_ssh_key_secret: str = ""          # OCI Vault secret (OCID or name) holding the SSH keypair JSON {public_key, private_key}
+    oci_ssh_username: str = "opc"          # Cloud-default login user (Entitle SSH-ephemeral registration; admin override)
     oci_vault_ocid: str = ""              # Vault the SSH/secret material lives in (for name→OCID lookups)
     # Free-tier guardrail — the Always-Free envelope the deploy form defaults to
     # and warns when exceeded (see services/oci_freetier.py). Advisory caps, not
@@ -934,6 +1283,48 @@ class Settings(BaseSettings):
     gcp_workforce_provider_id: str = ""              # OIDC provider id in the pool (e.g. bt-entra-oidc); for the end-user login config
     gcp_workforce_location: str = "global"           # workforce pool location (always "global" today)
     bt_vault_account_group_id: str = ""              # OPTIONAL — PRA Vault account group id for injected k8s/DB credentials
+    # ── Password-Safe-managed k8s ServiceAccount token rotation ──────────────
+    # The PRA-injected SA token above becomes a Password Safe managed account on the
+    # "Kubernetes Service Account Token" custom plugin, rotated on the tenant's
+    # schedule; a second managed account on the "PRA Vault Token" plugin mirrors each
+    # rotation into the PRA Vault copy. Operator prerequisites (manual): import both
+    # .psplugins, create the platforms, create the per-cloud functional accounts, and
+    # grant the pscli identity Requestor + an auto-release access policy on the new
+    # managed accounts. See docs/design/k8s-sa-token-rotation.md.
+    k8s_ps_token_rotation_enabled: bool = False      # master gate: row action, provision checkbox, sync loop
+    k8s_ps_token_platform: str = "Kubernetes Service Account Token"  # plugin platform (name or id)
+    k8s_ps_pravault_token_platform: str = "PRA Vault Token"          # mirror plugin platform (name or id)
+    k8s_ps_functional_account_aws: str = ""          # per-cloud functional account (name or id); _local is the
+    k8s_ps_functional_account_azure: str = ""        # generic/on-prem (and OKE) fallback
+    k8s_ps_functional_account_gcp: str = ""
+    k8s_ps_functional_account_local: str = ""
+    k8s_ps_pravault_functional_account: str = ""     # FA for the mirror (PRA Config API OAuth client)
+    k8s_ps_workgroup: str = ""                       # blank → passwordsafe_workgroup
+    k8s_ps_token_mode: str = "longlived"             # longlived (rotation revokes) | bound (TokenRequest, no revoke)
+    k8s_ps_token_ttl_seconds: int = 3600             # bound mode requested TTL; API-server floor is 600
+    k8s_ps_token_change_on_register: bool = True     # rotate once on register — proves the whole path immediately
+    k8s_ps_token_delete_legacy_secret: bool = True   # retire the dashboard-minted Secret the plugin's sweep never touches
+    k8s_ps_token_register_on_provision: bool = False  # provision-form checkbox default
+    k8s_ps_pravault_mirror_enabled: bool = True      # register the "PRA Vault Token" mirror when a PRA vault account exists
+    k8s_ps_token_checkout_duration_min: int = 15     # Password Safe request duration for token reads
+    k8s_ps_token_address_options: str = ""           # extra ;key=value appended to every address (serverName=, dnsEndpoint=true, …)
+    # In-cluster rotator RBAC (the plugin's scripts/rbac.yaml). The binding subject
+    # differs per cloud and mostly CANNOT be derived: AKS needs the SP's OBJECT id (not
+    # the client id in the FA username); EKS needs the access-entry username + the IAM
+    # principal ARN behind the FA's access key. GKE's subject IS the FA's account name
+    # (the SA email), so it is derived when the override is blank.
+    k8s_ps_rotator_apply_rbac: bool = True
+    k8s_ps_rotator_gke_sa_email: str = ""            # blank → derived from the GCP functional account's name
+    k8s_ps_rotator_aks_sp_object_id: str = ""        # the oid claim — the plugin logs it on every run
+    k8s_ps_rotator_eks_username: str = "passwordsafe-rotator"   # access-entry username = RBAC User subject
+    k8s_ps_rotator_eks_principal_arn: str = ""       # IAM role/user behind the FA's access key (not derivable)
+    k8s_ps_rotator_eks_create_access_entry: bool = True  # create the access entry when the ARN is set (never touches aws-auth)
+    k8s_ps_rotator_bootstrap_namespace: str = "beyondtrust"     # generic path bootstrap SA namespace
+    k8s_ps_rotator_bootstrap_sa: str = "password-safe-rotator"  # generic path bootstrap SA name
+    # No PS → PRA sync settings: Password Safe owns that. Registration links the PRA
+    # Vault account to the token account with SyncedAccounts, and a managed account and
+    # its subscribers always share a credential, so every rotation reaches PRA with
+    # nothing here on a timer and no interval to tune.
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md

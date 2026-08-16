@@ -68,6 +68,11 @@
         <span x-show="instances.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="instances.length"></span>
       </button>
+      <button @click="activeTab = 'build'"
+              :class="activeTab === 'build' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        Build Image
+      </button>
     </nav>
   </div>
 
@@ -82,12 +87,35 @@
       </template>
     </div>
 
+    <!-- Selection toolbar. Mirrors the other clouds: tick images, launch one instance
+         per image. For N copies of ONE image, use Count on the deploy form. -->
+    <div x-show="!imagesLoading && filteredImages().length > 0"
+         class="flex items-center justify-between mb-4">
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+        <input type="checkbox" @change="toggleSelectAllImages($event)"
+               :checked="selectedImages.length > 0 && selectedImages.length === filteredImages().length"
+               class="rounded border-gray-300 text-red-600 focus:ring-red-500">
+        Select all
+      </label>
+      <div class="flex items-center gap-2" x-show="selectedImages.length > 0" x-cloak>
+        <button @click="selectedImages = []"
+                class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1.5">Clear</button>
+        <button @click="openBulkDeployModal()"
+                class="text-xs bg-red-700 hover:bg-red-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Bulk Deploy (<span x-text="selectedImages.length"></span>)
+        </button>
+      </div>
+    </div>
+
     <div x-show="imagesLoading" class="text-sm text-gray-400">Loading images…</div>
 
     <div x-show="!imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <template x-for="img in filteredImages()" :key="img.ocid">
-        <div class="bg-white rounded-xl border border-gray-200 hover:border-red-300 hover:shadow-sm transition-all p-4 flex flex-col gap-2">
+        <div class="bg-white rounded-xl border hover:shadow-sm transition-all p-4 flex flex-col gap-2"
+             :class="selectedImages.includes(img.ocid) ? 'border-red-400 ring-1 ring-red-200' : 'border-gray-200 hover:border-red-300'">
           <div class="flex items-start justify-between gap-2">
+            <input type="checkbox" :value="img.ocid" x-model="selectedImages" @click.stop
+                   class="mt-0.5 rounded border-gray-300 text-red-600 focus:ring-red-500 flex-shrink-0">
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-gray-900 truncate" x-text="img.display_name"></p>
               <p class="text-xs text-gray-400 mt-0.5" x-text="(img.operating_system + ' ' + img.operating_system_version).trim() || 'Image'"></p>
@@ -139,6 +167,263 @@
     </div>
   </div>
 
+  <!-- ── Build Image ────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'build'" x-cloak>
+    <div class="max-w-2xl">
+      <div class="mb-4">
+        <h2 class="text-lg font-semibold text-gray-800">Build OCI Image with Packer</h2>
+        <p class="text-xs text-gray-400 mt-0.5">Provision a platform image with a shell script and capture the result as a custom image in your compartment. Runs as a tracked background job (typically 5–15 min).</p>
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+
+        <!-- Image Name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Image Name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="ociPackerForm.image_name"
+                 placeholder="my-hardened-oracle-linux"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+          <p class="text-xs text-gray-400 mt-1">Letters, digits, dots, underscores and hyphens. A timestamp is appended automatically.</p>
+        </div>
+
+        <!-- Base Image -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Base Image <span class="text-red-500">*</span></label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+              <input type="checkbox" x-model="packerIncludeCustomBases" class="h-3.5 w-3.5 rounded border-gray-300 text-red-600">
+              include custom images
+            </label>
+          </div>
+          <select x-model="ociPackerForm.base_image_ocid" @change="onPackerBaseImageChange()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+            <option value="">— pick a base image —</option>
+            <template x-for="img in packerBaseImages()" :key="img.ocid">
+              <option :value="img.ocid" x-text="img.display_name"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">Oracle-provided platform images by default. The SSH username is set from the image's OS — a wrong one fails at &ldquo;Waiting for SSH&rdquo; minutes into the build.</p>
+        </div>
+
+        <!-- Shape + SSH Username -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Build Shape</label>
+            <!-- Scoped to the AD + base image below, not region-wide: OCI does not
+                 offer every shape in every AD, and an image boots only on the
+                 shapes it was built for. -->
+            <select x-model="ociPackerForm.shape" @change="onPackerShapeChange()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+              <option value="">— pick a shape —</option>
+              <template x-for="s in packerShapes()" :key="s.shape">
+                <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (always-free)' : '')"></option>
+              </template>
+            </select>
+            <p x-show="packerShapesBusy()" x-cloak class="text-xs text-gray-400 mt-1">
+              Checking which shapes this availability domain and base image support…</p>
+            <p x-show="!packerShapesBusy() && packerShapeNotice()" x-cloak
+               class="text-xs text-amber-700 mt-1" x-text="packerShapeNotice()"></p>
+            <p class="text-xs text-gray-400 mt-1" x-show="packerFreeMicroMissing()" x-cloak>
+              This availability domain offers no <span class="font-mono">VM.Standard.E2.1.Micro</span> — the
+              Always-Free AMD micro only exists in the older regions. The free alternative,
+              <span class="font-mono">VM.Standard.A1.Flex</span>, is Arm and needs an aarch64 base image.
+            </p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Username</label>
+            <input type="text" x-model="ociPackerForm.ssh_username"
+                   placeholder="opc"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-red-500 focus:border-red-500">
+            <p class="text-xs text-gray-400 mt-1"><span class="font-mono">opc</span> on Oracle Linux, <span class="font-mono">ubuntu</span> on Ubuntu.</p>
+          </div>
+        </div>
+
+        <!-- Flex shape sizing -->
+        <div class="grid grid-cols-2 gap-4" x-show="packerShapeIsFlex()" x-cloak>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">OCPUs</label>
+            <input type="number" x-model.number="ociPackerForm.ocpus" min="1" max="128" step="1"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Memory (GB)</label>
+            <input type="number" x-model.number="ociPackerForm.memory_gb" min="1" max="1024" step="1"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+            <p class="text-xs text-gray-400 mt-1">Flexible shapes need explicit sizing; fixed shapes ignore it.</p>
+          </div>
+        </div>
+
+        <!-- Placement -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Availability Domain <span class="text-red-500">*</span></label>
+            <!-- @change refetches Build Shape: the shape list is AD-scoped, so
+                 changing AD without refetching leaves a list from another one. -->
+            <select x-model="ociPackerForm.availability_domain"
+                    @change="onPackerPlacementChange()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+              <option value="">— pick an availability domain —</option>
+              <template x-for="ad in (networkOpts.availability_domains || [])" :key="ad">
+                <option :value="ad" x-text="ad"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Subnet</label>
+            <select x-model="ociPackerForm.subnet_ocid"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+              <option value="">(configured default)</option>
+              <template x-for="sn in packerBuildSubnets()" :key="sn.ocid">
+                <option :value="sn.ocid" x-text="sn.display_name + ' — ' + sn.cidr_block"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">Public subnets only — Packer connects from this dashboard, not from inside the VCN.</p>
+          </div>
+        </div>
+
+        <!-- Boot volume -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Boot Volume (GB)</label>
+          <input type="number" x-model.number="ociPackerForm.boot_volume_gb" min="50" max="32768"
+                 placeholder="base image default"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+          <p class="text-xs text-gray-400 mt-1">Leave blank to use the base image's default. OCI's minimum is 50 GB, which is also the free-tier allowance.</p>
+        </div>
+
+        <!-- Provisioner Script -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Provisioner Script</label>
+            <div class="flex items-center gap-2" x-show="storedScripts.length > 0">
+              <label class="text-xs text-gray-500">Load from storage:</label>
+              <select @change="loadProvisionerScript($event.target.value); $event.target.value = ''"
+                      :disabled="loadingScript"
+                      class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-red-500 focus:border-red-500 disabled:opacity-50">
+                <option value="">— pick a .sh script —</option>
+                <template x-for="s in storedScripts" :key="s.backend + '|' + s.name">
+                  <option :value="s.backend + '|' + s.name"
+                          x-text="s.name + ' (' + backendLabelShort(s.backend) + ')'"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <textarea x-model="ociPackerForm.provisioner_script" rows="8"
+                    placeholder="#!/bin/sh&#10;# Install and configure your software here&#10;dnf -y update&#10;dnf -y install nginx"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-red-500 focus:border-red-500 resize-y"></textarea>
+          <p class="text-xs text-gray-400 mt-1">
+            Shell script run on the build instance. Leave empty to build a base image with no provisioning.
+            <span x-show="ociPackerForm.loaded_from" x-cloak class="text-red-600">
+              Loaded from <code x-text="ociPackerForm.loaded_from.replace('|', ' — ')"></code>.
+            </span>
+          </p>
+        </div>
+
+        <!-- BeyondTrust provisioner options -->
+        <div x-show="ociPackerForm.provisioner_script.trim()" x-cloak
+             class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust provisioner options
+            <span class="font-normal text-gray-400">— used by the bt-ready scripts; ignored by other provisioners.</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Admin user (Password Safe / Entitle)</label>
+              <input type="text" x-model="ociPackerForm.bt_admin_user" placeholder="adminuser"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Install EPM-L</label>
+              <select x-model="ociPackerForm.bt_epml" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="">Off</option>
+                <option value="deb">Debian (.deb)</option>
+                <option value="rpm">RPM (.rpm)</option>
+              </select>
+            </div>
+            <div x-show="ociPackerForm.bt_epml" x-cloak>
+              <label class="block text-xs font-medium text-gray-600 mb-1">EPM-L package from</label>
+              <select x-model="ociPackerForm.bt_epml_source" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="beyondtrust">BeyondTrust (always current)</option>
+                <option value="storage">Asset storage (the synced copy)</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Storage pins the version you synced and doesn't need BeyondTrust reachable
+                from the build — sync it first on the Storage page. Not available on
+                local-filesystem storage.
+              </p>
+            </div>
+          </div>
+          <div>
+            <p class="text-[11px] text-gray-400">EPM-L is installed at build; activation runs post-deploy via the EPM-L integration.</p>
+          </div>
+        </div>
+
+        <!-- Provisioner environment variables -->
+        <div x-show="ociPackerForm.provisioner_script.trim()" x-cloak
+             class="space-y-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <div class="flex items-center justify-between">
+            <p class="text-xs font-semibold text-gray-600">Environment variables
+              <span class="font-normal text-gray-400">— passed to the provisioner script.</span>
+            </p>
+            <button type="button" @click="ociPackerForm.provisioner_env_vars.push({name:'',value:'',is_secret_ref:false})"
+                    class="text-xs px-2 py-1 bg-red-700 hover:bg-red-800 text-white rounded">+ Add</button>
+          </div>
+          <template x-for="(ev, i) in ociPackerForm.provisioner_env_vars" :key="i">
+            <div class="flex items-center gap-2">
+              <input type="text" x-model="ev.name" placeholder="NAME"
+                     class="w-1/3 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+              <input type="text" x-model="ev.value" :placeholder="ev.is_secret_ref ? 'bt_safe://account' : 'value'"
+                     class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+              <label class="flex items-center gap-1 text-xs text-gray-600 whitespace-nowrap"
+                     title="Resolve from your configured secret manager (aws_sm://, azure_kv://, gcp_sm://, bt_safe://)">
+                <input type="checkbox" x-model="ev.is_secret_ref" class="h-3.5 w-3.5">secret ref
+              </label>
+              <button type="button" @click="ociPackerForm.provisioner_env_vars.splice(i,1)"
+                      class="text-gray-400 hover:text-red-600 text-lg leading-none px-1">&times;</button>
+            </div>
+          </template>
+          <p class="text-[11px] text-gray-400" x-show="ociPackerForm.provisioner_env_vars.some(e=>e.is_secret_ref)" x-cloak>
+            Secret refs are resolved at build start and passed via Packer sensitive variables — never written to the generated or archived template.
+          </p>
+        </div>
+
+        <!-- Reachability + architecture advisories (non-blocking) -->
+        <div x-show="packerSubnetWarning()" x-cloak
+             class="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800"
+             x-text="packerSubnetWarning()"></div>
+        <div x-show="packerArchWarning()" x-cloak
+             class="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800"
+             x-text="packerArchWarning()"></div>
+
+        <!-- Free-tier acknowledgment -->
+        <div x-show="packerFreeTierWarnings().length" x-cloak
+             class="p-3 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
+          <p class="text-sm text-amber-800">This build instance is outside the OCI Always-Free tier and may incur charges:</p>
+          <ul class="list-disc list-inside text-xs text-amber-700 space-y-0.5">
+            <template x-for="w in packerFreeTierWarnings()" :key="w">
+              <li x-text="w"></li>
+            </template>
+          </ul>
+          <label class="flex items-center gap-2 text-sm text-amber-900 cursor-pointer">
+            <input type="checkbox" x-model="ociPackerForm.acknowledge_charges"
+                   class="h-4 w-4 rounded border-amber-300 text-red-600">
+            I understand this may incur charges
+          </label>
+          <p class="text-[11px] text-amber-700">The build instance is transient — Packer terminates it when the build finishes or fails.</p>
+        </div>
+
+        <!-- Error -->
+        <div x-show="ociPackerError" x-cloak class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="ociPackerError"></div>
+
+        <!-- Submit -->
+        <button @click="submitOciPackerBuild()"
+                :disabled="ociPackerBuilding || !ociPackerForm.image_name || !ociPackerForm.base_image_ocid || !ociPackerForm.availability_domain"
+                class="w-full py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
+          <span x-show="!ociPackerBuilding">Start Packer Build</span>
+          <span x-show="ociPackerBuilding" x-cloak>Queuing build…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Deploy modal ───────────────────────────────────────────────────── -->
   <div x-show="deployModal" x-cloak x-transition
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -153,19 +438,45 @@
 
       <div class="space-y-4">
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Instance name</label>
-          <input type="text" x-model="deployForm.instance_name"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <label class="block text-xs font-medium text-gray-600 mb-1">Instance name</label>
+              <input type="text" x-model="deployForm.instance_name"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Count</label>
+              <!-- Clearing the acknowledgment on change is deliberate: a free-tier
+                   warning accepted at count 1 must not carry silently into count 10. -->
+              <input type="number" min="1" :max="countMax" step="1"
+                     x-model.number="deployForm.count"
+                     @change="deployForm.acknowledge_charges = false"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+          <p x-show="(deployForm.count || 1) > 1" x-cloak
+             class="text-xs font-mono text-gray-500 mt-1" x-text="namePreviewFor().text"></p>
         </div>
 
         <div>
           <label class="block text-xs font-medium text-gray-600 mb-1">Shape</label>
+          <!-- Scoped to the availability domain below and to this image: OCI does
+               not offer every shape in every AD, and an image boots only on the
+               shapes it was built for. -->
           <select x-model="deployForm.shape" @change="onShapeChange()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            <template x-for="s in networkOpts.shapes" :key="s.shape">
+            <!-- A placeholder, like the build form's: without one, a shape the
+                 narrowed list dropped renders as an empty box while the model keeps
+                 the old value and submits it. -->
+            <option value="">— pick a shape —</option>
+            <template x-for="s in deployShapes()" :key="s.shape">
               <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (Always-Free)' : '')"></option>
             </template>
           </select>
+          <p x-show="deployShapesBusy()" x-cloak class="text-xs text-gray-400 mt-1">
+            Checking which shapes this availability domain and image support…</p>
+          <p x-show="!deployShapesBusy() && deployShapeNotice()" x-cloak
+             class="text-xs text-amber-700 mt-1" x-text="deployShapeNotice()"></p>
         </div>
 
         <!-- Flexible shape sizing (A1.Flex etc.) -->
@@ -185,7 +496,10 @@
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Availability domain</label>
+            <!-- @change refetches Shape above: the shape list is AD-scoped, so
+                 changing AD without refetching leaves a list from another one. -->
             <select x-model="deployForm.availability_domain"
+                    @change="onDeployPlacementChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">(first available)</option>
               <template x-for="ad in networkOpts.availability_domains" :key="ad">
@@ -239,6 +553,37 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
         </div>
 
+        <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
+        <div class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+            <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+              <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+              <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.gateways.length"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in praPickers.gateways || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
+             class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
+        </div>
+
         <div class="flex flex-col gap-1.5 border-t border-gray-100 pt-3">
           <label class="flex items-center gap-2 text-sm text-gray-700">
             <input type="checkbox" x-model="deployForm.register_in_entitle"> Register in Entitle (SSH JIT)
@@ -275,11 +620,141 @@
       </div>
     </div>
   </div>
+
+  <!-- ── Bulk Deploy modal (one instance per selected image) ────────────────── -->
+  <div x-show="bulkModal.open" x-cloak x-transition
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+       @click.self="bulkModal.open = false">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl p-6 max-h-screen overflow-y-auto">
+      <h2 class="text-lg font-bold text-gray-900">Bulk Deploy OCI Instances</h2>
+      <p class="text-xs text-gray-500 mb-4">
+        <span x-text="bulkModal.items.length"></span> image<span x-show="bulkModal.items.length !== 1">s</span>
+        selected — one instance per image. To launch several copies of a single image,
+        use the Count field on the normal deploy form.
+      </p>
+
+      <div class="space-y-4">
+        <div class="space-y-2">
+          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wide">Instance Names</label>
+          <template x-for="(img, idx) in bulkModal.items" :key="img.ocid">
+            <div class="flex items-center gap-3">
+              <span class="text-xs text-gray-500 w-40 truncate" x-text="img.display_name"></span>
+              <input x-model="bulkModal.names[idx]" type="text"
+                     :placeholder="'instance-' + (idx + 1)"
+                     class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+            </div>
+          </template>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Workgroup (shared)</label>
+          <select x-model="bulkModal.workgroup"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">— select a workgroup —</option>
+            <template x-for="wg in availableWorkgroups" :key="wg">
+              <option :value="wg" x-text="wg"></option>
+            </template>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Shape (shared)</label>
+          <!-- Unscoped, unlike the single-deploy and build forms. Defensible on the
+               AD axis: this modal has no availability-domain picker, so it always
+               takes the first AD — which IS the unscoped list's scope. Image
+               narrowing is the real gap: it would need one compatibility lookup per
+               selected image, and since an empty intersection falls open anyway (see
+               _launchable_shape_rows_sync) a mixed x86 + Ampere selection would gain
+               nothing from it. The default IS dropped, though — defaultShape() blanks
+               it when the first AD has no free micro — and every selected image is
+               checked against the chosen shape by the API before anything is created
+               (400 shape_not_launchable), which is what covers the image axis here. -->
+          <select x-model="bulkModal.shape" @change="onBulkShapeChange()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">— pick a shape —</option>
+            <template x-for="s in networkOpts.shapes" :key="s.shape">
+              <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (Always-Free)' : '')"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1" x-show="bulkFreeMicroMissing()" x-cloak>
+            The first availability domain offers no <span class="font-mono">VM.Standard.E2.1.Micro</span>,
+            so the usual default is blank here. Every selected image launches on this one shape —
+            one that can't boot it is rejected by name before anything is created.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3" x-show="bulkIsFlexShape()" x-cloak>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">OCPUs</label>
+            <input type="number" min="1" x-model.number="bulkModal.ocpus"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Memory (GB)</label>
+            <input type="number" min="1" x-model.number="bulkModal.memory_gb"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Boot (GB)</label>
+            <input type="number" min="50" x-model.number="bulkModal.boot_volume_gb"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.assign_public_ip"
+                 class="rounded border-gray-300 text-red-600 focus:ring-red-500">
+          Assign public IP
+        </label>
+
+        <!-- Free-tier gate, evaluated over the WHOLE selection: N images means N
+             instances of the shared shape, which is what trips the 2-instance cap. -->
+        <div x-show="bulkFreeTierWarnings().length || bulkModal.serverGateTripped" x-cloak
+             class="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 text-xs text-amber-800">
+          <p class="font-semibold mb-1">This selection may exceed the Always-Free tier:</p>
+          <ul class="list-disc list-inside space-y-0.5">
+            <template x-for="w in bulkFreeTierWarnings()" :key="w"><li x-text="w"></li></template>
+            <li x-show="bulkModal.serverGateTripped && !bulkFreeTierWarnings().length"
+                x-text="bulkModal.serverGateMessage"></li>
+          </ul>
+          <label class="flex items-center gap-2 mt-2 font-medium text-amber-900">
+            <input type="checkbox" x-model="bulkModal.acknowledge_charges">
+            I understand this may incur charges
+          </label>
+        </div>
+
+        <p x-show="bulkModal.error" x-cloak class="text-xs text-red-600" x-text="bulkModal.error"></p>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="bulkModal.open = false"
+                class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 font-medium">Cancel</button>
+        <button @click="submitBulkDeploy()" :disabled="bulkModal.submitting || !bulkDeployReady()"
+                class="px-4 py-2 text-sm bg-red-700 hover:bg-red-800 disabled:opacity-40 text-white rounded-lg font-medium transition">
+          <span x-show="!bulkModal.submitting">
+            Deploy <span x-text="bulkModal.items.length"></span>
+          </span>
+          <span x-show="bulkModal.submitting" x-cloak>Deploying…</span>
+        </button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
 function ociDashboard() {
   return {
+    ...deployNameState(),
+    // Multi-select bulk: tick images, launch one instance per image. The other axis
+    // from deployForm.count, which launches N copies of ONE image.
+    selectedImages: [],
+    bulkModal: {
+      open: false, items: [], names: [], workgroup: '',
+      shape: 'VM.Standard.E2.1.Micro', ocpus: null, memory_gb: null,
+      boot_volume_gb: 50, assign_public_ip: false, acknowledge_charges: false,
+      submitting: false, error: '',
+      serverGateTripped: false, serverGateMessage: '',
+    },
     activeTab: 'images',
     region: '',
     imagesLoading: false,
@@ -293,6 +768,16 @@ function ociDashboard() {
     imageFilter: 'all',
     networkOpts: { availability_domains: [], shapes: [], subnets: [], region: '', free_tier: {}, ssh_key_configured: false },
     availableWorkgroups: [],
+    // networkOpts.shapes is AD- AND image-scoped (OCI offers different shapes in
+    // different ADs of one region, and an image boots only on the shapes it was
+    // built for). Three forms share this component, so one mutable shape list
+    // would mean the build tab's AD silently rewrites the deploy modal's picker.
+    // Instead: keep networkOpts.shapes as the unscoped baseline and cache each
+    // scope separately, keyed "<ad>|<image>".
+    shapeScopes: {},         // key → array of shapes (an EMPTY array is a real answer)
+    shapeScopeLoading: {},   // key → true while that scope is in flight
+    packerShapeNote: '',
+    deployShapeNote: '',
 
     deployModal: false,
     selectedImage: null,
@@ -300,34 +785,114 @@ function ociDashboard() {
     deploying: false,
     serverGateTripped: false,   // backend free-tier 400 (catches cases the client can't, e.g. existing-instance counts)
     serverGateMessage: '',
+    // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form dropdowns
+    // (shared /api/pra/pickers, fetched once). Empty when PRA isn't configured →
+    // dropdowns show only "(configured default)" and the backend falls back.
+    praPickers: { configured: false, jump_groups: [], gateways: [], loaded: false },
     // Initialised inline (a method-call initializer can't use `this` in an
     // object literal); openDeployModal() resets it via blankForm().
     deployForm: {
-      instance_name: '', shape: 'VM.Standard.E2.1.Micro',
+      instance_name: '', count: 1, shape: 'VM.Standard.E2.1.Micro',
       ocpus: null, memory_gb: null, availability_domain: '',
       subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
       boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
       register_in_entitle: false, register_in_passwordsafe: false,
       ssh_key_secret_override: '',
+      jump_group: '', jumpoint_name: '',
+    },
+
+    // The Always-Free AMD micro, but only where the region actually has it. E2
+    // shapes exist solely in the older OCI regions, and a default the region can't
+    // launch used to POST silently: the <select> has no <option> for it, so Alpine
+    // renders an empty box while the model still holds 'VM.Standard.E2.1.Micro'.
+    // The backend now rejects that by name, but a blank + "— pick a shape —" says
+    // so before the round-trip. The build form got this treatment in its init();
+    // this is the same rule for the bulk modal, which has no AD picker and so never
+    // runs _reconcileShape.
+    defaultShape() {
+      const micro = (this.networkOpts.free_tier || {}).amd_shape || 'VM.Standard.E2.1.Micro';
+      // The baseline list IS the bulk modal's scope: it sends no availability_domain,
+      // and an unscoped /network-options is the "first AD, any image" list — the AD a
+      // blank request resolves to at launch.
+      const offered = (this.networkOpts.shapes || []).map(s => s.shape);
+      // Shape list not fetched yet → keep the old default rather than guess blank.
+      if (!offered.length) return micro;
+      return offered.includes(micro) ? micro : '';
+    },
+
+    // True exactly when defaultShape() came back blank, i.e. the first AD has no
+    // Always-Free micro. Only the bulk modal needs it — the deploy and build forms
+    // annotate their own narrowed lists through *ShapeNotice().
+    bulkFreeMicroMissing() {
+      return !this.defaultShape();
     },
 
     blankForm() {
       return {
-        instance_name: '', shape: 'VM.Standard.E2.1.Micro',
+        // Hardcoded on purpose: openDeployModal() awaits onDeployPlacementChange(),
+        // whose _reconcileShape clears a default the AD+image scope doesn't offer.
+        instance_name: '', count: 1, shape: 'VM.Standard.E2.1.Micro',
         ocpus: null, memory_gb: null, availability_domain: '',
         subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
         boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
         register_in_entitle: false, register_in_passwordsafe: false,
         ssh_key_secret_override: '',
+        jump_group: '', jumpoint_name: '',
       };
     },
+
+    // ── Packer image builder ────────────────────────────────────────────────
+    ociPackerForm: {
+      image_name: '', base_image_ocid: '',
+      shape: 'VM.Standard.E2.1.Micro', ocpus: null, memory_gb: null,
+      availability_domain: '', subnet_ocid: '', ssh_username: 'opc',
+      boot_volume_gb: null, acknowledge_charges: false,
+      provisioner_script: '', archive_template: false, loaded_from: '',
+      provisioner_env_vars: [],
+      bt_admin_user: '', bt_epml: '', bt_epml_source: 'beyondtrust',
+    },
+    ociPackerBuilding: false,
+    ociPackerError: '',
+    packerIncludeCustomBases: false,
+    storedScripts: [],
+    loadingScript: false,
 
     async init() {
       if (typeof requireAuth === 'function') requireAuth();
       API.get('/api/groups/workgroups')
         .then(r => { this.availableWorkgroups = r || []; })
         .catch(() => { this.availableWorkgroups = []; });
+      // Build-tab scripts are optional garnish — don't make the page wait on them.
+      this.loadStoredScripts();
       await Promise.all([this.loadImages(), this.loadNetworkOpts()]);
+      // Default the build subnet to the first public one, so the common case needs
+      // no picking and the "no public subnet" warning fires when there isn't one.
+      const pub = this.packerBuildSubnets();
+      if (pub.length && !this.ociPackerForm.subnet_ocid) {
+        this.ociPackerForm.subnet_ocid = pub[0].ocid;
+      }
+      if ((this.networkOpts.availability_domains || []).length === 1) {
+        this.ociPackerForm.availability_domain = this.networkOpts.availability_domains[0];
+        // Preselecting an AD is a placement change like any other — the shape list
+        // has to follow it rather than stay on the unscoped baseline. Awaited so the
+        // default-shape check below judges against the scoped list.
+        await this.onPackerPlacementChange();
+      }
+      // The default shape is a guess, and a wrong one used to submit silently: the
+      // select has no <option> for a shape this region doesn't offer, so Alpine
+      // rendered an empty box while the model kept 'VM.Standard.E2.1.Micro' and
+      // POSTed it. LaunchInstance answers a shape that isn't there with a 404
+      // NotAuthorizedOrNotFound naming no field, one second into the build. Drop a
+      // default the region can't launch and make the operator pick.
+      // Judged against packerShapes() — the AD/image-scoped list — so a default
+      // that this region has but this AD does not is dropped too.
+      const offered = this.packerShapes().map(s => s.shape);
+      if (this.ociPackerForm.shape && offered.length
+          && !offered.includes(this.ociPackerForm.shape)) {
+        this.ociPackerForm.shape = '';
+        this.onPackerShapeChange();
+      }
+      if (window.location.hash === '#build') this.activeTab = 'build';
     },
 
     notify(msg, type = 'success') {
@@ -335,10 +900,10 @@ function ociDashboard() {
       setTimeout(() => { this.toast = ''; }, 5000);
     },
 
-    async loadImages() {
+    async loadImages(bust = false) {
       this.imagesLoading = true;
       try {
-        const r = await API.get('/api/oci/images');
+        const r = await API.get('/api/oci/images' + (bust ? '?bust=true' : ''));
         this.images = r?.images || [];
         this.credError = '';
       } catch (e) {
@@ -348,12 +913,97 @@ function ociDashboard() {
       }
     },
 
-    async loadNetworkOpts() {
+    async loadNetworkOpts(bust = false) {
       try {
-        const r = await API.get('/api/oci/network-options');
+        const r = await API.get('/api/oci/network-options' + (bust ? '?bust=true' : ''));
         this.networkOpts = r || this.networkOpts;
         this.region = r?.region || '';
+        // Drop cached scopes — a manual refresh has to refetch them, not keep
+        // serving lists built before it.
+        this.shapeScopes = {};
+        // The unscoped response IS the "first AD, any image" scope; seed it so the
+        // common case costs no second round-trip.
+        if (r) this.shapeScopes[this._shapeScopeKey('', '')] = r.shapes || [];
       } catch (e) { /* credError already surfaced by loadImages */ }
+    },
+
+    // ── AD/image-scoped shape lists ─────────────────────────────────────────
+    _shapeScopeKey(ad, imageOcid) { return (ad || '') + '|' + (imageOcid || ''); },
+
+    // Falls back to the unscoped list only while a scope is UNLOADED. A scope
+    // that loaded empty returns empty — "nothing here can launch this" is an
+    // answer, and papering over it with the first AD's list is the bug.
+    shapesFor(ad, imageOcid) {
+      const hit = this.shapeScopes[this._shapeScopeKey(ad, imageOcid)];
+      return Array.isArray(hit) ? hit : (this.networkOpts.shapes || []);
+    },
+
+    shapeScopeBusy(ad, imageOcid) {
+      return !!this.shapeScopeLoading[this._shapeScopeKey(ad, imageOcid)];
+    },
+
+    shapeScopeEmpty(ad, imageOcid) {
+      const hit = this.shapeScopes[this._shapeScopeKey(ad, imageOcid)];
+      return Array.isArray(hit) && hit.length === 0;
+    },
+
+    async loadShapeScope(ad, imageOcid, bust = false) {
+      const k = this._shapeScopeKey(ad, imageOcid);
+      if (this.shapeScopeLoading[k]) return;
+      if (Array.isArray(this.shapeScopes[k]) && !bust) return;
+      this.shapeScopeLoading[k] = true;
+      try {
+        const p = [];
+        if (ad) p.push('availability_domain=' + encodeURIComponent(ad));
+        if (imageOcid) p.push('image_ocid=' + encodeURIComponent(imageOcid));
+        if (bust) p.push('bust=true');
+        const r = await API.get('/api/oci/network-options' + (p.length ? '?' + p.join('&') : ''));
+        this.shapeScopes[k] = r?.shapes || [];
+      } catch (e) {
+        // Leave the scope unset so shapesFor() falls back to the baseline list.
+        // A transient failure must not empty the picker.
+      } finally {
+        delete this.shapeScopeLoading[k];
+      }
+    },
+
+    // is_flexible / free_tier belong to the shape itself, not to the scope it was
+    // listed in, so metadata lookups fall back to the baseline list — a narrowed
+    // scope must not turn a Flex shape into a fixed one mid-form.
+    _shapeMeta(name, shapes) {
+      return (shapes || []).find(s => s.shape === name)
+          || (this.networkOpts.shapes || []).find(s => s.shape === name)
+          || null;
+    },
+
+    // A narrower scope can drop the shape already picked. Leaving it selected is
+    // the worst outcome: Alpine has no <option> to match, so the select renders on
+    // the placeholder while the model still holds the old value and submits it —
+    // the exact silent-bad-shape failure this scoping exists to prevent.
+    //
+    // Clears it rather than picking a replacement, matching what init() does to an
+    // unofferable default. Substituting the first offered shape would be a silent
+    // override of a choice the operator actually made, and on a form whose whole
+    // problem was submitting a shape nobody chose, that is the wrong direction.
+    // The placeholder option and the *Ready() guards keep the cleared form
+    // unsubmittable until they pick.
+    _reconcileShape(form, shapes, ad) {
+      if (!shapes.length || !form.shape) return '';
+      if (shapes.some(s => s.shape === form.shape)) return '';
+      const was = form.shape;
+      form.shape = '';
+      return `${was} is not offered ${ad ? 'in ' + ad : 'for this selection'}`
+             + ' — pick a shape from the narrowed list.';
+    },
+
+    // Reachable only when the AD itself lists no shapes — a bad AD, or a failed
+    // ListShapes. The image narrowing cannot empty the list: it falls open to the
+    // full AD list whenever the intersection comes back empty, matching
+    // oci_service.check_launch_placement (see _launchable_shape_rows_sync).
+    _emptyScopeMessage(ad) {
+      return `OCI lists no shapes ${ad ? 'in ' + ad : 'in this availability domain'}.`
+             + ' Try another availability domain, or Refresh — a failed listing looks'
+             + ' the same as an empty one.';
     },
 
     async loadInstances(bust = false) {
@@ -371,7 +1021,15 @@ function ociDashboard() {
     switchToInstances() { this.activeTab = 'instances'; if (!this.instances.length) this.loadInstances(); },
 
     async refreshAll() {
-      await Promise.all([this.loadImages(), this.loadNetworkOpts()]);
+      // bust on all three: Refresh exists to escape a stale cache (most often one
+      // holding the previous region's OCIDs after a Setup → OCI change), and a
+      // plain re-GET would just be served the same entry for the rest of the TTL.
+      await Promise.all([this.loadImages(true), this.loadNetworkOpts(true)]);
+      // loadNetworkOpts() dropped the scoped shape caches. Rebuild the scope each
+      // open form is actually on — and bust it too, for the same reason as above:
+      // a scope refetched from a stale server entry has escaped nothing.
+      await this.onPackerPlacementChange(true);
+      if (this.deployModal) await this.onDeployPlacementChange(true);
       if (this.activeTab === 'instances') await this.loadInstances(true);
     },
 
@@ -380,8 +1038,256 @@ function ociDashboard() {
       return this.images.filter(i => i.source === this.imageFilter);
     },
 
+    // ── Packer build tab ────────────────────────────────────────────────────
+    packerBaseImages() {
+      return (this.images || []).filter(
+        i => this.packerIncludeCustomBases || i.source === 'platform');
+    },
+
+    packerSelectedBaseImage() {
+      return (this.images || []).find(i => i.ocid === this.ociPackerForm.base_image_ocid) || null;
+    },
+
+    // Packer runs in the dashboard's container, not inside the VCN, so it SSHes to
+    // the build instance's PUBLIC address. A subnet that prohibits public IPs can
+    // never work here, so it isn't offered.
+    packerBuildSubnets() {
+      return (this.networkOpts.subnets || []).filter(s => !s.prohibit_public_ip);
+    },
+
+    // The Always-Free AMD micro is region-dependent: it exists in the older OCI
+    // regions and not in the newer ones (us-chicago-1 offers no E2 shape at all).
+    // Reads the SCOPED list, like the picker it annotates — sourced from the
+    // region-wide list it would contradict the dropdown next to it.
+    // Blank until the live shape list has loaded, so the hint can't flash on a
+    // page that simply hasn't fetched yet.
+    packerFreeMicroMissing() {
+      const shapes = this.packerShapes();
+      if (!shapes.length) return false;
+      const micro = (this.networkOpts.free_tier || {}).amd_shape || 'VM.Standard.E2.1.Micro';
+      return !shapes.some(s => s.shape === micro);
+    },
+
+    // Shapes offered in the build tab's chosen AD that can boot the chosen base
+    // image — not the region-wide list, which is wrong for AD-2 and AD-3.
+    packerShapes() {
+      return this.shapesFor(this.ociPackerForm.availability_domain,
+                            this.ociPackerForm.base_image_ocid);
+    },
+
+    packerShapesBusy() {
+      return this.shapeScopeBusy(this.ociPackerForm.availability_domain,
+                                 this.ociPackerForm.base_image_ocid);
+    },
+
+    packerShapeNotice() {
+      const f = this.ociPackerForm;
+      if (this.shapeScopeEmpty(f.availability_domain, f.base_image_ocid))
+        return this._emptyScopeMessage(f.availability_domain);
+      return this.packerShapeNote;
+    },
+
+    // Availability domain or base image changed — both narrow the shape list, so
+    // both have to refetch it. Without this the picker keeps offering the first
+    // AD's shapes after the operator moves to AD-2.
+    async onPackerPlacementChange(bust = false) {
+      const f = this.ociPackerForm;
+      await this.loadShapeScope(f.availability_domain, f.base_image_ocid, bust);
+      this.packerShapeNote = this._reconcileShape(
+        f, this.packerShapes(), f.availability_domain);
+      if (this.packerShapeNote) {
+        this.onPackerShapeChange();          // flex-ness follows the shape
+        f.acknowledge_charges = false;       // and so does the free-tier envelope
+      }
+    },
+
+    packerShapeIsFlex() {
+      const m = this._shapeMeta(this.ociPackerForm.shape, this.packerShapes());
+      return m ? !!m.is_flexible : (this.ociPackerForm.shape || '').includes('Flex');
+    },
+
+    onPackerShapeChange() {
+      const ft = this.networkOpts.free_tier || {};
+      if (this.packerShapeIsFlex()) {
+        this.ociPackerForm.ocpus = this.ociPackerForm.ocpus || ft.a1_max_ocpus || 1;
+        this.ociPackerForm.memory_gb = this.ociPackerForm.memory_gb
+          || ft.a1_max_memory_gb || (this.ociPackerForm.ocpus * 8);
+      } else {
+        this.ociPackerForm.ocpus = null;
+        this.ociPackerForm.memory_gb = null;
+      }
+    },
+
+    // The base image's OS decides the login user; a wrong one fails at "Waiting
+    // for SSH" several minutes in, with nothing useful in the log.
+    onPackerBaseImageChange() {
+      const img = this.packerSelectedBaseImage();
+      const os = ((img && img.operating_system) || '').toLowerCase();
+      this.ociPackerForm.ssh_username =
+        os.includes('ubuntu') ? 'ubuntu' :
+        os.includes('debian') ? 'debian' : 'opc';
+      // The image also constrains which shapes can boot it.
+      this.onPackerPlacementChange();
+    },
+
+    // Launching an aarch64 image on an x86 shape (or the reverse) fails inside OCI
+    // with an opaque error. The image list carries no architecture field — Oracle
+    // encodes it in the display name — so this is a heuristic, hence advisory.
+    // The picker now narrows by real image/shape compatibility, which makes this
+    // mostly redundant; it stays as the backstop for when that narrowing fails
+    // open (compatibility unreadable), where the heuristic is all there is.
+    packerArchWarning() {
+      const img = this.packerSelectedBaseImage();
+      if (!img) return '';
+      const armImage = /aarch64|arm64/i.test(img.display_name || '');
+      const armShape = /\.A\d+\./i.test(this.ociPackerForm.shape || '');
+      if (armImage && !armShape)
+        return `"${img.display_name}" looks like an aarch64 image — pick an Ampere (A1/A2) shape or the instance will not launch.`;
+      if (!armImage && armShape)
+        return `${this.ociPackerForm.shape} is an Ampere (Arm) shape but "${img.display_name}" looks like an x86_64 image.`;
+      return '';
+    },
+
+    packerSubnetWarning() {
+      if (!this.packerBuildSubnets().length)
+        return 'No public subnet is available in this compartment. Packer reaches the build instance over the internet, so it needs a subnet that permits public IPs and allows inbound TCP 22 from this dashboard.';
+      const sn = (this.networkOpts.subnets || [])
+        .find(s => s.ocid === this.ociPackerForm.subnet_ocid);
+      if (!sn) return '';
+      return `Packer connects from this dashboard, not from inside the VCN — "${sn.display_name}" needs an Internet Gateway route and a security list or NSG allowing inbound TCP 22 from this dashboard's egress address.`;
+    },
+
+    // Mirrors services/oci_freetier.evaluate() so the acknowledgment appears before
+    // the request rather than only on the API's 400. The server re-evaluates and is
+    // the authority; this is the same warn-and-confirm gate the deploy form uses.
+    packerFreeTierWarnings() {
+      const ft = this.networkOpts.free_tier || {};
+      if (!ft.free_shapes) return [];
+      const f = this.ociPackerForm;
+      const out = [];
+      if (!(ft.free_shapes || []).includes(f.shape))
+        out.push(`Shape ${f.shape} is not an Always-Free shape.`);
+      if (f.shape === ft.a1_shape) {
+        if (f.ocpus > ft.a1_max_ocpus)
+          out.push(`${f.ocpus} OCPUs exceeds the free Ampere budget (~${ft.a1_max_ocpus}).`);
+        if (f.memory_gb > ft.a1_max_memory_gb)
+          out.push(`${f.memory_gb} GB exceeds the free Ampere memory budget (~${ft.a1_max_memory_gb} GB).`);
+      }
+      if (f.boot_volume_gb && f.boot_volume_gb > ft.boot_volume_gb)
+        out.push(`Boot volume ${f.boot_volume_gb} GB is above the ${ft.boot_volume_gb} GB free default.`);
+      return out;
+    },
+
+    async loadStoredScripts() {
+      try {
+        const data = await API.get('/api/storage/list-all');
+        this.storedScripts = (data.items || []).filter(a =>
+          a.type === 'script' || a.name.endsWith('.sh') || a.name.endsWith('.bash')
+        );
+      } catch (e) {
+        this.storedScripts = [];
+      }
+    },
+
+    async loadProvisionerScript(key) {
+      if (!key) return;
+      const [backend, ...rest] = key.split('|');
+      const name = rest.join('|');
+      this.loadingScript = true;
+      try {
+        const r = await API.get(`/api/storage/fetch/${encodeURIComponent(backend)}/${encodeURIComponent(name)}`);
+        const bin = atob(r.content_b64 || '');
+        let text;
+        try {
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          text = new TextDecoder('utf-8').decode(bytes);
+        } catch (_) {
+          text = bin;
+        }
+        this.ociPackerForm.provisioner_script = text;
+        this.ociPackerForm.loaded_from = key;
+        this.notify(`Loaded ${name} from ${backend}`);
+      } catch (e) {
+        this.notify(e.message || 'Failed to load script', 'error');
+      } finally {
+        this.loadingScript = false;
+      }
+    },
+
+    backendLabelShort(id) {
+      return ({ s3: 'S3', azure_blob: 'Azure', gcs: 'GCS',
+                oci_object_storage: 'OCI', local: 'Local' })[id] || id;
+    },
+
+    async submitOciPackerBuild() {
+      this.ociPackerError = '';
+      if (!this.ociPackerForm.image_name)      { this.ociPackerError = 'Image name is required.'; return; }
+      if (!this.ociPackerForm.base_image_ocid) { this.ociPackerError = 'A base image is required.'; return; }
+      if (!this.ociPackerForm.availability_domain) { this.ociPackerError = 'An availability domain is required.'; return; }
+      if (!this.ociPackerForm.shape)            { this.ociPackerError = 'A build shape is required.'; return; }
+      this.ociPackerBuilding = true;
+      try {
+        // OCI rejects a shape_config on a fixed shape and requires one on a Flex
+        // shape; the request model enforces the same pairing server-side. A blank
+        // number input arrives as '' — coerce so it doesn't fail validation.
+        const flex = this.packerShapeIsFlex();
+        const payload = {
+          ...this.ociPackerForm,
+          ocpus:          flex ? (Number(this.ociPackerForm.ocpus) || 1) : null,
+          memory_gb:      flex ? (Number(this.ociPackerForm.memory_gb) || 8) : null,
+          boot_volume_gb: Number(this.ociPackerForm.boot_volume_gb) || null,
+        };
+        delete payload.loaded_from;
+        const r = await API.post('/api/packer/oci/build', payload);
+        this.notify('Packer OCI build queued (job ' + r.job_id + ').');
+        setTimeout(() => { window.location.href = '/jobs/' + r.job_id; }, 400);
+      } catch (e) {
+        // The backend free-tier gate returns code=free_tier_exceeded; surface the
+        // acknowledgment for cases the client-side mirror can't see.
+        if (e && e.code === 'free_tier_exceeded') {
+          this.serverGateTripped = true;
+          this.serverGateMessage = e.message || '';
+        }
+        this.ociPackerError = (e && e.message) ? e.message : 'Build failed to queue.';
+      } finally {
+        this.ociPackerBuilding = false;
+      }
+    },
+
+    // Shapes offered in the deploy form's chosen AD that can boot the image being
+    // deployed. A blank AD is the "(first available)" option, which is the scope
+    // the backend resolves it to as well.
+    deployShapes() {
+      return this.shapesFor(this.deployForm.availability_domain,
+                            this.selectedImage?.ocid || '');
+    },
+
+    deployShapesBusy() {
+      return this.shapeScopeBusy(this.deployForm.availability_domain,
+                                 this.selectedImage?.ocid || '');
+    },
+
+    deployShapeNotice() {
+      const ad = this.deployForm.availability_domain;
+      const img = this.selectedImage?.ocid || '';
+      if (this.shapeScopeEmpty(ad, img)) return this._emptyScopeMessage(ad);
+      return this.deployShapeNote;
+    },
+
+    async onDeployPlacementChange(bust = false) {
+      const ad = this.deployForm.availability_domain;
+      const img = this.selectedImage?.ocid || '';
+      await this.loadShapeScope(ad, img, bust);
+      this.deployShapeNote = this._reconcileShape(this.deployForm, this.deployShapes(), ad);
+      if (this.deployShapeNote) {
+        this.onShapeChange();                          // flex-ness follows the shape
+        this.deployForm.acknowledge_charges = false;   // so does the free-tier envelope
+      }
+    },
+
     selectedShapeMeta() {
-      return (this.networkOpts.shapes || []).find(s => s.shape === this.deployForm.shape) || null;
+      return this._shapeMeta(this.deployForm.shape, this.deployShapes());
     },
     selectedShapeIsFlex() {
       const m = this.selectedShapeMeta();
@@ -401,29 +1307,175 @@ function ociDashboard() {
     },
 
     // Client-side advisory mirror of services/oci_freetier.py (backend enforces).
-    freeTierWarnings() {
+    // Client mirror of services/oci_freetier.evaluate, so the acknowledgment checkbox
+    // appears before submit rather than after a 400. Count-aware: a selection that is
+    // free once is not free N times, and the AMD instance cap is the rule a count
+    // trips first — it was missing here entirely.
+    // One implementation for both entry points. The single form multiplies by its
+    // Count, the bulk modal by the number of selected images — same arithmetic, and
+    // keeping it in one place is the whole reason the two can't drift apart.
+    _freeTierWarnings(sel, n) {
       const ft = this.networkOpts.free_tier || {};
-      const f = this.deployForm;
       const out = [];
-      const isAmd = f.shape === ft.amd_shape;
-      const isA1 = f.shape === ft.a1_shape;
+      const isAmd = sel.shape === ft.amd_shape;
+      const isA1 = sel.shape === ft.a1_shape;
       if (ft.amd_shape && !isAmd && !isA1) {
-        out.push('Shape ' + f.shape + ' is not an Always-Free shape.');
+        out.push('Shape ' + sel.shape + ' is not an Always-Free shape.');
+      }
+      if (isAmd && n > (ft.amd_max_instances || 2)) {
+        out.push('Launching ' + n + ' × ' + ft.amd_shape + ' exceeds the free tier’s '
+                 + (ft.amd_max_instances || 2) + ' instances.');
       }
       if (isA1) {
-        if ((f.ocpus || 0) > (ft.a1_max_ocpus || 0)) out.push('Ampere A1 OCPUs exceed the free budget (~' + ft.a1_max_ocpus + ').');
-        if ((f.memory_gb || 0) > (ft.a1_max_memory_gb || 0)) out.push('Ampere A1 memory exceeds the free budget (~' + ft.a1_max_memory_gb + ' GB).');
+        if ((sel.ocpus || 0) * n > (ft.a1_max_ocpus || 0)) out.push('Ampere A1 OCPUs (' + ((sel.ocpus || 0) * n) + ') exceed the free budget (~' + ft.a1_max_ocpus + ').');
+        if ((sel.memory_gb || 0) * n > (ft.a1_max_memory_gb || 0)) out.push('Ampere A1 memory (' + ((sel.memory_gb || 0) * n) + ' GB) exceeds the free budget (~' + ft.a1_max_memory_gb + ' GB).');
       }
-      if ((f.boot_volume_gb || 0) > (ft.boot_volume_gb || 50)) {
+      const bv = sel.boot_volume_gb || 0;
+      if (bv * n > (ft.block_storage_gb || 200)) {
+        out.push('Boot storage (' + bv + ' GB × ' + n + ') exceeds the '
+                 + (ft.block_storage_gb || 200) + ' GB free block-storage allotment.');
+      } else if (bv > (ft.boot_volume_gb || 50)) {
         out.push('Boot volume above the ' + (ft.boot_volume_gb || 50) + ' GB free default draws down the shared free pool.');
       }
       return out;
     },
 
+    freeTierWarnings() {
+      return this._freeTierWarnings(this.deployForm,
+                                    Math.max(1, this.deployForm.count || 1));
+    },
+
+    bulkFreeTierWarnings() {
+      // N selected images = N instances of the shared shape.
+      return this._freeTierWarnings(this.bulkModal,
+                                    Math.max(1, this.bulkModal.items.length));
+    },
+
+    bulkIsFlexShape() {
+      const ft = this.networkOpts.free_tier || {};
+      return this.bulkModal.shape === ft.a1_shape
+             || (this.bulkModal.shape || '').includes('Flex');
+    },
+
+    onBulkShapeChange() {
+      const ft = this.networkOpts.free_tier || {};
+      if (this.bulkIsFlexShape()) {
+        this.bulkModal.ocpus = this.bulkModal.ocpus || ft.a1_max_ocpus || 1;
+        this.bulkModal.memory_gb = this.bulkModal.memory_gb || ft.a1_max_memory_gb || 6;
+      } else {
+        this.bulkModal.ocpus = null;
+        this.bulkModal.memory_gb = null;
+      }
+      // A changed shape changes the envelope, so a prior acknowledgment no longer
+      // applies — same reasoning as the Count field clearing it on the single form.
+      this.bulkModal.acknowledge_charges = false;
+    },
+
+    toggleSelectAllImages(ev) {
+      this.selectedImages = ev.target.checked
+        ? this.filteredImages().map(i => i.ocid)
+        : [];
+    },
+
+    openBulkDeployModal() {
+      const items = this.filteredImages().filter(i => this.selectedImages.includes(i.ocid));
+      this.bulkModal = {
+        open: true,
+        items,
+        names: items.map(i => (i.display_name || '')
+          .replace(/[^A-Za-z0-9-]/g, '-').slice(0, 60)),
+        // Blank, like blankForm() — this page has always made the operator choose,
+        // and the submit button stays disabled until they do.
+        workgroup: '',
+        // Blank in a region without the free micro — see defaultShape(). The shape
+        // is shared by every image in the selection, so a wrong one fails N deploys.
+        shape: this.defaultShape(),
+        ocpus: null, memory_gb: null, boot_volume_gb: 50,
+        assign_public_ip: false, acknowledge_charges: false,
+        submitting: false, error: '',
+        serverGateTripped: false, serverGateMessage: '',
+      };
+    },
+
+    bulkDeployReady() {
+      const m = this.bulkModal;
+      if (!m.workgroup || !m.items.length || !m.shape) return false;
+      if (m.names.some(n => !n || !n.trim())) return false;
+      if ((this.bulkFreeTierWarnings().length || m.serverGateTripped)
+          && !m.acknowledge_charges) return false;
+      return true;
+    },
+
+    async submitBulkDeploy() {
+      const m = this.bulkModal;
+      m.submitting = true;
+      m.error = '';
+      try {
+        const r = await API.post('/api/oci/bulk-deploy', {
+          items: m.items.map((img, idx) => ({
+            image_ocid: img.ocid,
+            image_name: img.display_name || '',
+            instance_name: m.names[idx].trim(),
+          })),
+          shape: m.shape,
+          ocpus: m.ocpus,
+          memory_gb: m.memory_gb,
+          boot_volume_gb: m.boot_volume_gb,
+          assign_public_ip: m.assign_public_ip,
+          workgroup: m.workgroup,
+          acknowledge_charges: m.acknowledge_charges,
+        });
+        m.open = false;
+        this.selectedImages = [];
+        if (window.afterDeploy(r, { label: 'OCI bulk deploy',
+                                    notify: (msg, t) => this.notify(msg, t) })) return;
+        this.notify(`${r.count} instance(s) queued`);
+        this.activeTab = 'instances';
+        setTimeout(() => this.loadInstances(true), 1500);
+      } catch (e) {
+        // Same server free-tier gate as the single form — reveal the acknowledgment.
+        if (e && e.code === 'free_tier_exceeded') {
+          m.serverGateTripped = true;
+          m.serverGateMessage = e.message || 'Selection exceeds the Always-Free tier.';
+          m.error = 'Selection exceeds the Always-Free tier — tick the acknowledgment to proceed.';
+        } else {
+          // code=shape_not_launchable lands here on purpose: it is a hard gate with
+          // nothing to acknowledge, and its message already names the offending
+          // instances and lists the shapes that would work. Nothing was created.
+          m.error = (e && e.message) ? e.message : 'Bulk deploy failed.';
+        }
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // Preview of the names a count > 1 deploy will create.
+    namePreviewFor() {
+      return this.namePreview(this.deployForm.instance_name, this.deployForm.count,
+                              window.NAME_LIMITS.oci);
+    },
+
     deployReady() {
       if (!this.deployForm.instance_name || !this.deployForm.workgroup) return false;
+      // Cleared when the AD/image scope dropped it (_reconcileShape), same as the
+      // build form's required-shape check. Submitting '' would deploy on whatever
+      // the request model defaults to — a shape nobody chose and this AD may lack.
+      if (!this.deployForm.shape) return false;
+      const n = this.deployForm.count || 1;
+      if (!(n >= 1 && n <= this.countMax)) return false;
       if ((this.freeTierWarnings().length || this.serverGateTripped) && !this.deployForm.acknowledge_charges) return false;
       return true;
+    },
+
+    async loadPraPickers() {
+      // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form
+      // dropdowns (shared /api/pra/pickers). Fetched once, best-effort: on any
+      // failure the dropdowns just show "(configured default)".
+      if (this.praPickers.loaded) return;
+      try {
+        const r = await API.get('/api/pra/pickers');
+        if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], gateways: r.jumpoints || [], loaded: true };
+      } catch (e) { /* non-fatal */ }
     },
 
     openDeployModal(img) {
@@ -432,7 +1484,12 @@ function ociDashboard() {
       this.serverGateTripped = false;
       this.serverGateMessage = '';
       this.deployForm = this.blankForm();
+      this.deployShapeNote = '';
       this.deployModal = true;
+      this.loadPraPickers();
+      // Narrow the shape list to what THIS image can boot before the operator
+      // picks — blank AD, matching blankForm()'s "(first available)".
+      this.onDeployPlacementChange();
     },
 
     async deploy() {
@@ -442,6 +1499,9 @@ function ociDashboard() {
       try {
         const r = await API.post('/api/oci/deploy', body);
         this.deployModal = false;
+        // A batch lands on the /jobs rollup; a single deploy keeps its own path.
+        if (window.afterDeploy(r, { label: 'OCI deploy',
+                                    notify: (m, t) => this.notify(m, t) })) return;
         this.notify('Deploy started (job ' + r.job_id + ').');
         this.activeTab = 'instances';
         setTimeout(() => this.loadInstances(true), 1500);
@@ -453,6 +1513,9 @@ function ociDashboard() {
           this.serverGateMessage = e.message || 'Selection exceeds the Always-Free tier.';
           this.deployError = 'Selection exceeds the Always-Free tier — tick the acknowledgment to proceed.';
         } else {
+          // code=shape_not_launchable lands here on purpose: unlike the free-tier
+          // gate there is nothing to acknowledge — the shape genuinely cannot launch
+          // this image here — and the message already lists the shapes that can.
           this.deployError = (e && e.message) ? e.message : 'Deploy failed.';
         }
       } finally {

@@ -6,24 +6,37 @@ encrypted) via the ``_cfg`` helper: tenancy OCID + user OCID + key fingerprint +
 private-key PEM (+ optional passphrase) + region. Every resource lives in a
 compartment (``oci_compartment_ocid``; blank → the tenancy root).
 
-All blocking oci-SDK calls run in ``asyncio.to_thread()`` so the FastAPI event
-loop is never blocked — the same discipline as aws_service / gcp_service. The SDK
+All blocking oci-SDK calls run in ``_to_thread()`` — OCI's OWN bounded pool, not the
+event loop's shared default executor — so the FastAPI event loop is never blocked AND a
+slow OCI cannot starve the other providers (see services/cloud_executor.py). The SDK
 itself is imported lazily inside ``_require_oci`` so the app boots cleanly when
 OCI isn't configured (community-edition invariant).
 """
-import asyncio
 import base64
 import json
 import logging
 from typing import List, Optional
 
-from . import oci_freetier
+from . import cloud_executor, oci_freetier
 
 logger = logging.getLogger(__name__)
 
 
 class OCIError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking oci-SDK call on OCI's own thread pool.
+
+    Translates the executor's refusals into OCIError so every existing ``except
+    OCIError`` — which is what turns a failure into a 503 or an unavailable tile —
+    keeps working unchanged. Anything the SDK itself raises propagates untouched.
+    """
+    try:
+        return await cloud_executor.run("oci", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise OCIError(str(exc)) from exc
 
 
 # ── Credential helpers ────────────────────────────────────────────────────────
@@ -118,7 +131,7 @@ def _list_images_sync(compartment_id: str) -> list[dict]:
 
 
 async def list_images(compartment_id: str = "") -> list[dict]:
-    return await asyncio.to_thread(_list_images_sync, compartment_id or _compartment())
+    return await _to_thread(_list_images_sync, compartment_id or _compartment())
 
 
 # ── Shapes / availability domains / subnets ───────────────────────────────────
@@ -154,6 +167,122 @@ def _list_shapes_sync(compartment_id: str, availability_domain: str = "") -> lis
     return sorted(seen.values(), key=lambda x: (not x["free_tier"], x["shape"]))
 
 
+def _launchable_shapes_sync(
+    compartment_id: str, availability_domain: str, image_ocid: str,
+) -> list[str]:
+    """Shapes that can actually launch ``image_ocid`` in ``availability_domain``.
+
+    Two independent constraints, and a shape has to clear both:
+
+      • ``list_shapes`` — what this AD offers at all. Shape *families* are not
+        deployed to every region: the Always-Free AMD micro
+        ``VM.Standard.E2.1.Micro`` exists in the older regions and is absent from
+        newer ones (us-chicago-1 offers no E2 shape whatsoever).
+      • ``list_image_shape_compatibility_entries`` — what the image supports.
+        Chiefly an architecture gate: the Ampere ``A1.Flex`` free shape is
+        aarch64, so it never pairs with an x86 platform image, and a current
+        Oracle Linux build drops the oldest x86 generations.
+
+    Neither list alone is enough, and the intersection is frequently much smaller
+    than either — an x86 Oracle Linux 10 image in us-chicago-1 has four usable
+    shapes out of 89 compatible ones, none of them free-tier.
+    """
+    import oci
+    compute = oci.core.ComputeClient(_oci_config())
+    offered = {s.shape for s in oci.pagination.list_call_get_all_results(
+        compute.list_shapes, compartment_id=compartment_id,
+        availability_domain=availability_domain).data}
+    compatible = {e.shape for e in oci.pagination.list_call_get_all_results(
+        compute.list_image_shape_compatibility_entries, image_id=image_ocid).data}
+    return sorted(offered & compatible, key=_shape_sort_key)
+
+
+def _check_launch_placement_sync(
+    *, availability_domain: str, image_ocid: str, shape: str,
+    compartment_id: str = "", region: str = "",
+) -> None:
+    """Raise ``OCIError`` if ``shape`` cannot launch ``image_ocid`` in this AD.
+
+    LaunchInstance answers an absent shape, an incompatible image and a genuine
+    policy denial with the *same* opaque ``404 NotAuthorizedOrNotFound`` — no
+    field named, nothing to act on (see the troubleshooting note in
+    docs/image-management.md). Checking the placement first is what turns that
+    into a sentence naming the shape.
+
+    Fails **open** when the lookup itself errors: a listing call that can't
+    reach OCI is not evidence the placement is wrong, and this must never be the
+    reason a build refuses to start.
+    """
+    try:
+        usable = _launchable_shapes_sync(
+            compartment_id or _compartment(), availability_domain, image_ocid)
+    except Exception as exc:  # noqa: BLE001 — advisory check, never a blocker
+        logger.warning("OCI launch-placement precheck skipped: %s", exc)
+        return
+    if not usable or shape in usable:
+        # An empty intersection means the lookup told us nothing useful (an image
+        # with no compatibility entries, say) — don't reject on that either.
+        return
+
+    where = f"{region or _cfg('oci_region') or 'this region'} ({availability_domain})"
+    hint = ", ".join(usable[:8]) + ("…" if len(usable) > 8 else "")
+    free = [s for s in usable if oci_freetier.is_free_shape(s)]
+    raise OCIError(
+        f"Shape {shape} cannot launch this image in {where} — either the shape "
+        f"isn't offered there or the image doesn't support it. OCI reports both "
+        f"as a bare 404 NotAuthorizedOrNotFound. Usable shapes for this image "
+        f"here: {hint}."
+        + ("" if free else
+           " None of them are Always-Free — in regions with no E2 shape the only"
+           " free compute is Ampere VM.Standard.A1.Flex, which needs an aarch64"
+           " image.")
+    )
+
+
+async def check_launch_placement(
+    *, availability_domain: str, image_ocid: str, shape: str,
+    compartment_id: str = "", region: str = "",
+) -> None:
+    await _to_thread(
+        lambda: _check_launch_placement_sync(
+            availability_domain=availability_domain, image_ocid=image_ocid,
+            shape=shape, compartment_id=compartment_id, region=region))
+
+
+def _launchable_shape_rows_sync(compartment_id: str, availability_domain: str = "",
+                                image_ocid: str = "") -> list[dict]:
+    """``_list_shapes_sync`` rows, narrowed to what ``image_ocid`` can boot here.
+
+    The picker's counterpart to ``_check_launch_placement_sync``: that one gates a
+    submitted shape, this one keeps the unusable shapes out of the dropdown to
+    begin with. Both narrow through ``_launchable_shapes_sync``, deliberately —
+    a form that filters on a different rule than the gate enforces ends up either
+    hiding a shape the API would accept or offering one it rejects.
+
+    Returns rows (name + ocpus/memory/is_flexible/free_tier) rather than
+    ``_launchable_shapes_sync``'s bare names, because the form renders the
+    free-tier flag and switches its OCPU/memory inputs on ``is_flexible``.
+
+    Fails **open** on the same two conditions the gate does — a lookup error, and
+    an empty intersection (an image declaring no compatibility entries is
+    indistinguishable from one matching nothing) — so the picker never offers less
+    than the gate would accept, and an unreadable compatibility list degrades to
+    the plain AD list instead of an empty dropdown.
+    """
+    shapes = _list_shapes_sync(compartment_id, availability_domain)
+    if not shapes or not image_ocid or not availability_domain:
+        return shapes
+    try:
+        usable = set(_launchable_shapes_sync(compartment_id, availability_domain, image_ocid))
+    except Exception as exc:  # noqa: BLE001 — advisory narrowing, never a blocker
+        logger.warning("OCI image/shape compatibility lookup failed for %s; offering "
+                       "the unnarrowed AD list: %s", image_ocid, exc)
+        return shapes
+    if not usable:
+        return shapes
+    return [s for s in shapes if s["shape"] in usable]
+
+
 def _list_subnets_sync(compartment_id: str, vcn_id: str = "") -> list[dict]:
     import oci
     vnet = oci.core.VirtualNetworkClient(_oci_config())
@@ -175,15 +304,23 @@ def _list_subnets_sync(compartment_id: str, vcn_id: str = "") -> list[dict]:
     return subnets
 
 
-def _get_network_options_sync(compartment_id: str, vcn_id: str) -> dict:
+def _get_network_options_sync(compartment_id: str, vcn_id: str,
+                              availability_domain: str = "",
+                              image_ocid: str = "") -> dict:
     ads: list[str] = []
     try:
         ads = _list_availability_domains_sync(compartment_id)
     except Exception as exc:
         logger.warning("OCI list_availability_domains failed: %s", exc)
 
+    # A shape list is only meaningful for ONE availability domain, so it has to
+    # follow the AD the caller is actually deploying into — pinning it to ads[0]
+    # while the form lets the operator pick AD-2 offers shapes that may not exist
+    # there. Blank falls back to the first AD, which is also what a blank
+    # availability_domain resolves to at launch time, so the two agree.
+    scope_ad = availability_domain or (ads[0] if ads else "")
     try:
-        shapes = _list_shapes_sync(compartment_id, ads[0] if ads else "")
+        shapes = _launchable_shape_rows_sync(compartment_id, scope_ad, image_ocid)
     except Exception as exc:
         logger.warning("OCI list_shapes failed: %s", exc)
         shapes = []
@@ -202,20 +339,27 @@ def _get_network_options_sync(compartment_id: str, vcn_id: str) -> dict:
         "compartment_ocid": compartment_id,
         "ssh_key_configured": bool(_cfg("oci_ssh_key_secret")),
         "free_tier":      oci_freetier.free_tier_catalog(),
+        # Echo the scope the shape list was resolved for. A caller that sent a
+        # blank AD can only tell which one it actually got by being told.
+        "availability_domain": scope_ad,
+        "image_ocid":     image_ocid,
     }
 
 
-async def get_network_options(compartment_id: str = "", vcn_id: str = "") -> dict:
-    return await asyncio.to_thread(
-        _get_network_options_sync, compartment_id or _compartment(), vcn_id or _cfg("oci_vcn_ocid"))
+async def get_network_options(compartment_id: str = "", vcn_id: str = "",
+                              availability_domain: str = "",
+                              image_ocid: str = "") -> dict:
+    return await _to_thread(
+        _get_network_options_sync, compartment_id or _compartment(), vcn_id or _cfg("oci_vcn_ocid"),
+        availability_domain, image_ocid)
 
 
 async def list_availability_domains(compartment_id: str = "") -> list[str]:
-    return await asyncio.to_thread(_list_availability_domains_sync, compartment_id or _compartment())
+    return await _to_thread(_list_availability_domains_sync, compartment_id or _compartment())
 
 
 async def list_subnets(compartment_id: str = "", vcn_id: str = "") -> list[dict]:
-    return await asyncio.to_thread(
+    return await _to_thread(
         _list_subnets_sync, compartment_id or _compartment(), vcn_id or _cfg("oci_vcn_ocid"))
 
 
@@ -240,7 +384,7 @@ def _get_secret_content_sync(secret_ref: str) -> str:
 
 
 async def get_secret(secret_ref: str) -> str:
-    return await asyncio.to_thread(_get_secret_content_sync, secret_ref)
+    return await _to_thread(_get_secret_content_sync, secret_ref)
 
 
 def _clean_public_key(value: str) -> str:
@@ -402,7 +546,7 @@ async def launch_instance(
     workgroup: str = "",
 ) -> dict:
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _launch_instance_sync, compartment_id, availability_domain, instance_name,
             shape, image_ocid, subnet_ocid, assign_public_ip, ssh_public_key,
             ocpus, memory_gb, boot_volume_gb, workgroup,
@@ -434,7 +578,7 @@ def _describe_instances_sync(compartment_id: str, instance_ocids: list[str]) -> 
 async def describe_instances(compartment_id: str, instance_ocids: list[str]) -> list[dict]:
     if not instance_ocids:
         return []
-    return await asyncio.to_thread(
+    return await _to_thread(
         _describe_instances_sync, compartment_id or _compartment(), instance_ocids)
 
 
@@ -446,11 +590,93 @@ def _terminate_instance_sync(instance_id: str, preserve_boot_volume: bool = Fals
 
 async def terminate_instance(instance_id: str, preserve_boot_volume: bool = False) -> None:
     try:
-        await asyncio.to_thread(_terminate_instance_sync, instance_id, preserve_boot_volume)
+        await _to_thread(_terminate_instance_sync, instance_id, preserve_boot_volume)
     except OCIError:
         raise
     except Exception as exc:  # noqa: BLE001
         raise OCIError(f"terminate_instance failed: {exc}") from exc
+
+
+# ── OKE cluster options ───────────────────────────────────────────────────────
+
+def _version_sort_key(version: str) -> tuple:
+    """Numeric sort key for an OKE version string (``v1.33.10`` → ``(1, 33, 10)``).
+    Sorting the strings directly ranks v1.33.9 above v1.33.10; non-numeric
+    components sort last-resort low."""
+    parts = (version or "").lstrip("vV").split(".")
+    key = []
+    for part in parts:
+        try:
+            key.append(int(part))
+        except ValueError:
+            key.append(-1)
+    return tuple(key)
+
+
+def _oke_cluster_versions_sync(region: str) -> list[str]:
+    import oci
+    cfg = _oci_config()
+    if region:
+        cfg = {**cfg, "region": region}
+    client = oci.container_engine.ContainerEngineClient(cfg)
+    opts = client.get_cluster_options("all", compartment_id=_compartment()).data
+    versions = [str(v) for v in (getattr(opts, "kubernetes_versions", None) or []) if v]
+    return sorted(versions, key=_version_sort_key, reverse=True)
+
+
+async def oke_cluster_versions(region: str = "") -> list[str]:
+    """Kubernetes versions OKE currently offers, newest first — the API behind
+    ``oci ce cluster-options get``. OKE retires versions every few months, so the
+    provision form reads them live rather than trusting a curated list that rots
+    into a 400 "Invalid kubernetesVersion" mid-apply. Blank ``region`` → the
+    configured ``oci_region`` (where every OKE cluster lands)."""
+    try:
+        return await _to_thread(_oke_cluster_versions_sync, region)
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"OKE cluster-options lookup failed: {exc}") from exc
+
+
+def _shape_sort_key(shape: str) -> tuple:
+    """Ordering for the worker-shape picker: free-tier first, then flexible VM
+    shapes, then fixed VM shapes, then bare metal — alphabetical within each band.
+    Free-tier-first matches ``_list_shapes_sync``; bare metal sorts last on
+    purpose, since ``BM.Standard.E5.192`` is a 192-OCPU machine billed whole and
+    must never head a list operators pick lab clusters from."""
+    name = (shape or "").strip()
+    return (not oci_freetier.is_free_shape(name), name.startswith("BM."),
+            "Flex" not in name, name)
+
+
+def _oke_node_pool_shapes_sync(region: str) -> list[str]:
+    import oci
+    cfg = _oci_config()
+    if region:
+        cfg = {**cfg, "region": region}
+    client = oci.container_engine.ContainerEngineClient(cfg)
+    opts = client.get_node_pool_options("all", compartment_id=_compartment()).data
+    shapes = [str(s) for s in (getattr(opts, "shapes", None) or []) if s]
+    return sorted(dict.fromkeys(shapes), key=_shape_sort_key)
+
+
+async def oke_node_pool_shapes(region: str = "") -> list[str]:
+    """Worker shapes OKE currently offers, best default first — the API behind
+    ``oci ce node-pool-options get``. OKE takes only a *subset* of OCI's compute
+    shapes, and that subset varies by region and tenancy, so the provision form
+    reads it live: a shape Compute lists but OKE won't take fails node-pool
+    creation ~10 minutes into a provision, after the VCN and cluster are already
+    built. Blank ``region`` → the configured ``oci_region``, which is where every
+    OKE cluster lands regardless of the region picked in the form.
+
+    This is discovery for the picker, not a gate — nothing validates a submitted
+    shape against it (see ``k8s_service.provision_options``)."""
+    try:
+        return await _to_thread(_oke_node_pool_shapes_sync, region)
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"OKE node-pool-options lookup failed: {exc}") from exc
 
 
 # ── OKE cluster token (kubeconfig exec auth) ──────────────────────────────────
@@ -509,7 +735,7 @@ def _object_storage_namespace_sync() -> str:
 async def object_storage_namespace() -> str:
     """The tenancy's Object Storage namespace (needed to address buckets/objects
     and to build the image-import source tuple)."""
-    return await asyncio.to_thread(_object_storage_namespace_sync)
+    return await _to_thread(_object_storage_namespace_sync)
 
 
 def _delete_object_sync(namespace: str, bucket: str, object_name: str) -> None:
@@ -520,7 +746,7 @@ def _delete_object_sync(namespace: str, bucket: str, object_name: str) -> None:
 
 async def delete_object_storage_object(namespace: str, bucket: str, object_name: str) -> None:
     """Delete a staged Object Storage object (promote-staging cleanup). Best-effort."""
-    await asyncio.to_thread(_delete_object_sync, namespace, bucket, object_name)
+    await _to_thread(_delete_object_sync, namespace, bucket, object_name)
 
 
 def _run_ci_promote_runner_sync(
@@ -595,7 +821,7 @@ async def run_container_instance_promote_runner_task(
     gcp_service.run_cloud_run_promote_runner_task."""
     display_name = f"promote-runner-{(job_id or 'job')[:24]}"
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_ci_promote_runner_sync,
             compartment_id=compartment_id, availability_domain=availability_domain,
             subnet_ocid=subnet_ocid, image=image, runner_args=runner_args, env=env,
@@ -646,7 +872,7 @@ async def create_image_from_object_storage(
     Object Storage — the OCI leg of cross-cloud image promotion. Waits for the
     image to reach AVAILABLE. Returns {image_ocid, display_name, lifecycle_state}."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _create_image_from_object_storage_sync,
             compartment_id=compartment_id or _compartment(), display_name=display_name,
             namespace=namespace, bucket=bucket, object_name=object_name,
@@ -656,3 +882,81 @@ async def create_image_from_object_storage(
         raise
     except Exception as exc:  # noqa: BLE001
         raise OCIError(f"create_image_from_object_storage failed: {exc}") from exc
+
+
+# Poll knobs for the export wait below. A multi-GB image export routinely runs
+# 15-40 minutes, so the ceiling is generous and the interval is coarse.
+_EXPORT_POLL_INTERVAL_S = 20
+_EXPORT_MAX_WAIT_S = 5400
+
+
+def _export_image_sync(
+    *, image_ocid: str, namespace: str, bucket: str, object_name: str,
+    export_format: str, progress_cb=None,
+) -> dict:
+    import time
+    import oci
+    compute = oci.core.ComputeClient(_oci_config())
+    objs = oci.object_storage.ObjectStorageClient(_oci_config())
+
+    details = oci.core.models.ExportImageViaObjectStorageTupleDetails(
+        destination_type="objectStorageTuple",
+        namespace_name=namespace, bucket_name=bucket, object_name=object_name,
+        export_format=export_format,   # "QCOW2" | "VMDK" | "OCI" | "VHD" | "VDI"
+    )
+    compute.export_image(image_ocid, details)
+
+    # Wait on the DESTINATION OBJECT, not the image's lifecycle_state. export_image
+    # is asynchronous server-side: the image flips AVAILABLE → EXPORTING → AVAILABLE,
+    # but it is *already* AVAILABLE when the call returns, so a naive
+    # wait_until(lifecycle_state == "AVAILABLE") satisfies itself instantly and hands
+    # back an object that hasn't been written yet. head_object is the honest signal.
+    deadline = time.monotonic() + _EXPORT_MAX_WAIT_S
+    while True:
+        try:
+            head = objs.head_object(namespace, bucket, object_name)
+            size = int(getattr(head.headers, "get", lambda *_: 0)("content-length") or 0)
+            # The object appears at its final size only once the export completes;
+            # belt and braces, also require the image to be out of EXPORTING.
+            state = getattr(compute.get_image(image_ocid).data, "lifecycle_state", "")
+            if state != "EXPORTING":
+                return {"namespace": namespace, "bucket": bucket,
+                        "object_name": object_name, "export_format": export_format,
+                        "size_bytes": size}
+        except Exception as exc:  # noqa: BLE001 — 404 until the object lands
+            if "NotAuthorizedOrNotFound" not in str(exc) and "404" not in str(exc):
+                logger.debug("OCI export poll for %s: %s", object_name, exc)
+        if time.monotonic() > deadline:
+            raise OCIError(
+                f"image export to oci://{namespace}/{bucket}/{object_name} did not "
+                f"complete within {_EXPORT_MAX_WAIT_S}s")
+        if progress_cb:
+            try:
+                progress_cb(f"Exporting image to oci://{namespace}/{bucket}/{object_name}…")
+            except Exception:  # noqa: BLE001 — progress must never break the wait
+                pass
+        time.sleep(_EXPORT_POLL_INTERVAL_S)
+
+
+async def export_image_to_object_storage(
+    *, image_ocid: str, namespace: str = "", bucket: str, object_name: str,
+    export_format: str = "VHD", progress_cb=None,
+) -> dict:
+    """Export a custom compute image to an Object Storage object and wait for it.
+
+    Defaults to VHD because that is the image hub's canonical artefact format —
+    exporting straight to it means an OCI-built image is promotable to AWS/Azure/GCP
+    with no qemu-img conversion (Azure's import accepts vhd only). Returns
+    {namespace, bucket, object_name, export_format, size_bytes}."""
+    ns = namespace or await object_storage_namespace()
+    try:
+        return await _to_thread(
+            _export_image_sync,
+            image_ocid=image_ocid, namespace=ns, bucket=bucket,
+            object_name=object_name, export_format=export_format,
+            progress_cb=progress_cb,
+        )
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"export_image_to_object_storage failed: {exc}") from exc

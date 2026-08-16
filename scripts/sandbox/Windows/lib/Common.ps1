@@ -23,6 +23,30 @@ function Write-Die {
     exit 1
 }
 
+# Twin of `retry` in lib/common.sh. Re-runs a scriptblock until it succeeds,
+# where "succeeds" means the native command inside it left $LASTEXITCODE at 0 —
+# an AWS/Azure CLI failure is a non-zero exit, not a PowerShell exception, so
+# try/catch alone would never see it. Used mainly to absorb IAM eventual
+# consistency: a freshly created role/SP briefly 404s on attach.
+# Throws on the final attempt so callers can decide fatal-vs-warn themselves.
+function Invoke-Retry {
+    param(
+        [int]         $Attempts = 8,
+        [int]         $DelaySeconds = 5,
+        [scriptblock] $Script,
+        [string]      $What = 'command'
+    )
+    for ($n = 1; ; $n++) {
+        $out = & $Script 2>&1
+        if ($LASTEXITCODE -eq 0) { return $out }
+        if ($n -ge $Attempts) {
+            throw "$What failed after $Attempts attempts: $($out -join ' ')"
+        }
+        Write-Warn "${What}: attempt $n/$Attempts failed; retrying in ${DelaySeconds}s…"
+        Start-Sleep -Seconds $DelaySeconds
+    }
+}
+
 # ── Prereq checks ──────────────────────────────────────────────────────────────
 function Assert-Command {
     param([string]$Name)

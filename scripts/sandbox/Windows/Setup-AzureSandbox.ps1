@@ -500,6 +500,7 @@ $cfg = @(
     "# flat azure_* keys above stay as the default region for backward-compat.",
     "azure_region.${Location}.resource_group=$Rg",
     "azure_region.${Location}.vnet_resource_group=$Rg",
+    "azure_region.${Location}.default_subnet_id=$VmSubnetId",
     "azure_region.${Location}.desktops_subnet_id=$DesktopsSubnetId",
     "azure_region.${Location}.db_subnet_id=$DbSubnetId",
     "azure_region.${Location}.db_mysql_subnet_id=$DbMysqlSubnetId",

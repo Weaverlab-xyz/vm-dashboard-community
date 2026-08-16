@@ -1,0 +1,60 @@
+# Deploy a sample nginx Deployment + Service.
+# Target: a Kubernetes cluster. Kubeconfig is auto-injected (K8S_AUTH_KUBECONFIG).
+#
+# extra_vars (all optional — sensible defaults below):
+#   app_namespace: default
+#   app_name: sample-nginx
+#   app_replicas: 2
+#   app_image: nginx:1.27
+- name: Apply a sample nginx workload
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_namespace: default
+    app_name: sample-nginx
+    app_replicas: 2
+    app_image: nginx:1.27
+  tasks:
+    - name: Apply the Deployment
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ app_namespace }}"
+            labels:
+              app: "{{ app_name }}"
+          spec:
+            replicas: "{{ app_replicas | int }}"
+            selector:
+              matchLabels:
+                app: "{{ app_name }}"
+            template:
+              metadata:
+                labels:
+                  app: "{{ app_name }}"
+              spec:
+                containers:
+                  - name: nginx
+                    image: "{{ app_image }}"
+                    ports:
+                      - containerPort: 80
+
+    - name: Apply the Service
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ app_namespace }}"
+          spec:
+            selector:
+              app: "{{ app_name }}"
+            ports:
+              - port: 80
+                targetPort: 80

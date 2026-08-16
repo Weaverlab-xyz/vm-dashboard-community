@@ -1,0 +1,33 @@
+# Install/upgrade a Helm chart.
+# Target: a Kubernetes cluster. Kubeconfig is auto-injected (the runner exports both
+# K8S_AUTH_KUBECONFIG and KUBECONFIG; the helm CLI ships in the ansible-cloud image).
+#
+# extra_vars:
+#   helm_release: my-release           # required
+#   helm_chart: bitnami/nginx          # required (repo/chart, or a local path/oci ref)
+#   helm_repo_url: https://charts.bitnami.com/bitnami   # optional (needed for repo/chart form)
+#   helm_namespace: default
+- name: Install a Helm chart
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    helm_release: ""
+    helm_chart: ""
+    helm_repo_url: ""
+    helm_namespace: default
+  tasks:
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - helm_release | length > 0
+          - helm_chart | length > 0
+        fail_msg: "Set helm_release and helm_chart via extra vars."
+
+    - name: helm upgrade --install
+      kubernetes.core.helm:
+        name: "{{ helm_release }}"
+        chart_ref: "{{ helm_chart }}"
+        chart_repo_url: "{{ helm_repo_url | default(omit, true) }}"
+        release_namespace: "{{ helm_namespace }}"
+        create_namespace: true

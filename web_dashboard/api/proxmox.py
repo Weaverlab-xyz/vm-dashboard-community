@@ -14,6 +14,11 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_service, workgroup_override_service
 from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError
+from ..services import hypervisor_view_service
+from .hypervisor_deps import agent_power_job, conn_in_task, conn_or_error
+
+# Page verb -> the agent's closed verb allowlist (services/agent_hypervisor_meta).
+_AGENT_VERBS = {'start': 'power_on', 'stop': 'power_off', 'shutdown': 'restart', 'reset': 'power_reset', 'reboot': 'restart', 'hard_reboot': 'power_reset'}
 
 router = APIRouter(prefix="/api/proxmox", tags=["proxmox"])
 
@@ -47,9 +52,12 @@ async def get_cloud_images(current_user: User = Depends(get_current_user)):
 # ── Cluster / node info ───────────────────────────────────────────────────────
 
 @router.get("/nodes")
-async def get_nodes(current_user: User = Depends(get_current_user)):
+async def get_nodes(connection_id: str = "",
+                    db: Session = Depends(get_db),
+                    current_user: User = Depends(get_current_user)):
     try:
-        return await proxmox_service.list_nodes()
+        return await proxmox_service.list_nodes(
+            conn_or_error(db, "proxmox", connection_id))
     except ProxmoxError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -57,11 +65,14 @@ async def get_nodes(current_user: User = Depends(get_current_user)):
 @router.get("/storage")
 async def get_storage(
     node: str,
+    connection_id: str = "",
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """List active storage pools on a node that support images/import content."""
     try:
-        return await proxmox_service.list_storage(node)
+        return await proxmox_service.list_storage(
+            conn_or_error(db, "proxmox", connection_id), node)
     except ProxmoxError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -70,6 +81,7 @@ async def get_storage(
 
 @router.get("/resources")
 async def get_resources(
+    connection_id: str = "",
     node: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -86,7 +98,15 @@ async def get_resources(
     """
     try:
         nodes = [node] if node else None
-        resources = await proxmox_service.list_resources(nodes)
+        conn = conn_or_error(db, "proxmox", connection_id)
+        # An agent-bound connection is on a network the dashboard has no route
+        # to — that is why it is bound to an agent. Calling the live API here
+        # returned a 502 and made the page unusable; serve what the agent last
+        # synced instead. The banner says so.
+        if conn.via_agent:
+            resources = hypervisor_view_service.synced_rows(db, conn)
+        else:
+            resources = await proxmox_service.list_resources(conn, nodes)
     except ProxmoxError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -125,10 +145,13 @@ async def get_resources(
 
 
 @router.get("/templates")
-async def get_templates(current_user: User = Depends(get_current_user)):
+async def get_templates(connection_id: str = "",
+                        db: Session = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
     """List all QEMU templates across all nodes."""
     try:
-        return await proxmox_service.list_templates()
+        return await proxmox_service.list_templates(
+            conn_or_error(db, "proxmox", connection_id))
     except ProxmoxError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -138,12 +161,15 @@ async def get_vm_detail(
     node: str,
     vm_type: str,
     vmid: int,
+    connection_id: str = "",
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     if vm_type not in ("qemu", "lxc"):
         raise HTTPException(status_code=400, detail="vm_type must be 'qemu' or 'lxc'")
     try:
-        return await proxmox_service.get_vm_detail(node, vmid, vm_type)
+        return await proxmox_service.get_vm_detail(
+            conn_or_error(db, "proxmox", connection_id), node, vmid, vm_type)
     except ProxmoxError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -162,12 +188,13 @@ class ImportImageRequest(BaseModel):
     username: str = "ubuntu"
 
 
-async def _run_import(job_id: str, req: ImportImageRequest):
+async def _run_import(job_id: str, connection_id: str, req: ImportImageRequest):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 5, f"Downloading {req.image_filename}…")
         result = await proxmox_service.import_and_create_template(
+            conn_in_task(db, "proxmox", connection_id),
             node=req.node,
             storage=req.storage,
             image_url=req.image_url,
@@ -190,9 +217,11 @@ async def _run_import(job_id: str, req: ImportImageRequest):
 async def import_image(
     payload: ImportImageRequest,
     background_tasks: BackgroundTasks,
+    connection_id: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    conn = conn_or_error(db, "proxmox", connection_id)
     job = job_service.create_job(
         db,
         job_type="proxmox_import_image",
@@ -202,9 +231,10 @@ async def import_image(
             "node": payload.node,
             "image_filename": payload.image_filename,
             "template_name": payload.template_name,
+            "connection_id": conn.id,
         },
     )
-    background_tasks.add_task(_run_import, job.id, payload)
+    background_tasks.add_task(_run_import, job.id, conn.id, payload)
     return {"job_id": job.id, "status": "queued"}
 
 
@@ -220,12 +250,13 @@ class DeployRequest(BaseModel):
     full_clone: bool = True
 
 
-async def _run_deploy(job_id: str, req: DeployRequest):
+async def _run_deploy(job_id: str, connection_id: str, req: DeployRequest):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"Cloning template {req.template_vmid}…")
         result = await proxmox_service.deploy_from_template(
+            conn_in_task(db, "proxmox", connection_id),
             node=req.node,
             template_vmid=req.template_vmid,
             vm_name=req.vm_name,
@@ -245,10 +276,12 @@ async def _run_deploy(job_id: str, req: DeployRequest):
 async def deploy(
     payload: DeployRequest,
     background_tasks: BackgroundTasks,
+    connection_id: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     canonical = _validate_workgroup(db, current_user, payload.workgroup)
+    conn = conn_or_error(db, "proxmox", connection_id)
     job = job_service.create_job(
         db,
         job_type="proxmox_deploy",
@@ -261,20 +294,24 @@ async def deploy(
             "vm_name": payload.vm_name,
             "node": payload.node,
             "template_vmid": payload.template_vmid,
+            # Pinned at enqueue, never re-chosen at execution: flipping the
+            # default mid-flight must not redirect a queued deploy.
+            "connection_id": conn.id,
         },
     )
-    background_tasks.add_task(_run_deploy, job.id, payload)
+    background_tasks.add_task(_run_deploy, job.id, conn.id, payload)
     return {"job_id": job.id, "status": "queued"}
 
 
 # ── Delete VM or template ─────────────────────────────────────────────────────
 
-async def _run_delete(job_id: str, node: str, vmid: int, vm_type: str, label: str):
+async def _run_delete(job_id: str, connection_id: str, node: str, vmid: int, vm_type: str, label: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"Deleting {label}…")
-        result = await proxmox_service.delete_vm(node, vmid, vm_type)
+        result = await proxmox_service.delete_vm(
+            conn_in_task(db, "proxmox", connection_id), node, vmid, vm_type)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -287,19 +324,22 @@ async def delete_vm(
     node: str,
     vmid: int,
     vm_type: str = "qemu",
+    connection_id: str = "",
     background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     label = f"{vm_type}/{vmid} on {node}"
+    conn = conn_or_error(db, "proxmox", connection_id)
     job = job_service.create_job(
         db,
         job_type="proxmox_delete",
         created_by=current_user.username,
         workgroup=node,
-        metadata={"node": node, "vmid": vmid, "vm_type": vm_type},
+        metadata={"node": node, "vmid": vmid, "vm_type": vm_type,
+                  "connection_id": conn.id},
     )
-    background_tasks.add_task(_run_delete, job.id, node, vmid, vm_type, label)
+    background_tasks.add_task(_run_delete, job.id, conn.id, node, vmid, vm_type, label)
     return {"job_id": job.id, "status": "queued"}
 
 
@@ -312,12 +352,13 @@ class PowerOpRequest(BaseModel):
     name: str = ""
 
 
-async def _run_power_op(job_id: str, node: str, vmid: int, vm_type: str, op: str):
+async def _run_power_op(job_id: str, connection_id: str, node: str, vmid: int, vm_type: str, op: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"{op.capitalize()}ing {vm_type} {vmid} on {node}…")
-        result = await proxmox_service.power_op(node, vmid, vm_type, op)
+        result = await proxmox_service.power_op(
+            conn_in_task(db, "proxmox", connection_id), node, vmid, vm_type, op)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -329,10 +370,23 @@ def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
         background_tasks: BackgroundTasks,
+        connection_id: str = "",
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
         label = payload.name or f"{payload.vm_type}/{payload.vmid}"
+        conn = conn_or_error(db, "proxmox", connection_id)
+        # An agent-bound connection is on a network the dashboard cannot dial, so the
+        # button enqueues an agent job instead of calling the service. Verbs the agent
+        # has no implementation for are refused by it, in Live Output, naming why.
+        agent_job = agent_power_job(
+            db, conn, verb=_AGENT_VERBS.get(op, op), target_id=str(payload.vmid),
+            target_scope=payload.node, target_type=payload.vm_type,
+            created_by=current_user.username,
+            description=f"{op} {label} via agent")
+        if agent_job is not None:
+            return {"job_id": agent_job.id, "status": agent_job.status}
+
         job = job_service.create_job(
             db,
             job_type=f"proxmox_{op}",
@@ -347,7 +401,7 @@ def _power_endpoint(op: str):
             },
         )
         background_tasks.add_task(
-            _run_power_op, job.id, payload.node, payload.vmid, payload.vm_type, op,
+            _run_power_op, job.id, conn.id, payload.node, payload.vmid, payload.vm_type, op,
         )
         return {"job_id": job.id, "status": "queued"}
 

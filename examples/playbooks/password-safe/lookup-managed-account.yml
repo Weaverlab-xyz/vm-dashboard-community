@@ -1,0 +1,76 @@
+# Retrieve a rotated MANAGED-ACCOUNT password from BeyondTrust Password Safe,
+# in-play, via the beyondtrust.secrets_safe Ansible Galaxy collection.
+#
+# Target: On-prem host / localhost (Config Management runs this hosts: localhost play).
+# This is the *in-playbook* pattern — the play fetches its own credential from Password
+# Safe at runtime — complementary to the dashboard's "Use a secret → managed account"
+# out-of-band checkout. Password Safe stays the source of truth.
+#
+# Credentials: the dashboard AUTO-INJECTS PASSWORD_SAFE_API_URL / _CLIENT_ID /
+# _CLIENT_SECRET into the runner when BeyondTrust is enabled (it reuses the configured
+# ps-cli OAuth client), so you supply nothing. Running this by hand outside the
+# dashboard? Export those three env vars first. The lookup runs on the Ansible
+# controller (the runner), never on a remote host.
+#
+# extra_vars:
+#   managed_account: "MANAGED_SYSTEM/ACCOUNT"   # format: system_name/account_name
+- name: Retrieve a managed-account password from Password Safe
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+    managed_account: "MANAGED_SYSTEM/ACCOUNT"
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - ps_api_url | length > 0
+          - ps_client_id | length > 0
+          - ps_client_secret | length > 0
+          - managed_account | length > 0
+          - "'/' in managed_account"
+        fail_msg: >-
+          Password Safe creds (PASSWORD_SAFE_* env — auto-injected by the dashboard when
+          BeyondTrust is enabled) and a managed_account (system_name/account_name) are required.
+
+    - name: Retrieve the managed-account credential (checked out just-in-time)
+      ansible.builtin.set_fact:
+        ps_managed_credential: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='MANAGED_ACCOUNT',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=managed_account,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true              # never echo the credential
+
+    - name: Confirm a credential came back (the value itself is never shown)
+      ansible.builtin.assert:
+        that: ps_managed_credential | length > 0
+        fail_msg: >-
+          No credential returned for {{ managed_account }} — check the path and that the
+          API user has Managed Account scope + Requests→Create on it.
+        success_msg: "Retrieved the credential for {{ managed_account }}."
+
+    # ps_managed_credential now holds the password (kept out of logs by no_log). Use it
+    # in a downstream task — a connection/become password, an API token, etc. Example
+    # (commented; needs a real target):
+    #
+    # - name: Authenticate to an internal API with the fetched credential
+    #   ansible.builtin.uri:
+    #     url: "https://app.internal/api/login"
+    #     method: POST
+    #     body_format: json
+    #     body:
+    #       user: "{{ managed_account.split('/')[1] }}"
+    #       password: "{{ ps_managed_credential }}"
+    #   no_log: true
+    #
+    # For a single comma-separated path the lookup returns the value directly; pass a
+    # comma-separated secret_list (and wantlist=True) to fetch several at once.

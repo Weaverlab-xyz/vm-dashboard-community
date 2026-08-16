@@ -148,10 +148,34 @@
         const err = msg;
         const extra = {};
         if (err.requestAccessUrl) extra.requestAccessUrl = err.requestAccessUrl;
+        window.__lastApiError = null;   // handed the Error directly; stash is moot
         window._toast.show(err.message || 'Request failed', type === 'info' ? 'error' : type, 8000, extra);
         return;
       }
-      window._toast.show(msg, type, 4000, opts || {});
+      const extra = Object.assign({}, opts || {});
+      let duration = 4000;
+      // Recover the deep link the call site dropped. Nothing in the app reaches the
+      // branch above: all ~142 call sites pass a string derived from the caught
+      // Error, so requestAccessUrl dies at the call site rather than here. API.request
+      // stashes the Error it threw (static/js/app.js), and a catch block toasts it
+      // immediately, so the first string toast carrying that error's message is the
+      // one that wanted the link. Substring, not equality, to cover the prefixed and
+      // template-literal shapes as well as bare `e.message`.
+      const stash = window.__lastApiError;
+      if (stash && typeof msg === 'string' && !extra.requestAccessUrl) {
+        const err = stash.error || {};
+        // 5s: the catch block runs in the same tick as the throw, so this only has to
+        // survive an intervening await — while still expiring a link whose error was
+        // swallowed without ever being toasted.
+        if (err.requestAccessUrl && err.message && msg.includes(err.message)
+            && Date.now() - stash.at < 5000) {
+          extra.requestAccessUrl = err.requestAccessUrl;
+          duration = 8000;   // a link the user has to read and click needs longer
+        }
+        // Consume regardless: one throw yields at most one linked toast.
+        window.__lastApiError = null;
+      }
+      window._toast.show(msg, type, duration, extra);
     }
 
   </script>

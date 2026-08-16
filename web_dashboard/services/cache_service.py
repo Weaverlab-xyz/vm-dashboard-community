@@ -29,27 +29,27 @@ TTL = {
     "aws_network_opts":    600,   # 10 min
     "aws_instances":        60,   # 1 min
     "aws_community":       900,   # 15 min
-    "aws_ssh_key_secrets": 300,   # 5 min
     "aws_db_options":      600,   # 10 min — RDS subnet groups + SGs for the DB provision form
     "k8s_provision_opts":  600,   # 10 min — VPC subnets for the k8s provision form (AWS only)
-    # Config management
-    "cfgmgmt_instances":    60,   # 1 min
-    "cfgmgmt_s3status":    120,   # 2 min
     # Azure / azure-sdk-backed
     "azure_images":        300,   # 5 min
     "azure_network_opts":  600,   # 10 min
     "azure_vms":            60,   # 1 min
-    "azure_marketplace":   900,   # 15 min
     # Portainer (proxied via Hybrid Worker in cloud mode)
     "portainer_endpoints": 300,   # 5 min
     "portainer_containers": 60,   # 1 min
     "portainer_stacks":    120,   # 2 min
-    # Cost (cross-cloud MTD spend) — long TTL: cost data updates slowly and AWS
-    # Cost Explorer bills ~$0.01/request, so cache hard.
-    "cost_summary":      21600,   # 6 h
-    "cost_breakdown":    21600,   # 6 h — billable, grouped CE/CM queries; cache hard
+    # Cost (cross-cloud MTD spend) does NOT live here. It moved to services/cost_cache.py
+    # and a `cloud_cost_cache` table, because this store cannot express what that data
+    # needs: a failure must not overwrite a success, the throttle state must be shared
+    # across workers, and both must survive a restart. Don't add a cost key back.
     # Deployment inventory (DB aggregation) — short TTL; cheap indexed queries.
     "deployment_inventory": 60,   # 1 min
+    # Password Safe database import candidates (api/cloud_databases.py). Four paged
+    # collections per miss, so worth caching; 5 min because Password Safe discovery
+    # runs on an hourly-plus schedule and nothing here changes faster than that.
+    # Keyed on the workgroup filter — see SCOPED_CACHES in tests/test_cache_key_scoping.py.
+    "ps_db_candidates":    300,   # 5 min
 }
 
 # ── Internal store ────────────────────────────────────────────────────────────

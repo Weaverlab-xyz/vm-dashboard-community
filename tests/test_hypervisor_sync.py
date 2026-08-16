@@ -1,0 +1,156 @@
+"""End-to-end scenario for the agent-brokered hypervisor inventory sync.
+
+One ordered scenario rather than independent cases, because a paged sync IS a sequence:
+page 2 only means anything after page 1, and deletion is only detectable across two
+passes. Runs against a real throwaway SQLite database — the behaviour worth pinning here
+(the cursor chain, the page cap, the prune) is all storage behaviour.
+
+The subtle checkpoint is "a VM on an earlier page survives the final page's prune".
+Pruning per page rather than per pass would delete most of a large inventory on every
+sync, and it would look perfectly correct in any single-page test.
+
+Runs under pytest, or standalone:  python tests/test_hypervisor_sync.py
+"""
+import os
+import sys
+import tempfile
+import time
+from datetime import datetime, timedelta
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+os.environ.setdefault(
+    "DATABASE_URL",
+    "sqlite:///" + os.path.join(tempfile.mkdtemp(), "sync.db").replace("\\", "/"))
+os.environ.setdefault("JWT_SECRET_KEY", "x" * 32)
+
+try:
+    from web_dashboard.database import (Base, HypervisorConnection, Job, RemoteAgent,
+                                        SessionLocal, engine)
+    from web_dashboard.services import config_service, job_service
+    from web_dashboard.services import hypervisor_connection_service as hcs
+    from web_dashboard.services import hypervisor_sync_service as hss
+except Exception as exc:  # noqa: BLE001
+    print(f"SKIP: {exc}")
+    sys.exit(0)
+
+_STEPS = []
+
+
+def _ok(message):
+    _STEPS.append(message)
+
+
+def test_the_agent_sync_scenario():
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    config_service.set("remote_agents_enabled", "true")
+
+    agent = RemoteAgent(name=f"site-{os.getpid()}", public_key="k", is_active=True,
+                        last_seen_at=datetime.utcnow(), enrolled_at=datetime.utcnow())
+    db.add(agent)
+    db.commit()
+    db.refresh(agent)
+
+    conn = hcs.create(db, kind="nutanix", name="hq-prism", created_by="t",
+                      agent_id=agent.id, agent_connection_name="hq-prism")
+    cid = conn["id"]
+    assert conn["has_secret"] is False
+    _ok("an agent-bound connection stores no credential")
+
+    assert hss.enqueue_due_syncs(db) == 1
+    job = db.query(Job).filter(Job.job_type == "agent_hypervisor").one()
+    assert job.status == "queued" and job.agent_id == agent.id
+    assert job.cloud_resource_id == cid
+    meta = job.metadata_dict
+    assert meta["verb"] == "inventory_sync" and meta["connection_ref"] == "hq-prism"
+    # The whole design in one assertion: the job names a connection, not an endpoint.
+    for banned in ("host", "port", "username", "password", "url"):
+        assert banned not in meta, f"the sync payload carries {banned}"
+    _ok("the queued sync names a connection and carries no endpoint or credential")
+
+    assert hss.enqueue_due_syncs(db) == 0, "an open job must suppress a duplicate"
+    _ok("the duplicate-enqueue guard holds")
+
+    page1 = {"vms": [{"vm_id": "a", "name": "web01\x1b[31m", "power_state": "ON",
+                      "vcpus": 4, "mem_mib": 8192, "password": "leak"},
+                     {"vm_id": "b", "name": "db01", "power_state": "OFF"}],
+             "next_cursor": "250", "complete": False}
+    applied = hss.apply_page(db, job, page1)
+    assert "leak" not in repr(applied), "an undeclared field survived the projection"
+    assert "\x1b" not in applied["vms"][0]["name"], "an ANSI escape reached the browser"
+    assert {r["vm_id"] for r in hss.list_vms(db, cid)} == {"a", "b"}
+    _ok("page 1 is applied, projected and sanitised")
+
+    jobs = db.query(Job).filter(Job.job_type == "agent_hypervisor").all()
+    assert len(jobs) == 2
+    follow = [j for j in jobs if j.id != job.id][0]
+    assert follow.metadata_dict["cursor"] == "250"
+    assert follow.metadata_dict["sync_page"] == 2
+    assert follow.batch_id == (job.batch_id or job.id), "pages must share a batch"
+    _ok("page 2 is chained, carrying the cursor and sharing a batch id")
+
+    # A VM absent from page 2 is not deleted — it was on page 1. Pruning per page would
+    # wipe most of a large inventory on every single sync.
+    hss.apply_page(db, follow, {"vms": [{"vm_id": "c", "name": "app01"}],
+                                "next_cursor": "", "complete": True})
+    assert {r["vm_id"] for r in hss.list_vms(db, cid)} == {"a", "b", "c"}
+    _ok("a VM on an earlier page survives the final page's prune")
+
+    row = db.query(HypervisorConnection).filter(HypervisorConnection.id == cid).one()
+    assert row.last_sync_at is not None and not row.last_error
+    _ok("the connection is stamped with last_sync_at")
+
+    # Deletion is only detectable across PASSES: a later sync that never mentions "b".
+    time.sleep(0.01)
+    row.last_sync_at = None
+    db.commit()
+    db.query(Job).filter(Job.job_type == "agent_hypervisor").delete()
+    db.commit()
+    assert hss.enqueue_due_syncs(db) == 1
+    second = db.query(Job).filter(Job.job_type == "agent_hypervisor").one()
+    hss.apply_page(db, second, {"vms": [{"vm_id": "a", "name": "web01"}],
+                                "next_cursor": "", "complete": True})
+    assert {r["vm_id"] for r in hss.list_vms(db, cid)} == {"a"}
+    _ok("a later pass prunes VMs that no longer exist")
+
+    # A lying agent must not be able to make the dashboard enqueue forever.
+    capped = job_service.create_job(
+        db, job_type="agent_hypervisor", created_by="t",
+        metadata={**meta, "sync_page": hss.MAX_SYNC_PAGES}, agent_id=agent.id)
+    job_service.set_cloud_resource_id(db, capped.id, cid)
+    before = db.query(Job).filter(Job.job_type == "agent_hypervisor").count()
+    hss.apply_page(db, capped, {"vms": [], "next_cursor": "9999", "complete": False})
+    after = db.query(Job).filter(Job.job_type == "agent_hypervisor").count()
+    assert after == before, "the page cap did not stop the chain"
+    _ok("the page cap stops an endless chain")
+
+    # An offline agent is skipped with a visible reason rather than queued: a job that
+    # waits three days is worse than a refusal an operator can see.
+    agent.last_seen_at = datetime.utcnow() - timedelta(hours=2)
+    row = db.query(HypervisorConnection).filter(HypervisorConnection.id == cid).one()
+    row.last_sync_at = None
+    db.commit()
+    db.query(Job).filter(Job.job_type == "agent_hypervisor").delete()
+    db.commit()
+    assert hss.enqueue_due_syncs(db) == 0
+    row = db.query(HypervisorConnection).filter(HypervisorConnection.id == cid).one()
+    assert "not online" in (row.last_error or "")
+    _ok("an offline agent is skipped with a visible reason, not silently queued")
+
+    db.close()
+    assert len(_STEPS) == 10, f"expected 10 checkpoints, ran {len(_STEPS)}"
+
+
+if __name__ == "__main__":
+    failed = None
+    try:
+        test_the_agent_sync_scenario()
+    except Exception as exc:  # noqa: BLE001
+        failed = exc
+    for step in _STEPS:
+        print(f"ok   {step}")
+    if failed is not None:
+        print(f"FAIL test_the_agent_sync_scenario: {failed}")
+        sys.exit(1)
+    sys.exit(0)

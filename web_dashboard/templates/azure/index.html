@@ -12,7 +12,7 @@
       <p class="text-sm text-gray-500 mt-1">Manage Azure VMs, images, and containers</p>
     </div>
     <div class="flex items-center gap-3">
-      <select x-model="location" @change="refreshNetworkOpts()"
+      <select x-model="location" @change="onLocationChange()"
               class="text-sm border border-gray-300 rounded-md px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
         <template x-for="loc in networkOpts.locations" :key="loc">
           <option :value="loc" x-text="loc"></option>
@@ -129,7 +129,9 @@
   <div x-show="activeTab === 'private'">
     <div class="flex items-center justify-between mb-3">
       <p class="text-sm text-gray-500">Gallery images + standalone Managed Images in your resource group.</p>
-      <button x-show="selectedImages.length > 1"
+      <!-- `> 0`, matching AWS: one selected image is a perfectly good batch, and the
+           old `> 1` made a single-image bulk deploy unreachable from the UI. -->
+      <button x-show="selectedImages.length > 0"
               @click="openBulkDeployModal()"
               class="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
         Bulk Deploy (<span x-text="selectedImages.length"></span>)
@@ -336,9 +338,28 @@
           </select>
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-700 mb-1">VM Name <span class="text-red-500">*</span></label>
-          <input x-model="deployModal.vmName" type="text" placeholder="my-azure-vm"
-                 class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+          <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <label class="block text-xs font-medium text-gray-700 mb-1">VM Name <span class="text-red-500">*</span></label>
+              <input x-model="deployModal.vmName" type="text" placeholder="my-vm"
+                     class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1">Count <span class="text-red-500">*</span></label>
+              <input type="number" min="1" :max="countMax" step="1" x-model.number="deployModal.count"
+                     class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+            </div>
+          </div>
+          <p x-show="(deployModal.count || 1) > 1" x-cloak class="text-xs font-mono mt-1"
+             :class="namePreviewFor().truncated ? 'text-amber-600' : 'text-gray-500'"
+             x-text="namePreviewFor().text"></p>
+          <!-- 15 characters is not the ARM limit but the in-guest one: azure_service
+               derives computer_name as vm_name[:15], so a longer base would give every
+               VM in the batch the same hostname. -->
+          <p x-show="(deployModal.count || 1) > 1" x-cloak class="text-xs text-gray-400 mt-1">
+            Batch names are capped at 15 characters so each VM gets a distinct in-guest
+            hostname — keep the base to 12 or fewer to avoid truncation.
+          </p>
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
@@ -351,7 +372,7 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
-            <select x-model="deployModal.location" @change="loadNetworkOpts(true, deployModal.location)" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+            <select x-model="deployModal.location" @change="onDeployLocationChange()" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
               <template x-for="loc in networkOpts.locations" :key="loc">
                 <option :value="loc" x-text="loc"></option>
               </template>
@@ -374,8 +395,11 @@
           <label class="block text-xs font-medium text-gray-700 mb-1">Subnet <span class="text-red-500">*</span></label>
           <select x-model="deployModal.subnetId" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
             <option value="">Select a subnet…</option>
+            <!-- Region in the label: the sandbox names its VNet/subnet identically in
+                 every region it is run in, so without it two different subnets read
+                 the same. -->
             <template x-for="s in networkOpts.subnets" :key="s.id">
-              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name + (s.address_prefix ? ' (' + s.address_prefix + ')' : '')"></option>
+              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name + ' (' + [s.address_prefix, networkOpts.location].filter(Boolean).join(', ') + ')'"></option>
             </template>
           </select>
         </div>
@@ -439,7 +463,7 @@
           </p>
         </div>
         {% endif %}
-        {% if beyondtrust_enabled %}
+        {% if password_safe_enabled %}
         <!-- Password Safe registration opt-in (Linux only — managed system + account) -->
         <div x-show="deployModal.osType !== 'Windows'">
           <label class="flex items-center gap-2 text-sm text-gray-700">
@@ -466,20 +490,32 @@
         </p>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name)</span></label>
-            <input type="text" x-model="deployModal.jump_group" placeholder="(configured default)"
-                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+            <select x-model="deployModal.jump_group" :disabled="!praPickers.jump_groups.length"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <option value="">(configured default)</option>
+              <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                <option :value="g.name" x-text="g.name"></option>
+              </template>
+            </select>
           </div>
           <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name)</span></label>
-            <input type="text" x-model="deployModal.jumpoint_name" placeholder="(configured default)"
-                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+            <select x-model="deployModal.jumpoint_name" :disabled="!praPickers.gateways.length"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <option value="">(configured default)</option>
+              <template x-for="j in praPickers.gateways || []" :key="j.id">
+                <option :value="j.name" x-text="j.name"></option>
+              </template>
+            </select>
           </div>
         </div>
+        <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
+           class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
         {{ secret_picker("deployModal", "praCredBackend", "pra_credential_ref",
                          "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
         {{ secret_picker("deployModal", "dockerKeyBackend", "docker_deploy_key_ref",
-                         "Jumpoint deploy key", "Overrides the ACI Jumpoint deploy key for this deploy.") }}
+                         "Gateway deploy key", "Overrides the ACI Gateway deploy key for this deploy.") }}
       </div>
 
       <div class="flex justify-end gap-3 mt-5">
@@ -501,7 +537,14 @@
   <!-- ═══════════════════════════════════════════════════════════════════════ -->
   <div x-show="bulkModal.open" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40" @click.self="bulkModal.open = false">
     <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-xl mx-4 max-h-screen overflow-y-auto">
-      <h2 class="text-lg font-bold text-gray-900 mb-4">Bulk Deploy Azure VMs</h2>
+      <!-- Say which entry point this is: the single modal now has a Count field for
+           "N copies of one image", so bulk needs to read as "one VM per image". -->
+      <h2 class="text-lg font-bold text-gray-900">Bulk Deploy Azure VMs</h2>
+      <p class="text-xs text-gray-500 mb-4">
+        <span x-text="bulkModal.items.length"></span> image<span x-show="bulkModal.items.length !== 1">s</span>
+        selected — one VM per image. To deploy several copies of a single image, use
+        the Count field on the normal deploy form.
+      </p>
 
       <!-- Per-image VM names -->
       <div class="space-y-2 mb-4">
@@ -509,9 +552,10 @@
         <template x-for="(img, idx) in bulkModal.items" :key="img.resource_id">
           <div class="flex items-center gap-3">
             <span class="text-xs text-gray-500 w-40 truncate" x-text="img.name"></span>
-            <input :x-model="'bulkModal.vmNames[' + idx + ']'" type="text"
-                   @input="bulkModal.vmNames[idx] = $event.target.value"
-                   :value="bulkModal.vmNames[idx]"
+            <!-- Plain x-model. `:x-model` is a bound attribute literally named
+                 "x-model", which Alpine does not evaluate as a directive — the manual
+                 @input/:value pair was doing all the work. -->
+            <input x-model="bulkModal.vmNames[idx]" type="text"
                    :placeholder="'vm-' + (idx+1)"
                    class="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm">
           </div>
@@ -542,7 +586,7 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
-            <select x-model="bulkModal.location" @change="loadNetworkOpts(true, bulkModal.location)" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+            <select x-model="bulkModal.location" @change="onBulkLocationChange()" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
               <template x-for="loc in networkOpts.locations" :key="loc">
                 <option :value="loc" x-text="loc"></option>
               </template>
@@ -565,12 +609,43 @@
           <label class="block text-xs font-medium text-gray-700 mb-1">Subnet</label>
           <select x-model="bulkModal.subnetId" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
             <option value="">Select a subnet…</option>
+            <!-- Region in the label — see the single-deploy picker above. -->
             <template x-for="s in networkOpts.subnets" :key="s.id">
-              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name"></option>
+              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name + (networkOpts.location ? ' (' + networkOpts.location + ')' : '')"></option>
             </template>
           </select>
         </div>
-        <div x-show="bulkModal.osType !== 'Windows'">
+        <!-- Network Security Groups (shared) -->
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Network Security Groups <span class="text-gray-400 font-normal">(shared, optional)</span></label>
+          <div class="border border-gray-300 rounded-md max-h-28 overflow-y-auto p-2 space-y-1">
+            <p x-show="(networkOpts.nsgs || []).length === 0" class="text-xs text-gray-400 p-1">No NSGs found.</p>
+            <template x-for="nsg in networkOpts.nsgs || []" :key="nsg.id">
+              <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                <input type="checkbox" :value="nsg.id" x-model="bulkModal.nsgIds"
+                       class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+                <span class="text-xs text-gray-700" x-text="nsg.name"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Admin / SSH username <span class="text-gray-400 font-normal">(shared)</span></label>
+            <input x-model="bulkModal.sshUsername" type="text" placeholder="azureuser"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+          </div>
+          <div class="flex items-end pb-2">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="bulkModal.createPublicIp"
+                     class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+              Create public IP
+            </label>
+          </div>
+        </div>
+
+        <div x-show="bulkHasLinux()">
           <label class="block text-xs font-medium text-gray-700 mb-2">SSH Public Key</label>
           <div x-show="bulkModal.keyvaultLoading" class="text-xs text-gray-400 py-2">Fetching key from Key Vault…</div>
           <div x-show="!bulkModal.keyvaultLoading && bulkModal.keyvaultError"
@@ -580,12 +655,42 @@
             <textarea x-model="bulkModal.sshPublicKey" rows="2" readonly
                       class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-xs font-mono resize-none text-gray-600 cursor-default"></textarea>
           </div>
+          <div class="mt-2">
+            <label class="block text-xs font-medium text-gray-700 mb-1">Override secret (optional)</label>
+            <select x-model="bulkModal.ssh_key_secret_override"
+                    class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+              <option value="">Use configured default</option>
+              <template x-for="s in bulkModal.sshKeySecrets || []" :key="s">
+                <option :value="s" x-text="s"></option>
+              </template>
+            </select>
+          </div>
         </div>
-        <div x-show="bulkModal.osType === 'Windows'" x-cloak
+        <div x-show="bulkHasWindows()" x-cloak
              class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
           Windows images: each VM gets its own generated admin password, stored in the
           secrets backend — retrieve via <strong>VMs → Password</strong>.
         </div>
+        <div x-show="bulkHasLinux() && bulkHasWindows()" x-cloak
+             class="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+          This batch mixes Linux and Windows images — Linux VMs use the SSH key above,
+          Windows VMs each get a generated admin password.
+        </div>
+
+        {% if entitle_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.register_in_entitle"
+                 class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+          Register each Linux VM in Entitle for just-in-time SSH access
+        </label>
+        {% endif %}
+        {% if password_safe_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.register_in_passwordsafe"
+                 class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+          Onboard each Linux VM into Password Safe (managed system + account)
+        </label>
+        {% endif %}
       </div>
 
       <div class="flex justify-end gap-3 mt-5">
@@ -875,6 +980,18 @@
                 <option value="rpm">RPM (.rpm)</option>
               </select>
             </div>
+            <div x-show="azurePackerForm.bt_epml" x-cloak>
+              <label class="block text-xs font-medium text-gray-600 mb-1">EPM-L package from</label>
+              <select x-model="azurePackerForm.bt_epml_source" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="beyondtrust">BeyondTrust (always current)</option>
+                <option value="storage">Asset storage (the synced copy)</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Storage pins the version you synced and doesn't need BeyondTrust reachable
+                from the build — sync it first on the Storage page. Not available on
+                local-filesystem storage.
+              </p>
+            </div>
           </div>
           <div>
             <p class="text-[11px] text-gray-400">EPM-L is installed at build; activation runs post-deploy via the EPM-L integration.</p>
@@ -943,6 +1060,7 @@
 function azureDashboard() {
   return {
     ...secretPickerState(),
+    ...deployNameState(),
     // State
     loading: false,
     credError: false,
@@ -964,10 +1082,14 @@ function azureDashboard() {
     networkOptsWarnings: [],
     privateImagesWarnings: [],
     keyvaultAvailable: false,
+    // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form dropdowns
+    // (shared, cloud-agnostic; fetched once). Empty when PRA isn't configured, so
+    // the dropdowns show only "(configured default)" and the backend falls back.
+    praPickers: { configured: false, jump_groups: [], gateways: [], loaded: false },
 
     // Modals
     deployModal: {
-      open: false, image: null, vmName: '', vmSize: 'Standard_B2s',
+      open: false, image: null, vmName: '', count: 1, vmSize: 'Standard_B2s',
       location: '{{ default_location }}', subnetId: '', nsgIds: [], sshUsername: 'azureuser',
       sshPublicKey: '', sshKeyMode: 'keyvault', createPublicIp: false, submitting: false,
       keyvaultLoading: false, keyvaultError: '', keyvaultSecretName: '',
@@ -1008,6 +1130,7 @@ function azureDashboard() {
       provisioner_env_vars: [],  // [{name, value, is_secret_ref}] → provisioner environment_vars
       bt_admin_user: '',      // → BT_ADMIN_USER (bt-ready provisioner)
       bt_epml: '',            // '' | 'deb' | 'rpm' → BT_EPML_URL (EPM-L install)
+      bt_epml_source: 'beyondtrust',  // 'beyondtrust' | 'storage' → where BT_EPML_URL points
     },
     azurePackerBuilding: false,
     azurePackerError: '',
@@ -1134,8 +1257,38 @@ function azureDashboard() {
       }
     },
 
-    async refreshNetworkOpts() {
-      await this.loadNetworkOpts(true);
+    // Header region picker. The private image list is regional too — under
+    // azure_region_configs each region resolves its own Shared Image Gallery — so
+    // switching the header region has to refetch both, or the Images tab keeps
+    // showing the previous region's gallery. (Replaces refreshNetworkOpts, which only
+    // reloaded half of what the picker governs.)
+    async onLocationChange() {
+      await Promise.all([
+        this.loadNetworkOpts(true),
+        this.loadPrivateImages(),
+      ]);
+    },
+
+    // Subnets and NSGs are regional: the ones listed for the previous location do not
+    // exist in the new one, so reloading the options is not enough — the *selection*
+    // has to go too. An Azure subnet id embeds the VNet's resource group rather than
+    // its region, and the sandbox names its VNet/subnet identically in every region,
+    // so a carried-over pick looks right and is rejected only once the NIC is created:
+    // "InvalidResourceReference". The deploy routes now reject it up front too
+    // (_reject_cross_region_network in api/azure.py) — this keeps the form from
+    // offering the mismatch in the first place.
+    async onDeployLocationChange() {
+      this.deployModal.subnetId = '';
+      this.deployModal.nsgIds = [];
+      await this.loadNetworkOpts(true, this.deployModal.location);
+    },
+
+    // Same for the bulk modal's shared Location, where the cost is higher: a stale
+    // subnet there fails every VM in the batch, after all N child job rows exist.
+    async onBulkLocationChange() {
+      this.bulkModal.subnetId = '';
+      this.bulkModal.nsgIds = [];
+      await this.loadNetworkOpts(true, this.bulkModal.location);
     },
 
     async loadMarketplace() {
@@ -1152,10 +1305,17 @@ function azureDashboard() {
       }
     },
 
-    async loadPrivateImages() {
+    // Scoped to one region's gallery. Defaults to the header region rather than to
+    // "whatever the server thinks" — same resolution order as loadNetworkOpts — so the
+    // no-argument callers (initial load, Refresh, post-delete reload) stay on the
+    // region the operator is actually looking at instead of snapping back to the
+    // configured default.
+    async loadPrivateImages(location = '') {
       this.imagesLoading = true;
       try {
-        const data = await API.get('/api/azure/images');
+        const loc = location || this.location || '';
+        const q = loc ? '?location=' + encodeURIComponent(loc) : '';
+        const data = await API.get('/api/azure/images' + q);
         this.privateImages = data.images || [];
         this.privateImagesWarnings = data.warnings || [];
       } catch (e) {
@@ -1201,6 +1361,17 @@ function azureDashboard() {
       return !!(img && img.source === 'gallery' && img.os_type === 'Windows');
     },
 
+    async loadPraPickers() {
+      // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form
+      // dropdowns (shared /api/pra/pickers). Fetched once, best-effort: on any
+      // failure the dropdowns just show "(configured default)".
+      if (this.praPickers.loaded) return;
+      try {
+        const r = await API.get('/api/pra/pickers');
+        if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], gateways: r.jumpoints || [], loaded: true };
+      } catch (e) { /* non-fatal */ }
+    },
+
     async openDeployModal(img) {
       // img may be null when invoked from "Deploy from URN/ID…" — user pastes
       // a marketplace URN (publisher:offer:sku:version) or a full ARM resource
@@ -1211,6 +1382,7 @@ function azureDashboard() {
         osType: img?.os_type || 'Linux',
         trustedLaunch: this._isTrustedLaunchImage(img),
         vmName: img?.name ? img.name.replace(/-image$/i, '') : '',
+        count: 1,
         vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
         location: this.location, subnetId: '', nsgIds: [], sshUsername: 'azureuser',
         sshPublicKey: '', sshKeyMode: 'keyvault', createPublicIp: false, submitting: false,
@@ -1219,8 +1391,10 @@ function azureDashboard() {
         register_in_entitle: false,
         register_in_passwordsafe: false,
         ssh_key_secret_override: '', sshKeySecrets: [],
+        jump_group: '', jumpoint_name: '',
       };
       await this.loadNetworkOpts();
+      this.loadPraPickers();
       API.get('/api/azure/secrets/ssh-keys')
         .then(r => { this.deployModal.sshKeySecrets = r?.secrets || []; })
         .catch(() => { this.deployModal.sshKeySecrets = []; });
@@ -1261,10 +1435,27 @@ function azureDashboard() {
       }
     },
 
+    // Preview of the names a count > 1 deploy will create. Budgeted to 15 characters
+    // for both OS types, because azure_service derives the in-guest hostname as
+    // vm_name[:15] regardless of OS — see NAME_LIMITS in app.js.
+    namePreviewFor() {
+      return this.namePreview(this.deployModal.vmName, this.deployModal.count,
+                              window.NAME_LIMITS.azure);
+    },
+
+    // Bulk means one VM per selected image, so a batch can span both OS types.
+    bulkHasLinux()   { return (this.bulkModal.osTypes || []).some(t => t !== 'Windows'); },
+    bulkHasWindows() { return (this.bulkModal.osTypes || []).some(t => t === 'Windows'); },
+
     async submitDeploy() {
       const m = this.deployModal;
       if (!m.vmName) return toast('VM Name is required', 'error');
       if (!m.subnetId) return toast('Please select a subnet', 'error');
+      const count = m.count || 1;
+      // No <form> on this modal, so the input's min/max never gates submit.
+      if (!(count >= 1 && count <= this.countMax)) {
+        return toast(`Count must be between 1 and ${this.countMax}`, 'error');
+      }
 
       const isWindows = m.osType === 'Windows';
       const sshPublicKey = isWindows ? '' : m.sshPublicKey.trim();
@@ -1294,6 +1485,7 @@ function azureDashboard() {
         const result = await API.post('/api/azure/deploy', {
           ...imageFields,
           vm_name: m.vmName,
+          count: count,
           vm_size: m.vmSize,
           location: m.location,
           subnet_id: m.subnetId,
@@ -1313,6 +1505,8 @@ function azureDashboard() {
           ssh_key_secret_override: m.ssh_key_secret_override || null,
         });
         m.open = false;
+        // A batch lands on the /jobs rollup; a single deploy keeps its own path.
+        if (window.afterDeploy(result, { label: 'Azure deploy' })) return;
         toast(`Azure VM deployment queued: ${m.vmName}`, 'success');
         window.location.href = `/jobs/${result.job_id}`;
       } catch (e) {
@@ -1322,14 +1516,15 @@ function azureDashboard() {
       }
     },
 
-    openBulkDeployModal() {
+    async openBulkDeployModal() {
       const selected = this.privateImages.filter(i => this.selectedImages.includes(i.resource_id));
       this.bulkModal = {
         open: true,
         items: selected,
-        // Bulk deploys use the first image for every VM, so its OS decides.
-        osType: selected[0]?.os_type || 'Linux',
-        trustedLaunch: this._isTrustedLaunchImage(selected[0]),
+        // One VM per selected image, so a batch can mix Linux and Windows. Keep the
+        // whole set — a single osType taken from selected[0] would be wrong for half
+        // the batch, and Windows changes the per-VM flow (password, no Shell Jump).
+        osTypes: [...new Set(selected.map(i => i.os_type || 'Linux'))],
         vmNames: selected.map(img => img.name ? img.name.replace(/-image$/i, '') : ''),
         vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
         location: this.location,
@@ -1341,8 +1536,33 @@ function azureDashboard() {
         keyvaultSecretName: '',
         submitting: false,
         workgroup: this._defaultWorkgroup(),
+        // These were read by submitBulkDeploy but never initialised here, so they were
+        // permanently undefined -> false with no way to turn them on.
+        nsgIds: [],
+        createPublicIp: false,
+        sshUsername: 'azureuser',
+        register_in_entitle: false,
+        register_in_passwordsafe: false,
+        ssh_key_secret_override: '',
+        sshKeySecrets: [],
       };
-      if (this.bulkModal.osType !== 'Windows') this.fetchBulkKeyvaultKey();
+      API.get('/api/azure/secrets/ssh-keys')
+        .then(r => { this.bulkModal.sshKeySecrets = r?.secrets || []; })
+        .catch(() => { this.bulkModal.sshKeySecrets = []; });
+      if (this.bulkHasLinux()) this.fetchBulkKeyvaultKey();
+      // The modal opens on the header region, so the pickers have to be re-scoped to
+      // ITS subnets/NSGs — networkOpts is shared with the single-deploy modal, and a
+      // Location change there earlier in the session leaves it on another region (the
+      // mirror of onBulkLocationChange). Safe to run after the modal is shown: both
+      // selections start blank, so nothing stale can be submitted while it is in
+      // flight, and the dropdowns fill in reactively.
+      await this.loadNetworkOpts(false, this.bulkModal.location);
+      // vmSize was seeded from the pre-reload list; VM sizes are location-scoped too,
+      // so a size the new region doesn't offer would submit blank.
+      const sizes = this.networkOpts.vm_sizes || [];
+      if (sizes.length && !sizes.includes(this.bulkModal.vmSize)) {
+        this.bulkModal.vmSize = sizes[0];
+      }
     },
 
     async fetchBulkKeyvaultKey() {
@@ -1364,31 +1584,42 @@ function azureDashboard() {
     async submitBulkDeploy() {
       const m = this.bulkModal;
       if (!m.subnetId) return toast('Please select a subnet', 'error');
+      if (!m.workgroup) return toast('Select a workgroup', 'error');
 
-      const isWindows = m.osType === 'Windows';
-      const sshPublicKey = isWindows ? '' : m.sshPublicKey.trim();
-      if (!isWindows && !sshPublicKey) return toast('SSH key not loaded — check Key Vault configuration.', 'error');
+      // Linux VMs in the batch need a key; a Windows-only batch does not.
+      const sshPublicKey = this.bulkHasLinux() ? (m.sshPublicKey || '').trim() : '';
+      if (this.bulkHasLinux() && !sshPublicKey) {
+        return toast('SSH key not loaded — check Key Vault configuration.', 'error');
+      }
 
+      // One VM per selected image. The image travels on the ITEM; the top-level
+      // fields stay populated from the first image as a fallback, which keeps an
+      // older server (which reads only the top level) behaving as it does today.
       const items = m.items.map((img, idx) => ({
         vm_name: m.vmNames[idx] || `vm-${idx + 1}`,
+        image_id: img.resource_id,
+        image_publisher: img.publisher || null,
+        image_offer: img.offer || null,
+        image_sku: img.sku || null,
+        image_version: img.version || null,
+        os_type: img.os_type || 'Linux',
+        trusted_launch: this._isTrustedLaunchImage(img),
       }));
-      // Use first image for all (bulk deploys same image)
       const firstImage = m.items[0];
-      const imageId = firstImage?.resource_id;
 
       m.submitting = true;
       try {
         const result = await API.post('/api/azure/bulk-deploy', {
           items,
-          image_id: imageId,
+          image_id: firstImage?.resource_id,
           vm_size: m.vmSize,
           location: m.location,
           subnet_id: m.subnetId,
-          nsg_ids: [],
-          create_public_ip: false,
-          os_type: m.osType,
-          trusted_launch: !!m.trustedLaunch,
-          ssh_username: 'azureuser',
+          nsg_ids: m.nsgIds || [],
+          create_public_ip: !!m.createPublicIp,
+          os_type: firstImage?.os_type || 'Linux',
+          trusted_launch: this._isTrustedLaunchImage(firstImage),
+          ssh_username: m.sshUsername || 'azureuser',
           ssh_public_key: sshPublicKey,
           workgroup: m.workgroup,
           register_in_entitle: !!m.register_in_entitle,
@@ -1401,13 +1632,10 @@ function azureDashboard() {
           image_version: firstImage?.version || null,
         });
         m.open = false;
+        if (window.afterDeploy(result, { label: 'Azure bulk deploy' })) return;
         const jobIds = result.jobs.map(j => j.job_id);
         toast(`Bulk deploy queued: ${jobIds.length} VMs`, 'success');
-        if (jobIds.length === 1) {
-          window.location.href = `/jobs/${jobIds[0]}`;
-        } else {
-          window.location.href = '/jobs';
-        }
+        window.location.href = jobIds.length === 1 ? `/jobs/${jobIds[0]}` : '/jobs';
       } catch (e) {
         toast(e.message || 'Bulk deploy failed', 'error');
       } finally {

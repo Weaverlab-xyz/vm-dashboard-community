@@ -10,10 +10,54 @@ previously FastAPI owned the exact ``/docs`` path, which made the two collide
 confusingly.
 """
 import html as _html
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
+
+# Everything GitHub's slugger deletes outright: anything that isn't a word
+# character, a literal ASCII hyphen, or a space.
+_SLUG_STRIP_RE = re.compile(r"[^\w\- ]", re.UNICODE)
+
+
+class _GitHubSlugger:
+    """Heading → anchor id, the way GitHub does it rather than the way
+    python-markdown does it by default.
+
+    The stock ``toc`` slugifier collapses a *run* of separators down to one
+    hyphen, so ``## OCI (Autonomous Database) — read the caveats`` becomes
+    ``#oci-autonomous-database-read-the-caveats`` here but
+    ``#oci-autonomous-database--read-the-caveats`` on GitHub. Every anchor link
+    in ``docs/`` is authored and checked against GitHub, so that one-character
+    difference silently dumped the reader at the top of the page instead of at
+    the section — 30 links' worth.
+
+    GitHub (``github-slugger``) lowercases, *deletes* punctuation, turns spaces
+    into hyphens, and de-duplicates with a ``-1``/``-2`` suffix. Deleting rather
+    than replacing is the whole trick: `` — `` is space-nothing-space, which
+    leaves two spaces and therefore two hyphens.
+
+    Construct one per rendered page — the de-duplication counter is per-document,
+    exactly like ``new GithubSlugger()`` is per file.
+
+    Known, deliberate divergence: github-slugger keeps a bare variation selector
+    (U+FE0F) when it strips the emoji in front of it, minting an anchor with an
+    invisible character in it. We drop it. Headings are checked by
+    ``tests/test_docs_anchors.py``, which will fail if a doc ever depends on one.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, int] = {}
+
+    def __call__(self, value: str, separator: str) -> str:
+        slug = _SLUG_STRIP_RE.sub("", value.lower()).replace(" ", separator)
+        original = slug
+        while slug in self._seen:
+            self._seen[original] += 1
+            slug = f"{original}{separator}{self._seen[original]}"
+        self._seen[slug] = 0
+        return slug
 
 
 def _render_markdown(text: str) -> str:
@@ -22,7 +66,11 @@ def _render_markdown(text: str) -> str:
     readable <pre> fallback rather than taking the whole dashboard down."""
     try:
         import markdown as _md
-        return _md.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
+        from markdown.extensions.toc import TocExtension
+        return _md.markdown(text, extensions=[
+            "fenced_code", "tables", "sane_lists",
+            TocExtension(slugify=_GitHubSlugger()),
+        ])
     except ModuleNotFoundError:
         return f"<pre>{_html.escape(text)}</pre>"
 
@@ -31,6 +79,12 @@ router = APIRouter(tags=["docs"])
 # repo_root/docs (parents[2] of this file is the app root; docs/ sits beside it,
 # and is COPYed into the image — see Dockerfile).
 _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
+
+# Only these sections are surfaced on the /docs index. Other subdirectories
+# (design/, notes/, runbooks/) still render if you know the path — they're just
+# internal enough that we don't want them cluttering the operator-facing index.
+# "General" is the synthetic name for docs that live at the docs/ root.
+_INDEX_SECTIONS = {"General", "integrations"}
 
 _SHELL = """<!doctype html>
 <html lang="en"><head>
@@ -75,6 +129,8 @@ async def doc_index() -> HTMLResponse:
         rel = path.relative_to(_DOCS_DIR).with_suffix("")
         section = str(rel.parent).replace("\\", "/")
         section = "General" if section == "." else section
+        if section not in _INDEX_SECTIONS:
+            continue
         title = rel.name.replace("-", " ").replace("_", " ").title()
         groups.setdefault(section, []).append((title, str(rel).replace("\\", "/")))
 

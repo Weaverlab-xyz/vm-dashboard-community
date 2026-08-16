@@ -21,14 +21,10 @@ class VSphereError(Exception):
     pass
 
 
-def _cfg(key: str) -> str:
-    from . import config_service
-    return config_service.get(key) or ""
-
-
-def _cfg_bool(key: str, default: bool = False) -> bool:
-    from . import config_service
-    return config_service.get_bool(key, default)
+# No _cfg here any more. This module used to read the singleton config keys directly,
+# which meant there could only ever be ONE vCenter. It now takes a resolved
+# `Connection` (services/hypervisor_connection_service) as its first argument, and the
+# router is the only layer that chooses which one.
 
 
 def _require_pyvmomi():
@@ -41,25 +37,26 @@ def _require_pyvmomi():
         )
 
 
-def _connect():
+def _connect(conn):
     """
-    Open a vSphere service instance.  Caller is responsible for calling
-    Disconnect() — use _session() context manager instead.
+    Open a vSphere service instance for ONE connection.  Caller is responsible for
+    calling Disconnect() — use the _session() context manager instead.
     """
     _require_pyvmomi()
     from pyVim.connect import SmartConnect
 
-    host = _cfg("vsphere_host")
+    host = conn.host
     if not host:
-        raise VSphereError("VSPHERE_HOST is not configured")
+        raise VSphereError(f"Connection {conn.name!r} has no host configured")
 
-    port     = int(_cfg("vsphere_port") or "443")
-    user     = _cfg("vsphere_user") or "administrator@vsphere.local"
-    password = _cfg("vsphere_password")
+    port     = int(conn.port or 443)
+    user     = conn.username or "administrator@vsphere.local"
+    password = conn.secret
     if not password:
-        raise VSphereError("VSPHERE_PASSWORD is not configured")
+        raise VSphereError(
+            f"Connection {conn.name!r} has no password. Edit it on the Connections page.")
 
-    verify_ssl = _cfg_bool("vsphere_verify_ssl", False)
+    verify_ssl = conn.verify_ssl
     if verify_ssl:
         ctx = ssl.create_default_context()
     else:
@@ -71,10 +68,14 @@ def _connect():
 
 
 class _session:
-    """Context manager: opens a vSphere session and always disconnects."""
+    """Context manager: opens a vSphere session for one connection and always
+    disconnects."""
+    def __init__(self, conn):
+        self._conn = conn
+
     def __enter__(self):
         from pyVim.connect import Disconnect
-        self._si = _connect()
+        self._si = _connect(self._conn)
         self._disconnect = Disconnect
         return self._si
 
@@ -150,11 +151,11 @@ def _normalise_vm(vm) -> dict:
     }
 
 
-def _all_vms_sync(datacenter_filter: str = "") -> list[dict]:
+def _all_vms_sync(conn, datacenter_filter: str = "") -> list[dict]:
     """Return all non-template VMs, optionally filtered to one datacenter."""
     from pyVmomi import vim
 
-    with _session() as si:
+    with _session(conn) as si:
         content = si.RetrieveContent()
         root    = content.rootFolder
 
@@ -177,9 +178,9 @@ def _all_vms_sync(datacenter_filter: str = "") -> list[dict]:
     return sorted(vms, key=lambda v: v["name"].lower())
 
 
-def _list_datacenters_sync() -> list[str]:
+def _list_datacenters_sync(conn) -> list[str]:
     from pyVmomi import vim
-    with _session() as si:
+    with _session(conn) as si:
         content   = si.RetrieveContent()
         container = content.viewManager.CreateContainerView(
             content.rootFolder, [vim.Datacenter], False
@@ -191,9 +192,9 @@ def _list_datacenters_sync() -> list[str]:
     return sorted(names)
 
 
-def _list_hosts_sync() -> list[dict]:
+def _list_hosts_sync(conn) -> list[dict]:
     from pyVmomi import vim
-    with _session() as si:
+    with _session(conn) as si:
         content   = si.RetrieveContent()
         container = content.viewManager.CreateContainerView(
             content.rootFolder, [vim.HostSystem], True
@@ -218,9 +219,9 @@ def _list_hosts_sync() -> list[dict]:
     return sorted(hosts, key=lambda h: h["name"])
 
 
-def _get_vm_sync(moref: str) -> dict:
+def _get_vm_sync(conn, moref: str) -> dict:
     from pyVmomi import vim
-    with _session() as si:
+    with _session(conn) as si:
         content   = si.RetrieveContent()
         container = content.viewManager.CreateContainerView(
             content.rootFolder, [vim.VirtualMachine], True
@@ -250,14 +251,14 @@ def _wait_for_task(task, timeout: int = 300):
         raise VSphereError(f"Task failed: {msg}")
 
 
-def _power_op_sync(moref: str, op: str) -> dict:
+def _power_op_sync(conn, moref: str, op: str) -> dict:
     """
     Execute a power operation on a VM identified by its managed object reference.
     op: start | shutdown | stop | reset | suspend
     """
     from pyVmomi import vim
 
-    with _session() as si:
+    with _session(conn) as si:
         content   = si.RetrieveContent()
         container = content.viewManager.CreateContainerView(
             content.rootFolder, [vim.VirtualMachine], True
@@ -305,43 +306,43 @@ def _power_op_sync(moref: str, op: str) -> dict:
 
 # ── Async public API ──────────────────────────────────────────────────────────
 
-async def list_datacenters() -> list[str]:
+async def list_datacenters(conn) -> list[str]:
     try:
-        return await asyncio.to_thread(_list_datacenters_sync)
+        return await asyncio.to_thread(_list_datacenters_sync, conn)
     except VSphereError:
         raise
     except Exception as e:
         raise VSphereError(f"Failed to list datacenters: {e}") from e
 
 
-async def list_hosts() -> list[dict]:
+async def list_hosts(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_hosts_sync)
+        return await asyncio.to_thread(_list_hosts_sync, conn)
     except VSphereError:
         raise
     except Exception as e:
         raise VSphereError(f"Failed to list hosts: {e}") from e
 
 
-async def list_vms(datacenter: str = "") -> list[dict]:
+async def list_vms(conn, datacenter: str = "") -> list[dict]:
     try:
-        return await asyncio.to_thread(_all_vms_sync, datacenter)
+        return await asyncio.to_thread(_all_vms_sync, conn, datacenter)
     except VSphereError:
         raise
     except Exception as e:
         raise VSphereError(f"Failed to list VMs: {e}") from e
 
 
-async def get_vm(moref: str) -> dict:
+async def get_vm(conn, moref: str) -> dict:
     try:
-        return await asyncio.to_thread(_get_vm_sync, moref)
+        return await asyncio.to_thread(_get_vm_sync, conn, moref)
     except VSphereError:
         raise
     except Exception as e:
         raise VSphereError(f"Failed to get VM detail: {e}") from e
 
 
-async def power_op(moref: str, op: str) -> dict:
+async def power_op(conn, moref: str, op: str) -> dict:
     """
     Power operation: start | shutdown | stop | reset | suspend
     'stop' is force power-off; prefer 'shutdown' for a graceful guest OS halt.
@@ -350,7 +351,7 @@ async def power_op(moref: str, op: str) -> dict:
     if op not in valid:
         raise VSphereError(f"Invalid operation '{op}'. Must be one of: {', '.join(sorted(valid))}")
     try:
-        return await asyncio.to_thread(_power_op_sync, moref, op)
+        return await asyncio.to_thread(_power_op_sync, conn, moref, op)
     except VSphereError:
         raise
     except Exception as e:

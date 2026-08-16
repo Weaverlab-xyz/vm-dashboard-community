@@ -2,25 +2,53 @@
 {% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Databases – Infrastructure Management{% endblock %}
 
-{# Cloud database infrastructure page. PostgreSQL on AWS is the live engine/cloud
-   (provision → private RDS → BeyondTrust PRA tunnel → decommission); other
-   engines/clouds are "coming soon" (Phase 3) and the API returns 501 for them.
-   Backed by /api/databases (gated by cloud_database_enabled). #}
+{# Database infrastructure page. Two ways a row gets here: provisioned — Postgres/
+   MySQL/SQL Server on AWS/Azure/GCP and Oracle Autonomous DB on OCI, wired end to end
+   (provision → private managed DB → BeyondTrust PRA tunnel → decommission) — or
+   registered, a database that already existed, on-premises (cloud='local') or in a
+   cloud, recorded so it can be a Configuration Management target. Provisioning needs a
+   Terraform module, so it's cloud-only; registering needs only somewhere to reach.
+   Backed by /api/databases (gated by cloud_database_enabled), and the delete verb
+   follows source — a registered row is deregistered, not destroyed.
+   The "Register in Entitle" button is additionally gated
+   on d.entitle_viable, which is false for two kinds of row: a REGISTERED database
+   (no provisioning credential to hand the connector) and managed SQL Server (Cloud
+   SQL / RDS-standard / Azure SQL Database can't grant the sysadmin/CONTROL SERVER
+   its connector needs). See _entitle_viable in cloud_database_service.py — the API
+   rejects the same rows with a 400, so hiding the button is belt-and-braces. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="databasesPage()" x-init="init()">
 
   <div class="flex items-center justify-between mb-1">
-    <h1 class="text-2xl font-bold text-gray-800">Cloud Databases</h1>
-    <button @click="openProvision()"
-            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
-      Provision database
-    </button>
+    <h1 class="text-2xl font-bold text-gray-800">Databases</h1>
+    <div class="flex items-center gap-2">
+      {% if password_safe_enabled %}
+      <button @click="openImport()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Import from Password Safe
+      </button>
+      <button @click="openRegister()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Register existing
+      </button>
+      {% endif %}
+      <button @click="openProvision()"
+              class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+        Provision database
+      </button>
+    </div>
   </div>
   <p class="text-sm text-gray-500 mb-6">
-    Managed databases are provisioned <strong>private</strong> (no public endpoint) and
-    reached only through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL, MySQL,
-    and SQL Server</strong> across <strong>AWS, Azure, and GCP</strong> are all supported.
+    {% if password_safe_enabled %}<strong>Import from Password Safe</strong> to pick from the databases
+    Password Safe already discovered — it knows the platform, port and accounts, so there is nothing
+    to type. <strong>Register</strong> one by hand if it isn't in Password Safe.{% else %}<strong>Register</strong>
+    a database that already exists — on-premises or in any cloud — so it can be a Configuration
+    Management target.{% endif %} Or <strong>provision</strong> a new one:
+    managed databases are built <strong>private</strong> (no public endpoint) and reached only
+    through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL, MySQL, and SQL
+    Server</strong> across <strong>AWS, Azure, and GCP</strong> are supported, plus Oracle on
+    OCI. Provisioning needs a Terraform module, so it's cloud-only; registering isn't.
   </p>
 
   <!-- Toast -->
@@ -28,7 +56,7 @@
        :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
        class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
 
-  <!-- All cloud databases (unified list) -->
+  <!-- All databases, provisioned and registered (unified list) -->
   <div>
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
       <div x-show="!loading && regions().length > 1" x-cloak
@@ -48,13 +76,15 @@
       </div>
       <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
       <div x-show="!loading && databases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
-        No databases yet. Click <strong>Provision database</strong> to create a private managed instance.
+        No databases yet. Click <strong>Provision database</strong> to create a private managed
+        instance{% if password_safe_enabled %}, <strong>Import from Password Safe</strong> to pick from
+        the ones it already knows about, or <strong>Register existing</strong> to record one by hand{% endif %}.
       </div>
       <table x-show="!loading && databases.length > 0" x-cloak class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
             <th class="px-4 py-3">Engine</th>
-            <th class="px-4 py-3">Cloud</th>
+            <th class="px-4 py-3">Location</th>
             <th class="px-4 py-3">Region</th>
             <th class="px-4 py-3">Status</th>
             <th class="px-4 py-3">Endpoint (private)</th>
@@ -70,7 +100,7 @@
                 <div class="text-xs text-gray-400" x-text="d.provider"></div>
               </td>
               <td class="px-4 py-3">
-                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" x-text="d.cloud"></span>
+                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" x-text="locationLabel(d.cloud)"></span>
               </td>
               <td class="px-4 py-3 text-gray-500" x-text="d.region"></td>
               <td class="px-4 py-3">
@@ -87,15 +117,18 @@
               <td class="px-4 py-3 text-right whitespace-nowrap">
                 <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
                 <button @click="entitleRegister(d)"
-                        x-show="entitleRegEnabled && d.status === 'available' && !d.entitle_integration_id"
+                        x-show="entitleRegEnabled && d.status === 'available' && !d.entitle_integration_id && d.entitle_viable"
                         title="Register this database as an Entitle integration so users request JIT access (ephemeral accounts)"
                         class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium ml-1">Register in Entitle</button>
                 <button @click="entitleDeregister(d)"
                         x-show="entitleRegEnabled && d.entitle_integration_id"
                         title="Remove this database's Entitle integration"
                         class="text-xs px-2 py-1 text-fuchsia-700 hover:underline ml-1">Deregister</button>
+                <!-- Verb follows source, the same branch decommission() takes: a registered
+                     row is deregistered, not destroyed. -->
                 <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
-                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Decommission</button>
+                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1"
+                        x-text="d.source === 'registered' ? 'Deregister' : 'Decommission'"></button>
               </td>
             </tr>
           </template>
@@ -103,6 +136,272 @@
       </table>
     </div>
   </div>
+
+  {% if password_safe_enabled %}
+  <!-- Register-existing modal — records a database the dashboard did not create -->
+  <div x-show="showRegister" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showRegister = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Register an existing database</h3>
+        <button @click="showRegister = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+        <p class="text-sm text-gray-500">
+          Record a database the dashboard didn't provision — on-premises or in a cloud — so it
+          can be a Configuration Management target. Nothing is created or changed; removing it
+          later deregisters it and leaves the database alone.
+        </p>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Engine</label>
+            <select x-model="reg.engine" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="postgres">PostgreSQL</option>
+              <option value="mysql">MySQL</option>
+              <option value="sqlserver">SQL Server</option>
+              <option value="oracle">Oracle</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Location</label>
+            <select x-model="reg.cloud" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="local">On-premises</option>
+              <option value="azure">Azure</option>
+              <option value="aws">AWS</option>
+              <option value="gcp">GCP</option>
+              <option value="oci">OCI</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3">
+          <div class="col-span-2">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Host</label>
+            <input type="text" x-model="reg.host" @change="loadRegAccounts()"
+                   placeholder="db.corp.internal"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Port</label>
+            <input type="number" x-model.number="reg.port" placeholder="5432"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            Database name <span class="text-gray-400 font-normal">(optional — SQL Server uses master)</span>
+          </label>
+          <input type="text" x-model="reg.db_name" placeholder="appdb"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        </div>
+
+        <div class="pt-2 border-t border-gray-100">
+          <p class="text-sm font-medium text-gray-700 mb-1">
+            Admin account
+            <span class="text-gray-400 font-normal">(Password Safe — checked out just-in-time)</span>
+          </p>
+          <p x-show="regAccountsLoading" class="text-[11px] text-gray-400">Looking up managed accounts…</p>
+          <p x-show="!regAccountsLoading && regAccountsError" x-text="regAccountsError"
+             class="text-[11px] text-amber-600"></p>
+          <p x-show="!regAccountsLoading && !regAccountsError && regSystems.length === 0"
+             class="text-[11px] text-gray-400">
+            No Password Safe managed accounts found for this host. Enter the host above, then
+            onboard it in Password Safe — the dashboard never stores a database credential.
+          </p>
+          <template x-if="regSystems.length > 0">
+            <select x-model="reg.accountKey"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">— select an account —</option>
+              <template x-for="s in regSystems" :key="s.system_id">
+                <optgroup :label="`${s.name} (${s.ip})`">
+                  <template x-for="a in s.accounts" :key="a.account_id">
+                    <option :value="`${s.system_id}:${a.account_id}:${a.name}`" x-text="a.name"></option>
+                  </template>
+                </optgroup>
+              </template>
+            </select>
+          </template>
+        </div>
+
+        <div x-show="regError" x-cloak
+             class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
+             x-text="regError"></div>
+      </div>
+
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+        <button @click="showRegister = false"
+                class="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+        <button @click="submitRegister()" :disabled="!reg.host || !reg.accountKey || regSaving"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+          <span x-show="!regSaving">Register</span>
+          <span x-show="regSaving" x-cloak>Registering…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import from Password Safe. Password Safe already discovered these with managed
+       credentials, so every field is read from it; eligibility is decided server-side
+       and arrives as `eligible` + `reason`, so this list never offers a checkbox the
+       import endpoint would refuse. -->
+  <div x-show="showImport" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showImport = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Import from Password Safe</h3>
+        <button @click="showImport = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+        <p class="text-sm text-gray-500">
+          Databases Password Safe already knows about. Importing records them here so they can be
+          Configuration Management targets — the credential stays in Password Safe and is checked
+          out at run time. Nothing in Password Safe is created or changed.
+        </p>
+
+        <div x-show="impLoading" x-cloak class="text-sm text-gray-400">Reading Password Safe…</div>
+
+        <div x-show="!impEnabled" x-cloak
+             class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          BeyondTrust is turned off. Enable it in Settings → Integrations → BeyondTrust.
+        </div>
+        <div x-show="impEnabled && !impConfigured" x-cloak
+             class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2"
+             x-text="impReason"></div>
+        <div x-show="impError" x-cloak
+             class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
+             x-text="impError"></div>
+
+        <template x-for="w in impWarnings" :key="w">
+          <div class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2"
+               x-text="w"></div>
+        </template>
+        <div x-show="impTruncated" x-cloak
+             class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          Showing the first <span x-text="impCandidates.length"></span> — set an import workgroup in
+          Settings → Integrations → BeyondTrust to narrow the list rather than raising the cap.
+        </div>
+
+        <div x-show="!impLoading && impConfigured && impEnabled" x-cloak class="space-y-4">
+          <div class="flex items-end gap-3">
+            <div class="w-56">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
+              <select x-model="impCloud"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="local">On-premises</option>
+                <option value="aws">AWS</option>
+                <option value="azure">Azure</option>
+                <option value="gcp">GCP</option>
+                <option value="oci">OCI</option>
+              </select>
+            </div>
+            <p class="text-xs text-gray-400 pb-2">
+              Applies to everything in this batch. Password Safe does not record a cloud, and this
+              decides which runner reaches the database — a wrong value fails the run, not the import.
+            </p>
+          </div>
+
+          <div x-show="impCandidates.length === 0" x-cloak class="p-6 text-center text-sm text-gray-400">
+            Password Safe has no database managed systems to show.
+          </div>
+
+          <div x-show="impCandidates.length > 0" x-cloak
+               class="border border-gray-200 rounded-lg overflow-hidden">
+            <table class="min-w-full text-sm">
+              <thead>
+                <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+                  <th class="px-3 py-2 w-10">
+                    <input type="checkbox" @change="impToggleAll($event.target.checked)"
+                           :checked="impAllShownSelected()"
+                           :disabled="impSelectableShown().length === 0"
+                           title="Select every importable database"
+                           class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30">
+                  </th>
+                  <th class="px-3 py-2">System</th>
+                  <th class="px-3 py-2">Engine</th>
+                  <th class="px-3 py-2">Endpoint</th>
+                  <th class="px-3 py-2">Account</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                <template x-for="c in impCandidates" :key="c.system_id">
+                  <tr :class="impSelectable(c) ? '' : 'opacity-50'">
+                    <td class="px-3 py-2 align-top">
+                      <input type="checkbox" :checked="impIsSelected(c)" @change="impToggle(c)"
+                             :disabled="!impSelectable(c)" :title="impDisabledReason(c)"
+                             class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30 disabled:cursor-not-allowed">
+                    </td>
+                    <td class="px-3 py-2 align-top">
+                      <div class="font-medium text-gray-800" x-text="c.name || ('#' + c.system_id)"></div>
+                      <div class="text-xs text-gray-400" x-text="c.platform"></div>
+                      <div x-show="!impSelectable(c)" x-cloak
+                           class="text-xs text-amber-700 mt-1" x-text="impDisabledReason(c)"></div>
+                    </td>
+                    <td class="px-3 py-2 align-top">
+                      <span x-text="c.engine || '—'"></span>
+                      <div class="text-xs text-gray-400" x-show="c.version" x-text="c.version"></div>
+                    </td>
+                    <td class="px-3 py-2 align-top font-mono text-xs">
+                      <span x-text="(c.host || '—') + (c.port ? ':' + c.port : '')"></span>
+                      <div class="text-gray-400" x-show="c.db_name" x-text="c.db_name"></div>
+                    </td>
+                    <td class="px-3 py-2 align-top">
+                      <select x-show="c.accounts.length > 0" x-model.number="impAccount[c.system_id]"
+                              :disabled="!impSelectable(c)"
+                              class="w-full border border-gray-300 rounded px-2 py-1 text-xs disabled:opacity-50">
+                        <template x-for="a in c.accounts" :key="a.account_id">
+                          <option :value="a.account_id" x-text="a.name"></option>
+                        </template>
+                      </select>
+                      <span x-show="c.accounts.length === 0" x-cloak class="text-xs text-gray-400">none</span>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <p x-show="impCachedAt" x-cloak class="text-xs text-gray-400"
+             x-text="'Password Safe data as of ' + impCachedAt"></p>
+        </div>
+
+        <!-- Partial success: the modal stays open, because this is the only place the
+             per-row reasons are shown. -->
+        <div x-show="impResult && impResult.failed && impResult.failed.length" x-cloak
+             class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 space-y-1">
+          <p class="text-sm font-medium text-amber-900">
+            Imported <span x-text="impResult ? impResult.count : 0"></span>;
+            <span x-text="impResult ? impResult.failed.length : 0"></span> could not be imported:
+          </p>
+          <template x-for="f in (impResult ? impResult.failed : [])" :key="f.system_id">
+            <p class="text-xs text-amber-800">
+              <span class="font-medium" x-text="f.name"></span> — <span x-text="f.error"></span>
+            </p>
+          </template>
+        </div>
+      </div>
+
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-between items-center gap-2">
+        <span class="text-xs text-gray-400"
+              x-text="impSelected.length ? impSelected.length + ' selected' : ''"></span>
+        <div class="flex gap-2">
+          <button @click="showImport = false"
+                  class="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button @click="submitImport()" :disabled="impSelected.length === 0 || impSaving"
+                  class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+            <span x-show="!impSaving" x-text="impSelected.length > 1 ? ('Import ' + impSelected.length + ' databases') : 'Import'"></span>
+            <span x-show="impSaving" x-cloak>Importing…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   <!-- Provision modal -->
   <div x-show="showForm" x-cloak
@@ -136,7 +435,13 @@
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Region *</label>
-            <input type="text" x-model="form.region" @change="onRegionChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-east-2">
+            <select x-model="form.region" @change="onRegionChange()" :disabled="loadingOptions"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <option value="">Select region…</option>
+              <template x-for="r in options.regions || []" :key="r">
+                <option :value="r" x-text="r"></option>
+              </template>
+            </select>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
@@ -320,18 +625,18 @@
               </select>
             </div>
             <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
               <select x-model="form.jumpoint_name" :disabled="loadingOptions"
                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
                 <option value="">(configured default)</option>
-                <template x-for="j in options.jumpoints || []" :key="j.id">
+                <template x-for="j in options.gateways || []" :key="j.id">
                   <option :value="j.name" x-text="j.name"></option>
                 </template>
               </select>
             </div>
           </div>
-          <p x-show="!loadingOptions && (options.jump_groups || []).length === 0 && (options.jumpoints || []).length === 0" x-cloak
-             class="text-xs text-gray-400">No PRA jump groups/jumpoints returned — the tunnel falls back to the configured defaults (check PRA config to pick per-DB).</p>
+          <p x-show="!loadingOptions && (options.jump_groups || []).length === 0 && (options.gateways || []).length === 0" x-cloak
+             class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the tunnel falls back to the configured defaults (check PRA config to pick per-DB).</p>
           {{ secret_picker("form", "praCredBackend", "pra_credential_ref",
                            "PRA credential", "Resolved to a bt_client_secret override for this DB's tunnel provisioning.") }}
         </div>
@@ -396,7 +701,28 @@ function databasesPage() {
     entitleRegEnabled: {{ entitle_registration_enabled | default(false) | tojson }},
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
-    options: { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] },
+
+    // Register-existing: a database the dashboard didn't provision. The credential is
+    // a Password Safe managed account, so only its ids travel — never a password.
+    showRegister: false, regSaving: false, regError: '',
+    regSystems: [], regAccountsLoading: false, regAccountsError: '',
+    reg: { engine: 'postgres', cloud: 'local', host: '', port: null, db_name: '', accountKey: '' },
+
+    // Import-from-Password-Safe. Every key is prefixed `imp` on purpose: this page's
+    // `options` state object is pinned by tests/test_pra_picker_bindings.py, so a
+    // second object by that name here would break the Gateway-picker assertion.
+    // Note there is no colon-packed account key like reg.accountKey — the import
+    // posts {system_id, account_id} as numbers, so a ':' in an account name cannot
+    // break it. Don't "unify" the two.
+    showImport: false, impLoading: false, impSaving: false,
+    impEnabled: true, impConfigured: true, impError: '', impReason: '',
+    impCandidates: [], impWarnings: [], impTruncated: false, impCachedAt: '',
+    impSelected: [],        // system_ids
+    impAccount: {},         // system_id -> account_id
+    impCloud: 'local',
+    impResult: null,
+
+    options: { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] },
     loadingOptions: false, optionsError: '',
     form: { engine: 'postgres', cloud: 'aws', region: '', name: '', master_username: 'dbadmin',
             instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
@@ -407,7 +733,37 @@ function databasesPage() {
 
     _pollTimer: null,
 
-    async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
+    async init() {
+      requireAuth();
+      this.loadSecretBackends();
+      await this.refresh();
+      this.openFromQuery();
+    },
+
+    // ?register=1&engine=…&host=…&port=… prefill for this form.
+    //
+    // Agent discovery no longer produces database findings — Password Safe already
+    // knows these, with the platform and accounts a socket probe never could, so
+    // "Import from Password Safe" replaced that path. See docs/databases.md. This
+    // handler stays because the link still works if someone has one bookmarked.
+    openFromQuery() {
+      const q = new URLSearchParams(window.location.search);
+      if (!q.get('register')) return;
+      this.openRegister();
+      // mariadb is probed as its own engine but registered as mysql — the tunnel and the
+      // Config Management play are the same, and 'mariadb' is not one of the four values
+      // the select offers. Anything else is ignored rather than assigned, so a stray
+      // query param cannot leave the dropdown showing a value the API would reject.
+      const engine = (q.get('engine') || '').trim().toLowerCase();
+      const mapped = engine === 'mariadb' ? 'mysql' : engine;
+      if (['postgres', 'mysql', 'sqlserver', 'oracle'].includes(mapped)) {
+        this.reg.engine = mapped;
+      }
+      if (q.get('host')) this.reg.host = q.get('host');
+      const port = parseInt(q.get('port'), 10);
+      if (port > 0) this.reg.port = port;
+      if (this.reg.host) this.loadRegAccounts();
+    },
 
     // Region filter for the list — distinct from options.region, which is the
     // provision form's target region.
@@ -446,6 +802,161 @@ function databasesPage() {
       }
     },
 
+    openRegister() {
+      this.reg = { engine: 'postgres', cloud: 'local', host: '', port: null, db_name: '', accountKey: '' };
+      this.regSystems = [];
+      this.regError = '';
+      this.regAccountsError = '';
+      this.showRegister = true;
+    },
+
+    // ── Import from Password Safe ──────────────────────────────────────────────
+
+    openImport() {
+      this.impSelected = [];
+      this.impAccount = {};
+      this.impResult = null;
+      this.impError = '';
+      this.showImport = true;
+      this.loadImportCandidates();
+    },
+
+    async loadImportCandidates() {
+      this.impLoading = true;
+      this.impError = '';
+      try {
+        const data = await API.get('/api/databases/ps-candidates');
+        this.impEnabled = data.enabled !== false;
+        this.impConfigured = data.configured !== false;
+        this.impReason = data.reason || '';
+        this.impError = data.error || '';
+        this.impCandidates = data.systems || [];
+        this.impWarnings = data.warnings || [];
+        this.impTruncated = !!data.truncated;
+        this.impCachedAt = data.cached_at || '';
+        if (data.default_cloud) this.impCloud = data.default_cloud;
+        // Preselect each row's first account so "select all → Import" works without
+        // opening every dropdown. The list is sorted so a plain account name beats a
+        // ';'-suffixed cloud-plugin one.
+        const chosen = {};
+        for (const c of this.impCandidates) {
+          if (c.accounts && c.accounts.length) chosen[c.system_id] = c.accounts[0].account_id;
+        }
+        this.impAccount = chosen;
+        // Drop anything that stopped being importable while the modal was open.
+        this.impSelected = this.impSelected.filter(
+          id => this.impCandidates.some(c => c.system_id === id && this.impSelectable(c)));
+      } catch (e) {
+        this.impError = e.message || 'Failed to read Password Safe.';
+        this.impCandidates = [];
+      } finally {
+        this.impLoading = false;
+      }
+    },
+
+    // Eligibility is the SERVER's answer, never a rule invented here — so the list
+    // cannot offer a checkbox the import endpoint would refuse.
+    impSelectable(c) { return !!c.eligible && !c.already_imported; },
+    impDisabledReason(c) {
+      if (c.already_imported) return 'Already in the dashboard — a database is registered at this host for this engine.';
+      return c.reason || 'Not importable.';
+    },
+    impIsSelected(c) { return this.impSelected.includes(c.system_id); },
+    impToggle(c) {
+      if (!this.impSelectable(c)) return;
+      const i = this.impSelected.indexOf(c.system_id);
+      if (i === -1) this.impSelected.push(c.system_id); else this.impSelected.splice(i, 1);
+    },
+    impSelectableShown() { return this.impCandidates.filter(c => this.impSelectable(c)); },
+    impAllShownSelected() {
+      const shown = this.impSelectableShown();
+      return shown.length > 0 && shown.every(c => this.impIsSelected(c));
+    },
+    impToggleAll(checked) {
+      this.impSelected = checked ? this.impSelectableShown().map(c => c.system_id) : [];
+    },
+    impClearSelection() { this.impSelected = []; },
+
+    async submitImport() {
+      this.impSaving = true;
+      this.impError = '';
+      this.impResult = null;
+      try {
+        // Ids only. The server re-resolves each system from its own Password Safe
+        // read, so there is nothing here that could point an import at another host.
+        const items = this.impSelected.map(id => ({
+          system_id: id,
+          account_id: this.impAccount[id],
+          cloud: this.impCloud,
+        }));
+        const r = await API.post('/api/databases/ps-import', { items });
+        this.impResult = r;
+        await this.refresh();
+        if (!(r.failed || []).length) {
+          this.showImport = false;
+          this.flash(`Imported ${r.count} database${r.count === 1 ? '' : 's'} — they can now be selected in Configuration Management.`);
+        } else {
+          // Partial success is a normal outcome of a bulk action, so the modal stays
+          // open: closing it would hide the only place the per-row reasons appear.
+          this.impSelected = r.failed.map(f => f.system_id);
+          this.flash(`Imported ${r.count}; ${r.failed.length} could not be imported.`,
+                     r.count ? 'success' : 'error');
+          await this.loadImportCandidates();
+        }
+      } catch (e) {
+        this.impError = e.message || 'Import failed.';
+      } finally {
+        this.impSaving = false;
+      }
+    },
+
+    async loadRegAccounts() {
+      // Same lookup the Config Management run form uses — managed systems and their
+      // accounts for this host, ids and names only.
+      const host = (this.reg.host || '').trim();
+      this.regSystems = [];
+      this.regAccountsError = '';
+      if (!host) return;
+      this.regAccountsLoading = true;
+      try {
+        const data = await API.get('/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(host));
+        this.regSystems = data.systems || [];
+      } catch (e) {
+        this.regAccountsError = e.message;
+      } finally {
+        this.regAccountsLoading = false;
+      }
+    },
+
+    async submitRegister() {
+      this.regSaving = true;
+      this.regError = '';
+      try {
+        const [systemId, accountId, ...nameParts] = (this.reg.accountKey || '').split(':');
+        await API.post('/api/databases/register', {
+          engine: this.reg.engine,
+          cloud: this.reg.cloud,
+          host: (this.reg.host || '').trim(),
+          port: this.reg.port || null,
+          db_name: (this.reg.db_name || '').trim(),
+          managed_account: {
+            system_id: Number(systemId),
+            account_id: Number(accountId),
+            // Rejoin: an account name may itself contain a colon (the cloud-plugin
+            // scope suffix uses ';', but don't assume the separator is unique).
+            account_name: nameParts.join(':'),
+          },
+        });
+        this.showRegister = false;
+        await this.refresh();
+        this.flash('Database registered — it can now be selected in Configuration Management.');
+      } catch (e) {
+        this.regError = e.message || 'Registration failed.';
+      } finally {
+        this.regSaving = false;
+      }
+    },
+
     openProvision() {
       const cloud = 'aws';   // modal opens on AWS; the Cloud select switches it
       this.form = { engine: 'postgres', cloud, region: '', name: '', master_username: 'dbadmin',
@@ -453,7 +964,7 @@ function databasesPage() {
                     tier: 'db-f1-micro', disk_size: null, private_network: '',
                     sku_name: 'B_Standard_B1ms', storage_gb: 32,
                     jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' };
-      this.options = { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] };
+      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] };
       this.optionsError = '';
       this.showForm = true;
       this.loadOptions();   // fire-and-forget — the modal opens immediately, EC2-style
@@ -472,7 +983,10 @@ function databasesPage() {
         const o = await API.get('/api/databases/options?' + qs.toString());
         if (!o) return;   // 401 → API helper redirected to login
         o.cloud = this.form.cloud;
-        this.options = o;
+        // The endpoint answers with `o.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        this.options = { ...o, gateways: o.jumpoints || [] };
         if (!this.form.region) this.form.region = o.region;
         // Typical AWS sandbox: exactly one DB subnet group — preselect it.
         const groups = o.db_subnet_groups || [];
@@ -515,7 +1029,7 @@ function databasesPage() {
       this.form.region = '';
       this.form.db_subnet_group_name = '';
       this.form.vpc_security_group_ids = [];
-      this.options = { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] };
+      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] };
       this.optionsError = '';
       this.loadOptions();
     },
@@ -580,13 +1094,21 @@ function databasesPage() {
     },
 
     async decommission(d) {
-      if (!confirm(`Decommission "${d.engine}" database in ${d.region}?\n\nThis removes the PRA tunnel and destroys the instance.`)) return;
+      // A registered database is someone else's: the dashboard has no Terraform state
+      // for it and deleting the row must not promise destruction.
+      const registered = d.source === 'registered';
+      const prompt = registered
+        ? `Deregister "${d.engine}" at ${d.private_host || d.id}?\n\nThis removes it from the dashboard only — the database itself is left running.`
+        : `Decommission "${d.engine}" database in ${d.region}?\n\nThis removes the PRA tunnel and destroys the instance.`;
+      if (!confirm(prompt)) return;
       try {
         await API.del(`/api/databases/${d.id}`);
-        this.flash('Decommission started — watch the row status (tracked in Jobs).');
+        this.flash(registered
+          ? 'Deregistered — the database itself was not touched.'
+          : 'Decommission started — watch the row status (tracked in Jobs).');
         await this.refresh();
       } catch (e) {
-        this.flash(e.message || 'Decommission failed.', 'error');
+        this.flash(e.message || (registered ? 'Deregister failed.' : 'Decommission failed.'), 'error');
       }
     },
 
@@ -621,6 +1143,13 @@ function databasesPage() {
         decommissioned:   'bg-gray-100 text-gray-500',
       })[s] || 'bg-gray-100 text-gray-600';
     },
+
+    // 'local' is the on-prem case and is the one value that isn't a cloud, so the raw
+    // column would read LOCAL. Say what the register form says.
+    locationLabel(c) {
+      return c === 'local' ? 'On-premises' : (c || '');
+    },
+
     flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => { this.toast = ''; }, 4500); },
   };
 }

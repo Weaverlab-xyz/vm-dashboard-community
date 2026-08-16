@@ -59,7 +59,7 @@ state. No "ssh into the cloud console and click delete" lifecycle.
 
 | Principle | Where it shows up |
 |---|---|
-| Declarative | Each cloud uses a small Terraform module ([`terraform/ec2_instance/`](../terraform/ec2_instance/), [`terraform/azure_vm/`](../terraform/azure_vm/), [`terraform/gce_instance/`](../terraform/gce_instance/)) with a fixed resource shape. The deploy form provides variable values; the module is unchanged across deploys. |
+| Declarative | Cloud databases and Kubernetes clusters each use a Terraform module with a fixed resource shape ([`terraform/db_*/`](../terraform/), [`terraform/k8s_cluster/*/`](../terraform/k8s_cluster/)). The provision form supplies variable values; the module is unchanged across deploys. |
 | Version-controlled | All HCL is in the repo. Runtime variables flow through `services/terraform.py`'s `apply()` as `-var key=value`, never spliced into the template. Compromise an HCL template via PR review, not by hand-edit. |
 | Plan-then-record | Deploys run as background jobs (`/jobs`) with progress and final state saved to `Job.extra_data`. Failed apply leaves the deploy job marked `failed` with the Terraform stderr captured for forensics. |
 | Idempotent destroy | Each deploy's state is keyed per job (`terraform-state/{job_id}/`) in your active storage backend; destroy replays that exact state through `terraform destroy -auto-approve`. Purely state-driven — no "re-derive the resource ID from live cloud state" step. Because the state is remote, destroy still works after the container is recreated. |
@@ -71,16 +71,25 @@ state. No "ssh into the cloud console and click delete" lifecycle.
 The dashboard exposes IaC through several distinct surfaces. They
 overlap in concept but each has its own state model and lifecycle.
 
-### Cloud VM deployment (Terraform per-job)
+### Cloud databases and Kubernetes clusters (Terraform per-job)
 
-The most-used IaC surface. AWS / Azure / GCP deploy forms feed a
-small per-cloud Terraform module:
+The main Terraform surface. The provision forms feed a per-engine / per-cloud module,
+invoked through [`services/terraform.py`](../web_dashboard/services/terraform.py) by
+`cloud_database_service` and `k8s_service`:
 
-| Cloud | Module | Resources it creates |
+| Surface | Modules | Resources they create |
 |---|---|---|
-| AWS | [`terraform/ec2_instance/`](../terraform/ec2_instance/) | `aws_instance` + key-pair material; tags include `dashboard-deployed=true` |
-| Azure | [`terraform/azure_vm/`](../terraform/azure_vm/) | NIC + (optional) public IP + virtual machine |
-| GCP | [`terraform/gce_instance/`](../terraform/gce_instance/) | `google_compute_instance` with `ssh-keys` metadata |
+| Cloud databases | [`terraform/db_postgres/`](../terraform/db_postgres/), `db_mysql`, `db_sqlserver`, `db_azure_*`, `db_gcp_*`, `db_oci_autonomous` | The DB instance/server + database + (Azure SQL only) a private endpoint. **No networking** — the delegated subnet, DB subnet group, parameter groups and private DNS zone come in as variables from the sandbox. |
+| Kubernetes clusters | [`terraform/k8s_cluster/aws_eks/`](../terraform/k8s_cluster/aws_eks/), `azure_aks`, `gcp_gke`, `oci_oke` | Self-contained: each builds its **own** VPC/VNet + subnets + egress and peers back to the sandbox network, then the cluster + node pool. |
+
+> **Cloud VM deploys are *not* Terraform.** They go through the cloud SDKs directly
+> (`aws_service.launch_instance`, `azure_vm_service`, `gcp_vm_service`, `oci_vm_service`)
+> because VM lifecycle here needs mid-flight orchestration — Gateway ref-counting,
+> on-demand NAT, Password Safe onboarding — that reads more clearly as imperative code
+> than as a module. `terraform/ec2_instance/`, `terraform/azure_vm/` and
+> `terraform/gce_instance/` are **vestigial**: nothing references them and they aren't
+> shipped in the image. Only the PRA jump item for a VM is Terraform (see Shell Jump
+> below).
 
 State is keyed per deploy (`terraform-state/{job_id}/`) in your active
 storage backend — isolated per job, never reused or merged, so a destroy
@@ -107,8 +116,8 @@ applied to a different cloud-of-clouds (BeyondTrust's PRA platform).
 
 For the "build me a custom image" path, the dashboard wraps Packer:
 [`services/packer_service.py`](../web_dashboard/services/packer_service.py).
-Three builders are supported (`amazon-ebs`, `azure-arm`,
-`googlecompute`); per-build templates are generated in-process from
+Four builders are supported (`amazon-ebs`, `azure-arm`,
+`googlecompute`, `oracle-oci`); per-build templates are generated in-process from
 form input rather than pre-staged in repo, because image-build inputs
 (source AMI, instance type, provisioning script) are too varied to
 template statically.
@@ -139,8 +148,8 @@ Terraform state is the canonical record of what a deploy created — lose
 it and the destroy path can no longer target those resources. The
 dashboard keeps state in **two places, by design**.
 
-**Most state lives in your active storage backend.** Cloud VM,
-cloud-database, and Kubernetes-cluster deploys write their state to the
+**Most state lives in your active storage backend.** [Cloud VM](cloud-vms.md),
+[cloud-database](databases.md), and [Kubernetes-cluster](kubernetes.md) deploys write their state to the
 same backend the [/storage](storage-management.md) system uses (AWS S3 /
 Azure Blob / GCS), keyed per job at
 `terraform-state/{job_id}/terraform.tfstate`, authenticated with the same
@@ -206,15 +215,17 @@ A typical deploy:
    the per-cloud page (`/aws`, `/azure`, `/gcp`).
 2. **Job created** — the dashboard creates a `Job` row in the DB,
    queues a background task, returns the job ID immediately.
-3. **Provision Jumpoint** (if BeyondTrust enabled) — the cloud's
-   ephemeral Jumpoint container is spawned first so PRA can register
-   it before the user VM comes up. State for the Jumpoint deployment
+3. **Provision Gateway** (if BeyondTrust enabled) — the cloud's
+   ephemeral Gateway container is spawned first so PRA can register
+   it before the user VM comes up. State for the Gateway deployment
    is recorded under the same job's extra_data.
-4. **Terraform apply** — the per-cloud module is copied into a fresh
+4. **Create the resource** — for a **VM**, a direct cloud-SDK call
+   (`launch_instance` / equivalent). For a **cloud database or Kubernetes
+   cluster**, a Terraform apply: the module is copied into a fresh
    `terraform/deployments/{job_id}/` working dir; `init` configures the
    backend (state → your storage backend) and attaches the cached
    providers; `apply` runs with the form variables passed via `-var`.
-   Stderr / stdout are captured.
+   Stderr / stdout are captured either way.
 5. **Record outcome** — instance ID, IP addresses, AMI/image ID, all
    land in `Job.extra_data` for later destroy.
 6. **Provision Shell Jump** (if BT enabled) — a separate Terraform
@@ -231,8 +242,8 @@ A typical destroy:
 3. **Instance destroy** — `terraform destroy -auto-approve` against
    the per-job state (in the storage backend; the working dir is
    re-materialised from the module template if the container lost it).
-4. **Sibling-aware Jumpoint cleanup** — if no other active deploys
-   reference the same Jumpoint, the cloud Jumpoint container is
+4. **Sibling-aware Gateway cleanup** — if no other active deploys
+   reference the same Gateway, the cloud Gateway container is
    stopped too; otherwise it stays running for the others.
 5. **Mark deploy job as destroyed** — `Job.extra_data["destroyed"] =
    true` so it's filtered out of "active" lists.
@@ -245,7 +256,7 @@ A typical destroy:
 the cloud console, the dashboard's state directory is now lying — it
 still believes the resource exists. The next destroy will fail with a
 "resource not found" error, the directory has to be hand-cleaned, and
-any sibling-aware logic (Jumpoint cleanup) gets confused. The path is
+any sibling-aware logic (Gateway cleanup) gets confused. The path is
 designed to be closed.
 
 **Tag everything you create.** The dashboard tags every resource with

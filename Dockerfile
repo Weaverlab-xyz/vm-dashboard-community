@@ -112,10 +112,10 @@ COPY terraform/db_gcp_sqlserver/ ./terraform/db_gcp_sqlserver/
 COPY terraform/db_azure_sqlserver/ ./terraform/db_azure_sqlserver/
 COPY terraform/db_oci_autonomous/ ./terraform/db_oci_autonomous/
 # Managed-Kubernetes provisioning modules (driven by k8s_service, §1.1a): EKS
-# (hashicorp/aws), AKS (hashicorp/azurerm ~> 3.0), GKE (hashicorp/google ~> 5.0) —
-# all three providers are already in the pre-cache init below. Without the AKS/GKE
-# COPYs an azure/gcp provision fails at _materialize: "No such file or directory:
-# /app/terraform/k8s_cluster/azure_aks".
+# (hashicorp/aws), AKS (hashicorp/azurerm ~> 3.0), GKE (hashicorp/google ~> 5.0),
+# OKE (oracle/oci ~> 5.0) — all four providers are already in the pre-cache init
+# below. Without the AKS/GKE/OKE COPYs an azure/gcp/oci provision fails at
+# _materialize: "No such file or directory: /app/terraform/k8s_cluster/azure_aks".
 COPY terraform/k8s_cluster/aws_eks/ ./terraform/k8s_cluster/aws_eks/
 COPY terraform/k8s_cluster/azure_aks/ ./terraform/k8s_cluster/azure_aks/
 COPY terraform/k8s_cluster/gcp_gke/ ./terraform/k8s_cluster/gcp_gke/
@@ -158,19 +158,62 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Packer (architecture-aware) and pre-cache all three cloud plugins
-# so packer init does not require internet access at build time.
+# Install Packer (architecture-aware) and pre-cache all four cloud plugins
+# (amazon/azure/googlecompute/oracle) so packer init does not require internet
+# access at build time.
 # 1.10+ required for S3-native state locking (use_lockfile) — no DynamoDB needed.
 # See services/terraform.py + docs/terraform-state-backend-plan.md.
+#
+# `packer plugins install` resolves each plugin through the GitHub *API*
+# (GET /repos/hashicorp/packer-plugin-<name>/git/matching-refs/tags), which is
+# rate limited to 60 requests/hour per source IP when unauthenticated. On a
+# GitHub-hosted runner that IP is shared NAT, so the hour's budget is often
+# already spent by unrelated tenants before this step runs — release v26.7.3
+# died here with "403 API rate limit exceeded for 20.29.188.144 [rate reset in
+# 8m05s]": amazon installed, then azure was refused. Nothing in the build had
+# changed; v26.7.2 built the identical layer 2.5h earlier.
+#
+# Two defences, in the order they apply:
+#   1. PACKER_GITHUB_API_TOKEN from a build *secret* — never a --build-arg,
+#      which would leave the token in the image history. CI passes the
+#      workflow's GITHUB_TOKEN (see .github/workflows/publish-images.yml),
+#      lifting the ceiling to 1000 req/hour/repo so a shared IP stops
+#      mattering. required=false keeps tokenless local builds
+#      (`docker compose build`, scripts/onboard.sh) working unchanged.
+#   2. A retry loop for tokenless builds. A rate-limit reset is minutes away,
+#      not seconds, so the backoff escalates (60/120/180/240s, ~10min total)
+#      instead of burning its attempts inside a window that is still closed.
+#      That covers a reset like the one above but cannot outlast a full hourly
+#      window — hence the token is the real fix, this is the safety net. It
+#      hard-fails rather than ship an image whose plugins aren't cached.
+# The packer.zip curl also picks up the --retry flags the other release-artifact
+# fetches in this file already carry (see the helm-install curl below).
 ARG TERRAFORM_VERSION=1.10.5
-RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip" \
+RUN --mount=type=secret,id=github_token,required=false \
+    ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/packer.zip \
     && unzip -q /tmp/packer.zip -d /usr/local/bin/ \
     && rm /tmp/packer.zip \
-    && packer plugins install github.com/hashicorp/amazon \
-    && packer plugins install github.com/hashicorp/azure \
-    && packer plugins install github.com/hashicorp/googlecompute
+    && if [ -s /run/secrets/github_token ]; then \
+           PACKER_GITHUB_API_TOKEN="$(cat /run/secrets/github_token)"; \
+           export PACKER_GITHUB_API_TOKEN; \
+           echo "packer plugin getter: authenticating to the GitHub API"; \
+       else \
+           echo "packer plugin getter: no GITHUB token, using the 60/hour anonymous quota"; \
+       fi \
+    && for plugin in amazon azure googlecompute oracle; do \
+           for attempt in 1 2 3 4 5; do \
+               packer plugins install "github.com/hashicorp/${plugin}" && break; \
+               if [ "$attempt" = 5 ]; then \
+                   echo "packer plugins install ${plugin} failed after 5 attempts; if this is a 403 rate limit, pass a GitHub token as the github_token build secret" >&2; \
+                   exit 1; \
+               fi; \
+               echo "packer plugins install ${plugin} attempt $attempt failed (GitHub API rate limit?); retrying in $((attempt * 60))s..." >&2; \
+               sleep $((attempt * 60)); \
+           done; \
+       done
 
 # Install OPA (Open Policy Agent) — the bundled binary admission_service shells
 # for pre-action policy guardrails (services/_opa.py). Static build, arch-aware
@@ -189,7 +232,8 @@ RUN ARCH=$(dpkg --print-architecture) \
 
 # Install Terraform (architecture-aware) and pre-cache every provider the
 # dashboard uses at run time — the BeyondTrust SRA provider (PRA tunnels/shell
-# jumps) AND the cloud-database providers (aws/azurerm/google). Baking them in
+# jumps) AND the cloud-database / k8s-cluster providers (aws/azurerm/google/oci —
+# oracle/oci covers both db_oci_autonomous and k8s_cluster/oci_oke). Baking them in
 # at build (on CI's clean network) means a pulled image has NO outbound provider
 # download at run time — so cloud-DB provisioning works behind a TLS-inspecting
 # proxy without the corp-CA dance, and isn't subject to flaky registry pulls.
@@ -201,10 +245,15 @@ RUN ARCH=$(dpkg --print-architecture) \
 # slow — observed on BOTH the native amd64 leg and the emulated (QEMU) arm64 leg
 # of the multi-arch build — that 10s is exceeded ("request canceled
 # (Client.Timeout exceeded while awaiting headers)") and init fails even though
-# the provider exists. Resolving four providers (sra/aws/azurerm/google) in one
-# init multiplies the registry round-trips, so a single slow response is enough.
+# the provider exists. Resolving seven providers (sra/passwordsafe/entitle/aws/
+# azurerm/google/oci) in one init multiplies the registry round-trips, so a single
+# slow response is enough.
+# The registry also proxies provider signatures/checksums from github.com, so a
+# GitHub blip surfaces here as "504 Gateway Timeout returned from github.com"
+# (this failed release v26.6.5). Such blips can outlast a short retry window, so
+# the loop runs 8 attempts with escalating backoff (~2.5min total).
 # Fix: raise the registry client timeout to 30s AND keep a retry loop (fresh
-# attempt each time), hard-failing after 5 tries so a genuinely unreachable
+# attempt each time), hard-failing after 8 tries so a genuinely unreachable
 # registry never ships an image missing a cached provider.
 ENV TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
 RUN ARCH=$(dpkg --print-architecture) \
@@ -216,10 +265,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && mkdir -p /tmp/tf_provider_init \
     && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    passwordsafe = { source = "BeyondTrust/passwordsafe", version = "~> 1.0" }\n    entitle = { source = "entitleio/entitle", version = "~> 3.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n    oci = { source = "oracle/oci", version = "~> 5.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init/main.tf \
-    && for attempt in 1 2 3 4 5; do \
+    && for attempt in 1 2 3 4 5 6 7 8; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init init && break; \
-           if [ "$attempt" = 5 ]; then \
-               echo "terraform init failed to cache providers (sra/passwordsafe/entitle/aws/azurerm/google/oci) after 5 attempts" >&2; \
+           if [ "$attempt" = 8 ]; then \
+               echo "terraform init failed to cache providers (sra/passwordsafe/entitle/aws/azurerm/google/oci) after 8 attempts" >&2; \
                exit 1; \
            fi; \
            echo "terraform init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
@@ -228,10 +277,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && mkdir -p /tmp/tf_provider_init_az4 \
     && printf 'terraform {\n  required_providers {\n    azurerm = { source = "hashicorp/azurerm", version = ">= 4.55.0, < 5.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init_az4/main.tf \
-    && for attempt in 1 2 3 4 5; do \
+    && for attempt in 1 2 3 4 5 6 7 8; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init_az4 init && break; \
-           if [ "$attempt" = 5 ]; then \
-               echo "failed to cache azurerm 4.x (db_azure_mysql needs >= 4.55 for MySQL 8.4) after 5 attempts" >&2; \
+           if [ "$attempt" = 8 ]; then \
+               echo "failed to cache azurerm 4.x (db_azure_mysql needs >= 4.55 for MySQL 8.4) after 8 attempts" >&2; \
                exit 1; \
            fi; \
            echo "azurerm 4.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
@@ -240,10 +289,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && mkdir -p /tmp/tf_provider_init_g6 \
     && printf 'terraform {\n  required_providers {\n    google = { source = "hashicorp/google", version = "~> 6.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init_g6/main.tf \
-    && for attempt in 1 2 3 4 5; do \
+    && for attempt in 1 2 3 4 5 6 7 8; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init_g6 init && break; \
-           if [ "$attempt" = 5 ]; then \
-               echo "failed to cache google 6.x (db_gcp_mysql needs >= 6.x for MYSQL_8_4) after 5 attempts" >&2; \
+           if [ "$attempt" = 8 ]; then \
+               echo "failed to cache google 6.x (db_gcp_mysql needs >= 6.x for MYSQL_8_4) after 8 attempts" >&2; \
                exit 1; \
            fi; \
            echo "google 6.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
@@ -264,7 +313,8 @@ RUN ARCH=$(dpkg --print-architecture) \
         -o /usr/local/bin/kubectl \
     && chmod +x /usr/local/bin/kubectl \
     && kubectl version --client \
-    && curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
     && helm version
 
 # Entrypoint fixes SSH key permissions when the Windows override

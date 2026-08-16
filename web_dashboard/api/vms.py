@@ -3,6 +3,7 @@ VM operations API endpoints.
 All mutating operations (start/stop) are dispatched as background Celery tasks.
 """
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 import json
@@ -27,10 +28,79 @@ from ..services import powershell, job_service, cache_service
 from ..services import vm_inventory_service
 from .auth import get_current_user, require_permission
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/vms", tags=["vms"])
 
 
 # ── List endpoints ────────────────────────────────────────────────────────────
+
+def _agent_workstation_vms(db: Session, accessible: list) -> list:
+    """Workstation VMs a remote agent synced, as VMInfo rows.
+
+    The local path scans this host with PowerShell; a co-located agent reports its own
+    host through vmrest. Both are Workstation VMs and belong on the same page, so they
+    are merged here rather than given a second one — with a `source` so it is always
+    clear which host a row came from.
+
+    Workgroups come from `vm_workgroup_overrides`, exactly as they do for Proxmox and
+    Nutanix: the cache has no workgroup of its own, and a VM with no override is
+    admin-only. That is what stops an agent widening what a non-admin can see — an
+    agent can report any VM it likes, and none of them become visible without an
+    admin tagging them first.
+
+    Best-effort: a broken connection or an empty cache costs the local list nothing.
+    """
+    from ..database import HypervisorConnection, RemoteAgent
+    from ..services import hypervisor_sync_service, hypervisor_view_service
+    from ..services import workgroup_override_service
+
+    try:
+        rows = (db.query(HypervisorConnection)
+                .filter(HypervisorConnection.kind == "workstation",
+                        HypervisorConnection.is_active.is_(True),
+                        HypervisorConnection.agent_id.isnot(None)).all())
+    except Exception:  # noqa: BLE001
+        return []
+
+    agent_names = {}
+    out = []
+    for conn in rows:
+        try:
+            cached = hypervisor_view_service.project(
+                "workstation", hypervisor_sync_service.list_vms(db, conn.id))
+        except Exception:  # noqa: BLE001
+            logger.warning("could not read the synced inventory for %s", conn.name)
+            continue
+        if not cached:
+            continue
+
+        if conn.agent_id not in agent_names:
+            agent = db.query(RemoteAgent).filter(
+                RemoteAgent.id == conn.agent_id).first()
+            agent_names[conn.agent_id] = agent.name if agent else conn.name
+        source = agent_names[conn.agent_id]
+
+        overrides = workgroup_override_service.get_many(
+            db, "workstation", [vm["vm_id"] for vm in cached])
+        for vm in cached:
+            workgroup = overrides.get(vm["vm_id"])
+            # Same rule as every other hypervisor page: no override means admin-only.
+            if accessible is not None and (workgroup is None
+                                           or workgroup.lower() not in accessible):
+                continue
+            ips = vm.get("ip_addresses") or []
+            out.append(VMInfo(
+                vmx_path=vm.get("vmx_path") or "",
+                vm_name=vm.get("name") or "",
+                workgroup=workgroup or "",
+                is_running=vm.get("is_running"),
+                ip_address=ips[0] if ips else None,
+                source=source,
+                vm_id=vm.get("vm_id"),
+            ))
+    return out
+
 
 @router.get("", response_model=VMListResponse)
 async def list_vms(
@@ -56,6 +126,11 @@ async def list_vms(
         background_tasks.add_task(_bg_delta_sync, accessible)
 
     vms = vm_inventory_service.get_vms_from_db(db, accessible)
+    # A co-located agent reports its own host's Workstation VMs. They are the same kind
+    # of thing as the local ones, so they belong on this page rather than a second one.
+    vms = vms + _agent_workstation_vms(
+        db, None if current_user.is_admin else
+        [w.lower() for w in current_user.workgroups_list])
 
     if workgroup:
         vms = [v for v in vms if v.workgroup == workgroup]

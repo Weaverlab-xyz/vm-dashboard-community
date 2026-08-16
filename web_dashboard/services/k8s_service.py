@@ -99,10 +99,19 @@ def _serialize(r: K8sCluster) -> dict:
         "entitle_agent_installed": config_service.get("entitle_agent_cluster_id") == r.id,
         "api_tunnel_jump":       bool(config_service.get(f"k8s_api_tunnel_jump_{r.id}")),
         "entra_group_bound":     bool(config_service.get(f"k8s_entra_group_{r.id}")),
+        "impersonator_bound":    bool(config_service.get(f"k8s_impersonator_{r.id}")),
         # AKS is natively Entra-integrated (always federated); EKS/GKE are federated
         # once the "Entra federation" action runs (tracked in config).
         "entra_federation_enabled": (r.cloud == "azure")
                                     or bool(config_service.get(f"k8s_entra_fed_{r.id}")),
+        # Password Safe token rotation. The ids are not secrets — they are exactly what
+        # an operator pastes into the plugin's configuration. Whether the two accounts
+        # are still SYNCED is deliberately not here: that lives in Password Safe, and is
+        # read live by the ps-token/status endpoint rather than cached per row.
+        "ps_token_managed":      bool(r.ps_token_account_id),
+        "ps_token_account_id":   r.ps_token_account_id or "",
+        "ps_pra_vault_account_id": r.ps_pra_vault_account_id or "",
+        "pra_vault_account_id":  r.pra_vault_account_id or "",
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -244,9 +253,15 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
         raise K8sError(f"a cluster named {name!r} is already registered")
 
     cluster_id = str(uuid.uuid4())
+    from . import expiry_policy
     row = K8sCluster(
         id=cluster_id, cloud=cloud, name=name, status="provisioning",
         source="provisioned", region=region, created_by=created_by,
+        # Auto-delete timer from the global default; None (no timer) unless the feature
+        # is on AND a default is configured. Only this PROVISION path stamps one —
+        # register_cluster deliberately does not, since deleting a registered cluster
+        # only drops the dashboard's record. See expiry_policy.default_expiry_for_kind.
+        expires_at=expiry_policy.default_expiry_for_kind("k8s", source="provisioned"),
     )
     db.add(row)
     db.commit()
@@ -258,13 +273,19 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
     # that gap and dispatch with no tf_variables → KeyError('tf_variables'). k8s
     # tf_variables carry no secrets, so embedding them at create time is safe.
     tf_variables = _build_cluster_tf_variables(
-        cloud=cloud, cluster_id=cluster_id, name=name, region=region, opts=opts)
+        cloud=cloud, cluster_id=cluster_id, name=name, region=region, opts=opts, db=db)
 
     from . import job_service
+    meta = {"cluster_id": cluster_id, "cloud": cloud, "name": name,
+            "region": region, "tf_variables": tf_variables}
+    # The Password Safe token-registration opt-in rides the job metadata (not
+    # tf_variables — it is a post-provision step, not a module input). None means
+    # "use the configured default", resolved at chain time so a Settings change
+    # between enqueue and apply is honored.
+    if opts.get("register_token_in_passwordsafe") is not None:
+        meta["register_token_in_passwordsafe"] = bool(opts["register_token_in_passwordsafe"])
     job = job_service.create_job(
-        db, job_type="k8s_provision", created_by=created_by,
-        metadata={"cluster_id": cluster_id, "cloud": cloud, "name": name,
-                  "region": region, "tf_variables": tf_variables},
+        db, job_type="k8s_provision", created_by=created_by, metadata=meta,
     )
     row.deploy_job_id = job.id
     db.commit()
@@ -294,8 +315,11 @@ K8S_VERSIONS = {
     "aws":   ["1.36", "1.35", "1.34", "1.33"],
     "azure": ["1.36", "1.35", "1.34", "1.33"],
     "gcp":   ["1.36", "1.35", "1.34", "1.33"],
-    # OKE uses the v-prefixed patch format; confirm live with `oci ce cluster-options get`.
-    "oci":   ["v1.31.1", "v1.30.1", "v1.29.10"],
+    # OKE uses the v-prefixed patch format, and it *does* have a live version API —
+    # provision_options() reads it (oci_service.oke_cluster_versions) and only falls
+    # back to this list when OCI is unconfigured/unreachable. OKE rejects retired
+    # versions outright, so keep this in step with `oci ce cluster-options get`.
+    "oci":   ["v1.36.1", "v1.35.2", "v1.34.2", "v1.33.1"],
 }
 K8S_NODE_TYPES = {
     "aws":   ["t3.small", "t3.medium", "t3.large", "t3.xlarge",
@@ -305,7 +329,14 @@ K8S_NODE_TYPES = {
     "gcp":   ["e2-small", "e2-medium", "e2-standard-2", "e2-standard-4",
               "n2-standard-2", "n2-standard-4"],
     # A1.Flex (Always-Free Ampere) first; the flex shapes take an OCPU/memory config.
-    "oci":   ["VM.Standard.A1.Flex", "VM.Standard.E4.Flex", "VM.Standard.E5.Flex"],
+    # As with the versions above, OKE has a live shape API — provision_options()
+    # reads it (oci_service.oke_node_pool_shapes) and only falls back to this list
+    # when OCI is unconfigured/unreachable. OKE accepts only a SUBSET of OCI's
+    # compute shapes and the subset differs by region and tenancy, so keep every
+    # entry here one OKE actually offers (`oci ce node-pool-options get`):
+    # E4.Flex sat in this list unsupported and killed provisions ~10 minutes in, at
+    # node-pool creation, with the VCN and cluster already built.
+    "oci":   ["VM.Standard.A1.Flex", "VM.Standard.A2.Flex", "VM.Standard.E5.Flex"],
 }
 # Region lists come from the shared services/region_catalog (region_ids per cloud);
 # the K8s-specific version + node-size catalogs stay here.
@@ -324,8 +355,100 @@ def _with_configured_first(values: list, configured: str) -> list:
     return out
 
 
+# ── GKE private control-plane (master) CIDR allocation ───────────────────────
+# A private GKE cluster reserves a /28 for its control plane, and GCP enforces
+# that range as unique across the whole VPC the cluster touches: it materializes
+# as a system-managed `gke-<cluster>-<hash>-pe-subnet` subnetwork, and subnet
+# ranges may not overlap ANYWHERE in the network, other regions included. One
+# hard-coded module default therefore only ever works for the first cluster —
+# co-located clusters all sit in the shared sandbox VPC, and self-contained ones
+# export their subnet routes into it over the peering — so the second cluster
+# dies ~40s into the apply with
+#   Conflicting IP cidr range: Invalid IPCidrRange: 172.16.8.0/28 conflicts with
+#   existing subnetwork 'gke-<other>-pe-subnet' in region '<other-region>'
+# Hence a distinct /28 per cluster, carved from a base block the sandbox never
+# uses (its subnets live in 10.x — see scripts/sandbox/*/setup-gcp*).
+# NB the pe-subnet GCP blames is invisible to `subnetworks.list`, so a range in
+# use is discoverable only from the owning cluster's masterIpv4CidrBlock — and a
+# cluster left in ERROR by a failed apply still holds its range.
+_GKE_MASTER_CIDR_BASE = "172.16.0.0/16"
+_GKE_MASTER_PREFIX = 28
+# What the module defaulted to before per-cluster allocation: a cluster the
+# dashboard provisioned back then holds this range with nothing recorded.
+_GKE_LEGACY_MASTER_CIDR = "172.16.8.0/28"
+
+
+def _gke_recorded_master_cidrs(db: Optional[Session]) -> set:
+    """The control-plane /28 held by every GKE cluster this dashboard still owns,
+    read back from each cluster's provisioning Job (``tf_variables.master_cidr``).
+    A cluster provisioned before per-cluster allocation recorded nothing but still
+    holds the module's old default, so count that. Registered (not provisioned)
+    clusters contribute nothing — their range is unknown here, and the live scan
+    in :func:`gcp_service.reserved_cidrs` covers them. Empty when ``db`` is None."""
+    out: set = set()
+    if db is None:
+        return out
+    try:
+        rows = db.query(K8sCluster).filter(K8sCluster.cloud == "gcp").all()
+        metas: dict = {}
+        job_ids = [r.deploy_job_id for r in rows if r.deploy_job_id]
+        if job_ids:
+            for job in db.query(Job).filter(Job.id.in_(job_ids)).all():
+                metas[job.id] = (job.metadata_dict or {}).get("tf_variables") or {}
+        for row in rows:
+            recorded = str(metas.get(row.deploy_job_id or "", {}).get("master_cidr") or "").strip()
+            if recorded:
+                out.add(recorded)
+            elif row.source == "provisioned":
+                out.add(_GKE_LEGACY_MASTER_CIDR)
+    except Exception as exc:
+        logger.warning("GKE master-CIDR: could not read the recorded ranges (%s)", exc)
+    return out
+
+
+def _gke_master_cidr(db: Optional[Session], *, project: str) -> str:
+    """Allocate a free /28 for a new GKE cluster's private control plane — the
+    lowest slot in ``gcp_gke_master_cidr_base`` that overlaps neither a range this
+    dashboard already handed out nor anything live in the project."""
+    import ipaddress
+    configured = _cfg("gcp_gke_master_cidr_base", _GKE_MASTER_CIDR_BASE)
+    try:
+        base = ipaddress.ip_network(configured, strict=False)
+        if base.prefixlen > _GKE_MASTER_PREFIX:
+            raise ValueError(f"must be /{_GKE_MASTER_PREFIX} or wider")
+    except ValueError as exc:
+        logger.warning("gcp_gke_master_cidr_base %r is unusable (%s) — using %s",
+                       configured, exc, _GKE_MASTER_CIDR_BASE)
+        base = ipaddress.ip_network(_GKE_MASTER_CIDR_BASE)
+
+    taken = _gke_recorded_master_cidrs(db)
+    if project:
+        try:
+            from . import gcp_service
+            taken |= gcp_service.reserved_cidrs(project)
+        except Exception as exc:
+            # Non-fatal: the recorded ranges alone still separate our own clusters.
+            logger.warning("GKE master-CIDR: live range scan failed (%s)", exc)
+    taken_nets = []
+    for cidr in taken:
+        try:
+            taken_nets.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            continue
+
+    for candidate in base.subnets(new_prefix=_GKE_MASTER_PREFIX):
+        if not any(candidate.overlaps(net) for net in taken_nets):
+            logger.info("GKE master-CIDR: allocated %s from %s (%d range(s) in use)",
+                        candidate, base, len(taken_nets))
+            return str(candidate)
+    raise K8sError(
+        f"no free /{_GKE_MASTER_PREFIX} left in {base} for the GKE control plane — "
+        f"widen gcp_gke_master_cidr_base or decommission an unused cluster")
+
+
 def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
-                                region: str, opts: dict) -> dict:
+                                region: str, opts: dict,
+                                db: Optional[Session] = None) -> dict:
     """The Terraform ``-var`` set for the cluster module (aws EKS / azure AKS /
     gcp GKE).
 
@@ -335,7 +458,11 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
     the DB/VM SGs for direct management-plane access. k8s version + node size
     fall back to config then the module defaults; ``node_instance_type`` maps to
     the per-cloud node-size var (EKS instance type / AKS vm_size / GKE machine
-    type)."""
+    type).
+
+    ``db`` is only needed by the GKE control-plane CIDR allocator (which reads the
+    ranges already handed out); without it that allocation starts from an empty
+    ledger, so pass it on any path that provisions."""
     _tags = {"managed-by": "vm-dashboard", "k8s-cluster-id": cluster_id}
     if cloud == "aws":
         tf = {
@@ -390,7 +517,8 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         # Passing resource_group_name flips the module's RG count to 0 (uses the
         # existing RG); the cluster's VNet/subnet are still self-contained inside it.
         from .region_config import resolve_azure_region
-        rg = (resolve_azure_region(region) or {}).get("resource_group") or "vm-cli-rg"
+        _arc = resolve_azure_region(region) or {}
+        rg = _arc.get("resource_group") or "vm-cli-rg"
         tf = {
             "location": region,
             "cluster_name": _eks_name(f"k8s-{name}"),
@@ -416,6 +544,23 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         tf["cluster_id"] = cluster_id
         tf["agent_namespace"] = _cfg("entitle_agent_namespace", "entitle")
         tf["agent_service_account"] = _cfg("entitle_agent_service_account", "entitle-agent-sa")
+        # Peer the AKS VNet back to the sandbox VNet so an in-cluster agent (Entitle
+        # SSH ephemeral) can reach the private lab VMs — Azure parity with the aws/gcp
+        # branches above. Prefer an explicit azure_vnet_id; else derive it from the
+        # region-resolved vm-subnet id (…/virtualNetworks/<vnet>/subnets/<subnet>).
+        # `_arc` is region-resolved (per-region entry → flat key fallback), so a
+        # non-default-region cluster peers to THAT region's VNet; it's config-backed
+        # so it also flows through the destroy path (opts={}). No NSG rule is needed —
+        # the sandbox vm-subnet's VirtualNetwork-tag rule covers peered space.
+        sandbox_vnet_id = _cfg("azure_vnet_id")
+        if not sandbox_vnet_id:
+            subnet_id = _arc.get("default_subnet_id") or ""
+            if "/subnets/" in subnet_id:
+                sandbox_vnet_id = subnet_id.split("/subnets/")[0]
+        if sandbox_vnet_id:
+            tf["sandbox_vnet_id"] = sandbox_vnet_id
+            tf["sandbox_vnet_name"] = _cfg("azure_vnet_name") or sandbox_vnet_id.rsplit("/", 1)[-1]
+            tf["sandbox_vnet_rg"] = _arc.get("vnet_resource_group") or ""
         return tf
 
     if cloud == "gcp":
@@ -428,8 +573,24 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             "cluster_name": _gke_name(f"k8s-{name}"),
             "tags": _tags,
         }
-        if opts.get("zone"):
-            tf["zone"] = opts["zone"]
+        # Zone: an explicit form value wins, else the region-config zone (Settings →
+        # Multi-region / gcp_region.<region>.zone; flat gcp_zone for the default
+        # region). The config fallback only applies when the zone actually sits in
+        # the target region — resolve_region falls back to the flat gcp_zone for
+        # regions without an entry, and leaking the default region's zone would
+        # provision cross-region. Left blank, the module picks the region's first
+        # available zone (NOT "<region>-a": us-east1/europe-west1 have no -a zone,
+        # and GKE reports a nonexistent zone as a misleading 403
+        # LOCATION_POLICY_VIOLATED "Permission denied on 'locations/…'").
+        from .region_config import resolve_region
+        _grc = resolve_region("gcp", region) or {}
+        zone = str(opts.get("zone") or "").strip()
+        if not zone:
+            rc_zone = (_grc.get("zone") or "").strip()
+            if rc_zone.startswith(f"{region}-"):
+                zone = rc_zone
+        if zone:
+            tf["zone"] = zone
         version = opts.get("k8s_version") or _cfg("gcp_gke_k8s_version")
         if version:
             tf["k8s_version"] = version
@@ -441,6 +602,41 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         cidrs = opts.get("authorized_cidrs") or _cfg_list("gcp_gke_authorized_cidrs")
         if cidrs:
             tf["authorized_cidrs"] = cidrs
+        # A distinct /28 for the private control plane — the module default only
+        # fits one cluster per VPC (see _gke_master_cidr). The destroy path passes
+        # the recorded value through opts so its -var set matches the apply's.
+        tf["master_cidr"] = opts.get("master_cidr") or _gke_master_cidr(db, project=project)
+        # Reach the private lab resources from an in-cluster agent. Two modes,
+        # region-resolved (per-region entry → flat gcp_* fallback) so they also flow
+        # through the destroy path (opts={}):
+        #   1. CO-LOCATION (preferred, gcp_k8s_subnetwork set): provision the cluster
+        #      DIRECTLY in the sandbox VPC. Its nodes then reach BOTH the lab VMs
+        #      (intra-VPC) AND the Cloud SQL private IP — the sandbox VPC owns the
+        #      servicenetworking/PSA peering, and GCP peering is non-transitive so a
+        #      separate cluster VPC never could. ip-masq (applied at agent install)
+        #      SNATs pod→Cloud SQL to the node IP.
+        #   2. PEERING (fallback, gcp_k8s_subnetwork blank): self-contained VPC peered
+        #      to the sandbox VPC — reaches lab VMs (SSH) only; DB JIT stays on the PRA
+        #      tunnel. GCP parity with the aws_eks sandbox_vpc peering.
+        # (_grc is resolved above, alongside the zone.)
+        sandbox_net = _grc.get("network") or ""
+        k8s_subnet = _grc.get("k8s_subnetwork") or ""
+        if k8s_subnet and sandbox_net and sandbox_net != "default":
+            tf["existing_network"] = sandbox_net
+            tf["existing_subnetwork"] = k8s_subnet
+            tf["pods_range_name"] = _grc.get("k8s_pods_range") or "gke-pods"
+            tf["services_range_name"] = _grc.get("k8s_services_range") or "gke-services"
+            node_tag = _grc.get("k8s_node_tag") or ""
+            if node_tag:
+                tf["node_network_tags"] = [node_tag]
+            nat_ip = _cfg("gcp_nat_ip")
+            if nat_ip:
+                tf["nat_public_ip"] = nat_ip
+        elif sandbox_net and sandbox_net != "default":
+            tf["sandbox_network"] = sandbox_net
+            vm_tags = [t.strip() for t in (_grc.get("default_network_tag") or "").split(",") if t.strip()]
+            if vm_tags:
+                tf["sandbox_vm_target_tags"] = vm_tags
         return tf
 
     if cloud == "oci":
@@ -452,8 +648,10 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             "cluster_name": _gke_name(f"k8s-{name}"),   # OKE names: <=63, DNS-ish; reuse the GKE sanitizer
             "tags": _tags,
         }
-        # The provision form reuses the shared `vpc_cidr` field for the VCN CIDR.
-        vcn_cidr = opts.get("vpc_cidr") or opts.get("vcn_cidr") or _cfg("oci_oke_vcn_cidr")
+        # The provision form reuses the shared `vpc_cidr` request field for the VCN
+        # CIDR (it shows as "Cluster VCN CIDR" for oci) — there is no separate
+        # `vcn_cidr` request field.
+        vcn_cidr = opts.get("vpc_cidr") or _cfg("oci_oke_vcn_cidr")
         if vcn_cidr:
             tf["vcn_cidr"] = vcn_cidr
         version = opts.get("k8s_version") or _cfg("oci_oke_k8s_version")
@@ -478,10 +676,10 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
 async def provision_options(cloud: str, region: str = "") -> dict:
     """Assemble the provision-form pickers for one cloud (region-scoped). Curated
     static lists for regions / node sizes / k8s versions (the configured value is
-    merged in + first); AWS additionally serves live VPC subnets for the EKS subnet
-    override + the two configured sandbox subnet ids to pre-select. AKS/GKE create
-    their own network → subnets / configured_subnet_ids empty. Raises K8sError on an
-    unknown cloud; AWS subnet discovery errors propagate as aws_service.AWSError."""
+    merged in + first). Every cloud's module builds its own network, so there is no
+    subnet override on any cloud — ``subnets`` / ``configured_subnet_ids`` are always
+    empty (kept for response-shape compatibility). Raises K8sError on an unknown
+    cloud."""
     cloud = (cloud or "aws").strip().lower()
     if cloud not in _PROVISION_IMPLEMENTED:
         raise K8sError(f"unknown cloud {cloud!r} (expected one of {', '.join(_PROVISION_IMPLEMENTED)})")
@@ -498,17 +696,47 @@ async def provision_options(cloud: str, region: str = "") -> dict:
     regions = _with_configured_first(
         _with_configured_first(region_catalog.region_ids(cloud), region), configured_region)
 
+    versions = K8S_VERSIONS[cloud]
+    node_types = K8S_NODE_TYPES[cloud]
+    if cloud == "oci":
+        # OKE is the one cloud here with live version- AND shape-discovery APIs, and
+        # the one that hard-rejects both: a retired version 400s at CreateCluster,
+        # and a shape outside OKE's subset of OCI's compute shapes fails at
+        # node-pool creation — ~10 minutes into the apply, with the VCN and cluster
+        # already built. Both lists also rot on their own schedule (OKE retires
+        # versions; the shape subset differs by region and tenancy), so read them
+        # live and fall back to the curated lists when OCI is unconfigured or
+        # unreachable so the modal still opens. No region argument on either: every
+        # OKE cluster lands in the configured oci_region regardless of the region
+        # picked here, so the SDK's own config region is the right one.
+        from . import oci_service
+        try:
+            live = await oci_service.oke_cluster_versions()
+            if live:
+                versions = live
+        except Exception as exc:  # noqa: BLE001 — never block the form on OCI
+            logger.warning("OKE version discovery failed; using the curated list: %s", exc)
+        try:
+            live_shapes = await oci_service.oke_node_pool_shapes()
+            if live_shapes:
+                node_types = live_shapes
+        except Exception as exc:  # noqa: BLE001 — never block the form on OCI
+            logger.warning("OKE shape discovery failed; using the curated list: %s", exc)
+
     out = {
         "cloud": cloud,
         "region": region,
         "regions": regions,
-        "node_instance_types": _with_configured_first(K8S_NODE_TYPES[cloud], _cfg(cfg_node)),
-        "k8s_versions": _with_configured_first(K8S_VERSIONS[cloud], _cfg(cfg_ver)),
+        # Discovery for the pickers only. Nothing validates a submitted shape or
+        # version against these, deliberately: they are scoped to one region and
+        # tenancy, and a hard gate would reject a value valid in another region.
+        "node_instance_types": _with_configured_first(node_types, _cfg(cfg_node)),
+        "k8s_versions": _with_configured_first(versions, _cfg(cfg_ver)),
         "subnets": [],
         "configured_subnet_ids": [],
     }
-    # All three cloud modules build their own network now (EKS self-contained +
-    # peered), so no per-cloud subnet options are served.
+    # Every cloud module builds its own network now (EKS self-contained + peered),
+    # so no per-cloud subnet options are served.
     return out
 
 
@@ -682,13 +910,126 @@ def _tf_milestone(line: str, cur_pct: int, cur_msg: str) -> tuple:
     return cur_pct, cur_msg
 
 
+async def _rollback_failed_provision(*, cluster_id: str, job_id: str, cloud: str,
+                                     tf_variables: dict) -> str:
+    """Best-effort ``terraform destroy`` of a provision that died part-way through.
+    Returns a note to append to the job's error message (never raises).
+
+    A failed apply is **not** a no-op in the cloud — Terraform keeps whatever it
+    managed to create, and the deploy dir's state still references it. Observed on
+    GKE: the initial node pool hit GCE_STOCKOUT, so the apply failed, but the
+    cluster object survived in ERROR state with 0 nodes *and* went on holding its
+    private control-plane /28. That subnetwork doesn't show up in ``gcloud compute
+    networks subnets list``, so the orphan is invisible until the NEXT provision
+    dies with "Conflicting IP cidr range … conflicts with existing subnetwork".
+    Tearing the partial deployment down here keeps a failed provision cheap and
+    keeps the next one unblocked.
+
+    Deliberately non-fatal: the apply error is the thing the operator needs to see,
+    so a rollback that itself fails must not replace it. The caller appends the
+    returned note instead — and the ``failed`` row stays put, so Delete (which runs
+    :func:`run_decommission`) can retry the teardown.
+    """
+    from . import terraform, terraform_provider_env
+    from ..api.websocket import broadcast_progress
+    logger.warning("k8s provision: apply failed for %s — rolling back the partial "
+                   "deployment (terraform destroy)", cluster_id)
+
+    # NB: no job_service.cancel_check in this stream, unlike the apply's on_line.
+    # Cancelling the job is one of the ways we get here, and re-checking would
+    # abort the rollback on its first line — leaving behind exactly the orphan
+    # this function exists to clean up. The per-line broadcast still heartbeats
+    # the job row, which the startup reconcile needs to see during a long destroy.
+    async def on_line(line: str) -> None:
+        await broadcast_progress(job_id, 90, "Rolling back the failed provision…",
+                                 log_line=line)
+
+    try:
+        await broadcast_progress(job_id, 90, "Provision failed — rolling back…")
+        await terraform.destroy(
+            _deploy_dir(job_id),
+            env=terraform_provider_env.provider_env(cloud),
+            template_dir=_cluster_template_dir(cloud),
+            variables=tf_variables,   # destroy evaluates the config; same -var set as apply
+            on_line=on_line,
+        )
+    except Exception as exc:
+        logger.error("k8s provision rollback FAILED cluster_id=%s: %s", cluster_id, exc)
+        return ("\n\n[rollback] terraform destroy also failed — MANUAL CLEANUP REQUIRED. "
+                "Whatever the apply created is still live in the cloud (on GKE the "
+                "cluster keeps holding its control-plane CIDR and will block the next "
+                f"provision). Delete the cluster to retry the teardown. Cause: {exc}")
+    logger.info("k8s provision rollback complete cluster_id=%s — partial deployment destroyed",
+                cluster_id)
+    return ("\n\n[rollback] The partial deployment was destroyed — no cloud resources "
+            "should remain from this attempt.")
+
+
+def _explain_apply_failure(cloud: str, tf_variables: dict, text: str) -> str:
+    """Prefix a *zonal capacity* apply failure with what the operator has to do.
+
+    A GKE cluster is created with a one-node default pool in a SINGLE zone (the
+    module's ``zone`` — Settings → Multi-region, else the region's first UP zone),
+    so a zone with no room for that machine type fails the create ~35 min in, once
+    the node pool's instance group gives up:
+      Not all instances running in IGM … [GCE_STOCKOUT]: … does not have enough
+      resources available to fulfill the request.
+    Retrying the same zone just repeats it, so name the zone + the way out instead
+    of leaving that buried under a wall of instance-group text. The half-created
+    cluster is already gone by the time this is read — :func:`_rollback_failed_provision`
+    runs first and appends its own ``[rollback]`` note after this message.
+    """
+    low = text.lower()
+    if cloud != "gcp" or not ("stockout" in low or "does not have enough resources" in low):
+        return text
+    zone = str(tf_variables.get("zone") or "").strip() or "the region's first available zone"
+    machine = str(tf_variables.get("machine_type") or "").strip() or "the node machine type"
+    return (f"{zone} has no capacity for {machine} (GCE_STOCKOUT) — GKE could not create "
+            f"the cluster's first node. Retry in another zone (Settings → Multi-region → "
+            f"the region's zone; blank picks the region's first available zone) or with a "
+            f"different machine type.\n\n{text}")
+
+
+def _chain_ps_token_registration(db: Session, *, provision_job_id: str,
+                                 cluster_id: str, created_by: str) -> None:
+    """Enqueue the Password Safe token registration a provision opted into.
+
+    The opt-in rides the provision job's metadata; absent means "the settings
+    default" (``k8s_ps_token_register_on_provision``), resolved here — at chain time —
+    so a Settings change made while the cluster was building is honored. Created
+    ``pending`` deliberately: the worker must claim it like any other job (it is not a
+    parent-driven child), and its failure is its own, never the provision's."""
+    from . import job_service, ps_k8s_token_service
+    provision = db.query(Job).filter(Job.id == provision_job_id).first()
+    meta = (provision.metadata_dict or {}) if provision else {}
+    opted = meta.get("register_token_in_passwordsafe")
+    if opted is None:
+        opted = ps_k8s_token_service._cfg_bool("k8s_ps_token_register_on_provision", False)
+    if not opted:
+        return
+    if not ps_k8s_token_service.enabled():
+        logger.info("k8s provision: PS token registration requested for %s but the "
+                    "feature is disabled — skipping", cluster_id)
+        return
+    job = job_service.create_job(
+        db, job_type="k8s_ps_token", created_by=created_by or "system",
+        metadata={"cluster_id": cluster_id, "action": "register"})
+    logger.info("k8s provision: chained PS token registration for %s (job %s)",
+                cluster_id, job.id)
+
+
 async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
                               cloud: str, tf_variables: dict) -> None:
     """**§1.1a** background task: ``terraform apply`` the cluster module, assemble a
     kubeconfig from its outputs, store it as a secrets-backend reference (the same
     path :func:`register_cluster` uses), and flip the row to ``registered`` — after
-    which the Phase 2-4 flows treat it like any registered cluster. Marks the row +
-    job failed on apply error. Mirrors ``cloud_database_service.run_provision_apply``."""
+    which the Phase 2-4 flows treat it like any registered cluster.
+
+    On failure: roll the partial deployment back (see
+    :func:`_rollback_failed_provision`), then mark the row + job failed. The row is
+    left at ``failed`` either way — it's the operator's record that the attempt
+    happened, and if the rollback didn't fully succeed, Delete re-runs the destroy.
+    Mirrors ``cloud_database_service.run_provision_apply``."""
     from . import config_service, job_service, terraform, terraform_provider_env
     from ..api.websocket import broadcast_progress
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
@@ -703,6 +1044,7 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         _p["pct"], _p["msg"] = _tf_milestone(line, _p["pct"], _p["msg"])
         await broadcast_progress(job_id, _p["pct"], _p["msg"], log_line=line)
 
+    registered = False   # flipped once the row is committed as "registered"
     try:
         outputs = await terraform.apply(
             _deploy_dir(job_id), tf_variables,
@@ -742,6 +1084,7 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         row.api_server = endpoint
         row.status = "registered"
         db.commit()
+        registered = True    # past this point the cluster is live — never roll back
         job_service.set_completed(db, job_id)
         logger.info("k8s provision complete cluster_id=%s cluster=%s endpoint=%s egress_ip=%s",
                     cluster_id, cluster_out_name, endpoint, egress_ip or "-")
@@ -753,10 +1096,27 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
             await rancher_node_service.refresh_rancher_firewall(db)
         except Exception as exc:
             logger.warning("k8s provision: rancher firewall refresh failed (non-fatal): %s", exc)
+        # Chain the Password Safe token registration when the deploy opted in (else the
+        # settings default). A separate claimable job, not inline: it talks to Password
+        # Safe and the cluster and can fail on its own terms — never the provision's.
+        try:
+            _chain_ps_token_registration(db, provision_job_id=job_id,
+                                         cluster_id=cluster_id,
+                                         created_by=row.created_by or "system")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("k8s provision: PS token registration chain failed "
+                           "(non-fatal): %s", exc)
     except Exception as exc:
+        # Tear down whatever the apply managed to create BEFORE the row goes failed,
+        # so a failed provision doesn't leave a half-built cluster billing (and, on
+        # GKE, squatting on a control-plane CIDR the next provision needs).
+        note = "" if registered else await _rollback_failed_provision(
+            cluster_id=cluster_id, job_id=job_id, cloud=cloud, tf_variables=tf_variables)
         row.status = "failed"
         db.commit()
-        job_service.set_failed(db, job_id, str(exc))
+        # …explained first (a zonal stockout's actionable line), then the rollback note.
+        job_service.set_failed(
+            db, job_id, f"{_explain_apply_failure(cloud, tf_variables, str(exc))}{note}")
         logger.exception("k8s provision failed cluster_id=%s: %s", cluster_id, exc)
 
 
@@ -823,8 +1183,12 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
     #    most on GKE — its gateway IAM grant + fleet state are project-level and would
     #    otherwise outlive the destroyed cluster (EKS's OIDC config dies with it).
     job_service.update_progress(db, job_id, 15, "Removing PRA tunnels…")
-    for _dereg in (deregister_pra_tunnel, deregister_api_tunnel, unbind_entra_group,
-                   disable_entra_federation):
+    # The Password Safe token registration goes FIRST: it clears ps_token_account_id,
+    # so deregister_pra_tunnel below then takes its normal ServiceAccount-revoke path
+    # instead of the skip-because-managed branch.
+    from . import ps_k8s_token_service
+    for _dereg in (ps_k8s_token_service.deregister, deregister_pra_tunnel,
+                   deregister_api_tunnel, unbind_entra_group, disable_entra_federation):
         try:
             await _dereg(db, cluster_id)
         except Exception as exc:
@@ -855,10 +1219,16 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
             # terraform destroy evaluates the module config, so it needs the same
             # -var set apply used (else "No value for required variable"). The values
             # don't change what's destroyed (resources come from state), but the
-            # provider's region must be correct — reconstruct from the row.
+            # provider's region must be correct — reconstruct from the row. Carry the
+            # GKE control-plane /28 over from the provisioning job rather than letting
+            # the allocator hand out a fresh one (inert here, but a destroy shouldn't
+            # burn a slot or hit the live range scan).
+            prov_job = db.query(Job).filter(Job.id == row.deploy_job_id).first()
+            prov_vars = ((prov_job.metadata_dict or {}).get("tf_variables") or {}) if prov_job else {}
             destroy_vars = _build_cluster_tf_variables(
                 cloud=row.cloud, cluster_id=row.id, name=row.name,
-                region=row.region or "", opts={})
+                region=row.region or "", db=db,
+                opts={"master_cidr": prov_vars.get("master_cidr") or _GKE_LEGACY_MASTER_CIDR})
             await terraform.destroy(
                 _deploy_dir(row.deploy_job_id),
                 env=terraform_provider_env.provider_env(row.cloud),
@@ -1508,6 +1878,45 @@ def _entitle_agent_clusterrolebinding_manifest(namespace: str, sa: str) -> str:
     )
 
 
+# Default nonMasqueradeCIDRs for a CO-LOCATED GKE cluster in the sandbox VPC
+# (10.99.0.0/16). These are the ranges we keep DIRECT (no SNAT): the jumpoint /
+# vm / k8s subnets + the VPC-native pod & service ranges (so pod→VM stays direct)
+# and link-local (metadata server / Workload Identity). Everything else — the
+# Cloud SQL PSA range (wherever GCP allocated it) and the internet — is
+# masqueraded to the node IP. Overridable via config `gcp_k8s_nonmasq_cidrs` (CSV)
+# for a non-standard sandbox. Kept as SPECIFIC ranges (not the whole /16) so it's
+# robust even if the PSA /20 happens to land inside 10.99.0.0/16.
+_GKE_COLOCATE_NONMASQ_CIDRS = [
+    "10.99.1.0/24", "10.99.2.0/24", "10.99.3.0/24",
+    "10.99.128.0/18", "10.99.192.0/20", "169.254.0.0/16",
+]
+
+
+def _gke_ip_masq_configmap(nonmasq_cidrs: list) -> str:
+    """A ``kube-system/ip-masq-agent`` ConfigMap for a co-located GKE cluster.
+
+    Pod alias IPs are NOT re-advertised across the sandbox↔servicenetworking (PSA)
+    peering, so pod→Cloud SQL replies are unroutable unless the pod's source IP is
+    SNAT'd to the node IP (which IS a subnet route the PSA peering propagates).
+    ip-masq-agent masquerades everything EXCEPT ``nonMasqueradeCIDRs`` — we exempt
+    the in-VPC ranges (pod→VM stays direct) so only the Cloud SQL range + internet
+    get SNAT'd. Applied after the agent install via the same runner as the CRB.
+    NB GKE honours this only if the managed ip-masq-agent DaemonSet is running
+    (verify on first bring-up; apply the upstream DaemonSet if absent)."""
+    import yaml as _yaml
+    cfg_text = _yaml.safe_dump(
+        {"nonMasqueradeCIDRs": list(nonmasq_cidrs), "masqLinkLocal": False,
+         "resyncInterval": "60s"},
+        default_flow_style=False)
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "ip-masq-agent", "namespace": "kube-system"},
+        "data": {"config": cfg_text},
+    }
+    return _yaml.safe_dump(manifest, default_flow_style=False)
+
+
 async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
     """Install (or remove) the Entitle agent in a managed cluster. Background task.
 
@@ -1635,6 +2044,21 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         await _apply_manifest_via_runner(
             kubeconfig, _entitle_agent_clusterrolebinding_manifest(namespace, agent_sa),
             target_cloud=row.cloud)
+        # Co-located GKE (in the sandbox VPC): SNAT pod→Cloud SQL to the node IP so
+        # the PSA peering routes replies back — otherwise the agent's DB resource
+        # Sync times out even though nodes can reach the DB. Only for a GCP cluster
+        # provisioned in co-location mode (gcp_k8s_subnetwork set). Best-effort.
+        if row.cloud == "gcp":
+            from .region_config import resolve_region
+            if (resolve_region("gcp", row.region) or {}).get("k8s_subnetwork"):
+                nonmasq = _cfg_list("gcp_k8s_nonmasq_cidrs") or _GKE_COLOCATE_NONMASQ_CIDRS
+                try:
+                    await _apply_manifest_via_runner(
+                        kubeconfig, _gke_ip_masq_configmap(nonmasq), target_cloud=row.cloud)
+                    logger.info("Applied ip-masq-agent ConfigMap on co-located GKE cluster %s", row.name)
+                except Exception as exc:
+                    logger.warning("ip-masq-agent ConfigMap apply failed on %s "
+                                   "(pod→Cloud SQL reachability may need it): %s", row.name, exc)
         config_service.set("entitle_agent_cluster_id", cluster_id)
         logger.info("Entitle agent installed on cluster %s (ns=%s)", row.name, namespace)
         # If a k8s connector was already registered for this cluster (before the agent
@@ -2024,7 +2448,7 @@ async def _mint_pra_sa_token(kubeconfig: str, target_cloud: str = "") -> str:
     One command on purpose: on a Cloud Run runner each kubectl call is a fresh ~2-min
     container, so the old apply-then-poll-``.data.token``-6× loop was ~7 containers
     (~14 min) and still timed out on GKE, which never populated the Secret."""
-    ns = _cfg("pra_k8s_namespace", "kube-system")
+    ns = _cfg("pra_k8s_namespace", "pra-access")
     sa = _cfg("pra_k8s_sa_name", "pra-access")
     secret = f"{sa}-token"
     manifest = _entitle_k8s_rbac_manifest(ns, sa, secret)
@@ -2060,6 +2484,185 @@ async def _mint_pra_sa_token(kubeconfig: str, target_cloud: str = "") -> str:
                      len(out or ""), (out or "")[-1200:])
         raise K8sError("could not mint the PRA ServiceAccount token — see the job logs")
     return token
+
+
+# ── Password-Safe-managed ServiceAccount token ────────────────────────────────
+#
+# The token _mint_pra_sa_token creates can instead be a Password Safe managed
+# account, rotated by the "Kubernetes Service Account Token" plugin. Once it is,
+# the dashboard must stop minting: the plugin sweeps only the token Secrets
+# carrying ITS OWN labels (beyondtrust.com/managed-by=password-safe), so the
+# Secret this module creates — which has an annotation and no labels — would never
+# be swept and would stay valid forever. That is not a broken PRA copy; it is
+# worse and quieter: a permanent, unrotatable, unaudited cluster-admin bearer
+# token, defeating the only reason to choose the revoking token mode.
+#
+# See services/ps_k8s_token_service.py and docs/design/k8s-sa-token-rotation.md.
+
+# ClusterRole names + rules from the plugin's own scripts/rbac.yaml.
+_PS_ROTATOR_ROLE = "password-safe-token-rotator"
+_PS_ROTATOR_ROLE_BOUND = "password-safe-token-rotator-bound"
+
+
+def _ps_rotator_rbac_manifest(*, mode: str, subject_kind: str, subject_name: str,
+                              subject_namespace: str = "") -> str:
+    """ClusterRole + ClusterRoleBinding for the rotation plugin's functional account.
+
+    LongLived needs ``serviceaccounts`` get/list plus ``secrets``
+    create/get/list/delete, because it rotates by creating a new token Secret and
+    deleting the old ones. Bound needs ``serviceaccounts/token`` create and **no
+    access to Secrets at all** — strictly less privilege, which is the reason to
+    prefer it where a brief stale window is acceptable.
+
+    Deliberately NOT folded into _entitle_k8s_rbac_manifest: that manifest renders a
+    cluster-admin binding for a different subject, is shared with the Entitle
+    External-Access path, and is re-rendered and ``kubectl delete``d by
+    deregister_pra_tunnel — so anything added to it would be destroyed when the PRA
+    tunnel is removed, and this RBAC has to outlive the tunnel."""
+    bound = (mode or "").strip().lower() == "bound"
+    role = _PS_ROTATOR_ROLE_BOUND if bound else _PS_ROTATOR_ROLE
+    if bound:
+        rules = (
+            '  - apiGroups: [""]\n'
+            '    resources: ["serviceaccounts"]\n'
+            '    verbs: ["get", "list"]\n'
+            '  - apiGroups: [""]\n'
+            '    resources: ["serviceaccounts/token"]\n'
+            '    verbs: ["create"]\n'
+        )
+    else:
+        rules = (
+            '  - apiGroups: [""]\n'
+            '    resources: ["serviceaccounts"]\n'
+            '    verbs: ["get", "list"]\n'
+            '  - apiGroups: [""]\n'
+            '    resources: ["secrets"]\n'
+            '    verbs: ["create", "get", "list", "delete"]\n'
+        )
+    manifest = (
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n"
+        f"  name: {role}\nrules:\n{rules}"
+    )
+    if not subject_name:
+        # No subject configured: apply the role only. Harmless and idempotent, and
+        # Password Safe's own Verify Functional Account names what is still missing.
+        return manifest
+
+    subject = f"- kind: {subject_kind}\n  name: {subject_name}\n"
+    if subject_kind == "ServiceAccount":
+        subject += f"  namespace: {subject_namespace}\n"
+    else:
+        # A User/Group subject needs the RBAC API group; a ServiceAccount must NOT
+        # have it. Getting this wrong is silently accepted and matches nothing.
+        subject += "  apiGroup: rbac.authorization.k8s.io\n"
+    return (
+        manifest + "---\n"
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n"
+        f"  name: {role}-binding\n"
+        "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
+        f"  name: {role}\nsubjects:\n{subject}"
+    )
+
+
+def _ps_rotator_subject(cloud: str) -> tuple:
+    """``(kind, name, namespace)`` for the rotator ClusterRoleBinding, from config.
+
+    The subject differs per cloud and a wrong one fails as an opaque 401/403 at the
+    first rotation rather than at bind time, so each cloud names its own config key
+    and a missing one is reported by name.
+
+    These come from config rather than being derived because the dashboard only knows
+    the functional account's NAME — its cloud identity lives in Password Safe. AKS
+    needs the service principal's object id, which is a different GUID from the client
+    id in the functional account's username and would require a Graph lookup; and an
+    AWS access key id cannot be mapped to a principal ARN at all without the secret.
+    GKE is the exception: there the functional account's own name IS the subject, so
+    the caller passes it in when config is blank."""
+    c = (cloud or "").strip().lower()
+    if c == "gcp":
+        return ("User", _cfg("k8s_ps_rotator_gke_sa_email"), "")
+    if c == "azure":
+        return ("User", _cfg("k8s_ps_rotator_aks_sp_object_id"), "")
+    if c == "aws":
+        return ("User", _cfg("k8s_ps_rotator_eks_username", "passwordsafe-rotator"), "")
+    return ("ServiceAccount",
+            _cfg("k8s_ps_rotator_bootstrap_sa", "password-safe-rotator"),
+            _cfg("k8s_ps_rotator_bootstrap_namespace", "beyondtrust"))
+
+
+async def apply_ps_rotator_rbac(db: Session, cluster_id: str, *, mode: str,
+                                subject_name: str = "") -> str:
+    """Apply the rotator ClusterRole (+ binding when a subject is known). Returns a
+    human-readable note for the job result."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    kind, name, namespace = _ps_rotator_subject(row.cloud)
+    name = subject_name or name
+    manifest = _ps_rotator_rbac_manifest(
+        mode=mode, subject_kind=kind, subject_name=name, subject_namespace=namespace)
+    if kind == "ServiceAccount" and name:
+        # The generic path's bootstrap ServiceAccount has to exist before it can be
+        # bound; on the cloud paths the subject is a cloud identity we never create.
+        manifest = (
+            "apiVersion: v1\nkind: Namespace\nmetadata:\n"
+            f"  name: {namespace}\n---\n"
+            "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n"
+            f"  name: {name}\n  namespace: {namespace}\n---\n" + manifest
+        )
+    await _apply_manifest_via_runner(
+        resolve_kubeconfig(db, cluster_id), manifest, target_cloud=row.cloud)
+    if not name:
+        return ("rotator ClusterRole applied; no binding subject is configured for "
+                f"{row.cloud or 'this cloud'} — run Verify Functional Account in Password "
+                "Safe, which names the missing verbs and prints the ClusterRole to apply")
+    return f"rotator RBAC applied ({kind} {name})"
+
+
+async def remove_ps_rotator_rbac(db: Session, cluster_id: str, *, mode: str) -> None:
+    """Best-effort teardown of the rotator ClusterRole + binding."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        return
+    kind, name, namespace = _ps_rotator_subject(row.cloud)
+    manifest = _ps_rotator_rbac_manifest(
+        mode=mode, subject_kind=kind, subject_name=name, subject_namespace=namespace)
+    await _delete_manifest_via_runner(
+        resolve_kubeconfig(db, cluster_id), manifest, target_cloud=row.cloud)
+
+
+async def delete_legacy_pra_token_secret(db: Session, cluster_id: str) -> None:
+    """Delete the dashboard-minted ``<sa>-token`` Secret.
+
+    Called ONLY after the PRA Vault account carries a Password-Safe-issued token —
+    delete it any earlier and the brokered session loses the credential it is
+    currently using. Deleting the Secret, not the manifest: the manifest also carries
+    the Namespace, ServiceAccount and ClusterRoleBinding, all of which must survive
+    (the plugin binds every token it issues to the ServiceAccount's uid, so recreating
+    the SA would invalidate every token Password Safe has issued)."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        return
+    ns = _cfg("pra_k8s_namespace", "pra-access")
+    sa = _cfg("pra_k8s_sa_name", "pra-access")
+    command = (f"kubectl -n {shlex.quote(ns)} delete secret {shlex.quote(f'{sa}-token')} "
+               f"--ignore-not-found")
+    await _run_cluster_command(
+        resolve_kubeconfig(db, cluster_id), command, target_cloud=row.cloud)
+
+
+async def _resolve_pra_sa_token(db: Session, row: K8sCluster, kubeconfig: str) -> tuple:
+    """``(token, source)`` for PRA Vault injection.
+
+    ``source`` is ``"password_safe"`` when this cluster's ServiceAccount token is a
+    Password Safe managed account: the CURRENT value is checked out of Password Safe
+    and nothing is minted. Minting here would leave an unlabelled token Secret the
+    rotation plugin never sweeps — a cluster-admin credential nothing rotates (see
+    the section comment above). Otherwise ``"minted"``, and the legacy mint runs."""
+    if row.ps_token_account_id:
+        from . import ps_k8s_token_service
+        return await ps_k8s_token_service.current_token(db, row.id), "password_safe"
+    return await _mint_pra_sa_token(kubeconfig, target_cloud=row.cloud), "minted"
 
 
 async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str = None,
@@ -2125,9 +2728,10 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
     # hand it to the Vault token account associated with the jump.
     vault_account_name = ""
     sa_token = ""
+    token_source = ""
     group_id = vault_account_group_id
     if vault_inject:
-        sa_token = await _mint_pra_sa_token(kubeconfig, target_cloud=row.cloud)
+        sa_token, token_source = await _resolve_pra_sa_token(db, row, kubeconfig)
         vault_account_name = f"k8s-{row.name}-sa"
         if group_id is None:
             cfg_group = _cfg("bt_vault_account_group_id")
@@ -2147,11 +2751,18 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
     )
     row.pra_jump_id = str(result.get("tunnel_jump_id") or "")
     row.pra_tunnel_state = result.get("tf_state_json")
+    # Persist the Vault account id: the token sync needs a durable handle on it, and
+    # until now this was computed and thrown away — only the (token-redacted) tunnel
+    # state held it. Same precedent as rancher_ui_vault_account_id.
+    if result.get("vault_account_id"):
+        row.pra_vault_account_id = str(result["vault_account_id"])
     db.commit()
-    logger.info("Registered k8s PRA tunnel for cluster %s (jump id %s, vault account %s)",
-                row.name, row.pra_jump_id, result.get("vault_account_id") or "none")
+    logger.info("Registered k8s PRA tunnel for cluster %s (jump id %s, vault account %s, "
+                "token from %s)", row.name, row.pra_jump_id,
+                row.pra_vault_account_id or "none", token_source or "n/a")
     return {"pra_jump_id": row.pra_jump_id, "jump_group_name": result.get("jump_group_name"),
-            "vault_account_id": result.get("vault_account_id")}
+            "vault_account_id": result.get("vault_account_id"),
+            "token_source": token_source}
 
 
 async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
@@ -2171,18 +2782,38 @@ async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
     # long-lived and would otherwise stay valid in the cluster after the Vault
     # account is gone). Deleting the dedicated namespace removes the SA + token
     # Secret; the ClusterRoleBinding is deleted by name. Best-effort, idempotent.
-    try:
-        ns = _cfg("pra_k8s_namespace", "pra-access")
-        sa = _cfg("pra_k8s_sa_name", "pra-access")
-        await _delete_manifest_via_runner(
-            resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"), target_cloud=row.cloud)
-    except Exception as exc:
-        logger.warning("k8s tunnel: PRA ServiceAccount revoke for %s failed (non-fatal): %s",
-                       cluster_id, exc)
+    #
+    # NOT when the token is Password Safe-managed: the rotation plugin binds every
+    # token it issues to the ServiceAccount's uid, so deleting and recreating the SA
+    # invalidates all of them and leaves the managed account pointing at an object
+    # that no longer exists. Removing the Password Safe registration (which revokes
+    # properly) is the way to retire that ServiceAccount.
+    if row.ps_token_account_id:
+        logger.warning(
+            "k8s tunnel: cluster %s ServiceAccount token is Password Safe-managed "
+            "(account %s) — skipping the in-cluster ServiceAccount revoke; remove the "
+            "Password Safe registration to retire it.", cluster_id, row.ps_token_account_id)
+    else:
+        try:
+            ns = _cfg("pra_k8s_namespace", "pra-access")
+            sa = _cfg("pra_k8s_sa_name", "pra-access")
+            await _delete_manifest_via_runner(
+                resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"), target_cloud=row.cloud)
+        except Exception as exc:
+            logger.warning("k8s tunnel: PRA ServiceAccount revoke for %s failed (non-fatal): %s",
+                           cluster_id, exc)
 
     row.pra_jump_id = None
     row.pra_tunnel_state = None
+    row.pra_vault_account_id = None
     db.commit()
+    # Nothing to clear on the Password Safe side, and deliberately so. The synced-account
+    # link between the token account and the "PRA Vault Token" account is left in place:
+    # that plugin resolves its PRA Vault account by NAME (a stable `k8s-<cluster>-sa`), so
+    # re-provisioning the tunnel re-creates the account the link already points at and the
+    # pair resumes on its own. Unlinking here would trade that self-healing for a manual
+    # re-registration. The cost is that a rotation landing while no tunnel exists fails the
+    # PRA half — visibly, in Password Safe's change log, which is the right place for it.
 
     # The cluster no longer needs the shared Jumpoint — tear it down if nothing
     # else (VM / DB / another tunneled cluster) is using it. Best-effort.
@@ -2475,6 +3106,157 @@ async def run_group_binding(db: Session, *, cluster_id: str, job_id: str, action
     job_service.set_completed(db, job_id)
 
 
+# ── Entitle impersonation access (fine-grained per-cluster JIT) ───────────────
+#
+# Grant the Entra group cluster-wide `impersonate` on `users` ONLY. This is the
+# authN/authZ split: the group (federation) authenticates the user AND lets them
+# impersonate, but they have nothing to impersonate as until the Entitle
+# **Kubernetes** integration JIT-binds `<prefix>:<email>` → a role on THIS cluster.
+# They then run `kubectl --as=<prefix>:<email>` (over the TCP/API tunnel on GKE —
+# the tunnel_type=k8s tunnel strips Impersonate-*). Because the JIT grant is
+# per-cluster, one standing group gives login everywhere but admin only where a
+# grant exists — finer-grained than one group bound straight to cluster-admin.
+#
+# GUARDRAIL: impersonate `users` only — NEVER `groups` (`--as-group=system:masters`
+# would bypass RBAC entirely) and never serviceaccounts/uids/userextras. No
+# `resourceNames` — RBAC can't wildcard them (there is no way to express
+# "entitle:*@domain"), so the target is any User subject; in a group-federated
+# cluster only Entitle's JIT `entitle:` subjects are ever bound to a User, so the
+# effective blast radius is those time-boxed grants. Tracked in config
+# (k8s_impersonator_{cid}); fixed names → `kubectl apply` is idempotent.
+
+_IMPERSONATOR_NAME = "entitle-impersonator"
+
+
+def _entitle_impersonator_manifest(group_subject: str) -> str:
+    """ClusterRole (impersonate `users` only) + a ClusterRoleBinding of the Entra
+    group to it. ``group_subject`` is the cloud-aware RBAC subject (workforce
+    ``principalSet`` URI on GKE, bare group OID on EKS/AKS)."""
+    return (
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n"
+        f"  name: {_IMPERSONATOR_NAME}\n"
+        "rules:\n"
+        '- apiGroups: [""]\n  resources: ["users"]\n  verbs: ["impersonate"]\n---\n'
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n"
+        f"  name: {_IMPERSONATOR_NAME}\n"
+        "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
+        f"  name: {_IMPERSONATOR_NAME}\n"
+        "subjects:\n"
+        "- apiGroup: rbac.authorization.k8s.io\n  kind: Group\n"
+        f"  name: {_yaml_quote(group_subject)}\n"
+    )
+
+
+async def apply_impersonator_binding(db: Session, cluster_id: str, *,
+                                     group_id: str = None) -> dict:
+    """Grant the Entra group cluster-wide ``impersonate`` on ``users``. Reuses the
+    federation group id (config ``entra_rbac_group_id``, per-call overridable) and
+    the cloud-aware subject. Idempotent (fixed names, ``kubectl apply``). Tracked in
+    config ``k8s_impersonator_{cluster_id}``.
+
+    On **GKE** the ClusterRole is only HALF the grant: GKE authorizes ``impersonate``
+    through Cloud IAM as well as RBAC, so the group's principalSet also needs
+    ``container.clusters.impersonate`` (gcp_service.grant_impersonate_iam). Skipping it
+    was the bug that made this whole tier fail live on 2026-07-30 with a Forbidden that
+    *looks* like an RBAC problem. EKS and AKS need no cloud-side counterpart: EKS
+    authorizes impersonation purely in Kubernetes RBAC, and AKS ORs the Azure RBAC
+    webhook with Kubernetes RBAC so the RBAC half stands on its own (reasoned, not
+    live-tested — the AKS leg of this tier has never been exercised end to end)."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    gid = (group_id or "").strip() or _cfg("entra_rbac_group_id")
+    if not gid:
+        raise K8sError("no Entra group configured — set entra_rbac_group_id on Settings "
+                       "(k8s panel) or pass a group Object ID")
+    subject = _workforce_principalset(gid) if row.cloud == "gcp" else gid
+    kubeconfig = resolve_kubeconfig(db, cluster_id)
+    await _apply_manifest_via_runner(
+        kubeconfig, _entitle_impersonator_manifest(subject), target_cloud=row.cloud)
+    # Cloud IAM half (GKE only). Deliberately fatal: a half-applied grant is exactly
+    # the silent-partial-success that produced the original bug, and both halves are
+    # idempotent so a retry is safe.
+    if row.cloud == "gcp":
+        from . import gcp_service
+        project = _cfg("gcp_project_id")
+        if not project:
+            raise K8sError("gcp_project_id is not configured — GKE impersonation needs "
+                           "the project to grant container.clusters.impersonate")
+        await asyncio.to_thread(gcp_service.grant_impersonate_iam, subject, project)
+    from . import config_service
+    config_service.set(f"k8s_impersonator_{cluster_id}", gid)
+    logger.info("Applied Entitle impersonator binding (group %s) on cluster %s", gid, row.name)
+    return {"group_id": gid, "cloud_iam_granted": row.cloud == "gcp"}
+
+
+async def remove_impersonator_binding(db: Session, cluster_id: str) -> dict:
+    """Delete the impersonator ClusterRole + ClusterRoleBinding + clear its config
+    key (best-effort, idempotent). On GKE also drops the Cloud IAM half — but only
+    when no OTHER cluster still has the same group bound (see below)."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    from . import config_service
+    gid = config_service.get(f"k8s_impersonator_{cluster_id}")
+    if row is None or not gid:
+        return {"ok": True, "removed": False}
+    try:
+        # Delete matches by kind+name, so the subject value is irrelevant here —
+        # pass the raw gid (skip _workforce_principalset's pool-config dependency).
+        await _delete_manifest_via_runner(
+            resolve_kubeconfig(db, cluster_id),
+            _entitle_impersonator_manifest(gid), target_cloud=row.cloud)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Entitle impersonator unbind for %s failed (non-fatal): %s", cluster_id, exc)
+    # Cloud IAM half (GKE): the custom-role binding is PROJECT-level, so it is shared by
+    # every GKE cluster using this group — ref-count before revoking or removing
+    # impersonation from one cluster silently breaks `--as` on all the others.
+    iam_revoked = False
+    if row.cloud == "gcp":
+        shared = [c.id for c in db.query(K8sCluster).filter(K8sCluster.cloud == "gcp").all()
+                  if c.id != cluster_id and config_service.get(f"k8s_impersonator_{c.id}") == gid]
+        if shared:
+            logger.info("Keeping the GKE impersonate IAM binding for group %s — still used by %s",
+                        gid, ", ".join(shared))
+        else:
+            try:
+                from . import gcp_service
+                await asyncio.to_thread(gcp_service.revoke_impersonate_iam,
+                                        _workforce_principalset(gid), _cfg("gcp_project_id"))
+                iam_revoked = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GKE impersonate IAM revoke for %s failed (non-fatal): %s",
+                               cluster_id, exc)
+    config_service.set(f"k8s_impersonator_{cluster_id}", "")
+    return {"ok": True, "removed": True, "cloud_iam_revoked": iam_revoked}
+
+
+async def run_impersonator_binding(db: Session, *, cluster_id: str, job_id: str,
+                                   action: str = "apply", group_id: str = None) -> None:
+    """Worker entry for a ``k8s_impersonator_binding`` job: apply/remove the Entitle
+    impersonator binding (the apply drives the cloud runner)."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        if action == "remove":
+            await broadcast_progress(job_id, 20, "Removing the impersonation binding…")
+            await remove_impersonator_binding(db, cluster_id)
+        else:
+            await broadcast_progress(job_id, 20, "Granting the Entra group impersonation access…")
+            res = await apply_impersonator_binding(db, cluster_id, group_id=group_id)
+            if res.get("cloud_iam_granted"):
+                # Not a wait — just say so, because the first `kubectl --as` inside the
+                # propagation window still 403s and reads exactly like a missing grant.
+                await broadcast_progress(
+                    job_id, 100,
+                    "Granted (RBAC + Cloud IAM). Cloud IAM takes ~1-2 min to propagate — "
+                    "a `kubectl --as` before then can still be Forbidden.")
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("k8s impersonator job failed cluster=%s action=%s", cluster_id, action)
+        return
+    job_service.set_completed(db, job_id)
+
+
 # ── Entra OIDC federation → cluster trust (real-identity JIT) ─────────────────
 #
 # Make a cluster TRUST Entra as the token issuer so a user's own Entra token (not
@@ -2652,6 +3434,66 @@ def _entra_oidc_login_kubeconfig(kubeconfig: str, oidc: dict) -> str:
     return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
 
 
+# kubelogin login modes that authenticate as a *machine* identity rather than the
+# person holding the file. `spn` is what _assemble_aks_kubeconfig writes for the
+# runner (it reads AAD_SERVICE_PRINCIPAL_CLIENT_ID/_SECRET from the environment —
+# the dashboard's SP); msi/workloadidentity are the same problem from a registered
+# kubeconfig. Everything else (devicecode / interactive / azurecli / ropc) is
+# already the user, and is left alone.
+_KUBELOGIN_MACHINE_LOGINS = ("spn", "msi", "workloadidentity")
+
+
+def _entra_aks_user_login_kubeconfig(kubeconfig: str) -> str:
+    """Pure transform: rewrite an AKS ``kubelogin`` exec from service-principal mode
+    to interactive **device-code** as the end user, preserving ``--server-id`` and
+    adding the well-known AKS AAD client app id + the tenant. Token-free — no static
+    credential is written, and the cluster block (CA / repointed server) is untouched.
+
+    Without this the download carries ``--login spn``, which authenticates as whatever
+    ``AAD_SERVICE_PRINCIPAL_CLIENT_ID``/``_SECRET`` are in the operator's environment:
+    either nothing (the file just fails) or the *dashboard's* service principal, which
+    defeats the real-identity/JIT story the download exists for.
+
+    Device-code for the same reason as EKS (see ``_entra_oidc_login_kubeconfig``): the
+    browser authcode flow SSOs the operator into the *machine's own* tenant, the wrong
+    one for a lab/demo tenant. A registered (user-uploaded) kubeconfig that already
+    authenticates as a person — a user-mode exec, or the legacy ``azure``
+    auth-provider — is left exactly as it is."""
+    from . import azure_service
+    cfg = yaml.safe_load(kubeconfig) or {}
+    tenant = ""
+    for u in (cfg.get("users") or []):
+        user = u.get("user") or {}
+        if (user.get("auth-provider") or {}).get("name") == "azure":
+            continue    # legacy authprovider — already an interactive user login
+        exec_blk = user.get("exec") or {}
+        if (exec_blk.get("command") or "") not in ("kubelogin", "kubelogin.exe"):
+            continue
+        args = list(exec_blk.get("args") or [])
+        login = args[args.index("--login") + 1] if (
+            "--login" in args and args.index("--login") + 1 < len(args)) else ""
+        if login not in _KUBELOGIN_MACHINE_LOGINS:
+            continue    # devicecode / azurecli / interactive (or kubelogin's default) — the user's own
+        if not tenant:
+            tenant = _cfg("azure_tenant_id")
+            if not tenant:
+                raise K8sError("no Entra tenant — set azure_tenant_id on Settings (Azure "
+                               "panel) so the AKS kubeconfig can sign the user in "
+                               "interactively instead of as the dashboard's service principal")
+        server_id = args[args.index("--server-id") + 1] if (
+            "--server-id" in args and args.index("--server-id") + 1 < len(args)) \
+            else azure_service.AKS_AAD_SERVER_APP_ID
+        exec_blk["args"] = [
+            "get-token",
+            "--server-id", server_id,
+            "--client-id", azure_service.AKS_AAD_CLIENT_APP_ID,
+            "--tenant-id", tenant,
+            "--login", "devicecode",
+        ]
+        exec_blk.setdefault("interactiveMode", "IfAvailable")
+    return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+
+
 def _connect_gateway_kubeconfig(context_name: str, server: str) -> str:
     """A token-free Connect Gateway kubeconfig for GKE: server = the public gateway
     URL, auth = ``gke-gcloud-auth-plugin`` (picks up the active gcloud/workforce
@@ -2679,10 +3521,11 @@ def build_entra_oidc_kubeconfig(db: Session, cluster_id: str) -> str:
     """Return a token-free kubeconfig for real-identity access, authenticating as the
     USER's own Entra identity (not the dashboard's). EKS: the stored kubeconfig
     repointed at the API tunnel with the exec block replaced by ``kubectl oidc-login``
-    (int128 kubelogin) against the shared Entra app. AKS: the existing kubelogin
-    (Azure) kubeconfig repointed at the tunnel — already Entra. GKE: a **Connect
-    Gateway** kubeconfig (NOT the tunnel) — the user's workforce identity reaches the
-    private cluster through the gateway."""
+    (int128 kubelogin) against the shared Entra app. AKS: the Azure kubelogin
+    kubeconfig repointed at the tunnel, with its exec flipped out of service-principal
+    mode into an interactive device-code sign-in. GKE: a **Connect Gateway** kubeconfig
+    (NOT the tunnel) — the user's workforce identity reaches the private cluster
+    through the gateway."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
@@ -2699,7 +3542,7 @@ def build_entra_oidc_kubeconfig(db: Session, cluster_id: str) -> str:
     local_port = int(_cfg("k8s_api_tunnel_local_port", "6443"))
     kubeconfig = _repoint_kubeconfig_to_tunnel(resolve_kubeconfig(db, cluster_id), local_port)
     if row.cloud == "azure":
-        return kubeconfig  # AKS kubelogin exec is already the user's Entra identity
+        return _entra_aks_user_login_kubeconfig(kubeconfig)
     return _entra_oidc_login_kubeconfig(kubeconfig, _entra_oidc_settings())
 
 
@@ -2811,15 +3654,31 @@ async def register_rancher_ui_web_jump(db: Session) -> dict:
         return {"web_jump_id": existing, "reused": True}
     jump_group = _cfg("rancher_ui_jump_group") or _cfg("bt_jump_group_name")
     jumpoint = _cfg("rancher_ui_jumpoint_name") or _cfg("bt_jumpoint_name")
+    # Vault the admin credential for injection when a Vault account group is chosen
+    # (deploy form) — the operator never sees the password; PRA injects it into the
+    # Rancher login. Falls back to a plain (non-injected) Web Jump when no group is
+    # set. The generated/operator-set admin password comes from auto-first-run.
+    vault_group = (_cfg("rancher_ui_vault_account_group_id")
+                   or _cfg("bt_vault_account_group_id") or "").strip()
+    admin_password = _cfg("rancher_admin_password") if vault_group else ""
+    try:
+        vault_group_id = int(vault_group) if vault_group else None
+    except ValueError:
+        vault_group_id = None
     result = await pra.provision_web_jump(
         name="rancher-ui", url=server_url,
         jump_group_name=jump_group, jumpoint_name=jumpoint,
-        verify_certificate=config_service.get_bool("rancher_ui_verify_certificate", False))
+        verify_certificate=config_service.get_bool("rancher_ui_verify_certificate", False),
+        client_secret=_cfg("bt_client_secret"),
+        admin_password=admin_password,
+        vault_account_name="rancher-ui-admin" if (admin_password and vault_group_id) else "",
+        vault_username="admin", vault_account_group_id=vault_group_id)
     config_service.set("rancher_ui_web_jump_id", str(result.get("web_jump_id") or ""))
+    config_service.set("rancher_ui_vault_account_id", str(result.get("vault_account_id") or ""))
     if result.get("tf_state_json"):
         config_service.set("rancher_ui_web_jump_tfstate", result["tf_state_json"])
-    return {"web_jump_id": result.get("web_jump_id"), "jump_group": jump_group,
-            "jumpoint": jumpoint, "reused": False}
+    return {"web_jump_id": result.get("web_jump_id"), "vault_account_id": result.get("vault_account_id"),
+            "jump_group": jump_group, "jumpoint": jumpoint, "reused": False}
 
 
 async def remove_rancher_ui_web_jump() -> None:
@@ -2834,6 +3693,7 @@ async def remove_rancher_ui_web_jump() -> None:
             logger.warning("Rancher UI web-jump removal failed (non-fatal): %s", exc)
     config_service.set("rancher_ui_web_jump_id", "")
     config_service.set("rancher_ui_web_jump_tfstate", "")
+    config_service.set("rancher_ui_vault_account_id", "")
 
 
 async def open_console(db: Session, cluster_id: str, username: str = "system", *,

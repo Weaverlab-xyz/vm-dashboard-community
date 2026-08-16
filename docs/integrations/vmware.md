@@ -152,3 +152,56 @@ mode `0777`; the container entrypoint copies the key to a `0600` path
 automatically. If you see `WARNING: UNPROTECTED PRIVATE KEY FILE`, check that
 `/usr/local/bin/entrypoint.sh` ran and that the key copy succeeded (check
 `docker compose logs app | head -20`).
+
+## Over a co-located remote agent
+
+**This section previously said Workstation could not be managed by an agent. That was
+wrong, and it is worth saying why:** the reasoning was about `vmrun`, which is a local
+binary driving VMX paths on disk — correct as far as it went. Workstation **Pro** also
+ships **`vmrest`**, a REST daemon that is plain JSON over HTTP, and that changes the
+answer entirely. An agent on the Workstation host reaches it with no extra dependency and
+no container.
+
+This replaces `POWERSHELL_EXECUTION_MODE=ssh`, which does the same job today by having
+the dashboard hold an inbound SSH key to a Windows desktop. The agent polls outward
+instead, so nothing has to be opened toward that machine.
+
+### Setting it up
+
+On the Workstation host, once:
+
+```
+vmrest -C     # sets the API credentials
+vmrest        # runs the daemon on 127.0.0.1:8697
+```
+
+Confirm it works before involving the agent — this separates vmrest setup from agent
+configuration, which is where the time otherwise goes:
+
+```
+curl -u USER:PASS -H "Accept: application/vnd.vmware.vmw.rest-v1+json"      http://127.0.0.1:8697/api/vms
+```
+
+Then run an agent on that host and add a **workstation** connection bound to it. See
+[remote agents](../remote-agents.md#vmware-workstation-pro) for the connection and policy
+entries — including `allow_loopback: true`, which the agent needs because vmrest binds
+loopback and the agent denies loopback by default.
+
+### What it can do
+
+| | |
+|---|---|
+| Inventory sync | yes — name, power state, vCPU, memory, IP for running VMs |
+| Power on / off | yes |
+| Reset, reboot, snapshot | **no** — vmrest's API has none of them, and the agent refuses rather than substituting `shutdown` |
+
+Synced VMs appear on this page alongside the ones the dashboard scans locally, badged
+with the agent's name. They are tagged into workgroups exactly as Proxmox and Nutanix VMs
+are, and an untagged VM is admin-only.
+
+### Still local-only
+
+The **discovery** scan does not find Workstation, and that has not changed: a desktop
+hypervisor exposes nothing on the network by default. vmrest binds `127.0.0.1` and is off
+until someone runs it, so there is nothing for a subnet sweep to find. Add the connection
+by hand.

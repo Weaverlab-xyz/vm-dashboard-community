@@ -1,0 +1,22 @@
+# List cluster nodes — read-only smoke test for a Kubernetes target.
+# Target: a registered/provisioned Kubernetes cluster (Config Management → target
+# kind "Kubernetes cluster"). The dashboard token-preps the cluster's kubeconfig and
+# injects it into the runner via K8S_AUTH_KUBECONFIG (and KUBECONFIG) — you supply
+# nothing. This is a localhost play: Ansible reaches OUT to the API server.
+- name: List Kubernetes nodes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Query nodes
+      kubernetes.core.k8s_info:
+        kind: Node
+      register: nodes
+
+    - name: Show node names + status
+      ansible.builtin.debug:
+        msg: >-
+          {{ nodes.resources
+             | map(attribute='metadata.name')
+             | list }}
+          ({{ nodes.resources | length }} node(s))

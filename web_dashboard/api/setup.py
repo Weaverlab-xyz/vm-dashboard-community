@@ -86,10 +86,12 @@ class AzureRegionConfig(BaseModel):
     """
     resource_group: str = ""
     vnet_resource_group: str = ""
+    default_subnet_id: str = ""
     desktops_subnet_id: str = ""
     db_subnet_id: str = ""
     db_mysql_subnet_id: str = ""
     db_private_dns_zone_id: str = ""
+    jumpoint_subnet_id: str = ""
     gallery_name: str = ""
     gallery_resource_group: str = ""
     default_vm_size: str = ""
@@ -134,6 +136,10 @@ class GcpRegionConfig(BaseModel):
     ecs_subnetwork: str = ""
     router_name: str = ""
     nat_name: str = ""
+    k8s_subnetwork: str = ""
+    k8s_pods_range: str = ""
+    k8s_services_range: str = ""
+    k8s_node_tag: str = ""
 
 
 # Cloud → per-region-config model. Drives the /import parser and the /regions/{cloud}
@@ -194,7 +200,9 @@ class OCISetup(BaseModel):
 
 class FeaturesSetup(BaseModel):
     vmware_enabled: bool = False
-    beyondtrust_enabled: bool = False
+    password_safe_enabled: bool = False
+    pra_enabled: bool = False
+    epml_enabled: bool = False
     portainer_enabled: bool = False
     ansible_enabled: bool = False
     entitle_enabled: bool = False
@@ -207,6 +215,7 @@ class FeaturesSetup(BaseModel):
     admission_control_enabled: bool = False
     cloud_database_enabled: bool = False
     k8s_management_enabled: bool = False
+    remote_agents_enabled: bool = False
 
 
 class SetupPayload(BaseModel):
@@ -318,7 +327,9 @@ def _apply_config(payload: SetupPayload) -> None:
     # Feature flags — always store (explicit true/false is meaningful)
     pairs.update({
         "vmware_enabled":       "1" if payload.features.vmware_enabled else "0",
-        "beyondtrust_enabled":  "1" if payload.features.beyondtrust_enabled else "0",
+        "password_safe_enabled": "1" if payload.features.password_safe_enabled else "0",
+        "pra_enabled":          "1" if payload.features.pra_enabled else "0",
+        "epml_enabled":         "1" if payload.features.epml_enabled else "0",
         "portainer_enabled":    "1" if payload.features.portainer_enabled else "0",
         "ansible_enabled":      "1" if payload.features.ansible_enabled else "0",
         "entitle_enabled":      "1" if payload.features.entitle_enabled else "0",
@@ -331,6 +342,7 @@ def _apply_config(payload: SetupPayload) -> None:
         "admission_control_enabled": "1" if payload.features.admission_control_enabled else "0",
         "cloud_database_enabled":   "1" if payload.features.cloud_database_enabled else "0",
         "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
+        "remote_agents_enabled":    "1" if payload.features.remote_agents_enabled else "0",
     })
 
     config_service.set_many(pairs)
@@ -348,18 +360,70 @@ def _apply_config(payload: SetupPayload) -> None:
 # Data caches whose payload is derived from cloud/config values written via the
 # setup wizard. Invalidated after every wizard save so the next page load
 # rebuilds them against the new config instead of serving stale pre-save data.
+#
+# SPLIT BY KEY SHAPE, and keep it that way — the two need different deletes and
+# picking the wrong one is a silent no-op, not an error:
+#   * key_global("x")        -> "vmcli:x"           -> invalidate(key_global(x))
+#   * key_param("x", k=v)    -> "vmcli:x:k=v"       -> invalidate_prefix(x)
+# invalidate_prefix matches "vmcli:x:" so it never reaches a key_global key, and
+# invalidate(key_global(x)) never reaches a key_param family. Before checking a
+# name in here, grep for how its readers build the key.
 _CONFIG_DEPENDENT_CACHES = (
-    "azure_images", "azure_network_opts", "azure_vms", "azure_marketplace",
-    "aws_amis", "aws_network_opts", "aws_instances", "aws_ssh_key_secrets",
-    "cfgmgmt_instances", "cfgmgmt_s3status",
-    "portainer_endpoints", "portainer_containers", "portainer_stacks",
+    # Azure — api/azure.py
+    "azure_vms",
+    # AWS — api/aws.py
+    "aws_instances",
+    # Both are dashboard-wide inventories: their fetchers iterate every region a
+    # deploy job recorded, so the payload spans regions and the key is genuinely flat.
+    # OCI is deliberately absent: api/oci.py::_cache_key scopes every OCI cache by
+    # region + compartment, so a wizard change lands on a new key and misses. A
+    # scoped key self-heals and needs no entry here — prefer that to listing.
+)
+
+# key_param() families — one entry per region/location/project, cleared by prefix.
+_CONFIG_DEPENDENT_CACHE_PREFIXES = (
+    "aws_amis",               # api/aws.py           key_param(region=...)
+    "aws_network_opts",       # api/aws.py           key_param(region=...)
+    "azure_images",           # api/azure.py         key_param(location=...)
+    "azure_network_opts",     # api/azure.py         key_param(location=...)
+    "gcp_custom_images",      # api/gcp.py           key_param(project=...)
+    "gcp_instances",          # api/gcp.py           key_param(project=...)
+    "gcp_network_opts",       # api/gcp.py           key_param(region=...)
+    "portainer_endpoints",    # services/portainer_service.py  key_param() — "vmcli:portainer_endpoints:"
+    "portainer_containers",   # services/portainer_service.py  key_param(endpoint_id=, all=)
+    "portainer_stacks",       # services/portainer_service.py  key_param(endpoint_id=)
+    # The dimension this is keyed on (clouddb_ps_import_workgroup) is edited on the
+    # very panel whose save calls _invalidate_data_caches, so it MUST be here rather
+    # than in the exact-key tuple — an exact-key invalidate of a scoped key is a
+    # silent no-op, which is the whole reason these two tuples are separate.
+    "ps_db_candidates",       # api/cloud_databases.py  key_param(workgroup=...)
 )
 
 
 async def _invalidate_data_caches() -> None:
-    from ..services import cache_service
+    from ..database import SessionLocal
+    from ..services import cache_service, cost_cache
     for name in _CONFIG_DEPENDENT_CACHES:
         await cache_service.invalidate(cache_service.key_global(name))
+    for name in _CONFIG_DEPENDENT_CACHE_PREFIXES:
+        await cache_service.invalidate_prefix(name)
+
+    # The cost cache is a table, not a cache_service key, so it belongs in NEITHER tuple
+    # above — see the comment there about a name living in exactly one of them.
+    #
+    # Two distinct actions, and the payload survives both. `mark_stale` makes the next
+    # read re-query; `clear_cooldowns` drops the throttle/backoff gates, because the
+    # operator just changed a credential or a billing export and whatever we were backing
+    # off from may be exactly what they fixed. Deleting the payload instead would blank
+    # the page from the moment of the save until the requery lands.
+    db = SessionLocal()
+    try:
+        cost_cache.mark_stale(db)
+        cost_cache.clear_cooldowns(db)
+    except Exception as exc:  # noqa: BLE001 — a wizard save must not fail on a cache detail
+        logger.warning("setup: cost cache invalidation failed: %s", exc)
+    finally:
+        db.close()
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -472,6 +536,13 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
     for key, value in payload.config.items():
         if value is None:
             continue
+        # Skip the redaction sentinel, same as _write_feature. GET /api/setup/config
+        # returns bullets for the keys in config_service._SECRET_KEYS, so anything
+        # that round-trips a read back into a write arrives holding them. Storing
+        # one leaves a key that *looks* configured in the UI and fails at
+        # cloud-call time — worse than leaving it unset.
+        if isinstance(value, str) and value.startswith("••"):
+            continue
         if isinstance(value, bool):
             sval = "1" if value else "0"
         else:
@@ -536,7 +607,39 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
 class VMwareFeatureConfig(BaseModel):
     enabled: bool = False
 
-class BeyondTrustFeatureConfig(BaseModel):
+class RemoteAgentsFeatureConfig(BaseModel):
+    """Remote on-prem agents.
+
+    ``public_base_url`` lives on this panel rather than somewhere more general because
+    it is the single most common way an agent deployment breaks. The signing audience is
+    pinned from it, and an audience pinned as ``http://`` makes every agent 401 in a way
+    that looks exactly like a revoked agent — see docs/remote-agents.md. The operator
+    turning this feature on is the operator who needs to set it.
+
+    Both fields are bool/str on purpose: an unset *int* field reads back as ``""`` from
+    config_service and then fails model validation on save, 422-ing the whole panel.
+    tests/test_setup_feature_roundtrip.py exists because of that.
+    """
+    enabled: bool = False
+    public_base_url: str = ""
+
+class PasswordSafeFeatureConfig(BaseModel):
+    """Password Safe / Secrets Safe — secret and managed-account checkout, plus
+    onboarding of everything the dashboard builds (VMs, cloud databases, Kubernetes
+    ServiceAccount tokens) as managed systems + accounts. Driven by ``ps-cli``.
+
+    One of the three products that used to share a single ``BeyondTrustFeatureConfig``
+    and a single ``beyondtrust_enabled`` flag; see PRAFeatureConfig and
+    EPMLFeatureConfig for the other two. The split is strict — every key lives on
+    exactly one model, because patch_feature_config resolves the model from the URL
+    path segment, so a key bound inside another panel's drawer would be silently
+    dropped on save and read back blank.
+
+    Several keys here name PRA objects (``k8s_ps_pravault_*``,
+    ``clouddb_ps_pravault_platform``) and belong on THIS model regardless: they are
+    Password Safe platform and functional-account names used by the rotation path, so
+    turning PRA off must not blank them.
+    """
     enabled: bool = False
     pscli_api_url: str = ""
     pscli_client_id: str = ""
@@ -560,13 +663,6 @@ class BeyondTrustFeatureConfig(BaseModel):
     # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
     passwordsafe_gcp_registration_method: str = "gcpvm"   # "gcpvm" (GCP VM SSH Rotation plugin) | "ssh"
     passwordsafe_gcp_change_password_on_register: bool = True  # mint first key on onboard (adminuser has none baked in)
-    # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
-    bt_api_host: str = ""
-    bt_client_id: str = ""
-    bt_client_secret: str = ""      # encrypted at rest
-    # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
-    bt_jump_group_name: str = ""
-    bt_jumpoint_name: str = ""
     # Optional cloud-DATABASE Password Safe onboarding (AWS-only) — see config.py.
     # The two custom plugins + jump-host RSA prep are one-time MANUAL setup.
     clouddb_ps_onboarding_enabled: bool = False
@@ -575,6 +671,14 @@ class BeyondTrustFeatureConfig(BaseModel):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Import from Password Safe — see config.py for what each one does.
+    # clouddb_ps_import_max_systems MUST stay annotated `int`: _read_feature's
+    # int-coercion branch only fires on an int annotation, and an unset int otherwise
+    # reads back as "" and 422s the whole panel.
+    clouddb_ps_import_workgroup: str = ""
+    clouddb_ps_import_default_cloud: str = "local"
+    clouddb_ps_import_max_systems: int = 500
+    clouddb_ps_import_platform_map: str = ""
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
     clouddb_db_client_image_sqlserver: str = "mcr.microsoft.com/mssql-tools18"
@@ -583,23 +687,139 @@ class BeyondTrustFeatureConfig(BaseModel):
     clouddb_ps_ssm_secret_access_key: str = ""      # encrypted at rest
     clouddb_ps_ssm_account_suffix: str = "local"    # "local" or a cross-account AssumeRole ARN
     clouddb_ps_ssm_public_key_path: str = ""         # public key path on the PS node/broker
+    # Azure cloud-DATABASE Password Safe onboarding (Run Command plugins) — see config.py.
+    # The three custom plugins + the RSA keypair are one-time MANUAL setup.
+    passwordsafe_azure_db_registration_method: str = "runcommand"  # "runcommand" (Azure Run Command plugins) | "off"
+    clouddb_ps_platform_azure_postgres: str = "PostgreSQL Azure Run Command Plugin"
+    clouddb_ps_platform_azure_mysql: str = "MySQL Azure Run Command Plugin"
+    clouddb_ps_platform_azure_sqlserver: str = "MSSQL Azure Run Command Plugin"
+    clouddb_ps_azure_auth_mode: str = "SP"          # "SP" (service principal) | "MSI" (managed identity)
+    clouddb_ps_azure_cert_path: str = r"C:\BeyondTrust\certs\public_cert.cer"  # public cert path on the Resource Broker
+    clouddb_ps_azure_ssl: bool = True               # sslTRUE (Azure flex servers require TLS) | sslFALSE
+    clouddb_ps_azure_sp_client_id: str = ""         # blank → reuse azure_client_id
+    clouddb_ps_azure_sp_client_secret: str = ""     # encrypted at rest; blank → reuse azure_client_secret
+    clouddb_ps_azure_plugin_private_key: str = ""   # PEM, encrypted at rest; dropped on the jump VM
+    clouddb_ps_azure_plugin_passphrase: str = ""    # encrypted at rest
+    # k8s ServiceAccount token rotation (Password Safe) — see config.py for the key
+    # semantics. Every numeric key below MUST stay annotated `int`: _read_feature's
+    # int-coercion branch only fires on an int annotation, and an unset int otherwise
+    # reads back as "" and 422s the whole panel (same note as clouddb_ps_import_max_systems).
+    k8s_ps_token_rotation_enabled: bool = False
+    k8s_ps_token_platform: str = "Kubernetes Service Account Token"
+    k8s_ps_pravault_token_platform: str = "PRA Vault Token"
+    k8s_ps_functional_account_aws: str = ""
+    k8s_ps_functional_account_azure: str = ""
+    k8s_ps_functional_account_gcp: str = ""
+    k8s_ps_functional_account_local: str = ""
+    k8s_ps_pravault_functional_account: str = ""
+    k8s_ps_workgroup: str = ""
+    k8s_ps_token_mode: str = "longlived"
+    k8s_ps_token_ttl_seconds: int = 3600
+    k8s_ps_token_change_on_register: bool = True
+    k8s_ps_token_delete_legacy_secret: bool = True
+    k8s_ps_token_register_on_provision: bool = False
+    k8s_ps_pravault_mirror_enabled: bool = True
+    k8s_ps_token_checkout_duration_min: int = 15
+    k8s_ps_token_address_options: str = ""
+    k8s_ps_rotator_apply_rbac: bool = True
+    k8s_ps_rotator_gke_sa_email: str = ""
+    k8s_ps_rotator_aks_sp_object_id: str = ""
+    k8s_ps_rotator_eks_username: str = "passwordsafe-rotator"
+    k8s_ps_rotator_eks_principal_arn: str = ""
+    k8s_ps_rotator_eks_create_access_entry: bool = True
+    k8s_ps_rotator_bootstrap_namespace: str = "beyondtrust"
+    k8s_ps_rotator_bootstrap_sa: str = "password-safe-rotator"
+
+class PRAFeatureConfig(BaseModel):
+    """Privileged Remote Access (PRA/SRA) — brokered access to everything the dashboard
+    builds. Provisions Shell Jump, Web Jump, Remote RDP and Protocol Tunnel jump items
+    plus PRA Vault accounts, and runs the Gateway hosts those jumps are brokered
+    through. Driven by the ``sra`` Terraform provider plus a small REST client.
+
+    The Jump Group and Gateway named here must already exist in PRA — the dashboard
+    looks them up by name, it does not create them.
+
+    ``pra_k8s_namespace`` / ``pra_k8s_sa_name`` / ``bt_vault_account_group_id`` live
+    here rather than on PasswordSafeFeatureConfig even though the Password Safe token
+    rotator also reads them: they name the ServiceAccount PRA injects and the vault
+    group PRA drops credentials into, and PRA tunnel provisioning needs them with
+    Password Safe rotation off entirely.
+    """
+    enabled: bool = False
+    # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
+    bt_api_host: str = ""
+    bt_client_id: str = ""
+    bt_client_secret: str = ""      # encrypted at rest
+    # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
+    bt_jump_group_name: str = ""
+    bt_jumpoint_name: str = ""
+    # PRA Configuration API account — the few calls the SRA provider can't make
+    # (PRA Vault accounts for cloud-DB onboarding). Blank reuses the credentials above.
     pra_config_api_client_id: str = ""              # blank → reuse bt_client_id
     pra_config_api_client_secret: str = ""          # encrypted at rest; blank → reuse bt_client_secret
     # Azure-specific overrides (leave blank to fall back to the AWS values above)
     azure_bt_jump_group_name: str = ""
     azure_jumpoint_name: str = ""
+    # "shared" (default) | "aci" — whether a SINGLE Azure VM deploy borrows the
+    # ref-counted clouddb-jumpoint VM or starts its own ACI container group. Editable
+    # here so the choice is reversible without a redeploy. Batches always share one ACI.
+    azure_vm_jumpoint_mode: str = "shared"
     # GCP-specific overrides (leave blank to fall back to the AWS values above)
     gcp_bt_jump_group_name: str = ""
     gcp_jumpoint_name: str = ""
+    # "shared" (default) | "paired" — whether a SINGLE GCP VM deploy borrows the
+    # ref-counted Jumpoint host or starts its own bt-jumpoint-<vm>. Editable here so
+    # the choice is reversible without a redeploy. Batches always share.
+    gcp_vm_jumpoint_mode: str = "shared"
+    # The identity PRA injects into a managed cluster. Previously env-only, promoted
+    # alongside the Password Safe rotation feature that makes them operationally
+    # load-bearing (the managed account name is <namespace>/<sa>).
+    pra_k8s_namespace: str = "pra-access"
+    pra_k8s_sa_name: str = "pra-access"
+    bt_vault_account_group_id: str = ""
+
+class EPMLFeatureConfig(BaseModel):
+    """Endpoint Privilege Management for Linux (EPM-L) — agent package builds, sync to
+    asset storage, and installation tokens, via the BeyondTrust Pathfinder public API.
+
+    The site id comes from ``app.beyondtrust.io/api/platform/currentSite``, but the API
+    this talks to is ``api.beyondtrust.io`` — a common mix-up. The PAT must be created
+    while that site is the active one; PATs are bound to the site, not the user.
+    """
+    enabled: bool = False
     # EPM for Linux (EPM-L) — Pathfinder public API gateway at api.beyondtrust.io
     epml_site_id: str = ""          # Pathfinder site UUID; PATs are bound to the site active at creation
     epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
 
 class PortainerFeatureConfig(BaseModel):
+    """Portainer CE — both the connection to a server and the knobs for deploying a
+    MANAGED one. ``portainer_url`` / ``portainer_pat`` are either typed in (bring your
+    own server) or written by a ``portainer_node_deploy`` job, which is why the deploy
+    knobs live on the same panel. ``enabled`` owns ``portainer_enabled``."""
     enabled: bool = False
     portainer_url: str = ""
     portainer_pat: str = ""             # encrypted at rest; token or vault ref (bt_safe:// etc.)
     portainer_verify_ssl: bool = True
+    # Managed-node deploy knobs (COS on GCE; mirrors the Rancher node's panel)
+    portainer_allowed_source_cidrs: str = ""   # CSV of manual firewall source ranges (9443/8000)
+    portainer_dashboard_egress_cidr: str = ""  # the dashboard's own egress CIDR; auto-detected on deploy
+    portainer_admin_password: str = ""         # encrypted at rest; blank → auto-generated on first run
+    portainer_ready_timeout_s: int = 300       # readiness poll budget after the VM boots
+    gcp_portainer_image: str = "portainer/portainer-ce:latest"
+    gcp_portainer_machine_type: str = "e2-small"
+    gcp_portainer_zone: str = ""
+    gcp_portainer_name: str = "portainer-server"
+    gcp_portainer_boot_disk_gb: int = 20
+    gcp_portainer_network_tag: str = "portainer"
+    gcp_portainer_allow_open: bool = False     # open 0.0.0.0/0 when the CIDR list is empty (fail-open opt-in)
+    # Optional PRA Web Jump brokering the node's UI (chosen per-deploy on the form;
+    # these are the Settings-level defaults)
+    portainer_ui_web_jump_enabled: bool = False
+    portainer_ui_verify_certificate: bool = False
+    portainer_ui_jump_group: str = ""
+    portainer_ui_jumpoint_name: str = ""
+    portainer_ui_vault_account_group_id: str = ""
+    portainer_ui_jumpoint_cloud: str = "gcp"
 
 class AnsibleFeatureConfig(BaseModel):
     enabled: bool = False
@@ -636,6 +856,11 @@ class AnsibleFeatureConfig(BaseModel):
     gcp_ansible_cloud_run_region: str = ""
     gcp_ansible_image: str = "chrweav/ansible-winrm:latest"
     gcp_ansible_vpc_connector: str = ""
+    # Direct VPC egress (preferred over the connector — no standing infra; the
+    # Cloud Run job's NIC lands straight in the subnet). Set BOTH; wins over
+    # gcp_ansible_vpc_connector. Egress stays private-ranges-only.
+    gcp_run_network: str = ""
+    gcp_run_subnetwork: str = ""
     gcp_ansible_runner_service_account: str = ""   # SA the Cloud Run job runs as (required for GCP ephemeral secrets)
     # Ephemeral cloud secrets — managed-account checkout on ECS / Cloud Run. OFF by
     # default; copies a PAM credential into the cloud store (RBAC-locked) for the run.
@@ -654,11 +879,71 @@ class AnsibleFeatureConfig(BaseModel):
     k8s_runner_image_aws: str = ""    # per-cloud override; blank → k8s_runner_image
     k8s_runner_image_azure: str = ""  # e.g. an ACR mirror, to avoid Docker Hub pulls
     k8s_runner_image_gcp: str = ""
+    # Ansible image for Kubernetes-cluster / cloud-database targets (localhost plays;
+    # carries kubernetes.core + community.postgresql/mysql/general + client libs).
+    # Used for ALL cloud runners on k8s/DB targets — never the winrm image.
+    ansible_cloud_image: str = "chrweav/ansible-cloud:latest"
     # Image-promote runner — always runs as a one-shot task in the target cloud
-    # (ECS / ACI / Cloud Run); no per-cloud selector. Blank → the public Docker
-    # Hub image; set a full registry path to use a private mirror (e.g. an ACR
-    # copy that dodges Docker Hub pull limits). Read by promote_runner_service.
+    # (ECS / ACI / Cloud Run / Container Instances); no per-cloud selector.
+    # Blank → the public Docker Hub image; set a full registry path to use a
+    # private mirror (e.g. an ACR copy that dodges Docker Hub pull limits).
+    # Read by promote_runner_service.
     promote_runner_image: str = ""
+    # Per-target-cloud promote-runner config. Most keys fall back to the
+    # ansible_*/storage_*/<cloud>_* keys already on this model (single-account
+    # installs need set almost nothing) — the fallbacks live in
+    # promote_runner_service._resolve_*_runner_config, and the panel's hint text
+    # names them. Mirrors promote_runner_* in config.py + StorageConfigPatch;
+    # both surfaces write the same config_service keys.
+    #
+    # Numeric knobs are declared str here even where config.py types them as
+    # float, to survive the _read_feature round-trip — it only coerces bool/int,
+    # so a float field would fail validation on an unset "" PATCH. Same trick
+    # StorageConfigPatch uses.
+    #
+    # AWS target (ECS Fargate). task_role_arn has no fallback: the task needs
+    # s3:PutObject on the staging bucket, which the Ansible runner's role lacks.
+    promote_runner_ecs_cluster: str = ""
+    promote_runner_ecs_task_family: str = "promote-runner"
+    promote_runner_ecs_subnet_id: str = ""
+    promote_runner_ecs_security_group_ids: str = ""
+    promote_runner_ecs_execution_role_arn: str = ""
+    promote_runner_ecs_task_role_arn: str = ""
+    promote_runner_ecs_cpu: str = "1024"
+    promote_runner_ecs_memory: str = "4096"
+    promote_runner_aws_staging_bucket: str = ""
+    promote_runner_aws_staging_prefix: str = "promote-staging"
+    # Azure target (ACI container group).
+    promote_runner_azure_resource_group: str = ""
+    promote_runner_azure_location: str = ""
+    promote_runner_azure_subnet_id: str = ""
+    promote_runner_azure_cpu: str = "2"
+    promote_runner_azure_memory_gb: str = "4"
+    promote_runner_azure_staging_account: str = ""
+    promote_runner_azure_staging_container: str = ""
+    promote_runner_azure_staging_prefix: str = "promote-staging"
+    promote_runner_azure_target_resource_group: str = ""
+    promote_runner_azure_target_storage_account_id: str = ""
+    # GCP target (Cloud Run job).
+    promote_runner_gcp_region: str = ""
+    promote_runner_gcp_cpu: str = "4"
+    promote_runner_gcp_memory: str = "16Gi"
+    promote_runner_gcp_vpc_connector: str = ""
+    promote_runner_gcp_service_account: str = ""
+    promote_runner_gcp_staging_bucket: str = ""
+    promote_runner_gcp_staging_prefix: str = "promote-staging"
+    promote_runner_gcp_image_family: str = ""
+    # OCI target (Container Instances). OCI's only remote-worker task is the
+    # image-promote runner (no Ansible/K8s OCI runner), so its staging_bucket is
+    # required with no fallback; compartment/subnet fall back to the primary
+    # oci_* config. Read by promote_runner_service._resolve_oci_runner_config.
+    promote_runner_oci_staging_bucket: str = ""
+    promote_runner_oci_staging_prefix: str = "promote-staging"
+    promote_runner_oci_compartment: str = ""
+    promote_runner_oci_subnet_ocid: str = ""
+    promote_runner_oci_availability_domain: str = ""
+    promote_runner_oci_ocpus: str = "2"
+    promote_runner_oci_memory_gbs: str = "16"
 
 class EntitleFeatureConfig(BaseModel):
     enabled: bool = False
@@ -739,7 +1024,7 @@ class XcpNgFeatureConfig(BaseModel):
 
 
 class CloudDatabaseFeatureConfig(BaseModel):
-    """Config panel for the Cloud Databases feature. Graduated from preview to GA
+    """Config panel for the Databases feature. Graduated from preview to GA
     once every engine (PostgreSQL / MySQL / SQL Server) was validated end-to-end on
     all three clouds. The toggle owns `cloud_database_enabled` via its own `enabled`
     field (feature name → key through _feature_to_cfg_key, like cost_explorer /
@@ -778,15 +1063,26 @@ class K8sManagementFeatureConfig(BaseModel):
     aws_k8s_subnet_a_id: str = ""
     aws_k8s_subnet_b_id: str = ""
     # Optional defaults (blank → the terraform/k8s_cluster/aws_eks module defaults).
+    aws_eks_vpc_cidr: str = ""            # the EKS build's OWN VPC (blank → 10.97.0.0/16); must not overlap the sandbox VPC 10.99.0.0/16
     aws_eks_k8s_version: str = ""
     aws_eks_node_instance_type: str = ""
+    # OCI OKE provisioning defaults (blank → the terraform/k8s_cluster/oci_oke
+    # module defaults). The provision form overrides the CIDR per-cluster via the
+    # shared vpc_cidr request field.
+    oci_oke_vcn_cidr: str = ""            # the OKE build's OWN VCN (blank → 10.96.0.0/16); must not overlap the sandbox VCN 10.98.0.0/16
     # Rancher management plane (import model). The central Rancher server runs as
     # a single privileged container on a PUBLIC GCE COS VM (gcp_rancher_* below);
     # runtime ids (rancher_server_url / rancher_api_token) are set by the deploy
     # job, not entered here. Only the bootstrap password + node knobs are input.
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap; encrypted at rest
+    rancher_admin_password: str = ""          # admin UI password for auto first-run; blank = auto-generate a distinct one (Rancher forbids reusing the bootstrap password), surfaced in the Containers panel + job result; ≥12 chars; encrypted at rest
+    rancher_auto_first_run: bool = True       # auto-complete Rancher's first-run wizard on a fresh deploy (change admin password + accept EULA/telemetry); off = leave the manual Welcome wizard
     rancher_verify_tls: bool = False          # verify the node's TLS cert on API calls (False = self-signed)
     rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's public-IP GCE firewall (tcp 80/443). Provisioned clusters' egress IPs + the dashboard-managed Web-Jump Jumpoint IP are auto-added; use this only for extra operator IPs + pre-existing operator Jumpoints. Fully empty (manual + auto) = NOT opened unless gcp_rancher_allow_open
+    rancher_dashboard_egress_cidr: str = ""   # the dashboard's own egress IP/CIDR (auto-detected; a manually-set pool CIDR that contains the detected IP is kept)
+    rancher_ready_timeout_s: int = 360        # deploy readiness poll budget
+    rancher_api_transport: str = "direct"     # direct | runner (in-cloud Cloud Run curl — for corp networks whose TLS inspection blocks the node's self-signed cert)
+    rancher_runner_source_cidr: str = ""      # VPC connector /28 auto-added to the node firewall when transport=runner
     # GCE COS Rancher node deploy knobs (see config.py gcp_rancher_*).
     gcp_rancher_image: str = "rancher/rancher:latest"
     gcp_rancher_machine_type: str = "e2-medium"   # ≥4 GB required
@@ -796,18 +1092,31 @@ class K8sManagementFeatureConfig(BaseModel):
     gcp_rancher_network_tag: str = "rancher"
     gcp_rancher_allow_open: bool = False      # open 0.0.0.0/0 when allowed_source_cidrs is empty
     # Rancher UI PRA web-broker (opt-in zero-trust access without opening CIDRs).
+    # Bound in the k8s_management panel, mirroring the Portainer panel's
+    # portainer_ui_* group — these are the DEFAULTS the Containers deploy form
+    # starts from (jump group / gateway / vault group are also per-deploy picks).
     rancher_ui_web_jump_enabled: bool = False
-    rancher_ui_verify_certificate: bool = False
+    rancher_ui_verify_certificate: bool = False  # sra_web_jump verify_certificate — distinct from rancher_verify_tls, which is the dashboard's own httpx verify on Rancher API calls
     rancher_ui_jump_group: str = ""
     rancher_ui_jumpoint_name: str = ""
+    # NOT bound in the panel and read by nothing: a Web Jump has no local listen
+    # port (that belongs to protocol-tunnel jumps — see k8s_api_tunnel_local_port).
+    # Left settable by env only so an existing RANCHER_UI_LOCAL_PORT doesn't break;
+    # don't wire an input to it without a consumer. Kept plain `int` regardless, so
+    # the unset read-back is 443 and not "" (see CostExplorerFeatureConfig).
     rancher_ui_local_port: int = 443
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted
+    rancher_ui_vault_account_group_id: str = ""  # default PRA Vault account group (numeric id) for the vaulted admin credential; usually chosen per-deploy instead
     # Entra/IdP group → cluster RBAC (real-identity JIT demo): default group the
     # per-cluster "Entra group" action binds (overridable in the action). Members get
     # entra_rbac_group_role; Entitle's Entra-ID integration JIT-grants membership.
     entra_rbac_group_id: str = ""             # Entra group Object ID (GUID)
     entra_rbac_group_name: str = ""           # OPTIONAL friendly name (display only)
     entra_rbac_group_role: str = "cluster-admin"  # ClusterRole the group binds to
+    # Subject prefix Entitle's Kubernetes integration binds for a JIT grant
+    # (<prefix>:<email>) — also what a user passes to `kubectl --as=` when consuming
+    # an "Impersonation access" grant. Default "entitle".
+    entitle_k8s_user_prefix: str = "entitle"
     # Entra OIDC federation for EKS (the "Entra federation" action's AWS leg): a
     # shared Entra app registration associated as the cluster's OIDC IdP so a user's
     # Entra token authenticates and its group OIDs match the binding above.
@@ -845,16 +1154,25 @@ class VirtualDesktopsFeatureConfig(BaseModel):
 class CostExplorerFeatureConfig(BaseModel):
     """Cloud cost tracking. The toggle owns `cost_explorer_enabled` (the feature
     name maps to it via _feature_to_cfg_key). `cost_monthly_budget` is the monthly
-    spend budget used for the over/approaching alerts (0 = no budget)."""
+    spend budget used for the over/approaching alerts (0 = no budget); each
+    `cost_budget_<cloud>` is that cloud's own budget, checked in addition to it.
+
+    Every budget field must be BOTH declared here and listed on _blank_to_zero below.
+    Miss the field and the value is dropped on save (pydantic ignores unknown extras,
+    so patch_feature_config never sees it) while the form input reads back blank
+    forever; miss the validator and an unset key reads back "" from config_service —
+    _read_feature coerces bool and int only, never float — which then 422s the whole
+    panel on save. tests/test_setup_feature_roundtrip.py pins both halves."""
     enabled: bool = False
     cost_monthly_budget: float = 0.0
     cost_budget_aws: float = 0.0
     cost_budget_azure: float = 0.0
     cost_budget_gcp: float = 0.0
+    cost_budget_oci: float = 0.0
     gcp_billing_export_table: str = ""
 
     @field_validator("cost_monthly_budget", "cost_budget_aws", "cost_budget_azure",
-                     "cost_budget_gcp", mode="before")
+                     "cost_budget_gcp", "cost_budget_oci", mode="before")
     @classmethod
     def _blank_to_zero(cls, v):
         # An empty/blank input (no budget) round-trips as "" / null — treat as 0.
@@ -872,6 +1190,75 @@ class AdmissionControlFeatureConfig(BaseModel):
     admission_allowed_regions: str = ""
     admission_denied_instance_types: str = ""
     admission_prod_window: str = ""
+
+
+class ResourceExpiryFeatureConfig(BaseModel):
+    """Auto-delete timer. The toggle owns `resource_expiry_enabled` (feature name → key
+    via _feature_to_cfg_key) and turns on stamping, display and warning ONLY — deletion
+    additionally requires `resource_expiry_enforce`, default off, so enabling the feature
+    is observe-only until an operator opts in. `resource_expiry_default_hours` = 0 means
+    new deploys aren't stamped either, so an install that enables this without choosing a
+    default is inert twice over.
+
+    Every numeric field is annotated plain `int`, never Optional[int]: _read_feature keys
+    off `info.annotation is int`, so an Optional would read back as "" for an unset key
+    and 422 the whole panel on save — the exact regression
+    tests/test_setup_feature_roundtrip.py exists to pin.
+
+    Hard floors (minimum lifetime, reap grace, arming delay, per-pass cap) are module
+    constants in services/expiry_policy.py, NOT keys here, so no configuration can reach
+    past them. `resource_expiry_armed_at` / `_last_sweep` are runtime state the reaper
+    writes and are deliberately absent for the same reason.
+    """
+    enabled: bool = False
+    resource_expiry_enforce: bool = False
+    resource_expiry_dry_run: bool = True
+    resource_expiry_default_hours: int = 0
+    resource_expiry_extend_hours: int = 24
+    resource_expiry_max_total_hours: int = 720
+    resource_expiry_warn_hours: int = 24
+    resource_expiry_grace_minutes: int = 30
+    resource_expiry_sweep_interval_minutes: int = 30
+    resource_expiry_sweep_retention_days: int = 7
+    resource_expiry_max_per_pass: int = 10
+    resource_expiry_allow_never: bool = False
+    resource_expiry_exempt_workgroups: str = ""
+
+
+class WorkerFeatureConfig(BaseModel):
+    """Background job-worker concurrency. Config-only (see ``_CONFIG_ONLY_FEATURES``):
+    the worker is always running, so an enable toggle would be a switch with one
+    position. `enabled` is carried only because every panel model has it.
+
+    How many jobs the worker runs at once, tiered because the jobs are not alike —
+    ``jobs_worker.HEAVY/MEDIUM/LIGHT_TYPES`` owns which type is which, since that
+    partition is only reviewable next to the dispatch table. These caps take effect on
+    the worker's next supervisor pass (~5s, bounded by config_service's cache) without a
+    restart, which is the whole reason they are here rather than environment-only.
+
+    Every numeric field is annotated plain `int`, never Optional[int]: _read_feature keys
+    off `info.annotation is int`, so an Optional would read back as "" for an unset key
+    and 422 the whole panel on save — the exact regression
+    tests/test_setup_feature_roundtrip.py exists to pin.
+
+    Hard ceilings (how high each cap may go, and the executor/drain bounds) are module
+    constants in services/worker_policy.py, NOT keys here, so no configuration can reach
+    past them. `worker_runtime_status` is runtime state the worker writes and is
+    deliberately absent for the same reason `resource_expiry_last_sweep` is.
+
+    Deliberately absent for a different reason: `db_pool_size` / `db_max_overflow`.
+    create_engine runs at import in database.py, before any connection exists, so the
+    pool that connects to the database cannot be sized from a value stored in it. They
+    are environment-only, and the worker clamps these caps down to what the pool can
+    actually serve — reporting that in the status readout.
+    """
+    enabled: bool = False
+    worker_heavy_concurrency: int = 2
+    worker_medium_concurrency: int = 1
+    worker_light_concurrency: int = 3
+    worker_max_concurrency: int = 3
+    worker_executor_threads: int = 0
+    worker_drain_timeout_s: int = 20
 
 
 class MultiRegionFeatureConfig(BaseModel):
@@ -915,11 +1302,60 @@ class CloudFunctionsFeatureConfig(BaseModel):
     aws_functions_security_group_ids: str = ""
     azure_functions_subnet_id: str = ""
     gcp_functions_vpc_connector: str = ""
+class NotificationsFeatureConfig(BaseModel):
+    """Outbound notifications. Two brakes, both deliberate.
+
+    The toggle owns `notifications_enabled`; `notify_dry_run` then defaults ON, so
+    turning the feature on records what *would* be sent and sends nothing. Enabling
+    this against a live estate can produce hundreds of messages in the first pass, so
+    the first thing an operator gets is a delivery log to read rather than an inbox to
+    apologise for — the same observe-first rollout `resource_expiry_dry_run` gives the
+    reaper.
+
+    The endpoints themselves are NOT here: they are rows in `notification_endpoints`,
+    managed through /api/notifications/endpoints, because their URLs and HMAC secrets
+    are credentials and there can be several of them. This panel carries only the
+    global knobs.
+
+    Every numeric field is annotated plain `int`, never Optional[int]: _read_feature
+    keys off `info.annotation is int`, so an Optional would read back as "" for an
+    unset key and 422 the whole panel on save — the exact regression
+    tests/test_setup_feature_roundtrip.py exists to pin.
+
+    `notify_last_scan_at` is runtime state the scanner writes and is deliberately
+    absent, for the same reason `resource_expiry_last_sweep` is.
+    """
+    enabled: bool = False
+    notify_dry_run: bool = True
+    notify_event_types: str = (
+        "resource.expiring,resource.reaped,job.failed,"
+        "cost.budget_exceeded,secret.stale,config.drift")
+    notify_min_severity: str = "warning"
+    # Absolute origin (e.g. https://dash.corp.example). The worker has no request
+    # context, so without this every message ships with no link at all.
+    notify_base_url: str = ""
+    notify_http_timeout_s: int = 10
+    notify_flush_interval_s: int = 30
+    notify_scan_interval_s: int = 3600
+    notify_max_attempts: int = 4
+    notify_max_per_flush: int = 50
+    notify_max_queue: int = 500
+    notify_retention_days: int = 30
 
 
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
-    "beyondtrust":  BeyondTrustFeatureConfig,
+    # Keyed "remote_agents" so _feature_to_cfg_key derives the EXISTING flag name
+    # `remote_agents_enabled` with no special-casing. Renaming this key would silently
+    # start writing a different config key and the toggle would stop doing anything.
+    "remote_agents": RemoteAgentsFeatureConfig,
+    # The three BeyondTrust products, split out of a single "beyondtrust" panel.
+    # These keys must stay exactly as-is: _feature_to_cfg_key suffixes "_enabled" to
+    # derive the config key, so renaming one silently repoints its toggle at a key
+    # nothing reads.
+    "password_safe": PasswordSafeFeatureConfig,
+    "pra":          PRAFeatureConfig,
+    "epml":         EPMLFeatureConfig,
     "portainer":    PortainerFeatureConfig,
     "ansible":      AnsibleFeatureConfig,
     "entitle":      EntitleFeatureConfig,
@@ -933,20 +1369,28 @@ _FEATURE_MODELS = {
     "vdesktops":      VirtualDesktopsFeatureConfig,
     "cost_explorer":  CostExplorerFeatureConfig,
     "admission_control": AdmissionControlFeatureConfig,
+    "resource_expiry":   ResourceExpiryFeatureConfig,
+    "notifications":  NotificationsFeatureConfig,
     "multi_region":   MultiRegionFeatureConfig,
     "oidc":           OidcFeatureConfig,
     "cloud_functions": CloudFunctionsFeatureConfig,
+    "worker":         WorkerFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off
 # lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
 # key for these, so saving config can't flip the feature's flag.
-_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "cloud_functions"}
+#
+# "worker" is here because the job worker has no off position at all: it is the process
+# that runs every queued job, so an enable toggle could only ever mislead.
+_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker", "cloud_functions"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
     "clouddb_ps_ssm_secret_access_key", "pra_config_api_client_secret",
-    "portainer_pat",
+    "clouddb_ps_azure_sp_client_secret", "clouddb_ps_azure_plugin_private_key",
+    "clouddb_ps_azure_plugin_passphrase",
+    "portainer_pat", "portainer_admin_password",
     "entitle_api_token", "entitle_api_key",
     "proxmox_token_secret", "proxmox_password",
     "vsphere_password",
@@ -954,7 +1398,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "nutanix_password",
     "xcpng_password",
     "ansible_aci_acr_password",
-    "rancher_bootstrap_password", "rancher_api_token",
+    "rancher_bootstrap_password", "rancher_admin_password", "rancher_api_token",
     "oidc_client_secret",
 })
 

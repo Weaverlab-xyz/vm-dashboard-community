@@ -15,6 +15,12 @@ otherwise it reports ``unavailable`` with a configure hint).
 Per-cloud failures are caught and reported as ``status="unavailable"`` so one
 misconfigured cloud never sinks the result — same resilience contract as the
 containers page.
+
+This module only *queries*. Persistence, throttle cooldowns and single-flight live in
+``services/cost_cache.py``, which is what the endpoints and the warmer call. Keep it that
+way: the reason a 429 used to blank the tile for six hours is that a degraded entry from
+here is a perfectly well-formed return value, and the old caching layer could not tell
+one from a real answer.
 """
 import asyncio
 import calendar
@@ -23,16 +29,46 @@ from datetime import date, timedelta
 
 import httpx
 
-from . import aws_service, azure_service, config_service, gcp_service
+from . import aws_service, azure_service, config_service, gcp_service, oci_service
 
 logger = logging.getLogger(__name__)
 
 _AZURE_MGMT = "https://management.azure.com"
 
-# Canonical dashboard resource tag (#194/#196) — scopes the breakdown to
-# dashboard-managed resources.
+# Canonical dashboard resource tag (#194/#196) and the sandbox bootstrapper's tag
+# (scripts/sandbox/Linux/lib/common.sh:11-13). SAME KEY, different value — which is
+# what lets one query per cloud return both scopes. AWS/Azure activate cost-allocation
+# tags by KEY, so covering the second value needs no extra tag activation.
 _MANAGED_TAG_KEY = "managed-by"
 _MANAGED_TAG_VALUE = "vm-dashboard"
+_SANDBOX_TAG_VALUE = "dashboard-sandbox"
+
+SCOPE_DASHBOARD = "dashboard"
+SCOPE_SANDBOX = "sandbox"
+SCOPE_UNATTRIBUTED = "unattributed"
+_SCOPES = (SCOPE_DASHBOARD, SCOPE_SANDBOX, SCOPE_UNATTRIBUTED)
+
+# Tag-filter values for AWS CE / Azure Cost Management. Dashboard first (the order
+# shows up in the request).
+_SCOPE_TAG_VALUES = [_MANAGED_TAG_VALUE, _SANDBOX_TAG_VALUE]
+
+# GCP label variants. setup-gcp.sh used to rewrite BOTH key and value to underscores
+# while the dashboard's own labels stayed hyphenated (gcp_service.py:745). The script
+# now emits hyphens, but these variants are PERMANENT, not a migration shim: BigQuery
+# billing rows are immutable history, sandboxes stay underscored until someone re-runs
+# setup, and the month the fix landed legitimately contains both forms.
+_GCP_LABEL_KEYS = (_MANAGED_TAG_KEY, _MANAGED_TAG_KEY.replace("-", "_"))
+_SCOPE_BY_TAG_VALUE = {
+    _MANAGED_TAG_VALUE: SCOPE_DASHBOARD,
+    _MANAGED_TAG_VALUE.replace("-", "_"): SCOPE_DASHBOARD,
+    _SANDBOX_TAG_VALUE: SCOPE_SANDBOX,
+    _SANDBOX_TAG_VALUE.replace("-", "_"): SCOPE_SANDBOX,
+}
+
+def _scope_of(tag_value) -> str:
+    """Map a ``managed-by`` tag/label value to a scope. Anything unrecognised (or
+    absent) is ``unattributed`` — never silently folded into a real scope."""
+    return _SCOPE_BY_TAG_VALUE.get((tag_value or "").strip().lower(), SCOPE_UNATTRIBUTED)
 
 
 def evaluate_budget(total_mtd, currency, limit, today=None) -> dict:
@@ -69,7 +105,8 @@ def evaluate_budget(total_mtd, currency, limit, today=None) -> dict:
     }
 
 
-_BUDGET_KEYS = {"aws": "cost_budget_aws", "azure": "cost_budget_azure", "gcp": "cost_budget_gcp"}
+_BUDGET_KEYS = {"aws": "cost_budget_aws", "azure": "cost_budget_azure",
+                "gcp": "cost_budget_gcp", "oci": "cost_budget_oci"}
 
 
 def _budget_limit(key: str) -> float:
@@ -136,26 +173,77 @@ async def get_aws_mtd_cost() -> tuple:
     return await asyncio.to_thread(_query)
 
 
-def _retry_after_seconds(header_val, *, default: int, cap: int = 30) -> int:
+def _retry_after_seconds(header_val, *, default: int, cap: int = None) -> int:
     """Parse a Cost Management ``Retry-After`` header (seconds; HTTP-date form is
-    not used by the API). Falls back to ``default``, capped so a retry never
-    stretches a request past a reasonable ceiling."""
+    not used by the API). Falls back to ``default``.
+
+    ``cap=None`` — the default now — parses the header in full. Capping is right for an
+    INLINE retry, which stalls a request handler, and wrong for a cooldown, which does
+    not: truncating a ``Retry-After: 300`` to 30 is precisely how the old code
+    guaranteed its retry fired while still inside the throttle window, spending a second
+    call to earn a second 429. Callers that sleep on the result pass a cap; callers that
+    record a cooldown from it must not."""
     if not header_val:
         return default
     try:
-        return max(1, min(int(header_val), cap))
+        val = max(1, int(header_val))
     except (TypeError, ValueError):
         return default
+    return min(val, cap) if cap is not None else val
+
+
+# The longest we will sleep INSIDE a request handler to retry a 429. Equal to
+# _retry_after_seconds' `default` on purpose: a 429 carrying no Retry-After still earns
+# exactly one real retry, which is the behaviour the tile has always had. An explicit
+# header asking for longer is not a sleep — it is a cooldown, and the caller records it
+# and returns immediately so the page can serve its last known figure instead.
+_INLINE_RETRY_MAX_WAIT = 10
+
+
+def _throttled(exc_cls, label: str, retry_after=None):
+    """Build the provider's OWN error type, tagged so ``cost_cache`` can set a cooldown.
+
+    Attributes rather than a dedicated exception class, deliberately: ``_cloud_entry``
+    and ``_breakdown_entry`` catch AWSError/AzureError/GCPError/OCIError by type, and the
+    message keeps the ``label`` prefix that the endpoints' user-facing string — and
+    tests/test_cost_service.py — depend on. A new class would have to be threaded through
+    every one of those to say the same thing."""
+    suffix = f"; retry after {retry_after}s" if retry_after else ""
+    err = exc_cls(f"{label}: 429 Too Many Requests (rate limited by the provider){suffix}")
+    err.throttled = True
+    err.retry_after = retry_after
+    return err
+
+
+# Azure is the only one of the four that returns a usable Retry-After. For the rest the
+# signal is in the error text, so detection is a substring match and can miss wording we
+# have not seen. A miss only costs a SHORTER cooldown — the generic exponential backoff
+# still applies — and can never produce a wrong number, so erring loose is safe here.
+_THROTTLE_MARKERS = (
+    "throttlingexception", "limitexceededexception",      # AWS Cost Explorer
+    "ratelimitexceeded", "quotaexceeded",                 # GCP BigQuery
+    "toomanyrequests", "too many requests", "429",        # OCI + generic
+)
+
+
+def _looks_throttled(exc) -> bool:
+    """True when an error is a rate limit rather than a misconfiguration. Explicit
+    ``.throttled`` (set by :func:`_throttled`) wins; otherwise sniff the message."""
+    if getattr(exc, "throttled", False):
+        return True
+    return any(m in str(exc).lower() for m in _THROTTLE_MARKERS)
 
 
 async def _azure_cost_query(sub_id: str, token: str, body: dict, *, label: str) -> dict:
     """POST an Azure Cost Management query and return the parsed JSON body.
 
     Cost Management is aggressively rate-limited per subscription (429 with a
-    ``Retry-After`` header) — retry once honoring the header so a single throttled
-    response doesn't poison the tile for the whole 6 h cache TTL. On a repeat
-    429 (or any other HTTP error) surface an ``AzureError`` with a message that
-    starts with ``label`` so the caller's user-facing string is preserved."""
+    ``Retry-After`` header). Retry once, honoring the header, but ONLY when it asks for
+    less than ``_INLINE_RETRY_MAX_WAIT`` — a longer wait means the retry would fire while
+    still throttled, so we raise a tagged error immediately and let ``cost_cache`` record
+    a cooldown and serve the last known figure. On a repeat 429 (or any other HTTP error)
+    surface an ``AzureError`` whose message starts with ``label`` so the caller's
+    user-facing string is preserved."""
     url = (f"{_AZURE_MGMT}/subscriptions/{sub_id}/providers/"
            "Microsoft.CostManagement/query?api-version=2023-03-01")
     headers = {"Authorization": f"Bearer {token}"}
@@ -163,15 +251,20 @@ async def _azure_cost_query(sub_id: str, token: str, body: dict, *, label: str) 
         async with httpx.AsyncClient(timeout=30) as client:
             for attempt in (0, 1):
                 resp = await client.post(url, json=body, headers=headers)
-                if getattr(resp, "status_code", None) == 429 and attempt == 0:
+                if getattr(resp, "status_code", None) == 429:
                     wait = _retry_after_seconds(
                         resp.headers.get("Retry-After") if hasattr(resp, "headers") else None,
                         default=10)
-                    logger.warning(
-                        "azure cost 429 for %s; retrying in %ss (Retry-After honored)",
-                        label, wait)
-                    await asyncio.sleep(wait)
-                    continue
+                    if attempt == 0 and wait <= _INLINE_RETRY_MAX_WAIT:
+                        logger.warning(
+                            "azure cost 429 for %s; retrying in %ss (Retry-After honored)",
+                            label, wait)
+                        await asyncio.sleep(wait)
+                        continue
+                    # AzureError is not an httpx.HTTPError, so this propagates past the
+                    # handler below with its .throttled/.retry_after tags intact.
+                    logger.warning("azure cost 429 for %s; cooling down for %ss", label, wait)
+                    raise _throttled(azure_service.AzureError, label, wait)
                 resp.raise_for_status()
                 return resp.json() or {}
     except httpx.HTTPError as e:
@@ -207,21 +300,67 @@ async def get_azure_mtd_cost() -> tuple:
     return amount, currency
 
 
+def _empty_scopes() -> dict:
+    return {s: {"total": None, "services": []} for s in _SCOPES}
+
+
+def _scoped_breakdown_result(amounts: dict, currency: str, *,
+                             measured=(SCOPE_DASHBOARD, SCOPE_SANDBOX),
+                             basis=None, notes=None) -> dict:
+    """Shape a ``{(scope, service): amount}`` map into the breakdown payload.
+
+    ``services`` (the legacy key) still holds amount-desc service rows summing to
+    ``total``, but now carries dashboard **and** sandbox rows, each tagged with its
+    ``scope``. The unattributed remainder lives only under ``scopes.unattributed``:
+    folding it into ``total`` would double-count against the account-total card.
+
+    ``measured`` names the scopes this cloud's query genuinely observes. A scope
+    outside it with no rows reports ``total: None`` (**unknown** — e.g. OCI can't see
+    dashboard spend at all) rather than ``0.0`` (**measured, and zero**). That
+    distinction is the whole point of the page, so don't collapse it."""
+    per_scope: dict = {s: [] for s in _SCOPES}
+    for (scope, service), amount in amounts.items():
+        per_scope.setdefault(scope, []).append(
+            {"scope": scope, "service": service, "amount": round(amount, 2)})
+
+    scopes: dict = {}
+    for s in _SCOPES:
+        rows = sorted(per_scope.get(s, []), key=lambda r: r["amount"], reverse=True)
+        total = round(sum(r["amount"] for r in rows), 2) if (s in measured or rows) else None
+        scopes[s] = {"total": total, "services": rows}
+
+    flat = sorted(scopes[SCOPE_DASHBOARD]["services"] + scopes[SCOPE_SANDBOX]["services"],
+                  key=lambda r: r["amount"], reverse=True)
+    attributed = [t for t in (scopes[SCOPE_DASHBOARD]["total"],
+                              scopes[SCOPE_SANDBOX]["total"]) if t is not None]
+    return {
+        "total": round(sum(attributed), 2) if attributed else None,
+        "dashboard_total": scopes[SCOPE_DASHBOARD]["total"],
+        "sandbox_total": scopes[SCOPE_SANDBOX]["total"],
+        "unattributed_total": scopes[SCOPE_UNATTRIBUTED]["total"],
+        "currency": currency,
+        "services": flat,
+        "scopes": scopes,
+        "scope_basis": dict(basis or {}),
+        "notes": list(notes or []),
+    }
+
+
 def _breakdown_result(services: dict, currency: str) -> dict:
-    """Shape a ``{service: amount}`` map into a sorted services list + total."""
-    items = sorted(
-        ({"service": k, "amount": round(v, 2)} for k, v in services.items()),
-        key=lambda s: s["amount"], reverse=True,
-    )
-    return {"total": round(sum(s["amount"] for s in items), 2),
-            "currency": currency, "services": items}
+    """Back-compat shim: a flat ``{service: amount}`` map is all dashboard scope."""
+    return _scoped_breakdown_result(
+        {(SCOPE_DASHBOARD, k): v for k, v in services.items()}, currency,
+        measured=(SCOPE_DASHBOARD,))
 
 
 async def get_aws_managed_breakdown() -> dict:
-    """AWS MTD spend for resources tagged ``managed-by=vm-dashboard``, grouped by
-    service. Returns ``{total, currency, services:[{service, amount}]}``. Raises
-    ``aws_service.AWSError`` (incl. when the ``managed-by`` cost-allocation tag
-    isn't activated in Billing yet)."""
+    """AWS MTD spend tagged ``managed-by``, split into dashboard vs sandbox scope and
+    grouped by service. Raises ``aws_service.AWSError`` (incl. when the ``managed-by``
+    cost-allocation tag isn't activated in Billing yet).
+
+    ``unattributed_total`` is ``None`` for AWS: the tag filter structurally excludes
+    untagged spend, so we can't measure the remainder — the account-total card already
+    shows the whole number."""
     aws_service._require_boto3()
     start, end = _month_range()
 
@@ -234,10 +373,15 @@ async def get_aws_managed_breakdown() -> dict:
                 TimePeriod={"Start": start, "End": end},
                 Granularity="MONTHLY",
                 Metrics=["UnblendedCost"],
+                # One request, both scopes: same tag KEY, two values (Values is an OR
+                # list). Cost Explorer bills ~$0.01/request — don't split this in two.
                 Filter={"Tags": {"Key": _MANAGED_TAG_KEY,
-                                 "Values": [_MANAGED_TAG_VALUE],
+                                 "Values": _SCOPE_TAG_VALUES,
                                  "MatchOptions": ["EQUALS"]}},
-                GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+                # CE allows at most 2 GroupBy entries, and service + the scope tag is
+                # exactly 2 — there is no room for a third dimension here.
+                GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"},
+                         {"Type": "TAG", "Key": _MANAGED_TAG_KEY}],
             )
         except (BotoCoreError, ClientError) as e:
             raise aws_service.AWSError(
@@ -245,22 +389,61 @@ async def get_aws_managed_breakdown() -> dict:
                 f"activate the '{_MANAGED_TAG_KEY}' cost-allocation tag in the AWS "
                 "Billing console (forward-only; ~24h to populate)."
             ) from e
-        services, currency = {}, "USD"
+        amounts, currency = {}, "USD"
         for period in resp.get("ResultsByTime", []):
             for grp in period.get("Groups", []):
-                name = (grp.get("Keys") or ["(unknown)"])[0]
+                keys = grp.get("Keys") or []
+                service = (keys[0] if keys else "") or "(unknown)"
+                # CE renders a TAG group key as "<key>$<value>" ("<key>$" when absent).
+                raw = keys[1] if len(keys) > 1 else ""
+                scope = _scope_of(raw.split("$", 1)[1] if "$" in raw else raw)
                 blob = grp.get("Metrics", {}).get("UnblendedCost", {})
-                services[name] = services.get(name, 0.0) + float(blob.get("Amount") or 0)
+                k = (scope, service)
+                amounts[k] = amounts.get(k, 0.0) + float(blob.get("Amount") or 0)
                 currency = blob.get("Unit") or currency
-        return _breakdown_result(services, currency)
+        return _scoped_breakdown_result(amounts, currency, basis={
+            SCOPE_DASHBOARD: f"tag:{_MANAGED_TAG_KEY}={_MANAGED_TAG_VALUE}",
+            SCOPE_SANDBOX: f"tag:{_MANAGED_TAG_KEY}={_SANDBOX_TAG_VALUE}",
+        }, notes=[
+            "Untaggable line items (inter-AZ data transfer, some VPC charges) can't be "
+            "attributed to either scope; they show only in the account total.",
+        ])
 
     return await asyncio.to_thread(_query)
 
 
+# Column names Cost Management returns that are NOT the managed-by tag value.
+_AZURE_KNOWN_COLS = {"Cost", "CostUSD", "PreTaxCost", "Currency", "ServiceName",
+                     "UsageDate", "ResourceGroup", "ResourceGroupName"}
+
+
+def _azure_tag_col(cols: list):
+    """Index of the ``managed-by`` tag VALUE column, or None.
+
+    The name is inconsistent across API versions/tenants — it has been observed named
+    after the tag key itself and, elsewhere, ``TagValue``. Try value-shaped names first
+    (so a TagKey/TagValue *pair* resolves to the value, not the key), then fall back to
+    "the one column we don't recognise". Guessing wrong degrades every row to
+    ``unattributed``, which is visible on the page rather than silently wrong."""
+    for name in (_MANAGED_TAG_KEY, "TagValue", "Tag", "TagKey"):
+        if name in cols:
+            return cols.index(name)
+    extras = [i for i, c in enumerate(cols) if c not in _AZURE_KNOWN_COLS]
+    return extras[0] if len(extras) == 1 else None
+
+
 async def get_azure_managed_breakdown() -> dict:
-    """Azure MTD spend for resources tagged ``managed-by=vm-dashboard``, grouped
-    by service. Returns ``{total, currency, services:[...]}``. Raises
-    ``azure_service.AzureError``."""
+    """Azure MTD spend tagged ``managed-by``, split into dashboard vs sandbox scope and
+    grouped by service. Raises ``azure_service.AzureError``.
+
+    ``unattributed_total`` is ``None``: Azure tags do NOT inherit from a resource group
+    to its children, and Azure creates children (disks, NICs, public IPs, ACI) untagged,
+    so a tag-filtered query can't see them. Enabling *Cost Management → Manage tag
+    inheritance* at subscription scope fixes this with no code change — the sandbox
+    already tags its RG (setup-azure.sh:59) and inherited tags lose to resource tags, so
+    it yields exactly the right semantics. Note RG-dimension scoping is NOT an option:
+    the dashboard deploys into the same ``dashboard-sandbox-rg``, so the dimension can't
+    separate the two scopes."""
     cred, sub_id = await azure_service._ensure_creds()
     token = (await asyncio.to_thread(cred.get_token, f"{_AZURE_MGMT}/.default")).token
     body = {
@@ -269,9 +452,14 @@ async def get_azure_managed_breakdown() -> dict:
         "dataset": {
             "granularity": "None",
             "aggregation": {"totalCost": {"name": "Cost", "function": "Sum"}},
-            "grouping": [{"type": "Dimension", "name": "ServiceName"}],
+            # Cost Management caps `grouping` at 2 entries, so ServiceName + the scope
+            # tag uses the whole budget — a third (ResourceGroupName) isn't possible.
+            "grouping": [
+                {"type": "Dimension", "name": "ServiceName"},
+                {"type": "TagKey", "name": _MANAGED_TAG_KEY},
+            ],
             "filter": {"tags": {"name": _MANAGED_TAG_KEY, "operator": "In",
-                                "values": [_MANAGED_TAG_VALUE]}},
+                                "values": _SCOPE_TAG_VALUES}},
         },
     }
     data = await _azure_cost_query(
@@ -281,13 +469,23 @@ async def get_azure_managed_breakdown() -> dict:
     cost_idx = cols.index("Cost") if "Cost" in cols else 0
     svc_idx = cols.index("ServiceName") if "ServiceName" in cols else None
     cur_idx = cols.index("Currency") if "Currency" in cols else None
-    services, currency = {}, "USD"
+    tag_idx = _azure_tag_col(cols)
+    amounts, currency = {}, "USD"
     for row in props.get("rows", []):
         name = row[svc_idx] if svc_idx is not None else "(unknown)"
-        services[name] = services.get(name, 0.0) + float(row[cost_idx] or 0)
+        scope = _scope_of(row[tag_idx]) if tag_idx is not None else SCOPE_UNATTRIBUTED
+        k = (scope, name)
+        amounts[k] = amounts.get(k, 0.0) + float(row[cost_idx] or 0)
         if cur_idx is not None and row[cur_idx]:
             currency = row[cur_idx]
-    return _breakdown_result(services, currency)
+    return _scoped_breakdown_result(amounts, currency, basis={
+        SCOPE_DASHBOARD: f"tag:{_MANAGED_TAG_KEY}={_MANAGED_TAG_VALUE}",
+        SCOPE_SANDBOX: f"tag:{_MANAGED_TAG_KEY}={_SANDBOX_TAG_VALUE}",
+    }, notes=[
+        "Azure tags don't inherit to child resources (disks, NICs, public IPs, ACI), so "
+        "their cost is missing here. Enable Cost Management → Manage tag inheritance at "
+        "subscription scope to include it.",
+    ])
 
 
 # ── GCP (BigQuery billing export) ────────────────────────────────────────────
@@ -350,30 +548,60 @@ async def get_gcp_mtd_cost() -> tuple:
         raise gcp_service.GCPError(f"GCP BigQuery cost query failed: {e}") from e
 
 
+def _gcp_key_list() -> str:
+    """The accepted ``managed-by`` label keys as a SQL IN-list literal. Module
+    constants, not user input."""
+    return "(" + ", ".join(f"'{k}'" for k in _GCP_LABEL_KEYS) + ")"
+
+
 async def get_gcp_managed_breakdown() -> dict:
-    """GCP MTD net cost for resources labelled ``managed-by=vm-dashboard``, grouped
-    by service. Returns ``{total, currency, services:[...]}``. Raises GCPError."""
+    """GCP MTD net cost labelled ``managed-by``, split into dashboard vs sandbox scope
+    and grouped by service. Raises GCPError.
+
+    Unlike AWS/Azure the query is UNFILTERED, so ``unattributed_total`` here is a real
+    measured number rather than ``None``. That matters: Cloud Router and Cloud NAT — the
+    entire GCP idle cost — accept no labels at all, so they can only ever land in the
+    unattributed bucket. The ``project.labels`` arm of the COALESCE is the escape hatch:
+    ``gcloud projects update <p> --update-labels managed-by=dashboard-sandbox`` puts them
+    in the sandbox scope (forward-only; billing-export rows are immutable), while a
+    resource label still wins for dashboard-provisioned VMs."""
     table = _gcp_billing_table()
 
     def _query() -> dict:
         bigquery, client = _gcp_bq_client(table)
-        # The label key/value are fixed constants (not user input); the table is an
+        # The label keys are fixed constants (not user input); the table is an
         # admin-configured identifier (BigQuery can't parameterize table names).
+        keys = _gcp_key_list()
         sql = (
-            f"SELECT service.description AS service, {_GCP_NET} AS amount, "
-            f"ANY_VALUE(currency) AS currency FROM `{table}` "
-            f"WHERE usage_start_time >= TIMESTAMP(@month_start) "
-            f"AND EXISTS (SELECT 1 FROM UNNEST(labels) l "
-            f"WHERE l.key = '{_MANAGED_TAG_KEY}' AND l.value = '{_MANAGED_TAG_VALUE}') "
-            f"GROUP BY service"
+            "WITH line_items AS ("
+            "  SELECT service.description AS service, cost, credits, currency, "
+            "    COALESCE("
+            f"      (SELECT l.value FROM UNNEST(labels) l WHERE l.key IN {keys} LIMIT 1), "
+            f"      (SELECT p.value FROM UNNEST(project.labels) p WHERE p.key IN {keys} LIMIT 1)"
+            "    ) AS managed_by"
+            f"  FROM `{table}`"
+            "  WHERE usage_start_time >= TIMESTAMP(@month_start)"
+            ") "
+            f"SELECT managed_by, service, {_GCP_NET} AS amount, "
+            "ANY_VALUE(currency) AS currency FROM line_items "
+            "GROUP BY managed_by, service"
         )
-        services, currency = {}, "USD"
+        amounts, currency = {}, "USD"
         for r in client.query(sql, job_config=_gcp_month_param(bigquery)).result():
             name = r["service"] or "(unknown)"
-            services[name] = services.get(name, 0.0) + float(r["amount"] or 0)
+            k = (_scope_of(r["managed_by"]), name)
+            amounts[k] = amounts.get(k, 0.0) + float(r["amount"] or 0)
             if r["currency"]:
                 currency = r["currency"]
-        return _breakdown_result(services, currency)
+        return _scoped_breakdown_result(amounts, currency, measured=_SCOPES, basis={
+            SCOPE_DASHBOARD: f"label:{'|'.join(_GCP_LABEL_KEYS)}={_MANAGED_TAG_VALUE}",
+            SCOPE_SANDBOX: f"label:{'|'.join(_GCP_LABEL_KEYS)}={_SANDBOX_TAG_VALUE} "
+                           "(resource or project label)",
+        }, notes=[
+            "Cloud Router and Cloud NAT accept no labels, so the sandbox's standing GCP "
+            "cost lands in unattributed. Label the project "
+            "(managed-by=dashboard-sandbox) to attribute it going forward.",
+        ])
 
     try:
         return await asyncio.to_thread(_query)
@@ -383,34 +611,206 @@ async def get_gcp_managed_breakdown() -> dict:
         raise gcp_service.GCPError(f"GCP BigQuery breakdown query failed: {e}") from e
 
 
+# ── OCI (Usage API) ──────────────────────────────────────────────────────────
+# OCI has no Cost Explorer equivalent; the Usage API (request_summarized_usages)
+# returns cost. MONTHLY granularity requires the time range aligned to month
+# boundaries, so we query [first-of-this-month, first-of-next-month) — future
+# usage is $0, so that MONTHLY bucket IS the month-to-date cost.
+
+def _oci_month_bounds():
+    """(month_start_dt, next_month_start_dt) as UTC-midnight datetimes for the
+    Usage API's month-aligned MONTHLY query."""
+    from datetime import datetime, timezone
+    today = date.today()
+    start = today.replace(day=1)
+    nxt = (date(start.year + 1, 1, 1) if start.month == 12
+           else date(start.year, start.month + 1, 1))
+    to_dt = lambda d: datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    return to_dt(start), to_dt(nxt)
+
+
+def _oci_tenancy() -> str:
+    return (config_service.get("oci_tenancy_ocid") or "").strip()
+
+
+async def get_oci_mtd_cost() -> tuple:
+    """OCI tenancy month-to-date cost via the Usage API. Returns (amount, currency).
+    Raises ``oci_service.OCIError`` (incl. when OCI isn't configured)."""
+    tenancy = _oci_tenancy()
+    if not tenancy:
+        raise oci_service.OCIError("OCI cost unavailable — oci_tenancy_ocid not configured.")
+
+    def _query() -> tuple:
+        import oci
+        client = oci.usage_api.UsageapiClient(oci_service._oci_config())
+        start, end = _oci_month_bounds()
+        details = oci.usage_api.models.RequestSummarizedUsagesDetails(
+            tenant_id=tenancy, time_usage_started=start, time_usage_ended=end,
+            granularity="MONTHLY", query_type="COST",
+        )
+        resp = client.request_summarized_usages(details)
+        amount, currency = 0.0, "USD"
+        for item in (resp.data.items or []):
+            amount += float(getattr(item, "computed_amount", 0) or 0)
+            currency = getattr(item, "currency", None) or currency
+        return amount, currency
+
+    try:
+        return await asyncio.to_thread(_query)
+    except oci_service.OCIError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise oci_service.OCIError(f"OCI Usage API cost query failed: {e}") from e
+
+
+def _oci_sandbox_compartment() -> str:
+    """The sandbox compartment OCID, or "" when the config points at the tenancy root.
+
+    ``oci_service._compartment()`` falls back to the tenancy when
+    ``oci_compartment_ocid`` is blank — taking that fallback here would make "sandbox"
+    mean "the entire tenancy", so guard it explicitly."""
+    tenancy = _oci_tenancy()
+    comp = (config_service.get("oci_compartment_ocid") or "").strip()
+    return "" if (not comp or comp == tenancy) else comp
+
+
+async def get_oci_managed_breakdown() -> dict:
+    """OCI MTD cost grouped by compartment + service, scoped by COMPARTMENT rather than
+    by tag. Raises OCIError.
+
+    The Usage API only reports tags configured as **cost-tracking (defined) tags**, and
+    the sandbox writes a *freeform* tag (setup-oci.sh:51) — so the tag filter this
+    replaced could never match anything, and OCI's breakdown was always empty. Compartment
+    is the only scope OCI billing can express.
+
+    Two honest consequences: ``dashboard_total`` is ``None`` (unknowable — OCI can't tell
+    dashboard-provisioned resources from the sandbox baseline, since both live in the same
+    compartment), and the sandbox figure therefore *includes* dashboard deploys. Promoting
+    ``managed-by`` to a cost-tracking tag namespace and re-tagging would let OCI split like
+    AWS/Azure."""
+    tenancy = _oci_tenancy()
+    if not tenancy:
+        raise oci_service.OCIError("OCI cost unavailable — oci_tenancy_ocid not configured.")
+    sandbox_comp = _oci_sandbox_compartment()
+
+    def _query() -> dict:
+        import oci
+        client = oci.usage_api.UsageapiClient(oci_service._oci_config())
+        start, end = _oci_month_bounds()
+        details = oci.usage_api.models.RequestSummarizedUsagesDetails(
+            tenant_id=tenancy, time_usage_started=start, time_usage_ended=end,
+            granularity="MONTHLY", query_type="COST",
+            # No tag filter — see the docstring. compartmentId is returned per item, so
+            # group by it (not compartmentName) to compare against the configured OCID.
+            group_by=["compartmentId", "service"],
+        )
+        resp = client.request_summarized_usages(details)
+        amounts, currency = {}, "USD"
+        for item in (resp.data.items or []):
+            name = getattr(item, "service", None) or "(unknown)"
+            comp = (getattr(item, "compartment_id", None) or "").strip()
+            scope = (SCOPE_SANDBOX if sandbox_comp and comp == sandbox_comp
+                     else SCOPE_UNATTRIBUTED)
+            k = (scope, name)
+            amounts[k] = amounts.get(k, 0.0) + float(getattr(item, "computed_amount", 0) or 0)
+            currency = getattr(item, "currency", None) or currency
+        notes = ["OCI can't separate dashboard-provisioned resources from the sandbox "
+                 "baseline: the Usage API ignores freeform tags, so this is scoped by "
+                 "compartment and the sandbox figure includes dashboard deploys."]
+        if not sandbox_comp:
+            notes.append("oci_compartment_ocid is unset (or equals the tenancy root), so "
+                         "nothing can be attributed — set it to the sandbox compartment.")
+        # Without a configured compartment the sandbox scope isn't measurable at all, so
+        # it must report None ("can't see it") rather than 0.0 ("looked, found nothing").
+        measured = (SCOPE_SANDBOX, SCOPE_UNATTRIBUTED) if sandbox_comp else (SCOPE_UNATTRIBUTED,)
+        return _scoped_breakdown_result(
+            amounts, currency, measured=measured,
+            basis={SCOPE_SANDBOX: f"compartment:{sandbox_comp}"} if sandbox_comp else {},
+            notes=notes)
+
+    try:
+        return await asyncio.to_thread(_query)
+    except oci_service.OCIError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise oci_service.OCIError(f"OCI Usage API breakdown query failed: {e}") from e
+
+
+def _unavailable_breakdown(cloud: str, detail: str, *, exc=None) -> dict:
+    """A degraded entry that still exposes every key the template reads, so an
+    unavailable cloud renders "unavailable" instead of `undefined`.
+
+    ``throttled``/``retry_after`` are carried on the UNAVAILABLE entry only — they tell
+    ``cost_cache`` how long to leave this cloud alone, and a successful entry has nothing
+    to say about that."""
+    return {"cloud": cloud, "status": "unavailable", "detail": detail,
+            "throttled": _looks_throttled(exc) if exc is not None else False,
+            "retry_after": getattr(exc, "retry_after", None),
+            "total": None, "dashboard_total": None, "sandbox_total": None,
+            "unattributed_total": None, "currency": None, "services": [],
+            "scopes": _empty_scopes(), "scope_basis": {}, "notes": []}
+
+
 async def _breakdown_entry(cloud: str, fetch) -> dict:
     """One cloud's breakdown, degrading any failure to status=unavailable."""
     try:
         res = await fetch()
         return {"cloud": cloud, "status": "ok", "detail": "", **res}
-    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError) as e:
-        return {"cloud": cloud, "status": "unavailable", "detail": str(e),
-                "total": None, "currency": None, "services": []}
+    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError, oci_service.OCIError) as e:
+        return _unavailable_breakdown(cloud, str(e), exc=e)
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
         logger.warning("cost: %s breakdown failed unexpectedly: %s", cloud, e)
-        return {"cloud": cloud, "status": "unavailable", "detail": str(e),
-                "total": None, "currency": None, "services": []}
+        return _unavailable_breakdown(cloud, str(e), exc=e)
+
+
+def _sum_scope(entries: list, key: str):
+    """Sum one scope across clouds. ``None`` when no cloud could measure it — which is
+    different from ``0.0`` (every cloud measured, and it's zero)."""
+    vals = [e.get(key) for e in entries if e.get(key) is not None]
+    return round(sum(vals), 2) if vals else None
+
+
+def assemble_breakdown(clouds: list) -> dict:
+    """Roll per-cloud breakdown entries into the payload the endpoint returns. Shared by
+    the cached path and :func:`get_cost_breakdown` for the reason in
+    :func:`assemble_summary`."""
+    oks = [c for c in clouds if c["status"] == "ok"]
+    currency = oks[0]["currency"] if oks else "USD"
+    return {"clouds": clouds,
+            # `total` is None for a cloud that measured nothing, so sum defensively.
+            "grand_total": _sum_scope(oks, "total"),
+            "dashboard_total": _sum_scope(oks, "dashboard_total"),
+            "sandbox_total": _sum_scope(oks, "sandbox_total"),
+            "unattributed_total": _sum_scope(oks, "unattributed_total"),
+            "currency": currency}
 
 
 async def get_cost_breakdown() -> dict:
-    """Per-cloud, per-service MTD spend for dashboard-managed resources
-    (``managed-by=vm-dashboard``). AWS + Azure live; GCP via BigQuery when configured.
-    ``grand_total`` sums only the clouds that returned ``ok``."""
-    aws_entry, azure_entry, gcp_entry = await asyncio.gather(
+    """Per-cloud, per-service MTD spend split into **dashboard** (``managed-by=
+    vm-dashboard``) and **sandbox** (``managed-by=dashboard-sandbox``) scope, plus each
+    cloud's unattributed remainder where it can measure one.
+
+    ``grand_total`` covers only clouds that returned ``ok``, and only their attributed
+    (dashboard + sandbox) spend — unattributed is reported separately so it never
+    double-counts against the account-total card.
+
+    Uncached and unthrottled, like :func:`get_cost_summary`."""
+    clouds = list(await asyncio.gather(
         _breakdown_entry("aws", get_aws_managed_breakdown),
         _breakdown_entry("azure", get_azure_managed_breakdown),
         _breakdown_entry("gcp", get_gcp_managed_breakdown),
-    )
-    clouds = [aws_entry, azure_entry, gcp_entry]
-    oks = [c for c in clouds if c["status"] == "ok"]
-    grand_total = round(sum(c["total"] for c in oks), 2) if oks else None
-    currency = oks[0]["currency"] if oks else "USD"
-    return {"clouds": clouds, "grand_total": grand_total, "currency": currency}
+        _breakdown_entry("oci", get_oci_managed_breakdown),
+    ))
+    return assemble_breakdown(clouds)
+
+
+def _unavailable_summary(cloud: str, detail: str, *, exc=None) -> dict:
+    """The degraded summary entry. Mirror of :func:`_unavailable_breakdown` — see there
+    for why the throttle tags ride on the failure and not on the success."""
+    return {"cloud": cloud, "amount": None, "currency": None,
+            "status": "unavailable", "detail": detail,
+            "throttled": _looks_throttled(exc) if exc is not None else False,
+            "retry_after": getattr(exc, "retry_after", None)}
 
 
 async def _cloud_entry(cloud: str, fetch) -> dict:
@@ -420,26 +820,59 @@ async def _cloud_entry(cloud: str, fetch) -> dict:
         amount, currency = await fetch()
         return {"cloud": cloud, "amount": round(amount, 2),
                 "currency": currency, "status": "ok", "detail": ""}
-    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError) as e:
-        return {"cloud": cloud, "amount": None, "currency": None,
-                "status": "unavailable", "detail": str(e)}
+    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError, oci_service.OCIError) as e:
+        return _unavailable_summary(cloud, str(e), exc=e)
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
         logger.warning("cost: %s query failed unexpectedly: %s", cloud, e)
-        return {"cloud": cloud, "amount": None, "currency": None,
-                "status": "unavailable", "detail": str(e)}
+        return _unavailable_summary(cloud, str(e), exc=e)
+
+
+# Per-cloud fetchers, resolved BY NAME at call time rather than bound here. Tests
+# monkeypatch svc.get_aws_mtd_cost & friends, and a dict of function objects captured at
+# import would freeze the originals and quietly ignore every stub.
+SUMMARY_FETCHERS = {"aws": "get_aws_mtd_cost", "azure": "get_azure_mtd_cost",
+                    "gcp": "get_gcp_mtd_cost", "oci": "get_oci_mtd_cost"}
+BREAKDOWN_FETCHERS = {"aws": "get_aws_managed_breakdown",
+                      "azure": "get_azure_managed_breakdown",
+                      "gcp": "get_gcp_managed_breakdown",
+                      "oci": "get_oci_managed_breakdown"}
+
+
+async def cloud_summary_entry(cloud: str) -> dict:
+    """One cloud's summary entry. The single per-cloud entrypoint ``cost_cache`` calls,
+    so the cached path and ``get_cost_summary`` below cannot drift apart."""
+    return await _cloud_entry(cloud, globals()[SUMMARY_FETCHERS[cloud]])
+
+
+async def cloud_breakdown_entry(cloud: str) -> dict:
+    """One cloud's breakdown entry — the breakdown twin of :func:`cloud_summary_entry`."""
+    return await _breakdown_entry(cloud, globals()[BREAKDOWN_FETCHERS[cloud]])
+
+
+def assemble_summary(clouds: list) -> dict:
+    """Roll per-cloud summary entries into the payload the endpoint returns.
+
+    Split out so the cached per-cloud path and the live whole-payload path below produce
+    byte-identical shapes — assembling in two places is how a template ends up reading a
+    key that only one of them sets."""
+    oks = [c for c in clouds if c["status"] == "ok"]
+    total = round(sum(c["amount"] for c in oks), 2) if oks else None
+    currency = oks[0]["currency"] if oks else "USD"
+    return {"total_mtd": total, "currency": currency, "clouds": clouds}
 
 
 async def get_cost_summary() -> dict:
     """Per-cloud account/subscription MTD spend. AWS + Azure are queried live; GCP
     is queried via the BigQuery billing export when configured. ``total_mtd`` sums
-    only the clouds that returned ``ok``."""
-    aws_entry, azure_entry, gcp_entry = await asyncio.gather(
+    only the clouds that returned ``ok``.
+
+    Uncached and unthrottled — every cloud, right now. ``cost_cache.get_summary`` is what
+    the endpoints and the warmer call; this stays as the direct path for tests and for
+    anything that genuinely wants a live read."""
+    clouds = list(await asyncio.gather(
         _cloud_entry("aws", get_aws_mtd_cost),
         _cloud_entry("azure", get_azure_mtd_cost),
         _cloud_entry("gcp", get_gcp_mtd_cost),
-    )
-    clouds = [aws_entry, azure_entry, gcp_entry]
-    oks = [c for c in clouds if c["status"] == "ok"]
-    total = round(sum(c["amount"] for c in oks), 2) if oks else None
-    currency = oks[0]["currency"] if oks else "USD"
-    return {"total_mtd": total, "currency": currency, "clouds": clouds}
+        _cloud_entry("oci", get_oci_mtd_cost),
+    ))
+    return assemble_summary(clouds)
