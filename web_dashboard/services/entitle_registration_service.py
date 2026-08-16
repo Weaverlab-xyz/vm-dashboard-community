@@ -84,6 +84,7 @@ _PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/pl
 # overridable via `entitle_ssh_app_slug` (parallel to `entitle_rancher_app_slug`)
 # for tenants whose catalog differs.
 _APP_SLUG = {
+    "rest":       "rest api",          # ⚠️ tenant-specific — see _rest_app_slug()
     "ssh":        "ssh ephemeral accounts",
     "postgres":   "postgres",
     "mysql":      "mysql",
@@ -542,6 +543,126 @@ async def register_database(
                            username=username, database=database, version=version,
                            private=private)
     return await asyncio.to_thread(_apply_hcl_sync, hcl, {"db_password": password})
+
+
+# ── REST integration (Entitle Remote Adapter) ────────────────────────────────
+#
+# Registers a Cloud Functions adapter as an Entitle REST integration. This is the
+# path for every target Entitle has no native connector for, and for the ones whose
+# connector cannot do what we need — MySQL (persistent roles only) and the managed
+# SQL Server flavors (its ephemeral accounts assume a server-level login plus USE,
+# which is not how Azure SQL Database works).
+#
+# The adapter's contract is documented at
+# docs.beyondtrust.com/entitle/docs/open-api-definition; the routes below match
+# what web_dashboard/functions/fnworkloads/db_grant.py serves.
+
+# Entitle supports relative paths under a schema+host, or a full URL per field. Full
+# URLs are used here so a base with its own path prefix (Azure's /api) needs no
+# splitting — one fewer thing to get subtly wrong per cloud.
+_REST_ROUTES = (
+    ("get_assets_path", "/get_assets"),
+    ("get_actors_path", "/get_actors"),
+    ("get_all_permissions_path", "/get_all_permissions"),
+    ("give_access_path", "/give_access"),
+    ("revoke_access_path", "/revoke_access"),
+)
+
+# Only sent when the integration is ephemeral. Entitle requires BOTH to manage a
+# temporary account's lifecycle, so they are all-or-nothing.
+_REST_EPHEMERAL_ROUTES = (
+    ("create_actor_path", "/create_actor"),
+    ("delete_actor_path", "/delete_actor"),
+)
+
+
+def _rest_app_slug() -> str:
+    """The catalog name of the REST application, lowercased.
+
+    ⚠️  TENANT-SPECIFIC, and unconfirmed against a live catalog — the same caveat
+        as the DB/SSH slugs above. The entitleio/entitle provider validates this
+        client-side as all-lowercase at plan time, then case-insensitively matches
+        the catalog at apply time, so a wrong value fails as a 404
+        "Application not found" rather than anything more helpful. Check your
+        tenant's ``entitle_applications`` data source and set
+        ``entitle_rest_app_slug`` if it differs from the default.
+    """
+    return (_cfg("entitle_rest_app_slug") or _APP_SLUG["rest"]).strip().lower()
+
+
+def _rest_connection_json_hcl(*, base_url: str, ephemeral: bool,
+                              auth_header: str) -> str:
+    """``connection_json`` for a REST integration.
+
+    The bearer secret is referenced as ``var.rest_secret`` rather than interpolated,
+    so it never lands in the HCL written to disk — the same discipline the DB path
+    uses for ``db_password``.
+    """
+    # strip() before rstrip("/"): a whitespace-only value is truthy and would
+    # generate paths like "   /give_access" that fail only at the first real grant.
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise EntitleRegistrationError("REST registration needs the adapter's base URL")
+
+    routes = list(_REST_ROUTES) + (list(_REST_EPHEMERAL_ROUTES) if ephemeral else [])
+    lines = [f"    {field} = {json.dumps(base + path)}" for field, path in routes]
+    # Token auth: Entitle sends these verbatim on every request, which is exactly
+    # what fnruntime.auth verifies. The alternative the docs offer (oauth_data) buys
+    # nothing here — the adapter has no OAuth server in front of it.
+    lines.append(
+        f"    headers = {{ {json.dumps(auth_header)} = \"Bearer ${{var.rest_secret}}\" }}")
+    body = "\n".join(lines)
+    return f"  connection_json = jsonencode({{\n{body}\n  }})\n"
+
+
+def _generate_rest_hcl(*, name: str, base_url: str, private: bool,
+                       ephemeral: bool, auth_header: str) -> str:
+    label = _safe_name(name)
+    header = _provider_header('variable "rest_secret" { sensitive = true }\n')
+    conn = _rest_connection_json_hcl(base_url=base_url, ephemeral=ephemeral,
+                                     auth_header=auth_header)
+    # allow_creating_accounts follows `ephemeral` directly. Note this is where the
+    # MySQL limitation goes away: the constraint was never MySQL's, it was Entitle's
+    # MySQL CONNECTOR's, and a REST adapter does not use that connector.
+    return header + f"""
+resource "entitle_integration" {json.dumps(label)} {{
+  name        = {json.dumps(name[:50])}
+  application = {{ name = {json.dumps(_rest_app_slug())} }}
+{conn}{_common_attrs_hcl(private, allow_creating_accounts=ephemeral)}}}
+
+output "integration_id" {{
+  value = entitle_integration.{label}.id
+}}
+"""
+
+
+async def register_rest(*, name: str, base_url: str, shared_secret: str,
+                        private: bool = False, ephemeral: bool = True,
+                        auth_header: str = "Authorization") -> dict:
+    """Register a Cloud Functions adapter as an Entitle REST integration.
+
+    ``base_url`` is the function's endpoint with no route on it — the adapter routes
+    on the path, so Entitle appends ``/give_access`` and friends.
+
+    ``private`` defaults to **False**, unlike the other register_* helpers: the
+    whole point of the adapter is that it is an internet-reachable endpoint Entitle
+    can call directly, even when the resource behind it is private. It is the
+    FUNCTION that is VPC-attached, not the integration. Pass ``private=True`` only
+    if the function's own ingress is restricted and Entitle needs the agent.
+
+    ``ephemeral`` adds the create_actor/delete_actor routes and turns on
+    ``allow_creating_accounts`` — the just-in-time account lifecycle.
+
+    Returns ``{integration_id, tf_state_json}``; stash the state so ``deregister``
+    can remove it.
+    """
+    if not shared_secret:
+        raise EntitleRegistrationError(
+            "REST registration needs the adapter's shared secret — without it "
+            "every call Entitle makes would be rejected by the function")
+    hcl = _generate_rest_hcl(name=name, base_url=base_url, private=private,
+                             ephemeral=ephemeral, auth_header=auth_header)
+    return await asyncio.to_thread(_apply_hcl_sync, hcl, {"rest_secret": shared_secret})
 
 
 async def register_kubernetes(*, name: str, private: bool = True,

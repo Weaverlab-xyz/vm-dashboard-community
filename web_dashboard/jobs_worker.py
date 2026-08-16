@@ -57,7 +57,7 @@ HANDLED_TYPES = (
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "portainer_node_deploy", "portainer_node_teardown",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
-    "cloudfn_deploy", "cloudfn_decommission",
+    "cloudfn_deploy", "cloudfn_decommission", "cloudfn_entitle_register",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
@@ -111,7 +111,7 @@ MEDIUM_TYPES = (
     # / ps_resource_service — k8s_ps_token applies RBAC with kubectl AND creates up to two
     # Password Safe managed systems, each a terraform apply in a tempdir)
     "k8s_tunnel", "k8s_api_tunnel", "k8s_entitle_register", "k8s_ps_token",
-    "rancher_entitle_register", "clouddb_entitle_register",
+    "rancher_entitle_register", "clouddb_entitle_register", "cloudfn_entitle_register",
     # cloud SDK + HTTP readiness poll + an OPT-IN short terraform for the PRA Web Jump
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown",
@@ -354,6 +354,11 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import cloud_function_service
             await cloud_function_service.run_decommission(
                 db, fn_id=meta["fn_id"], job_id=job_id)
+        elif job_type == "cloudfn_entitle_register":
+            from .services import cloud_function_service
+            await cloud_function_service.run_entitle_register(
+                db, fn_id=meta["fn_id"], job_id=job_id,
+                action=meta.get("action", "register"))
         elif job_type == "ansible_cloud_run":
             # Config-Management localhost Ansible run against a Kubernetes cluster or
             # cloud database — always executes on a transient in-cloud runner.

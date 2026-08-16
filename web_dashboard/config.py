@@ -134,6 +134,11 @@ class Settings(BaseSettings):
     # entitle_rancher_private for tenants who lock the node behind CIDRs Entitle
     # can't traverse.
     entitle_rancher_app_slug: str = "rancher"     # Entitle application catalog slug for the Rancher connector
+    # Catalog slug for the REST integration (Entitle Remote Adapter) — how a Cloud
+    # Functions adapter is registered. Lowercase; the entitleio provider rejects any
+    # uppercase at plan time and 404s a wrong name at apply. Confirm against your
+    # tenant's entitle_applications data source.
+    entitle_rest_app_slug: str = "rest api"
     entitle_rancher_private: bool = False         # attach the shared Entitle agent token (node unreachable from Entitle's cloud)
     entitle_rancher_url_key: str = "url"          # (unused — _generate_rancher_hcl hardcodes connection_json keys) retained for compat
     entitle_rancher_token_key: str = "api_token"  # (unused — see above)

@@ -356,12 +356,34 @@ Three things worth stating explicitly, because each shaped the implementation:
 The read routes are not optional in practice: `get_assets` is how Entitle populates
 the request UI, and `get_all_permissions` is how it reconciles.
 
-### Still to do
+### Registering an adapter
 
-`register_rest()` in `entitle_registration_service` (the Terraform side that
-creates the integration), and the provision-path wiring that pairs a database with
-its adapter function. Both are now unblocked — the contract above is the input they
-were waiting on.
+`entitle_registration_service.register_rest()` creates the integration through the
+`entitleio/entitle` provider, the same inline-HCL path the DB/SSH/K8s registrations
+use. Driven from the Functions page (**Register in Entitle**) or
+`POST /api/functions/{id}/entitle-register`, as a `cloudfn_entitle_register` job.
+
+Three choices worth recording:
+
+- **Full URLs per path, not `schema` + `host`.** Entitle accepts either, but Azure's
+  base carries an `/api` prefix that relative paths would drop. One fewer thing to
+  get subtly wrong per cloud.
+- **`private=False` by default**, unlike every other `register_*` helper. The whole
+  point of an adapter is an internet-reachable endpoint Entitle can call directly
+  even when the resource behind it is private — it is the *function* that is
+  VPC-attached, not the integration, so no agent is involved.
+- **`allow_creating_accounts` follows `ephemeral`.** This is where the MySQL
+  limitation disappears: the constraint was never MySQL's, it was Entitle's MySQL
+  *connector's*, and a REST adapter does not use that connector.
+
+`tests/test_entitle_register_rest.py` cross-checks the generated paths against the
+routes `db_grant` actually serves, in both directions — a mismatch there produces an
+integration that saves cleanly in Entitle and 404s on every real grant, which is not
+a failure anyone would enjoy diagnosing.
+
+⚠️  The application catalog slug (`entitle_rest_app_slug`, default `"rest api"`) is
+tenant-specific and still unconfirmed — the same caveat as the DB and SSH slugs.
+A wrong value fails at apply as a 404 "Application not found".
 
 ## 8. Security notes
 

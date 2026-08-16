@@ -187,12 +187,16 @@ output "resource_id" {
   description = "Function App resource id"
 }
 
-# The route is /api/invoke because host.json sets routePrefix=api and the v2 model
-# declares route="invoke". The host KEY is not available here — azurerm exposes no
-# data source for it — so the service fetches it post-apply over the ARM REST API.
+# A BASE url, not a single route: the workload routes on the path (an Entitle
+# Remote Adapter's verb IS the path), so callers append /give_access and friends.
+# The /api prefix comes from host.json's routePrefix and is stripped again by the
+# adapter, so the same routes read identically on all three clouds.
+#
+# The host KEY is not here — azurerm exposes no data source for it — so the service
+# fetches it post-apply over the ARM REST API.
 output "invoke_url" {
-  value       = "https://${azurerm_linux_function_app.this.default_hostname}/api/invoke"
-  description = "HTTPS endpoint — what an Entitle REST integration posts to (append ?code=<host key>)"
+  value       = "https://${azurerm_linux_function_app.this.default_hostname}/api"
+  description = "HTTPS base URL — an Entitle REST integration appends /give_access etc. (plus ?code=<host key>)"
 }
 
 output "health_url" {

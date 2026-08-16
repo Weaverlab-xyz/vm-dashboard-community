@@ -95,6 +95,10 @@
                       class="text-gray-600 hover:underline disabled:text-gray-300 disabled:no-underline text-xs mr-3">
                 Endpoint
               </button>
+              <button x-show="$store.auth.isAdmin && isAdapter(fn)"
+                      @click="toggleEntitle(fn)" :disabled="fn.status !== 'available'"
+                      class="text-gray-600 hover:underline disabled:text-gray-300 disabled:no-underline text-xs mr-3"
+                      x-text="fn.entitle_integration_id ? 'Deregister' : 'Register in Entitle'"></button>
               <button @click="destroy(fn)" :disabled="fn.status === 'deleting'"
                       class="text-red-600 hover:underline disabled:text-gray-300 disabled:no-underline text-xs">
                 Destroy
@@ -298,6 +302,19 @@ function functionsPage() {
       try {
         this.creds = await API.get(`/api/functions/${fn.id}/invoke-info`);
         this.credsOpen = true;
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    // Only workloads implementing the Entitle Remote Adapter contract can be
+    // registered; offering it on echo_diag would just produce a broken integration.
+    isAdapter(fn) { return ['db_grant', 'entitle_webhook_echo'].includes(fn.workload); },
+
+    async toggleEntitle(fn) {
+      const action = fn.entitle_integration_id ? 'deregister' : 'register';
+      try {
+        await API.post(`/api/functions/${fn.id}/entitle-register?action=${action}`, {});
+        this.notify(`${action === 'register' ? 'Registering' : 'Deregistering'} — follow progress in Jobs.`);
+        this.load();
       } catch (e) { this.notify(e.message, 'error'); }
     },
 
