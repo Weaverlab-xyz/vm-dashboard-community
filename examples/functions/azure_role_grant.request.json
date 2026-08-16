@@ -1,0 +1,9 @@
+{
+  "asset": {
+    "identifier": "azure:scope:/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/prod",
+    "name": "prod",
+    "type": "azure_scope"
+  },
+  "actor_identifier": "99999999-8888-7777-6666-555555555555",
+  "role_code": "reader"
+}

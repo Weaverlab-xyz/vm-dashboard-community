@@ -22,6 +22,7 @@ from web_dashboard.services import cloud_function_package as pkg  # noqa: E402
 _SAMPLE_ROUTE = {
     "db_grant": ("POST", "/give_access"),
     "portainer_access": ("POST", "/give_access"),
+    "azure_role_grant": ("POST", "/give_access"),
     "entitle_webhook_echo": ("POST", "/give_access"),
 }
 
@@ -80,6 +81,9 @@ def test_samples_actually_run_through_their_workload():
             os.environ.update({"FN_DB_ENGINE": "mysql", "FN_DB_HOST": "db.invalid",
                                "FN_DB_NAME": "appdb"})
             os.environ.pop("FN_DB_DRY_RUN", None)
+        if workload_name == "azure_role_grant":
+            os.environ.update({"FN_AZURE_SUBSCRIPTION_ID": "1" * 8 + "-2222-3333-4444-" + "5" * 12})
+            os.environ.pop("FN_AZURE_DRY_RUN", None)
         if workload_name == "portainer_access":
             os.environ["FN_PORTAINER_URL"] = "https://portainer.invalid"
             os.environ.pop("FN_PORTAINER_API_KEY", None)
