@@ -1,5 +1,19 @@
 # Design — Entitle User-Based JIT Authorization (Entra Quickstart)
 
+> ### ⚠️ This documents the LEGACY (Entra-group) mechanism
+>
+> There are now **two** ways Entitle grants dashboard permissions, and this design
+> covers the older one. It is still supported and still works — but it grants via
+> Entra group membership, so it only serves Entra users and a grant or revoke does
+> not take effect until the user's **next login**.
+>
+> The current mechanism is a **REST integration** that grants any user (local, Entra,
+> any OIDC) immediately. Both can run at once.
+>
+> **Start here instead:**
+> [`integrations/entitle-dashboard-permissions.md`](../integrations/entitle-dashboard-permissions.md)
+> — it compares the two, and covers migrating from this one.
+
 > **Status:** Design + execution plan, v1.
 > **Audience:** enterprise operators wiring the dashboard into an
 > existing Entra ID + Entitle deployment. Community/dev installs
