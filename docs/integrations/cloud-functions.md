@@ -113,6 +113,42 @@ nothing, so you can confirm the network path, the front door, the shared secret 
 every `*_path` mapping before a real database is involved. A 404 from it lists the
 routes it actually serves, which is almost always the fix.
 
+> **Doing this for the first time?** Follow
+> [the first-deploy runbook](../runbooks/cloud-functions-first-deploy.md), which
+> orders the clouds GCP → AWS → Azure for a reason and says what fails how at each
+> stage.
+
+### Automatic pairing on provision
+
+You do not have to deploy a `db_grant` adapter by hand. Provision a database with
+**Register in Entitle** checked and the engine decides how it reaches Entitle:
+
+| Engine | Route | Why |
+|---|---|---|
+| Postgres | native Entitle connector | it works; nothing to gain from replacing it |
+| MySQL | **paired adapter** | the native connector assigns persistent roles and never mints an account |
+| SQL Server | **paired adapter** | the native connector needs sysadmin, which managed SQL Server does not grant |
+
+The pairing runs as one `clouddb_adapter_pair` job covering all three stages: it
+stages the admin credential in the cloud's own secret store, deploys a `db_grant`
+function **VPC/VNet-attached** beside the database, and registers it as a REST
+integration. One job because the stages are useless individually — a half-finished
+pairing leaves you unable to tell whether to retry or clean up.
+
+Two things worth knowing:
+
+- **The adapter is deployed in dry run.** Its first act is to report the SQL it
+  *would* run. Arming it (`FN_DB_DRY_RUN=0`) is a deliberate second step.
+- **Pairing is non-fatal.** A working database is the deliverable; failed Entitle
+  wiring is logged and does not fail the provision that produced it. Check the Jobs
+  page if a pairing you expected did not appear.
+
+### Dashboard permissions
+
+The fourth integration is not a function at all: granting **dashboard permissions**
+happens on a dashboard-hosted endpoint, because there the dashboard *is* the target
+system. See [entitle-user-identity.md](entitle-user-identity.md).
+
 ### db_grant
 
 The Phase 2 flagship: short-lived database accounts, minted on Give Access and

@@ -1153,6 +1153,7 @@ task (AWS ECS Fargate / Azure ACI / GCP Cloud Run).
 ## Appendix M — Cloud Functions (preview)
 
 > **Full guide:** [docs/integrations/cloud-functions.md](integrations/cloud-functions.md)
+> **First deploy:** [docs/runbooks/cloud-functions-first-deploy.md](runbooks/cloud-functions-first-deploy.md) — ordered GCP → AWS → Azure, with what fails how at each stage.
 
 Optional, and **preview**. Deploys a dashboard-authored Python handler as an
 **AWS Lambda**, an **Azure Linux Function App**, or a **GCP Cloud Run
