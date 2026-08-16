@@ -101,15 +101,129 @@ def test_azure_entry_must_be_function_app_py():
 
 
 def test_azure_vendor_tree_contains_no_compiled_artifacts():
-    """The dashboard image is multi-arch — a vendored .so can be built for the
-    wrong architecture and fail at import time, in the cloud. This assertion is
-    what stops someone later vendoring psycopg2-binary the same way."""
+    """The dashboard image is multi-arch — a .so vendored out of site-packages can
+    be built for the wrong architecture and fail at import time, in the cloud. This
+    assertion is what stops someone later vendoring psycopg2-binary the same way.
+
+    It covers the SITE-PACKAGES path only. db_grant deliberately ships compiled
+    wheels, but from the Dockerfile's arch-pinned FN_VENDOR_DIR, which is built for
+    the function's platform rather than the build host's — see
+    test_vendored_drivers_come_only_from_the_arch_pinned_dir."""
     if not _azure_available():
         print("SKIP: azure-functions not installed")
         return
     names = _names(pkg.build(cloud="azure", workload="echo_diag")[0])
     bad = [n for n in names if n.endswith((".so", ".pyd", ".dll", ".dylib"))]
     assert not bad, f"compiled artifacts in the package: {bad}"
+
+
+def test_stdlib_only_workloads_vendor_nothing():
+    """The contract that keeps a package ~30 KB and needs no build step."""
+    for workload in ("echo_diag", "entitle_webhook_echo"):
+        assert not pkg._WORKLOAD_VENDOR.get(workload), workload
+        names = _names(pkg.build(cloud="aws", workload=workload)[0])
+        assert all(n.startswith(("fnruntime/", "workload.py", "aws_entry.py"))
+                   for n in names), names
+
+
+import contextlib
+import tempfile
+
+
+@contextlib.contextmanager
+def _fake_vendor_dir():
+    """A stand-in for the Dockerfile's FN_VENDOR_DIR.
+
+    The real one only exists inside the built image, and CI runs the suite on a
+    bare runner — so without synthesizing one here the entire db_grant packaging
+    path (the only path that ships compiled artifacts) would never be exercised
+    anywhere before a real deploy.
+    """
+    original = pkg._VENDOR_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        for package in ("pymysql", "pytds", "OpenSSL", "cryptography", "cffi"):
+            os.makedirs(os.path.join(tmp, package))
+            with open(os.path.join(tmp, package, "__init__.py"), "w") as handle:
+                handle.write(f"# fake {package}\n")
+        # cryptography really does carry compiled objects; include one so the
+        # allowance is genuinely exercised rather than assumed.
+        with open(os.path.join(tmp, "cryptography", "_rust.abi3.so"), "wb") as handle:
+            handle.write(b"\x7fELF fake")
+        # A bare top-level compiled module, matched by prefix rather than name.
+        with open(os.path.join(tmp, "_cffi_backend.cpython-312-x86_64-linux-gnu.so"), "wb") as handle:
+            handle.write(b"\x7fELF fake")
+        pkg._VENDOR_DIR = tmp
+        try:
+            yield tmp
+        finally:
+            pkg._VENDOR_DIR = original
+
+
+def test_db_grant_build_fails_loudly_without_the_vendor_dir():
+    """A missing vendor dir must not silently produce a package that imports fine
+    locally and dies on first invocation in the cloud."""
+    if "db_grant" not in pkg.available_workloads():
+        print("SKIP: db_grant workload not present yet")
+        return
+    original = pkg._VENDOR_DIR
+    pkg._VENDOR_DIR = os.path.join(tempfile.gettempdir(), "definitely-not-here-xyz")
+    try:
+        pkg.build(cloud="aws", workload="db_grant")
+    except pkg.CloudFunctionPackageError as exc:
+        assert "does not exist" in str(exc) and "Dockerfile" in str(exc), str(exc)
+    else:
+        raise AssertionError("db_grant built with no vendor dir present")
+    finally:
+        pkg._VENDOR_DIR = original
+
+
+def test_vendored_drivers_come_only_from_the_arch_pinned_dir():
+    """db_grant is the one workload allowed compiled artifacts, and only because
+    the Dockerfile fetches them for the FUNCTION's platform rather than the build
+    host's. Everything else must still be binary-free."""
+    if "db_grant" not in pkg.available_workloads():
+        print("SKIP: db_grant workload not present yet")
+        return
+    with _fake_vendor_dir():
+        names = _names(pkg.build(cloud="aws", workload="db_grant")[0])
+    assert any(n.startswith("pymysql/") for n in names), "PyMySQL not vendored"
+    assert any(n.startswith("pytds/") for n in names), "python-tds not vendored"
+    assert any(n.startswith("OpenSSL/") for n in names), \
+        "pyOpenSSL not vendored — python-tds cannot do the TLS Azure SQL requires"
+    assert "sqlplan.py" in names, "the SQL builders were not shipped"
+    # The compiled artifacts are present, and only from the vendor dir.
+    binaries = [n for n in names if n.endswith((".so", ".pyd", ".dll", ".dylib"))]
+    assert binaries, "the arch-pinned allowance is not being exercised"
+    assert all(n.split("/")[0] in ("cryptography", "pymysql", "pytds", "OpenSSL", "cffi")
+               or n.startswith("_cffi_backend.") for n in binaries), binaries
+
+
+def test_azure_puts_vendored_drivers_where_run_from_package_looks():
+    """AWS and GCP put the zip root on sys.path; Azure only searches
+    .python_packages, so a root-level package is invisible there."""
+    if "db_grant" not in pkg.available_workloads() or not _azure_available():
+        print("SKIP: db_grant or azure-functions unavailable")
+        return
+    with _fake_vendor_dir():
+        names = _names(pkg.build(cloud="azure", workload="db_grant")[0])
+    assert any(n.startswith(".python_packages/lib/site-packages/pymysql/") for n in names)
+    assert not any(n.startswith("pymysql/") for n in names), \
+        "a root-level package is not importable under run-from-package"
+    # The workload's own modules stay at the root — they are imported by the
+    # handler, not resolved by the platform's dependency loader.
+    assert "sqlplan.py" in names and "workload.py" in names
+
+
+def test_db_grant_packages_are_still_deterministic():
+    """Vendoring must not reintroduce non-determinism — a changing hash would
+    redeploy every function on every apply."""
+    if "db_grant" not in pkg.available_workloads():
+        print("SKIP: db_grant workload not present yet")
+        return
+    with _fake_vendor_dir():
+        first = pkg.build(cloud="aws", workload="db_grant")[1]
+        second = pkg.build(cloud="aws", workload="db_grant")[1]
+    assert first == second
 
 
 def test_azure_build_fails_loudly_without_the_vendor_dependency():

@@ -59,6 +59,13 @@ class DeployRequest(BaseModel):
     resource_group_name: Optional[str] = None       # azure
     sku_name: Optional[str] = None                  # azure
     service_account_email: Optional[str] = None     # gcp
+    # Credential access for workloads that need one (db_grant). Each cloud resolves
+    # it differently and none of them takes the secret VALUE: AWS grants the
+    # function read on named Secrets Manager ARNs, GCP injects a Secret Manager
+    # secret as an env var, and Azure resolves an @Microsoft.KeyVault(...) reference
+    # placed in `environment` using the app's system-assigned identity.
+    readable_secret_arns: Optional[list[str]] = None   # aws
+    db_admin_secret: Optional[str] = None              # gcp
 
 
 class InvokeRequest(BaseModel):
@@ -166,6 +173,8 @@ def deploy_function(payload: DeployRequest, background: BackgroundTasks,
             resource_group_name=payload.resource_group_name,
             sku_name=payload.sku_name,
             service_account_email=payload.service_account_email,
+            readable_secret_arns=payload.readable_secret_arns or [],
+            db_admin_secret=payload.db_admin_secret or "",
         )
     except NotImplementedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

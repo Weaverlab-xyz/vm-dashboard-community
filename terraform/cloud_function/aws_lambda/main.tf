@@ -95,6 +95,18 @@ variable "environment" {
   description = "Extra NON-SECRET environment variables for the handler"
 }
 
+# Secrets Manager read for workloads that resolve a credential at cold start
+# (db_grant). AWS is the only one of the three clouds with no platform-resolved
+# env-var secret for functions — GCP has secret_environment_variables and Azure has
+# Key Vault references — so the function reads it itself, with boto3 the runtime
+# already ships. Scoped to named ARNs: a wildcard here would let any workload read
+# every secret in the account.
+variable "readable_secret_arns" {
+  type        = list(string)
+  default     = []
+  description = "Secrets Manager ARNs this function may read. Empty = no access."
+}
+
 # ── Networking (optional) ─────────────────────────────────────────────────────
 #
 # Empty subnet_ids = a public function with normal internet egress. Non-empty =
@@ -206,6 +218,20 @@ resource "aws_lambda_function" "this" {
       error_message = "A VPC-attached function needs at least one security group; otherwise its ENIs get the default SG and the DB path silently fails."
     }
   }
+}
+
+resource "aws_iam_role_policy" "secrets" {
+  count = length(var.readable_secret_arns) > 0 ? 1 : 0
+  name  = "${var.name}-secrets"
+  role  = aws_iam_role.this.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = var.readable_secret_arns
+    }]
+  })
 }
 
 resource "aws_lambda_function_url" "this" {

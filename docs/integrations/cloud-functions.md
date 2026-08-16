@@ -84,6 +84,41 @@ catalog** — adding a module makes it deployable, no registry to edit.
 |---|---|
 | `echo_diag` | Echoes the request as the function saw it (redacted), reports where it landed, and DNS/TCP-probes any `{host, port}` you pass |
 | `entitle_webhook_echo` | Validates an Entitle Give/Revoke payload and reports what it understood, without granting anything. Supports `?fail=401\|403\|404\|500\|slow\|timeout` |
+| `db_grant` | Mints and drops ephemeral just-in-time database accounts on MySQL and SQL Server. **Dry run by default.** See below. |
+
+### db_grant
+
+The Phase 2 flagship: short-lived database accounts, minted on Give Access and
+dropped on Revoke. This is the case Entitle's native connectors cannot serve — its
+MySQL connector assigns persistent roles and never mints an account, and its SQL
+Server connector assumes a server-level login plus `USE`, which is not how Azure SQL
+Database works.
+
+Configure the target on the function itself (never in the request, so a caller
+cannot redirect a grant at another database):
+
+| Setting | Notes |
+|---|---|
+| `FN_DB_ENGINE` | `mysql` or `sqlserver` |
+| `FN_DB_HOST` / `FN_DB_PORT` | the private endpoint; deploy the function in `vpc` mode to reach it |
+| `FN_DB_NAME` | the database grants are scoped to |
+| `FN_DB_FLAVOR` | `rds` (default), `azure_sql`, or `cloudsql` — **matters for SQL Server only** |
+| `FN_DB_ADMIN_USER` | the admin login that runs CREATE/DROP |
+| `FN_DB_DRY_RUN` | unset or truthy = dry run. **Default is dry run.** |
+
+`FN_DB_FLAVOR=azure_sql` is not cosmetic: Azure SQL Database is a contained-database
+model, so the login goes in `master` on the logical server and the user in the target
+database, over two separate connections with no `USE` between them.
+
+The admin password is never a request field. Set it as a Secret Manager secret env
+var on GCP (`db_admin_secret`), an `@Microsoft.KeyVault(SecretUri=…)` app setting on
+Azure (the module declares a system-assigned identity so the platform can resolve
+it — grant that identity `get` on the vault), or `FN_DB_ADMIN_SECRET_ID` plus
+`readable_secret_arns` on AWS.
+
+Start in dry run. The response contains the exact SQL the function would execute,
+per connection, which is how you validate the whole Entitle path before anything
+touches a real database.
 
 ### Writing your own
 

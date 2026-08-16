@@ -63,6 +63,14 @@ def test_samples_actually_run_through_their_workload():
         payload.pop("egress", None)
         payload["egress"] = False
         payload["timeout"] = 0.2
+        # db_grant reads its target from the function's own configuration and
+        # refuses to guess, so give it one. Dry run is the default, so this opens
+        # no connection — it only proves the sample payload is the shape the
+        # handler expects.
+        if workload_name == "db_grant":
+            os.environ.update({"FN_DB_ENGINE": "mysql", "FN_DB_HOST": "db.invalid",
+                               "FN_DB_NAME": "appdb"})
+            os.environ.pop("FN_DB_DRY_RUN", None)
         request = Request(method="POST", path="/", headers={}, query={},
                           body=json.dumps(payload).encode(), source="aws_function_url")
         response = module.handle(request, Context.from_env(workload=workload_name))

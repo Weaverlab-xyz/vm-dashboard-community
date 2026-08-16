@@ -127,6 +127,30 @@ def test_every_cloud_gets_the_shared_secret_and_workload():
         assert got["name"] == "fn-demo", cloud
 
 
+def test_credential_access_is_per_cloud_and_never_carries_the_value():
+    """Three different mechanisms, one rule: the dashboard passes a REFERENCE, never
+    the secret itself, so a credential cannot leak through Terraform state."""
+    _reset()
+    aws = _vars("aws", opts={"readable_secret_arns": "arn:aws:secretsmanager:::a"})
+    assert aws["readable_secret_arns"] == ["arn:aws:secretsmanager:::a"]
+
+    gcp = _vars("gcp", opts={"db_admin_secret": "clouddb-admin"})
+    assert gcp["db_admin_secret"] == "clouddb-admin"
+
+    # Azure needs no variable at all: a Key Vault reference is just a string in the
+    # app settings, resolved by the platform before the worker starts.
+    azure = _vars("azure", opts={"environment": {
+        "FN_DB_ADMIN_PASSWORD": "@Microsoft.KeyVault(SecretUri=https://v/secrets/db/)"}})
+    assert "@Microsoft.KeyVault" in azure["environment"]["FN_DB_ADMIN_PASSWORD"]
+
+
+def test_credential_access_defaults_to_none():
+    """A workload that needs no credential must not be granted one."""
+    _reset()
+    assert _vars("aws")["readable_secret_arns"] == []
+    assert _vars("gcp")["db_admin_secret"] == ""
+
+
 def test_defaults_are_applied_for_blank_sizing():
     _reset()
     got = _vars("aws")

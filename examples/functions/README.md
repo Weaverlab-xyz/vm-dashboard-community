@@ -14,6 +14,36 @@ own. See [docs/integrations/cloud-functions.md](../../docs/integrations/cloud-fu
 | `custom_handler.py` | Template for a new workload. Copy into `fnworkloads/`. |
 | `echo_diag.request.json` | Probe a private database endpoint and check egress |
 | `entitle_webhook_echo.request.json` | An Entitle Give Access payload |
+| `db_grant.request.json` | Mint an ephemeral database account (dry run by default) |
+
+## db_grant
+
+Mints a short-lived database account and drops it on revoke — the case Entitle's
+native connectors cannot serve (its MySQL connector assigns persistent roles and
+never mints an account; its SQL Server connector assumes a server-level login plus
+`USE`, which is not how Azure SQL Database works).
+
+**Dry run is the default.** With `FN_DB_DRY_RUN` unset the function returns the exact
+statements it *would* run and opens no connection, which is how you validate the
+whole Entitle path before touching a real database:
+
+```bash
+curl -sS -X POST "$FN_URL" -H "Authorization: Bearer $FN_SECRET" \
+  -H 'content-type: application/json' -d @db_grant.request.json
+```
+
+The target — engine, host, port, database, flavor — comes from the function's own
+configuration, never from the request, so a caller cannot redirect a grant at
+another database. Set `FN_DB_FLAVOR=azure_sql` for Azure SQL Database; it is the
+one flavor that needs the login in `master` and the user in the target database
+over two separate connections.
+
+To revoke, pass the username back (or the original `user_email` **and**
+`request_id`, from which the same name is re-derived):
+
+```json
+{ "action": "revoke", "username": "jit_alice_example_com_1111" }
+```
 
 ## Calling a function
 
