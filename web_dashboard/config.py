@@ -1351,6 +1351,12 @@ class Settings(BaseSettings):
     # nav link + 403-page deep links pointing at the matching Entitle resource.
     entitle_user_jit_enabled: bool = False
     entitle_request_portal_url: str = ""
+    # Shared secret Entitle presents to /api/entitle/rest/* (as Authorization:
+    # Bearer, or X-Entitle-Secret). Deliberately NOT a Personal Access Token: a PAT
+    # inherits its owning user's permissions, and an endpoint whose whole job is
+    # granting permissions must not authenticate with a credential that already has
+    # some. Unset → the endpoint is closed (503), never open.
+    entitle_rest_secret: str = ""            # encrypted at rest
     entitle_resource_ids_json: str = "{}"
 
     class Config:

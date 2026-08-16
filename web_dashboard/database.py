@@ -108,6 +108,17 @@ class User(Base):
     # sees the group gone → matching permissions drop.
     session_permissions = Column(Text, nullable=True)
 
+    # Entitle REST-granted permissions, and a SEPARATE column on purpose.
+    # _complete_oauth_login overwrites session_permissions with the group-derived
+    # union on every login — that overwrite is load-bearing, because it is how a
+    # removed Entra group actually reduces access. Writing an Entitle grant there
+    # would therefore be silently wiped at the user's next login.
+    #
+    # Keeping the two sources independent also means both can be live at once,
+    # which is what makes migrating from Entra groups to the REST integration a
+    # gradual change rather than a cutover.
+    jit_permissions = Column(Text, nullable=True)
+
     fido2_credentials = relationship("Fido2Credential", back_populates="user", cascade="all, delete-orphan")
     personal_access_tokens = relationship("PersonalAccessToken", back_populates="user", cascade="all, delete-orphan")
 
@@ -161,12 +172,26 @@ class User(Base):
         self.session_permissions = json.dumps(value) if value else None
 
     @property
+    def jit_permissions_dict(self) -> dict:
+        """Permissions granted by an Entitle REST integration. See the column."""
+        if not self.jit_permissions:
+            return {}
+        try:
+            return json.loads(self.jit_permissions)
+        except Exception:
+            return {}
+
+    @jit_permissions_dict.setter
+    def jit_permissions_dict(self, value: dict):
+        self.jit_permissions = json.dumps(value) if value else None
+
+    @property
     def effective_permissions_dict(self) -> dict:
-        """Union of admin-baseline (permissions) and group-derived
-        (session_permissions). This is what require_permission()
-        consults. Special key ``is_admin`` (bool) is OR'd separately
-        in is_effective_admin; everything else is treated as a list
-        of levels per scope and union-merged.
+        """Union of admin-baseline (permissions), group-derived
+        (session_permissions) and Entitle-granted (jit_permissions).
+        This is what require_permission() consults. Special key ``is_admin``
+        (bool) is OR'd separately in is_effective_admin; everything else is
+        treated as a list of levels per scope and union-merged.
 
         Empty dict means "no explicit permissions" → require_permission
         treats this as unrestricted (existing pre-OIDC users keep working
@@ -174,10 +199,11 @@ class User(Base):
         """
         baseline = self.permissions_dict
         session = self.session_permissions_dict
-        if not baseline and not session:
+        jit = self.jit_permissions_dict
+        if not baseline and not session and not jit:
             return {}
         out: dict = {}
-        for src in (baseline, session):
+        for src in (baseline, session, jit):
             for key, val in src.items():
                 if key == "is_admin":
                     out[key] = out.get(key, False) or bool(val)
@@ -193,11 +219,12 @@ class User(Base):
 
     @property
     def is_effective_admin(self) -> bool:
-        """True if either the persistent is_admin flag OR a current
-        session_permissions row grants admin."""
+        """True if the persistent is_admin flag, a current session_permissions row,
+        or a live Entitle grant confers admin."""
         if bool(self.is_admin):
             return True
-        return bool(self.session_permissions_dict.get("is_admin", False))
+        return (bool(self.session_permissions_dict.get("is_admin", False))
+                or bool(self.jit_permissions_dict.get("is_admin", False)))
 
 
 class Fido2Credential(Base):
@@ -1446,6 +1473,9 @@ def init_db():
             # cloud_identity_service._new_activation_row has always passed
             # tenant_id=; without the column every elevation raised TypeError.
             "ALTER TABLE entitle_activations ADD COLUMN tenant_id VARCHAR(64)",
+            # Entitle REST-granted permissions. Separate from session_permissions
+            # because the OIDC login path overwrites that column on every login.
+            "ALTER TABLE users ADD COLUMN jit_permissions TEXT",
             # Bulk Config-Management runs: group the N jobs of one run so the jobs
             # page can filter to a batch and roll up its status.
             "ALTER TABLE jobs ADD COLUMN batch_id VARCHAR(32)",

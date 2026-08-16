@@ -541,7 +541,10 @@ _SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/ap
 # polls this API in a loop with follow_redirects off; a redirect would arrive as an
 # opaque non-JSON response it can only treat as a hard error. 503 + Retry-After says
 # "not yet, come back" in the one vocabulary an HTTP client already understands.
-_SETUP_503_PREFIXES = ("/api/agent",)
+# /api/entitle/rest is here for the same reason: Entitle calls it as a machine
+# client and would read a 302-to-HTML as an integration failure rather than as
+# "this dashboard has not finished its first-run setup".
+_SETUP_503_PREFIXES = ("/api/agent", "/api/entitle/rest")
 
 @app.middleware("http")
 async def setup_guard(request: Request, call_next):
@@ -649,6 +652,7 @@ from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
 from .api import cloud_databases  # noqa: E402
 from .api import cloud_functions as cloud_functions_api  # noqa: E402
+from .api import entitle_rest as entitle_rest_api  # noqa: E402
 from .api import pra as pra_api  # noqa: E402
 from .api import audit as audit_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
@@ -763,6 +767,11 @@ app.include_router(cloud_databases.router)
 # so a stale route can't leak either).
 app.include_router(cloud_functions_api.router,
                    dependencies=[_feature_gate("cloud_functions_enabled")])
+# The one Entitle adapter the dashboard hosts itself, because here the dashboard IS
+# the target system. Gated by entitle_user_jit_enabled, and additionally closed
+# (503) whenever entitle_rest_secret is unset — see the router's _require_secret.
+app.include_router(entitle_rest_api.router,
+                   dependencies=[_feature_gate("entitle_user_jit_enabled")])
 app.include_router(azure.router)
 app.include_router(gcp.router)
 app.include_router(oci.router)
