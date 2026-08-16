@@ -86,6 +86,7 @@ catalog** — adding a module makes it deployable, no registry to edit.
 | `entitle_webhook_echo` | A **no-op Entitle Remote Adapter** — serves every route with valid empty responses and reports what arrived, without granting anything. Supports `?fail=401\|403\|404\|500\|slow\|timeout` |
 | `db_grant` | **Entitle Remote Adapter** for ephemeral just-in-time database accounts on MySQL and SQL Server. **Dry run by default.** See below. |
 | `portainer_access` | **Entitle Remote Adapter** for just-in-time Portainer access, granted through team membership. **Dry run by default.** See below. |
+| `azure_role_grant` | **Entitle Remote Adapter** for time-boxed Azure RBAC on a machine identity. **Dry run by default.** See below. |
 
 ### Wiring an Entitle REST integration
 
@@ -183,6 +184,42 @@ Two guards worth knowing about, because they bound the blast radius:
 
 If Portainer is reachable only from inside your network, deploy the adapter in
 `vpc` mode; otherwise `public` is fine.
+
+### azure_role_grant
+
+Time-boxed Azure RBAC for a **machine identity**. AWS machine identity works because
+Entitle attaches an IAM policy to the dashboard's IAM *user*; Azure has no
+equivalent, because a machine identity there is an *application* and an application
+cannot be the account privileges are requested for. So Entitle's native Azure
+integration cannot grant to one, and this adapter is the only route.
+
+| Setting | Notes |
+|---|---|
+| `FN_AZURE_TENANT_ID` / `FN_AZURE_CLIENT_ID` / `FN_AZURE_CLIENT_SECRET` | the adapter's own service principal; needs **User Access Administrator** on the scopes below |
+| `FN_AZURE_SUBSCRIPTION_ID` | where role definitions are resolved from |
+| `FN_AZURE_SCOPES` | comma-separated scopes it may grant at — subscription or resource-group paths |
+| `FN_AZURE_ROLES` | comma-separated role names or GUIDs it may grant |
+| `FN_AZURE_PRINCIPALS` | comma-separated service-principal **object** ids, optionally `objectid=Label` |
+| `FN_AZURE_DRY_RUN` | unset or truthy = dry run. **Default is dry run.** |
+
+> **An unbounded adapter here is a privilege-escalation primitive**, so it is bounded
+> three ways. Scopes, roles and principals are all allowlists — an empty one grants
+> nothing rather than everything. Management-group and tenant-root scopes are refused
+> outright. And **Owner, User Access Administrator and RBAC Administrator are refused
+> even if you allowlist them**: a time-boxed grant of a role that can grant further
+> access is not time-boxed, because the grantee can make it permanent before it
+> expires. If you genuinely need to hand one of those out, that belongs with a human
+> and a change ticket, not an automated integration behind a shared secret.
+
+Assignments are named by a GUID derived from (scope, principal, role), so a grant is
+an idempotent upsert and a revoke deletes by name without listing anything — and
+`get_all_permissions` reports only assignments this adapter made, never ones a human
+created at the same scope.
+
+`FN_AZURE_PRINCIPALS` accepts a label (`<object-id>=deploy-sp`) so an Entitle request
+reads as a name rather than a GUID. Note it must be the service principal's **object**
+id: Azure accepts an application id and silently creates an assignment that grants
+nothing.
 
 ### Writing your own
 

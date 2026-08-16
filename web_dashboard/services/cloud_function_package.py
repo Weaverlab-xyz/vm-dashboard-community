@@ -84,6 +84,10 @@ _WORKLOAD_MODULES = {
     # disagree about which user a name refers to or whether a membership exists, so
     # they share one tested copy of the rules. Stdlib-only and I/O-free.
     "portainer_access": (("services/portainer_access_rules.py", "portainerrules.py"),),
+    # The scope/role allowlists and the escalation-role refusal. Pure and I/O-free,
+    # so the guards that stop this adapter becoming a privilege-escalation
+    # primitive are testable without an Azure subscription.
+    "azure_role_grant": (("services/azure_role_rules.py", "azureroles.py"),),
 }
 
 # Per-cloud zip layout. Each entry:

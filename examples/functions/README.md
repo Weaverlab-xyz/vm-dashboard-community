@@ -16,6 +16,7 @@ own. See [docs/integrations/cloud-functions.md](../../docs/integrations/cloud-fu
 | `entitle_webhook_echo.request.json` | An Entitle Give Access payload |
 | `db_grant.request.json` | Grant an ephemeral database account a role (dry run by default) |
 | `portainer_access.request.json` | Add an ephemeral Portainer account to a team (dry run by default) |
+| `azure_role_grant.request.json` | Grant a service principal an Azure RBAC role (dry run by default) |
 
 ## db_grant
 
