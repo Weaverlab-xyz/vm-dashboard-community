@@ -143,7 +143,8 @@ def _fake_vendor_dir():
     with tempfile.TemporaryDirectory() as tmp:
         for package in ("pymysql", "pytds", "OpenSSL", "cryptography", "cffi"):
             os.makedirs(os.path.join(tmp, package))
-            with open(os.path.join(tmp, package, "__init__.py"), "w") as handle:
+            with open(os.path.join(tmp, package, "__init__.py"), "w",
+                      encoding="utf-8") as handle:
                 handle.write(f"# fake {package}\n")
         # cryptography really does carry compiled objects; include one so the
         # allowance is genuinely exercised rather than assumed.
