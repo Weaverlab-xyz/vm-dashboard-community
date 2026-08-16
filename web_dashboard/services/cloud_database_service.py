@@ -811,6 +811,31 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
                 row.id, row.entitle_integration_id)
 
 
+async def _pair_adapter(db: Session, *, row: CloudDatabase, engine: str,
+                        job_id: str) -> None:
+    """Queue the adapter pairing for an engine the native connector can't serve.
+
+    Non-fatal, exactly like :func:`_register_entitle`: a provisioned database that
+    works is the primary deliverable, and a failed Entitle wiring should never fail
+    the provision that produced it. Queued rather than run inline because pairing
+    itself deploys a function (a full terraform apply) — doing that inside the DB's
+    own apply would put two streamed terraform runs in one job.
+    """
+    from . import cloud_db_adapter_service
+    try:
+        result = cloud_db_adapter_service.start_pairing(
+            db, row=row, created_by="clouddb-provision",
+            # Dry run: the adapter is deployed and registered, but its first act is
+            # to report the SQL it WOULD run. Arming it is a deliberate second step.
+            dry_run=True)
+        logger.info("clouddb: adapter pairing queued db_id=%s job_id=%s (%s)",
+                    row.id, result["job_id"],
+                    cloud_db_adapter_service.adapter_required(engine))
+    except Exception as exc:
+        logger.warning("clouddb: adapter pairing could not be queued db_id=%s "
+                       "(non-fatal): %s", row.id, exc)
+
+
 async def _register_entitle(db: Session, *, row: CloudDatabase, engine: str,
                             tf_variables: Optional[dict] = None) -> None:
     """Non-fatal wrapper used on the provision path: register the DB in Entitle but
@@ -1411,7 +1436,19 @@ async def run_provision_apply(
         _job = db.query(Job).filter(Job.id == job_id).first()
         _reg_choice = bool((_job.metadata_dict or {}).get("register_in_entitle")) if _job else False
         if row.private_host and _reg_choice and _registration_enabled():
-            await _register_entitle(db, row=row, engine=engine, tf_variables=tf_variables)
+            # Two routes to Entitle, chosen by whether the NATIVE connector can
+            # actually do just-in-time accounts for this engine. MySQL's assigns
+            # persistent roles and never mints an account; SQL Server's needs
+            # sysadmin, which managed flavors do not grant (and which
+            # _entitle_ineligible_reason blocks outright). Both are served by a REST
+            # adapter instead — a db_grant Cloud Function deployed beside the
+            # database. Postgres keeps the native connector, which works.
+            from . import cloud_db_adapter_service
+            if cloud_db_adapter_service.adapter_required(engine):
+                await _pair_adapter(db, row=row, engine=engine, job_id=job_id)
+            else:
+                await _register_entitle(db, row=row, engine=engine,
+                                        tf_variables=tf_variables)
 
         job_service.set_completed(db, job_id)
         logger.info("clouddb apply complete db_id=%s host=%s tunnel=%s",
