@@ -48,6 +48,7 @@ _SERVICES = os.path.join(_ROOT, "web_dashboard", "services")
 _STREAMS_A_SUBPROCESS = {
     "k8s_provision", "k8s_decommission",              # terraform apply/destroy(on_line=)
     "clouddb_provision", "clouddb_decommission",      # same
+    "cloudfn_deploy", "cloudfn_decommission",         # same (cloud_function_service._job_stream)
     "packer_aws_build", "packer_azure_build",         # packer_service._stream_command
     "packer_gcp_build", "packer_oci_build",
     "ansible_local",                                  # ansible_local_service, `docker run`

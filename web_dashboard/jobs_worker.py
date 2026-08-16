@@ -92,6 +92,7 @@ HANDLED_TYPES = (
 HEAVY_TYPES = (
     "k8s_provision", "k8s_decommission",              # k8s_service, terraform apply/destroy
     "clouddb_provision", "clouddb_decommission",      # cloud_database_service, same
+    "cloudfn_deploy", "cloudfn_decommission",         # cloud_function_service, same
     "packer_aws_build", "packer_azure_build",         # packer_service._stream_command
     "packer_gcp_build", "packer_oci_build",
     "ansible_local",                                  # ansible_local_service, `docker run`
