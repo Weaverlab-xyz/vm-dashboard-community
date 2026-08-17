@@ -80,6 +80,15 @@ Files outside this set are rejected at upload. Assets are stored under a
 configurable key prefix (default `config-mgmt/`), so multiple deployments
 can share a bucket if the prefix differs.
 
+> **The table above governs the ASSET UPLOAD path only** — files a user uploads
+> for the Ansible runner to execute. It is not a restriction on what the dashboard
+> itself can store. In particular, **Cloud Functions are unaffected by it**: their
+> Python handlers are not uploaded at all. They ship inside the dashboard image,
+> the packager builds the deployable zip in memory, and it goes to a dedicated
+> per-cloud bucket (`function_package_s3_bucket` / `function_package_gcs_bucket` /
+> a container on `storage_azure_account`) rather than to the active storage
+> backend. See [Cloud Functions → package stores](integrations/cloud-functions.md).
+
 > **Beyond user-uploaded assets, the active backend also holds Terraform
 > remote state.** Cloud VM, cloud-database, and Kubernetes-cluster deploys
 > write their state to the *same* active backend (keyed per job under
