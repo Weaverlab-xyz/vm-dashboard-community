@@ -260,11 +260,25 @@ nothing.
 
 ### Writing your own
 
-**You do not have to upstream your workloads.** Run your own image: fork, add
-handlers under `fnworkloads/`, build, and deploy. Everything else — the packager, the
-Terraform modules, the adapter contract, the guards — works unchanged, and
-[provenance](#provenance-what-is-actually-running) records which source produced each
-deployed function, so a fleet built from several images is still auditable.
+> **Workloads are repository files, not uploads.** There is deliberately **no
+> upload path** for handler code: a workload is added by committing a file to
+> `web_dashboard/functions/fnworkloads/` and shipping an image. This is not the
+> same pipeline as [asset uploads](../storage-management.md#what-counts-as-an-asset)
+> and the `.yml`/`.sh`/`.ps1` allowlist there does not apply.
+>
+> The reason is what these handlers hold. A workload runs with the database admin
+> credential, or rights to write Azure role assignments, from inside your VPC. An
+> endpoint that accepted arbitrary uploaded Python and then ran it with those
+> credentials would be a remote-code-execution surface wearing a feature's clothes.
+> Requiring a commit means every workload passes review, diff and CI — and it is
+> also what makes the package **deterministic**, since the source is fixed at image
+> build rather than varying per upload.
+>
+> **You do not have to upstream your workloads.** Run your own image: fork, add
+> handlers under `fnworkloads/`, build, and deploy. Everything else — the packager, the
+> Terraform modules, the adapter contract, the guards — works unchanged, and
+> [provenance](#provenance-what-is-actually-running) records which source produced each
+> deployed function, so a fleet built from several images is still auditable.
 
 Copy `examples/functions/custom_handler.py` into `fnworkloads/`, and implement one
 function:
