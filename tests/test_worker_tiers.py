@@ -208,6 +208,34 @@ def test_the_stale_cutoff_is_shared():
         "that finished cleanly, or one a sibling worker owns")
 
 
+def test_the_stale_sweep_is_not_startup_only():
+    """Startup alone cannot reap a job orphaned by a ROLLING restart, which is how every
+    PaaS host swaps a revision: the replacement becomes healthy BEFORE the old process is
+    SIGTERMed, so its startup pass runs while the dying worker's job still has a fresh
+    heartbeat and skips it — then never looks again. Diagnosed live on Azure Container
+    Apps 2026-08-17 (a k8s_ps_token job stuck `running` at 15% with no worker behind it).
+    See RECONCILE_INTERVAL in jobs_worker."""
+    src = _src()
+    interval = re.search(r"^RECONCILE_INTERVAL = ([0-9.]+)", src, re.M)
+    assert interval, "the sweep interval constant is gone"
+    stale = re.search(r"^STALE_AFTER_MINUTES = (\d+)", src, re.M)
+    assert stale, "the cutoff constant is gone"
+    assert float(interval.group(1)) < int(stale.group(1)) * 60, (
+        "the sweep interval is not shorter than the staleness cutoff, so an orphan waits "
+        "on the interval rather than being reaped as soon as it goes stale")
+
+    loop = fn_code("_run_loop")
+    assert "_reconcile_stale" in loop, (
+        "_run_loop no longer re-runs the stale sweep, so a job orphaned by a rolling "
+        "revision swap sits `running` until a human next deploys")
+    assert "RECONCILE_INTERVAL" in loop, (
+        "the sweep in _run_loop is not interval-guarded — that is a scan of every "
+        "`running` row plus a session open on every poll pass")
+    assert "to_thread(_reconcile_stale" in _norm(loop), (
+        "the periodic sweep runs synchronously on the event loop; it opens a session and "
+        "can emit notifications, delaying every in-flight job's progress writes")
+
+
 def test_the_heartbeat_write_is_off_the_event_loop():
     """The heartbeat shares its loop with every in-flight job now. A synchronous session
     open/commit/close here would delay their progress writes and their sleep timers — and

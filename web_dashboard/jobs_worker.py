@@ -33,6 +33,7 @@ import contextlib
 import logging
 import os
 import signal
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Optional
@@ -185,10 +186,24 @@ HEARTBEAT_INTERVAL = 60.0
 # sibling worker.
 STALE_AFTER_MINUTES = 10
 
+# How often the sweep re-runs. Startup alone cannot reap a job orphaned by a ROLLING
+# restart, which is how every PaaS host replaces a revision: Azure Container Apps (and a
+# k8s rollout) starts the replacement and lets it become healthy BEFORE it SIGTERMs the
+# old process, so the new worker's startup pass runs while the abandoned job's heartbeat
+# is still fresh, skips it — correctly, it cannot tell a live sibling's job from a dying
+# one — and then never looks again. The drain backdates on the way out precisely so the
+# "next startup" catches it, but on a rolling swap that startup already happened, and the
+# next one is whenever a human next deploys. Observed live: a k8s_ps_token job left
+# `running` at 15% with no worker behind it, duration climbing, indistinguishable in the
+# UI from work in progress. An interval makes the reap eventual rather than dependent on
+# an unrelated future restart. Well under STALE_AFTER_MINUTES * 60 so the reap is prompt
+# once the cutoff passes.
+RECONCILE_INTERVAL = 60.0
+
 # What one in-flight job costs the connection pool, and what the process needs on top.
 # A job is not one connection: _dispatch holds a session for the whole job and several
 # services open their own. The reserve covers the claim query, a heartbeat beat, the
-# notification drain and the startup reconcile.
+# notification drain and the reconcile sweep.
 _SESSIONS_PER_JOB = 2
 _POOL_RESERVED = 4
 
@@ -539,16 +554,21 @@ async def _run_job(job_id: str, job_type: str, meta: dict) -> None:
                 await hb
 
 
-def _reconcile_at_startup() -> None:
+def _reconcile_stale(when: str = "startup") -> None:
     """Fail jobs whose heartbeat went stale because a prior runner crashed or was
-    restarted, before claiming new work. Extracted from the loop so the loop can be
-    tested with no database. ``STALE_AFTER_MINUTES`` is passed explicitly so it cannot
-    drift from the value the shutdown drain backdates past."""
+    restarted. Runs once before claiming any work and then every RECONCILE_INTERVAL —
+    see that constant for why startup alone leaves a permanent zombie behind a rolling
+    revision swap. Extracted from the loop so the loop can be tested with no database.
+    ``STALE_AFTER_MINUTES`` is passed explicitly so it cannot drift from the value the
+    shutdown drain backdates past.
+
+    Synchronous: the caller hands the periodic pass to a thread, since this opens a
+    session and can emit notifications (same rule as the heartbeat write)."""
     db = SessionLocal()
     try:
         n = job_service.reconcile_stale_jobs(db, stale_after_minutes=STALE_AFTER_MINUTES)
         if n:
-            logger.warning("job runner: reconciled %d stale job(s) at startup", n)
+            logger.warning("job runner: reconciled %d stale job(s) at %s", n, when)
     finally:
         db.close()
 
@@ -657,11 +677,18 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL,
     """
     if shutdown is None:
         shutdown = asyncio.Event()
-    _reconcile_at_startup()
+    _reconcile_stale()
+    last_reconcile = time.monotonic()
     running: dict = {}                  # task -> (tier, job_type)
     logger.info("job runner started; handling %d job types", len(HANDLED_TYPES))
 
     while not shutdown.is_set():
+        # Off the event loop: this opens a session and may emit notifications, and every
+        # in-flight job's progress writes share this loop.
+        if time.monotonic() - last_reconcile >= RECONCILE_INTERVAL:
+            last_reconcile = time.monotonic()
+            await asyncio.to_thread(_reconcile_stale, "the periodic sweep")
+
         limits = _limits()
         _publish_if_changed(limits, len(running))
         allowed = _allowed_types(limits, running)
@@ -723,12 +750,14 @@ async def _drain(running: dict, timeout: float) -> None:
 
     Anything still running is deliberately NOT requeued: the cloud side effect is already
     under way and re-running would launch it twice — the same reasoning that makes bulk
-    children ``queued``. Instead the heartbeat is backdated past reconcile's cutoff, so
-    the reconcile the NEXT process runs at startup — seconds later — fails the row
-    immediately, with the resource-row flip, rather than it looking alive for ten more
-    minutes. Backdated BEFORE the cancel as well as after: if the platform's SIGKILL
-    lands during the cancel window we still want the first UPDATE committed. Both are
-    idempotent.
+    children ``queued``. Instead the heartbeat is backdated past reconcile's cutoff so the
+    next sweep fails the row immediately, with the resource-row flip, rather than it
+    looking alive for ten more minutes. That sweep is whichever comes first: the next
+    process's startup pass, or any worker's periodic one — this backdate cannot rely on a
+    startup, because a ROLLING revision swap starts the replacement before it SIGTERMs us
+    and that startup is already in the past (see RECONCILE_INTERVAL). Backdated BEFORE the
+    cancel as well as after: if the platform's SIGKILL lands during the cancel window we
+    still want the first UPDATE committed. Both are idempotent.
     """
     if not running:
         return
@@ -751,7 +780,7 @@ async def _drain(running: dict, timeout: float) -> None:
     with contextlib.suppress(Exception):
         await asyncio.wait(pending, timeout=5)
     await asyncio.to_thread(_expire_heartbeats, ids)
-    logger.warning("job runner: abandoned %d job(s) to the next startup reconcile: %s",
+    logger.warning("job runner: abandoned %d job(s) to the next stale sweep: %s",
                    len(ids), ", ".join(ids))
 
 

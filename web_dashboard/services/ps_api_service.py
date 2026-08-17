@@ -439,9 +439,19 @@ async def change_managed_account_password(account_id: int) -> None:
                 json={"Queue": False},
             )
             if resp.status_code not in (200, 201, 202, 204):
+                # The 400 body here is NOT an error string like every other body in this
+                # module — it is the rotation plugin's own multi-line attempt log, and the
+                # only place the real reason is ever stated (a denied API-server call, a
+                # missing RBAC verb, a subject that matches nothing). The usual 400-char
+                # bound cuts it off inside the preamble every single time: the header,
+                # cluster, token mode and API-server URL alone spend ~380 characters, so
+                # what survives is the part nobody needs. Cost of getting this wrong,
+                # measured live: an EKS rotation failed on a missing access entry and the
+                # message stopped at "Functional account ma", sending the operator to the
+                # Password Safe console to read what the dashboard already had in hand.
                 raise PSApiError(
                     f"POST ManagedAccounts/{account_id}/Credentials/Change failed "
-                    f"({resp.status_code}): {resp.text[:400]}")
+                    f"({resp.status_code}): {resp.text[:4000]}")
         finally:
             await _sign_out(client)
 

@@ -95,6 +95,32 @@ variable "endpoint_private_access" {
   description = "Enable the private (in-VPC) API server endpoint"
 }
 
+# How IAM principals are mapped to Kubernetes identities. EKS still defaults new
+# clusters to CONFIG_MAP, where the ONLY way in is editing the aws-auth ConfigMap and
+# the access-entry API is rejected outright — so on a CONFIG_MAP cluster the dashboard
+# cannot map the Password Safe rotator's principal at all, and the rotation fails as an
+# opaque 401/403 from the API server at the first credential change, long after the
+# cluster looks healthy (see docs/design/k8s-sa-token-rotation.md §7). The dashboard
+# deliberately never edits aws-auth: a bad edit there locks every principal out.
+#
+# API_AND_CONFIG_MAP rather than API so that any aws-auth entry an operator added by
+# hand keeps working alongside the access entries. Raising CONFIG_MAP →
+# API_AND_CONFIG_MAP is an in-place update on an existing cluster; EKS refuses the
+# reverse, which is why the validation below excludes plain CONFIG_MAP rather than
+# offering it as an option nobody could back out of.
+#
+# Needs AWS provider >= 5.33 for the access_config block (the image pre-cache resolves
+# the newest 5.x at build, so the floor is satisfied there).
+variable "authentication_mode" {
+  type        = string
+  default     = "API_AND_CONFIG_MAP"
+  description = "EKS access-entry authentication mode: API_AND_CONFIG_MAP (default, keeps any hand-made aws-auth entries) or API (access entries only)"
+  validation {
+    condition     = contains(["API", "API_AND_CONFIG_MAP"], var.authentication_mode)
+    error_message = "authentication_mode must be API or API_AND_CONFIG_MAP — CONFIG_MAP has no access-entry API, so the Password Safe rotator could never be mapped into the cluster (and EKS cannot downgrade back to it)."
+  }
+}
+
 # Optional VPC peering back to the sandbox VPC + management-plane reachability.
 # Blank sandbox_vpc_id → the cluster is fully isolated (Entitle/PRA still broker
 # access, exactly like AKS/GKE). When set, the module peers its VPC to the
@@ -390,6 +416,16 @@ resource "aws_eks_cluster" "this" {
     endpoint_private_access = var.endpoint_private_access
     # Only meaningful when public access is on; null = leave unset otherwise.
     public_access_cidrs = var.endpoint_public_access ? var.public_access_cidrs : null
+  }
+
+  # See var.authentication_mode: without API in the mode there is no access-entry API,
+  # and the Password Safe rotator's IAM principal can never be mapped into the cluster.
+  # bootstrap_cluster_creator_admin_permissions is deliberately left unset — it is true
+  # by default (the provisioning principal keeps cluster-admin, which every post-provision
+  # step here depends on) and changing it FORCES CLUSTER REPLACEMENT, so naming it would
+  # turn a future default change into a silently destructive plan.
+  access_config {
+    authentication_mode = var.authentication_mode
   }
 
   tags = var.tags

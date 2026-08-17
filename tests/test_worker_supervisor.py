@@ -17,7 +17,7 @@ surfaces only as a GC warning, so the backstop is the only thing standing betwee
 payload and a job stuck `running` until the ten-minute reconciler.
 
 No database, no cloud: _claim_one, _dispatch, _heartbeat, _fail_backstop,
-_reconcile_at_startup and _expire_heartbeats are all replaced, which is why they are named
+_reconcile_stale and _expire_heartbeats are all replaced, which is why they are named
 module functions rather than inline blocks. Requires sqlalchemy only because jobs_worker
 imports it at module level.
 
@@ -57,6 +57,7 @@ class _Harness:
         self.correlations = {}           # job_id -> correlation id seen inside dispatch
         self.expired = []                # job ids handed to _expire_heartbeats
         self.claims = []                 # (job_id, allowed_len) in claim order
+        self.reconciles = []             # the `when` label of each _reconcile_stale pass
         self.t0 = time.monotonic()
 
     # ── fakes ────────────────────────────────────────────────────────────────
@@ -97,6 +98,9 @@ class _Harness:
     def expire_heartbeats(self, job_ids):
         self.expired.append(list(job_ids))
 
+    def reconcile_stale(self, when="startup"):
+        self.reconciles.append(when)
+
     # ── queries over the timeline ────────────────────────────────────────────
 
     def entry(self, job_id):
@@ -124,7 +128,7 @@ class _Harness:
 
 
 def _drive(harness, caps, poll_interval=0.02, capacity=0, timeout=15.0,
-           stop_after=None, drain_timeout=0.0):
+           stop_after=None, drain_timeout=0.0, reconcile_interval=None):
     """Run the REAL _run_loop against the harness until the queue drains, then stop it.
 
     Only the leaf functions are faked; _run_loop, _limits, _allowed_types, _idle, _run_job
@@ -132,11 +136,12 @@ def _drive(harness, caps, poll_interval=0.02, capacity=0, timeout=15.0,
     _allowed_types feeding _claim_one an allowlist, and that interaction is what breaks.
     """
     saved = {name: getattr(jw, name) for name in
-             ("_claim_one", "_dispatch", "_fail_backstop", "_reconcile_at_startup",
+             ("_claim_one", "_dispatch", "_fail_backstop", "_reconcile_stale",
               "_heartbeat", "_expire_heartbeats", "SessionLocal", "pool_capacity",
               "_publish_if_changed")}
     saved_caps = worker_policy.caps
     saved_drain = worker_policy.drain_timeout_s
+    saved_interval = jw.RECONCILE_INTERVAL
 
     async def _never_beat(job_id, interval=0):
         await asyncio.sleep(3600)
@@ -148,7 +153,7 @@ def _drive(harness, caps, poll_interval=0.02, capacity=0, timeout=15.0,
     jw._claim_one = harness.claim_one
     jw._dispatch = harness.dispatch
     jw._fail_backstop = harness.fail_backstop
-    jw._reconcile_at_startup = lambda: None
+    jw._reconcile_stale = harness.reconcile_stale
     jw._heartbeat = _never_beat
     jw._expire_heartbeats = harness.expire_heartbeats
     jw.SessionLocal = _FakeSession
@@ -156,6 +161,8 @@ def _drive(harness, caps, poll_interval=0.02, capacity=0, timeout=15.0,
     jw._publish_if_changed = lambda limits, in_flight: None
     worker_policy.caps = lambda: dict(caps)
     worker_policy.drain_timeout_s = lambda: drain_timeout
+    if reconcile_interval is not None:
+        jw.RECONCILE_INTERVAL = reconcile_interval
 
     async def _go():
         # Owned per run, like _main does: an asyncio.Event binds to the loop that first
@@ -194,6 +201,7 @@ def _drive(harness, caps, poll_interval=0.02, capacity=0, timeout=15.0,
             setattr(jw, name, fn)
         worker_policy.caps = saved_caps
         worker_policy.drain_timeout_s = saved_drain
+        jw.RECONCILE_INTERVAL = saved_interval
         jw._last_published = None
     return harness
 
@@ -419,12 +427,65 @@ def test_allowed_types_excludes_a_live_singleton_but_not_its_tier():
     assert "aws_export_image" in allowed, "a live singleton closed its whole tier"
 
 
+# ── reaping orphans ──────────────────────────────────────────────────────────
+
+def test_the_stale_sweep_runs_before_any_work_is_claimed():
+    """A job the previous process abandoned must be failed before this one starts adding
+    to the pile — and a resource row left `provisioning` is only Delete-able once its job
+    is reconciled."""
+    h = _Harness(queue=[("a", "expiry_sweep")], default_duration=0.05)
+    _drive(h, caps={"heavy": 1, "medium": 1, "light": 1, "total": 1})
+    assert h.reconciles and h.reconciles[0] == "startup", (
+        f"the startup reconcile no longer runs first; passes={h.reconciles}")
+
+
+def test_an_orphan_from_a_rolling_restart_is_reaped_without_a_second_restart():
+    """The gap a startup-only sweep leaves, and the reason this interval exists.
+
+    Every PaaS host replaces a revision by ROLLING: Azure Container Apps starts the new
+    replica and waits for it to be healthy BEFORE it SIGTERMs the old one. So the new
+    worker's startup pass runs while the dying worker's job still has a fresh heartbeat,
+    and skips it — correctly; it cannot distinguish that from a live sibling's job. The
+    drain then backdates the heartbeat on the way out for "the next startup" to catch,
+    but that startup has already been and gone, and the next one is whenever a human
+    happens to deploy again.
+
+    Observed live 2026-08-17: a k8s_ps_token job sat `running` at 15% with no worker
+    behind it, duration climbing, indistinguishable in the UI from work in progress.
+    Without a periodic pass it would have stayed that way indefinitely.
+    """
+    h = _Harness(queue=[("slow", "aws_export_image")],
+                 durations={"aws_export_image": 0.5})
+    _drive(h, caps={"heavy": 1, "medium": 1, "light": 1, "total": 1},
+           poll_interval=0.02, reconcile_interval=0.05)
+
+    periodic = [w for w in h.reconciles if w != "startup"]
+    assert periodic, (
+        "the sweep ran only at startup, so a job orphaned by a rolling revision swap "
+        f"stays `running` forever; passes={h.reconciles}")
+
+
+def test_the_periodic_sweep_does_not_run_on_every_poll_pass():
+    """The loop spins every poll interval (and straight back round after a claim), so an
+    unguarded sweep would mean a full scan of `running` rows plus a session open every
+    2 seconds, for a condition that cannot change faster than the 10-minute cutoff."""
+    h = _Harness(queue=[("slow", "aws_export_image")],
+                 durations={"aws_export_image": 0.4})
+    _drive(h, caps={"heavy": 1, "medium": 1, "light": 1, "total": 1}, poll_interval=0.02)
+
+    assert h.reconciles == ["startup"], (
+        "the sweep is running on poll passes rather than on RECONCILE_INTERVAL; "
+        f"passes={h.reconciles}")
+
+
 # ── shutdown ─────────────────────────────────────────────────────────────────
 
 def test_shutdown_stops_claiming_and_abandons_in_flight_work_to_the_reconciler():
     """A revision change SIGTERMs the worker. Anything still running is deliberately not
     requeued (the cloud side effect is already under way) — its heartbeat is backdated so
-    the next process's startup reconcile fails it in seconds instead of ten minutes."""
+    the next stale sweep fails it in seconds instead of ten minutes. Which sweep that is
+    matters: see test_an_orphan_from_a_rolling_restart_is_reaped_without_a_second_restart
+    for why it cannot be assumed to be the next process's startup pass."""
     h = _Harness(queue=[("slow", "aws_export_image"), ("never", "ami_copy")],
                  durations={"aws_export_image": 5.0}, default_duration=5.0)
     # One slot, so "never" is still queued when shutdown lands mid-flight.
