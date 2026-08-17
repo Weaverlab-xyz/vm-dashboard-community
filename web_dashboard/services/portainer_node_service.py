@@ -331,7 +331,8 @@ def _pra_configured() -> bool:
 
 async def register_portainer_ui_web_jump(db) -> dict:
     """Ensure a PRA **Web Jump** to the managed Portainer UI exists. Idempotent:
-    returns the stored id if already provisioned. OPT-IN
+    returns the stored id if already provisioned, EXCEPT when the node has moved to a
+    new URL, which is re-pointed (destroy + recreate). OPT-IN
     (``portainer_ui_web_jump_enabled``): lets an operator whose IP isn't in
     ``portainer_allowed_source_cidrs`` reach the node's UI from the PRA
     representative console — brokered and recorded, with no CIDR change.
@@ -365,7 +366,26 @@ async def register_portainer_ui_web_jump(db) -> dict:
 
     existing = config_service.get("portainer_ui_web_jump_id")
     if existing:
-        return {"web_jump_id": existing, "reused": True}
+        # A Web Jump carries the URL it was created with, and this node is EPHEMERAL: a
+        # stop/recreate (or a relocation to another region) gives it a new public IP, and
+        # `portainer_url` follows while the jump item does not. Left alone, the item keeps
+        # dialling an address nothing answers on and every session dies with PRA's
+        # "internal timeout starting session" — indistinguishable from a firewall problem,
+        # and no redeploy could converge it, because this early-return is the only path a
+        # redeploy takes.
+        prior_url = pra.web_jump_url_from_state(
+            config_service.get("portainer_ui_web_jump_tfstate"))
+        if not prior_url or prior_url == url:
+            # "" means the state couldn't tell us — reuse rather than destroy something
+            # that is probably fine.
+            return {"web_jump_id": existing, "reused": True}
+        # provision_web_jump starts from empty state, so there is no in-place update to
+        # make: re-pointing is destroy + recreate. The remove is best-effort inside, so a
+        # PRA-side failure leaves the old item orphaned rather than blocking the new one —
+        # the log line below is what ties the two together afterwards.
+        logger.info("Portainer UI web-jump: node URL moved %s -> %s — re-pointing the Web Jump",
+                    prior_url, url)
+        await remove_portainer_ui_web_jump()
 
     jump_group = config_service.get("portainer_ui_jump_group") or config_service.get("bt_jump_group_name")
     jumpoint = config_service.get("portainer_ui_jumpoint_name") or config_service.get("bt_jumpoint_name")

@@ -2063,6 +2063,11 @@ function containersDashboard() {
         // markup reads exists in both shapes this object takes.
         const o = await API.get('/api/containers/rancher/pra-options');
         this.praOpts = { ...o, gateways: o.jumpoints || [] };
+        // Seed the per-deploy toggle from the CONFIGURED default. The form state hard-codes
+        // false and the request model defaults false, so without this a Deploy/Redeploy from
+        // this page silently skipped Web Jump registration even with the feature enabled in
+        // Settings — and the stale jump item was left pointing at the old node.
+        if (typeof o.web_jump_enabled === 'boolean') this.deployForm.web_jump_enabled = o.web_jump_enabled;
       } catch (e) { /* leave defaults — the fieldset just stays hidden */ }
     },
 
@@ -2237,6 +2242,9 @@ function containersDashboard() {
         // markup reads exists in both shapes this object takes.
         this.portainerDeployOpts = { ...opts, gateways: opts.jumpoints || [] };
         this.portainerRegions = opts.regions || [];
+        // Seed the per-deploy toggle from the CONFIGURED default — see the Rancher fetch
+        // above for the defect this closes.
+        if (typeof opts.web_jump_enabled === 'boolean') this.portainerDeployForm.web_jump_enabled = opts.web_jump_enabled;
       } catch (e) { /* leave defaults — the select still offers "(current / default)" */ }
     },
 

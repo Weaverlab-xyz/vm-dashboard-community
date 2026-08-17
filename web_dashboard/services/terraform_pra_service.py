@@ -1021,6 +1021,33 @@ async def remove_web_jump(tf_state_json: str) -> None:
     await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
 
 
+def web_jump_url_from_state(tf_state_json: str) -> str:
+    """The ``url`` an existing ``sra_web_jump`` was provisioned with, from its stored
+    Terraform state. Returns "" when the state is absent, unparseable, or holds no
+    web jump.
+
+    Read from state rather than remembered in a config key on purpose: the state is
+    the only record of what the item actually points at, so a deployment that
+    provisioned its Web Jump before this function existed converges with no migration
+    and no guessing. Pure and forgiving by design — callers treat "" as "don't know",
+    which must mean *leave it alone*, never *recreate it*.
+    """
+    if not (tf_state_json or "").strip():
+        return ""
+    try:
+        state = json.loads(tf_state_json)
+    except (ValueError, TypeError):
+        return ""
+    for res in (state.get("resources") or []):
+        if res.get("type") != "sra_web_jump":
+            continue
+        for inst in (res.get("instances") or []):
+            url = ((inst.get("attributes") or {}).get("url") or "").strip()
+            if url:
+                return url
+    return ""
+
+
 # ── Remote RDP jump (VDI desktops, Phase 2) ──────────────────────────────────
 # A VDI seat is reached over PRA via an agentless Remote RDP jump item on the
 # Jumpoint. Mirrors the DB-tunnel template (resource + optional Vault account +

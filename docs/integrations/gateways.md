@@ -334,10 +334,54 @@ Azure's 64, because the in-guest hostname is `name[:15]`.
 *Web-Jump Gateways* in **Settings → Containers**; if not, its egress IP was never recorded —
 redeploy the gateway, or add the IP to the node's `*_allowed_source_cidrs` manually.
 
+**A Web Jump times out after its node was recreated** — the Rancher and Portainer nodes are
+ephemeral, so a recreate gives them a new address, and a Web Jump carries the URL it was
+made with. The registration now compares the two and re-points the jump item (destroy +
+recreate) when they disagree; before that it reused the stored id unconditionally, so the
+item kept dialling the dead address and no redeploy could converge it. If you are on an
+older build, tear the node down (**Stop**, which removes the jump item) rather than
+redeploying it.
+
 **I can't remove the managed gateway** — by design; it is created and reclaimed by the
 reference-counted lifecycle. Remove whatever still
 [holds a reference](#why-the-managed-one-is-reference-counted) and the idle teardown
 reclaims it.
+
+### A Web Jump connects, then drops — "the endpoint has disconnected"
+
+The gateway ran out of memory. **A Web Jump renders the target UI in a headless Chromium
+on the gateway itself** (`sra-web.bin`) — unlike a tunnel, which only forwards bytes — so
+a host sized for tunnels is not sized for this. At 1 GB the kernel OOM-kills the renderer
+and every session on that node dies at once.
+
+It is a nasty one to read from symptoms, because *which* error you get depends on timing:
+
+| When it dies | What PRA shows |
+|---|---|
+| Mid-session | "Waiting for Reconnect — the endpoint has disconnected" |
+| Before the session is up | "internal timeout starting session" — identical to a blocked firewall |
+
+The second is the trap: it sends you to the node firewall, which may be perfectly correct.
+Distinguish them at the source — on a GCP gateway:
+
+```bash
+gcloud compute instances get-serial-port-output <gateway> --zone <zone>
+```
+
+A confirmed kill looks like `Out of memory: Killed process … (sra-web.bin)`, usually with
+Chromium's own `ThreadPoolServi invoked oom-killer` just above it and `global_oom` (the
+whole VM, not a container limit). The Containers page cannot tell you this — its `RUNNING`
+badge is the *instance* status, so a VM whose gateway container is dead still reads healthy.
+
+Defaults are now sized for a Web Jump (`gcp_jumpoint_machine_type` = `e2-medium`, Azure
+`Standard_B2s`, AWS `bt_ecs_host_instance_type` = `t3.small`). A gateway built before that
+keeps its old size — the launcher is idempotent on name and reuses the VM without touching
+its shape, so raising the setting is not enough. Resize it in place, or delete it and let
+the next ensure rebuild it. **Either way its ephemeral IP changes**, so the node firewalls
+need the new `/32`: a gateway deploy/teardown re-applies them, or add it manually.
+
+Concurrency is the usual trigger — one session may fit where two do not. Budget for the
+number of Web Jumps you expect to have open at once, not for one.
 
 ### The AWS host never joins the cluster
 

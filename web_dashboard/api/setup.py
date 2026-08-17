@@ -180,6 +180,11 @@ class GCPSetup(BaseModel):
     # secrets backend the user picks. Consumed by jumpoint_host_service when
     # provisioning the GCP cloud-database tunnel jumpoint.
     gcp_cloud_run_docker_deploy_key: str = ""
+    # Gateway VM size. Declared here so it can be changed without an env change and a
+    # container redeploy — it was previously readable only from config.py/env, which is
+    # a bad place for the one value that decides whether a Web Jump survives (see the
+    # OOM note on `gcp_jumpoint_machine_type` in config.py). Blank keeps the default.
+    gcp_jumpoint_machine_type: str = ""
     # Packer template archive (optional)
     packer_gcs_bucket: str = ""
 

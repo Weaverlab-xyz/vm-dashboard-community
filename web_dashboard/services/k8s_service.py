@@ -3618,7 +3618,8 @@ async def _entitle_rancher_grant(cluster_id: str, username: str) -> dict:
 async def register_rancher_ui_web_jump(db: Session) -> dict:
     """Ensure a PRA **Web Jump** to the central Rancher UI exists — created ONCE
     and reused by every cluster's console (they all live in the same Rancher UI).
-    Idempotent: returns the stored id if already provisioned. Requires the Rancher
+    Idempotent: returns the stored id if already provisioned, EXCEPT when the node has
+    moved to a new URL, which is re-pointed (destroy + recreate). Requires the Rancher
     node running + PRA configured. OPT-IN (``rancher_ui_web_jump_enabled``): lets an
     operator whose IP isn't in ``rancher_allowed_source_cidrs`` reach the node's UI
     from the PRA representative console (brokered/recorded, no CIDR change).
@@ -3651,7 +3652,25 @@ async def register_rancher_ui_web_jump(db: Session) -> dict:
 
     existing = _cfg("rancher_ui_web_jump_id")
     if existing:
-        return {"web_jump_id": existing, "reused": True}
+        # A Web Jump carries the URL it was created with, and the Rancher node is
+        # EPHEMERAL: a stop/recreate (or a relocation to another region) gives it a new
+        # public IP, and `rancher_server_url` follows while the jump item does not. Left
+        # alone, the item keeps dialling an address nothing answers on and every session
+        # dies with PRA's "internal timeout starting session" — indistinguishable from a
+        # firewall problem, and no redeploy could ever converge it, because this
+        # early-return is the only path a redeploy takes.
+        prior_url = pra.web_jump_url_from_state(_cfg("rancher_ui_web_jump_tfstate"))
+        if not prior_url or prior_url == server_url:
+            # "" means the state couldn't tell us — reuse rather than destroy something
+            # that is probably fine.
+            return {"web_jump_id": existing, "reused": True}
+        # provision_web_jump starts from empty state, so there is no in-place update to
+        # make: re-pointing is destroy + recreate. The remove is best-effort inside, so
+        # a PRA-side failure leaves the old item orphaned rather than blocking the new
+        # one — the log line below is what ties the two together afterwards.
+        logger.info("Rancher UI web-jump: node URL moved %s -> %s — re-pointing the Web Jump",
+                    prior_url, server_url)
+        await remove_rancher_ui_web_jump()
     jump_group = _cfg("rancher_ui_jump_group") or _cfg("bt_jump_group_name")
     jumpoint = _cfg("rancher_ui_jumpoint_name") or _cfg("bt_jumpoint_name")
     # Vault the admin credential for injection when a Vault account group is chosen
