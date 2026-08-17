@@ -179,14 +179,27 @@ def set_completed(db: Session, job_id: str, result: Optional[dict] = None) -> Op
     return job
 
 
-def set_failed(db: Session, job_id: str, error: str) -> Optional[Job]:
-    """Mark a job as failed with an error message."""
+def set_failed(db: Session, job_id: str, error: str,
+               result: Optional[dict] = None) -> Optional[Job]:
+    """Mark a job as failed with an error message and optional result metadata.
+
+    ``result`` merges into the row's metadata exactly as ``set_completed``'s does. A run
+    that got partway can have collected detail worth keeping — see
+    ``ps_k8s_token_service.run``, where the non-fatal steps' warnings carry the remedy —
+    and without this the only durable home for any of it was ``error``. Both still
+    matter: ``error_message`` is the one field the job page renders, this is where the
+    same thing survives as structure rather than prose.
+    """
     job = db.query(Job).filter(Job.id == job_id).first()
     if job:
         job.status = "failed"
         job.completed_at = datetime.utcnow()
         job.updated_at = datetime.utcnow()
         job.error_message = error
+        if result:
+            existing = job.metadata_dict
+            existing.update(result)
+            job.metadata_dict = existing
         db.commit()
         db.refresh(job)
         # After the commit, always: the notification is a report on a transition that
