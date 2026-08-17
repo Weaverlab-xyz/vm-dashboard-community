@@ -273,6 +273,12 @@ nothing.
 > Requiring a commit means every workload passes review, diff and CI — and it is
 > also what makes the package **deterministic**, since the source is fixed at image
 > build rather than varying per upload.
+>
+> **You do not have to upstream your workloads.** Run your own image: fork, add
+> handlers under `fnworkloads/`, build, and deploy. Everything else — the packager, the
+> Terraform modules, the adapter contract, the guards — works unchanged, and
+> [provenance](#provenance-what-is-actually-running) records which source produced each
+> deployed function, so a fleet built from several images is still auditable.
 
 Copy `examples/functions/custom_handler.py` into `fnworkloads/`, and implement one
 function:
@@ -296,6 +302,48 @@ Two rules:
 
 If a workload needs a cloud SDK only one runtime provides, add it to
 `cloud_function_service._CLOUD_RESTRICTED`.
+
+## Provenance: what is actually running
+
+A deployed function runs privileged code from inside your network, so the question
+"what exactly is running in there, and where did it come from?" needs to stay
+answerable months later — especially once workloads come from more than one image.
+
+Every deploy records three things on the function:
+
+| | What it tells you | Availability |
+|---|---|---|
+| **source tree hash** | *what code* — two functions with the same value run the same handlers | **always** |
+| **package hash** | the exact deployed artifact, including vendored dependencies | always |
+| **git commit / ref / origin** | *who wrote and reviewed it* | when the image was built with the build args |
+
+The tree hash is computed from the files that produced the package, so it cannot be
+wrong. Git metadata is best-effort — an image built without the build args records
+**"unknown" rather than a guess**, because a confidently wrong commit is worse than
+an honest blank. A build from a modified working tree is marked `-dirty`.
+
+To get git provenance into your image:
+
+```bash
+docker build \
+  --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+  --build-arg GIT_REF="$(git rev-parse --abbrev-ref HEAD)" \
+  --build-arg GIT_ORIGIN="$(git config --get remote.origin.url)" \
+  --build-arg BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+```
+
+It also lands as the standard `org.opencontainers.image.revision` label.
+
+**Ask the function, don't trust the record.** The same values are injected as
+`FN_SOURCE_COMMIT` / `FN_SOURCE_TREE`, and `echo_diag` reports them in its
+`provenance` block. So verifying a deployment is one request — and it catches the
+case the dashboard row cannot: a deploy that half-failed, or a function someone
+changed by hand.
+
+```bash
+curl -sS -X POST "$FN_URL" -H "Authorization: Bearer $SECRET" \
+  -d '{"egress": false}' | jq .provenance
+```
 
 ## Authentication
 

@@ -319,6 +319,7 @@ def _serialize(row: CloudFunction) -> dict:
         "auth_mode": row.auth_mode,
         "network_mode": row.network_mode,
         "network": json.loads(row.network_ref) if row.network_ref else {},
+        "provenance": json.loads(row.provenance) if row.provenance else {},
         "deploy_job_id": row.deploy_job_id,
         "entitle_integration_id": row.entitle_integration_id,
         "created_by": row.created_by,
@@ -500,6 +501,30 @@ def _azure_sas_url(account: str, account_key: str, container: str, key: str) -> 
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
+def _record_provenance(row: CloudFunction) -> dict:
+    """Capture where the handler source came from, onto ``row``.
+
+    A separate function on purpose, and not just for tidiness: it takes ONLY the row,
+    so no secret — and no structure carrying one — is in scope at the log calls.
+    ``deploy`` holds the freshly minted shared secret, and logging anywhere in that
+    scope is exactly the shape CodeQL's clear-text-logging rule flags. Keeping the
+    sink somewhere a secret cannot reach is a better answer than suppressing it.
+
+    Never raises: provenance is metadata and must not be able to fail a deploy.
+    """
+    try:
+        from . import build_provenance
+        provenance = build_provenance.collect()
+        row.provenance = json.dumps(provenance)
+        logger.info("cloudfn: %s built from %s", row.id,
+                    build_provenance.describe(provenance))
+        return provenance
+    except Exception as exc:
+        logger.warning("cloudfn: could not record provenance for %s (non-fatal): %s",
+                       row.id, type(exc).__name__)
+        return {}
+
+
 def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
            created_by: str, network_mode: str = "public",
            subnet_ids: Optional[list] = None, subnet_id: str = "",
@@ -558,7 +583,19 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
                "sas_url": "", "storage_key": ""}
     row.package_sha256 = sha256_hex
     row.package_uri = package["uri"]
+
+    # Captured HERE, at the moment the package hash is pinned, so the two describe
+    # the same source.
+    provenance = _record_provenance(row)
     db.commit()
+
+    # Also handed to the function itself, so a RUNNING function can report what it
+    # is rather than you having to trust the row that claims to describe it.
+    try:
+        from . import build_provenance as _bp
+        environment = {**(environment or {}), **_bp.env_for_function(provenance)}
+    except Exception:
+        pass
 
     tf_variables = _build_tf_variables(
         cloud=cloud, region=region, name=fn_name, workload=workload,

@@ -123,6 +123,35 @@ RUN pip install --no-cache-dir --no-deps --upgrade \
 # Copy the application.
 COPY web_dashboard/ ./web_dashboard/
 
+# Build provenance for Cloud Functions.
+#
+# A deployed function runs privileged code — a database admin credential, or rights
+# to write Azure role assignments — from inside a customer network. These make
+# "which commit is running in that function?" answerable months later, recorded on
+# the function's row at deploy time (services/build_provenance.py).
+#
+# All optional: an image built without them still records the handler source-tree
+# hash, which is computed from the files and cannot be wrong. Git metadata is the
+# nice-to-have, so a missing build arg degrades to "unknown" rather than to a guess.
+#
+#   docker build \
+#     --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+#     --build-arg GIT_REF="$(git rev-parse --abbrev-ref HEAD)" \
+#     --build-arg GIT_ORIGIN="$(git config --get remote.origin.url)" \
+#     --build-arg BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+#
+# Declared AFTER the COPY so changing them does not bust the dependency layers.
+ARG GIT_SHA=""
+ARG GIT_REF=""
+ARG GIT_ORIGIN=""
+ARG BUILT_AT=""
+ENV DASHBOARD_GIT_SHA=${GIT_SHA} \
+    DASHBOARD_GIT_REF=${GIT_REF} \
+    DASHBOARD_GIT_ORIGIN=${GIT_ORIGIN} \
+    DASHBOARD_BUILT_AT=${BUILT_AT}
+LABEL org.opencontainers.image.revision=${GIT_SHA} \
+      org.opencontainers.image.created=${BUILT_AT}
+
 # In-repo docs, rendered at /docs/<page> by api/docs_pages.py (the "guide" links
 # in Settings). Markdown only; small.
 COPY docs/ ./docs/

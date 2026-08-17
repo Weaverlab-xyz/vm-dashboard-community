@@ -167,6 +167,22 @@ def _placement() -> dict:
     }
 
 
+def _provenance() -> dict:
+    """What code this function is actually running.
+
+    Injected at deploy by services/build_provenance. Reported by the RUNNING
+    function so "is this the code I think it is?" is one request, rather than a
+    question you answer by trusting the dashboard row that describes it — the two
+    can disagree if a deploy half-failed or someone changed the function by hand.
+    """
+    env = os.environ
+    return {
+        "source_commit": env.get("FN_SOURCE_COMMIT", ""),
+        "source_tree": env.get("FN_SOURCE_TREE", ""),
+        "workload": env.get("FN_WORKLOAD", ""),
+    }
+
+
 def handle(req: Request, ctx: Context) -> Response:
     payload = req.json()
 
@@ -213,6 +229,7 @@ def handle(req: Request, ctx: Context) -> Response:
             "body_bytes": len(req.body),
         },
         "placement": _placement(),
+        "provenance": _provenance(),
         "probes": probes,
         "egress": egress,
         "duration_ms": ctx.elapsed_ms(),
