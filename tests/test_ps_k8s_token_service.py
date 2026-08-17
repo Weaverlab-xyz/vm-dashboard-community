@@ -260,7 +260,8 @@ def _install_stubs(rec, *, cfg=None, link_fails=False, link_confirmed=True,
 
     m_job = types.ModuleType("web_dashboard.services.job_service")
     m_job.set_running = lambda db, jid: rec.hit("job_running")
-    m_job.set_failed = lambda db, jid, msg: rec.events.append(("job_failed", msg))
+    m_job.set_failed = lambda db, jid, msg, result=None: rec.events.append(
+        ("job_failed", msg, result))
     m_job.set_completed = lambda db, jid, result=None: rec.events.append(
         ("job_completed", result))
 
@@ -761,6 +762,95 @@ def test_run_rejects_an_unknown_action():
     asyncio.run(svc.run(db, cluster_id="c-1", job_id="j-1", action="explode"))
     failed = [e for e in rec.events if isinstance(e, tuple) and e[0] == "job_failed"]
     assert failed and "explode" in failed[0][1]
+
+
+# ── warnings survive onto a FAILED job ───────────────────────────────────────────
+#
+# The warnings are where the non-fatal steps put the REMEDY, and `_apply_rbac` is
+# deliberately non-fatal — it returns "failed: {exc}" as its note rather than raising, so
+# an RBAC problem exists nowhere else. They used to live only in the entry point's return
+# value, which a later raise means never happens, and `run`'s except branch reported
+# `str(exc)` alone.
+
+def _failed_event(rec):
+    ev = [e for e in rec.events if isinstance(e, tuple) and e[0] == "job_failed"]
+    assert ev, f"the job was never failed; got {rec.events}"
+    return ev[0]
+
+
+def test_a_warning_collected_before_the_failing_step_survives_on_the_failed_job():
+    """The live case, 2026-08-17, EKS cluster k8s-aws-east.
+
+    Step 1 collects the access-entry warning (no `k8s_ps_rotator_eks_principal_arn`, so
+    no entry was created and the warning carries the exact CLI line that creates one),
+    and step 5 then fails on a 400 from Password Safe's Credentials/Change. The operator
+    saw the 400 alone and diagnosed the IAM mapping by hand — the instruction that would
+    have fixed it had already been written, into a list that was thrown away."""
+    rec = Recorder()
+    _install_stubs(rec, cfg={"k8s_ps_functional_account_aws": "psafe-eks-rotator",
+                             "aws_region": "us-east-1"})
+    ps = sys.modules["web_dashboard.services.ps_api_service"]
+
+    async def _change_400(account_id):
+        rec.hit("rotate")
+        raise RuntimeError(
+            "POST ManagedAccounts/201/Credentials/Change failed (400): "
+            "The account could not be changed")
+    ps.change_managed_account_password = _change_400
+
+    db = FakeDB({"K8sCluster": _row(cloud="aws", name="k8s-aws-east",
+                                    region="us-east-1"),
+                 "Job": _fake_job({"tf_variables": {"region": "us-east-1",
+                                                    "cluster_name": "k8s-aws-east"}})})
+    asyncio.run(svc.run(db, cluster_id="c-1", job_id="j-1", action="register"))
+
+    _e, msg, result = _failed_event(rec)
+    assert "400" in msg, "the error that actually failed the job must still lead"
+    assert "aws eks create-access-entry --cluster-name k8s-aws-east" in msg, (
+        f"the remedy collected at step 1 was discarded by the failure at step 5 — "
+        f"error_message is the only field the job page renders for a failed job. "
+        f"Got:\n{msg}")
+    warned = (result or {}).get("ps_k8s_token", {}).get("warnings") or []
+    assert any("create-access-entry" in w for w in warned), (
+        f"the same warnings must reach the job row as structure, not only as prose; "
+        f"got {warned}")
+
+
+def test_a_failed_rotation_still_reports_that_the_pair_was_unsynced():
+    """`rotate_now` builds its note BEFORE the change call, and the change call is what
+    fails. Same shape as the register case: the note is only in a return value."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False)
+    ps = sys.modules["web_dashboard.services.ps_api_service"]
+
+    async def _change_400(account_id):
+        raise RuntimeError("POST ManagedAccounts/201/Credentials/Change failed (400)")
+    ps.change_managed_account_password = _change_400
+
+    db = FakeDB({"K8sCluster": _row(ps_token_account_id="201",
+                                    ps_pra_vault_account_id="202")})
+    asyncio.run(svc.run(db, cluster_id="c-1", job_id="j-1", action="rotate"))
+
+    _e, msg, _result = _failed_event(rec)
+    assert "NOT synced" in msg, (
+        f"a rotation that fails on an unlinked pair must still say the pair is "
+        f"unlinked — that is the likelier root cause. Got:\n{msg}")
+
+
+def test_a_failure_with_nothing_collected_reports_the_error_alone():
+    """No empty "Collected before the failure" block. The dashboard's activity widget
+    renders error_message truncated to one line, so decorating every failure would push
+    the error itself out of view."""
+    rec = Recorder()
+    _install_stubs(rec, link_fails=True)
+    db = FakeDB({"K8sCluster": _row(),
+                 "Job": _fake_job({"tf_variables": {"project": "p", "region": "r",
+                                                    "cluster_name": "c"}})})
+    asyncio.run(svc.run(db, cluster_id="c-1", job_id="j-1", action="register"))
+
+    _e, msg, result = _failed_event(rec)
+    assert msg == "POST ManagedAccounts/201/SyncedAccounts/202 failed (403)"
+    assert (result or {}).get("ps_k8s_token", {}).get("warnings") == []
 
 
 if __name__ == "__main__":

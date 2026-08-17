@@ -291,7 +291,8 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
                    cluster_name: str = "", resource_group: str = "", location: str = "",
                    functional_account: str = "",
                    change_on_register: Optional[bool] = None,
-                   mirror_to_pra: Optional[bool] = None) -> dict:
+                   mirror_to_pra: Optional[bool] = None,
+                   warnings: Optional[list] = None) -> dict:
     """Make the cluster's ServiceAccount token a Password Safe managed account.
 
     Ordered, and the order is the correctness argument:
@@ -340,7 +341,9 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
             "Password Safe is not configured — set pscli_api_url, pscli_client_id, "
             "pscli_client_secret and pscli_api_account_name")
 
-    warnings: list = []
+    # Caller-owned when ``run`` supplies one: the returned dict is the only thing that
+    # carries these, and a step raising means there is no returned dict. See ``run``.
+    warnings = [] if warnings is None else warnings
     mode = (mode or token_mode(cluster_id)).strip().lower()
     if mode not in VALID_PS_TOKEN_MODES:
         raise PSK8sTokenError(f"unknown token mode {mode!r}")
@@ -721,7 +724,8 @@ async def current_token(db: Session, cluster_id: str) -> str:
 
 # ── rotate on demand ──────────────────────────────────────────────────────────
 
-async def rotate_now(db: Session, cluster_id: str, *, job_id: str = "") -> dict:
+async def rotate_now(db: Session, cluster_id: str, *, job_id: str = "",
+                     warnings: Optional[list] = None) -> dict:
     """Ask Password Safe to rotate the token now.
 
     One call, because the synced-account link means PRA is updated by Password Safe as
@@ -734,6 +738,7 @@ async def rotate_now(db: Session, cluster_id: str, *, job_id: str = "") -> dict:
         raise PSK8sTokenError(
             f"cluster {cluster_id} has no Password Safe-managed ServiceAccount token")
     from . import ps_api_service
+    warnings = [] if warnings is None else warnings
 
     linked = False
     note = "no PRA Vault Token account is registered, so PRA will not be updated"
@@ -747,13 +752,19 @@ async def rotate_now(db: Session, cluster_id: str, *, job_id: str = "") -> dict:
             f"{row.ps_token_account_id} in Password Safe — this rotation will not reach PRA. "
             f"Re-register the cluster's token, or re-create the sync in Password Safe.")
 
+    # Into the warnings as well as the return value, and before the rotation: the change
+    # call is exactly what fails here (a 400 from Credentials/Change), and on that path
+    # the return value never happens.
+    if note:
+        warnings.append(note)
     await ps_api_service.change_managed_account_password(int(row.ps_token_account_id))
-    return {"rotated": True, "pra_synced": linked, "note": note}
+    return {"rotated": True, "pra_synced": linked, "note": note, "warnings": warnings}
 
 
 # ── deregister ────────────────────────────────────────────────────────────────
 
-async def deregister(db: Session, cluster_id: str, *, job_id: str = "") -> dict:
+async def deregister(db: Session, cluster_id: str, *, job_id: str = "",
+                     warnings: Optional[list] = None) -> dict:
     """Off-board both managed systems and drop the rotator RBAC (best-effort).
 
     Positional ``cluster_id`` so this can join ``k8s_service.run_decommission``'s
@@ -769,7 +780,10 @@ async def deregister(db: Session, cluster_id: str, *, job_id: str = "") -> dict:
         return {"ok": True, "removed": False}
     from . import k8s_service, ps_api_service, ps_resource_service
     state = get_state(cluster_id)
-    errors: list = []
+    # This call's best-effort step failures ARE its warnings, so they share ``run``'s
+    # list — off-boarding one managed system and then dying on the next must still
+    # report the first.
+    errors: list = [] if warnings is None else warnings
 
     if row.ps_token_account_id and row.ps_pra_vault_account_id:
         try:
@@ -856,18 +870,52 @@ async def sync_status(db: Session, cluster_id: str) -> dict:
 
 # ── worker entry ──────────────────────────────────────────────────────────────
 
+def _failure_message(exc: Exception, warnings: list) -> str:
+    """The failed job's ``error_message``: what raised, then what was already known.
+
+    The warnings are not colour — the non-fatal steps put the *remedy* in them.
+    ``_apply_rbac`` returns ``"failed: {exc}"`` as a note rather than raising, so an RBAC
+    problem exists only in the warnings and the result dict; ``_ensure_eks_access_entry``
+    writes the exact ``aws eks create-access-entry`` line there when
+    ``k8s_ps_rotator_eks_principal_arn`` is unset.
+
+    Diagnosed live on 2026-08-17 against EKS cluster k8s-aws-east: a register collected
+    that access-entry line at step 1 and then failed at step 5 on a 400 from
+    ``ManagedAccounts/{id}/Credentials/Change``, and because the warnings lived only in a
+    return value that never happened, the operator saw the 400 alone and worked the IAM
+    mapping out by hand. ``error_message`` is the field the job page renders for a failed
+    job (``templates/jobs/detail.html``); the row's metadata reaches that page through
+    one allowlisted view that serves ``agent_discover`` alone, and ``GET /api/jobs/{id}``
+    is a fixed projection that omits it. So the prose copy goes here, where the operator
+    reads it, and the structured copy goes to ``set_failed``'s result.
+    """
+    msg = str(exc) or exc.__class__.__name__
+    if not warnings:
+        return msg
+    return "\n".join([msg, "", f"Collected before the failure ({len(warnings)}):",
+                      *(f"  • {w}" for w in warnings)])
+
+
 async def run(db: Session, *, cluster_id: str, job_id: str, action: str = "register",
               **kwargs) -> None:
-    """``k8s_ps_token`` job handler. Owns its terminal state and never raises."""
+    """``k8s_ps_token`` job handler. Owns its terminal state and never raises.
+
+    The warnings list is owned HERE, not by the three entry points, and that is the
+    whole point: each of them returns its warnings in its result dict, and an exception
+    means there is no result dict — so every warning a run collected before a later step
+    raised used to be discarded by the ``except`` below. Passing the list down leaves it
+    in this frame, where the failure path can still read it (see ``_failure_message``)."""
     from . import job_service
     job_service.set_running(db, job_id)
+    warnings: list = []
     try:
         if action == "register":
-            result = await register(db, cluster_id, job_id=job_id, **kwargs)
+            result = await register(db, cluster_id, job_id=job_id, warnings=warnings,
+                                    **kwargs)
         elif action == "deregister":
-            result = await deregister(db, cluster_id, job_id=job_id)
+            result = await deregister(db, cluster_id, job_id=job_id, warnings=warnings)
         elif action == "rotate":
-            result = await rotate_now(db, cluster_id, job_id=job_id)
+            result = await rotate_now(db, cluster_id, job_id=job_id, warnings=warnings)
         else:
             job_service.set_failed(
                 db, job_id,
@@ -875,7 +923,9 @@ async def run(db: Session, *, cluster_id: str, job_id: str, action: str = "regis
                 f"{', '.join(VALID_PS_TOKEN_ACTIONS)})")
             return
     except Exception as exc:
-        job_service.set_failed(db, job_id, str(exc))
+        job_service.set_failed(
+            db, job_id, _failure_message(exc, warnings),
+            {"ps_k8s_token": {"action": action, "failed": True, "warnings": warnings}})
         logger.exception("PS token job failed cluster=%s action=%s", cluster_id, action)
         return
     job_service.set_completed(db, job_id, {"ps_k8s_token": result})
