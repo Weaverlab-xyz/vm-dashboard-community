@@ -252,6 +252,28 @@ def _vendor_workload_packages(workload: str, arc_prefix: str) -> list:
     return entries
 
 
+def source_tree_sha256(source_root: str = "") -> str:
+    """A hash of the handler source tree — every workload and the runtime.
+
+    This is the provenance statement that is ALWAYS available. A git commit is
+    best-effort (an image can be built without the build arg, or from a tarball),
+    but the source that produced a package is right there on disk, so this can be
+    computed unconditionally and cannot be wrong.
+
+    Deterministic for the same reasons ``build`` is: sorted order, content only.
+    """
+    root = _functions_root(source_root)
+    digest = hashlib.sha256()
+    entries = (_walk_tree(os.path.join(root, "fnruntime"), "fnruntime")
+               + _walk_tree(os.path.join(root, "fnworkloads"), "fnworkloads")
+               + _walk_tree(os.path.join(root, "fnentry"), "fnentry"))
+    for arcname, payload in sorted(entries, key=lambda item: item[0]):
+        digest.update(arcname.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(payload).digest())
+    return digest.hexdigest()
+
+
 def collect_entries(*, cloud: str, workload: str, source_root: str = "") -> list:
     """Every ``(arcname, bytes)`` that goes into the zip, unsorted."""
     if cloud not in _LAYOUT:

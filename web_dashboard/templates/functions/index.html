@@ -66,7 +66,17 @@
                  class="text-xs text-gray-400 hover:text-blue-600 break-all"
                  x-text="fn.invoke_url"></a>
             </td>
-            <td class="px-4 py-2 text-gray-600" x-text="fn.workload"></td>
+            <td class="px-4 py-2 text-gray-600">
+              <div x-text="fn.workload"></div>
+              <!-- Provenance: which source built the package that is running. The
+                   tree hash is always present; the commit only when the image was
+                   built with the git build-arg. -->
+              <div x-show="fn.provenance && (fn.provenance.commit || fn.provenance.tree_sha256)"
+                   class="text-[11px] text-gray-400 font-mono"
+                   :title="'source tree ' + (fn.provenance?.tree_sha256 || 'unknown')"
+                   x-text="(fn.provenance?.commit ? fn.provenance.commit.slice(0,12) : 'no commit')
+                           + (fn.provenance?.dirty ? '-dirty' : '')"></div>
+            </td>
             <td class="px-4 py-2 text-gray-600">
               <span x-text="fn.cloud"></span>
               <span class="text-gray-400 text-xs" x-text="fn.region"></span>

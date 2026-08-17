@@ -1260,6 +1260,12 @@ class CloudFunction(Base):
     network_ref = Column(Text, nullable=True)              # JSON: subnet ids / connector / security groups
     env_ref = Column(Text, nullable=True)                  # JSON of the NON-secret env applied
 
+    # Where the handler source came from, as JSON: the source-tree hash (always
+    # present), plus git commit/ref/origin when the image was built with them.
+    # Recorded at deploy so "what is running in that function, and who reviewed it?"
+    # stays answerable after the image that produced it is gone.
+    provenance = Column(Text, nullable=True)
+
     # Stored on the row (as K8sCluster does) rather than re-derived by scanning Job
     # metadata: it is a direct lookup and it survives job pruning.
     deploy_job_id = Column(String(36), nullable=True)
@@ -1476,6 +1482,8 @@ def init_db():
             # Entitle REST-granted permissions. Separate from session_permissions
             # because the OIDC login path overwrites that column on every login.
             "ALTER TABLE users ADD COLUMN jit_permissions TEXT",
+            # Cloud Functions build provenance (source tree hash + git commit).
+            "ALTER TABLE cloud_functions ADD COLUMN provenance TEXT",
             # Bulk Config-Management runs: group the N jobs of one run so the jobs
             # page can filter to a batch and roll up its status.
             "ALTER TABLE jobs ADD COLUMN batch_id VARCHAR(32)",
