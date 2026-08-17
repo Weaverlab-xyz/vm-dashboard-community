@@ -501,6 +501,30 @@ def _azure_sas_url(account: str, account_key: str, container: str, key: str) -> 
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
+def _record_provenance(row: CloudFunction) -> dict:
+    """Capture where the handler source came from, onto ``row``.
+
+    A separate function on purpose, and not just for tidiness: it takes ONLY the row,
+    so no secret — and no structure carrying one — is in scope at the log calls.
+    ``deploy`` holds the freshly minted shared secret, and logging anywhere in that
+    scope is exactly the shape CodeQL's clear-text-logging rule flags. Keeping the
+    sink somewhere a secret cannot reach is a better answer than suppressing it.
+
+    Never raises: provenance is metadata and must not be able to fail a deploy.
+    """
+    try:
+        from . import build_provenance
+        provenance = build_provenance.collect()
+        row.provenance = json.dumps(provenance)
+        logger.info("cloudfn: %s built from %s", row.id,
+                    build_provenance.describe(provenance))
+        return provenance
+    except Exception as exc:
+        logger.warning("cloudfn: could not record provenance for %s (non-fatal): %s",
+                       row.id, type(exc).__name__)
+        return {}
+
+
 def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
            created_by: str, network_mode: str = "public",
            subnet_ids: Optional[list] = None, subnet_id: str = "",
@@ -561,17 +585,8 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
     row.package_uri = package["uri"]
 
     # Captured HERE, at the moment the package hash is pinned, so the two describe
-    # the same source. Never fatal: provenance is metadata and must not fail a deploy.
-    try:
-        from . import build_provenance
-        provenance = build_provenance.collect()
-        row.provenance = json.dumps(provenance)
-        logger.info("cloudfn: %s built from %s", fn_name,
-                    build_provenance.describe(provenance))
-    except Exception as exc:
-        provenance = {}
-        logger.warning("cloudfn: could not record provenance for %s (non-fatal): %s",
-                       fn_name, exc)
+    # the same source.
+    provenance = _record_provenance(row)
     db.commit()
 
     # Also handed to the function itself, so a RUNNING function can report what it
