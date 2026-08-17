@@ -1110,7 +1110,16 @@ class Settings(BaseSettings):
     # Container-Optimised-OS GCE instance.
     gcp_cloud_run_docker_deploy_key: str = ""
     gcp_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
-    gcp_jumpoint_machine_type: str = "e2-micro"
+    # e2-medium (4 GB), NOT e2-micro (1 GB): a Web Jump renders the target UI in a
+    # headless Chromium ON THE GATEWAY (`sra-web.bin`). At 1 GB that is OOM-killed by
+    # the kernel — observed live 2026-08-17, `global_oom` with Chromium's own
+    # ThreadPoolService invoking the oom-killer, which drops every session on the node
+    # and reads in PRA as "the endpoint has disconnected" (or, before the session gets
+    # that far, "internal timeout starting session"). A tunnel-only gateway would be
+    # fine on e2-micro; nothing here knows in advance which it will be asked to carry,
+    # and AWS already sizes its host t3.small for the same reason. Dial down to e2-small
+    # (2 GB) if cost matters more than concurrent Web Jumps.
+    gcp_jumpoint_machine_type: str = "e2-medium"
     gcp_jumpoint_zone: str = ""          # blank → use the deploy zone
     # Which Jumpoint a SINGLE GCP VM deploy gets. "shared" (default) borrows the
     # ref-counted host that cloud databases, k8s tunnels and VDI seats already use;

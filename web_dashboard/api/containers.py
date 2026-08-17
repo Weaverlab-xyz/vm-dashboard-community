@@ -911,12 +911,19 @@ async def get_rancher_pra_options(
     """Deploy-form options for the Rancher node: selectable GCP regions plus the PRA
     pickers (Jump Groups, Jumpoints, Vault account groups; best-effort). ``configured``
     is false when PRA OAuth isn't set, so the form shows a note instead of empty
-    dropdowns. Mirrors ``/api/k8s/clusters/pra-options``."""
-    from ..services import pra_api_service
+    dropdowns. Mirrors ``/api/k8s/clusters/pra-options``.
+
+    ``web_jump_enabled`` is the CONFIGURED default for the per-deploy checkbox. Without
+    it the form had nothing to seed from and the request model defaults to False, so a
+    deploy launched from the Containers page silently opted OUT of Web Jump
+    registration even with the feature switched on in Settings — leaving whatever stale
+    jump item already existed in place."""
+    from ..services import config_service, pra_api_service
     pickers = await pra_api_service.list_pickers()
     return {
         "configured": pra_api_service.configured(),
         "regions": _rancher_deploy_regions(),
+        "web_jump_enabled": config_service.get_bool("rancher_ui_web_jump_enabled", False),
         **pickers,
     }
 
@@ -1095,12 +1102,16 @@ async def get_portainer_node_deploy_options(
     regional), plus the PRA pickers (Jump Groups, Jumpoints, Vault account groups;
     best-effort). ``configured`` is false when PRA OAuth isn't set, so the form shows
     a note instead of empty dropdowns. Same payload shape as
-    /api/containers/rancher/pra-options."""
-    from ..services import pra_api_service
+    /api/containers/rancher/pra-options.
+
+    ``web_jump_enabled`` is the CONFIGURED default for the per-deploy checkbox — see
+    that endpoint for why a form with nothing to seed from silently opted out."""
+    from ..services import config_service, pra_api_service
     pickers = await pra_api_service.list_pickers()
     return {
         "configured": pra_api_service.configured(),
         "regions": _portainer_deploy_regions(),
+        "web_jump_enabled": config_service.get_bool("portainer_ui_web_jump_enabled", False),
         **pickers,
     }
 

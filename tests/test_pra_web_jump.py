@@ -83,8 +83,46 @@ def test_web_jump_hcl_vault_without_group_omits_account_group_id():
     assert "account_group_id" not in hcl                   # omitted → provider default group
 
 
+def _state(url, rtype="sra_web_jump"):
+    import json
+    return json.dumps({"version": 4, "resources": [
+        {"type": rtype, "name": "rancher_ui",
+         "instances": [{"attributes": {"name": "rancher-ui", "url": url}}]},
+    ]})
+
+
+def test_web_jump_url_from_state_reads_the_url():
+    """The URL an existing Web Jump points at, read from its own Terraform state.
+
+    This is what lets a redeploy notice the node MOVED. The state is the only record of
+    what the item actually dials, so reading it converges a deployment that provisioned
+    its Web Jump before this existed — no config key to migrate, no guessing.
+    """
+    assert tps.web_jump_url_from_state(_state(URL_SENTINEL)) == URL_SENTINEL
+
+
+def test_web_jump_url_from_state_returns_blank_when_it_cannot_tell():
+    """Every unreadable shape must yield "" — and "" MUST mean "leave it alone".
+
+    The caller destroys and recreates the Web Jump when this disagrees with the node's
+    current URL, so a parse failure that returned some other string would tear down a
+    perfectly good jump item on every single call.
+    """
+    assert tps.web_jump_url_from_state("") == ""
+    assert tps.web_jump_url_from_state("   ") == ""
+    assert tps.web_jump_url_from_state("not json at all") == ""
+    assert tps.web_jump_url_from_state("{}") == ""
+    assert tps.web_jump_url_from_state('{"resources": []}') == ""
+    # A state holding some OTHER resource type is not a web jump URL.
+    assert tps.web_jump_url_from_state(_state(URL_SENTINEL, rtype="sra_shell_jump")) == ""
+    # Present but empty attribute.
+    assert tps.web_jump_url_from_state(_state("")) == ""
+
+
 if __name__ == "__main__":
     test_web_jump_hcl()
     test_web_jump_hcl_with_vault_account()
     test_web_jump_hcl_vault_without_group_omits_account_group_id()
+    test_web_jump_url_from_state_reads_the_url()
+    test_web_jump_url_from_state_returns_blank_when_it_cannot_tell()
     print("ok")

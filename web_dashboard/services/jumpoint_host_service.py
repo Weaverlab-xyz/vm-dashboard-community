@@ -956,7 +956,11 @@ async def _ensure_jumpoint_host_azure(region: str, name: str = "",
             rg=rg, location=location, subnet_id=subnet, name=name,
             container_image=_cfg("azure_aci_jumpoint_image") or "beyondtrust/sra-jumpoint:latest",
             deploy_key=deploy_key,
-            vm_size=_cfg("azure_jumpoint_vm_size") or "Standard_B1s",
+            # Standard_B2s (4 GB), NOT Standard_B1s (1 GB) — Azure's side of the same
+            # defect proven on GCP 2026-08-17: a Web Jump renders the target UI in a
+            # headless Chromium on the GATEWAY, and 1 GB gets it OOM-killed, dropping
+            # every session on the node. See `gcp_jumpoint_machine_type` in config.py.
+            vm_size=_cfg("azure_jumpoint_vm_size") or "Standard_B2s",
             admin_password=_azure_compliant_password(),
             install_db_clients=install_db_clients,
         )
