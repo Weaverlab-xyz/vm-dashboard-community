@@ -259,6 +259,13 @@ For EKS the dashboard also creates the access entry when
 nothing and the API server 401s — invisible from inside the cluster. It never edits the
 `aws-auth` ConfigMap: a bad edit there can lock every principal out.
 
+That access entry only exists as an API when the cluster's authentication mode includes
+`API`, and EKS defaults new clusters to `CONFIG_MAP` — so the mode is a **precondition of
+this whole design on EKS**, not a detail of it. The provisioning module therefore builds
+clusters `API_AND_CONFIG_MAP` (`authentication_mode`, which keeps any hand-made `aws-auth`
+entries working); on a `CONFIG_MAP` cluster there is no way to map the rotator at all, and
+the failure surfaces only at the first rotation.
+
 ## 8. Smaller decisions worth recording
 
 - **Password Safe is driven over REST (`ps_api_service`), not `ps-cli`.** `ps-cli` does

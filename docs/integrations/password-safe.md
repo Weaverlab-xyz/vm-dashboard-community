@@ -384,6 +384,23 @@ aws eks create-access-entry --cluster-name <cluster> \
   --principal-arn <arn> --type STANDARD --username passwordsafe-rotator
 ```
 
+**The cluster's authentication mode must include `API`, or there is no access-entry API to
+call.** EKS defaults new clusters to `CONFIG_MAP`, where the command above is rejected and
+the only way in is the `aws-auth` ConfigMap the dashboard deliberately never edits. Clusters
+provisioned here are built `API_AND_CONFIG_MAP` (`authentication_mode` in
+`terraform/k8s_cluster/aws_eks`); an older or hand-built cluster is converted in place, and
+EKS allows the upgrade but never the reverse:
+
+```
+aws eks update-cluster-config --name <cluster> \
+  --access-config authenticationMode=API_AND_CONFIG_MAP
+```
+
+Symptom when this is missed: registration succeeds, then the **first rotation** fails with a
+`400` from `Credentials/Change` whose body is the plugin's attempt log ending in an API-server
+`401`/`403` — nothing in the cluster looks wrong, because the binding is fine and it is the
+*identity* that was never mapped.
+
 Run **Verify Functional Account** in Password Safe after registering: it names every missing
 verb, prints the ClusterRole to apply, and logs the correct AKS object id on every run.
 
