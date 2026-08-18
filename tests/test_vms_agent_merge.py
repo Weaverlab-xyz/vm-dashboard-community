@@ -13,6 +13,7 @@ Real throwaway SQLite; no PowerShell and no agent.
 
 Runs under pytest, or standalone:  python tests/test_vms_agent_merge.py
 """
+import asyncio
 import json
 import os
 import sys
@@ -27,10 +28,13 @@ os.environ.setdefault(
 os.environ.setdefault("JWT_SECRET_KEY", "x" * 32)
 
 try:
+    from fastapi import BackgroundTasks
+
     from web_dashboard.api import vms as vms_api
     from web_dashboard.database import (Base, HypervisorVMCache, RemoteAgent,
                                         SessionLocal, engine)
     from web_dashboard.services import hypervisor_connection_service as hcs
+    from web_dashboard.services import powershell, vm_inventory_service
     from web_dashboard.services import workgroup_override_service
 except Exception as exc:  # noqa: BLE001
     print(f"SKIP: {exc}")
@@ -146,6 +150,73 @@ def test_no_workstation_connection_at_all_is_not_an_error():
         db.commit()
         assert vms_api._agent_workstation_vms(db, None) == []
     finally:
+        db.close()
+
+
+class _Admin:
+    """Enough of a User for the endpoint: it reads these two and nothing else."""
+    is_admin = True
+    workgroups_list: list = []
+
+
+def _list_vms(db):
+    return asyncio.run(vms_api.list_vms(
+        BackgroundTasks(), workgroup=None, db=db, current_user=_Admin()))
+
+
+def _no_local_powershell(*a, **kw):
+    async def _raise(*_a, **_kw):
+        raise powershell.PowerShellError(
+            r"PowerShell wrapper not found: C:\Scripts\VM_CLI\vm_cli_api_wrapper.ps1",
+            "WRAPPER_NOT_FOUND")
+    return _raise
+
+
+def test_agent_rows_survive_a_host_with_no_powershell():
+    """The regression that matters, and the one every test above missed by exercising the
+    merge helper instead of the endpoint that calls it.
+
+    A cloud-hosted dashboard has no local hypervisor, so `VMStateCache` never gets a row,
+    so `count == 0` on every request and the cold-start scan fires every time and fails.
+    That used to raise straight out of the endpoint — a 500 — and the merge below it never
+    ran, which made an agent-bound Workstation connection permanently invisible on a
+    hosted install no matter how healthy the agent was.
+    """
+    db = SessionLocal()
+    original = vm_inventory_service.populate_db_from_ps
+    try:
+        _setup(db)
+        vm_inventory_service.populate_db_from_ps = _no_local_powershell()
+        out = _list_vms(db)
+        assert out.count == 1, "the agent's rows must outlive a failed local scan"
+        assert out.vms[0].vm_name == "win11-lab"
+        assert out.vms[0].source == "desk-01"
+    finally:
+        vm_inventory_service.populate_db_from_ps = original
+        db.close()
+
+
+def test_a_database_failure_in_the_local_scan_still_surfaces():
+    """The catch is scoped to PowerShellError on purpose. Swallowing everything here
+    would turn a broken database into a silently short page, which is the failure mode
+    this whole fix exists to remove — not one to reintroduce one layer up."""
+    db = SessionLocal()
+    original = vm_inventory_service.populate_db_from_ps
+
+    async def _db_exploded(*_a, **_kw):
+        raise RuntimeError("connection pool exhausted")
+
+    try:
+        _setup(db)
+        vm_inventory_service.populate_db_from_ps = _db_exploded
+        try:
+            _list_vms(db)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("a non-PowerShell failure must not be swallowed")
+    finally:
+        vm_inventory_service.populate_db_from_ps = original
         db.close()
 
 
