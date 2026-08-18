@@ -154,9 +154,10 @@ def _power_endpoint(op: str):
         job = job_service.create_job(
             db,
             job_type=f"vsphere_{op}",
-            description=f"vSphere {op}: {label}" + (f" on {payload.host}" if payload.host else ""),
+            created_by=current_user.username,
             workgroup=payload.host or "vsphere",
-            owner_id=current_user.id,
+            metadata={"moref": payload.moref, "vm_name": payload.name,
+                      "host": payload.host, "op": op},
         )
         background_tasks.add_task(_run_power_op, job.id, conn.id, payload.moref, op, label)
         return {"job_id": job.id, "status": "queued"}

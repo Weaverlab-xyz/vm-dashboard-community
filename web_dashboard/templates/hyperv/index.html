@@ -14,6 +14,8 @@
     is reached through a remote agent, so the dashboard cannot query it live.
     {% if synced_at %}<span x-text="'Synced ' + timeAgo('{{ synced_at }}') + '.'"></span>{% endif %}
     Live-only figures such as CPU usage and uptime are blank here.
+    Start, Force Off and Restart run as agent jobs; Shutdown, Pause, Resume and Save
+    are not available through an agent.
   </div>
   {% endif %}
 
@@ -239,7 +241,9 @@
                 <!-- Paused (9): Resume + Force Off -->
                 <template x-if="vm.state === 9">
                   <div class="flex items-center gap-1.5">
-                    <button @click="powerOp(vm, 'resume')" :disabled="vm._busy"
+                    <button @click="powerOp(vm, 'resume')"
+                            :disabled="vm._busy || !canOp('resume')"
+                            :title="opTitle('resume')"
                             class="px-2.5 py-1 text-xs font-medium rounded
                                    border border-green-600 text-green-600 hover:bg-green-50
                                    disabled:opacity-50 transition-colors">
@@ -258,10 +262,12 @@
                 <template x-if="vm.state === 2">
                   <div class="flex items-center gap-1.5">
                     <button @click="powerOp(vm, 'shutdown')"
-                            :disabled="vm._busy || !vm.integration_services_state"
-                            :title="vm.integration_services_state
-                              ? 'Graceful shutdown via Integration Services'
-                              : 'Requires Integration Services to be installed'"
+                            :disabled="vm._busy || !canOp('shutdown')
+                                       || !vm.integration_services_state"
+                            :title="!canOp('shutdown') ? opTitle('shutdown')
+                              : (vm.integration_services_state
+                                 ? 'Graceful shutdown via Integration Services'
+                                 : 'Requires Integration Services to be installed')"
                             class="px-2.5 py-1 text-xs font-medium rounded
                                    bg-blue-600 hover:bg-blue-700 text-white
                                    disabled:opacity-50 transition-colors">
@@ -280,8 +286,9 @@
                                    disabled:opacity-50 transition-colors">
                       Restart
                     </button>
-                    <button @click="powerOp(vm, 'pause')" :disabled="vm._busy"
-                            title="Pause (Suspend-VM)"
+                    <button @click="powerOp(vm, 'pause')"
+                            :disabled="vm._busy || !canOp('pause')"
+                            :title="canOp('pause') ? 'Pause (Suspend-VM)' : opTitle('pause')"
                             class="px-2.5 py-1 text-xs font-medium rounded
                                    bg-gray-200 hover:bg-gray-300 text-gray-700
                                    disabled:opacity-50 transition-colors">
@@ -450,6 +457,12 @@ function hypervDashboard() {
     selectAll: false,
     bulkAssignModal: { open: false, workgroup: '' },
 
+    // An agent-bound connection can only be sent the verbs the agent implements for
+    // Hyper-V. Mirrors api/hyperv.py::_AGENT_VERBS, which refuses the rest with a 501 —
+    // this is only so the operator sees why the button is dead instead of clicking it.
+    viaAgent: {{ 'true' if via_agent else 'false' }},
+    agentOps: ['start', 'stop', 'restart'],
+
     get filteredVms() {
       const q = this.search.toLowerCase();
       return this.allVms.filter(vm => {
@@ -559,6 +572,18 @@ function hypervDashboard() {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
+    // Methods, not getters: tests/template_helpers_check.js cannot see a getter, so a
+    // getter here would be an unbound name in every x-text that used it.
+    canOp(op) {
+      return !this.viaAgent || this.agentOps.includes(op);
+    },
+
+    opTitle(op) {
+      if (this.canOp(op)) return '';
+      return 'Not available through a remote agent — the agent implements '
+           + this.agentOps.join(', ') + ' for Hyper-V only.';
+    },
+
     stateDot(state) {
       const m = { 2: 'bg-green-500', 3: 'bg-gray-400', 6: 'bg-amber-400', 9: 'bg-blue-400' };
       return m[state] || 'bg-yellow-400';
@@ -596,7 +621,9 @@ function hypervDashboard() {
 
     timeAgo(dt) {
       if (!dt) return '';
-      const s = Math.round((new Date() - dt) / 1000);
+      // new Date(dt), not dt: the sync banner passes a server-rendered ISO STRING, and
+      // subtracting a string yields NaN ("Synced NaNh ago").
+      const s = Math.round((new Date() - new Date(dt)) / 1000);
       if (s < 10) return 'just now';
       if (s < 60) return `${s}s ago`;
       if (s < 3600) return `${Math.floor(s/60)}m ago`;

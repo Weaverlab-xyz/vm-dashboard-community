@@ -1663,7 +1663,8 @@ _SYNC = {"vsphere": _sync_vsphere, "proxmox": _sync_proxmox,
 
 # Verb -> (proxmox path fragment, nutanix power state, XAPI method). Hyper-V is absent
 # on purpose: WinRM needs a real NTLM/Negotiate stack, which is the one transport the
-# stdlib cannot do, so Hyper-V stays dashboard-direct.
+# stdlib cannot do, so Hyper-V power goes through the sibling runner instead — see
+# _SIBLING_KINDS and runners/hypervisor/run.py::_PS_POWER.
 _POWER = {
     "power_on":    {"proxmox": "start",    "nutanix": "ON",  "xcpng": "VM.start"},
     "power_off":   {"proxmox": "stop",     "nutanix": "OFF", "xcpng": "VM.hard_shutdown"},
