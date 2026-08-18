@@ -287,24 +287,54 @@ async def dashboard_stats(
     current_user: User = Depends(require_permission("vms", "read")),
 ):
     """Single-call endpoint for the dashboard: VM counts, active jobs, per-workgroup counts.
-    Total VM count comes from the DB (instant). Running count still uses the PS-backed cache."""
+
+    Counts the same two sources `GET /api/vms` lists — the PowerShell-scanned
+    `VMStateCache` rows plus the Workstation rows a remote agent syncs — so the numbers
+    on the dashboard match the page they link to. Totals come from the DB (instant); the
+    running count prefers the PS-backed cache and degrades to stored state without it.
+    """
     accessible = current_user.workgroups_list
+
+    # VM inventory from DB — fast
+    local_vms = vm_inventory_service.get_vms_from_db(db, accessible)
+    # The same merge the list route does, for the same reason: `VMStateCache` is written
+    # only by the two PowerShell scan paths, so counting it alone can never include an
+    # agent-synced VM — a hosted install reported a total of 0 while the page behind the
+    # number rendered rows.
+    agent_vms = _agent_workstation_vms(
+        db, None if current_user.is_admin else [w.lower() for w in accessible])
+    all_vms = local_vms + agent_vms
+
+    # An agent row's power state arrives with its sync, so it is counted whether or not
+    # there is any local PowerShell to ask about the local ones.
+    agent_running = sum(1 for vm in agent_vms if vm.is_running)
+
     running_key = cache_service.key_workgroups("vms_running", accessible)
 
     async def _fetch_running():
         return (await powershell.execute("list_running_vms", {})).get("vms", [])
 
-    running_vms, _ = await cache_service.get_or_refresh(
-        running_key, cache_service.TTL["vms_running"], _fetch_running
-    )
+    try:
+        running_vms, _ = await cache_service.get_or_refresh(
+            running_key, cache_service.TTL["vms_running"], _fetch_running
+        )
+        local_running = sum(
+            1 for vm in running_vms
+            if not accessible or _workgroup_from_path(vm.get("vmx_path", "")) in accessible
+        )
+    except powershell.PowerShellError as exc:
+        # The local scan is one SOURCE for this count, not a precondition for serving it —
+        # the rule `list_vms` already keeps one function away. On a cloud-hosted dashboard
+        # the wrapper path is a Windows path that cannot exist, so this raised on EVERY
+        # request and took the whole endpoint down with it, including the agent-sourced
+        # numbers that need no PowerShell at all. Fall back to the running state the last
+        # scan persisted; a cache or database failure is NOT caught and should still 500.
+        logger.warning(
+            "the local running-VM scan is unavailable, counting stored state instead: %s",
+            exc)
+        local_running = sum(1 for vm in local_vms if vm.is_running)
 
-    # VM inventory from DB — fast
-    all_vms = vm_inventory_service.get_vms_from_db(db, accessible)
-
-    running_count = sum(
-        1 for vm in running_vms
-        if not accessible or _workgroup_from_path(vm.get("vmx_path", "")) in accessible
-    )
+    running_count = local_running + agent_running
 
     active_jobs = (
         db.query(Job)

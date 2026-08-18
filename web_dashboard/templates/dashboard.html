@@ -560,9 +560,12 @@
       // Workstation VMs, plus the per-workgroup badge counts below, from the one call.
       // `/api/vms` is the list the Workstation page itself renders: the local VMX scan
       // MERGED with the rows a remote agent syncs for its own host. The counts used to
-      // come from /api/vms/dashboard-stats, which reads VMStateCache alone — a table only
-      // the two PowerShell paths ever write. On a host with no local PowerShell that
-      // endpoint 500s, and even if it didn't its total could never include an agent's VMs.
+      // come from /api/vms/dashboard-stats, which counted VMStateCache alone — a table
+      // only the two PowerShell paths ever write — and 500d outright on a host with no
+      // local PowerShell. That endpoint has since been fixed to merge and degrade the
+      // same way this call does, so either would work now; this one stays because the
+      // tile then counts the exact list a click takes you to, and one request covers
+      // both the tile and the badges.
       async _fetchWorkstationVms() {
         try {
           const r = await API.get('/api/vms');
