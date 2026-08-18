@@ -33,7 +33,7 @@ this adds** — an always-on, externally callable endpoint is.
 
 | Cloud | Needs |
 |---|---|
-| **AWS** | An S3 bucket for packages. The dashboard's IAM identity needs `s3:PutObject`, plus `lambda:*`, `iam:CreateRole`/`AttachRolePolicy`/`PutRolePolicy` (the execution role, and the inline policy that lets a workload read its Secrets Manager entry) and `logs:*` on the function's log group. |
+| **AWS** | An S3 bucket for packages. The dashboard's IAM identity needs `s3:PutObject`, plus `lambda:*`, `iam:CreateRole`/`AttachRolePolicy`/`PutRolePolicy` (the execution role and its inline secrets policy), `secretsmanager:CreateSecret`/`PutSecretValue`/`DeleteSecret`/`DescribeSecret`/`TagResource` (every function keeps its bearer secret there) and `logs:*` on the function's log group. |
 | **Azure** | The dashboard's existing storage account (`storage_azure_account`) and resource group. The service principal needs `Microsoft.Web/*`, `Microsoft.Storage/storageAccounts/listKeys/action`, and `Microsoft.Web/sites/host/listKeys/action`. |
 | **GCP** | A GCS bucket for sources, and a noticeably larger IAM surface: `roles/cloudfunctions.developer`, `roles/run.admin`, `roles/cloudbuild.builds.builder`, `roles/artifactregistry.writer`, `roles/storage.objectAdmin`, `roles/secretmanager.admin`, plus `roles/iam.serviceAccountUser` on the runtime service account. |
 | All | Terraform in the image (it is, by default). |
@@ -399,8 +399,29 @@ with a plain header and would otherwise need a proxy — so the bearer secret is
 gate there. Tighten `auth_mode` per function if you front it with a gateway.
 
 The secret is minted at deploy, stored encrypted (`cloudfn/{id}/bearer`), and shown
-via the **Endpoint** button. The handler **fails closed**: if the secret is missing
-from its environment it returns 500, never 200.
+via the **Endpoint** button. The handler **fails closed**: if it cannot resolve the
+secret it returns 500, never 200 — including when the secret store is unreachable or
+the function's role has lost its read grant.
+
+**Where the function keeps it**, which is not the same question as where the
+dashboard keeps it:
+
+| Cloud | Where | Who can read it |
+|---|---|---|
+| **AWS** | a Secrets Manager secret the module creates (`<name>-fn-secret`); only its ARN is in the function's environment | the function's role, and principals you grant on that secret |
+| **GCP** | Secret Manager, injected as a `secret_environment_variables` entry | the runtime service account |
+| **Azure** | an app setting | anyone with `Microsoft.Web/sites/config/list/action` on the app |
+
+The AWS arrangement matters more than it looks: a Lambda's environment is returned
+in full by `lambda:GetFunctionConfiguration`, which the AWS-managed **ReadOnlyAccess**
+policy grants — so a bearer token stored there is readable by every read-only
+principal in the account, and reading it is enough to call the function. It now costs
+one Secrets Manager secret per function (~$0.40/month).
+
+> The secret still passes through Terraform state on all three clouds, because the
+> resource that creates it takes the value. State lives in your configured backend;
+> treat it as sensitive. What changed is that the *function's own configuration* no
+> longer hands the credential to anyone who can describe it.
 
 ## Networking
 

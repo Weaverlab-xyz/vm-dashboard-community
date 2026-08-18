@@ -19,15 +19,35 @@ from web_dashboard import functions  # noqa: F401  (puts fnruntime on sys.path)
 from fnruntime import auth, dispatch, logs
 from fnruntime.contract import Context, Request, Response
 
-_ENV_KEYS = ("FN_SHARED_SECRET", "FN_AUTH_HEADER", "FN_AUTH_PREFIX",
-             "FN_DEBUG", "FN_LOG_BODY")
+_ENV_KEYS = ("FN_SHARED_SECRET", "FN_SHARED_SECRET_SECRET_ID", "FN_AUTH_HEADER",
+             "FN_AUTH_PREFIX", "FN_DEBUG", "FN_LOG_BODY")
 
 
 def _reset_env(**overrides):
+    from fnruntime import secretref
+    secretref.clear_cache()
+    sys.modules.pop("boto3", None)
     for key in _ENV_KEYS:
         os.environ.pop(key, None)
     for key, val in overrides.items():
         os.environ[key] = val
+
+
+def _fake_boto3(payload=None, error=None):
+    """A boto3 whose get_secret_value answers, or fails, on demand. AWS is the one
+    cloud where the bearer secret is resolved by the FUNCTION rather than injected
+    by the platform, so both outcomes are reachable in production."""
+    import types
+
+    class _Client:
+        def get_secret_value(self, SecretId):  # noqa: N803 — boto3's spelling
+            if error is not None:
+                raise error
+            return {"SecretString": payload}
+
+    module = types.ModuleType("boto3")
+    module.client = lambda service, **kw: _Client()
+    sys.modules["boto3"] = module
 
 
 def _req(headers=None, body=b"", source="aws_function_url"):
@@ -215,6 +235,54 @@ def test_the_secret_never_reaches_a_log_line():
     assert "topsecret" not in output, output
     assert "hunter2" not in output, output
     assert "alice" in output, "redaction ate the useful fields too"
+
+
+# ── The AWS path: the secret is resolved, not injected ───────────────────────
+
+def test_a_secrets_manager_id_authorizes_exactly_like_an_injected_value():
+    """On AWS the module keeps the bearer secret in Secrets Manager and puts only the
+    id in the environment, so lambda:GetFunctionConfiguration no longer hands over a
+    working credential. The check itself must not notice the difference."""
+    _reset_env(FN_SHARED_SECRET_SECRET_ID="arn:aws:secretsmanager:us-east-1:1:secret:fn-Ab12Cd")
+    _fake_boto3(payload="topsecret")
+    assert auth.verify(_req({"authorization": "Bearer topsecret"})) is None
+    resp = auth.verify(_req({"authorization": "Bearer wrong"}))
+    assert resp is not None and resp.status == 401, resp
+
+
+def test_an_unresolvable_secret_fails_closed_without_raising():
+    """dispatch calls verify() OUTSIDE its own try/except, so an exception escaping
+    here would skip the log line and leave the platform to render an opaque 502.
+    Fail closed, in the shape the rest of the module already uses."""
+    _reset_env(FN_SHARED_SECRET_SECRET_ID="arn:aws:secretsmanager:us-east-1:1:secret:fn-Ab12Cd")
+    _fake_boto3(error=RuntimeError("AccessDeniedException"))
+    resp = auth.verify(_req({"authorization": "Bearer topsecret"}))
+    assert resp is not None, "an unresolvable secret authorized a request"
+    assert resp.status == 500, resp.status
+
+
+def test_the_unresolvable_response_tells_the_caller_nothing():
+    """An unauthenticated caller must not learn how the function is configured."""
+    _reset_env(FN_SHARED_SECRET_SECRET_ID="arn:aws:secretsmanager:us-east-1:1:secret:fn-Ab12Cd")
+    _fake_boto3(error=RuntimeError("AccessDeniedException on arn:aws:...:fn-Ab12Cd"))
+    body = repr(auth.verify(_req({"authorization": "Bearer x"})).body)
+    assert "AccessDenied" not in body and "arn:aws" not in body, body
+
+
+def test_no_module_puts_the_bearer_secret_in_a_plaintext_setting():
+    """The property the three Terraform modules exist to hold. Read the modules
+    themselves: a regression here is invisible in Python and only shows up as a
+    readable credential in somebody's cloud console."""
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                        "terraform", "cloud_function")
+    for module in ("aws_lambda", "gcp_cloudrun"):
+        with open(os.path.join(root, module, "main.tf"), encoding="utf-8") as fh:
+            body = fh.read()
+        for line in body.splitlines():
+            code = line.split("#", 1)[0]
+            if "FN_SHARED_SECRET" in code and "=" in code and "var.shared_secret" in code:
+                raise AssertionError(
+                    f"{module} assigns the bearer secret to a plaintext setting: {line.strip()}")
 
 
 if __name__ == "__main__":

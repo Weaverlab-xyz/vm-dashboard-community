@@ -20,6 +20,7 @@ Stdlib only.
 import hmac
 import os
 
+from fnruntime import logs, secretref
 from fnruntime.contract import Request, Response
 
 # Which header carries the secret, and the scheme prefix to strip. Overridable so
@@ -33,7 +34,15 @@ _DENIED = {"error": "unauthorized"}
 
 
 def _expected() -> str:
-    return os.environ.get("FN_SHARED_SECRET", "") or ""
+    """The configured secret, resolved the same way every other credential is.
+
+    GCP injects it from Secret Manager and Azure resolves it before the worker
+    starts, so on those two it is already in FN_SHARED_SECRET. On AWS the module
+    keeps it in Secrets Manager and passes only the id, so it is read here — once
+    per cold start, then from secretref's cache — and never appears in
+    ``lambda:GetFunctionConfiguration`` output.
+    """
+    return secretref.resolve("FN_SHARED_SECRET")
 
 
 def _header_name() -> str:
@@ -66,8 +75,21 @@ def presented_secret(req: Request) -> str:
 
 
 def verify(req: Request):
-    """``None`` when the caller is authorized, else the ``Response`` to return."""
-    expected = _expected().strip()
+    """``None`` when the caller is authorized, else the ``Response`` to return.
+
+    Never raises. ``dispatch`` calls this outside its own try/except, so an escaping
+    exception would skip the log line and leave the platform to render an opaque
+    502 — the one failure mode worse than a clear 500.
+    """
+    try:
+        expected = _expected().strip()
+    except Exception as exc:
+        # The secret could not be resolved: Secrets Manager unreachable, the role's
+        # grant removed, a malformed payload. Fail CLOSED, and say why in the
+        # function's own log — never in the response, which would tell an
+        # unauthenticated caller how the function is configured.
+        logs.emit("error", "shared_secret_unresolvable", error_type=type(exc).__name__)
+        return Response(500, {"error": "function not configured"})
     if not expected:
         # Fail CLOSED. Deploying without the secret wired up is an operator error,
         # and the one outcome we must never produce is a working open endpoint.

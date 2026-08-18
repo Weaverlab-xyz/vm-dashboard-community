@@ -409,6 +409,13 @@ A wrong value fails at apply as a 404 "Application not found".
   garbage-collected, a `data "google_storage_bucket_object"` would make `destroy`
   unrecoverable.
 - Terraform variables holding secrets are marked `sensitive = true`.
+- The **bearer secret** is not a plaintext setting on AWS or GCP either: the AWS
+  module creates its own Secrets Manager secret and puts only the ARN in the
+  function's environment (a Lambda's env is readable with `ReadOnlyAccess`, so the
+  old arrangement handed a working credential to every read-only principal), and GCP
+  already used Secret Manager. `fnruntime.auth` resolves it through the same
+  `secretref` path as every other credential, and fails closed — without raising,
+  because `dispatch` calls `verify()` outside its own try/except.
 - No credential is passed to a function as a plaintext env var on any cloud. The
   deploy path refuses one (`_reject_plaintext_secrets`), using a superset of
   `fnruntime.logs`' redaction rule — what the runtime will not log is what the

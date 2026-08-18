@@ -157,14 +157,16 @@ def test_every_credential_using_workload_resolves_by_reference():
     """The regression that matters: a workload reading os.environ directly for a
     credential is a workload that needs a plaintext setting."""
     import inspect
+    import re
     from fnworkloads import azure_role_grant, db_grant, portainer_access
     for module, var in ((db_grant, "FN_DB_ADMIN_PASSWORD"),
                         (portainer_access, "FN_PORTAINER_API_KEY"),
                         (azure_role_grant, "FN_AZURE_CLIENT_SECRET")):
-        source = inspect.getsource(module)
-        assert f'secretref.resolve("{var}"' in source, \
+        # Whitespace-stripped, so line breaking the call is not a test failure.
+        compact = re.sub(r"\s+", "", inspect.getsource(module))
+        assert f'secretref.resolve("{var}"' in compact, \
             f"{module.NAME} does not resolve {var} through fnruntime.secretref"
-        assert f'_env("{var}")' not in source, \
+        assert f'_env("{var}")' not in compact, \
             f"{module.NAME} still reads {var} as a plaintext env var"
 
 
