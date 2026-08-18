@@ -163,4 +163,12 @@ disk) are blank there rather than zero: they were never measured, and a fabricat
 worse than an empty cell.
 
 Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
-with Live Output, exactly like a discovery scan.
+with Live Output, exactly like a discovery scan. Start, Force Off, Shutdown, Reboot and
+Hard Reboot all map to a verb; **Suspend, Resume, Pause and Unpause** do not, and are
+refused with a 501 naming what is available rather than approximated onto a neighbouring
+operation — see [the verbs](../remote-agents.md#the-verbs).
+
+Shutdown and Reboot are the two that need the guest utilities. The synced inventory
+carries no `tools_installed`, so those buttons are offered rather than hidden — and no
+"⚠ No guest tools" badge is shown either, since the sync never measured it — and XAPI is
+what answers if `xe-guest-utilities` is missing.

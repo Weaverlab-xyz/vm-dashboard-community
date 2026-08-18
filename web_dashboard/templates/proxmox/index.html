@@ -592,7 +592,7 @@ function proxmoxDashboard() {
     // refuses the rest with a 501 — this is only so the operator sees why a button is
     // dead instead of clicking it and reading an error.
     viaAgent: {{ 'true' if via_agent else 'false' }},
-    agentOps: ['start', 'stop', 'shutdown'],
+    agentOps: ['start', 'stop', 'shutdown', 'reboot'],
 
     async init() {
       requireAuth();

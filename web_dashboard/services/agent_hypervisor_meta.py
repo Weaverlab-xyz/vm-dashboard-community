@@ -40,8 +40,31 @@ HYPERVISOR_META_KEYS = (
 # Phase 4 ships ONE read-only verb. Shipping the *shape* before granting any *power* is
 # the point of splitting this from the write-verb phase.
 READ_VERBS = ("inventory_sync",)
-WRITE_VERBS = ("power_on", "power_off", "power_reset", "restart", "snapshot")
+WRITE_VERBS = ("power_on", "power_off", "power_reset", "restart", "shutdown",
+               "reboot", "snapshot")
 VALID_VERBS = READ_VERBS + WRITE_VERBS
+
+# `shutdown` and `reboot` are the GRACEFUL pair, added because the five verbs before
+# them could not express either one and the pages offer both. They are separate verbs
+# rather than a `graceful` flag on `power_off`/`power_reset` for the same reason those
+# two are separate verbs: a boolean on a destructive op gets defaulted wrong once and
+# then nobody can tell which button did what.
+#
+# Adding a verb is a THREE-file change, and landing part of it is worse than landing
+# none of it: `normalize()` below falls an unrecognised verb back to `inventory_sync`,
+# so a verb this allowlist grants but an agent does not implement would enqueue a
+# discovery scan that completes green while the VM never moves. The three:
+#
+#   1. here — the allowlist, and PAGE_OPS below;
+#   2. runners/agent/agent.py — `_POWER`, and `_power_vsphere`'s own table;
+#   3. runners/hypervisor/run.py — `VALID_VERBS` and `_PS_POWER`, for Hyper-V/ESXi.
+#
+# Version skew across those three is safe in the one direction it actually occurs: an
+# agent is deployed separately and lags. An OLD agent given a NEW verb refuses it out
+# loud — it reads `payload["verb"]` raw and never normalises, so the refusal comes first
+# from `policy.check_verb` (the customer's policy.yaml grants no such verb, and the
+# message names the file and the line to add) and then from the per-kind dispatch. The
+# dangerous direction — an agent that quietly does something else — is not reachable.
 
 # `snapshot` was held back from the first cut because it is a *create* verb and a
 # created thing needs a name — and a name is a free-form string, which is the first
@@ -68,10 +91,10 @@ def snapshot_name(job_id: str) -> str:
 #   delete / deploy / clone / console — these need names, sizes, networks, cloud-init:
 #              a payload shape indistinguishable from a config file, and a config file
 #              is one step from a script. They stay dashboard-direct.
-#   shutdown — a *graceful* guest shutdown, which none of the five verbs above
-#              express. See PAGE_OPS: it is refused rather than approximated, and
-#              adding it means adding it to the agent's per-kind maps in the same
-#              change.
+#   suspend / resume / pause / save — a suspend writes guest RAM to the datastore, so
+#              it is a storage operation wearing a power button's clothes, and the four
+#              products disagree about what resuming one even means. Still refused; see
+#              _NO_EQUIVALENT.
 # power_off and power_reset are separate verbs rather than one verb with a `force`
 # boolean, because a boolean flag on a destructive verb gets defaulted wrong exactly once.
 
@@ -79,8 +102,8 @@ def snapshot_name(job_id: str) -> str:
 # ── Page op -> verb, per hypervisor kind ──────────────────────────────────────
 
 # The hypervisor pages speak the vocabulary of the hypervisor's own UI (`shutdown`,
-# `reboot`, `hard_reboot`); the agent speaks the five verbs above. This is the map
-# between them, and it is **per kind on purpose**.
+# `reboot`, `hard_reboot`); the agent speaks the verbs above. This is the map between
+# them, and it is **per kind on purpose**.
 #
 # It has to be, because `restart` is not one operation. Each kind resolves it
 # differently: Proxmox `/status/shutdown` (a graceful shutdown), vSphere `?action=reset`
@@ -105,39 +128,70 @@ def snapshot_name(job_id: str) -> str:
 # Nothing is approximated onto a neighbouring verb — an op with no honest equivalent is
 # absent here and refused, because "close enough" on a power button is how a graceful
 # shutdown becomes a hard reset.
+#
+# `shutdown` and `reboot` are the verbs that fixed the four inversions above. Note that
+# they did NOT do it by making `restart` mean one thing: `restart` is still XCP-ng's
+# clean reboot and nothing else's, and the one remaining reading of it below is that
+# one. The alternative — redefining `restart` as "graceful reboot" everywhere — was
+# rejected because a deployed agent already implements `restart` and a deployed
+# policy.yaml already grants it, so redefining it would silently change what an
+# un-upgraded agent does with a button, which is the exact failure this whole table
+# exists to prevent. A NEW verb name is refused out loud by an old agent instead.
 PAGE_OPS = {
     "proxmox": {
         "start": "power_on",
         "stop": "power_off",       # /status/stop — the force-stop the page offers
-        "shutdown": "restart",     # -> /status/shutdown, genuinely graceful here
-        # `reboot` is absent: `restart` is Proxmox's *shutdown*, and `power_reset` is a
-        # hard reset. Proxmox has a real /status/reboot; it needs a verb of its own.
+        "shutdown": "shutdown",    # /status/shutdown
+        "reboot": "reboot",        # /status/reboot
+        # `shutdown` was `restart` until the `shutdown` verb existed, because on Proxmox
+        # alone `restart` really does resolve to /status/shutdown. That mapping was
+        # correct and it still moved: leaving it would have kept "restart means shutdown
+        # here" alive as a per-kind special case, which is the reading that made Reboot
+        # unmappable. The cost is that Proxmox Shutdown — the one button in this table
+        # that worked before this change — refuses until its agent is re-pulled.
     },
     "vsphere": {
         "start": "power_on",
         "stop": "power_off",       # ?action=stop — a hard power off, which is the op
         "reset": "power_reset",    # ?action=reset
-        # `shutdown` is absent: vCenter's graceful shutdown is not a power action at all,
-        # it is /guest/power?action=shutdown and needs VMware Tools in the guest.
+        "shutdown": "shutdown",    # NOT a power action: /guest/power?action=shutdown,
+                                   # a different endpoint, and it needs VMware Tools
+                                   # running in the guest. See _power_vsphere.
         # `suspend` is absent: there is no suspend verb.
     },
     "xcpng": {
         "start": "power_on",
         "stop": "power_off",           # VM.hard_shutdown
-        "reboot": "restart",           # VM.clean_reboot
+        "shutdown": "shutdown",        # VM.clean_shutdown
+        "reboot": "restart",           # VM.clean_reboot — the one place `restart` is
+                                       # still read, and the only kind where it is a
+                                       # reboot. Deliberately NOT moved to the new
+                                       # `reboot` verb: this button works on every
+                                       # agent already deployed, and moving it would
+                                       # break it until each one is re-pulled, for no
+                                       # change in what the VM does.
         "hard_reboot": "power_reset",  # VM.hard_reboot
-        # `shutdown` is absent: XAPI's VM.clean_shutdown has no verb. `suspend`,
-        # `resume`, `pause` and `unpause` are absent for the same reason.
+        # `suspend`, `resume`, `pause` and `unpause` are absent — no verb for any.
     },
     "hyperv": {
         "start": "power_on",           # Start-VM
         "stop": "power_off",           # Stop-VM -TurnOff -Force, the force-stop
-        "restart": "power_reset",      # Restart-VM -Force. `-Force` only suppresses the
+        "shutdown": "shutdown",        # Stop-VM, bare — Microsoft's own example for it
+                                       # is "shuts down … through the guest operating
+                                       # system". NO -Force: on Stop-VM that switch is
+                                       # not the prompt suppressor it is on Restart-VM,
+                                       # it means "regardless of any unsaved application
+                                       # data", which is a different promise.
+        "restart": "power_reset",      # Restart-VM -Force. Documented as a "hard"
+                                       # restart — "like powering the computer down,
+                                       # then back up again" — so `power_reset` is the
+                                       # honest verb for it; -Force only suppresses the
                                        # confirmation prompt, which a non-interactive
-                                       # WinRM session cannot answer — so this is the
-                                       # honest Restart here, not a hard reset.
-        # `shutdown`, `pause`, `resume` and `save` are absent; the sibling runner
-        # implements no script for any of them.
+                                       # WinRM session could not answer.
+        # `reboot` is absent, and it is the one op refused for a reason that is not the
+        # dashboard's: Hyper-V has no graceful-reboot cmdlet at all. Restart-VM is the
+        # hard one (above), so there is no script to point a `reboot` verb at here.
+        # `pause`, `resume` and `save` are absent; the runner implements no script.
     },
 }
 
@@ -147,20 +201,21 @@ PAGE_OPS = {
 # said success, and nothing was suspended. `agent_verb` therefore returns None rather
 # than defaulting, and its caller raises rather than enqueues.
 
-_NO_EQUIVALENT = {
-    ("vsphere", "shutdown"):
-        "the nearest verb, `restart`, resolves to a HARD reset here, which risks guest "
-        "data loss",
-    ("xcpng", "shutdown"):
-        "the nearest verb, `restart`, resolves to `VM.clean_reboot` here, which would "
-        "bring the VM back up",
-    ("proxmox", "reboot"):
-        "the nearest verb, `restart`, resolves to `/status/shutdown` here, which would "
-        "leave the VM off",
-    ("hyperv", "shutdown"):
-        "no verb asks the guest to shut down, and `power_off` would be a hard power "
-        "cut — use Force Off if that is what you want",
-}
+# An op whose nearest verb would do something DIFFERENT rather than nothing, and what
+# that something is. Only for those: the generic reason below is the right answer for an
+# op that is merely absent, and a message that over-explains an ordinary gap trains the
+# operator to skim the one that matters.
+#
+# Empty, and that is the point of this change rather than an oversight. Every entry it
+# held — vSphere/XCP-ng/Hyper-V `shutdown` and Proxmox `reboot` — described `restart`
+# resolving to the wrong operation on that kind, and all four now have a verb that
+# resolves to the right one. What remains refused (`suspend`, `resume`, `pause`,
+# `unpause`, `save`) is refused for the ordinary reason: no verb, no near-neighbour
+# quietly standing in for one. Kept rather than deleted because the next verb-shaped gap
+# will want it, and because a stale entry here is a lie the operator reads at the moment
+# they are least able to check it — which is what
+# tests/…::test_no_stated_reason_outlives_the_gap_it_described exists to catch.
+_NO_EQUIVALENT: dict = {}
 
 
 def agent_verb(kind: str, op: str):
@@ -177,8 +232,8 @@ def no_verb_reason(kind: str, op: str) -> str:
     """Why this op is refused for an agent-bound connection, and what is available.
 
     This string is the operator's whole diagnosis — they are looking at a page whose
-    button just failed — so it names the substitution that would have been wrong and
-    the buttons that do work.
+    button just failed — so it names the buttons that do work, and, where one exists,
+    the substitution that would have been wrong.
     """
     kind = str(kind or "").strip().lower()
     op = str(op or "").strip().lower()

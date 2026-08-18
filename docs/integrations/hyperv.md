@@ -285,4 +285,14 @@ disk) are blank there rather than zero: they were never measured, and a fabricat
 worse than an empty cell.
 
 Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
-with Live Output, exactly like a discovery scan.
+with Live Output, exactly like a discovery scan. Start, Force Off, Shutdown and Restart
+all map to a verb; **Pause, Resume and Save** do not, and are refused with a 501 naming
+what is available rather than approximated onto a neighbouring operation — see
+[the verbs](../remote-agents.md#the-verbs).
+
+Shutdown is the one that needs the guest. It runs bare `Stop-VM`, which shuts down
+through the guest operating system — not `-TurnOff` (the power cut) and not `-Force`,
+which on `Stop-VM` means "regardless of any unsaved application data". The synced
+inventory carries no Integration Services state, so the button is offered rather than
+hidden — and no "⚠ No Integration Services" badge is shown either, since the sync never
+measured it — and the host is what answers if Integration Services is not running.

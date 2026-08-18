@@ -1347,8 +1347,13 @@ def _hv_request(conn: dict, method: str, url: str, *, headers=None, body=None,
         with _urlrequest.urlopen(request, timeout=timeout, context=context) as resp:
             raw = resp.read()
     except _urlerror.HTTPError as exc:
-        raise PolicyRefusal(
+        # The code is carried on the exception as well as in the message: a caller that
+        # can explain one particular status (see _power_vsphere and VMware Tools) should
+        # not have to parse the sentence back apart to find out which one it got.
+        refusal = PolicyRefusal(
             f"{parsed.hostname} answered {exc.code} for {method} {parsed.path}")
+        refusal.status = exc.code
+        raise refusal from exc
     except (OSError, ssl.SSLError) as exc:
         raise PolicyRefusal(f"could not reach {parsed.hostname}: {exc}")
     try:
@@ -1665,10 +1670,21 @@ _SYNC = {"vsphere": _sync_vsphere, "proxmox": _sync_proxmox,
 # on purpose: WinRM needs a real NTLM/Negotiate stack, which is the one transport the
 # stdlib cannot do, so Hyper-V power goes through the sibling runner instead — see
 # _SIBLING_KINDS and runners/hypervisor/run.py::_PS_POWER.
+#
+# The nutanix column is inert — `_power_nutanix` refuses before reading this table — and
+# is kept only so the rows stay the same shape. A v3 power change is a full spec PUT, so
+# there is no action string for it to hold in the first place.
 _POWER = {
     "power_on":    {"proxmox": "start",    "nutanix": "ON",  "xcpng": "VM.start"},
     "power_off":   {"proxmox": "stop",     "nutanix": "OFF", "xcpng": "VM.hard_shutdown"},
     "power_reset": {"proxmox": "reset",    "nutanix": "OFF", "xcpng": "VM.hard_reboot"},
+    "shutdown":    {"proxmox": "shutdown", "nutanix": "OFF", "xcpng": "VM.clean_shutdown"},
+    "reboot":      {"proxmox": "reboot",   "nutanix": "OFF", "xcpng": "VM.clean_reboot"},
+    # `restart` predates `shutdown`/`reboot` and resolves differently per kind, which is
+    # exactly why those two were added. It stays for one reason: an agent is upgraded
+    # separately from the dashboard, so removing a verb an already-deployed policy.yaml
+    # grants would break the button that uses it. Only XCP-ng's Reboot still maps here;
+    # the dashboard's PAGE_OPS says so and says why.
     "restart":     {"proxmox": "shutdown", "nutanix": "OFF", "xcpng": "VM.clean_reboot"},
 }
 
@@ -1705,10 +1721,34 @@ def _power_vsphere(conn, payload, policy, emit, verb, checkins=None):
     vm = payload.get("target_id") or ""
     if not vm:
         raise PolicyRefusal("a vSphere power verb needs target_id (the VM moref)")
-    action = {"power_on": "start", "power_off": "stop",
-              "power_reset": "reset", "restart": "reset"}[verb]
-    _hv_request(conn, "POST", f"{base}/api/vcenter/vm/{vm}/power?action={action}",
-                headers={"vmware-api-session-id": token})
+    # Verb -> the sub-path under /api/vcenter/vm/{vm}, not just the ?action= value,
+    # because vCenter puts the graceful pair on a DIFFERENT ENDPOINT. `power` is the
+    # virtual power button; `guest/power` asks the operating system, through VMware
+    # Tools. Holding the whole sub-path here is what lets one table say which of the two
+    # a verb uses — a table of bare actions could only have said `shutdown`, and
+    # `power?action=shutdown` is not a thing vCenter accepts.
+    path = {"power_on":    "power?action=start",
+            "power_off":   "power?action=stop",
+            "power_reset": "power?action=reset",
+            "restart":     "power?action=reset",
+            "shutdown":    "guest/power?action=shutdown",
+            "reboot":      "guest/power?action=reboot"}[verb]
+    try:
+        _hv_request(conn, "POST", f"{base}/api/vcenter/vm/{vm}/{path}",
+                    headers={"vmware-api-session-id": token})
+    except PolicyRefusal as exc:
+        # The guest endpoint has one failure the power endpoint cannot have, and its
+        # bare status line does not say so: 503 here means VMware Tools is not answering
+        # in that guest. Without this the operator reads "answered 503" on a VM that is
+        # plainly running and has no reason to suspect the guest agent.
+        if path.startswith("guest/") and getattr(exc, "status", None) in (400, 503):
+            raise PolicyRefusal(
+                f"{exc}. A graceful {verb} on vCenter is not a power action — it asks "
+                f"the guest OS through VMware Tools (503: Tools not running in the "
+                f"guest; 400: the VM is not powered on). Install or start VMware Tools, "
+                f"or use Force Off, which cuts power and needs no guest agent."
+            ) from exc
+        raise
     emit(f"{verb} issued for {vm}")
     return {"verb": verb, "target_id": vm, "ok": True}
 
@@ -2129,6 +2169,16 @@ def _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins):
         if verb == "snapshot":
             raise PolicyRefusal(
                 f"snapshot is not available for {kind!r} through the sibling runner")
+        if verb == "reboot" and kind == "hyperv":
+            # Refused here rather than by the runner's verb list, which would answer
+            # "unknown verb 'reboot'" and read as a version mismatch. It is not one:
+            # Hyper-V has no graceful-reboot cmdlet to run. Restart-VM is documented as
+            # a "hard" restart — "like powering the computer down, then back up again" —
+            # so it is what `power_reset` uses, and there is nothing left for `reboot`.
+            raise PolicyRefusal(
+                "Hyper-V has no graceful reboot: Restart-VM is a hard restart, which is "
+                "what the page's Restart button already does. Shut the guest down and "
+                "start it again if the reboot has to be graceful.")
         return _via_sibling(conn, payload, policy, emit, verb, kind, checkins)
 
     if verb == "inventory_sync":

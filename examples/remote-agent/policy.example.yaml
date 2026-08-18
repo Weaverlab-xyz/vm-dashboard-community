@@ -75,7 +75,7 @@ job_types:
 #   - name: dc1-vcenter
 #     verbs: [inventory_sync]                                  # read-only
 #   - name: lab-proxmox
-#     verbs: [inventory_sync, power_on, power_off, restart, snapshot]
+#     verbs: [inventory_sync, power_on, power_off, shutdown, reboot, snapshot]
 #
 #   # VMware Workstation on THIS host. `allow_loopback` is what lets the agent reach
 #   # vmrest on 127.0.0.1 — see below.
@@ -83,9 +83,30 @@ job_types:
 #     verbs: [inventory_sync, power_on, power_off]
 #     allow_loopback: true
 #
-# `snapshot` creates a snapshot named dash-<job id>. The name is GENERATED, never
-# supplied — there is no field anywhere in the protocol through which an operator
-# string could reach a hypervisor. Grant it only where you want snapshots piling up.
+# The verbs, and which button each one is:
+#
+#   power_on     Start / Power On
+#   power_off    Force Off — cuts the virtual power, no guest involvement
+#   shutdown     Shutdown — asks the GUEST to shut down, so it needs the guest agent
+#                (VMware Tools / Integration Services / qemu-guest-agent) and does
+#                nothing without it. Granting power_off instead is a power cut.
+#   reboot       Reboot — the graceful one, guest agent again. Proxmox only; XCP-ng's
+#                Reboot button still uses `restart` (see below) and Hyper-V has no
+#                graceful reboot at all.
+#   power_reset  Reset / Hard Reboot / Restart — a hard bounce, no guest involvement
+#   restart      Older name, kept because policies in the field grant it. It resolves
+#                PER PRODUCT — a clean reboot on XCP-ng and ESXi, a graceful shutdown
+#                on Proxmox — which is exactly why `shutdown` and `reboot` exist. Grant
+#                those instead for anything new; only XCP-ng's Reboot button still
+#                needs this one.
+#   snapshot     creates a snapshot named dash-<job id>. The name is GENERATED, never
+#                supplied — there is no field anywhere in the protocol through which an
+#                operator string could reach a hypervisor. Grant it only where you want
+#                snapshots piling up.
+#
+# A verb this agent's build does not know is refused by name, so upgrading the dashboard
+# before the agent costs you the new buttons and nothing else: the refusal names this
+# file and the line to add, and no job is left half-done.
 
 # ── allow_loopback ────────────────────────────────────────────────────────────
 # Loopback and cloud-metadata addresses are denied unconditionally, and that deny is

@@ -151,7 +151,10 @@
               <button @click="openDetail(vm)"
                       class="font-medium text-gray-900 hover:text-blue-600 text-left truncate block w-full"
                       x-text="vm.name"></button>
-              <span x-show="vm.is_running && !vm.tools_installed"
+              <!-- Only when we positively know. On an agent-synced row `tools_installed`
+                   is absent, and `!undefined` would badge every running VM as missing
+                   its guest tools — a claim about something this page never measured. -->
+              <span x-show="vm.is_running && !guestToolsMaybeReady(vm)"
                     class="text-xs text-orange-500 mt-0.5 block"
                     title="xe-guest-utilities not installed — graceful operations unavailable">
                 ⚠ No guest tools
@@ -226,10 +229,15 @@
                 <template x-if="vm.power_state === 'Running'">
                   <div class="flex items-center gap-1.5">
                     <button @click="powerOp(vm, 'shutdown')"
-                            :disabled="vm._busy || !canOp('shutdown') || !vm.tools_installed"
+                            :disabled="vm._busy || !canOp('shutdown')
+                                       || !guestToolsMaybeReady(vm)"
                             :title="!canOp('shutdown') ? opTitle('shutdown')
-                              : (vm.tools_installed ? 'Graceful shutdown'
-                                                    : 'Requires xe-guest-utilities')"
+                              : (vm.tools_installed === undefined
+                                 ? 'Graceful shutdown (VM.clean_shutdown) — this '
+                                   + 'connection is agent-bound, so guest-tools state is '
+                                   + 'not synced; XAPI answers if they are missing'
+                                 : (vm.tools_installed ? 'Graceful shutdown'
+                                                       : 'Requires xe-guest-utilities'))"
                             class="px-2.5 py-1 text-xs font-medium rounded bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 transition-colors">
                       Shutdown
                     </button>
@@ -239,8 +247,15 @@
                       Force Off
                     </button>
                     <button @click="powerOp(vm, 'reboot')"
-                            :disabled="vm._busy || !vm.tools_installed"
-                            :title="vm.tools_installed ? 'Graceful reboot' : 'Requires xe-guest-utilities'"
+                            :disabled="vm._busy || !canOp('reboot')
+                                       || !guestToolsMaybeReady(vm)"
+                            :title="!canOp('reboot') ? opTitle('reboot')
+                              : (vm.tools_installed === undefined
+                                 ? 'Graceful reboot (VM.clean_reboot) — this connection '
+                                   + 'is agent-bound, so guest-tools state is not synced; '
+                                   + 'XAPI answers if they are missing'
+                                 : (vm.tools_installed ? 'Graceful reboot'
+                                                       : 'Requires xe-guest-utilities'))"
                             class="px-2.5 py-1 text-xs font-medium rounded bg-orange-500 hover:bg-orange-600 text-white disabled:opacity-50 transition-colors">
                       Reboot
                     </button>
@@ -384,7 +399,7 @@ function xcpngDashboard() {
     // refuses the rest with a 501 — this is only so the operator sees why a button is
     // dead instead of clicking it and reading an error.
     viaAgent: {{ 'true' if via_agent else 'false' }},
-    agentOps: ['start', 'stop', 'reboot', 'hard_reboot'],
+    agentOps: ['start', 'stop', 'reboot', 'hard_reboot', 'shutdown'],
 
     get hosts() {
       return [...new Set(this.allVms.map(v => v.host).filter(Boolean))].sort();
@@ -488,9 +503,20 @@ function xcpngDashboard() {
 
     opTitle(op) {
       if (this.canOp(op)) return '';
-      return 'Not available through a remote agent — the agent has no clean-shutdown, '
-           + 'suspend, resume or pause verb, and its restart verb is a clean REBOOT. '
+      return 'Not available through a remote agent — the agent has no suspend, resume, '
+           + 'pause or unpause verb, and refuses rather than approximate one. '
            + 'Available: ' + this.agentOps.join(', ') + '.';
+    },
+
+    // UNKNOWN is not ABSENT. A row synced by an agent carries no `tools_installed` at
+    // all: hypervisor_view_service drops live-only fields rather than fabricate them, so
+    // `!vm.tools_installed` is true and Shutdown stays disabled on precisely the
+    // connections the `shutdown` verb was added for. Show it unless we positively know
+    // the guest utilities are missing; if they are, XAPI refuses VM.clean_shutdown and
+    // the job carries that message.
+    guestToolsMaybeReady(vm) {
+      return vm.tools_installed === undefined || vm.tools_installed === null
+          || !!vm.tools_installed;
     },
 
     async powerOp(vm, op) {
