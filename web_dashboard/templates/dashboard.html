@@ -234,7 +234,7 @@
       tileSections: [
         {
           // Always-on summary band (jobs run for every integration; inventory is
-          // cross-provider), so it lives up top rather than under On-Premises.
+          // cross-provider), so it lives up top rather than inside a provider band.
           id: 'overview',
           label: 'Overview',
           gridClass: 'grid grid-cols-1 sm:grid-cols-2 gap-4',
@@ -249,23 +249,6 @@
               key: 'deployed_resources', title: 'Deployed Resources', href: '/inventory',
               description: 'across all providers',
               valueClass: 'text-indigo-600',
-            },
-          ],
-        },
-        {
-          id: 'onprem',
-          label: 'On-Premises',
-          gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
-          refreshable: false,
-          tiles: [
-            {
-              key: 'total_vms', title: 'Total VMs', href: '/vms',
-              flag: 'vmware', description: 'across all workgroups',
-            },
-            {
-              key: 'running_vms', title: 'Running', href: '/vms',
-              flag: 'vmware', description: 'VMs currently online',
-              valueClass: 'text-green-600',
             },
           ],
         },
@@ -302,11 +285,17 @@
           ],
         },
         {
+          // Every on-prem hypervisor, one tile each — Workstation included. It used to
+          // get a two-tile "On-Premises" band of its own directly above this one, which
+          // read as a second, separate inventory even though the tiles here count the
+          // same kind of thing for every other hypervisor. Tile order matches the nav
+          // (_nav_links.html).
           id: 'hypervisors',
           label: 'Hypervisors',
           gridClass: 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4',
           refreshable: true,
           tiles: [
+            { key: 'workstation_vms', title: 'Workstation', href: '/vms', flag: 'vmware', secondaryLabel: 'running' },
             { key: 'proxmox_vms', title: 'Proxmox',  href: '/proxmox', flag: 'proxmox', secondaryLabel: 'running' },
             { key: 'vsphere_vms', title: 'vSphere',  href: '/vsphere', flag: 'vsphere', secondaryLabel: 'running' },
             { key: 'hyperv_vms',  title: 'Hyper-V',  href: '/hyperv',  flag: 'hyperv',  secondaryLabel: 'running' },
@@ -346,8 +335,10 @@
         }
 
         await this.loadFeatures();
-        // Load on-prem stats + jobs in parallel; cloud/hypervisor/containers in background
-        await Promise.all([this.loadOnPremStats(), this.loadActiveJobs(), this.loadJobs(), this.loadInventoryCount(), this.loadAttention()]);
+        // Jobs + inventory + attention up front; cloud/managed/hypervisor/container tiles
+        // in the background. Workstation counts — the tile and the workgroup badges —
+        // come with the hypervisor section now, not a call of their own.
+        await Promise.all([this.loadActiveJobs(), this.loadJobs(), this.loadInventoryCount(), this.loadAttention()]);
         this.refreshSection(this.tileSections.find(s => s.id === 'cloud'));
         this.refreshSection(this.tileSections.find(s => s.id === 'managed'));
         this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'));
@@ -566,20 +557,30 @@
         }
       },
 
-      async loadOnPremStats() {
-        if (!this.features.vmware) return;
+      // Workstation VMs, plus the per-workgroup badge counts below, from the one call.
+      // `/api/vms` is the list the Workstation page itself renders: the local VMX scan
+      // MERGED with the rows a remote agent syncs for its own host. The counts used to
+      // come from /api/vms/dashboard-stats, which reads VMStateCache alone — a table only
+      // the two PowerShell paths ever write. On a host with no local PowerShell that
+      // endpoint 500s, and even if it didn't its total could never include an agent's VMs.
+      async _fetchWorkstationVms() {
         try {
-          const resp = await API.get('/api/vms/dashboard-stats');
-          if (!resp) return;
-          this.stats.total_vms   = { value: resp.total_vms };
-          this.stats.running_vms = { value: resp.running_vms };
-          for (const wg of this.workgroups) {
-            wg.count = resp.workgroup_counts[wg.name] ?? 0;
+          const r = await API.get('/api/vms');
+          if (!r) return { value: -1 };
+          const vms = r.vms || [];
+          // The badges ride along on this call rather than costing a second one; the block
+          // that renders them is gated on the same `vmware` flag as this tile, so it is
+          // visible exactly when this fetcher runs.
+          const counts = {};
+          for (const vm of vms) {
+            const wg = vm.workgroup || '';
+            counts[wg] = (counts[wg] || 0) + 1;
           }
+          for (const wg of this.workgroups) wg.count = counts[wg.name] ?? 0;
+          return { value: r.count ?? vms.length,
+                   secondary: vms.filter(v => v.is_running).length };
         } catch (e) {
-          // No /api/vms endpoint (community without VMware) — quietly mark unavailable
-          this.stats.total_vms   = { value: -1 };
-          this.stats.running_vms = { value: -1 };
+          return { value: -1 };
         }
       },
 
@@ -658,6 +659,7 @@
         if (k === 'ovas')             return this._fetchListCount('/api/images/ovas',           'ovas');
         if (k === 'cloud_cost')       return this._fetchCost();
         // Hypervisors
+        if (k === 'workstation_vms')  return this._fetchWorkstationVms();
         if (k === 'proxmox_vms')      return this._fetchListCount('/api/proxmox/resources?type=vm', 'resources', v => v.status === 'running');
         if (k === 'vsphere_vms')      return this._fetchListCount('/api/vsphere/vms',           'vms',       v => v.power_state === 'poweredOn' || v.state === 'running');
         if (k === 'hyperv_vms')       return this._fetchListCount('/api/hyperv/vms',            'vms',       v => v.state === 'Running' || v.state === 'running');
