@@ -1,16 +1,37 @@
 # Hypervisor connections — YOUR file, not the dashboard's.
 #
-# This is where hypervisor credentials live when a connection is reached through an
-# agent. The dashboard stores the connection's NAME and nothing else: no host, no
-# username, no password. A job says "run inventory_sync on dc1-vcenter" and the agent
-# resolves the rest from here.
+# This is where a connection's HOST and USERNAME live, and by default its credential
+# too. The dashboard never stores the host or the username for an agent-bound
+# connection: those aim the connection, and aiming stays yours. A job says "run
+# inventory_sync on dc1-vcenter" and the agent resolves the rest from here.
 #
-# That is deliberate, and it is the difference between this design and a proxy. If the
-# dashboard shipped credentials in the job envelope, a standing vCenter administrator
-# password would sit in its database, in every job payload, in this agent's memory —
-# and, because envelopes are signed rather than encrypted, in the logs of any
-# TLS-inspecting corporate proxy between the two. The whole feature is sold on the
-# opposite property.
+# That is the difference between this design and a proxy. A dashboard that could set the
+# host could point this agent at an endpoint of its choosing and collect whatever
+# credential the agent presented there.
+#
+# The credential is the one part you can choose to move. Three options, weakest first:
+#
+#   password / password_file    it lives on this host. Simple, and the historical
+#                               default — but anyone who can read files here has a
+#                               standing hypervisor administrator password, offline and
+#                               forever, and a file read is not an event anybody sees.
+#
+#   ps_managed_account          this agent asks Password Safe per job. No hypervisor
+#                               password here, but a Password Safe OAuth client is here
+#                               instead, and its entitlements are usually broader than
+#                               the one account you are using it for.
+#
+#   dashboard_secret: true      the DASHBOARD holds the credential (or a Password Safe
+#                               account reference) and this agent fetches it per job,
+#                               encrypted to a key that exists only for that fetch.
+#                               Nothing sensitive is stored on this host at all.
+#
+# The trade in that last one is real and worth stating: the dashboard, rather than this
+# host, becomes the thing holding the credential. Point it at a Password Safe managed
+# account on the Connections page and neither holds a standing password — the dashboard
+# checks one out per job, checks it back in and rotates it. Which of the three applies
+# is decided HERE, in your file; a credential set on the dashboard does nothing until an
+# entry below says `dashboard_secret: true`.
 #
 # Mount it read-only, with the SELinux relabel:
 #   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"      # bash
@@ -25,7 +46,7 @@
 # verb runs:
 #   1. the dashboard grants this agent the `agent_hypervisor` job type (Agents page);
 #   2. policy.yaml grants that verb on this connection name;
-#   3. this file defines the name, with a credential.
+#   3. this file defines the name, and says where its credential comes from.
 # Withhold any one and nothing happens.
 
 connections:
@@ -86,6 +107,12 @@ connections:
   # below it — an operator who has moved a connection to Password Safe should not
   # silently keep authenticating with the stale secret.
   #
+  # It is MUTUALLY EXCLUSIVE with `dashboard_secret` rather than ordered against it: the
+  # two are different authorities (this agent asking Password Safe, versus the dashboard
+  # asking it), there is no stale-leftover story that makes preferring one kind, and
+  # choosing quietly would leave nobody able to say which credential a job used. Declare
+  # both and the agent refuses the job and says so.
+  #
   # Mount the client alongside this file (see passwordsafe.example.yaml):
   #   -v "$PWD/passwordsafe.yaml:/etc/dashboard-agent/passwordsafe.yaml:ro,Z"      # bash
   #   -v "${PWD}/passwordsafe.yaml:/etc/dashboard-agent/passwordsafe.yaml:ro,Z"    # PowerShell
@@ -96,6 +123,34 @@ connections:
   #   username: svc-dashboard@vsphere.local
   #   ps_managed_account: 4821        # the Password Safe ManagedAccountID
   #   ps_duration_minutes: 30
+  #   verify_ssl: true
+
+  # ── Credential held by the dashboard, fetched per job ──────────────────────
+  #
+  # This host then stores NOTHING sensitive for this connection — no password, no
+  # password file, and no Password Safe client either. The credential is fetched when a
+  # job needs it and encrypted to a keypair generated for that one fetch, so it is not
+  # readable by a TLS-inspecting proxy in between and there is no decryption key on this
+  # host for anyone to steal later.
+  #
+  # Set the credential on the dashboard's Connections page for this connection. Point it
+  # at a Password Safe managed account there and the dashboard holds no standing password
+  # either: it checks one out per job, checks it back in, and rotates it on release.
+  #
+  # Requires an agent image of 2.1.0 or newer. The dashboard refuses to QUEUE work for an
+  # older one rather than let it fail against the hypervisor, because an old agent does
+  # not know this key — it would fall through to a password you have just deleted, send an
+  # empty one, and get back "wrong username or password", which reads as the wrong problem
+  # and on the sync schedule risks locking the service account out.
+  #
+  # Delete `password` / `password_file` when you add this. They are ignored, and the agent
+  # warns on every job that they are still sitting here in plaintext.
+  #
+  # - name: dc3-vcenter
+  #   kind: vsphere
+  #   host: vcenter3.lab.internal
+  #   username: svc-dashboard@vsphere.local
+  #   dashboard_secret: true
   #   verify_ssl: true
 
   # ── VMware Workstation Pro (co-located) ────────────────────────────────────

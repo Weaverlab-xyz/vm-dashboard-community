@@ -103,6 +103,12 @@ def agent_power_job(db: Session, conn, *, op: str, target_id: str,
             detail=(f"Agent '{agent.name}' is not granted the agent_hypervisor job "
                     f"type. Grant it on the Agents page."))
 
+    # Still before create_job, for the same reason every refusal above is: a job row
+    # created and then failed reads as an agent fault, and there is no field on it in which
+    # to say otherwise.
+    for problem in hcs.dashboard_secret_blockers(db, conn.id, agent):
+        raise HTTPException(status_code=409, detail=problem)
+
     meta = agent_hypervisor_meta.normalize({
         "verb": verb, "connection_ref": conn.agent_connection_name or "",
         "connection_id": conn.id, "kind": conn.kind,

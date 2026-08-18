@@ -56,17 +56,28 @@ from urllib.parse import quote as _quote, urlparse
 
 import requests
 import yaml
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey, Ed25519PublicKey,
 )
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey, X25519PublicKey,
+)
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 # 2.x scans for HYPERVISORS. 1.x scanned for Kubernetes API servers and database
 # listeners, and handed a 2.x scan request it would probe nothing, complete green and
 # report zero findings — indistinguishable from a clean network. The dashboard refuses
 # to queue for a 1.x agent (api/agent.queue_discovery), which is why the major matters
 # and why the lease body reports it on every poll rather than only at enrolment.
-AGENT_VERSION = "2.0.0"
+# 2.1 added `dashboard_secret`: the credential is fetched per job from the dashboard and
+# opened with `open_sealed`, so nothing sensitive sits in connections.yaml. A 2.0 agent
+# does not know the key and would fall through to a local password the operator has just
+# deleted — sending an empty one — so the dashboard refuses to QUEUE for an agent below
+# this (agent_service.supports_dashboard_secret) rather than let it fail against the
+# hypervisor, where an empty password reads as a wrong one and retries risk a lockout.
+AGENT_VERSION = "2.1.0"
 
 log = logging.getLogger("agent")
 
@@ -240,6 +251,115 @@ def canonical_request(*, agent_id: str, timestamp: str, nonce: str, audience: st
         "sha256": hashlib.sha256(body or b"").hexdigest(),
         "ts": str(timestamp),
     })
+
+
+# ── Sealed credentials (mirrors web_dashboard/services/agent_sealing.py) ──────
+# Vendored for the same reason the signing block above is, and pinned by the same
+# contract test. Read that module's header for why a just-in-time credential is
+# encrypted to a per-fetch key rather than trusted to TLS: an inspecting proxy sees
+# response bodies, and this feature is sold on the property that it learns nothing.
+#
+# The ephemeral private half below never touches disk and dies with the fetch, so a
+# stolen identity.json yields no decryption key for traffic captured earlier.
+
+SEAL_VERSION = 1
+SEAL_ALG = "X25519-HKDF-SHA256-AES256GCM"
+SEAL_INFO = b"vm-dashboard/agent-secret-seal/v1"
+SEAL_NONCE_BYTES = 12
+_SEAL_KEY_BYTES = 32
+
+
+class SealError(Exception):
+    """A sealed credential that could not be opened, and why."""
+
+
+def seal_aad(*, agent_id: str, audience: str, epk: str, job_id: str, ref: str) -> bytes:
+    """Rebuilt locally from trusted state, never read off the wire — the binding is
+    vacuous otherwise. `ref` is the load-bearing field: without it a credential can be
+    relabelled as one for a connection pointing at a host the attacker controls."""
+    return serialize({
+        "agent_id": str(agent_id),
+        "aud": str(audience),
+        "epk": str(epk),
+        "job_id": str(job_id),
+        "ref": str(ref),
+        "v": SEAL_VERSION,
+    })
+
+
+def generate_reply_keypair() -> tuple:
+    private = X25519PrivateKey.generate()
+    raw_private = private.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption())
+    raw_public = private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw)
+    return (base64.b64encode(raw_private).decode("ascii"),
+            base64.b64encode(raw_public).decode("ascii"))
+
+
+def _seal_b64(envelope: dict, name: str, expect: int = 0) -> bytes:
+    try:
+        raw = base64.b64decode(str(envelope.get(name) or "").encode("ascii"),
+                               validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise SealError(f"sealed envelope field {name!r} is not valid base64") from exc
+    if not raw:
+        raise SealError(f"sealed envelope field {name!r} is missing or empty")
+    if expect and len(raw) != expect:
+        raise SealError(
+            f"sealed envelope {name!r} is {len(raw)} bytes, not {expect}")
+    return raw
+
+
+def open_sealed(private_b64: str, envelope: dict, *, agent_id: str, audience: str,
+                job_id: str, ref: str) -> str:
+    if not isinstance(envelope, dict):
+        raise SealError("sealed envelope is not an object")
+    if envelope.get("v") != SEAL_VERSION:
+        raise SealError(
+            f"the dashboard sealed this credential as version {envelope.get('v')!r}, "
+            f"but this agent only understands version {SEAL_VERSION} — pull a newer "
+            f"chrweav/dashboard-agent image and restart")
+    if envelope.get("alg") != SEAL_ALG:
+        raise SealError(
+            f"sealed envelope algorithm {envelope.get('alg')!r} is not {SEAL_ALG}")
+
+    private_raw = _seal_b64({"k": private_b64}, "k", _SEAL_KEY_BYTES)
+    epk_raw = _seal_b64(envelope, "epk", _SEAL_KEY_BYTES)
+    nonce = _seal_b64(envelope, "nonce", SEAL_NONCE_BYTES)
+    ciphertext = _seal_b64(envelope, "ct")
+
+    try:
+        private = X25519PrivateKey.from_private_bytes(private_raw)
+        shared = private.exchange(X25519PublicKey.from_public_bytes(epk_raw))
+    except Exception as exc:  # noqa: BLE001
+        raise SealError("X25519 key agreement failed") from exc
+
+    recipient_raw = private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw)
+    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+               info=SEAL_INFO).derive(epk_raw + recipient_raw + shared)
+    aad = seal_aad(agent_id=agent_id, audience=audience,
+                   epk=base64.b64encode(epk_raw).decode("ascii"),
+                   job_id=job_id, ref=ref)
+    try:
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
+    except Exception as exc:  # noqa: BLE001
+        raise SealError(
+            "the sealed credential did not authenticate — it was sealed to a different "
+            "key, or for a different agent, job or connection") from exc
+
+    try:
+        payload = json.loads(plaintext.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise SealError("the sealed payload is not valid JSON") from exc
+    if not isinstance(payload, dict) or "secret" not in payload:
+        raise SealError("the sealed payload carries no 'secret' field")
+    return str(payload["secret"])
 
 
 # ── Policy ────────────────────────────────────────────────────────────────────
@@ -578,6 +698,9 @@ class Dashboard:
         elif INSECURE_TLS:
             self.session.verify = False
         self.identity: Optional[Identity] = None
+        # Credentials fetched for the job in flight, held only to scrub them out of
+        # anything sent back. Cleared by `execute` when the job ends.
+        self._held: set = set()
 
     def _url(self, path: str) -> str:
         url = f"{self.base}{path}"
@@ -587,8 +710,50 @@ class Dashboard:
             raise AgentFatal(f"refusing to call a host other than {self._host}")
         return url
 
+    def hold_secret(self, value: str) -> None:
+        """Remember a fetched credential so it can be scrubbed from anything outbound.
+
+        Registered here rather than at each use site because this object owns the only
+        two channels back to the dashboard — Live Output and the job's error string — and
+        filtering at the exit is the only approach that actually holds. The alternative is
+        auditing every library's exception text, which cannot be done: a URL with embedded
+        credentials, an XML-RPC fault echoing the request it failed on, or a driver that
+        helpfully prints its connection string all arrive as `str(exc)`, and `execute`
+        ships that verbatim into the job row where it renders as the failure reason.
+        """
+        if value and len(str(value)) >= 4:
+            self._held.add(str(value))
+
+    def release_secrets(self) -> None:
+        self._held.clear()
+
+    def redact(self, text: str) -> str:
+        """``text`` with every credential this job fetched replaced.
+
+        Not a defence against a hostile process — it shares memory with the credential
+        either way. It is a defence against the ordinary accident of a secret riding out
+        inside somebody else's error message.
+        """
+        out = str(text)
+        for secret in self._held:
+            if secret in out:
+                out = out.replace(secret, "***redacted***")
+        return out
+
+    def _scrub(self, payload):
+        if not self._held:
+            return payload
+        if isinstance(payload, dict):
+            return {k: self._scrub(v) for k, v in payload.items()}
+        if isinstance(payload, list):
+            return [self._scrub(v) for v in payload]
+        if isinstance(payload, str):
+            return self.redact(payload)
+        return payload
+
     def _request(self, method: str, path: str, payload: dict, *, signed: bool = True):
-        body = serialize(payload)
+        # Scrubbed BEFORE serialisation, so the signature covers the bytes actually sent.
+        body = serialize(self._scrub(payload))
         headers = {"Content-Type": "application/json"}
         if signed:
             if not self.identity:
@@ -706,6 +871,50 @@ class Dashboard:
                  error: str = "") -> None:
         self._request("POST", f"/api/agent/jobs/{job_id}/complete",
                       {"status": status, "result": result or {}, "error": error})
+
+    def job_secret(self, job_id: str, ref: str) -> str:
+        """Fetch this job's hypervisor credential from the dashboard, sealed.
+
+        A fresh X25519 keypair per call. The public half rides in the request body, which
+        ``canonical_request`` already covers, so it is authenticated by this agent's
+        Ed25519 identity with nothing new on the wire — and the private half exists only
+        as a local for the length of this method, so there is no decryption key on this
+        host for anyone to steal and use on captured traffic.
+
+        The AAD is rebuilt from what this agent already knows — its own identity, and the
+        job envelope it verified before running anything — never from the response. Reading
+        any of it back out of the same reply that carried the ciphertext would make the
+        binding meaningless.
+        """
+        private_b64, public_b64 = generate_reply_keypair()
+        resp = self._request("POST", f"/api/agent/jobs/{job_id}/secret",
+                             {"connection_ref": ref, "reply_key": public_b64})
+        if resp.status_code != 200:
+            detail = ""
+            try:
+                detail = str((resp.json() or {}).get("detail") or "")
+            except Exception:  # noqa: BLE001
+                detail = (resp.text or "")[:400]
+            # Says which of the three files is NOT the problem. Every other refusal this
+            # agent produces points at policy.yaml or connections.yaml, so without this the
+            # operator goes and re-reads their own configuration first.
+            raise PolicyRefusal(
+                f"the dashboard refused to release the credential for {ref!r} "
+                f"({resp.status_code}): {detail} — this is a dashboard-side authorization "
+                f"or configuration refusal, not a policy.yaml or connections.yaml problem.")
+        try:
+            envelope = (resp.json() or {}).get("sealed") or {}
+        except Exception as exc:  # noqa: BLE001
+            raise PolicyRefusal(
+                f"the dashboard's credential response for {ref!r} was not JSON") from exc
+        try:
+            secret = open_sealed(
+                private_b64, envelope, agent_id=self.identity.agent_id,
+                audience=self.identity.audience, job_id=job_id, ref=ref)
+        except SealError as exc:
+            raise PolicyRefusal(f"connection {ref!r}: {exc}") from exc
+        self.hold_secret(secret)
+        return secret
 
 
 # ── Probes — never authenticate ───────────────────────────────────────────────
@@ -953,7 +1162,8 @@ def _expand(payload: dict, policy: Policy, emit) -> list:
     return targets[:max_hosts]
 
 
-def run_discovery(payload: dict, policy: Policy, emit, cancelled, job_id: str = "") -> dict:
+def run_discovery(payload: dict, policy: Policy, emit, cancelled, job_id: str = "",
+                  dashboard=None) -> dict:
     """Sweep the requested scope with unauthenticated probes and return findings."""
     scan_kind = payload.get("scan_kind") or "all"
     timeout = float(payload.get("timeout_s") or 3)
@@ -1245,19 +1455,91 @@ class PasswordSafe:
             log.debug("Password Safe check-in failed for request %s", request_id)
 
 
-def _secret_for(conn: dict, checkins: list = None) -> str:
-    """The connection's password, by whichever of the three means it declares.
+class JobSecrets(list):
+    """The per-job credential context, carried by the `checkins` parameter.
 
-    Precedence is deliberate: `ps_managed_account` first, because an operator who has
-    moved a connection to Password Safe should not silently keep using a stale literal
-    left in the file below it. Then `password_file` (so a Docker/Podman secret can be
-    mounted), then an inline `password`.
+    A ``list`` subclass, which is a liberty taken on purpose. ``_secret_for`` needs a job
+    id and a dashboard client, and thirteen call sites across the per-kind sync, power and
+    snapshot functions already thread ``checkins`` down to it. Subclassing means
+    ``checkins.append(request_id)``, ``_checkin_all(checkins)`` and every one of those
+    thirteen signatures stay byte-for-byte unchanged — and, more to the point, so do the
+    fourteen tests in ``tests/test_agent_ps_checkout.py`` that pin the precedence chain.
+    Rewriting the call shape of the file that *proves* the ordering, in the change that
+    adds to the ordering, is the diff you least want to review.
+
+    The alternative, if this ever grates: rename the last parameter to ``ctx`` at all
+    thirteen sites and take the test churn.
+    """
+
+    def __init__(self, *, job_id: str = "", dashboard=None, ref: str = ""):
+        super().__init__()
+        self.job_id = job_id
+        self.dashboard = dashboard
+        self.ref = ref
+        self._fetched: Optional[str] = None
+
+    def dashboard_secret(self, conn: dict) -> str:
+        """The credential the dashboard holds for this connection, fetched once per job.
+
+        Memoised because a Workstation job reads the credential on *every* HTTP call —
+        `_vmrest` calls `_secret_for` each time — and for a `ps_account://` connection each
+        of those would otherwise be another Password Safe request to open and close.
+        """
+        if self._fetched is not None:
+            return self._fetched
+        if not self.dashboard or not self.job_id:
+            raise PolicyRefusal(
+                f"connection {conn.get('name')!r} declares 'dashboard_secret: true', but "
+                f"this build cannot fetch a dashboard-held credential outside a leased "
+                f"job. Remove the key and configure a local credential, or upgrade the "
+                f"agent image.")
+        self._fetched = self.dashboard.job_secret(self.job_id, self.ref or
+                                                  str(conn.get("name") or ""))
+        return self._fetched
+
+
+def _secret_for(conn: dict, checkins: list = None) -> str:
+    """The connection's password, by whichever of the four means it declares.
+
+    Precedence is deliberate: a *remote* source first, because an operator who has moved a
+    connection off local storage should not silently keep authenticating with a stale
+    literal left in the file underneath it. Then `password_file` (so a Docker/Podman secret
+    can be mounted), then an inline `password`.
+
+    ``ps_managed_account`` and ``dashboard_secret`` are the two remote sources and they are
+    **mutually exclusive** rather than ordered. They are different authorities — one has
+    this agent ask Password Safe directly, the other has the dashboard do it — and there is
+    no stale-leftover story that makes silently preferring one over the other kind. Picking
+    quietly would leave nobody able to say which credential a job actually used.
 
     When `checkins` is provided, a just-in-time checkout appends its request id so the
     caller can check the credential back in when the job finishes. Without it the
     request simply expires on its own duration — which is safe, just untidy.
     """
     account = conn.get("ps_managed_account")
+    if conn.get("dashboard_secret"):
+        if account:
+            raise PolicyRefusal(
+                f"connection {conn.get('name')!r} declares both 'ps_managed_account' and "
+                f"'dashboard_secret: true'. Those are two different authorities and this "
+                f"agent will not choose between them — remove one from connections.yaml "
+                f"and restart the agent.")
+        for stale in ("password", "password_file"):
+            if conn.get(stale):
+                # Warned, not refused, so this matches the rule already in force for
+                # `ps_managed_account` over a leftover literal — and warned rather than
+                # silent because the operator has left a plaintext credential on this host
+                # believing they had moved it to the dashboard.
+                log.warning(
+                    "connection %r takes its credential from the dashboard; the %r left "
+                    "in connections.yaml is IGNORED and should be deleted",
+                    conn.get("name"), stale)
+        if not isinstance(checkins, JobSecrets):
+            raise PolicyRefusal(
+                f"connection {conn.get('name')!r} declares 'dashboard_secret: true', but "
+                f"this code path has no job context to fetch it with. This is an agent "
+                f"bug — please report it.")
+        return checkins.dashboard_secret(conn)
     if account:
         ps = PasswordSafe.from_file()
         ps.sign_in()
@@ -2104,7 +2386,8 @@ def _via_sibling(conn, payload, policy, emit, verb, kind, checkins=None):
     return _run_sibling(policy, env, emit, lambda: False)
 
 
-def run_hypervisor(payload: dict, policy: Policy, emit, cancelled, job_id: str = "") -> dict:
+def run_hypervisor(payload: dict, policy: Policy, emit, cancelled, job_id: str = "",
+                   dashboard=None) -> dict:
     """Execute ONE allow-listed verb against ONE named connection.
 
     Three independent gates, and all three must agree:
@@ -2140,7 +2423,12 @@ def run_hypervisor(payload: dict, policy: Policy, emit, cancelled, job_id: str =
     if conn.get("ps_managed_account"):
         emit(f"checking a credential out of Password Safe for account "
              f"{conn['ps_managed_account']} — this agent stores none")
-    checkins: list = []
+    elif conn.get("dashboard_secret"):
+        # A statement of fact, never the value. The credential is scrubbed out of anything
+        # outbound anyway (Dashboard.hold_secret), but nothing should be relying on that.
+        emit(f"fetching the credential for {ref} from the dashboard — "
+             f"nothing is stored on this host")
+    checkins = JobSecrets(job_id=job_id, dashboard=dashboard, ref=ref)
     try:
         return _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins)
     finally:
@@ -2219,6 +2507,10 @@ class Reporter:
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
     def emit(self, line: str) -> None:
+        # Redacted before it reaches either destination, including the local log — a
+        # credential this job fetched has no business in a line somebody pasted into a
+        # ticket, wherever that line came from.
+        line = self.dashboard.redact(line)
         log.info("[%s] %s", self.job_id[:8], line)
         with self._lock:
             self.lines.append(str(line)[:8000])
@@ -2266,7 +2558,7 @@ def execute(dashboard: Dashboard, policy: Policy, job: dict) -> None:
 
         reporter.emit(f"Starting {job_type} (policy {policy.digest[:12]}…)")
         result = handler(job.get("payload") or {}, policy, reporter.emit,
-                         lambda: reporter.cancelled, job_id)
+                         lambda: reporter.cancelled, job_id, dashboard)
         reporter.stop()
 
         if reporter.cancelled:
@@ -2286,7 +2578,19 @@ def execute(dashboard: Dashboard, policy: Policy, job: dict) -> None:
     except Exception as exc:  # noqa: BLE001
         log.exception("job %s failed", job_id)
         reporter.stop()
-        dashboard.complete(job_id, status="failed", error=str(exc)[:1000])
+        # Type name plus a shortened message rather than the raw `str(exc)`. This string
+        # lands in the job row and is the ONLY text a failed job renders, and an arbitrary
+        # library's exception message is not something this agent can vouch for — a driver
+        # that prints its connection string, or an XML-RPC fault echoing the request it
+        # failed on, both arrive here. `Dashboard._scrub` removes any credential this job
+        # fetched on the way out; the type name is what keeps the line diagnosable.
+        dashboard.complete(job_id, status="failed",
+                           error=f"{type(exc).__name__}: {str(exc)[:400]}")
+    finally:
+        # The credential is scoped to the job, so the scrub set is too. Nothing here
+        # pretends to wipe it from memory — a Python str cannot be zeroed, and claiming
+        # otherwise would be theatre; the bound is scope, not erasure.
+        dashboard.release_secrets()
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────

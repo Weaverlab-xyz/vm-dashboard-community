@@ -241,15 +241,66 @@ def test_option_keys_hold_nothing_credential_shaped():
 
 # ── agent binding ──────────────────────────────────────────────────────────────
 
-def test_an_agent_bound_connection_holds_a_name_and_no_credential():
+def test_an_agent_bound_connection_never_holds_the_target():
+    """The half of the old invariant that did not change, and must not.
+
+    `host`/`username` are the fields that *aim* the connection. A dashboard able to set
+    them could point the agent at an endpoint it controls and collect whatever credential
+    the agent presents there — which is precisely what makes handing the agent a
+    credential safe only while the target stays the customer's to choose.
+    """
     db = _fresh()
     out = hcs.create(db, kind="vsphere", name="dc1", created_by="t",
                      agent_id="agt-1", agent_connection_name="dc1-vcenter",
-                     host="ignored.example.com", secret="ignored")
+                     host="ignored.example.com", username="ignored",
+                     secret="s3cret")
     assert out["via_agent"] is True
     assert out["host"] == "", "an agent-bound row must not imply the dashboard dials it"
-    assert out["has_secret"] is False
+    assert out["username"] == ""
     assert out["agent_connection_name"] == "dc1-vcenter"
+    db.close()
+
+
+def test_an_agent_bound_connection_may_now_hold_a_secret():
+    """The half that DID change, and the reason this test was split in two.
+
+    It used to assert `has_secret is False` — an agent-bound row was defined as holding no
+    credential at all. It may now hold one so the agent can fetch it just-in-time and keep
+    nothing on the on-prem host. The credential is still inert until that agent's
+    connections.yaml opts in, so the row alone changes no behaviour.
+    """
+    db = _fresh()
+    out = hcs.create(db, kind="vsphere", name="dc1", created_by="t",
+                     agent_id="agt-1", agent_connection_name="dc1-vcenter",
+                     secret="s3cret")
+    assert out["has_secret"] is True
+    assert "secret" not in out and "secret_enc" not in out, \
+        "the projection still never carries the credential itself"
+
+    row = db.query(hcs.HypervisorConnection).filter_by(id=out["id"]).one()
+    assert row.secret_enc and row.secret_enc != "s3cret", "ciphertext at rest"
+    assert hcs.resolve_agent_secret(row) == ("s3cret", "secret_enc")
+
+    # ...but the generic resolver used by every page load does NOT decrypt it, or an
+    # agent-bound connection would be decrypted on every request that resolves it.
+    assert hcs.to_connection(row).secret == ""
+    db.close()
+
+
+def test_an_agent_bound_row_cannot_be_aimed_by_a_later_edit():
+    """`create` stripped the aiming fields; `update` used to let them straight back in.
+
+    Harmless while nothing read `host` on an agent row. Not harmless now that the row can
+    carry a credential, so the guard runs after `agent_id` is applied — which also catches
+    a row that has only just become agent-bound.
+    """
+    db = _fresh()
+    out = hcs.create(db, kind="vsphere", name="dc1", created_by="t",
+                     agent_id="agt-1", agent_connection_name="dc1-vcenter")
+    edited = hcs.update(db, out["id"], host="attacker.example.com",
+                        username="administrator@vsphere.local")
+    assert edited["host"] == ""
+    assert edited["username"] == ""
     db.close()
 
 

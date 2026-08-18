@@ -580,6 +580,23 @@ def _reconcile_stale(when: str = "startup") -> None:
         db.close()
 
 
+def _release_agent_credentials() -> None:
+    """Hand back any Password Safe credential still held by a finished agent job.
+
+    Synchronous for the same reason ``_reconcile_stale`` is, and paired with it: the
+    reconcile is what makes an abandoned job terminal, and this is what releases what it
+    was holding. Never allowed to raise — a Password Safe outage must not stop the runner
+    claiming work, and an unreleased request expires on its own duration regardless."""
+    db = SessionLocal()
+    try:
+        from .services import agent_ps_credential_service
+        agent_ps_credential_service.sweep(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("job runner: agent credential release pass failed: %s", exc)
+    finally:
+        db.close()
+
+
 def _limits() -> dict:
     """Per-tier in-flight caps, clamped to what this process's DB pool can serve.
 
@@ -695,6 +712,12 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL,
         if time.monotonic() - last_reconcile >= RECONCILE_INTERVAL:
             last_reconcile = time.monotonic()
             await asyncio.to_thread(_reconcile_stale, "the periodic sweep")
+            # Immediately after, and in that order: the pass above is what turns an
+            # abandoned agent job terminal, and this is what then hands its Password Safe
+            # credential back. `reconcile_stale_jobs` writes `failed` inline without ever
+            # reaching the completion hook, so for a killed agent container this is the
+            # only path that ever releases.
+            await asyncio.to_thread(_release_agent_credentials)
 
         limits = _limits()
         _publish_if_changed(limits, len(running))

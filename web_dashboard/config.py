@@ -1055,6 +1055,23 @@ class Settings(BaseSettings):
     # then check it in afterwards (best-effort — rotation isn't enforceable, it
     # depends on the account being auto-managed). Default 60 min covers a long cloud task.
     ansible_managed_request_duration_min: int = 60
+    # Same idea for a remote agent's just-in-time hypervisor credential, but the window
+    # has to cover more than the job: an agent whose container dies stops heartbeating,
+    # and the request is only released once `reconcile_stale_jobs` has failed the job
+    # (STALE_AFTER_MINUTES=10) and the sweeper has next run (RECONCILE_INTERVAL=60s). So
+    # the floor is job runtime + ~11 minutes; a request that expires before then is
+    # checked in by Password Safe itself, which is safe but leaves the release audit
+    # trail looking like the dashboard never tidied up. Declared here and not only as a
+    # config_service key on purpose — `get_bool`/`_cfg` fall back to `getattr(settings,
+    # ...)`, so a key with no field here reads as its default forever no matter what the
+    # operator sets in the environment.
+    agent_ps_checkout_duration_min: int = 45
+    # Rotate the managed account's password when the credential is checked back in, so
+    # the value the agent held is dead the moment its job ends. Default ON: it is the
+    # reason to reach for a managed account rather than a stored password in the first
+    # place. Turn it off only where Password Safe is not the sole owner of that account —
+    # something else configured statically with the same password would break on rotation.
+    agent_ps_rotate_on_release: bool = True
     ansible_ephemeral_kms_key_id: str = ""           # AWS: CMK for the ephemeral secret; its key policy
                                                      # should grant kms:Decrypt to the ECS execution role
                                                      # only (the true read-restriction on AWS). "" = default key.

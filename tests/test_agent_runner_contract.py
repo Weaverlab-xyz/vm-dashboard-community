@@ -39,6 +39,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _EXAMPLES = os.path.join(_ROOT, "examples", "remote-agent")
 _AGENT = os.path.join(_ROOT, "runners", "agent", "agent.py")
 _SIGNING = os.path.join(_ROOT, "web_dashboard", "services", "agent_signing.py")
+_SEALING = os.path.join(_ROOT, "web_dashboard", "services", "agent_sealing.py")
 _SERVICE = os.path.join(_ROOT, "web_dashboard", "services", "agent_service.py")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "agent.py")
 _DOCKERFILE = os.path.join(_ROOT, "runners", "agent", "Dockerfile")
@@ -59,6 +60,7 @@ def _load(name, path):
 try:
     agent = _load("agent_runner", _AGENT)
     signing = _load("agent_signing", _SIGNING)
+    sealing = _load("agent_sealing", _SEALING)
 except Exception as exc:  # pragma: no cover — deps missing
     try:
         import pytest
@@ -90,6 +92,68 @@ def test_canonical_request_is_byte_identical():
     ]
     for kwargs in cases:
         assert agent.canonical_request(**kwargs) == signing.canonical_request(**kwargs)
+
+
+def test_seal_constants_are_identical():
+    """A mismatch here makes every seal fail to open, which reads as a key problem rather
+    than a code bug — the same trap the canonicalization test above exists for."""
+    assert agent.SEAL_VERSION == sealing.SEAL_VERSION
+    assert agent.SEAL_ALG == sealing.SEAL_ALG
+    assert agent.SEAL_INFO == sealing.SEAL_INFO
+    assert agent.SEAL_NONCE_BYTES == sealing.NONCE_BYTES
+
+
+def test_seal_aad_is_byte_identical():
+    """The sibling of test_canonical_request_is_byte_identical, and just as load-bearing:
+    the AAD is never transmitted, so if the two builders disagree the dashboard produces
+    ciphertexts no agent can ever open."""
+    cases = [
+        dict(agent_id="ag-1", audience="https://d.example", epk="AAAA",
+             job_id="job-1", ref="dc1-vcenter"),
+        dict(agent_id="ünïcode", audience="https://x/", epk="", job_id="", ref="dc1中"),
+        # A ref that looks like the field separator must not shift its neighbour.
+        dict(agent_id="a", audience='","v":9,"x":"', epk="c", job_id="d",
+             ref='x","job_id":"evil'),
+    ]
+    for kwargs in cases:
+        assert agent.seal_aad(**kwargs) == sealing.seal_aad(**kwargs), kwargs
+
+
+def test_the_dashboard_can_seal_what_the_agent_opens():
+    """End to end through both implementations, then each AAD input flipped one at a time.
+    This is the assertion that would catch a divergence the constant checks miss."""
+    ctx = dict(agent_id="ag-1", audience="https://d.example.com",
+               job_id="job-1", ref="dc1-vcenter")
+    private, public = agent.generate_reply_keypair()
+    envelope = sealing.seal(public, "vCenter!Adm1n", **ctx)
+    assert agent.open_sealed(private, envelope, **ctx) == "vCenter!Adm1n"
+
+    for field in ("agent_id", "audience", "job_id", "ref"):
+        wrong = dict(ctx)
+        wrong[field] = "tampered"
+        try:
+            agent.open_sealed(private, envelope, **wrong)
+        except agent.SealError:
+            continue
+        raise AssertionError(f"the agent opened a seal with a wrong {field}")
+
+
+def test_the_agent_never_writes_a_reply_key_to_disk():
+    """The whole reason the recipient key is ephemeral: a stolen identity.json must not
+    yield a decryption key usable against traffic captured earlier."""
+    src = _read(_AGENT)
+    fn = _function_source_or_empty(src, "job_secret")
+    assert fn, "Dashboard.job_secret not found"
+    for forbidden in ("open(", "STATE_DIR", "_IDENTITY_FILE", ".save("):
+        assert forbidden not in fn, f"job_secret touches {forbidden!r}"
+
+
+def _function_source_or_empty(src, name):
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return ast.get_source_segment(src, node) or ""
+    return ""
 
 
 def test_a_signature_made_by_the_agent_verifies_on_the_dashboard():

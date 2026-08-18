@@ -75,6 +75,8 @@
 		format json
 		# Agent credentials are Ed25519 signatures valid for one request and 60
 		# seconds, so there is nothing replayable in these headers to redact —
+		# and a credential the dashboard releases to an agent is sealed to a
+		# per-fetch key inside the TLS session, so it is not readable here either —
 		# which is precisely why the design does not use a bearer token.
 	}
 }

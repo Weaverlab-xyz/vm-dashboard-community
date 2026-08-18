@@ -447,6 +447,30 @@ def test_an_op_with_no_stated_reason_still_gets_a_usable_message():
     assert "start" in reason, reason
 
 
+def test_the_credential_gate_also_precedes_the_job():
+    """Same rule for the dashboard-held-credential blockers as for an unmappable op.
+
+    The failure being prevented is quiet and expensive: an agent too old to understand
+    `dashboard_secret` does not error on it, it falls through to a local password the
+    operator has just deleted and sends an empty one. The hypervisor answers "wrong
+    username or password", which reads as a credential problem rather than a version
+    problem — and on the sync schedule it retries until the service account locks out.
+    """
+    fn = _function(_tree(_DEPS), "agent_power_job")
+
+    def _first(predicate):
+        return min((n.lineno for n in ast.walk(fn) if predicate(n)), default=None)
+
+    gated = _first(lambda n: isinstance(n, ast.Call)
+                   and getattr(n.func, "attr", "") == "dashboard_secret_blockers")
+    created = _first(lambda n: isinstance(n, ast.Call)
+                     and getattr(n.func, "attr", "") == "create_job")
+    assert gated, "agent_power_job no longer checks dashboard_secret_blockers"
+    assert gated < created, (
+        f"the credential gate (line {gated}) must run before the job is created "
+        f"(line {created})")
+
+
 def test_the_refusal_precedes_the_job_it_would_otherwise_create():
     """A refused op must leave nothing behind on /jobs.
 

@@ -50,6 +50,21 @@ def test_no_field_can_carry_executable_content():
     assert not hits, f"{hits} could carry executable content or free-form text"
 
 
+def test_the_allowlist_did_not_grow_for_the_credential_fetch():
+    """The just-in-time credential fetch deliberately added NO field here.
+
+    That is the design claim and it is worth an assertion rather than a comment: a
+    credential in the lease envelope would ride in a payload that is only *signed*, so an
+    inspecting proxy would read it — which is the exact property the whole remote-agent
+    feature is sold on. The credential is fetched over a separate signed route and sealed
+    to a per-fetch key instead. If a field ever appears here to carry one, this fails.
+    """
+    assert set(ahm.HYPERVISOR_META_KEYS) == {
+        "verb", "connection_ref", "connection_id", "kind", "target_id",
+        "target_scope", "target_type", "page_size", "cursor", "timeout_s",
+    }
+
+
 def test_no_field_is_credential_shaped():
     banned = re.compile(r"pass|secret|token|credential|user|auth|key", re.I)
     hits = [k for k in ahm.HYPERVISOR_META_KEYS if banned.search(k)]

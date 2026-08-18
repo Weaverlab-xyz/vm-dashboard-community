@@ -131,6 +131,26 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_ephemeral_gc_startup(), name="ephemeral_gc_startup")
     )
 
+    # The same shape, for a Password Safe credential a remote agent's job was holding when
+    # the process died. The job runner sweeps on its own timer; this covers the deployment
+    # where the app restarts and the runner does not, and it costs one query when no agent
+    # connection uses Password Safe at all.
+    async def _agent_credential_release_startup():
+        try:
+            from .services import agent_ps_credential_service
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(agent_ps_credential_service.sweep, db)
+            finally:
+                db.close()
+        except Exception:
+            logger.warning("startup agent credential release failed (non-fatal)",
+                           exc_info=True)
+    warmers.append(
+        asyncio.create_task(_agent_credential_release_startup(),
+                            name="agent_credential_release_startup")
+    )
+
     yield
 
     for task in warmers:

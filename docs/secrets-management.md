@@ -283,6 +283,25 @@ for setup instructions.
 | SSH key | Stored as vault secret | Managed Account checkout (key never written to disk) |
 | Requires BeyondTrust licence | No | Yes (Secrets Safe) |
 
+### Hypervisor credentials for a remote agent
+
+An agent-bound hypervisor connection can take its credential from any of the tiers above,
+which is what lets an on-prem agent host store no hypervisor password at all. The
+connection's `secret_ref` accepts the usual backend prefixes, plus one that is specific to
+this path:
+
+`ps_account://<managed-account-id>` — the dashboard checks a credential out of Password Safe
+for the duration of one agent job, seals it to that agent, checks it back in when the job
+ends, and **rotates the password on release** so the value the agent held is dead
+immediately. Combined with `dashboard_secret: true` in the agent's own `connections.yaml`,
+neither the agent host nor the application database holds a standing hypervisor credential.
+
+Unlike the four backend prefixes, `ps_account://` is deliberately **not** resolvable through
+`config_service.get()`. The others are stateless reads; this one opens a request that
+something has to close, so it is handled only on the agent-credential path where the release
+lifecycle exists. See
+[docs/remote-agents.md](remote-agents.md#the-credential-the-dashboard-holds).
+
 ---
 
 ## Using a secret in an Ansible run (without seeing it)
