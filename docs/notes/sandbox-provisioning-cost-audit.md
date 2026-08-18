@@ -225,10 +225,23 @@ and broken Gateway deploys**:
 | `bt_ecs_host_instance_profile` | Dashboard has no profile to attach to the on-demand Gateway host |
 
 Now at parity: both scripts issue an identical set of AWS CLI operations and emit an
-identical set of 37 config keys. The `AmazonEC2ContainerServiceforEC2Role` attach is
+identical set of config keys. The `AmazonEC2ContainerServiceforEC2Role` attach is
 outside the role-create branch, which is the detail that caused the earlier fleet-wide
 gateway outage — a pre-existing `ecsInstanceRole` (AWS's own default name) would otherwise
 never receive the grant.
+
+That earlier pass fixed the **flat** keys but left the `aws_region.<region>.*` block
+behind, so the "identical set" claim above was not true of the per-region half until
+later: it omitted `db_parameter_group_name` and `db_mysql_parameter_group_name`, and
+pointed `db_security_group_id` at `$VmSg` rather than `$DbSg` — the same VM-SG fallback
+listed in the table above, reintroduced one layer down. The omissions were benign (a
+blank field falls back to the flat key, and the parameter-group names are fixed
+constants in every region), but the wrong SG was not: a region entry *shadows* the flat
+key rather than falling back to it, so a **non-default** region's RDS instance got the
+VM security group — no ingress on 5432/3306/1433 from the Gateway SG, so the PRA tunnel
+could not reach it. Both are fixed, and `tests/test_sandbox_region_keys.py` now enforces
+the invariant in two directions: the twins must emit the same per-region fields, and
+every per-region value must match its flat fallback (they name one resource).
 
 `lib/Common.ps1` gained `Invoke-Retry`, the missing twin of `lib/common.sh`'s `retry`,
 needed to absorb IAM eventual consistency after `create-role`. The pre-existing
@@ -271,6 +284,9 @@ unretried `ecsTaskExecutionRole` attach now uses it too.
    **default region's** zone/subnet.
 5. **`Setup-AzureSandbox.ps1`** omits the optional external image-gallery block
    (`setup-azure.sh:406-479`). Low priority — it's gated behind `AZURE_IMAGE_GALLERY_RG`.
+   Because of it the PowerShell twin also emits neither `azure_region.<r>.gallery_name`
+   nor `gallery_resource_group`; both are listed in `_KNOWN_TWIN_GAPS` in
+   `tests/test_sandbox_region_keys.py`, which fails if the exemption outlives the gap.
 6. **Dead config keys** `aws_k8s_subnet_a_id` / `aws_k8s_subnet_b_id`
    (`config.py:253-254`, already annotated "no longer consumed").
 
