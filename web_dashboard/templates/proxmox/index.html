@@ -298,7 +298,9 @@
                     </button>
                   </template>
                   <template x-if="vm.is_running && vm.type === 'qemu'">
-                    <button @click="powerOp(vm, 'reboot')" :disabled="pending.has(vm.node + '-' + vm.vmid)"
+                    <button @click="powerOp(vm, 'reboot')"
+                            :disabled="pending.has(vm.node + '-' + vm.vmid) || !canOp('reboot')"
+                            :title="opTitle('reboot')"
                             class="text-xs px-2.5 py-1 rounded bg-gray-500 hover:bg-gray-600
                                    disabled:opacity-40 text-white font-medium transition">
                       <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Reboot'"></span>
@@ -585,6 +587,13 @@ function proxmoxDashboard() {
     selectAll: false,
     bulkAssignModal: { open: false, workgroup: '' },
 
+    // An agent-bound connection can only be sent the verbs the agent implements for
+    // this product. Mirrors agent_hypervisor_meta.PAGE_OPS['proxmox'], which is also what
+    // refuses the rest with a 501 — this is only so the operator sees why a button is
+    // dead instead of clicking it and reading an error.
+    viaAgent: {{ 'true' if via_agent else 'false' }},
+    agentOps: ['start', 'stop', 'shutdown'],
+
     async init() {
       requireAuth();
       this._loadWorkgroups();
@@ -804,6 +813,19 @@ function proxmoxDashboard() {
       } catch { /* keep row data */ } finally {
         this.detailLoading = false;
       }
+    },
+
+    // Methods, not getters: tests/template_helpers_check.js cannot see a getter, so a
+    // getter here would be an unbound name in every binding that used it.
+    canOp(op) {
+      return !this.viaAgent || this.agentOps.includes(op);
+    },
+
+    opTitle(op) {
+      if (this.canOp(op)) return '';
+      return 'Not available through a remote agent — the agent restart verb resolves to '
+           + 'a graceful shutdown on Proxmox, so a reboot would leave the VM off. '
+           + 'Available: ' + this.agentOps.join(', ') + '.';
     },
 
     // ── Helpers ────────────────────────────────────────────────────────────────

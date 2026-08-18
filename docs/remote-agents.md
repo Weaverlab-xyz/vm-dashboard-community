@@ -582,6 +582,37 @@ override per connection with `options.sync_interval_minutes`). `power_on`, `powe
 `power_reset` and `restart` are on-demand, issued by the existing power buttons on the
 hypervisor pages when the resolved connection is agent-bound.
 
+Not every button on those pages has one of them behind it, and the ones that do not are
+**refused rather than approximated**. `restart` is why: each kind resolves it
+differently — Proxmox `/status/shutdown` (graceful), vSphere `?action=reset` (a hard
+reset), XCP-ng `VM.clean_reboot` (a reboot), Hyper-V nothing at all. It is a graceful
+shutdown on Proxmox and nothing of the sort anywhere else, so which buttons work is per
+product:
+
+| Button | Proxmox | vCenter | XCP-ng | Hyper-V |
+|---|---|---|---|---|
+| Power On / Force Off | yes | yes | yes | yes |
+| Shutdown (graceful) | yes — `restart` is `/status/shutdown` here | **refused** — would hard-reset the guest | **refused** — would reboot it | **refused** — would be a hard power cut |
+| Reboot / Restart | **refused** — would shut it down and leave it off | not offered | yes — `restart` is `VM.clean_reboot` here | yes — `Restart-VM -Force` |
+| Reset / Hard Reboot | not offered | yes | yes | not offered |
+| Suspend / Resume / Pause / Unpause / Save | not offered | **refused** | **refused** | **refused** |
+
+The mapping is one table, [`agent_hypervisor_meta.PAGE_OPS`][page-ops], keyed by kind —
+it was once a copy per router, and three identical copies is how `shutdown` came to hard
+-reset a vCenter VM. A refused button is greyed out on the page with the reason in its
+tooltip, and the endpoint answers 501 naming the substitution that would have been wrong
+and the buttons that do work. The refusal happens before a job row exists, so nothing
+appears on /jobs.
+
+Same principle as the Workstation note further down: mapping a verb onto a neighbouring
+operation quietly does something other than what was asked, and on a power button
+quietly is the whole problem. Adding a real `shutdown` verb means adding it to the
+dashboard's allowlist **and** to the agent's per-kind maps and the sibling runner in the
+same change — the dashboard normalizes an unrecognised verb to `inventory_sync`, so a
+half-landed one would run a discovery scan and report success.
+
+[page-ops]: ../web_dashboard/services/agent_hypervisor_meta.py
+
 **`snapshot`** creates a snapshot named `dash-<job id>`. The name is *generated*, never
 supplied — which is exactly why it was held back at first: a created thing needs a name,
 and a name is a free-form string. There is still no field in the protocol through which
@@ -599,12 +630,12 @@ flag, because a boolean on a destructive verb gets defaulted wrong exactly once.
 
 | Product | Transport | Inventory | Power |
 |---|---|---|---|
-| vCenter | vSphere Automation REST API | yes | yes |
-| Proxmox VE | `/api2/json` + API token | yes | yes |
-| XCP-ng | XAPI (stdlib XML-RPC) | yes | yes |
+| vCenter | vSphere Automation REST API | yes | on/off/reset — no graceful shutdown, see above |
+| Proxmox VE | `/api2/json` + API token | yes | on/off/shutdown — no reboot, see above |
+| XCP-ng | XAPI (stdlib XML-RPC) | yes | on/off/reboot/hard reboot — no graceful shutdown, see above |
 | Nutanix Prism | Prism v3 REST | yes | no — a v3 power change is a full spec PUT with a metadata version, not an action |
 | VMware Workstation Pro | `vmrest`, on the same host | yes | on/off only — vmrest has no reset, reboot or snapshot |
-| bare ESXi | SOAP, via the [sibling runner](#the-sibling-runner) | yes | yes |
+| bare ESXi | SOAP, via the [sibling runner](#the-sibling-runner) | yes | the same four verbs |
 | Hyper-V | WinRM, via the [sibling runner](#the-sibling-runner) | yes | Start, Force Off and Restart — the allowlist has no graceful-shutdown or suspend verb, so Shutdown, Pause, Resume and Save are refused rather than approximated |
 
 `esxi` is a distinct connection kind from `vsphere` on the agent's side even though the
@@ -873,6 +904,7 @@ an objection into a demonstration.
 | `Agent … reports version 1.x` on a 409, and nothing is queued | A 1.x agent scans for Kubernetes and databases. Given a hypervisor scan it would probe nothing, complete **green**, and report zero findings — indistinguishable from a clean network. Pull `chrweav/dashboard-agent:latest` and restart the container; re-enrolment is not needed. |
 | `Agent … does not offer discovery` | The agent is current but its `policy.yaml` omits `agent_discover` from `job_types`. |
 | `unknown connection 'x'` | The name in the dashboard's connection row does not match any `name:` in that agent's `connections.yaml`. The dashboard holds no credential for it; the string is the whole join. |
+| `'shutdown' is not available on an agent-bound vsphere connection` (501) | Working as intended, and not a policy or grant problem — no verb in the allowlist performs a graceful guest shutdown, and the nearest one hard-resets the guest on vSphere. See [The verbs](#the-verbs) for which button works on which product. |
 | `policy.yaml does not grant 'power_off' on 'x'` | Working as intended — the customer's file is the authority. Add the verb under that connection's `verbs:` list and restart the agent. |
 | One sync produced a dozen job rows | Expected for a large inventory: one row per page, all sharing a `batch_id`. See [Large inventories](#large-inventories). |
 | `policy.yaml does not enable the sibling runner` | Hyper-V and bare ESXi need it. Add the `sibling:` block, and apply `docker-compose.sibling.yml` so the socket is present. Read that file first — it mounts the Docker socket. |

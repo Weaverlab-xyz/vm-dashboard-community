@@ -68,8 +68,125 @@ def snapshot_name(job_id: str) -> str:
 #   delete / deploy / clone / console — these need names, sizes, networks, cloud-init:
 #              a payload shape indistinguishable from a config file, and a config file
 #              is one step from a script. They stay dashboard-direct.
+#   shutdown — a *graceful* guest shutdown, which none of the five verbs above
+#              express. See PAGE_OPS: it is refused rather than approximated, and
+#              adding it means adding it to the agent's per-kind maps in the same
+#              change.
 # power_off and power_reset are separate verbs rather than one verb with a `force`
 # boolean, because a boolean flag on a destructive verb gets defaulted wrong exactly once.
+
+
+# ── Page op -> verb, per hypervisor kind ──────────────────────────────────────
+
+# The hypervisor pages speak the vocabulary of the hypervisor's own UI (`shutdown`,
+# `reboot`, `hard_reboot`); the agent speaks the five verbs above. This is the map
+# between them, and it is **per kind on purpose**.
+#
+# It has to be, because `restart` is not one operation. Each kind resolves it
+# differently: Proxmox `/status/shutdown` (a graceful shutdown), vSphere `?action=reset`
+# (a HARD reset), XCP-ng `VM.clean_reboot` (a reboot). One table shared across the
+# routers therefore cannot be correct for more than one of them — and one *was* shared,
+# by copy, into proxmox.py, vsphere.py and xcpng.py, mapping every page's `shutdown`
+# onto `restart`. All three results shipped:
+#
+#   * agent-bound vCenter **Shutdown** hard-reset the guest, risking the data loss the
+#     operator pressed Shutdown to avoid;
+#   * agent-bound XCP-ng **Shutdown** cleanly rebooted it, so it came back up;
+#   * Proxmox **Reboot** gracefully shut it down and left it off — the same fault
+#     mirrored, since there `restart` really is the shutdown.
+#
+# Checking each mapped verb against WRITE_VERBS (which `agent_power_job` does, and
+# should keep doing) cannot catch any of that: `restart` is a perfectly real verb. Only
+# asking what it *resolves to on this kind* catches it, which is what
+# tests/test_hypervisor_power_routing.py::AGENT_OP does.
+#
+# So the rule this table exists to enforce: a page op maps to a verb only when the
+# verb's resolved operation *for that kind* is the operation the button promises.
+# Nothing is approximated onto a neighbouring verb — an op with no honest equivalent is
+# absent here and refused, because "close enough" on a power button is how a graceful
+# shutdown becomes a hard reset.
+PAGE_OPS = {
+    "proxmox": {
+        "start": "power_on",
+        "stop": "power_off",       # /status/stop — the force-stop the page offers
+        "shutdown": "restart",     # -> /status/shutdown, genuinely graceful here
+        # `reboot` is absent: `restart` is Proxmox's *shutdown*, and `power_reset` is a
+        # hard reset. Proxmox has a real /status/reboot; it needs a verb of its own.
+    },
+    "vsphere": {
+        "start": "power_on",
+        "stop": "power_off",       # ?action=stop — a hard power off, which is the op
+        "reset": "power_reset",    # ?action=reset
+        # `shutdown` is absent: vCenter's graceful shutdown is not a power action at all,
+        # it is /guest/power?action=shutdown and needs VMware Tools in the guest.
+        # `suspend` is absent: there is no suspend verb.
+    },
+    "xcpng": {
+        "start": "power_on",
+        "stop": "power_off",           # VM.hard_shutdown
+        "reboot": "restart",           # VM.clean_reboot
+        "hard_reboot": "power_reset",  # VM.hard_reboot
+        # `shutdown` is absent: XAPI's VM.clean_shutdown has no verb. `suspend`,
+        # `resume`, `pause` and `unpause` are absent for the same reason.
+    },
+    "hyperv": {
+        "start": "power_on",           # Start-VM
+        "stop": "power_off",           # Stop-VM -TurnOff -Force, the force-stop
+        "restart": "power_reset",      # Restart-VM -Force. `-Force` only suppresses the
+                                       # confirmation prompt, which a non-interactive
+                                       # WinRM session cannot answer — so this is the
+                                       # honest Restart here, not a hard reset.
+        # `shutdown`, `pause`, `resume` and `save` are absent; the sibling runner
+        # implements no script for any of them.
+    },
+}
+
+# Why an unmapped op cannot simply be passed through: `normalize()` falls an
+# unrecognised verb back to `inventory_sync`, so a page op that reached it unmapped
+# became a *discovery scan* that completed green. The operator clicked Suspend, the job
+# said success, and nothing was suspended. `agent_verb` therefore returns None rather
+# than defaulting, and its caller raises rather than enqueues.
+
+_NO_EQUIVALENT = {
+    ("vsphere", "shutdown"):
+        "the nearest verb, `restart`, resolves to a HARD reset here, which risks guest "
+        "data loss",
+    ("xcpng", "shutdown"):
+        "the nearest verb, `restart`, resolves to `VM.clean_reboot` here, which would "
+        "bring the VM back up",
+    ("proxmox", "reboot"):
+        "the nearest verb, `restart`, resolves to `/status/shutdown` here, which would "
+        "leave the VM off",
+    ("hyperv", "shutdown"):
+        "no verb asks the guest to shut down, and `power_off` would be a hard power "
+        "cut — use Force Off if that is what you want",
+}
+
+
+def agent_verb(kind: str, op: str):
+    """The agent verb for a page op on this kind of hypervisor, or None.
+
+    None means refuse. It never means "pass the op through": see the note above on
+    :func:`normalize` turning an unknown verb into ``inventory_sync``.
+    """
+    return (PAGE_OPS.get(str(kind or "").strip().lower()) or {}).get(
+        str(op or "").strip().lower())
+
+
+def no_verb_reason(kind: str, op: str) -> str:
+    """Why this op is refused for an agent-bound connection, and what is available.
+
+    This string is the operator's whole diagnosis — they are looking at a page whose
+    button just failed — so it names the substitution that would have been wrong and
+    the buttons that do work.
+    """
+    kind = str(kind or "").strip().lower()
+    op = str(op or "").strip().lower()
+    available = sorted(PAGE_OPS.get(kind) or {})
+    detail = _NO_EQUIVALENT.get((kind, op), "the agent has no verb for it")
+    return (f"'{op}' is not available on an agent-bound {kind} connection: {detail}. "
+            f"Available here: {', '.join(available) or 'none'}. For {op}, use the "
+            f"hypervisor's own console, or a directly-reachable connection.")
 
 # `esxi` is a DISTINCT kind from `vsphere` on purpose. Same product, different
 # transport: vCenter serves the Automation REST API the agent speaks directly, while a
