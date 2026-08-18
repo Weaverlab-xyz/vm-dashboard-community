@@ -226,6 +226,76 @@ def test_azure_db_uses_non_default_region_subnet_and_rg():
         CONF.clear()
 
 
+def test_azure_engine_specific_zones_and_pe_subnet_are_region_resolved():
+    """MySQL's DNS zone and SQL Server's PE subnet + zone read the region set.
+
+    All three used to be read flat, so a westus2 MySQL server got the centralus zone
+    and a westus2 SQL database a private endpoint in a subnet of a VNet it is not in.
+    Postgres was already region-resolved, which is what made the gap easy to miss.
+    """
+    import json
+    CONF.clear()
+    CONF.update({
+        "azure_location": "centralus",
+        "azure_db_mysql_private_dns_zone_id": "zone-default-my",
+        "azure_db_sqlserver_subnet_id": "subnet-default-sql",
+        "azure_db_sqlserver_private_dns_zone_id": "zone-default-sql",
+        "azure_region_configs": json.dumps({
+            "westus2": {
+                "db_mysql_private_dns_zone_id": "zone-west-my",
+                "db_sqlserver_subnet_id": "subnet-west-sql",
+                "db_sqlserver_private_dns_zone_id": "zone-west-sql",
+            },
+        }),
+    })
+    try:
+        assert _build("mysql", "azure", region="westus2")["private_dns_zone_id"] == "zone-west-my"
+        sql = _build("sqlserver", "azure", region="westus2")
+        assert sql["subnet_id"] == "subnet-west-sql"
+        assert sql["private_dns_zone_id"] == "zone-west-sql"
+        # The default region still resolves to the flat keys.
+        assert _build("mysql", "azure", region="centralus")["private_dns_zone_id"] == "zone-default-my"
+        default_sql = _build("sqlserver", "azure", region="centralus")
+        assert default_sql["subnet_id"] == "subnet-default-sql"
+        assert default_sql["private_dns_zone_id"] == "zone-default-sql"
+    finally:
+        CONF.clear()
+
+
+def test_aws_db_uses_non_default_region_parameter_groups():
+    """The cleartext parameter groups are per-region resources.
+
+    The sandbox creates clouddb-nossl-pg16 / clouddb-nossl-mysql84 in every region it
+    runs in and emits both per-region, but the builder read them flat — so a second
+    region's RDS instance was handed the first region's group name. RDS rejects a
+    parameter group from another region, and without one it falls back to the default
+    group, which forces SSL and breaks the PRA protocol tunnel.
+    """
+    import json
+    CONF.clear()
+    CONF.update({
+        "aws_region": "us-east-1",
+        "aws_db_subnet_group_name": "grp-default",
+        "aws_db_parameter_group_name": "pg-default",
+        "aws_db_mysql_parameter_group_name": "my-default",
+        "aws_region_configs": json.dumps({
+            "us-west-2": {"db_subnet_group_name": "grp-west",
+                          "db_parameter_group_name": "pg-west",
+                          "db_mysql_parameter_group_name": "my-west"},
+        }),
+    })
+    try:
+        pg = _build("postgres", "aws", region="us-west-2")
+        assert pg["parameter_group_name"] == "pg-west"
+        assert pg["db_subnet_group_name"] == "grp-west"
+        assert _build("mysql", "aws", region="us-west-2")["parameter_group_name"] == "my-west"
+        # The default region still resolves to the flat keys.
+        assert _build("postgres", "aws", region="us-east-1")["parameter_group_name"] == "pg-default"
+        assert _build("mysql", "aws", region="us-east-1")["parameter_group_name"] == "my-default"
+    finally:
+        CONF.clear()
+
+
 def test_gcp_db_uses_non_default_region_network():
     import json
     CONF.clear()

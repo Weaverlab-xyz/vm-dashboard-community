@@ -191,6 +191,38 @@ def test_per_region_value_matches_its_flat_fallback():
         + "\n  ".join(failures))
 
 
+def test_flat_emitted_field_has_a_per_region_line():
+    """A field the script emits FLAT must also be emitted per-region.
+
+    The mirror of the check above, and the half nothing covered: that one verifies a
+    per-region line agrees with its flat fallback, this one verifies the line exists at
+    all. ``resolve_region()`` falls back to the flat key, which always describes the
+    *configured default* region — so a script emitting ``azure_db_sqlserver_subnet_id``
+    with no ``azure_region.<r>.db_sqlserver_subnet_id`` silently hands every other region
+    the default region's private-endpoint subnet. Both azure twins shipped the SQL Server
+    subnet, both engine-specific DNS zones and the Gateway subnet exactly that way.
+
+    Gating on "this script also emits the flat key" is what makes the rule
+    exemption-free. A region field naming something the sandbox does not create is
+    operator-supplied, emits neither half, and is skipped — `aws ssm_instance_profile`,
+    `gcp ecs_subnetwork` and `azure default_vm_size` are the three today. Anything the
+    sandbox does create must emit both halves.
+    """
+    failures = []
+    for cloud, paths in _PAIRS.items():
+        fallbacks = field_fallbacks(cloud)
+        for path in paths:
+            emitted, per = _emitted(path), _per_region(path, cloud)
+            for fld, flat in sorted(fallbacks.items()):
+                if flat in emitted and fld not in per:
+                    failures.append(
+                        f"{os.path.basename(path)}: emits {flat} but no "
+                        f"{cloud}_region.<r>.{fld} — every non-default region "
+                        f"inherits the default region's value")
+    assert not failures, (
+        "flat sandbox key with no per-region twin:\n  " + "\n  ".join(failures))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

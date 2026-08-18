@@ -358,6 +358,11 @@ protocol-tunnel — in `azure_jumpoint_subnet_id` (falls back to `azure_aci_subn
 | `azure_aci_deploy_key` / `azure_aci_docker_deploy_key` | — | Gateway Docker deploy key |
 | `azure_jumpoint_vm_size` | `Standard_B1s` | Gateway VM size |
 
+All six are per-region: running the sandbox in a second location emits
+`azure_region.<location>.db_*` alongside the flat keys, and the provisioner resolves the
+database's own region before falling back to them. The flat keys stay the default
+region's copy, so a single-region install behaves exactly as before.
+
 **Checklist:** run `setup-azure.sh` → import the six `azure_db_*` keys + RG/location +
 `azure_jumpoint_subnet_id` → set `azure_aci_docker_deploy_key` + PRA keys → provision.
 
