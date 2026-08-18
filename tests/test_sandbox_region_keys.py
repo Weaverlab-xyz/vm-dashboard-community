@@ -1,10 +1,16 @@
 """Guard: every `<cloud>_region.<region>.<field>` key the sandbox scripts emit
-must be a field the import parser accepts.
+must be a field the import parser accepts — and the bash and PowerShell twins must
+agree on which fields they emit and what each one points at.
 
 `/api/setup/import` validates each region key against that cloud's config model
 and **silently drops** anything unrecognized (only a log line). So a script
 emitting a field the resolver doesn't know produces a sandbox that looks
 multi-region and isn't — with no error anywhere. This test fails loudly instead.
+
+Twin parity is hand-maintained (no shellcheck, no PSScriptAnalyzer, no parity job),
+and both failure shapes have shipped: `Setup-AwsSandbox.ps1` omitted the two DB
+parameter groups entirely, and pointed `db_security_group_id` at the VM security
+group instead of the DB one.
 
 It reads the shell + PowerShell scripts as text, so it needs neither a cloud
 account nor fastapi.
@@ -19,9 +25,12 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from web_dashboard.services.region_config import REGION_CONFIG_CLOUDS, region_fields
+from web_dashboard.services.region_config import (
+    REGION_CONFIG_CLOUDS, field_fallbacks, region_fields)
 
 _SCRIPTS = os.path.join(_ROOT, "scripts", "sandbox")
+_LINUX = os.path.join(_SCRIPTS, "Linux")
+_WINDOWS = os.path.join(_SCRIPTS, "Windows")
 
 # `aws_region.$REGION.field=` (bash) or `aws_region.$($Region).field=` /
 # `aws_region.$Region.field=` (PowerShell). Only the field name matters here.
@@ -31,6 +40,35 @@ _KEY = re.compile(
     r'(\w+)\s*='
 )
 
+# The bash/PowerShell setup pair per cloud. OCI has no region-config support.
+_PAIRS = {
+    "aws": (os.path.join(_LINUX, "setup-aws.sh"),
+            os.path.join(_WINDOWS, "Setup-AwsSandbox.ps1")),
+    "azure": (os.path.join(_LINUX, "setup-azure.sh"),
+              os.path.join(_WINDOWS, "Setup-AzureSandbox.ps1")),
+    "gcp": (os.path.join(_LINUX, "setup-gcp.sh"),
+            os.path.join(_WINDOWS, "Setup-GcpSandbox.ps1")),
+}
+
+# Known, separately-tracked twin gaps. Listed explicitly so a NEW gap fails loudly
+# rather than hiding behind an old one, and so the list shrinks as they close.
+#
+# azure gallery_*: Setup-AzureSandbox.ps1 has never carried the external
+# image-gallery block that setup-azure.sh provisions, so it emits neither key.
+# Closing it means porting that whole section, not adding two lines — tracked in
+# docs/notes/sandbox-provisioning-cost-audit.md ("Open — not addressed here", item 5).
+_KNOWN_TWIN_GAPS = {
+    ("azure", "gallery_name"),
+    ("azure", "gallery_resource_group"),
+}
+
+# One `key=value` line out of a config array, in either dialect. The value keeps its
+# variable reference ($DB_SG / $DbSg) so it can be compared with the flat key's.
+_ASSIGN = re.compile(r'^([\w.${}()]+)=(.*)$')
+
+_REGION_KEY = re.compile(
+    r'(\w+)_region\.(?:\$\{?\w+\}?|\$\(\$?\w+\)|[a-z0-9-]+)\.(\w+)')
+
 
 def _script_files():
     for root, _dirs, files in os.walk(_SCRIPTS):
@@ -38,6 +76,30 @@ def _script_files():
             if f.endswith((".sh", ".ps1")):
                 full = os.path.join(root, f)
                 yield os.path.relpath(full, _ROOT).replace("\\", "/"), full
+
+
+def _emitted(path):
+    """Every ``key=value`` the script prints, as {key: value-expression}."""
+    out = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            s = line.strip().rstrip(",").strip('"').strip("'")
+            if not s or s.startswith("#"):
+                continue
+            m = _ASSIGN.match(s)
+            if m:
+                out[m.group(1)] = m.group(2).split("#")[0].strip()
+    return out
+
+
+def _per_region(path, cloud):
+    """{field: value-expression} for this cloud's ``<cloud>_region.<r>.<field>``."""
+    out = {}
+    for key, val in _emitted(path).items():
+        m = _REGION_KEY.fullmatch(key)
+        if m and m.group(1) == cloud:
+            out[m.group(2)] = val
+    return out
 
 
 def test_emitted_region_keys_are_accepted_fields():
@@ -64,6 +126,71 @@ def test_each_cloud_with_region_config_emits_something():
     missing = [c for c in REGION_CONFIG_CLOUDS if c not in seen]
     assert not missing, (
         "no sandbox script emits per-region keys for: " + ", ".join(missing))
+
+
+def test_per_region_fields_match_across_twins():
+    """Both variants must emit the SAME per-region fields.
+
+    A field in one twin and not the other silently degrades that platform's
+    multi-region support: the missing one falls back to the flat key, which always
+    describes the *default* region. `Setup-AwsSandbox.ps1` shipped without
+    db_parameter_group_name / db_mysql_parameter_group_name this way.
+    """
+    failures = []
+    for cloud, (sh, ps1) in _PAIRS.items():
+        a, b = set(_per_region(sh, cloud)), set(_per_region(ps1, cloud))
+        for fld in sorted(a - b):
+            if (cloud, fld) not in _KNOWN_TWIN_GAPS:
+                failures.append(
+                    f"{cloud}: {os.path.basename(sh)} emits {fld} but "
+                    f"{os.path.basename(ps1)} does not")
+        for fld in sorted(b - a):
+            if (cloud, fld) not in _KNOWN_TWIN_GAPS:
+                failures.append(
+                    f"{cloud}: {os.path.basename(ps1)} emits {fld} but "
+                    f"{os.path.basename(sh)} does not")
+        # A gap that has since been closed should leave the exemption list, or it
+        # goes on silently excusing a future regression on the same field.
+        for gap_cloud, fld in sorted(_KNOWN_TWIN_GAPS):
+            if gap_cloud == cloud and fld in a and fld in b:
+                failures.append(
+                    f"{cloud}: {fld} is twinned now — remove it from "
+                    f"_KNOWN_TWIN_GAPS")
+    assert not failures, (
+        "sandbox per-region twin drift:\n  " + "\n  ".join(failures))
+
+
+def test_per_region_value_matches_its_flat_fallback():
+    """A per-region field and its flat fallback must name the SAME resource.
+
+    ``resolve_region()`` takes the region entry when set and the flat key otherwise,
+    so the two describe one thing — the flat key just carries the default region's
+    copy. A per-region line pointing at a *different* variable is therefore always a
+    bug, and a quiet one: it only bites in a NON-default region, where the wrong
+    value shadows the right flat key instead of falling back to it.
+
+    `Setup-AwsSandbox.ps1` emitted ``db_security_group_id=$VmSg`` against a flat
+    ``aws_db_security_group_id=$DbSg``, which attaches the VM security group to a
+    second region's RDS instance — no ingress on 5432/3306/1433 from the Gateway SG,
+    so the PRA tunnel cannot reach the database.
+    """
+    failures = []
+    for cloud, paths in _PAIRS.items():
+        fallbacks = field_fallbacks(cloud)
+        for path in paths:
+            emitted, per = _emitted(path), _per_region(path, cloud)
+            for fld, val in sorted(per.items()):
+                flat = fallbacks.get(fld)
+                # Only comparable when this script also emits the flat key.
+                if not flat or flat not in emitted:
+                    continue
+                if emitted[flat] != val:
+                    failures.append(
+                        f"{os.path.basename(path)}: {cloud}_region.<r>.{fld}={val} "
+                        f"but {flat}={emitted[flat]} — same resource, two values")
+    assert not failures, (
+        "per-region value disagrees with its flat fallback:\n  "
+        + "\n  ".join(failures))
 
 
 if __name__ == "__main__":
