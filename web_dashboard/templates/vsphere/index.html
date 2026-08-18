@@ -225,8 +225,9 @@
                 <!-- Shutdown (graceful) -->
                 <template x-if="vm.is_running && vm.tools_status === 'toolsOk'">
                   <button @click="powerOp(vm, 'shutdown')"
-                          :disabled="pending.has(vm.moref)"
-                          title="Graceful shutdown via VMware Tools"
+                          :disabled="pending.has(vm.moref) || !canOp('shutdown')"
+                          :title="canOp('shutdown') ? 'Graceful shutdown via VMware Tools'
+                                                    : opTitle('shutdown')"
                           class="text-xs px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600
                                  disabled:opacity-40 text-white font-medium transition">
                     <span x-text="pending.has(vm.moref) ? '…' : 'Shutdown'"></span>
@@ -385,6 +386,13 @@ function vsphereDashboard() {
     selectAll: false,
     bulkAssignModal: { open: false, workgroup: '' },
 
+    // An agent-bound connection can only be sent the verbs the agent implements for
+    // this product. Mirrors agent_hypervisor_meta.PAGE_OPS['vsphere'], which is also what
+    // refuses the rest with a 501 — this is only so the operator sees why a button is
+    // dead instead of clicking it and reading an error.
+    viaAgent: {{ 'true' if via_agent else 'false' }},
+    agentOps: ['start', 'stop', 'reset'],
+
     get connectionLabel() {
       if (this.loading) return 'Connecting…';
       if (this.hosts.length === 1 && this.hosts[0]?.name) return 'Connected to ' + this.hosts[0].name;
@@ -510,6 +518,19 @@ function vsphereDashboard() {
         const detail = await API.get('/api/vsphere/vms/' + encodeURIComponent(vm.moref));
         this.detailVm = detail;
       } catch (_) { /* keep row data */ }
+    },
+
+    // Methods, not getters: tests/template_helpers_check.js cannot see a getter, so a
+    // getter here would be an unbound name in every binding that used it.
+    canOp(op) {
+      return !this.viaAgent || this.agentOps.includes(op);
+    },
+
+    opTitle(op) {
+      if (this.canOp(op)) return '';
+      return 'Not available through a remote agent — a graceful vCenter shutdown is a '
+           + 'separate guest-power call, and the nearest power action is a hard reset. '
+           + 'Available: ' + this.agentOps.join(', ') + '.';
     },
 
     powerLabel(state) {

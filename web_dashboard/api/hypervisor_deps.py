@@ -31,10 +31,10 @@ def conn_or_error(db: Session, kind: str, connection_id: Optional[str] = None):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-def agent_power_job(db: Session, conn, *, verb: str, target_id: str,
+def agent_power_job(db: Session, conn, *, op: str, target_id: str,
                     target_scope: str = "", target_type: str = "vm",
                     created_by: str = "", description: str = ""):
-    """Enqueue a power verb for an AGENT-BOUND connection, or return None.
+    """Enqueue a power op for an AGENT-BOUND connection, or return None.
 
     The dashboard has no route to these endpoints — that is the whole reason the
     connection is bound to an agent — so the power buttons on the hypervisor pages
@@ -51,9 +51,13 @@ def agent_power_job(db: Session, conn, *, verb: str, target_id: str,
     here — the other two are the agent's, deliberately, and their refusal shows up in
     Live Output naming the file and the line to add.
 
-    ``verb`` must already be one of the agent's write verbs; a caller whose op has no
-    agent equivalent has to refuse it rather than pass the op name through. See the
-    check below for why that cannot be left to the normaliser.
+    Takes the **page op** (`shutdown`, `hard_reboot`, …), not an agent verb, because the
+    op-to-verb map is per hypervisor kind — the agent's `restart` is a graceful shutdown
+    on Proxmox, a hard reset on vSphere and a reboot on XCP-ng. See
+    :data:`~web_dashboard.services.agent_hypervisor_meta.PAGE_OPS` for what went wrong
+    while each router kept its own copy. Translating here also puts the translation
+    *after* the agent-bound check below, so refusing an op the agent cannot express can
+    never touch a connection the dashboard dials directly.
     """
     if not getattr(conn, "agent_id", None):
         return None
@@ -64,8 +68,21 @@ def agent_power_job(db: Session, conn, *, verb: str, target_id: str,
     # Refused here rather than left to normalize(): an unrecognised verb falls back to
     # ``inventory_sync`` there (deliberately — see agent_hypervisor_meta), which for a
     # POWER request is the worst possible outcome. The operator would get a job that
-    # completes GREEN having run a scan, while the VM never moved. A router that has no
-    # agent verb for one of its ops must say so instead of passing the op through.
+    # completes GREEN having run a scan, while the VM never moved. An op with no agent
+    # verb has to be said out loud instead of passed through.
+    verb = agent_hypervisor_meta.agent_verb(conn.kind, op)
+    if verb is None:
+        # 501, not 400: the request is well formed and the operator is entitled to make
+        # it — this build simply cannot carry it out. The message names the substitution
+        # that would have been wrong and the buttons that do work, because a page whose
+        # button just failed is all the operator can see.
+        raise HTTPException(
+            status_code=501,
+            detail=agent_hypervisor_meta.no_verb_reason(conn.kind, op))
+
+    # Belt and braces, and not redundant: the check above trusts PAGE_OPS to contain
+    # only real verbs, and this one is what fails loudly if it ever does not — a typo
+    # in that table would otherwise reach normalize() and become a scan.
     if verb not in agent_hypervisor_meta.WRITE_VERBS:
         raise HTTPException(
             status_code=501,

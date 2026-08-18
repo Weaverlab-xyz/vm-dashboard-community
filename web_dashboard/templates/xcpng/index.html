@@ -193,7 +193,9 @@
                 <!-- Suspended: Resume + Force Off -->
                 <template x-if="vm.power_state === 'Suspended'">
                   <div class="flex items-center gap-1.5">
-                    <button @click="powerOp(vm, 'resume')" :disabled="vm._busy"
+                    <button @click="powerOp(vm, 'resume')"
+                            :disabled="vm._busy || !canOp('resume')"
+                            :title="opTitle('resume')"
                             class="px-2.5 py-1 text-xs font-medium rounded border border-green-600 text-green-600 hover:bg-green-50 disabled:opacity-50 transition-colors">
                       Resume
                     </button>
@@ -207,7 +209,9 @@
                 <!-- Paused: Unpause + Force Off -->
                 <template x-if="vm.power_state === 'Paused'">
                   <div class="flex items-center gap-1.5">
-                    <button @click="powerOp(vm, 'unpause')" :disabled="vm._busy"
+                    <button @click="powerOp(vm, 'unpause')"
+                            :disabled="vm._busy || !canOp('unpause')"
+                            :title="opTitle('unpause')"
                             class="px-2.5 py-1 text-xs font-medium rounded border border-green-600 text-green-600 hover:bg-green-50 disabled:opacity-50 transition-colors">
                       Unpause
                     </button>
@@ -222,8 +226,10 @@
                 <template x-if="vm.power_state === 'Running'">
                   <div class="flex items-center gap-1.5">
                     <button @click="powerOp(vm, 'shutdown')"
-                            :disabled="vm._busy || !vm.tools_installed"
-                            :title="vm.tools_installed ? 'Graceful shutdown' : 'Requires xe-guest-utilities'"
+                            :disabled="vm._busy || !canOp('shutdown') || !vm.tools_installed"
+                            :title="!canOp('shutdown') ? opTitle('shutdown')
+                              : (vm.tools_installed ? 'Graceful shutdown'
+                                                    : 'Requires xe-guest-utilities')"
                             class="px-2.5 py-1 text-xs font-medium rounded bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 transition-colors">
                       Shutdown
                     </button>
@@ -238,8 +244,9 @@
                             class="px-2.5 py-1 text-xs font-medium rounded bg-orange-500 hover:bg-orange-600 text-white disabled:opacity-50 transition-colors">
                       Reboot
                     </button>
-                    <button @click="powerOp(vm, 'suspend')" :disabled="vm._busy"
-                            title="Suspend to disk"
+                    <button @click="powerOp(vm, 'suspend')"
+                            :disabled="vm._busy || !canOp('suspend')"
+                            :title="canOp('suspend') ? 'Suspend to disk' : opTitle('suspend')"
                             class="px-2.5 py-1 text-xs font-medium rounded bg-gray-200 hover:bg-gray-300 text-gray-700 disabled:opacity-50 transition-colors">
                       Suspend
                     </button>
@@ -372,6 +379,13 @@ function xcpngDashboard() {
     selectAll: false,
     bulkAssignModal: { open: false, workgroup: '' },
 
+    // An agent-bound connection can only be sent the verbs the agent implements for
+    // this product. Mirrors agent_hypervisor_meta.PAGE_OPS['xcpng'], which is also what
+    // refuses the rest with a 501 — this is only so the operator sees why a button is
+    // dead instead of clicking it and reading an error.
+    viaAgent: {{ 'true' if via_agent else 'false' }},
+    agentOps: ['start', 'stop', 'reboot', 'hard_reboot'],
+
     get hosts() {
       return [...new Set(this.allVms.map(v => v.host).filter(Boolean))].sort();
     },
@@ -464,6 +478,19 @@ function xcpngDashboard() {
       } finally {
         this.loading = false;
       }
+    },
+
+    // Methods, not getters: tests/template_helpers_check.js cannot see a getter, so a
+    // getter here would be an unbound name in every binding that used it.
+    canOp(op) {
+      return !this.viaAgent || this.agentOps.includes(op);
+    },
+
+    opTitle(op) {
+      if (this.canOp(op)) return '';
+      return 'Not available through a remote agent — the agent has no clean-shutdown, '
+           + 'suspend, resume or pause verb, and its restart verb is a clean REBOOT. '
+           + 'Available: ' + this.agentOps.join(', ') + '.';
     },
 
     async powerOp(vm, op) {

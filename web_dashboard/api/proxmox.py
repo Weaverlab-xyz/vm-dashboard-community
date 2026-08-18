@@ -17,9 +17,6 @@ from ..services.proxmox_service import ProxmoxError
 from ..services import hypervisor_view_service
 from .hypervisor_deps import agent_power_job, conn_in_task, conn_or_error
 
-# Page verb -> the agent's closed verb allowlist (services/agent_hypervisor_meta).
-_AGENT_VERBS = {'start': 'power_on', 'stop': 'power_off', 'shutdown': 'restart', 'reset': 'power_reset', 'reboot': 'restart', 'hard_reboot': 'power_reset'}
-
 router = APIRouter(prefix="/api/proxmox", tags=["proxmox"])
 
 PROVIDER = "proxmox"
@@ -377,10 +374,13 @@ def _power_endpoint(op: str):
         label = payload.name or f"{payload.vm_type}/{payload.vmid}"
         conn = conn_or_error(db, "proxmox", connection_id)
         # An agent-bound connection is on a network the dashboard cannot dial, so the
-        # button enqueues an agent job instead of calling the service. Verbs the agent
-        # has no implementation for are refused by it, in Live Output, naming why.
+        # button enqueues an agent job instead of calling the service. Ops the agent's
+        # verb allowlist cannot honestly express — `reboot`, since the agent's `restart`
+        # is Proxmox's graceful *shutdown* — are a 501
+        # naming what it can; verbs it has no implementation for are refused by the
+        # agent itself, in Live Output, naming why.
         agent_job = agent_power_job(
-            db, conn, verb=_AGENT_VERBS.get(op, op), target_id=str(payload.vmid),
+            db, conn, op=op, target_id=str(payload.vmid),
             target_scope=payload.node, target_type=payload.vm_type,
             created_by=current_user.username,
             description=f"{op} {label} via agent")
