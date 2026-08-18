@@ -546,6 +546,8 @@ def test_no_dead_cache_names_remain():
     """These had a TTL entry and/or an invalidation call but no reader or writer."""
     dead = ("cfgmgmt_instances", "cfgmgmt_s3status", "aws_ssh_key_secrets",
             "azure_marketplace",
+            # The /api/images/{ovas,isos} listing endpoints are gone; the TTLs outlived them.
+            "images_ovas", "images_isos",
             # Moved to the cloud_cost_cache table — see cost_cache.py's docstring.
             "cost_summary", "cost_breakdown_v2")
     listed = set(setup_api._CONFIG_DEPENDENT_CACHES) | set(

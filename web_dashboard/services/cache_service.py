@@ -20,10 +20,7 @@ logger = logging.getLogger(__name__)
 
 # ── TTL constants (seconds) ───────────────────────────────────────────────────
 TTL = {
-    # PowerShell-backed
     "vms_running":         1800,  # 30 min — now only triggered by explicit user action
-    "images_ovas":         300,   # 5 min
-    "images_isos":         600,   # 10 min
     # AWS / boto3-backed
     "aws_amis":            300,   # 5 min
     "aws_network_opts":    600,   # 10 min
