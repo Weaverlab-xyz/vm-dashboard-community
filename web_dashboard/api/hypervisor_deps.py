@@ -50,12 +50,27 @@ def agent_power_job(db: Session, conn, *, verb: str, target_id: str,
     actually existing in that agent's ``connections.yaml``. Only the first is checked
     here — the other two are the agent's, deliberately, and their refusal shows up in
     Live Output naming the file and the line to add.
+
+    ``verb`` must already be one of the agent's write verbs; a caller whose op has no
+    agent equivalent has to refuse it rather than pass the op name through. See the
+    check below for why that cannot be left to the normaliser.
     """
     if not getattr(conn, "agent_id", None):
         return None
 
     from ..database import RemoteAgent
     from ..services import agent_hypervisor_meta, agent_service, job_service
+
+    # Refused here rather than left to normalize(): an unrecognised verb falls back to
+    # ``inventory_sync`` there (deliberately — see agent_hypervisor_meta), which for a
+    # POWER request is the worst possible outcome. The operator would get a job that
+    # completes GREEN having run a scan, while the VM never moved. A router that has no
+    # agent verb for one of its ops must say so instead of passing the op through.
+    if verb not in agent_hypervisor_meta.WRITE_VERBS:
+        raise HTTPException(
+            status_code=501,
+            detail=(f"'{verb}' is not something an agent can be asked to do. The agent "
+                    f"verbs are: {', '.join(agent_hypervisor_meta.WRITE_VERBS)}."))
 
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == conn.agent_id).first()
     if agent is None:

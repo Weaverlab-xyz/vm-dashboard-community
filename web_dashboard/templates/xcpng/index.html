@@ -494,7 +494,9 @@ function xcpngDashboard() {
 
     timeAgo(dt) {
       if (!dt) return '';
-      const s = Math.round((new Date() - dt) / 1000);
+      // new Date(dt), not dt: the sync banner passes a server-rendered ISO STRING, and
+      // subtracting a string yields NaN ("Synced NaNh ago").
+      const s = Math.round((new Date() - new Date(dt)) / 1000);
       if (s < 10) return 'just now';
       if (s < 60) return `${s}s ago`;
       if (s < 3600) return `${Math.floor(s/60)}m ago`;

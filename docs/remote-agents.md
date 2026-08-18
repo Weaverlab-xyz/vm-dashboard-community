@@ -538,8 +538,11 @@ connected to, so a second scan matches.
 ## Hypervisor connections
 
 Once an agent is enrolled it can also **broker hypervisor operations** — inventory sync
-on a schedule, and power verbs on demand — for vCenter, Proxmox, Nutanix and XCP-ng
-endpoints the dashboard has no route to.
+on a schedule, and power verbs on demand — for vCenter, Proxmox, Nutanix, XCP-ng, Hyper-V
+and bare ESXi endpoints the dashboard has no route to. Which of the two each product gets
+is [its own table](#what-the-agent-can-and-cannot-reach); Nutanix syncs but cannot be
+powered, and a page whose button has no agent verb says so rather than sending the
+nearest one.
 
 ### The credential is the agent's, never the dashboard's
 
@@ -602,7 +605,7 @@ flag, because a boolean on a destructive verb gets defaulted wrong exactly once.
 | Nutanix Prism | Prism v3 REST | yes | no — a v3 power change is a full spec PUT with a metadata version, not an action |
 | VMware Workstation Pro | `vmrest`, on the same host | yes | on/off only — vmrest has no reset, reboot or snapshot |
 | bare ESXi | SOAP, via the [sibling runner](#the-sibling-runner) | yes | yes |
-| Hyper-V | WinRM, via the [sibling runner](#the-sibling-runner) | yes | yes |
+| Hyper-V | WinRM, via the [sibling runner](#the-sibling-runner) | yes | Start, Force Off and Restart — the allowlist has no graceful-shutdown or suspend verb, so Shutdown, Pause, Resume and Save are refused rather than approximated |
 
 `esxi` is a distinct connection kind from `vsphere` on the agent's side even though the
 dashboard has only `vsphere`: same product, different transport, and the agent is the only

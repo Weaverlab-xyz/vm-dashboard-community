@@ -108,9 +108,9 @@ def _power_endpoint(op: str):
         job = job_service.create_job(
             db,
             job_type=f"xcpng_{op}",
-            description=f"XCP-ng {op.replace('_', ' ')}: {label}",
+            created_by=current_user.username,
             workgroup="xcpng",
-            owner_id=current_user.id,
+            metadata={"uuid": payload.uuid, "vm_name": payload.name, "op": op},
         )
         background_tasks.add_task(
             _run_power_op, job.id, conn.id, payload.uuid, payload.name, op, label
