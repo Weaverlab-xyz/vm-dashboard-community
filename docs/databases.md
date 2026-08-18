@@ -450,6 +450,11 @@ OCI has no per-region config sets.
 and keeps the PRA-vaulted credential in sync. **GCP and OCI are not supported** — those
 databases provision and get a tunnel, but no Password Safe onboarding.
 
+> **Setting this up or testing the plugins?**
+> [docs/runbooks/clouddb-password-safe-plugin-setup.md](runbooks/clouddb-password-safe-plugin-setup.md)
+> is the field-by-field operator runbook: prerequisites, exactly what to put in each
+> settings-panel field, the test procedure, and how to read a failure.
+
 Both paths create a **dedicated managed DB user** as the rotation target (not the master
 admin), point the PRA tunnel's injected credential at it, onboard the DB as a Password
 Safe **managed system + managed account**, and onboard the PRA Vault account on the
