@@ -38,7 +38,7 @@ import os
 import secrets
 import string
 
-from fnruntime import logs
+from fnruntime import logs, secretref
 from fnruntime.contract import Context, Request, Response
 
 NAME = "db_grant"
@@ -55,6 +55,11 @@ except ImportError:  # pragma: no cover - exercised in-repo, never in the zip
 
 _TRUTHY = ("1", "true", "yes", "on")
 _CONNECT_TIMEOUT = 10
+
+# Every account this adapter mints starts with this (see
+# cloud_db_sql_service.ephemeral_username). Accounts that do not are somebody
+# else's, and this adapter neither lists nor deletes them.
+_JIT_PREFIX = "jit_"
 
 # Entitle role_code → the access level the SQL builders understand. Exposed to
 # Entitle through get_assets' role_options, so an operator picks from these rather
@@ -76,12 +81,15 @@ def _dry_run() -> bool:
     return True if raw is None else raw.strip().lower() in _TRUTHY
 
 
-def _target() -> dict:
-    """Where and what to connect to — all from the function's own configuration.
+def _server() -> dict:
+    """The ONE server this adapter fronts — engine, endpoint, admin login.
 
-    Never from the request. Entitle sends an ``asset`` object, and honouring a host
-    or database from it would make every caller of this endpoint a lateral-movement
-    primitive; the asset identifier is only ever CHECKED against what we serve.
+    One function, one server, and that is a security boundary rather than a
+    limitation. The admin credential a JIT adapter needs (CREATE/DROP USER) is
+    already server-level on every managed engine here, so several databases on one
+    server share a blast radius whether or not they share a function. Two servers do
+    not, and giving one endpoint credentials for both would genuinely widen it —
+    which is why ``FN_DB_HOST`` stays singular.
     """
     engine = _env("FN_DB_ENGINE").lower()
     if engine not in ("mysql", "sqlserver"):
@@ -93,18 +101,42 @@ def _target() -> dict:
         port = int(_env("FN_DB_PORT") or (3306 if engine == "mysql" else 1433))
     except ValueError:
         raise RuntimeError("FN_DB_PORT is not a number") from None
-    database = _env("FN_DB_NAME")
-    if not database:
-        raise RuntimeError("FN_DB_NAME is not set")
     return {
-        "engine": engine, "host": host, "port": port, "database": database,
+        "engine": engine, "host": host, "port": port,
         "flavor": _env("FN_DB_FLAVOR"), "admin_user": _env("FN_DB_ADMIN_USER") or "dbadmin",
     }
 
 
+def _database_names() -> list:
+    """The databases this adapter serves, in configuration order.
+
+    ``FN_DB_NAMES`` is the allowlist; ``FN_DB_NAME`` is the single-database spelling
+    and stays exactly as it was. A request can only ever SELECT from this list — it
+    can never add to it. That is the whole safety property: the asset identifier
+    picks a target, it does not describe one, so no caller can point a grant at a
+    database (or a host) the operator did not configure.
+    """
+    raw = _env("FN_DB_NAMES") or _env("FN_DB_NAME")
+    names = []
+    for part in raw.split(","):
+        name = part.strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        raise RuntimeError("set FN_DB_NAME (one database) or FN_DB_NAMES (several)")
+    return names
+
+
+def _targets() -> dict:
+    """``{asset identifier: target}`` — everything this adapter may touch."""
+    server = _server()
+    return {_asset_identifier(dict(server, database=name)): dict(server, database=name)
+            for name in _database_names()}
+
+
 def _asset_identifier(target: dict) -> str:
-    """The one asset this adapter fronts. One function per database keeps the blast
-    radius of a compromised endpoint to exactly that database."""
+    """One asset per database served. Distinct per database, so a request naming one
+    can never be satisfied against another."""
     return f"{target['engine']}:{target['host']}:{target['database']}"
 
 
@@ -124,28 +156,22 @@ def _asset(target: dict) -> dict:
 def _admin_password() -> str:
     """The DB admin password, resolved without it ever being a request field.
 
-    GCP injects it as a secret env var and Azure resolves a Key Vault reference in
-    app settings — both land in FN_DB_ADMIN_PASSWORD before this code runs. AWS has
-    no platform-resolved equivalent for Lambda, so read Secrets Manager directly
-    with the boto3 the runtime already ships.
+    Always a reference, never a plaintext setting: GCP injects a Secret Manager
+    secret and Azure resolves a Key Vault reference (both land in
+    FN_DB_ADMIN_PASSWORD before this code runs), and on AWS the function reads
+    Secrets Manager itself. ``fnruntime.secretref`` owns that fan-out.
+
+    FN_DB_ADMIN_SECRET_ID is the id variable this workload shipped with, so it is
+    still accepted ahead of the conventional name and existing deployments keep
+    resolving unchanged.
     """
-    direct = _env("FN_DB_ADMIN_PASSWORD")
-    if direct:
-        return direct
-    secret_id = _env("FN_DB_ADMIN_SECRET_ID")
-    if not secret_id:
+    password = secretref.resolve("FN_DB_ADMIN_PASSWORD", "FN_DB_ADMIN_SECRET_ID")
+    if not password:
         raise RuntimeError(
             "no database admin credential available: set FN_DB_ADMIN_PASSWORD "
             "(GCP secret env var / Azure Key Vault reference) or FN_DB_ADMIN_SECRET_ID "
             "(AWS Secrets Manager)")
-    import boto3  # noqa: PLC0415 — Lambda ships it; the other clouds never reach here
-    client = boto3.client("secretsmanager", region_name=_env("AWS_REGION") or None)
-    payload = client.get_secret_value(SecretId=secret_id).get("SecretString") or ""
-    if payload.startswith("{"):
-        import json
-        parsed = json.loads(payload)
-        return str(parsed.get("password") or parsed.get("admin_password") or "")
-    return payload
+    return password
 
 
 def _generate_password(length: int = 24) -> str:
@@ -217,20 +243,48 @@ def _apply(plan, target: dict, ctx: Context, extra: dict = None) -> Response:
     return Response(200, body)
 
 
-def _check_asset(payload: dict, target: dict):
-    """``None`` if the request names the asset we serve, else the error Response.
+def _resolve_target(identifier: str, targets: dict) -> tuple:
+    """``(target, None)`` for the asset a request names, else ``(None, Response)``.
 
-    Entitle sends the whole asset object back; a mismatch means the integration is
-    pointed at the wrong function, which is worth failing loudly rather than
-    quietly granting on the only database we have.
+    An unknown identifier is a 404 — the integration is pointed at the wrong
+    function, which is worth failing loudly rather than granting on some database we
+    happen to have.
+
+    A MISSING identifier is the case that matters. With one database it is
+    unambiguous, and every existing deployment calls this way, so it resolves. With
+    several, choosing one for the caller would be precisely the silent mis-grant
+    this adapter exists to prevent, so it is a 400 that lists what it serves.
     """
-    asset = payload.get("asset") or {}
-    identifier = str(asset.get("identifier") or "").strip()
-    expected = _asset_identifier(target)
-    if identifier and identifier != expected:
-        return Response(404, {"error": f"unknown asset {identifier!r}; "
-                                       f"this adapter serves {expected!r}"})
-    return None
+    identifier = str(identifier or "").strip()
+    if not identifier:
+        if len(targets) == 1:
+            return next(iter(targets.values())), None
+        return None, Response(400, {
+            "error": "asset.identifier is required: this adapter serves "
+                     f"{len(targets)} databases, so there is no default",
+            "assets": sorted(targets)})
+    target = targets.get(identifier)
+    if target is None:
+        return None, Response(404, {"error": f"unknown asset {identifier!r}",
+                                    "assets": sorted(targets)})
+    return target, None
+
+
+def _asset_target(payload: dict, targets: dict) -> tuple:
+    """:func:`_resolve_target` for the ``asset`` object Entitle sends on a grant."""
+    return _resolve_target((payload.get("asset") or {}).get("identifier"), targets)
+
+
+def _is_minted(username: str) -> bool:
+    """Whether this adapter made the account, by the naming convention it mints
+    with (``cloud_db_sql_service.ephemeral_username``).
+
+    The only thing standing between ``delete_actor`` and the database's own admin
+    login, so it is checked on every destructive route that takes a name from a
+    request. ``portainer_access`` draws the same line for the same reason: a grant
+    integration must not be able to remove an operator's account.
+    """
+    return str(username or "").startswith(_JIT_PREFIX)
 
 
 def _role_code(payload: dict) -> str:
@@ -243,13 +297,15 @@ def _actor_identifier(payload: dict) -> str:
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
-def _get_assets(req, ctx, target):
-    # No pagination: one function fronts exactly one database, so there is never a
-    # second page. `next` is still present because the contract declares it.
-    return Response(200, {"next": "", "data": {"assets": [_asset(target)]}})
+def _get_assets(req, ctx, targets):
+    # No pagination: the asset list is the operator's own FN_DB_NAMES, which is a
+    # handful of databases on one server, not a discovered catalogue. `next` is
+    # still present because the contract declares it.
+    return Response(200, {"next": "", "data": {
+        "assets": [_asset(target) for target in targets.values()]}})
 
 
-def _get_actors(req, ctx, target):
+def _get_actors(req, ctx, targets):
     """The ephemeral accounts that currently exist.
 
     Derived from the account naming convention rather than a stored list — the
@@ -258,25 +314,18 @@ def _get_actors(req, ctx, target):
     """
     if _dry_run():
         return Response(200, {"next": "", "data": {"actors": []}})
-    return Response(200, {"next": "", "data": {"actors": _list_actors(target)}})
+    return Response(200, {"next": "", "data": {"actors": _list_all_actors(targets)}})
 
 
-def _list_actors(target: dict) -> list:
-    engine = target["engine"]
-    if engine == "mysql":
-        query = ("SELECT user FROM mysql.user WHERE user LIKE 'jit\\_%' "
-                 "AND host = '%'")
-        database = target["database"]
-    else:
-        query = ("SELECT name FROM sys.database_principals "
-                 "WHERE name LIKE 'jit[_]%' AND type IN ('S','U')")
-        database = target["database"]
-    connection = _connect(engine, host=target["host"], port=target["port"],
-                          database=database, user=target["admin_user"],
+def _query(target: dict, query: str, params=None) -> list:
+    """One column of one query, against one database. Connection-scoped: the
+    database is chosen by connecting to it, never by interpolating its name."""
+    connection = _connect(target["engine"], host=target["host"], port=target["port"],
+                          database=target["database"], user=target["admin_user"],
                           password=_admin_password())
     try:
         cursor = connection.cursor()
-        cursor.execute(query)
+        cursor.execute(query, params) if params else cursor.execute(query)
         names = [str(row[0]) for row in cursor.fetchall()]
         cursor.close()
     finally:
@@ -284,53 +333,137 @@ def _list_actors(target: dict) -> list:
             connection.close()
         except Exception:
             pass
+    return names
+
+
+def _actors(names) -> list:
     return [{"identifier": name, "name": name, "type": "database_account",
-             "email": ""} for name in names]
+             "email": ""} for name in sorted(set(names)) if _is_minted(name)]
 
 
-def _get_all_permissions(req, ctx, target):
-    """Who currently holds what. Entitle reconciles against this, so an adapter that
-    lies here produces drift it can never correct."""
+def _list_actors_in(target: dict) -> list:
+    """Accounts holding access **in one database**.
+
+    The per-asset answer, and the reason it is not the server-wide one: on MySQL an
+    account is a server-level principal and only the GRANT is per-database, so
+    reading ``mysql.user`` would report every database's accounts against every
+    asset. ``mysql.db`` holds the database-scoped grants, which is the actual
+    question. On SQL Server ``sys.database_principals`` is already per-database.
+    """
+    if target["engine"] == "mysql":
+        return _actors(_query(
+            target,
+            "SELECT User FROM mysql.db WHERE Db = %s AND User LIKE %s",
+            (target["database"], _JIT_PREFIX.replace("_", "\\_") + "%")))
+    return _actors(_query(
+        target,
+        "SELECT name FROM sys.database_principals "
+        "WHERE name LIKE 'jit[_]%' AND type IN ('S','U')"))
+
+
+def _list_all_actors(targets: dict) -> list:
+    """Every account this adapter minted on this server.
+
+    MySQL can answer directly — the adapter owns the whole ``jit_`` namespace on the
+    server it fronts — and answering that way also lists an account whose
+    ``give_access`` never arrived, which Entitle needs in order to clean it up. SQL
+    Server has no equivalent readable from a user database, so it is the union of
+    the per-database users, which ``create_actor`` puts in every served database.
+    """
+    first = next(iter(targets.values()))
+    if first["engine"] == "mysql":
+        return _actors(_query(
+            first, "SELECT User FROM mysql.user WHERE User LIKE %s AND Host = %s",
+            (_JIT_PREFIX.replace("_", "\\_") + "%", "%")))
+    found = []
+    for target in targets.values():
+        found += [actor["identifier"] for actor in _list_actors_in(target)]
+    return _actors(found)
+
+
+def _permissions_body(targets: dict) -> dict:
+    """The reconciliation payload for a set of assets.
+
+    Entitle reconciles against this, so an adapter that lies here produces drift it
+    can never correct — which is why each actor is attributed only to the databases
+    it actually holds a grant in, read per database rather than inferred from the
+    name.
+    """
+    actors_permissions = []
+    seen = set()
+    for identifier, target in targets.items():
+        for actor in _list_actors_in(target):
+            if actor["identifier"] in seen:
+                continue
+            seen.add(actor["identifier"])
+            # The role an account holds is not recoverable from its name, and
+            # reading it back per engine is a separate piece of work; report
+            # membership without a role rather than inventing one Entitle would
+            # then act on.
+            actors_permissions.append({"actor_id": actor["identifier"],
+                                       "role_code": "", "direct_member": True})
+    return {
+        "actors_permissions": actors_permissions,
+        "assets_permissions": [{"asset_id": identifier, "role_code": code}
+                               for identifier in targets for code in _ROLE_CODES],
+    }
+
+
+def _get_all_permissions(req, ctx, targets):
+    """Who currently holds what, across every database served."""
     if _dry_run():
         return Response(200, {"next": "", "data": {"actors_permissions": [],
                                                    "assets_permissions": []}})
-    actors = _list_actors(target)
-    asset_id = _asset_identifier(target)
-    return Response(200, {"next": "", "data": {
-        # The role an account holds is not recoverable from its name, and reading it
-        # back per engine is a separate piece of work; report membership without a
-        # role rather than inventing one Entitle would then act on.
-        "actors_permissions": [
-            {"actor_id": actor["identifier"], "role_code": "", "direct_member": True}
-            for actor in actors],
-        "assets_permissions": [{"asset_id": asset_id, "role_code": code}
-                               for code in _ROLE_CODES],
-    }})
+    return Response(200, {"next": "", "data": _permissions_body(targets)})
 
 
-def _get_asset_permissions(req, ctx, target):
-    return _get_all_permissions(req, ctx, target)
+def _get_asset_permissions(req, ctx, targets):
+    """The same, for ONE asset named in the path.
+
+    Not an alias for the all-assets route any more: with several databases served,
+    answering an asset-scoped question with every asset's actors would report people
+    as holding access they do not have.
+    """
+    identifier = (req.path or "").rstrip("/").rsplit("/", 1)[-1]
+    target, refusal = _resolve_target(identifier, targets)
+    if refusal:
+        return refusal
+    if _dry_run():
+        return Response(200, {"next": "", "data": {"actors_permissions": [],
+                                                   "assets_permissions": []}})
+    scoped = {_asset_identifier(target): target}
+    return Response(200, {"next": "", "data": _permissions_body(scoped)})
 
 
-def _create_actor(req, ctx, target):
+def _create_actor(req, ctx, targets):
+    """Mint the account, with no privileges anywhere.
+
+    Entitle's ``create_actor`` carries **no asset** — an actor belongs to the
+    adapter, not to an asset — so this cannot know which database the grant will be
+    for, and creates a role-less account across every database served. That is the
+    same "useless and harmless until give_access" guarantee as the single-database
+    case, just applied N times.
+    """
     payload = req.json()
     actor = payload.get("actor") or payload
     identity = str(actor.get("email") or actor.get("identifier")
                    or actor.get("name") or "").strip()
     if not identity:
         return Response(400, {"error": "create_actor needs an actor with an email or identifier"})
+    server = next(iter(targets.values()))
+    databases = [target["database"] for target in targets.values()]
     username = _sqlplan.ephemeral_username(identity, ctx.request_id)
     password = _generate_password()
     try:
         plan = _sqlplan.create_actor_plan(
-            target["engine"], username=username, password=password,
-            database=target["database"], flavor=target["flavor"])
+            server["engine"], username=username, password=password,
+            database=databases[0], flavor=server["flavor"], databases=databases)
     except _sqlplan.CloudDbSqlError as exc:
         return Response(400, {"error": str(exc)})
 
     logs.emit("info", "create_actor", request_id=ctx.request_id,
-              identity=identity, username=username, engine=target["engine"],
-              dry_run=_dry_run())
+              identity=identity, username=username, engine=server["engine"],
+              databases=len(databases), dry_run=_dry_run())
 
     # The credentials ARE the point of create_actor — Entitle hands them to the
     # requester. In dry run nothing was created, so returning one would be a secret
@@ -338,35 +471,53 @@ def _create_actor(req, ctx, target):
     extra = {"identifier": username, "name": username, "type": "database_account"}
     if not _dry_run():
         extra.update({"username": username, "password": password,
-                      "host": target["host"], "port": target["port"],
-                      "database": target["database"]})
-    return _apply(plan, target, ctx, extra)
+                      "host": server["host"], "port": server["port"]})
+        # One database has an unambiguous answer; several do not, and naming one
+        # would tell the requester they have access somewhere they do not.
+        extra.update({"database": databases[0]} if len(databases) == 1
+                     else {"databases": databases})
+    return _apply(plan, server, ctx, extra)
 
 
-def _delete_actor(req, ctx, target):
+def _delete_actor(req, ctx, targets):
     payload = req.json()
     username = _actor_identifier(payload) or str(payload.get("identifier") or "").strip()
     if not username:
         return Response(400, {"error": "delete_actor needs actor_identifier"})
+    if not _is_minted(username):
+        # Without this, delete_actor is a DROP USER for any name the caller likes —
+        # the database's own admin login included. Entitle only ever returns names
+        # this adapter minted, so a name that fails here did not come from it.
+        return Response(403, {"error": f"{username!r} was not created by this adapter; "
+                                       "it only manages accounts it minted"})
+    server = next(iter(targets.values()))
+    databases = [target["database"] for target in targets.values()]
     try:
         plan = _sqlplan.delete_actor_plan(
-            target["engine"], username=username, database=target["database"],
-            flavor=target["flavor"])
+            server["engine"], username=username, database=databases[0],
+            flavor=server["flavor"], databases=databases)
     except _sqlplan.CloudDbSqlError as exc:
         return Response(400, {"error": str(exc)})
     logs.emit("info", "delete_actor", request_id=ctx.request_id,
-              username=username, engine=target["engine"], dry_run=_dry_run())
-    return _apply(plan, target, ctx, {"identifier": username})
+              username=username, engine=server["engine"], dry_run=_dry_run())
+    return _apply(plan, server, ctx, {"identifier": username})
 
 
-def _give_access(req, ctx, target):
+def _give_access(req, ctx, targets):
     payload = req.json()
-    mismatch = _check_asset(payload, target)
-    if mismatch:
-        return mismatch
+    target, refusal = _asset_target(payload, targets)
+    if refusal:
+        return refusal
     username = _actor_identifier(payload)
     if not username:
         return Response(400, {"error": "give_access needs actor_identifier"})
+    if not _is_minted(username):
+        # Otherwise this grants a role to any EXISTING account named in a request —
+        # an application login, say — which is a privilege-escalation primitive
+        # rather than a JIT grant. Entitle only ever passes back names from
+        # create_actor or get_actors, and both are minted-only.
+        return Response(403, {"error": f"{username!r} was not created by this adapter; "
+                                       "it only manages accounts it minted"})
     role = _role_code(payload)
     try:
         plan = _sqlplan.give_access_plan(
@@ -376,18 +527,25 @@ def _give_access(req, ctx, target):
         return Response(400, {"error": str(exc)})
     logs.emit("info", "give_access", request_id=ctx.request_id,
               username=username, role_code=role, engine=target["engine"],
-              dry_run=_dry_run())
+              asset=_asset_identifier(target), dry_run=_dry_run())
     return _apply(plan, target, ctx, {"actor_identifier": username, "role_code": role})
 
 
-def _revoke_access(req, ctx, target):
+def _revoke_access(req, ctx, targets):
     payload = req.json()
-    mismatch = _check_asset(payload, target)
-    if mismatch:
-        return mismatch
+    target, refusal = _asset_target(payload, targets)
+    if refusal:
+        return refusal
     username = _actor_identifier(payload)
     if not username:
         return Response(400, {"error": "revoke_access needs actor_identifier"})
+    if not _is_minted(username):
+        # Otherwise this grants a role to any EXISTING account named in a request —
+        # an application login, say — which is a privilege-escalation primitive
+        # rather than a JIT grant. Entitle only ever passes back names from
+        # create_actor or get_actors, and both are minted-only.
+        return Response(403, {"error": f"{username!r} was not created by this adapter; "
+                                       "it only manages accounts it minted"})
     role = _role_code(payload)
     try:
         plan = _sqlplan.revoke_access_plan(
@@ -397,12 +555,12 @@ def _revoke_access(req, ctx, target):
         return Response(400, {"error": str(exc)})
     logs.emit("info", "revoke_access", request_id=ctx.request_id,
               username=username, role_code=role, engine=target["engine"],
-              dry_run=_dry_run())
+              asset=_asset_identifier(target), dry_run=_dry_run())
     return _apply(plan, target, ctx, {"actor_identifier": username, "role_code": role})
 
 
-def _check_config(req, ctx, target):
-    """Configuration self-test. Reports the target it resolved so a misconfigured
+def _check_config(req, ctx, targets):
+    """Configuration self-test. Reports every asset it resolved so a misconfigured
     integration is caught at setup rather than at the first real grant."""
     problems = []
     if not _dry_run():
@@ -410,11 +568,12 @@ def _check_config(req, ctx, target):
             _admin_password()
         except Exception as exc:
             problems.append(str(exc))
+    server = next(iter(targets.values()))
     return Response(200, {"data": {
         "valid": not problems,
-        "asset": _asset_identifier(target),
-        "engine": target["engine"],
-        "flavor": target["flavor"] or "rds",
+        "assets": sorted(targets),
+        "engine": server["engine"],
+        "flavor": server["flavor"] or "rds",
         "dry_run": _dry_run(),
         "problems": problems,
     }})
@@ -433,7 +592,7 @@ _ROUTES = {
 
 
 def handle(req: Request, ctx: Context) -> Response:
-    target = _target()
+    targets = _targets()
     path = (req.path or "/").rstrip("/") or "/"
 
     handler = _ROUTES.get((req.method, path))
@@ -446,4 +605,4 @@ def handle(req: Request, ctx: Context) -> Response:
             # means the integration's *_path fields disagree with these.
             "routes": sorted(f"{method} {route}" for method, route in _ROUTES),
         })
-    return handler(req, ctx, target)
+    return handler(req, ctx, targets)

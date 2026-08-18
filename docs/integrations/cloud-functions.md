@@ -33,8 +33,8 @@ this adds** — an always-on, externally callable endpoint is.
 
 | Cloud | Needs |
 |---|---|
-| **AWS** | An S3 bucket for packages. The dashboard's IAM identity needs `s3:PutObject`, plus `lambda:*`, `iam:CreateRole`/`AttachRolePolicy` (for the execution role) and `logs:*` on the function's log group. |
-| **Azure** | The dashboard's existing storage account (`storage_azure_account`) and resource group. The service principal needs `Microsoft.Web/*`, `Microsoft.Storage/storageAccounts/listKeys/action`, and `Microsoft.Web/sites/host/listKeys/action`. |
+| **AWS** | An S3 bucket for packages. The dashboard's IAM identity needs `s3:PutObject`, plus `lambda:*`, `iam:CreateRole`/`AttachRolePolicy`/`PutRolePolicy` (the execution role and its inline secrets policy), `secretsmanager:CreateSecret`/`PutSecretValue`/`DeleteSecret`/`DescribeSecret`/`TagResource` (every function keeps its bearer secret there) and `logs:*` on the function's log group. |
+| **Azure** | The dashboard's existing storage account (`storage_azure_account`) and resource group, **plus a Key Vault** — every function keeps its bearer secret there. The service principal needs `Microsoft.Web/*`, `Microsoft.Storage/storageAccounts/listKeys/action`, `Microsoft.Web/sites/host/listKeys/action`, `Microsoft.ManagedIdentity/userAssignedIdentities/*`, secret `set` on the vault, and authority to grant on it (`Microsoft.Authorization/roleAssignments/write` for an RBAC vault, or `Microsoft.KeyVault/vaults/accessPolicies/write` for a policy-based one). |
 | **GCP** | A GCS bucket for sources, and a noticeably larger IAM surface: `roles/cloudfunctions.developer`, `roles/run.admin`, `roles/cloudbuild.builds.builder`, `roles/artifactregistry.writer`, `roles/storage.objectAdmin`, `roles/secretmanager.admin`, plus `roles/iam.serviceAccountUser` on the runtime service account. |
 | All | Terraform in the image (it is, by default). |
 
@@ -166,19 +166,21 @@ cannot redirect a grant at another database):
 | `FN_DB_ENGINE` | `mysql` or `sqlserver` |
 | `FN_DB_HOST` / `FN_DB_PORT` | the private endpoint; deploy the function in `vpc` mode to reach it |
 | `FN_DB_NAME` | the database grants are scoped to |
+| `FN_DB_NAMES` | **several** databases on that server, comma-separated. Replaces `FN_DB_NAME`; see [One adapter, several databases](#one-adapter-several-databases) |
 | `FN_DB_FLAVOR` | `rds` (default), `azure_sql`, or `cloudsql` — **matters for SQL Server only** |
 | `FN_DB_ADMIN_USER` | the admin login that runs CREATE/DROP |
+| `FN_DB_ADMIN_PASSWORD` | **never set directly** — pass it as `secret_environment` (see [Credentials](#credentials)) |
 | `FN_DB_DRY_RUN` | unset or truthy = dry run. **Default is dry run.** |
 
 `FN_DB_FLAVOR=azure_sql` is not cosmetic: Azure SQL Database is a contained-database
 model, so the login goes in `master` on the logical server and the user in the target
 database, over two separate connections with no `USE` between them.
 
-The admin password is never a request field. Set it as a Secret Manager secret env
-var on GCP (`db_admin_secret`), an `@Microsoft.KeyVault(SecretUri=…)` app setting on
-Azure (the module declares a system-assigned identity so the platform can resolve
-it — grant that identity `get` on the vault), or `FN_DB_ADMIN_SECRET_ID` plus
-`readable_secret_arns` on AWS.
+The admin password is never a request field, and never a plaintext setting: pass it
+as `secret_environment` (`{"FN_DB_ADMIN_PASSWORD": "<reference>"}`) and each cloud
+resolves it as described under [Credentials](#credentials). The older per-cloud
+spellings — `db_admin_secret` on GCP, `FN_DB_ADMIN_SECRET_ID` plus
+`readable_secret_arns` on AWS — still work for callers that already use them.
 
 Start in dry run. The response contains the exact SQL the function would execute,
 per connection, which is how you validate the whole Entitle path before anything
@@ -189,6 +191,74 @@ the account with **no privileges**, `give_access` grants a role, `revoke_access`
 removes the role but leaves the account, and `delete_actor` drops it. Entitle owns
 the expiry — no request carries a TTL, and the adapter schedules nothing.
 
+Two guards bound what a caller past the bearer secret can do, and they are the same
+line `portainer_access` draws:
+
+- **Only accounts this adapter minted.** `give_access`, `revoke_access` and
+  `delete_actor` refuse any identifier that is not one of its own `jit_` accounts,
+  with a 403. Without that, `delete_actor` is a `DROP USER` for any name — the
+  admin login included — and `give_access` grants a role to any existing account,
+  such as your application's.
+- **The request selects a target, it never describes one.** Entitle echoes the whole
+  `asset` object; only its `identifier` is read, and only to look up a database the
+  operator configured. A host or database name in the request is ignored.
+
+#### One adapter, several databases
+
+Set `FN_DB_NAMES` instead of `FN_DB_NAME` and one function serves every database in
+the list, each as its own Entitle asset:
+
+```
+FN_DB_NAMES = appdb,reporting,billing
+```
+
+**They must be on the same server** — `FN_DB_HOST` stays singular, and that is a
+security boundary rather than an oversight:
+
+- The admin credential a JIT adapter needs (`CREATE`/`DROP USER`) is **already
+  server-level** on every managed engine here. Several databases on one server
+  therefore share a blast radius whether or not they share a function, so
+  consolidating them removes copies of that credential rather than adding reach.
+  Two *servers* do not share one, and an endpoint holding both would genuinely
+  widen it.
+- Entitle's `create_actor` and `delete_actor` carry **no asset** — an actor belongs
+  to the adapter, not to an asset — so an adapter spanning servers could not know
+  which server to mint an account on. Within one server it can: the account is a
+  server-level principal (a MySQL user, a SQL Server login) and only the *grant* is
+  per-database.
+
+What changes with more than one database:
+
+| | One database | Several |
+|---|---|---|
+| `get_assets` | one asset | one per database |
+| a request with no `asset.identifier` | resolves — the only database | **400**, listing what it serves; picking one would be a silent mis-grant |
+| `create_actor` | account, no privileges | same, in every listed database (SQL Server gets a role-less user per database; MySQL's user is already server-wide) |
+| `delete_actor` | drops the account | drops it everywhere it was made, then the login — a database user left behind when its login goes is an orphaned user a later login of the same name re-adopts |
+| `get_asset_permissions/{id}` | the one asset | only that asset's accounts, read per database rather than inferred |
+
+To add a database to an adapter that is already running, change its settings rather
+than redeploying it:
+
+```
+POST /api/functions/{id}/environment
+{ "environment": { "FN_DB_NAMES": "appdb,reporting,billing" } }
+```
+
+Settings are merged over the current ones and a key set to `null` is removed. The
+function is re-applied **in place**, which is the point: destroy-and-redeploy loses
+the endpoint URL, the bearer secret, and the Entitle integration registered against
+both. An update also rebuilds the package from the running image, so it brings the
+function up to that image's handler code — a no-op when the image is unchanged,
+since packages are deterministic.
+
+> **Automatic pairing is unaffected, and that is correct.** **Register in Entitle**
+> deploys one adapter per database because each dashboard-provisioned database is its
+> own server instance — two of them never share one, so there is no adapter to share.
+> `FN_DB_NAMES` is for several databases on **one** server, which is the shape you get
+> from a server that was provisioned once and grew databases since, or from databases
+> registered rather than provisioned.
+
 ### portainer_access
 
 Just-in-time Portainer access. Portainer has no Entitle connector at all, so this
@@ -197,7 +267,7 @@ adapter is the only route to it.
 | Setting | Notes |
 |---|---|
 | `FN_PORTAINER_URL` | base URL of the Portainer instance |
-| `FN_PORTAINER_API_KEY` | an access token; supply it by reference (GCP secret env var / Azure Key Vault reference / AWS Secrets Manager) |
+| `FN_PORTAINER_API_KEY` | an access token — pass it as `secret_environment`, never as a plaintext setting (see [Credentials](#credentials)) |
 | `FN_PORTAINER_VERIFY_SSL` | `0` only for a self-signed lab instance |
 | `FN_PORTAINER_DRY_RUN` | unset or truthy = dry run. **Default is dry run.** |
 
@@ -232,7 +302,8 @@ integration cannot grant to one, and this adapter is the only route.
 
 | Setting | Notes |
 |---|---|
-| `FN_AZURE_TENANT_ID` / `FN_AZURE_CLIENT_ID` / `FN_AZURE_CLIENT_SECRET` | the adapter's own service principal; needs **User Access Administrator** on the scopes below |
+| `FN_AZURE_TENANT_ID` / `FN_AZURE_CLIENT_ID` | the adapter's own service principal; needs **User Access Administrator** on the scopes below |
+| `FN_AZURE_CLIENT_SECRET` | that principal's secret — pass it as `secret_environment` (see [Credentials](#credentials)). It is the highest-value credential in the feature, so it is never a plaintext setting |
 | `FN_AZURE_SUBSCRIPTION_ID` | where role definitions are resolved from |
 | `FN_AZURE_SCOPES` | comma-separated scopes it may grant at — subscription or resource-group paths |
 | `FN_AZURE_ROLES` | comma-separated role names or GUIDs it may grant |
@@ -257,6 +328,44 @@ created at the same scope.
 reads as a name rather than a GUID. Note it must be the service principal's **object**
 id: Azure accepts an application id and silently creates an assignment that grants
 nothing.
+
+### Credentials
+
+A workload that needs a credential — a database admin password, a Portainer token,
+an Azure client secret — gets it **by reference on every cloud**. You name a secret
+that already lives in the cloud's own secret store, and the dashboard wires up that
+cloud's resolution mechanism:
+
+| Cloud | What you pass | What happens |
+|---|---|---|
+| **AWS** | the Secrets Manager **ARN** | the id lands in `<NAME>_SECRET_ID` and the ARN on the function's role; the handler reads it at cold start |
+| **GCP** | the Secret Manager **secret id** | injected as a `secret_environment_variables` entry, and the runtime service account is bound `roles/secretmanager.secretAccessor` on that secret alone |
+| **Azure** | the **Key Vault secret name** | becomes an `@Microsoft.KeyVault(SecretUri=…)` app setting the platform resolves through the app's system-assigned identity (grant it `get` on the vault) |
+
+On AWS it must be the full ARN: the role's policy names ARNs, and AWS appends a
+random suffix to every one, so a name cannot be turned into an ARN by concatenation.
+
+```
+POST /api/functions
+{
+  "cloud": "gcp", "region": "us-central1", "name": "portainer-jit",
+  "workload": "portainer_access",
+  "environment": { "FN_PORTAINER_URL": "https://portainer.internal",
+                   "FN_PORTAINER_DRY_RUN": "0" },
+  "secret_environment": { "FN_PORTAINER_API_KEY": "portainer-jit-token" }
+}
+```
+
+> **`environment` is for non-secret settings, and the dashboard enforces that.** A
+> credential-shaped value there is refused at deploy with a message pointing here.
+> The reason it is an error rather than a warning: `environment` is stored in the
+> deploy job's metadata, streams into the job's Live Output as Terraform renders the
+> plan, and stays readable on the function's own console page — so by the time you
+> saw a warning, the credential would need rotating.
+
+Automatic pairing already works this way; nothing to configure. A `db_grant` adapter
+deployed by **Register in Entitle** stages the admin password in the cloud's secret
+store and passes only the reference.
 
 ### Writing your own
 
@@ -359,8 +468,43 @@ with a plain header and would otherwise need a proxy — so the bearer secret is
 gate there. Tighten `auth_mode` per function if you front it with a gateway.
 
 The secret is minted at deploy, stored encrypted (`cloudfn/{id}/bearer`), and shown
-via the **Endpoint** button. The handler **fails closed**: if the secret is missing
-from its environment it returns 500, never 200.
+via the **Endpoint** button. The handler **fails closed**: if it cannot resolve the
+secret it returns 500, never 200 — including when the secret store is unreachable or
+the function's role has lost its read grant.
+
+**Where the function keeps it**, which is not the same question as where the
+dashboard keeps it:
+
+| Cloud | Where | Who can read it |
+|---|---|---|
+| **AWS** | a Secrets Manager secret the module creates (`<name>-fn-secret`); only its ARN is in the function's environment | the function's role, and principals you grant on that secret |
+| **GCP** | Secret Manager, injected as a `secret_environment_variables` entry | the runtime service account |
+| **Azure** | Key Vault, referenced from an app setting the platform resolves | the function's own managed identity, and principals you grant on the vault |
+
+The AWS arrangement matters more than it looks: a Lambda's environment is returned
+in full by `lambda:GetFunctionConfiguration`, which the AWS-managed **ReadOnlyAccess**
+policy grants — so a bearer token stored there is readable by every read-only
+principal in the account, and reading it is enough to call the function. It now costs
+one Secrets Manager secret per function (~$0.40/month).
+
+**Azure needs a Key Vault, and a deploy without one is refused rather than
+downgraded to a readable app setting.** Configure it under Settings → Secrets →
+Azure Key Vault (`secrets_azure_kv_url`); set `azure_key_vault_resource_group` too if
+the vault does not live in the dashboard's own resource group. You do **not** grant
+anything per function: the module creates a user-assigned identity, grants it read on
+that vault, and points the app's Key Vault reference resolution at it.
+
+> Why a user-assigned identity rather than the app's system-assigned one: a
+> system-assigned identity does not exist until the app has been created, so the app
+> would boot with an unresolvable reference and only recover when Azure re-checks
+> references — up to 24 hours later. A user-assigned identity can be granted *before*
+> the app exists, so the first cold start resolves. The system-assigned identity is
+> still created, so an existing manual grant keeps working.
+
+> The secret passes through Terraform state on AWS and GCP, because the resource that
+> creates it takes the value. On Azure it does not — the dashboard writes it to the
+> vault and Terraform only ever sees the reference. State lives in your configured
+> backend; treat it as sensitive.
 
 ## Networking
 

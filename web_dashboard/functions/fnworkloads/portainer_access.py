@@ -46,7 +46,7 @@ import string
 import urllib.error
 import urllib.request
 
-from fnruntime import logs
+from fnruntime import logs, secretref
 from fnruntime.contract import Context, Request, Response
 
 NAME = "portainer_access"
@@ -75,11 +75,14 @@ def _config() -> dict:
     base = _env("FN_PORTAINER_URL").rstrip("/")
     if not base:
         raise RuntimeError("FN_PORTAINER_URL is not set")
-    api_key = _env("FN_PORTAINER_API_KEY")
+    # Always by reference — the platform resolves it on GCP/Azure, and on AWS
+    # secretref reads Secrets Manager by the id in FN_PORTAINER_KEY_SECRET_ID.
+    api_key = secretref.resolve("FN_PORTAINER_API_KEY", "FN_PORTAINER_KEY_SECRET_ID")
     if not api_key and not _dry_run():
         raise RuntimeError(
-            "FN_PORTAINER_API_KEY is not set (GCP secret env var / Azure Key Vault "
-            "reference / AWS Secrets Manager via FN_PORTAINER_KEY_SECRET_ID)")
+            "no Portainer API key available: set FN_PORTAINER_API_KEY (GCP secret "
+            "env var / Azure Key Vault reference) or FN_PORTAINER_KEY_SECRET_ID "
+            "(AWS Secrets Manager)")
     return {
         "base": base,
         "api_key": api_key,
@@ -342,7 +345,9 @@ def _check_config(req, ctx, config):
     problems = []
     teams = []
     if not config["api_key"]:
-        problems.append("FN_PORTAINER_API_KEY is not set")
+        problems.append("no API key available — set FN_PORTAINER_API_KEY (GCP secret "
+                        "env var / Azure Key Vault reference) or "
+                        "FN_PORTAINER_KEY_SECRET_ID (AWS Secrets Manager)")
     else:
         try:
             teams = [str(t.get("Name")) for t in _teams(config)]

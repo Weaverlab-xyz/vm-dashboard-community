@@ -186,13 +186,18 @@ resource "aws_lambda_function" "this" {
 
   environment {
     variables = merge(var.environment, {
-      FN_SHARED_SECRET = var.shared_secret
-      FN_WORKLOAD      = var.workload
-      FN_CLOUD         = "aws"
-      FN_REGION        = var.region
-      FN_NAME          = var.name
-      FN_NETWORK_MODE  = local.vpc_attached ? "vpc" : "public"
-      FN_SUBNETS       = join(",", var.subnet_ids)
+      # The ID, never the value. A Lambda's environment is returned in full by
+      # lambda:GetFunctionConfiguration — which the AWS-managed ReadOnlyAccess policy
+      # grants — so the bearer token living here made every read-only principal in
+      # the account able to call the function. fnruntime.secretref resolves it from
+      # Secrets Manager at cold start instead, which only this role may read.
+      FN_SHARED_SECRET_SECRET_ID = aws_secretsmanager_secret.shared_secret.arn
+      FN_WORKLOAD                = var.workload
+      FN_CLOUD                   = "aws"
+      FN_REGION                  = var.region
+      FN_NAME                    = var.name
+      FN_NETWORK_MODE            = local.vpc_attached ? "vpc" : "public"
+      FN_SUBNETS                 = join(",", var.subnet_ids)
     })
   }
 
@@ -210,6 +215,11 @@ resource "aws_lambda_function" "this" {
     aws_iam_role_policy_attachment.basic,
     aws_iam_role_policy_attachment.vpc,
     aws_cloudwatch_log_group.this,
+    # Both are needed before the first invocation, and neither is implied by the
+    # ARN reference above: a function that starts before the version exists, or
+    # before it may read it, fails auth closed with a 500 and looks broken.
+    aws_secretsmanager_secret_version.shared_secret,
+    aws_iam_role_policy.secrets,
   ]
 
   lifecycle {
@@ -220,16 +230,39 @@ resource "aws_lambda_function" "this" {
   }
 }
 
+# GCP puts the bearer secret in Secret Manager and Azure resolves it from Key Vault,
+# so AWS is the odd one out — and the most exposed, because a Lambda's environment is
+# readable with ReadOnlyAccess. The module owns the secret rather than taking a
+# reference: it has no independent lifetime, and requiring an operator to pre-create
+# one per function would make the simplest deploy a two-step.
+resource "aws_secretsmanager_secret" "shared_secret" {
+  name = "${var.name}-fn-secret"
+  # No soft-delete window. A per-function secret is worthless once the function is
+  # gone, and the 7-day default makes redeploying a function of the SAME NAME fail
+  # with "already scheduled for deletion" — a wall you hit right after a destroy,
+  # with a message that does not suggest waiting a week is the alternative.
+  recovery_window_in_days = 0
+  tags                    = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "shared_secret" {
+  secret_id     = aws_secretsmanager_secret.shared_secret.id
+  secret_string = var.shared_secret
+}
+
+# Always created now: the function reads its OWN bearer secret through this policy,
+# so it is no longer conditional on a workload needing a credential.
 resource "aws_iam_role_policy" "secrets" {
-  count = length(var.readable_secret_arns) > 0 ? 1 : 0
-  name  = "${var.name}-secrets"
-  role  = aws_iam_role.this.id
+  name = "${var.name}-secrets"
+  role = aws_iam_role.this.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = var.readable_secret_arns
+      Effect = "Allow"
+      Action = ["secretsmanager:GetSecretValue"]
+      # The function's own secret, plus whatever the workload was granted. Named
+      # ARNs only — never a wildcard.
+      Resource = concat([aws_secretsmanager_secret.shared_secret.arn], var.readable_secret_arns)
     }]
   })
 }

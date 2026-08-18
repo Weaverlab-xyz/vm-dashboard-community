@@ -304,18 +304,64 @@ connection; `tests/test_db_grant_workload.py` pins both properties.
 
 ### Credentials
 
-The admin password is never a request field. Each cloud resolves a **reference**,
-so the value never enters Terraform state:
+The admin password is never a request field, and never a plaintext setting either.
+Every credential any workload needs is declared once, as `secret_environment`
+(`{ENV_VAR: reference}`), and `cloud_function_service._secret_environment` turns it
+into that cloud's own mechanism. Terraform sees a reference; the value never enters
+plan output, state, or the function's describe output:
 
 | Cloud | Mechanism |
 |---|---|
-| GCP | `secret_environment_variables` → `FN_DB_ADMIN_PASSWORD` |
-| Azure | `@Microsoft.KeyVault(SecretUri=…)` app setting, resolved by the platform using the app's system-assigned identity (which is why the module now declares one) |
-| AWS | no platform equivalent for Lambda — the function reads Secrets Manager itself with the boto3 the runtime already ships, scoped to named ARNs |
+| GCP | `secret_environment_variables` — the module takes a map, and binds `roles/secretmanager.secretAccessor` on each referenced secret to the runtime SA |
+| Azure | `@Microsoft.KeyVault(SecretUri=…)` app setting, resolved by the platform using the app's system-assigned identity (which is why the module declares one) |
+| AWS | no platform equivalent for Lambda — the id goes in `<NAME>_SECRET_ID` and the ARN on the role, and `fnruntime.secretref` reads Secrets Manager at cold start with the boto3 the runtime already ships |
+
+`fnruntime.secretref` is the workload-side half: **the value env var wins if set**
+(GCP and Azure have already put it there), otherwise resolve an id (AWS). One
+implementation, so the JSON-payload rules and the read caching are right once rather
+than per workload.
+
+The counterpart guard is on the way in: `environment` is for non-secret settings, and
+`_reject_plaintext_secrets` refuses a credential-shaped value there before the row and
+the Job are written. It has to be a hard error — `environment` is deliberately not in
+`_SECRET_TF_KEYS`, so there is no state between "accepted" and "leaked".
 
 The target (engine, host, port, database, flavor) also comes from the function's
 own configuration, never the request — otherwise every caller of this endpoint
 would be a lateral-movement primitive.
+
+### One adapter, several databases — and why not several servers
+
+`FN_DB_NAMES` lets one function serve N databases, each its own Entitle asset. The
+request's `asset.identifier` **selects** from that allowlist; it can never extend it,
+and with more than one database a missing identifier is a 400 rather than a default.
+
+The line is drawn at the **server**, for two independent reasons:
+
+1. **Blast radius does not actually widen.** The admin credential this adapter needs
+   is server-level on every managed engine here, so databases sharing a server
+   already share a blast radius. Consolidating them removes copies of that credential
+   from the fleet. A second *server* is a second credential, and one endpoint holding
+   both is a genuine widening.
+2. **The contract forbids it.** Entitle's `create_actor` and `delete_actor` carry no
+   asset — the actor is bound to the adapter — so an adapter spanning servers cannot
+   know where to mint. Within one server it does not need to: the principal is
+   server-scoped (MySQL user, SQL Server login) and only the grant is per-database.
+   `create_actor_plan`/`delete_actor_plan` take `databases` for exactly this, and a
+   delete must undo the create everywhere or it leaves orphaned users behind.
+
+Changing which databases an adapter serves is an **update**, not a redeploy:
+`update_environment` re-applies in the ORIGINAL deploy job's directory, because that
+is where the function's terraform state lives — applying under the update job's own
+id would build a second function beside the first. Destroy-and-redeploy is not an
+alternative here: the endpoint URL, the bearer secret and the Entitle integration
+registered against both are exactly what a redeploy discards.
+
+Two guards were added with it, both of which were missing and both of which matter
+at one database too: `give_access`, `revoke_access` and `delete_actor` refuse any
+account outside the adapter's own `jit_` namespace (403). Without them `delete_actor`
+was a `DROP USER` for any name and `give_access` could grant a role to an existing
+application login — `portainer_access` already drew this line and `db_grant` had not.
 
 ### The Entitle contract (confirmed)
 
@@ -396,4 +442,20 @@ A wrong value fails at apply as a 404 "Application not found".
   garbage-collected, a `data "google_storage_bucket_object"` would make `destroy`
   unrecoverable.
 - Terraform variables holding secrets are marked `sensitive = true`.
+- The **bearer secret** is not a plaintext setting on any cloud. AWS: the module
+  creates its own Secrets Manager secret and puts only the ARN in the environment (a
+  Lambda's env is readable with `ReadOnlyAccess`, so the old arrangement handed a
+  working credential to every read-only principal). GCP: Secret Manager, as before.
+  Azure: the dashboard writes it to Key Vault and passes a reference, so it is the
+  one cloud where the value reaches neither a setting nor Terraform state — and the
+  module grants its own user-assigned identity read on the vault, because a
+  system-assigned one does not exist early enough to resolve the first cold start.
+  `fnruntime.auth` resolves it through the same `secretref` path as every other
+  credential, and fails closed — without raising, because `dispatch` calls
+  `verify()` outside its own try/except.
+- No credential is passed to a function as a plaintext env var on any cloud. The
+  deploy path refuses one (`_reject_plaintext_secrets`), using a superset of
+  `fnruntime.logs`' redaction rule — what the runtime will not log is what the
+  dashboard will not store. `tests/test_cloud_function_service.py` pins the
+  relationship so the two cannot drift.
 - Auth fails closed; see §2.4.

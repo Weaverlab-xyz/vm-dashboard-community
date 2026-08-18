@@ -106,10 +106,30 @@ variable "ingress_settings" {
   description = "ALLOW_ALL (reachable by Entitle) or ALLOW_INTERNAL_AND_GCLB"
 }
 
-# An EXISTING Secret Manager secret injected as FN_DB_ADMIN_PASSWORD, for workloads
-# that need a database credential (db_grant). Platform-resolved: the value never
-# passes through Terraform state or the function's describe output, and the handler
-# needs no SDK to read it. Empty = not injected.
+# ── Credentials ───────────────────────────────────────────────────────────────
+#
+# How a credential reaches a workload on GCP, and the only supported way: name an
+# EXISTING Secret Manager secret and let the platform inject it. Terraform passes
+# the secret's ID, never its value, so the credential appears in no plan output, no
+# state file, and no `gcloud functions describe`. The handler needs no SDK.
+#
+# `environment` above is the plaintext counterpart and is for NON-secret settings
+# only; the dashboard refuses credential-shaped values there.
+
+variable "secret_environment" {
+  type        = map(string)
+  default     = {}
+  description = "Env var name → Secret Manager secret ID (not a version) to inject"
+  validation {
+    condition = alltrue([
+      for key in keys(var.secret_environment) : can(regex("^[A-Za-z_][A-Za-z0-9_]*$", key))
+    ])
+    error_message = "secret_environment keys must be valid environment variable names."
+  }
+}
+
+# The original, db_grant-specific spelling of the same thing. Kept so functions
+# deployed before secret_environment existed still plan clean; merged into it below.
 variable "db_admin_secret" {
   type        = string
   default     = ""
@@ -135,6 +155,13 @@ variable "vpc_connector" {
 
 locals {
   vpc_attached = length(trimspace(var.vpc_connector)) > 0
+
+  # One map, whichever variable the credential arrived in. secret_environment wins a
+  # collision: it is the explicit, current spelling.
+  secret_env = merge(
+    var.db_admin_secret != "" ? { FN_DB_ADMIN_PASSWORD = var.db_admin_secret } : {},
+    var.secret_environment
+  )
 }
 
 resource "google_cloudfunctions2_function" "this" {
@@ -182,11 +209,11 @@ resource "google_cloudfunctions2_function" "this" {
     }
 
     dynamic "secret_environment_variables" {
-      for_each = var.db_admin_secret != "" ? [1] : []
+      for_each = local.secret_env
       content {
-        key        = "FN_DB_ADMIN_PASSWORD"
+        key        = secret_environment_variables.key
         project_id = var.project
-        secret     = var.db_admin_secret
+        secret     = secret_environment_variables.value
         version    = "latest"
       }
     }
@@ -219,6 +246,21 @@ resource "google_secret_manager_secret_version" "shared_secret" {
 resource "google_secret_manager_secret_iam_member" "accessor" {
   count     = var.service_account_email != "" ? 1 : 0
   secret_id = google_secret_manager_secret.shared_secret.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.service_account_email}"
+}
+
+# The same binding for every OPERATOR-supplied secret. Without it the function
+# deploys and then fails at cold start resolving its credential — a permission error
+# surfacing as a broken workload, which is the confusing failure this avoids.
+# Scoped per secret: no project-level accessor, so a function reads only what it was
+# given. Terraform removes the binding on destroy along with the function.
+# Keyed by the SECRET, not by the env var that names it: two variables may point at
+# one secret, and binding it twice is a duplicate resource, not a second grant.
+resource "google_secret_manager_secret_iam_member" "injected" {
+  for_each  = var.service_account_email != "" ? toset(values(local.secret_env)) : toset([])
+  project   = var.project
+  secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${var.service_account_email}"
 }

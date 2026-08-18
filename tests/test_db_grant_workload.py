@@ -19,7 +19,8 @@ from fnruntime.contract import Context, Request, Response
 from fnworkloads import db_grant
 from web_dashboard.services import cloud_db_sql_service
 
-_ENV_KEYS = ("FN_DB_ENGINE", "FN_DB_HOST", "FN_DB_PORT", "FN_DB_NAME", "FN_DB_FLAVOR",
+_ENV_KEYS = ("FN_DB_ENGINE", "FN_DB_HOST", "FN_DB_PORT", "FN_DB_NAME", "FN_DB_NAMES",
+             "FN_DB_FLAVOR",
              "FN_DB_ADMIN_USER", "FN_DB_ADMIN_PASSWORD", "FN_DB_ADMIN_SECRET_ID",
              "FN_DB_DRY_RUN", "FN_DB_CAFILE")
 
@@ -41,8 +42,12 @@ def _call(method, path, payload=None):
         Context.from_env(workload="db_grant"))
 
 
-def _asset_id():
-    return db_grant._asset_identifier(db_grant._target())
+def _asset_id(database=None):
+    """The asset identifier for one served database (the first, by default)."""
+    identifiers = list(db_grant._targets())
+    if database is None:
+        return identifiers[0]
+    return next(i for i in identifiers if i.endswith(f":{database}"))
 
 
 def _statements(body):
@@ -116,7 +121,7 @@ def test_check_config_reports_valid_and_the_resolved_target():
     _env()
     body = _call("POST", "/check_config", {"config": {}}).body
     assert body["data"]["valid"] is True
-    assert body["data"]["asset"] == _asset_id()
+    assert body["data"]["assets"] == [_asset_id()]
     assert body["data"]["engine"] == "mysql"
 
 
@@ -252,7 +257,10 @@ def test_a_hostile_actor_identifier_is_refused_not_escaped():
     _env()
     for evil in ("a'; DROP TABLE x;--", 'a" OR 1=1', "1abc", "a b", ""):
         resp = _call("POST", "/delete_actor", {"actor_identifier": evil})
-        assert resp.status == 400, (evil, resp.body)
+        # 400 for a missing name, 403 for one this adapter did not mint. Either way
+        # it is refused before any SQL is built, which is the property that matters.
+        assert resp.status in (400, 403), (evil, resp.body)
+        assert "plan" not in (resp.body.get("data") or {}), (evil, resp.body)
 
 
 def test_missing_required_fields_are_400s():
@@ -327,6 +335,125 @@ def test_the_adapter_delegates_every_plan_to_the_service():
                  "give_access_plan", "revoke_access_plan"):
         assert hasattr(cloud_db_sql_service, name), name
         assert name in open(db_grant.__file__, encoding="utf-8").read(), name
+
+
+# ── One function, several databases on one server ─────────────────────────────
+
+def _multi(**overrides):
+    _env(FN_DB_NAMES="appdb,reporting,billing", **overrides)
+
+
+def test_one_function_serves_every_configured_database():
+    _multi()
+    assets = _call("GET", "/get_assets").body["data"]["assets"]
+    assert [a["identifier"] for a in assets] == [
+        "mysql:db.internal:appdb", "mysql:db.internal:reporting",
+        "mysql:db.internal:billing"]
+    # Distinct identifiers are what make a request able to name one unambiguously.
+    assert len({a["identifier"] for a in assets}) == 3
+
+
+def test_a_grant_lands_on_the_database_the_asset_names():
+    """The whole point: the identifier SELECTS a target from the allowlist."""
+    _multi()
+    sql = _statements(_call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id("billing")},
+        "actor_identifier": "jit_a_1", "role_code": "read"}).body)
+    assert "`billing`" in sql
+    assert "`appdb`" not in sql and "`reporting`" not in sql
+
+
+def test_a_missing_asset_identifier_is_refused_when_several_are_served():
+    """Choosing one for the caller would be exactly the silent mis-grant the
+    adapter exists to prevent."""
+    _multi()
+    resp = _call("POST", "/give_access", {"actor_identifier": "jit_a_1",
+                                          "role_code": "read"})
+    assert resp.status == 400, resp.body
+    assert len(resp.body["assets"]) == 3
+
+
+def test_a_missing_asset_identifier_still_resolves_for_a_single_database():
+    """Back-compat: every existing single-database deployment calls this way."""
+    _env()
+    resp = _call("POST", "/give_access", {"actor_identifier": "jit_a_1",
+                                          "role_code": "read"})
+    assert resp.status == 200, resp.body
+    assert "`appdb`" in _statements(resp.body)
+
+
+def test_a_database_that_is_not_served_is_refused():
+    """The request can only ever pick from FN_DB_NAMES — it can never add to it."""
+    _multi()
+    for identifier in ("mysql:db.internal:secrets", "mysql:other.host:appdb"):
+        resp = _call("POST", "/give_access", {
+            "asset": {"identifier": identifier},
+            "actor_identifier": "jit_a_1", "role_code": "read"})
+        assert resp.status == 404, (identifier, resp.body)
+
+
+def test_create_actor_covers_every_served_database():
+    """Entitle's create_actor carries no asset, so the account has to exist
+    everywhere before anything knows which database the grant is for."""
+    _multi(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql")
+    plan = _call("POST", "/create_actor",
+                 {"actor": {"email": "alice@example.com"}}).body["data"]["plan"]
+    assert [entry["database"] for entry in plan] == [
+        "master", "appdb", "reporting", "billing"]
+    assert all("CREATE USER" in " ".join(entry["statements"])
+               for entry in plan[1:])
+    # Created with no role anywhere — give_access is still the only thing granting.
+    assert "ALTER ROLE" not in _statements({"data": {"plan": plan}})
+
+
+def test_delete_actor_undoes_create_everywhere():
+    """A database user left behind when its login goes is an ORPHANED USER, which a
+    later login of the same name silently re-adopts."""
+    _multi(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql")
+    plan = _call("POST", "/delete_actor",
+                 {"actor_identifier": "jit_a_1"}).body["data"]["plan"]
+    assert [entry["database"] for entry in plan] == [
+        "appdb", "reporting", "billing", "master"]
+    assert "DROP LOGIN" in " ".join(plan[-1]["statements"])
+
+
+def test_mysql_needs_no_per_database_account_work():
+    """CREATE USER is server-scoped on MySQL and only the GRANT is per-database, so
+    the multi-database plan is the single-database one."""
+    _multi()
+    plan = _call("POST", "/create_actor",
+                 {"actor": {"email": "alice@example.com"}}).body["data"]["plan"]
+    assert len(plan) == 1 and "CREATE USER" in " ".join(plan[0]["statements"])
+
+
+# ── Only ever accounts this adapter minted ────────────────────────────────────
+
+def test_destructive_routes_refuse_an_account_it_did_not_mint():
+    """Without this, delete_actor is a DROP USER for any name the caller likes, and
+    give_access grants a role to any existing login — an application account, or
+    the admin. Both are privilege-escalation primitives rather than JIT grants."""
+    _multi()
+    for path, payload in (
+            ("/delete_actor", {"actor_identifier": "dbadmin"}),
+            ("/give_access", {"asset": {"identifier": _asset_id()},
+                              "actor_identifier": "dbadmin", "role_code": "readwrite"}),
+            ("/revoke_access", {"asset": {"identifier": _asset_id()},
+                                "actor_identifier": "app_user", "role_code": "read"})):
+        resp = _call("POST", path, payload)
+        assert resp.status == 403, (path, resp.body)
+        assert "plan" not in (resp.body.get("data") or {}), (path, resp.body)
+
+
+def test_the_names_this_adapter_mints_pass_its_own_guard():
+    """A guard that rejected the adapter's own accounts would break every grant."""
+    _multi()
+    identifier = _call("POST", "/create_actor",
+                       {"actor": {"email": "alice@example.com"}}).body["data"]["identifier"]
+    assert db_grant._is_minted(identifier), identifier
+    resp = _call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id()}, "actor_identifier": identifier,
+        "role_code": "read"})
+    assert resp.status == 200, resp.body
 
 
 if __name__ == "__main__":

@@ -79,6 +79,34 @@ _DEFAULT_AUTH_MODE = {"aws": "NONE", "azure": "function_key", "gcp": "none"}
 # jobs.extra_data AND streams into the job's Live Output line by line.
 _SECRET_TF_KEYS = ("shared_secret", "package_sas_url", "storage_account_access_key")
 
+# Environment keys whose VALUE would be a credential. Every workload that needs one
+# takes it BY REFERENCE (``secret_environment`` below), on all three clouds, so a
+# plaintext one in `environment` is always an operator mistake — and an expensive
+# one, because `environment` is deliberately not in _SECRET_TF_KEYS: it lands in
+# jobs.extra_data, streams into the job's Live Output as terraform renders the plan,
+# and stays readable on the function's own console page for the life of the deploy.
+#
+# A superset of fnruntime.logs' redaction substrings (pinned by
+# tests/test_cloud_function_service.py), so what the runtime refuses to LOG is at
+# least what the deploy path refuses to STORE. It also folds in the credential names
+# that module matches EXACTLY rather than by substring — `api_key` and friends —
+# because an environment variable is always prefixed (FN_PORTAINER_API_KEY), so an
+# exact match would never fire here.
+#
+# Deliberately NOT included, for the same reason logs.py leaves out "key": "auth",
+# which would refuse the legitimate FN_AUTH_HEADER / FN_AUTH_PREFIX settings and
+# teach people to work around the guard.
+_SECRET_ENV_SUBSTRINGS = (
+    "password", "passwd", "pwd", "secret", "token", "credential", "authorization",
+    "api_key", "apikey", "private_key", "connection_string", "cookie", "sas_url",
+)
+
+# Two things that carry a credential's NAME rather than its value, and are therefore
+# fine in cleartext: the id variable fnruntime.secretref reads on AWS, and the app
+# setting the Azure platform resolves before the worker starts.
+_REFERENCE_SUFFIX = "_SECRET_ID"
+_AZURE_KV_PREFIX = "@Microsoft.KeyVault("
+
 _DEFAULT_TIMEOUT_SECONDS = 60
 _DEFAULT_MEMORY_MB = 256
 
@@ -86,6 +114,11 @@ _DEFAULT_MEMORY_MB = 256
 # an Azure Function App name becomes a DNS label, so lowercase alphanumeric + '-'
 # only, <= 60). Normalising to the strictest rule keeps one name valid everywhere.
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{2,59}$")
+
+# Environment variable names, checked before they reach a module: all three clouds
+# reject an invalid one, but two of them do it at apply time with a message that
+# does not name the offending key.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class CloudFunctionError(Exception):
@@ -236,6 +269,153 @@ def _csv(raw) -> list:
     return [part.strip() for part in str(raw or "").split(",") if part.strip()]
 
 
+def _reject_plaintext_secrets(environment: Optional[dict]) -> None:
+    """Refuse a credential VALUE in the plaintext ``environment`` map.
+
+    Deliberately a hard error rather than a warning: the damage is done the moment
+    the deploy is recorded (see _SECRET_ENV_SUBSTRINGS), so there is no useful state
+    between "accepted" and "leaked", and rotating whatever was pasted is a worse
+    afternoon than reading this message.
+    """
+    for key, value in (environment or {}).items():
+        name = str(key)
+        if not any(s in name.lower() for s in _SECRET_ENV_SUBSTRINGS):
+            continue
+        if name.upper().endswith(_REFERENCE_SUFFIX):
+            continue                                    # an id, not a value
+        text = str(value or "")
+        if not text or text.startswith(_AZURE_KV_PREFIX):
+            continue                                    # unset, or a Key Vault reference
+        raise CloudFunctionError(
+            f"{name} looks like a credential, and `environment` is stored and logged "
+            "in cleartext. Pass it as secret_environment instead — a Secrets Manager "
+            "ARN on AWS, a Secret Manager secret id on GCP, a Key Vault secret name "
+            "on Azure — so only the reference is ever recorded.")
+
+
+def _secret_environment(cloud: str, refs: Optional[dict], *, vault: str = "") -> tuple:
+    """``(extra_environment, extra_tf_variables)`` for ``{ENV_NAME: <reference>}``.
+
+    One deploy field, three mechanisms, because only two of the clouds resolve a
+    secret for you:
+
+      * **GCP** — ``secret_environment_variables``; Terraform passes the secret id
+        and the platform injects the value.
+      * **Azure** — an ``@Microsoft.KeyVault(...)`` app setting, resolved by the
+        platform using the app's system-assigned identity.
+      * **AWS** — nothing platform-side, so the id goes in the function's
+        environment and the ARN goes on its role; ``fnruntime.secretref`` reads it
+        at cold start. ``<NAME>_SECRET_ID`` is the name that module derives, which
+        is what lets one entry here work on all three clouds with no per-workload
+        mapping table.
+
+    In every case Terraform sees a reference and never a value.
+    """
+    cleaned = {}
+    for key, value in (refs or {}).items():
+        name, ref = str(key).strip(), str(value).strip()
+        if not name or not ref:
+            continue
+        if not _ENV_NAME_RE.match(name):
+            raise CloudFunctionError(
+                f"{name!r} is not a valid environment variable name")
+        cleaned[name] = ref
+    if not cleaned:
+        return {}, {}
+
+    if cloud == "gcp":
+        return {}, {"secret_environment": cleaned}
+
+    if cloud == "aws":
+        for name, ref in cleaned.items():
+            if not ref.startswith("arn:"):
+                raise CloudFunctionError(
+                    f"secret_environment[{name}] must be a full Secrets Manager ARN "
+                    "on AWS — the role's policy names the ARN, and AWS appends a "
+                    f"random suffix to every one, so {ref!r} cannot be turned into "
+                    "one by concatenation")
+        return ({f"{name}{_REFERENCE_SUFFIX}": ref for name, ref in cleaned.items()},
+                {"readable_secret_arns": list(cleaned.values())})
+
+    out = {}
+    for name, ref in cleaned.items():
+        if ref.startswith(_AZURE_KV_PREFIX):
+            out[name] = ref                             # already a full reference
+            continue
+        if not vault:
+            raise CloudFunctionError(
+                "azure_key_vault_name is not configured — an Azure function resolves "
+                "its credentials through a Key Vault reference, so there is nowhere "
+                f"for {name} to come from")
+        out[name] = (f"@Microsoft.KeyVault(SecretUri="
+                     f"https://{vault}.vault.azure.net/secrets/{ref}/)")
+    return out, {}
+
+
+def azure_bearer_key(fn_id: str) -> str:
+    """Key Vault secret name for a function's bearer secret. Derived from the id so
+    :func:`_reinject_secrets` can rebuild the reference at apply and destroy time
+    without writing to the vault again."""
+    return f"cloudfn-{fn_id}-bearer"
+
+
+def _azure_key_vault() -> tuple:
+    """``(name, url, resource_group)`` of the vault Azure functions resolve from.
+
+    The name and the URL are each derivable from the other, and operators have
+    historically set one or the other, so accept either. The resource group is only
+    needed for the module's ``data "azurerm_key_vault"`` lookup, which is what lets
+    it detect RBAC-vs-access-policy and grant the right one.
+    """
+    url = (_cfg("secrets_azure_kv_url") or "").strip().rstrip("/")
+    name = (_cfg("azure_key_vault_name") or _cfg("azure_keyvault_name") or "").strip()
+    if not name and url:
+        name = url.split("://", 1)[-1].split("/", 1)[0].split(".", 1)[0]
+    if not url and name:
+        url = f"https://{name}.vault.azure.net"
+    return name, url, (_cfg("azure_key_vault_resource_group")
+                       or _cfg("azure_resource_group") or "").strip()
+
+
+def azure_bearer_reference(fn_id: str) -> dict:
+    """The module variables that point an Azure function at its bearer secret.
+
+    Pure — no vault write. :func:`_stage_azure_bearer` does that once at deploy;
+    everything afterwards (apply, destroy) only needs to name the same secret again.
+    """
+    name, url, resource_group = _azure_key_vault()
+    if not name:
+        return {}
+    return {
+        "shared_secret_kv_uri":
+            f"@Microsoft.KeyVault(SecretUri={url}/secrets/{azure_bearer_key(fn_id)}/)",
+        "key_vault_name": name,
+        "key_vault_resource_group": resource_group,
+    }
+
+
+def _stage_azure_bearer(fn_id: str, secret: str) -> dict:
+    """Write the bearer secret to Key Vault and return the reference variables.
+
+    Azure ends up the strictest of the three: the value reaches neither an app
+    setting nor Terraform state, because the platform resolves the reference itself
+    and the module is handed only the URI. AWS and GCP still pass the value to the
+    resource that stores it, so it lands in state there.
+
+    Refuses rather than falling back to a literal app setting — a deploy that
+    quietly downgrades to a readable credential is the failure this is here to stop.
+    """
+    refs = azure_bearer_reference(fn_id)
+    if not refs:
+        raise CloudFunctionError(
+            "an Azure function keeps its bearer secret in Key Vault, and no vault is "
+            "configured — set the Azure Key Vault secrets backend "
+            "(Settings → Secrets → Azure Key Vault), or azure_key_vault_name")
+    from . import secrets_backend_service
+    secrets_backend_service.write_azure_kv(azure_bearer_key(fn_id), secret)
+    return refs
+
+
 def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
                         package: dict, network: dict, opts: dict) -> dict:
     """The ``-var`` set for the cloud's module. Pure: no config reads, no I/O —
@@ -262,8 +442,9 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
             "subnet_ids": network.get("subnet_ids", []),
             "security_group_ids": network.get("security_group_ids", []),
             # AWS is the only cloud with no platform-resolved env-var secret for
-            # functions, so a credential-using workload reads it itself and needs
-            # the grant. Named ARNs only — never a wildcard.
+            # functions, so a credential-using workload reads it itself (via
+            # fnruntime.secretref, from the <NAME>_SECRET_ID env var deploy() sets)
+            # and needs the grant. Named ARNs only — never a wildcard.
             "readable_secret_arns": _csv(opts.get("readable_secret_arns")),
         }
 
@@ -278,13 +459,17 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
             "package_object": package["key"],
             "service_account_email": opts.get("service_account_email", ""),
             "vpc_connector": network.get("vpc_connector", ""),
-            # Injected as FN_DB_ADMIN_PASSWORD by the platform, so the value never
+            # Secret Manager ids, injected as env vars by the platform, so no value
             # reaches Terraform state or the function's describe output.
+            # db_admin_secret is the original db_grant-specific spelling; the module
+            # merges the two.
+            "secret_environment": dict(opts.get("secret_environment") or {}),
             "db_admin_secret": opts.get("db_admin_secret", ""),
         }
 
     # Azure: no bucket/key vars — run-from-package takes a single SAS URL, and the
     # object key still carries the content hash so terraform sees a real diff.
+    bearer = dict(opts.get("azure_bearer") or {})
     return {
         **common,
         "location": region,
@@ -295,6 +480,11 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
         "storage_account_name": package["storage_account"],
         "storage_account_access_key": package["storage_key"],
         "subnet_id": network.get("subnet_id", ""),
+        # A reference, not a value — so unlike the other two clouds the bearer
+        # secret never reaches Terraform at all. The module's precondition wants
+        # exactly one of the two, hence blanking the literal.
+        **bearer,
+        "shared_secret": "" if bearer else common["shared_secret"],
     }
 
 
@@ -530,6 +720,7 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
            subnet_ids: Optional[list] = None, subnet_id: str = "",
            vpc_connector: str = "", security_group_ids: Optional[list] = None,
            auth_mode: str = "", environment: Optional[dict] = None,
+           secret_environment: Optional[dict] = None,
            timeout_seconds: Optional[int] = None, memory_mb: Optional[int] = None,
            **opts) -> dict:
     """Record and stage a function deploy: validate, mint the bearer secret, build
@@ -553,6 +744,21 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
                                 vpc_connector=vpc_connector,
                                 security_group_ids=security_group_ids)
 
+    # Same reason, and the more important one: a credential pasted into `environment`
+    # is leaked the instant the row and the Job are written, so it has to be refused
+    # here rather than anywhere downstream.
+    _reject_plaintext_secrets(environment)
+    secret_env, secret_vars = _secret_environment(
+        cloud, secret_environment,
+        vault=_cfg("azure_key_vault_name") or _cfg("azure_keyvault_name"))
+    environment = {**(environment or {}), **secret_env}
+    # The union of what the caller granted explicitly and what secret_environment
+    # implies, deduplicated: the same ARN twice is a policy statement that reads
+    # like a mistake.
+    readable_arns = _csv(opts.get("readable_secret_arns"))
+    readable_arns += [arn for arn in secret_vars.get("readable_secret_arns", [])
+                      if arn not in readable_arns]
+
     row = CloudFunction(
         name=fn_name, workload=workload, cloud=cloud, region=region,
         provider=_PROVIDER[cloud], runtime=_RUNTIME[cloud], status="deploying",
@@ -570,6 +776,11 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
     shared_secret = secrets.token_urlsafe(32)
     config_service.set(f"cloudfn/{row.id}/bearer", shared_secret)
     row.invoke_secret_ref = f"config://cloudfn/{row.id}/bearer"
+
+    # Azure resolves the secret from Key Vault rather than from an app setting, so
+    # it has to exist there before terraform runs. Done once, here, where the secret
+    # is minted: apply and destroy only rebuild the reference.
+    azure_bearer = _stage_azure_bearer(row.id, shared_secret) if cloud == "azure" else {}
 
     # Build now to pin the hash (and to fail fast on a broken workload), but let the
     # background job do the UPLOAD: it is network I/O, and on Azure it needs async
@@ -612,6 +823,16 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
             "sku_name": opts.get("sku_name") or _cfg("azure_functions_plan_sku"),
             "service_account_email": opts.get("service_account_email")
             or _cfg("gcp_functions_service_account"),
+            # Credential references. Both spellings reach the module: the generic
+            # secret_environment, and the two workload-specific options the pairing
+            # path passes. Without this they were dropped silently — the AWS role
+            # got no secretsmanager:GetSecretValue and GCP injected nothing, so a
+            # paired db_grant adapter deployed cleanly and then failed every grant
+            # at cold start.
+            "readable_secret_arns": readable_arns,
+            "db_admin_secret": opts.get("db_admin_secret", ""),
+            "secret_environment": secret_vars.get("secret_environment", {}),
+            "azure_bearer": azure_bearer,
         })
 
     # Build the vars BEFORE create_job so the secret-stripped copy is embedded
@@ -628,6 +849,138 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
 
     return {"ok": True, "fn_id": row.id, "job_id": job.id,
             "tf_variables": safe_variables}
+
+
+def _package_variables(cloud: str, fn_id: str, sha256_hex: str, sha256_b64: str) -> dict:
+    """The module variables naming the package, per cloud.
+
+    Azure is absent on purpose: its module takes a single SAS URL, which is a
+    credential and is therefore stripped from persisted vars and rebuilt by
+    :func:`_reinject_secrets` from ``row.package_sha256``.
+    """
+    location = package_location(cloud, fn_id, sha256_hex)
+    if cloud == "aws":
+        return {"package_key": location["key"], "package_sha256_b64": sha256_b64}
+    if cloud == "gcp":
+        return {"package_object": location["key"]}
+    return {}
+
+
+def merged_environment(current: dict, changes: dict) -> dict:
+    """Settings merged over the current ones, with ``None`` meaning *remove*.
+
+    Removal needs an explicit spelling: a merge alone can only ever add keys, so
+    without this there would be no way to stop serving a database once FN_DB_NAMES
+    listed it, short of destroying the function.
+    """
+    return {key: value
+            for key, value in {**(current or {}), **(changes or {})}.items()
+            if value is not None}
+
+
+def update_environment(db: Session, *, fn_id: str, environment: dict,
+                       created_by: str = "") -> dict:
+    """Change a deployed function's NON-SECRET settings and re-apply in place.
+
+    Exists because the alternative is destroy-and-redeploy, and three things do not
+    survive that: the endpoint URL, the bearer secret, and the Entitle integration
+    registered against both. Adding a database to a ``db_grant`` adapter
+    (``FN_DB_NAMES``) is the case that needs it — the adapter's whole point is being
+    a stable endpoint something else already points at.
+
+    Settings are MERGED over the current ones; a key set to ``None`` is removed. The
+    package is rebuilt from the running image, so an update also brings the function
+    up to the code that image ships — deterministically a no-op when it is the same
+    image, and never a silent downgrade when it is not.
+    """
+    row = get_function(db, fn_id)
+    if not row:
+        raise CloudFunctionError(f"unknown function {fn_id!r}")
+    if row.status not in ("available", "failed"):
+        raise CloudFunctionError(
+            f"function is {row.status} — wait for the current job to finish")
+    if not row.deploy_job_id:
+        raise CloudFunctionError(
+            "this function has no deploy job recorded, so terraform has nothing to "
+            "update in place; redeploy it instead")
+    job = db.query(Job).filter(Job.id == row.deploy_job_id).first()
+    persisted = ((job.metadata_dict or {}).get("tf_variables") if job else None) or {}
+    if not persisted:
+        raise CloudFunctionError(
+            "the original deploy job's variables are gone, so the function cannot be "
+            "updated in place; redeploy it instead")
+
+    _reject_plaintext_secrets(environment)
+    merged = merged_environment(json.loads(row.env_ref or "{}"), environment)
+
+    # Rebuild to pin the hash, exactly as deploy does — the upload in the background
+    # job re-derives it and refuses to proceed if the source moved underneath.
+    _blob, sha256_hex, sha256_b64 = cloud_function_package.build(
+        cloud=row.cloud, workload=row.workload)
+    row.package_sha256 = sha256_hex
+    row.package_uri = package_location(row.cloud, row.id, sha256_hex)["uri"]
+    row.env_ref = json.dumps(merged)
+    provenance = _record_provenance(row)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+
+    environment_vars = dict(merged)
+    try:
+        from . import build_provenance as _bp
+        environment_vars.update(_bp.env_for_function(provenance))
+    except Exception:
+        pass
+
+    tf_variables = {**persisted, "environment": environment_vars,
+                    **_package_variables(row.cloud, row.id, sha256_hex, sha256_b64)}
+    update_job = job_service.create_job(
+        db, job_type="cloudfn_update", created_by=created_by,
+        metadata={"fn_id": row.id, "cloud": row.cloud, "workload": row.workload,
+                  "name": row.name, "tf_variables": strip_secrets(tf_variables)})
+    db.commit()
+    return {"ok": True, "fn_id": row.id, "job_id": update_job.id,
+            "environment": merged,
+            "tf_variables": strip_secrets(tf_variables)}
+
+
+async def run_update_apply(db: Session, *, fn_id: str, job_id: str,
+                           tf_variables: dict) -> None:
+    """Background task: re-apply the function with changed settings.
+
+    Applies in the ORIGINAL deploy job's directory, which is what makes this an
+    update rather than a second function — the terraform state for this function
+    lives under that job's key in the state backend.
+    """
+    row = get_function(db, fn_id)
+    if not row:
+        logger.warning("cloudfn update: row %s vanished", fn_id)
+        return
+    job_service.set_running(db, job_id)
+    try:
+        await _upload_package(cloud=row.cloud, fn_id=row.id,
+                              workload=row.workload, sha256_hex=row.package_sha256)
+        variables = await _reinject_secrets(row, tf_variables)
+        outputs = await terraform.apply(
+            _deploy_dir(row.deploy_job_id), variables,
+            template_dir=template_dir(row.cloud),
+            env=terraform_provider_env.provider_env(row.cloud),
+            on_line=_job_stream(job_id, 5, "Updating the function…"),
+        )
+        # Re-read rather than assume: an update must not leave the row describing
+        # something the cloud no longer matches.
+        row.resource_id = str(outputs.get("resource_id") or row.resource_id or "")
+        row.invoke_url = str(outputs.get("invoke_url") or row.invoke_url or "")
+        row.status = "available"
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        job_service.set_completed(db, job_id, result={
+            "fn_id": row.id, "invoke_url": row.invoke_url})
+    except Exception as exc:
+        # Deliberately NOT marking the row failed: a refused apply leaves the
+        # function serving its previous configuration, and flagging a working
+        # endpoint as broken sends people to redeploy something that is fine.
+        logger.error("cloudfn: update failed for %s: %s", fn_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
 
 
 # Terraform line → (pct, message). GCP dominates this timeline: every deploy runs
@@ -672,7 +1025,13 @@ async def _reinject_secrets(row: CloudFunction, tf_variables: dict) -> dict:
     """
     variables = dict(tf_variables or {})
     secret = config_service.get(f"cloudfn/{row.id}/bearer") or ""
-    if secret:
+    if row.cloud == "azure":
+        # Rebuild the Key Vault reference rather than the value. Also covers a
+        # function deployed before the vault path existed: it has no persisted
+        # reference, so it keeps using its literal app setting until redeployed.
+        variables.update(azure_bearer_reference(row.id)
+                         if variables.get("shared_secret_kv_uri") else {})
+    if secret and not variables.get("shared_secret_kv_uri"):
         variables["shared_secret"] = secret
     if row.cloud == "azure" and row.package_sha256:
         account = _cfg("storage_azure_account")

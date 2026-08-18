@@ -58,7 +58,8 @@ HANDLED_TYPES = (
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "portainer_node_deploy", "portainer_node_teardown",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
-    "cloudfn_deploy", "cloudfn_decommission", "cloudfn_entitle_register",
+    "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
+    "cloudfn_entitle_register",
     "clouddb_adapter_pair",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
@@ -94,7 +95,8 @@ HANDLED_TYPES = (
 HEAVY_TYPES = (
     "k8s_provision", "k8s_decommission",              # k8s_service, terraform apply/destroy
     "clouddb_provision", "clouddb_decommission",      # cloud_database_service, same
-    "cloudfn_deploy", "cloudfn_decommission",         # cloud_function_service, same
+    "cloudfn_deploy", "cloudfn_update",               # cloud_function_service, same
+    "cloudfn_decommission",
     "clouddb_adapter_pair",                           # drives cloudfn_deploy's apply inline
     "packer_aws_build", "packer_azure_build",         # packer_service._stream_command
     "packer_gcp_build", "packer_oci_build",
@@ -365,6 +367,11 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "cloudfn_deploy":
             from .services import cloud_function_service
             await cloud_function_service.run_deploy_apply(
+                db, fn_id=meta["fn_id"], job_id=job_id,
+                tf_variables=meta["tf_variables"])
+        elif job_type == "cloudfn_update":
+            from .services import cloud_function_service
+            await cloud_function_service.run_update_apply(
                 db, fn_id=meta["fn_id"], job_id=job_id,
                 tf_variables=meta["tf_variables"])
         elif job_type == "cloudfn_decommission":

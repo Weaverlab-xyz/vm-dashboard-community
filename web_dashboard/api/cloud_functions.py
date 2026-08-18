@@ -53,23 +53,35 @@ class DeployRequest(BaseModel):
     subnet_id: Optional[str] = None                 # azure
     vpc_connector: Optional[str] = None             # gcp
     auth_mode: Optional[str] = None
-    environment: Optional[dict] = None              # NON-secret env only
+    # NON-secret settings only. A credential-shaped value here is refused — see
+    # secret_environment below, which is where credentials go.
+    environment: Optional[dict] = None
     timeout_seconds: Optional[int] = None
     memory_mb: Optional[int] = None
     resource_group_name: Optional[str] = None       # azure
     sku_name: Optional[str] = None                  # azure
     service_account_email: Optional[str] = None     # gcp
-    # Credential access for workloads that need one (db_grant). Each cloud resolves
-    # it differently and none of them takes the secret VALUE: AWS grants the
-    # function read on named Secrets Manager ARNs, GCP injects a Secret Manager
-    # secret as an env var, and Azure resolves an @Microsoft.KeyVault(...) reference
-    # placed in `environment` using the app's system-assigned identity.
+    # Credentials for workloads that need one (db_grant, portainer_access,
+    # azure_role_grant), as ``{ENV_VAR: reference}``. None of the three clouds takes
+    # the secret VALUE here: pass a Secrets Manager ARN on AWS, a Secret Manager
+    # secret id on GCP, or a Key Vault secret name on Azure, and the service wires up
+    # that cloud's own resolution mechanism.
+    secret_environment: Optional[dict] = None
+    # The original per-workload spellings of the same thing, still accepted so an
+    # existing caller keeps working. secret_environment covers both.
     readable_secret_arns: Optional[list[str]] = None   # aws
     db_admin_secret: Optional[str] = None              # gcp
 
 
 class InvokeRequest(BaseModel):
     payload: Optional[dict] = None
+
+
+class UpdateEnvironmentRequest(BaseModel):
+    # Merged over the function's current settings; a key set to null is removed.
+    # NON-secret only, same guard as deploy — credentials are changed by
+    # redeploying with secret_environment, not by editing settings.
+    environment: dict
 
 
 def _visible(db: Session, user: User):
@@ -168,6 +180,7 @@ def deploy_function(payload: DeployRequest, background: BackgroundTasks,
             vpc_connector=payload.vpc_connector or "",
             auth_mode=payload.auth_mode or "",
             environment=payload.environment or {},
+            secret_environment=payload.secret_environment or {},
             timeout_seconds=payload.timeout_seconds,
             memory_mb=payload.memory_mb,
             resource_group_name=payload.resource_group_name,
@@ -225,6 +238,44 @@ async def invoke_function(fn_id: str, payload: InvokeRequest,
             status_code=502,
             detail={"code": "invoke_failed",
                     "message": f"could not reach the function ({type(exc).__name__})"}) from exc
+
+
+@router.post("/{fn_id}/environment")
+def update_environment(fn_id: str, payload: UpdateEnvironmentRequest,
+                       background: BackgroundTasks, db: Session = Depends(get_db),
+                       user: User = Depends(require_permission("cloud_function", "write"))):
+    """Change a deployed function's settings and re-apply it in place.
+
+    In place, because destroy-and-redeploy loses the endpoint URL, the bearer secret
+    and any Entitle integration registered against them. Adding a database to a
+    db_grant adapter (FN_DB_NAMES) is the case this exists for.
+    """
+    _require_enabled()
+    if not cloud_function_service.terraform_available():
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "terraform_unavailable",
+                    "message": "terraform is not installed in this image"})
+    try:
+        result = cloud_function_service.update_environment(
+            db, fn_id=fn_id, environment=payload.environment,
+            created_by=user.username)
+    except CloudFunctionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    background.add_task(
+        _run_update, fn_id=result["fn_id"], job_id=result["job_id"],
+        tf_variables=result["tf_variables"])
+    return result
+
+
+async def _run_update(*, fn_id: str, job_id: str, tf_variables: dict) -> None:
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        await cloud_function_service.run_update_apply(
+            db, fn_id=fn_id, job_id=job_id, tf_variables=tf_variables)
+    finally:
+        db.close()
 
 
 @router.post("/{fn_id}/entitle-register")
