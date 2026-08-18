@@ -110,7 +110,7 @@ your VMs listed within a few seconds.
 | **Generation badge** | Gen 1 or Gen 2 per VM |
 | **Power On** | Start an off, saved, or paused VM |
 | **Graceful Shutdown** | Guest OS shutdown via Integration Services (button disabled without IS) |
-| **Force Off** | Hard power-off (`Stop-VM -Force`) |
+| **Force Off** | Hard power-off (`Stop-VM -TurnOff -Force`) |
 | **Restart** | Hard reset (`Restart-VM -Force`) |
 | **Pause** | Suspend VM to memory (`Suspend-VM`) |
 | **Resume** | Resume a paused or saved VM |
@@ -156,7 +156,7 @@ The dashboard shows the IS state as:
 |---|---|---|---|
 | **Start** | `Start-VM` | No | Starts off, saved, or paused VM |
 | **Graceful Shutdown** | `Stop-VM` | **Yes** | Guest OS shutdown — button disabled without IS |
-| **Force Off** | `Stop-VM -Force` | No | Hard power-off — data loss risk |
+| **Force Off** | `Stop-VM -TurnOff -Force` | No | Hard power-off — data loss risk |
 | **Restart** | `Restart-VM -Force` | No | Hard reset |
 | **Pause** | `Suspend-VM` | No | Suspends VM to memory |
 | **Resume** | `Resume-VM` | No | Resumes paused or saved state |

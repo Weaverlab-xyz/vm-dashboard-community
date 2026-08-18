@@ -185,10 +185,16 @@ def _list_vms_sync(conn) -> list[dict]:
 
 # ── Power operations ──────────────────────────────────────────────────────────
 
+# `stop` is the page's "Force Off", and the switch that makes it one is -TurnOff, not
+# -Force: -Force only suppresses the confirmation prompt. Without -TurnOff this is the
+# same graceful, Integration-Services-dependent shutdown as `shutdown` above, so it does
+# nothing at all on a VM whose guest cannot answer — which is exactly when an operator
+# reaches for it. The sibling runner (runners/hypervisor/run.py::_PS_POWER, "power_off")
+# carries -TurnOff for the same reason; tests/test_hyperv_power_parity.py pins both.
 _POWER_OPS_PS = {
     "start":    "$vm = Get-VM -Id '{vmid}' -EA Stop; Start-VM   -VM $vm -ErrorAction Stop",
     "shutdown": "$vm = Get-VM -Id '{vmid}' -EA Stop; Stop-VM    -VM $vm -ErrorAction Stop",
-    "stop":     "$vm = Get-VM -Id '{vmid}' -EA Stop; Stop-VM    -VM $vm -Force -ErrorAction Stop",
+    "stop":     "$vm = Get-VM -Id '{vmid}' -EA Stop; Stop-VM    -VM $vm -TurnOff -Force -ErrorAction Stop",
     "restart":  "$vm = Get-VM -Id '{vmid}' -EA Stop; Restart-VM -VM $vm -Force -ErrorAction Stop",
     "pause":    "$vm = Get-VM -Id '{vmid}' -EA Stop; Suspend-VM -VM $vm -ErrorAction Stop",
     "resume":   "$vm = Get-VM -Id '{vmid}' -EA Stop; Resume-VM  -VM $vm -ErrorAction Stop",
