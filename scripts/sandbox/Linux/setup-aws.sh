@@ -361,6 +361,54 @@ state_write aws nat_sg "$NAT_SG"
 # aws_ssm_endpoints_enabled config emitted below — see
 # web_dashboard/services/ssm_endpoint_service.py.
 
+# ── 5c. Secrets Manager interface endpoint — for network_mode=vpc functions ────
+# A VPC-attached Lambda reads its bearer secret from Secrets Manager at cold start
+# (web_dashboard/functions/fnruntime/secretref.py), and the private route table is
+# local-VPC-only: the NAT instance is on-demand and exists only while an EC2 VM is
+# up. Without a Secrets Manager path a vpc-mode function deploys clean and then
+# fails auth CLOSED — a 500 on every invoke, including the dashboard's own Test
+# invoke. Unlike the SSM endpoints in 5b this cannot be on-demand: it has to be
+# there whenever a function runs, not whenever a VM exists. ~$7.30/mo; opt out
+# with SANDBOX_SKIP_FN_VPCE=1 (public-mode functions are unaffected either way).
+#
+# Side effect worth knowing: --private-dns-enabled is VPC-WIDE, so the Jumpoint
+# task and the ECS runners in the public subnet also start resolving
+# secretsmanager.* to this endpoint. That is why the SG admits the whole
+# 10.99.0.0/16 rather than just the private subnet — narrowing it breaks them.
+if [[ "${SANDBOX_SKIP_FN_VPCE:-0}" == "1" ]]; then
+  FN_VPCE_SG=""; FN_VPCE_ID=""
+  warn "Skipping Secrets Manager endpoint (SANDBOX_SKIP_FN_VPCE=1) — network_mode=vpc functions will only authenticate while the on-demand NAT instance is up"
+else
+  section "Secrets Manager interface endpoint (Cloud Functions)"
+  # Deliberately NOT the ssm-vpce-sg name: ssm_endpoint_service.reclaim_ssm_endpoints
+  # deletes that SG by name when the last EC2/DB goes away, which would fail for as
+  # long as this endpoint referenced it.
+  FN_VPCE_SG="$(make_sg "${NAME}-fn-vpce-sg" "Secrets Manager interface endpoint - 443 from VPC")"
+  aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$FN_VPCE_SG" \
+    --ip-permissions '[{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' >/dev/null 2>&1 || true
+
+  FN_VPCE_SERVICE="com.amazonaws.${REGION}.secretsmanager"
+  FN_VPCE_ID="$(aws ec2 describe-vpc-endpoints --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC_ID" "Name=service-name,Values=$FN_VPCE_SERVICE" \
+    --query 'VpcEndpoints[0].VpcEndpointId' --output text 2>/dev/null || true)"
+  if [[ "$FN_VPCE_ID" != "None" && -n "$FN_VPCE_ID" ]]; then
+    ok "Reusing Secrets Manager endpoint $FN_VPCE_ID"
+  else
+    FN_VPCE_ID="$(aws ec2 create-vpc-endpoint --region "$REGION" \
+      --vpc-id "$VPC_ID" --vpc-endpoint-type Interface \
+      --service-name "$FN_VPCE_SERVICE" \
+      --subnet-ids "$PRIVATE_SUBNET_ID" \
+      --security-group-ids "$FN_VPCE_SG" \
+      --private-dns-enabled \
+      --tag-specifications "$(tag_spec vpc-endpoint "${NAME}-secretsmanager-vpce")" \
+      --query 'VpcEndpoint.VpcEndpointId' --output text)"
+    ok "Created Secrets Manager endpoint $FN_VPCE_ID (private DNS, ~\$7.30/mo)"
+  fi
+  ok "FN VPCE SG  $FN_VPCE_SG (ingress 443/tcp from 10.99.0.0/16)"
+  state_write aws fn_vpce_sg "$FN_VPCE_SG"
+  state_write aws fn_vpce_id "$FN_VPCE_ID"
+fi
+
 # ── 6. SSH keypair JSON in Secrets Manager ────────────────────────────────────
 section "SSH keypair (Secrets Manager)"
 SSH_SECRET_NAME="dashboard/sandbox/ssh-keypair"
@@ -730,7 +778,8 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
         "arn:aws:iam::${ACCOUNT_ID}:role/ecsInstanceRole",
         "arn:aws:iam::${ACCOUNT_ID}:role/${PROMOTE_TASK_ROLE_NAME}",
         "arn:aws:iam::${ACCOUNT_ID}:role/k8s-*",
-        "arn:aws:iam::${ACCOUNT_ID}:role/ec2-ssm-*"
+        "arn:aws:iam::${ACCOUNT_ID}:role/ec2-ssm-*",
+        "arn:aws:iam::${ACCOUNT_ID}:role/*-role"
       ]
     },
     {
@@ -785,9 +834,13 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
         "secretsmanager:PutSecretValue",
         "secretsmanager:UpdateSecret",
         "secretsmanager:DeleteSecret",
-        "secretsmanager:TagResource"
+        "secretsmanager:TagResource",
+        "secretsmanager:GetResourcePolicy"
       ],
-      "Resource": "arn:aws:secretsmanager:*:${ACCOUNT_ID}:secret:dashboard/*"
+      "Resource": [
+        "arn:aws:secretsmanager:*:${ACCOUNT_ID}:secret:dashboard/*",
+        "arn:aws:secretsmanager:*:${ACCOUNT_ID}:secret:*-fn-secret-*"
+      ]
     },
     {
       "Sid": "DashboardSecretsManagerListAll",
@@ -817,13 +870,7 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
     {
       "Sid": "DashboardLogs",
       "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
-        "logs:GetLogEvents",
-        "logs:PutRetentionPolicy"
-      ],
+      "Action": "logs:*",
       "Resource": "*"
     },
     {
@@ -844,13 +891,19 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Resource": "*"
     },
     {
+      "Sid": "DashboardLambda",
+      "Effect": "Allow",
+      "Action": "lambda:*",
+      "Resource": "*"
+    },
+    {
       "Sid": "DashboardEKS",
       "Effect": "Allow",
       "Action": "eks:*",
       "Resource": "*"
     },
     {
-      "Sid": "DashboardEKSRoles",
+      "Sid": "DashboardRoles",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
@@ -862,9 +915,16 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
         "iam:ListRolePolicies",
         "iam:ListInstanceProfilesForRole",
         "iam:TagRole",
-        "iam:UntagRole"
+        "iam:UntagRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:UpdateAssumeRolePolicy"
       ],
-      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/k8s-*"
+      "Resource": [
+        "arn:aws:iam::${ACCOUNT_ID}:role/k8s-*",
+        "arn:aws:iam::${ACCOUNT_ID}:role/*-role"
+      ]
     },
     {
       "Sid": "DashboardEKSServiceLinkedRole",
@@ -979,6 +1039,12 @@ _cfg=(
   "# On-demand SSM interface endpoints — created on the first EC2 deploy / AWS cloud-DB provision, removed with the last one (private-subnet SSM reach for Password Safe onboarding; ~\$7/mo each while up, \$0 idle):"
   "aws_ssm_endpoints_enabled=true"
   ""
+  "# Cloud Functions (preview) — Lambda lifecycle. Packages reuse the image-hub bucket:"
+  "cloud_functions_enabled=true"
+  "function_package_s3_bucket=$STORAGE_BUCKET                        # Same bucket as the image hub, under function-packages/"
+  "aws_functions_subnet_ids=$PRIVATE_SUBNET_ID                      # network_mode=vpc: the Lambda's ENIs land here"
+  "aws_functions_security_group_ids=$JUMPOINT_SG                    # egress 0.0.0.0/0; the DB SG already admits this SG on 5432/3306/1433"
+  ""
   "# Image-registry hub + automated cross-cloud promote:"
   "storage_s3_bucket=$STORAGE_BUCKET                                       # Image hub + promote staging"
   "storage_active_backend=s3                                                  # Active asset backend"
@@ -1032,6 +1098,11 @@ Sandbox topology summary
 
   Managed EKS clusters build their OWN VPC + NAT-instance egress per cluster and
   VPC-peer back to this VPC (no sandbox NAT). Decommission clusters before rollback.
+
+  Cloud Functions: network_mode=vpc Lambdas land in the private subnet and read
+  their bearer secret through the Secrets Manager interface endpoint
+  ${FN_VPCE_ID:-<skipped>} (private DNS, VPC-wide). Without it a vpc-mode
+  function deploys clean and then 500s on every invoke.
 
 Note: the tunnel-capable Jumpoint runs on an EC2 ECS container instance
 (t3.small) that the DASHBOARD creates on demand when you provision an EC2

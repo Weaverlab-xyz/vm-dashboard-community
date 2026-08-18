@@ -2,9 +2,14 @@ terraform {
   required_providers {
     google = {
       source = "hashicorp/google"
-      # cloudfunctions2 (Cloud Run functions, "2nd gen"). Pinned to the 6.x line,
-      # which is already in the image's provider pre-cache alongside 5.x.
-      version = "~> 6.0"
+      # cloudfunctions2 (Cloud Run functions, "2nd gen"). 7.21 is the floor for Direct
+      # VPC egress: direct_vpc_network_interface / direct_vpc_egress landed on this
+      # resource in GA 7.21.0 (google-beta 7.10.0). The 6.x line exposes vpc_connector
+      # ONLY, which is why this module used to require a pre-provisioned ~$26/mo
+      # connector. The image's provider pre-cache has a matching 7.x leg — see the
+      # tf_provider_init_g7 block in the Dockerfile; without it terraform init here
+      # has nothing to resolve against at run time.
+      version = "~> 7.21"
     }
   }
   required_version = ">= 1.3.0"
@@ -138,23 +143,61 @@ variable "db_admin_secret" {
 
 # ── Networking (optional) ─────────────────────────────────────────────────────
 #
-# A Serverless VPC Access connector, NOT Direct VPC egress: cloudfunctions2's
-# service_config exposes only vpc_connector. Direct egress lives on the underlying
-# google_cloud_run_v2_service, which would mean giving up cloudfunctions2 and
-# owning the container build.
+# DIRECT VPC EGRESS is the default path: no Serverless VPC Access connector, so
+# nothing to pre-provision, nothing billed when no function exists, and the whole
+# attachment is created and destroyed with the function itself. A connector, by
+# contrast, runs a minimum of two e2-micro instances (~$26/mo) whether or not the
+# function is ever invoked, and needs a non-overlapping /28 of its own.
 #
-# Reference an EXISTING connector. One runs a minimum of two e2-micro instances
-# (~$26/mo) whether or not the function is ever invoked, so creating one per
-# function would cost more than the functions and make destroy take minutes.
+# Two things to know about direct egress:
+#   * It is REGION-LOCKED — the subnet must live in var.region. Reaching an internal
+#     IP in another region silently drops SYNs (see rancher_api_runner.py, which ate
+#     this live). Pass a BARE subnet name so it resolves per-region.
+#   * Cloud Run reserves IPs in /28 blocks out of the subnet and needs a /26 minimum.
+#     Sharing one subnet across functions is supported, so no dedicated subnet.
+#
+# vpc_connector is kept as an escape hatch for the one thing direct egress cannot do:
+# reach another region from a region-pinned function. The provider declares the two
+# ConflictsWith each other, so the locals below are mutually exclusive and direct
+# wins when both are set — matching the precedence k8s_runner_service documents.
+
+variable "vpc_network" {
+  type        = string
+  default     = ""
+  description = "VPC network for Direct VPC egress. Empty (with vpc_subnetwork empty) = no VPC attachment."
+}
+
+variable "vpc_subnetwork" {
+  type        = string
+  default     = ""
+  description = "Subnet for Direct VPC egress. MUST exist in var.region. Use a BARE NAME, not a regional self_link, so it resolves per-region."
+}
+
+variable "vpc_egress" {
+  type        = string
+  default     = "PRIVATE_RANGES_ONLY"
+  description = "Which traffic leaves through the VPC: PRIVATE_RANGES_ONLY or ALL_TRAFFIC."
+  validation {
+    condition     = contains(["PRIVATE_RANGES_ONLY", "ALL_TRAFFIC"], var.vpc_egress)
+    error_message = "vpc_egress must be PRIVATE_RANGES_ONLY or ALL_TRAFFIC."
+  }
+}
 
 variable "vpc_connector" {
   type        = string
   default     = ""
-  description = "Existing Serverless VPC Access connector name or self_link. Empty = no VPC attachment."
+  description = "Legacy escape hatch: an EXISTING Serverless VPC Access connector. Ignored when vpc_network/vpc_subnetwork is set."
 }
 
 locals {
-  vpc_attached = length(trimspace(var.vpc_connector)) > 0
+  direct_vpc    = trimspace(var.vpc_network) != "" || trimspace(var.vpc_subnetwork) != ""
+  use_connector = !local.direct_vpc && trimspace(var.vpc_connector) != ""
+  vpc_attached  = local.direct_vpc || local.use_connector
+
+  # What FN_NETWORK reports back to the handler, whichever path is live.
+  network_ref = local.direct_vpc ? (
+    trimspace(var.vpc_subnetwork) != "" ? trimspace(var.vpc_subnetwork) : trimspace(var.vpc_network)
+  ) : trimspace(var.vpc_connector)
 
   # One map, whichever variable the credential arrived in. secret_environment wins a
   # collision: it is the explicit, current spelling.
@@ -187,8 +230,18 @@ resource "google_cloudfunctions2_function" "this" {
     ingress_settings      = var.ingress_settings
     service_account_email = var.service_account_email != "" ? var.service_account_email : null
 
-    vpc_connector                 = local.vpc_attached ? var.vpc_connector : null
-    vpc_connector_egress_settings = local.vpc_attached ? "PRIVATE_RANGES_ONLY" : null
+    dynamic "direct_vpc_network_interface" {
+      for_each = local.direct_vpc ? [1] : []
+      content {
+        network    = trimspace(var.vpc_network) != "" ? var.vpc_network : null
+        subnetwork = trimspace(var.vpc_subnetwork) != "" ? var.vpc_subnetwork : null
+      }
+    }
+    # The enum is PREFIXED on the direct path and bare on the connector path.
+    direct_vpc_egress = local.direct_vpc ? "VPC_EGRESS_${var.vpc_egress}" : null
+
+    vpc_connector                 = local.use_connector ? var.vpc_connector : null
+    vpc_connector_egress_settings = local.use_connector ? var.vpc_egress : null
 
     environment_variables = merge(var.environment, {
       FN_WORKLOAD     = var.workload
@@ -196,7 +249,8 @@ resource "google_cloudfunctions2_function" "this" {
       FN_REGION       = var.region
       FN_NAME         = var.name
       FN_NETWORK_MODE = local.vpc_attached ? "vpc" : "public"
-      FN_NETWORK      = var.vpc_connector
+      FN_NETWORK      = local.network_ref
+      FN_VPC_EGRESS   = local.direct_vpc ? "direct" : (local.use_connector ? "connector" : "")
     })
 
     # Kept out of environment_variables so it is not rendered into plan output
@@ -290,5 +344,5 @@ output "invoke_url" {
 
 output "network_mode" {
   value       = local.vpc_attached ? "vpc" : "public"
-  description = "Whether the function egresses through a VPC connector"
+  description = "Whether the function egresses through the VPC (direct egress or a connector)"
 }

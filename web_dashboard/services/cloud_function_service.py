@@ -209,7 +209,8 @@ def workload_catalog() -> list:
 
 def _resolved_network(cloud: str, region: str, *, network_mode: str,
                       subnet_ids: Optional[list], subnet_id: str,
-                      vpc_connector: str, security_group_ids: Optional[list]) -> dict:
+                      vpc_connector: str, security_group_ids: Optional[list],
+                      vpc_network: str = "", vpc_subnetwork: str = "") -> dict:
     """Per-cloud network ids for ``network_mode``, defaulting from region config.
 
     Returns ``{}`` for public mode. Raises when vpc mode is asked for without the
@@ -230,8 +231,11 @@ def _resolved_network(cloud: str, region: str, *, network_mode: str,
         regional = {}
 
     if cloud == "aws":
+        # NB: the last resort is default_subnet_id, NOT db_subnet_group_name — that is
+        # an RDS subnet-GROUP NAME, and handing it to Terraform as a subnet id passes
+        # validation here and then dies at apply on InvalidSubnetID.NotFound.
         subnets = [s for s in (subnet_ids or []) if s] or _csv(
-            _cfg("aws_functions_subnet_ids")) or _csv(regional.get("db_subnet_group_name", ""))
+            _cfg("aws_functions_subnet_ids")) or _csv(regional.get("default_subnet_id", ""))
         groups = [g for g in (security_group_ids or []) if g] or _csv(
             _cfg("aws_functions_security_group_ids")) or _csv(
                 regional.get("db_security_group_id", ""))
@@ -254,12 +258,29 @@ def _resolved_network(cloud: str, region: str, *, network_mode: str,
                 "subnet from the database one (delegated to the DB service)")
         return {"subnet_id": chosen}
 
+    # GCP: Direct VPC egress is the default — no connector to pre-provision and
+    # nothing billed when no function exists. The module creates and destroys the
+    # attachment with the function. Fall back through the keys the sandbox emits,
+    # then the ones the Cloud Run runners already use, before the legacy connector.
+    #
+    # Deliberately a BARE subnet name, not a regional self-link: direct egress is
+    # region-locked, and the sandbox gives every region an identically-named subnet,
+    # so one bare name resolves correctly wherever the function lands.
+    net = ((vpc_network or "").strip() or _cfg("gcp_functions_network")
+           or _cfg("gcp_run_network") or _cfg("gcp_network"))
+    subnet = ((vpc_subnetwork or "").strip() or _cfg("gcp_functions_subnetwork")
+              or _cfg("gcp_run_subnetwork") or _cfg("gcp_jumpoint_subnetwork"))
+    if net or subnet:
+        return {"vpc_network": net, "vpc_subnetwork": subnet}
+
     chosen = (vpc_connector or "").strip() or _cfg("gcp_functions_vpc_connector")
     if not chosen:
         raise CloudFunctionError(
-            "network_mode=vpc needs an existing Serverless VPC Access connector on GCP — "
-            "set gcp_functions_vpc_connector (reference one; a per-function connector "
-            "costs ~$26/mo whether invoked or not)")
+            "network_mode=vpc needs a VPC on GCP — set gcp_functions_network and "
+            "gcp_functions_subnetwork for Direct VPC egress (no connector, nothing "
+            "billed while idle; the subnet must be in the function's region). A "
+            "pre-existing Serverless VPC Access connector still works via "
+            "gcp_functions_vpc_connector, but costs ~$26/mo whether invoked or not")
     return {"vpc_connector": chosen}
 
 
@@ -367,7 +388,8 @@ def _azure_key_vault() -> tuple:
     needed for the module's ``data "azurerm_key_vault"`` lookup, which is what lets
     it detect RBAC-vs-access-policy and grant the right one.
     """
-    url = (_cfg("secrets_azure_kv_url") or "").strip().rstrip("/")
+    url = (_cfg("secrets_azure_kv_url") or _cfg("azure_key_vault_url")
+           or "").strip().rstrip("/")
     name = (_cfg("azure_key_vault_name") or _cfg("azure_keyvault_name") or "").strip()
     if not name and url:
         name = url.split("://", 1)[-1].split("/", 1)[0].split(".", 1)[0]
@@ -459,6 +481,8 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
             "package_object": package["key"],
             "service_account_email": opts.get("service_account_email", ""),
             "vpc_connector": network.get("vpc_connector", ""),
+            "vpc_network": network.get("vpc_network", ""),
+            "vpc_subnetwork": network.get("vpc_subnetwork", ""),
             # Secret Manager ids, injected as env vars by the platform, so no value
             # reaches Terraform state or the function's describe output.
             # db_admin_secret is the original db_grant-specific spelling; the module
@@ -719,6 +743,7 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
            created_by: str, network_mode: str = "public",
            subnet_ids: Optional[list] = None, subnet_id: str = "",
            vpc_connector: str = "", security_group_ids: Optional[list] = None,
+           vpc_network: str = "", vpc_subnetwork: str = "",
            auth_mode: str = "", environment: Optional[dict] = None,
            secret_environment: Optional[dict] = None,
            timeout_seconds: Optional[int] = None, memory_mb: Optional[int] = None,
@@ -742,7 +767,9 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
     network = _resolved_network(cloud, region, network_mode=network_mode,
                                 subnet_ids=subnet_ids, subnet_id=subnet_id,
                                 vpc_connector=vpc_connector,
-                                security_group_ids=security_group_ids)
+                                security_group_ids=security_group_ids,
+                                vpc_network=vpc_network,
+                                vpc_subnetwork=vpc_subnetwork)
 
     # Same reason, and the more important one: a credential pasted into `environment`
     # is leaked the instant the row and the Job are written, so it has to be refused

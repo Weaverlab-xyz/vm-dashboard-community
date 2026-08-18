@@ -51,7 +51,9 @@ class DeployRequest(BaseModel):
     subnet_ids: Optional[list[str]] = None          # aws
     security_group_ids: Optional[list[str]] = None  # aws
     subnet_id: Optional[str] = None                 # azure
-    vpc_connector: Optional[str] = None             # gcp
+    vpc_network: Optional[str] = None               # gcp (Direct VPC egress)
+    vpc_subnetwork: Optional[str] = None            # gcp — BARE NAME; direct egress is region-locked
+    vpc_connector: Optional[str] = None             # gcp (legacy connector fallback)
     auth_mode: Optional[str] = None
     # NON-secret settings only. A credential-shaped value here is refused — see
     # secret_environment below, which is where credentials go.
@@ -177,6 +179,8 @@ def deploy_function(payload: DeployRequest, background: BackgroundTasks,
             subnet_ids=payload.subnet_ids,
             security_group_ids=payload.security_group_ids,
             subnet_id=payload.subnet_id or "",
+            vpc_network=payload.vpc_network or "",
+            vpc_subnetwork=payload.vpc_subnetwork or "",
             vpc_connector=payload.vpc_connector or "",
             auth_mode=payload.auth_mode or "",
             environment=payload.environment or {},

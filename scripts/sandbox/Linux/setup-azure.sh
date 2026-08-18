@@ -168,6 +168,33 @@ ok "Private DNS zone $DB_SQLSERVER_DNS_ZONE linked to $VNET"
 state_write azure db_sqlserver_subnet_id           "$DB_SQLSERVER_SUBNET_ID"
 state_write azure db_sqlserver_private_dns_zone_id  "$DB_SQLSERVER_DNS_ZONE_ID"
 
+# ── 2c. Functions subnet (delegated to Microsoft.Web/serverFarms) ─────────────
+# network_mode=vpc Cloud Functions integrate with the VNet through THIS subnet. It
+# has to be its own: a delegated subnet hosts exactly one service, so it can share
+# neither db-subnet (DBforPostgreSQL) nor aci-subnet (ContainerInstance).
+#
+# Deliberately NO NSG. The function module sets vnet_route_all_enabled whenever a
+# subnet is attached, so ALL app egress leaves here — including the Functions host's
+# own calls to AzureWebJobsStorage and WEBSITE_RUN_FROM_PACKAGE. Attaching $NSG
+# (which denies the Internet service tag outbound) would stop the host reaching
+# them and the app would boot to zero indexed functions. Same reason
+# jumpoint-subnet and db-sqlserver-subnet have none.
+#
+# Service endpoints instead of a NAT gateway: Storage + KeyVault are free and keep
+# the two hops that MUST work (run-from-package blob, and the platform resolving
+# @Microsoft.KeyVault(SecretUri=...) — which does traverse the VNet once
+# vnet_route_all_enabled is on) on the Azure backbone, without depending on the
+# subnet's implicit default outbound access. Generic internet egress from a
+# vnet-mode function still needs a NAT gateway (~$32/mo) — not created here.
+FN_SUBNET="functions-subnet"
+az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$FN_SUBNET" \
+  --address-prefix 10.99.9.0/24 \
+  --delegations Microsoft.Web/serverFarms \
+  --service-endpoints Microsoft.Storage Microsoft.KeyVault >/dev/null
+ok "Functions subnet $FN_SUBNET (10.99.9.0/24, delegated to Microsoft.Web/serverFarms, service endpoints Storage+KeyVault)"
+FN_SUBNET_ID="$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$FN_SUBNET" --query id -o tsv)"
+state_write azure functions_subnet_id "$FN_SUBNET_ID"
+
 # ── 3. NSG: deny VM internet egress, allow VNet ──────────────────────────────
 section "NSG (block VM internet egress)"
 az network nsg create -g "$RG" -n "$NSG" --tags "$TAGS" >/dev/null
@@ -579,7 +606,14 @@ _cfg=(
   "azure_aci_storage_account_rg=$RG"
   "azure_aci_file_share=jpt"
   "azure_key_vault_url=$KV_URL"
+  "secrets_azure_kv_url=$KV_URL                            # Same vault — the key the Cloud Functions path reads"
   "azure_ssh_keypair_secret_name=$SSH_SECRET               # JSON {public_key, private_key}"
+  ""
+  "# Cloud Functions (preview) — Linux Function Apps on the sandbox storage account:"
+  "cloud_functions_enabled=true"
+  "function_package_azure_container=function-packages      # Blob container on $SA_NAME (the app creates it)"
+  "azure_functions_plan_sku=B1                             # Cheapest SKU doing BOTH VNet integration and run-from-package (Y1 cannot)"
+  "azure_functions_subnet_id=$FN_SUBNET_ID  # network_mode=vpc: delegated to Microsoft.Web/serverFarms"
   ""
   "# Per-region config set for $LOCATION (multi-region — PR3). /api/setup/import"
   "# merges these into azure_region_configs[$LOCATION] without clobbering other"

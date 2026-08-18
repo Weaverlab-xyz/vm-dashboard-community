@@ -465,9 +465,20 @@ class Settings(BaseSettings):
     # VPC/VNet attachment for functions that must reach private resources. Blank →
     # the function deploys public-only. Per-region overrides resolve through
     # region_config; these are the flat fallbacks.
-    aws_functions_subnet_ids: str = ""              # CSV; blank → falls back to the DB subnets
+    aws_functions_subnet_ids: str = ""              # CSV; blank → falls back to the region default subnet
     aws_functions_security_group_ids: str = ""      # CSV; blank → falls back to aws_db_security_group_id
     azure_functions_subnet_id: str = ""             # MUST be delegated to Microsoft.Web/serverFarms
+    # Runtime service account the GCP function runs as. Blank falls back to the broad
+    # default compute SA — and skips the module's per-secret accessor binding, so the
+    # function then cannot read its own bearer secret.
+    gcp_functions_service_account: str = ""
+    # GCP uses Direct VPC egress: no connector, nothing billed while idle, and the
+    # attachment is created/destroyed with the function. REGION-LOCKED, so give the
+    # subnet as a BARE NAME and let it resolve in whatever region the function lands.
+    gcp_functions_network: str = ""                  # VPC network name for Direct VPC egress
+    gcp_functions_subnetwork: str = ""               # bare subnet name, must exist in the function's region
+    # Legacy escape hatch — the one thing direct egress cannot do is reach another
+    # region from a region-pinned function. Costs ~$26/mo whether invoked or not.
     gcp_functions_vpc_connector: str = ""           # existing Serverless VPC Access connector name/self_link
     # ── Azure cloud-DATABASE Password Safe onboarding (Run Command plugins) ───
     # The Azure counterpart of the SSM path above: when enabled, provisioning an

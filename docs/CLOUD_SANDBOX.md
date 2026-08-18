@@ -48,6 +48,7 @@ A consistent topology across all three clouds:
 | **VM segment** | Hosts the lab [VMs you deploy](cloud-vms.md) via the dashboard. | ❌ No — only the Gateway can reach them, and they cannot reach the internet directly. |
 | **DB segment** | Dedicated private subnets for [managed cloud databases](databases.md) (AWS shown; Azure/GCP/OCI have their own DB subnets below). | ❌ No — brokered only through the PRA tunnel. |
 | **[Managed Kubernetes](kubernetes.md)** | Clusters build their **own** network — the dashboard's Terraform creates each cluster's VPC/VNet + subnets + egress (AWS: a small NAT instance) and destroys it on decommission. No sandbox k8s subnet. The AWS EKS build additionally VPC-peers back to the sandbox VPC and opens the DB/VM SGs for direct access. | Cluster-owned (per-cluster NAT). Management-plane access via Entitle/PRA + the AWS peering. |
+| **[Cloud Functions](integrations/cloud-functions.md)** (preview) | `network_mode=vpc` functions reach private resources. Azure gets a dedicated `functions-subnet` delegated to `Microsoft.Web/serverFarms`; AWS reuses the private subnet plus a Secrets Manager interface endpoint (without which a vpc-mode Lambda cannot read its bearer secret and 500s on every invoke); GCP uses Direct VPC egress into the VM subnet — no connector, nothing billed while idle. **No OCI support.** | ❌ No on AWS (no NAT unless a VM is up). Azure: Storage + Key Vault via service endpoints only — generic egress needs a NAT gateway. |
 | **Desktops segment** (Azure) | Dedicated **non-delegated** subnet (`10.99.6.0/24`) for VDI desktop pools, separate from the VM segment because the RS jump client must register with the appliance at first boot. | ⚠️ **443 only** — the NSG allows outbound HTTPS (jump-client registration + Windows activation/updates) but denies other Internet; RDP brokered in via the Gateway. |
 
 Per-cloud isolation mechanism:
@@ -177,6 +178,15 @@ Security groups:
   dashboard-sandbox-vm-sg
     egress: 10.99.0.0/16 only — no internet
     ingress: tcp/22 from dashboard-sandbox-jumpoint-sg
+  dashboard-sandbox-fn-vpce-sg
+    ingress: tcp/443 from 10.99.0.0/16  (Secrets Manager interface endpoint)
+
+VPC endpoints:
+  dashboard-sandbox-secretsmanager-vpce   Interface, private subnet, private DNS
+    Lets a network_mode=vpc Cloud Function read its bearer secret at cold start.
+    Private DNS is VPC-WIDE, so the Gateway task and ECS runners resolve through
+    it too — hence the /16 ingress. ~$7.30/mo; SANDBOX_SKIP_FN_VPCE=1 to skip.
+  (the three SSM endpoints are created ON DEMAND by the dashboard, not here)
 
 ECS:
   cluster bt-jumpoint
@@ -191,7 +201,8 @@ IAM (sandbox-tagged, deleted by rollback):
   role vmimport                                  vmie.amazonaws.com → S3 + EC2
   role dashboard-sandbox-promote-runner-task     ECS task → S3 PutObject
   user dashboard-sandbox-app                     Dashboard programmatic creds
-    inline policy dashboard-app-policy           EC2 / ECS / SM / S3 / Logs / RDS
+    managed policy dashboard-app-policy          EC2 / ECS / SM / S3 / Logs / RDS /
+                                                 Lambda / EKS / Cost Explorer
     access key cached at ~/.dashboard-sandbox/aws/secret_access_key (0600)
 ```
 
@@ -223,6 +234,13 @@ Resource group dashboard-sandbox-rg
        │    → private VNet-integrated Flexible Server
        ├─ jumpoint-subnet 10.99.5.0/24              [tunnel-capable VM Gateway]
        │    → internet egress (no deny NSG; phones home to PRA)
+       ├─ functions-subnet 10.99.9.0/24             [vpc-mode Cloud Functions]
+       │    (delegated to Microsoft.Web/serverFarms)
+       │    service endpoints: Microsoft.Storage, Microsoft.KeyVault
+       │    NO NSG, deliberately — the module routes ALL app egress here, so an
+       │    Internet deny would also block AzureWebJobsStorage and
+       │    WEBSITE_RUN_FROM_PACKAGE and the app would index zero functions
+       │    → Azure backbone only; generic egress needs a NAT gateway (~$32/mo)
        └─ desktops-subnet 10.99.6.0/24              [VDI desktop pools]
             NSG dashboard-sandbox-desktops-nsg:
               outbound: allow 443 → Internet  (priority 100)
@@ -302,9 +320,13 @@ Private Services Access (managed databases):
   only the gateway reaches it (GCP analog of the AWS private DB subnets).
 
 Service account dashboard-sandbox-sa@<project>.iam.gserviceaccount.com
-  Roles: compute.admin, secretmanager.secretAccessor,
-         iam.serviceAccountUser, run.admin, cloudsql.admin,
-         servicenetworking.networksAdmin
+  Roles: 21 project-level bindings — see the `for role in ...` loop in
+         scripts/sandbox/Linux/setup-gcp.sh, which carries a why-comment per
+         role. (Listing them here just went stale; the script is the source
+         of truth.) Cloud Functions (preview) adds cloudfunctions.developer,
+         secretmanager.admin, cloudbuild.builds.builder and
+         artifactregistry.writer, plus the cloudfunctions +
+         artifactregistry APIs.
   Key cached at ~/.dashboard-sandbox/gcp/sa-key.json (mode 600)
 
 Secret Manager:
@@ -341,9 +363,20 @@ gcp_service_account_json=$(cat …/sa-key.json | jq -c .)
 # Managed databases (Cloud SQL private IP via the PRA tunnel):
 gcp_db_network=projects/my-lab-project/global/networks/dashboard-sandbox-vpc
 
+# Cloud Functions (preview) — gen2 sources reuse the image-hub bucket:
+cloud_functions_enabled=true
+function_package_gcs_bucket=my-lab-project-dashboard-sandbox-storage
+gcp_functions_service_account=dashboard-sandbox-sa@my-lab-project.iam.gserviceaccount.com
+gcp_functions_network=dashboard-sandbox-vpc
+gcp_functions_subnetwork=dashboard-sandbox-vm-subnet
+
 # BeyondTrust deploy key — set in /setup or /secrets:
 gcp_cloud_run_docker_deploy_key=…
 ```
+
+Note that `cloud_functions_enabled=true` rides along in the import, so **Cloud
+Functions is already switched on** under Settings → Preview features when the
+dashboard comes up — no restart and no extra click.
 
 Three ways to apply these to a running dashboard:
 
@@ -402,10 +435,10 @@ per-resource Terraform — see
 
 | Cloud | Idle / month | Why |
 |---|--:|---|
-| AWS   | ~$0.40  | VPC, subnets, IGW, SGs, IAM are free; ECS cluster has no charge until a task runs. Secrets Manager: ~$0.40. No NAT gateway or Elastic IP is created. SSM interface VPC endpoints are created on-demand per running EC2/DB (~$7/mo each, ~$22/mo for all three) and removed automatically when the last one is decommissioned — nothing while idle. |
+| AWS   | ~$7.70  | VPC, subnets, IGW, SGs, IAM are free; ECS cluster has no charge until a task runs. Secrets Manager: ~$0.40. No NAT gateway or Elastic IP is created. SSM interface VPC endpoints are created on-demand per running EC2/DB (~$7/mo each, ~$22/mo for all three) and removed automatically when the last one is decommissioned — nothing while idle. **The Secrets Manager interface endpoint (~$7.30) is the one that does stand: `network_mode=vpc` Cloud Functions read their bearer secret through it, so unlike the SSM three it cannot be on-demand.** Opt out with `SANDBOX_SKIP_FN_VPCE=1` if you only need public-mode functions. |
 | Azure | ~$6.60  | RG, VNet, NSGs, Key Vault, SP free. Container registry (Basic): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. **Three private DNS zones (Postgres, MySQL, SQL Server): ~$0.50/mo each.** Those are what make VNet-integrated managed databases resolvable; they're created unconditionally, with no opt-out, and `rollback.sh --cloud azure` removes them with the resource group. Storage account file share: ~$0.05. |
 | GCP   | ~$1.56  | Cloud NAT bills hourly even when idle. Secret Manager: ~$0.06 per active version. VPC, subnets, Cloud Router, firewall rules and the PSA reserved range are free. |
-| OCI   | ~$0.10  | KMS vault (the shared `DEFAULT` type, not the ~$1/hr `VIRTUAL_PRIVATE`) plus one key version and one secret; skip with `OCI_SKIP_VAULT=1`. VCN, subnets, gateways, security lists and IAM are free — and unlike AWS, an OCI NAT gateway carries no hourly charge. |
+| OCI   | ~$0.10  | KMS vault (the shared `DEFAULT` type, not the ~$1/hr `VIRTUAL_PRIVATE`) plus one key version and one secret; skip with `OCI_SKIP_VAULT=1`. VCN, subnets, gateways, security lists and IAM are free — and unlike AWS, an OCI NAT gateway carries no hourly charge. **Cloud Functions is not supported on OCI**, so `setup-oci.sh` provisions nothing for it. |
 
 Once `cost_explorer_enabled` is on, **`/costs` reports this baseline as its own
 "sandbox" scope**, separate from resources the dashboard provisioned — the two are
@@ -532,6 +565,23 @@ the prefix/tag if you want multiple isolated sandboxes per cloud account
   via separate `AzurePlatform*` service tags — by design, since Azure VMs
   legitimately need DNS and metadata. Add explicit deny rules for those if
   your threat model excludes them.
+- **AWS `vpc`-mode Cloud Functions depend on the Secrets Manager endpoint.**
+  A VPC-attached Lambda resolves its bearer secret from Secrets Manager at cold
+  start, and the private subnet has no internet route unless the on-demand NAT
+  instance happens to be up for an unrelated VM. Skip the endpoint
+  (`SANDBOX_SKIP_FN_VPCE=1`) and a vpc-mode function deploys cleanly, then **fails
+  auth closed — a 500 on every invoke**, including the dashboard's own Test invoke.
+  It reads like a bad bearer secret; it is a missing network path.
+- **The Azure `functions-subnet` carries no NSG on purpose.** The function module
+  turns on `vnet_route_all_enabled` whenever a subnet is attached, so *all* app
+  egress leaves through that subnet — including the Functions host's own calls to
+  `AzureWebJobsStorage` and `WEBSITE_RUN_FROM_PACKAGE`. Attaching the VM NSG (which
+  denies the `Internet` service tag) would starve the host and the app would boot
+  with zero indexed functions. `Microsoft.Storage` + `Microsoft.KeyVault` service
+  endpoints keep those hops on the Azure backbone instead.
+- **Cloud Functions is AWS / Azure / GCP only.** There is no
+  `terraform/cloud_function/oci_*` module and no `oci` branch in
+  `cloud_function_service`, so the four-cloud tables above do not imply OCI support.
 - **AWS public subnet is the Gateway's only home.** The dashboard's
   printed config sets the *private* subnet as the deploy default, but if
   someone overrides the deploy form's subnet to the public one, the

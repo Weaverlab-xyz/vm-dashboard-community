@@ -358,7 +358,19 @@ RUN ARCH=$(dpkg --print-architecture) \
            echo "google 6.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
            sleep $((attempt * 5)); \
        done \
-    && rm -rf /tmp/tf_provider_init /tmp/tf_provider_init_az4 /tmp/tf_provider_init_g6
+    && mkdir -p /tmp/tf_provider_init_g7 \
+    && printf 'terraform {\n  required_providers {\n    google = { source = "hashicorp/google", version = "~> 7.21" }\n  }\n}\n' \
+       > /tmp/tf_provider_init_g7/main.tf \
+    && for attempt in 1 2 3 4 5 6 7 8; do \
+           TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init_g7 init && break; \
+           if [ "$attempt" = 8 ]; then \
+               echo "failed to cache google 7.x (cloud_function/gcp_cloudrun needs >= 7.21 for Direct VPC egress) after 8 attempts" >&2; \
+               exit 1; \
+           fi; \
+           echo "google 7.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
+           sleep $((attempt * 5)); \
+       done \
+    && rm -rf /tmp/tf_provider_init /tmp/tf_provider_init_az4 /tmp/tf_provider_init_g6 /tmp/tf_provider_init_g7
 
 # kubectl + helm -- baked in so the k8s management-plane / ESO / Entitle-agent ops
 # run them as in-process subprocesses (services/k8s_service), NOT as sibling

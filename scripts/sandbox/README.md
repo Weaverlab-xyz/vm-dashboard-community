@@ -118,6 +118,14 @@ modify DB instances + subnet groups) and creates a private **DB subnet group**
 spanning two AZs, so the managed-database feature can deploy a private Postgres
 into the sandbox.
 
+For **Cloud Functions (preview)**, all three setup scripts emit
+`cloud_functions_enabled=true` (so the preview toggle is already on after the import)
+plus a package store pointing at the same image-hub bucket/container the scripts
+already create — no new storage. AWS additionally grants `lambda:*` and creates a
+Secrets Manager interface endpoint; Azure adds a `functions-subnet` delegated to
+`Microsoft.Web/serverFarms`; GCP enables the `cloudfunctions` + `artifactregistry`
+APIs and emits network/subnetwork for Direct VPC egress.
+
 ## Set up multiple regions
 
 The dashboard can deploy into several regions at once. Each region needs its own
@@ -255,7 +263,7 @@ deployed):
 
 | Cloud | Idle cost / month | Why |
 |---|---|---|
-| AWS   | ~$0   | VPC, subnets, IGW, SGs, IAM are free; ECS cluster is free until a task runs. Secret in Secrets Manager: ~$0.40. |
+| AWS   | ~$7.70 | VPC, subnets, IGW, SGs, IAM are free; ECS cluster is free until a task runs. Secret in Secrets Manager: ~$0.40. Secrets Manager **interface VPC endpoint** (so `network_mode=vpc` Cloud Functions can read their bearer secret): ~$7.30 — opt out with `SANDBOX_SKIP_FN_VPCE=1`. |
 | Azure | ~$5   | RG, VNet, NSGs, Key Vault free at idle. Storage account ~$0.05. Container registry (Basic, mirrors the Jumpoint/Ansible/promote images so deploy-time pulls skip Docker Hub rate limits): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. |
 | GCP   | ~$1.50 | Cloud NAT charges per-hour even when idle (~$1.50/mo). VPC, subnets, firewall rules, Secret Manager are free. |
 
@@ -263,6 +271,12 @@ A running Jumpoint container/VM adds:
 - AWS:  ~$10/mo for ECS Fargate (256 CPU / 512 MB).
 - Azure: ~$10/mo for ACI (1 vCPU / 2 GB).
 - GCP:  ~$5/mo for `e2-micro`.
+
+A **Cloud Function** adds only per-invocation cost on all three clouds — the sandbox
+provisions no standing compute for it. GCP uses Direct VPC egress rather than a
+Serverless VPC Access connector precisely to avoid the connector's ~$26/mo standing
+charge. An Azure `vpc`-mode function does need a B1 App Service plan (~$13/mo) while
+it exists, because Linux Consumption (`Y1`) cannot do VNet integration.
 
 A running **managed Kubernetes cluster** adds its control-plane + node cost, plus
 (AWS EKS) a small NAT instance ~$3/mo. Each cluster builds its own VPC + egress
@@ -357,6 +371,7 @@ AWS_REGION=us-west-2          ./scripts/sandbox/Linux/setup-aws.sh
 AZURE_LOCATION=westus2        ./scripts/sandbox/Linux/setup-azure.sh
 GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/Linux/setup-gcp.sh
 SANDBOX_SKIP_ACR=1            ./scripts/sandbox/Linux/setup-azure.sh   # skip the Azure ACR image mirror
+SANDBOX_SKIP_FN_VPCE=1        ./scripts/sandbox/Linux/setup-aws.sh     # skip the Secrets Manager endpoint (breaks vpc-mode functions)
 ```
 
 ```powershell
@@ -387,6 +402,20 @@ need a different topology.
   deploy a user VM into the public subnet via the dashboard, it gets internet
   by default — the sandbox doesn't prevent that, the **default subnet** in the
   config block is the private one.
+- **AWS `vpc`-mode Cloud Functions need the Secrets Manager endpoint.** A
+  VPC-attached Lambda reads its bearer secret from Secrets Manager at cold start,
+  and the private subnet has no internet route unless the on-demand NAT instance
+  happens to be up for an unrelated VM. Without the endpoint (`SANDBOX_SKIP_FN_VPCE=1`)
+  the function deploys cleanly and then **fails auth closed — a 500 on every
+  invoke**, including Test invoke. Public-mode functions are unaffected.
+- **The Azure `functions-subnet` has no NSG, deliberately.** The module routes all
+  app egress through it, so the NSG's `Internet` deny would also block the Functions
+  host's own calls to `AzureWebJobsStorage` and `WEBSITE_RUN_FROM_PACKAGE` and the
+  app would boot to zero indexed functions. Storage + Key Vault service endpoints
+  keep those hops on the Azure backbone; generic internet egress from a vnet-mode
+  function would need a NAT gateway (~$32/mo), which the sandbox does not create.
+- **Cloud Functions is AWS / Azure / GCP only.** There is no OCI module and no `oci`
+  branch in the service, so `setup-oci.sh` provisions nothing for it.
 - **All three set up only the network/auth scaffolding**, not the dashboard
   itself. Bring the dashboard up with `docker compose up -d` after pasting
   the config into `/setup`.

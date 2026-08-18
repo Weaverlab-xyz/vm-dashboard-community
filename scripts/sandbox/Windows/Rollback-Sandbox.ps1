@@ -76,6 +76,32 @@ function Invoke-AwsRollback {
             return
         }
 
+        # A network_mode=vpc Cloud Function is a VPC-attached Lambda, and its hyperplane
+        # ENIs hold BOTH the security group and the subnet. Refuse rather than delete:
+        # the function lives in its own Terraform state, so removing it here would orphan
+        # that state (same reason the instance and peering guards above refuse). Without
+        # this the SG/subnet/RT sweeps each fail with an opaque DependencyViolation and
+        # leave a half-torn sandbox.
+        $fns = (aws lambda list-functions --region $region `
+            --query "Functions[?VpcConfig.VpcId=='$vpcId'].FunctionName" --output text 2>$null).Trim()
+        if ($fns -and $fns -ne 'None') {
+            Write-Warn "VPC-attached Lambda function(s) in $vpcId : $fns"
+            Write-Warn "Decommission them from the dashboard's Functions page first, then re-run rollback. Skipping VPC teardown."
+            return
+        }
+
+        # Even after the last VPC function is destroyed, Lambda can take ~20 minutes to
+        # detach its ENIs. They still pin the SG and subnet, so check separately — the
+        # remedy is just to wait, which is worth saying out loud.
+        $lambdaEnis = (aws ec2 describe-network-interfaces --region $region `
+            --filters "Name=vpc-id,Values=$vpcId" "Name=interface-type,Values=lambda" `
+            --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>$null).Trim()
+        if ($lambdaEnis -and $lambdaEnis -ne 'None') {
+            Write-Warn "Lambda ENIs still attached in $vpcId : $lambdaEnis"
+            Write-Warn 'Lambda releases these up to ~20 min after the last VPC function is destroyed — re-run rollback shortly. Skipping VPC teardown.'
+            return
+        }
+
         # RDS DB subnet groups in this VPC — RDS holds the subnets, so these
         # must go before the subnet sweep below or delete-subnet fails.
         $dbgs = (aws rds describe-db-subnet-groups --region $region `
@@ -87,9 +113,11 @@ function Invoke-AwsRollback {
             else { Write-Warn "Could not delete DB subnet group $g (a DB may still be provisioned — decommission it first)" }
         }
 
-        # Interface VPC endpoints (SSM: ssm/ssmmessages/ec2messages). Created on-demand
-        # by the dashboard (or by older setup scripts). Each holds an ENI in the private
-        # subnet and references the ssm-vpce SG, so they MUST go before the SG and subnet
+        # Interface VPC endpoints — the on-demand SSM three (ssm/ssmmessages/ec2messages)
+        # plus the secretsmanager endpoint Setup-AwsSandbox.ps1 creates for vpc-mode Cloud
+        # Functions. The filter below is vpc-id only, so it already covers every endpoint
+        # in the VPC whoever made it. Each holds an ENI in the private subnet and
+        # references its own SG, so they MUST go before the SG and subnet
         # sweeps or those deletes fail — and each keeps billing (~$7/mo) if left behind.
         $vpces = (aws ec2 describe-vpc-endpoints --region $region `
             --filters "Name=vpc-id,Values=$vpcId" `
