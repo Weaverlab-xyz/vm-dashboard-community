@@ -21,7 +21,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import Job, User, VMStateCache, Workgroup
+from ..database import Job, User, VMWorkgroupOverride, Workgroup
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")
 
@@ -168,9 +168,20 @@ def delete(db: Session, name: str) -> None:
     if active_jobs:
         raise WorkgroupError(f"Cannot delete workgroup '{canonical}': {active_jobs} active job(s) reference it.")
 
-    vm_refs = db.query(VMStateCache.vmx_path).filter(VMStateCache.workgroup == canonical).count()
+    # Every on-prem VM tagged into this workgroup, across ALL providers — deliberately
+    # not filtered to one. This replaced a guard that counted `vm_state_cache` rows, the
+    # local VMX scan, which is the one VM source that no longer exists; the overrides it
+    # never covered are the ones that matter. `VMWorkgroupOverride.workgroup` is a
+    # ForeignKey with ondelete="CASCADE" and nothing enables PRAGMA foreign_keys, so
+    # without this the delete silently destroys every override on PostgreSQL and leaves
+    # dangling rows on SQLite — and the operator's next clue is a hypervisor page that
+    # has quietly gone admin-only.
+    vm_refs = (db.query(VMWorkgroupOverride.vm_id)
+               .filter(VMWorkgroupOverride.workgroup == canonical).count())
     if vm_refs:
-        raise WorkgroupError(f"Cannot delete workgroup '{canonical}': {vm_refs} VM(s) in local cache reference it.")
+        raise WorkgroupError(
+            f"Cannot delete workgroup '{canonical}': {vm_refs} VM(s) are tagged into it. "
+            f"Clear or reassign them on their hypervisor page first.")
 
     db.delete(wg)
     db.commit()

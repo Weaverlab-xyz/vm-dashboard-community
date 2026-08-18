@@ -4,15 +4,24 @@ cloud calls).
 
 Cloud VMs + on-prem Proxmox/Nutanix VMs come from completed, non-destroyed deploy
 Jobs; cloud databases, K8s clusters, and virtual-desktop seats come from their
-inventory tables. Each row is normalized to one dict shape. RBAC filtering is the
-API layer's job (see :func:`visible_to`), not the collector's.
+inventory tables; and every VM a remote agent has synced comes from the hypervisor
+cache, whether the dashboard deployed it or not. Each row is normalized to one dict
+shape. RBAC filtering is the API layer's job (see :func:`visible_to`), not the
+collector's.
+
+Note what the hypervisor source can and cannot see: ``hypervisor_vm_cache`` is written
+only by agent-brokered syncs, so a directly-dialled Proxmox or vSphere connection
+contributes nothing here. "Every hypervisor kind" means every AGENT-BOUND connection.
 """
+import json
 import logging
 from typing import Optional, Set
 
 from sqlalchemy.orm import Session
 
-from ..database import CloudDatabase, Job, K8sCluster, VirtualDesktop
+from ..database import (CloudDatabase, HypervisorConnection,
+                        HypervisorVMCache, Job, K8sCluster, VirtualDesktop)
+from . import expiry_policy, hypervisor_view_service
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +190,160 @@ def _desktop_item(row) -> dict:
     }
 
 
+# Hypervisor kind -> the page a synced VM links to. Workstation has no page of its own;
+# its rows are the /vms page.
+_HV_PAGES = {"proxmox": "/proxmox", "nutanix": "/nutanix", "vsphere": "/vsphere",
+             "esxi": "/vsphere", "xcpng": "/xcpng", "hyperv": "/hyperv",
+             "workstation": "/vms"}
+
+# Kinds whose `scope` is a PLACE worth filtering on — a Proxmox node, a Nutanix cluster.
+# Elsewhere `scope` is either empty (vsphere/xcpng/hyperv report none) or PER-VM: for
+# workstation it is a VMX path on somebody's desktop, and one Region entry per row is not
+# a filter.
+_SCOPE_IS_A_REGION = ("proxmox", "nutanix")
+
+# deploy job_type -> (hypervisor kind, the metadata key holding the created VM's own id).
+# `set_completed` merges a deploy's result into the job's metadata and collect() only
+# sees completed jobs, so these ids are present and the dedup below can be exact.
+_HV_DEPLOY_JOBS = {"proxmox_deploy": ("proxmox", "vmid"),
+                   "nutanix_deploy": ("nutanix", "uuid")}
+
+
+def _hv_override_key(kind: str, vm_id: str, scope: str) -> str:
+    """The key each provider's own ``_override_key`` builds.
+
+    Must match api/{proxmox,nutanix,hyperv,vsphere,xcpng}.py EXACTLY, or an admin's
+    assignment on those pages silently stops applying here. Proxmox is the only composite
+    one — a vmid is not unique across a cluster, so the node is in the key.
+    """
+    if kind == "proxmox":
+        return f"{scope or ''}/{vm_id}"
+    return str(vm_id or "")
+
+
+def _job_match_keys(job) -> set:
+    """Identity keys a completed hypervisor deploy Job lays claim to.
+
+    Two, and either matching means "same VM". The exact one holds because
+    ``job_service.set_completed`` merges a deploy's result into the job metadata, so a
+    completed proxmox_deploy carries its vmid and a nutanix_deploy its uuid. The
+    casefolded name is the fallback for a job predating that merge, and is deliberately
+    the same join api/proxmox.py and api/nutanix.py already use to inherit a deploy-time
+    workgroup — so this page and those cannot disagree about what one VM is.
+    """
+    spec = _HV_DEPLOY_JOBS.get(job.job_type)
+    if spec is None:
+        return set()
+    kind, id_key = spec
+    meta = job.metadata_dict or {}
+    keys = set()
+    conn_id = str(meta.get("connection_id") or "")
+    vm_id = str(meta.get(id_key) or "")
+    if conn_id and vm_id:
+        # str() on both sides: Proxmox stores an int vmid in metadata and the agent
+        # reports a string.
+        keys.add(("hvid", conn_id, vm_id))
+    name = str(meta.get("vm_name") or meta.get("name") or "").strip().casefold()
+    if name:
+        scope = str(meta.get("node") or "").casefold() if kind == "proxmox" else ""
+        keys.add(("name", kind, scope, name))
+    return keys
+
+
+def _hv_match_keys(conn, row) -> set:
+    """The same identity keys, from the cache side."""
+    keys = {("hvid", conn.id, str(row.vm_id or ""))}
+    name = (row.name or "").strip().casefold()
+    if name:
+        scope = (row.scope or "").casefold() if conn.kind == "proxmox" else ""
+        keys.add(("name", conn.kind, scope, name))
+    return keys
+
+
+def _hv_item(conn, row, workgroup: Optional[str], ips: list) -> dict:
+    kind = (conn.kind or "").lower()
+    if kind in _SCOPE_IS_A_REGION:
+        region = (row.scope or "") or (conn.site or "")
+    else:
+        region = conn.site or ""
+    return {
+        "id": f"hv:{conn.id}:{row.vm_id}",
+        # The hypervisor kind, not a generic "onprem": a Proxmox VM the dashboard
+        # DEPLOYED already reports cloud "proxmox", and a second label would list one
+        # hypervisor under two Provider values in the same dropdown.
+        "cloud": kind,
+        "kind": "vm",
+        "name": row.name or row.vm_id,
+        "region": region,
+        # Normalised through the one function that knows all six products' spellings, so
+        # a capitalisation change upstream cannot render every VM stopped. Neither value
+        # is in expiry_policy's reapable-state set, which is a free extra safety layer.
+        "state": "running" if hypervisor_view_service.is_running(
+            kind, row.power_state) else "stopped",
+        "workgroup": (workgroup or "").lower() or None,
+        # Load-bearing, not an oversight. `visible_to` falls back to comparing
+        # `deployed_by` against the caller for a row with no workgroup, and None can
+        # never match — which makes an untagged synced VM admin-only, exactly the rule
+        # every hypervisor page already keeps.
+        "deployed_by": None,
+        # The cache knows when it was SYNCED, which is not when the VM was created.
+        "created_at": None,
+        "expires_at": None,
+        "source": expiry_policy.SYNCED_HYPERVISOR_SOURCE,
+        "job_id": None,
+        "ip": ips[0] if ips else "",
+        "detail_href": _HV_PAGES.get(kind, "/connections"),
+    }
+
+
+def _hypervisor_items(db: Session, claimed: set) -> list:
+    """Synced hypervisor VMs, minus any a deploy Job already accounts for.
+
+    One row query plus one bulk override lookup per kind present — at most six, whatever
+    the size of the estate.
+
+    Only ACTIVE connections: a sync only ever touches those, and ``_prune`` only removes
+    rows a pass touched, so deactivating a connection freezes its cache rather than
+    emptying it. Listing frozen rows as current inventory would be the lie.
+    """
+    from . import workgroup_override_service as wos
+
+    rows = (db.query(HypervisorVMCache, HypervisorConnection)
+            .join(HypervisorConnection,
+                  HypervisorConnection.id == HypervisorVMCache.connection_id)
+            .filter(HypervisorConnection.is_active.is_(True))
+            .all())
+    if not rows:
+        return []
+
+    by_kind: dict = {}
+    for row, conn in rows:
+        by_kind.setdefault((conn.kind or "").lower(), []).append((row, conn))
+
+    items = []
+    for kind, pairs in by_kind.items():
+        if kind not in wos.ALLOWED_PROVIDERS:
+            # `esxi` is a valid agent kind but not a connection kind, and get_many raises
+            # on an unknown provider. Skip rather than take the whole page down.
+            continue
+        keys = [_hv_override_key(kind, row.vm_id, row.scope) for row, _ in pairs]
+        try:
+            overrides = wos.get_many(db, kind, keys)
+        except Exception:  # noqa: BLE001
+            logger.warning("could not read %s workgroup overrides for the inventory", kind)
+            overrides = {}
+        for row, conn in pairs:
+            if _hv_match_keys(conn, row) & claimed:
+                continue      # a deploy Job already lists this VM, with its timer
+            try:
+                ips = json.loads(row.ip_addresses or "[]")
+            except (TypeError, ValueError):
+                ips = []
+            key = _hv_override_key(kind, row.vm_id, row.scope)
+            items.append(_hv_item(conn, row, overrides.get(key), ips))
+    return items
+
+
 def collect(db: Session) -> list:
     """Assemble the full (unfiltered) inventory from DB records. The returned
     dicts are detached from the session (all primitives), so the caller may close
@@ -193,9 +356,16 @@ def collect(db: Session) -> list:
         .order_by(Job.created_at.desc())
         .all()
     )
+    # Identity keys the deploy Jobs claim, so the hypervisor cache does not list the same
+    # VM twice. The Job row wins: it carries the auto-delete timer, the deploy-time
+    # workgroup and the job link, none of which the cache has. Collected after the
+    # `destroyed` guard, so a VM the dashboard destroyed but the agent has not re-synced
+    # yet still shows up from the cache — which is the honest reading of that state.
+    claimed: set = set()
     for job in vm_jobs:
         if job.metadata_dict.get("destroyed"):
             continue
+        claimed |= _job_match_keys(job)
         items.append(_vm_item(job))
 
     for row in (db.query(CloudDatabase)
@@ -208,6 +378,8 @@ def collect(db: Session) -> list:
     for row in (db.query(VirtualDesktop)
                 .filter(VirtualDesktop.status.notin_(("deprovisioning", "deleted"))).all()):
         items.append(_desktop_item(row))
+
+    items.extend(_hypervisor_items(db, claimed))
 
     # Annotate each row with whether it can be a Config-Management target, and why
     # not when it can't. Derived from the same _target_spec the bulk-run endpoint
@@ -222,7 +394,6 @@ def collect(db: Session) -> list:
     # is cached for 60s, so a time-derived flag would go stale inside the cache (the
     # discipline cost_service.apply_budget_alerts documents). Clients get the raw
     # expires_at plus the warn threshold and derive it live.
-    from . import expiry_policy
     for item in items:
         spec = _target_spec(item)
         unrunnable = isinstance(spec, str)
@@ -252,8 +423,13 @@ def accessible_workgroups(user):
 def visible_to(item: dict, accessible, username: str) -> bool:
     """RBAC predicate. ``accessible=None`` → admin (sees everything). Otherwise a
     workgroup-scoped item (a VM) is visible when its workgroup is in the user's
-    set; an item without a workgroup (database / k8s / desktop) is visible only to
-    the user who created it."""
+    set; an item without a workgroup (database / k8s / desktop, or a synced hypervisor
+    VM) is visible only to the user who created it.
+
+    A synced hypervisor VM has no creator, so that last clause makes it admin-only until
+    an admin assigns a workgroup override — deliberately, and the same rule every
+    hypervisor page keeps: an agent can report any VM it likes, and none of them widen
+    what a non-admin sees until someone tags them."""
     if accessible is None:
         return True
     wg = item.get("workgroup")
@@ -267,6 +443,11 @@ def visible_to(item: dict, accessible, username: str) -> bool:
 # Kinds that have a Config-Management path at all. "desktop" is a virtual-desktop
 # seat — there is no Ansible target behind it, so it can never be selected.
 CONFIG_MANAGEABLE_KINDS = ("vm", "k8s", "database")
+
+# On-prem kinds that api/config_mgmt.py exposes a GROUP target for. `workstation` is
+# absent there: it has no group target, so a Workstation VM with no address has nowhere
+# to be pointed at all, and the reason string has to say so rather than suggest one.
+_GROUP_TARGET_KINDS = ("proxmox", "vsphere", "hyperv", "nutanix", "xcpng")
 
 # Ceiling on one bulk run. Each target becomes its own job, so a mis-click on
 # "select all" against a large estate would otherwise fan out unbounded work.
@@ -292,6 +473,18 @@ def _target_spec(item: dict):
     if kind == "vm":
         ip = item.get("ip") or ""
         if not ip:
+            if item.get("source") == expiry_policy.SYNCED_HYPERVISOR_SOURCE:
+                # "its deploy job stored none" would be a lie: this row has no deploy
+                # job. Only a powered-on guest with tools installed reports an address,
+                # and only the Workstation and ESXi syncs ask for one at all.
+                tail = (f"Configure it through the {cloud} group target on the Config "
+                        f"Management page."
+                        if cloud in _GROUP_TARGET_KINDS else
+                        "There is no group target for it either — power it on and "
+                        "re-sync, or target it by IP from the Config Management page.")
+                return (f"the {cloud or 'hypervisor'} inventory sync reports no address "
+                        f"for this VM (only a powered-on guest with tools installed "
+                        f"reports one). {tail}")
             return ("no recorded IP address — its deploy job stored none. Proxmox and "
                     "Nutanix VMs are configured through their hypervisor group target "
                     "on the Config Management page, not selected individually.")

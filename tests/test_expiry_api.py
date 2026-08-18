@@ -53,7 +53,7 @@ def _install_stubs():
 
     db = types.ModuleType("web_dashboard.database")
     for name in ("CloudDatabase", "Job", "K8sCluster", "VirtualDesktop", "User",
-                 "AuditLog", "JobLog"):
+                 "AuditLog", "JobLog", "HypervisorConnection", "HypervisorVMCache"):
         setattr(db, name, type(name, (), {}))
     db.get_db = lambda: None
     db._is_sqlite = True

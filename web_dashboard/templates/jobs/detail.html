@@ -240,12 +240,9 @@
     packer_oci_build:   { href: '/oci',        label: 'OCI' },
     oci_export_image:   { href: '/oci',        label: 'OCI' },
     // VMware / Workstation
-    vm_start:           { href: '/vms',        label: 'Workstation' },
-    vm_stop:            { href: '/vms',        label: 'Workstation' },
-    vm_decommission:    { href: '/vms',        label: 'Workstation' },
-    bulk_start:         { href: '/vms',        label: 'Workstation' },
-    bulk_start_jobs:    { href: '/vms',        label: 'Workstation' },
-    bulk_stop:          { href: '/vms',        label: 'Workstation' },
+    // Every on-prem power job is an agent_hypervisor job now, whichever page queued
+    // it. /jobs rather than a page, because the kind is in the job's own metadata.
+    agent_hypervisor:   { href: '/jobs',       label: 'Hypervisor (agent)' },
     // Images
     iso_to_vmx:           { href: '/images',   label: 'Images' },
     clone_to_ova:         { href: '/images',   label: 'Images' },
@@ -497,10 +494,7 @@
 
       jobLabel() {
         const labels = {
-          vm_start:   'Start VM',
-          vm_stop:    'Stop VM',
-          bulk_start: `Bulk Start – ${this.job.workgroup || ''}`,
-          bulk_stop:  `Bulk Stop – ${this.job.workgroup || ''}`,
+          agent_hypervisor: 'Hypervisor (agent)',
           iso_to_vmx: `Build VMX – ${this.job.extra_data?.vm_name || ''}`,
           agent_discover: 'Discovery scan',
         };

@@ -542,13 +542,13 @@ class HypervisorConnection(Base):
 class HypervisorVMCache(Base):
     """VMs an agent reported for one connection.
 
-    Not ``VMStateCache``: that table's identity is a VMX path on the dashboard host,
-    which has no meaning for a VM on a customer's vCenter. Identity here is
-    ``(connection_id, vm_id)`` — the hypervisor's own opaque id.
+    Identity is ``(connection_id, vm_id)`` — the hypervisor's own opaque id. It replaced
+    a ``vm_state_cache`` table keyed on a VMX path *on the dashboard host*, which had no
+    meaning for a VM on a customer's vCenter and none at all once the dashboard stopped
+    running on the VM host.
 
     A read-through cache, never a source of truth. ``synced_at`` is what makes deletion
-    detectable: the last page of a sync prunes rows older than the pass that started it,
-    the same trick ``populate_db_from_ps`` uses.
+    detectable: the last page of a sync prunes rows older than the pass that started it.
     """
     __tablename__ = "hypervisor_vm_cache"
 
@@ -559,9 +559,18 @@ class HypervisorVMCache(Base):
     vcpus = Column(Integer)
     mem_mib = Column(Integer)
     ip_addresses = Column(Text)     # JSON list
-    scope = Column(String(128))     # node / cluster / datacenter
+    # Text, not String(128). For a workstation connection this carries a full Windows
+    # VMX path, and one longer than 128 chars raised StringDataRightTruncation inside
+    # hypervisor_sync_service._upsert on PostgreSQL — which api/agent.py swallows, so an
+    # entire sync page of VMs vanished with a log line and no user-visible failure.
+    scope = Column(Text)            # node / cluster / datacenter, VMX path for workstation
     vm_type = Column(String(16))
     tags = Column(Text)             # JSON list
+    # The hypervisor's OWN guest-OS code (`windows9-64`), not a display label. The label
+    # table lives in hypervisor_view_service.guest_os_label, on the dashboard, because an
+    # agent is upgraded separately and lags: a label baked into the agent would freeze at
+    # whatever build the host last pulled.
+    guest_os = Column(String(64))
     synced_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
@@ -570,7 +579,7 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    job_type = Column(String(50), nullable=False, index=True)  # 'vm_start', 'vm_stop', 'bulk_start', etc.
+    job_type = Column(String(50), nullable=False, index=True)  # 'ec2_deploy', 'agent_hypervisor', etc.
     workgroup = Column(String(50), index=True)
     vm_path = Column(Text)
     # Cloud SDK resource id (EC2 instance id, Azure VM name, GCP instance id) for
@@ -840,24 +849,6 @@ class OAuthGroupMapping(Base):
     # Default permissions for auto-created users from this group. NULL = all permissions.
     default_permissions = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-
-class VMStateCache(Base):
-    """Cache for VM state to improve dashboard performance"""
-    __tablename__ = "vm_state_cache"
-
-    vmx_path = Column(Text, primary_key=True)
-    vm_name = Column(String(200))
-    workgroup = Column(String(50), index=True)
-    os_type = Column(String(50))
-    is_running = Column(Boolean, default=False)
-    ip_address = Column(String(45))
-    bt_managed_system_id = Column(Integer)
-    bt_asset_id = Column(Integer)
-    last_updated = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    last_seen_running_at = Column(DateTime, nullable=True)   # last PS-confirmed running time
-    is_online = Column(Boolean, nullable=True)               # Python socket reachability
-    last_online_check_at = Column(DateTime, nullable=True)   # when ping was last attempted
 
 
 class Workgroup(Base):
@@ -1447,11 +1438,12 @@ def init_db():
             "ALTER TABLE users ADD COLUMN permissions TEXT",
             "ALTER TABLE users ADD COLUMN session_permissions TEXT",
             "ALTER TABLE oauth_group_mappings ADD COLUMN default_permissions TEXT",
-            "ALTER TABLE vm_state_cache ADD COLUMN os_type VARCHAR(50)",
-            "ALTER TABLE vm_state_cache ADD COLUMN last_seen_running_at TIMESTAMP",
-            "ALTER TABLE vm_state_cache ADD COLUMN is_online BOOLEAN",
-            "ALTER TABLE vm_state_cache ADD COLUMN last_online_check_at TIMESTAMP",
             "ALTER TABLE jobs ADD COLUMN cloud_resource_id VARCHAR(255)",
+            "ALTER TABLE hypervisor_vm_cache ADD COLUMN guest_os VARCHAR(64)",
+            # A workstation VMX path outgrows VARCHAR(128); see HypervisorVMCache.scope.
+            # A syntax error on SQLite, which the per-statement guard below swallows —
+            # and harmless there, because SQLite does not enforce VARCHAR lengths.
+            "ALTER TABLE hypervisor_vm_cache ALTER COLUMN scope TYPE TEXT",
             "CREATE INDEX ix_jobs_cloud_resource_id ON jobs(cloud_resource_id)",
             "ALTER TABLE app_config ADD COLUMN workgroup VARCHAR(64)",
             "CREATE INDEX ix_app_config_key_workgroup ON app_config(key, workgroup)",

@@ -950,7 +950,14 @@ async def login_page(request: Request):
 async def vms_page(request: Request):
     if not config_service.get_bool("vmware_enabled", settings.vmware_enabled):
         raise HTTPException(status_code=404, detail="VMware integration is disabled")
-    return templates.TemplateResponse("vms/list.html", {"request": request, **_feature_flags()})
+    # Always agent-bound, and structurally so: `workstation` is in
+    # hypervisor_connection_service.AGENT_ONLY_KINDS because the dashboard has no
+    # transport to vmrest under any configuration. Deliberately NOT taken from
+    # _hypervisor_page_host, which returns via_agent=False in its except branch — that
+    # would ungrey every button on an install whose connection failed to resolve.
+    return templates.TemplateResponse(
+        "vms/list.html",
+        {"request": request, "via_agent": True, **_feature_flags()})
 
 
 def _hypervisor_page_host(kind: str) -> dict:
@@ -1313,18 +1320,4 @@ async def cache_status():
         "cost_cache": cost_rows,
     }
 
-
-@app.get("/api/health/powershell", tags=["health"])
-async def health_powershell():
-    """Test connectivity to the PowerShell wrapper."""
-    from .services import powershell
-    try:
-        result = await powershell.execute("health_check", {})
-        return {"status": "ok", "details": result}
-    except powershell.PowerShellError as e:
-        # Log the real error server-side; return a generic detail (a raw exception
-        # string here would leak internal detail — CodeQL py/stack-trace-exposure).
-        logger.warning("powershell health check failed: %s", e)
-        return JSONResponse(status_code=503,
-                            content={"status": "error", "detail": "PowerShell wrapper unavailable"})
 

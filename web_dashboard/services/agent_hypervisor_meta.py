@@ -193,6 +193,15 @@ PAGE_OPS = {
         # hard one (above), so there is no script to point a `reboot` verb at here.
         # `pause`, `resume` and `save` are absent; the runner implements no script.
     },
+    "workstation": {
+        "start": "power_on",       # PUT /api/vms/{id}/power, body `on`
+        "stop": "power_off",       # body `off`
+        # Two, and only two. vmrest's API offers shutdown/suspend/pause/unpause and has
+        # NO reset, reboot or snapshot at all, and the agent maps only these two
+        # (_VMREST_POWER). A Shutdown button would need the verb adding to the agent
+        # AND to the customer's policy.yaml, so it is refused out loud rather than
+        # approximated onto power_off — which is a power cut, not a shutdown.
+    },
 }
 
 # Why an unmapped op cannot simply be passed through: `normalize()` falls an
@@ -358,12 +367,18 @@ VM_KEYS = (
     "vcpus",         # int
     "mem_mib",       # int
     "ip_addresses",  # list[str]
-    "scope",         # str — node / cluster / datacenter
+    "scope",         # str — node / cluster / datacenter, and the VMX path for workstation
     "vm_type",       # str
     "tags",          # list[str]
+    "guest_os",      # str — the hypervisor's own guest-OS code, e.g. `windows9-64`
 )
 
 MAX_VM_TEXT = 256
+# `scope` alone, because for a workstation connection it carries a full Windows VMX path
+# and Windows MAX_PATH is 260 — a 256-char cap clips real ones. Its own constant rather
+# than a bigger MAX_VM_TEXT: every other field here is a name or an id, and the cap is
+# what stops one from arriving as a page of prose.
+MAX_VM_PATH = 1024
 MAX_VMS_PER_PAGE = MAX_PAGE_SIZE
 MAX_IPS = 16
 MAX_TAGS = 32
@@ -399,24 +414,25 @@ def _clean_vm(vm: dict) -> dict:
         elif key == "tags":
             out[key] = [_clean_text(v) for v in (value or [])[:MAX_TAGS] if _clean_text(v)]
         else:
-            text = _clean_text(value)
+            text = _clean_text(value, MAX_VM_PATH if key == "scope" else MAX_VM_TEXT)
             if text:
                 out[key] = text
     return out
 
 
-def _clean_text(value) -> str:
+def _clean_text(value, limit: int = MAX_VM_TEXT) -> str:
     """Strip C0/C1 control characters (except tab) and truncate.
 
     Mirrors ``agent_job_meta._clean_text`` rather than importing it — same four-line
-    rule, same reason both modules are stdlib-only.
+    rule, same reason both modules are stdlib-only. ``limit`` is per key rather than
+    global: see MAX_VM_PATH.
     """
     text = str(value if value is not None else "")
     cleaned = "".join(
         ch for ch in text
         if ch == "\t" or (ord(ch) >= 32 and not (0x7F <= ord(ch) <= 0x9F))
     ).strip()
-    return cleaned[:MAX_VM_TEXT]
+    return cleaned[:limit]
 
 
 def _non_negative(value) -> int:

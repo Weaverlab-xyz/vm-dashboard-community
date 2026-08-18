@@ -66,6 +66,8 @@ _META = os.path.join(_ROOT, "web_dashboard", "services", "agent_hypervisor_meta.
 _DEPS = os.path.join(_API, "hypervisor_deps.py")
 _AGENT = os.path.join(_ROOT, "runners", "agent", "agent.py")
 _SIBLING = os.path.join(_ROOT, "runners", "hypervisor", "run.py")
+_CONNS = os.path.join(_ROOT, "web_dashboard", "services",
+                     "hypervisor_connection_service.py")
 
 # agent_hypervisor_meta is stdlib-only by design, so it is the one module that can simply
 # be loaded. Everything else here is read as source.
@@ -78,7 +80,16 @@ _spec.loader.exec_module(ahm)
 # full spec PUT, not an action), so routing them to it would enqueue jobs that can only
 # fail. test_nutanix_power_is_still_unimplemented_in_the_agent is the other half of that
 # statement — if the agent ever grows the implementation, it fails and points here.
-_AGENT_ROUTED = ("hyperv", "proxmox", "vsphere", "xcpng")
+_AGENT_ROUTED = ("hyperv", "proxmox", "vsphere", "xcpng", "workstation")
+
+# Where each kind's router and page live. Everything but `workstation` follows the
+# convention api/<kind>.py + templates/<kind>/index.html. Workstation has no page of its
+# own — its rows ARE the /vms page, which predates the convention — so its two paths are
+# stated once here rather than special-cased at each of the six read sites.
+_ROUTER_PATH = {"workstation": os.path.join(_API, "vms.py")}
+_TEMPLATE_PATH = {"workstation": os.path.join(_TEMPLATES, "vms", "list.html")}
+# api module basename -> the kind it brokers, for the one module whose name differs.
+_KIND_OF_MODULE = {"vms": "workstation"}
 
 
 def _read(path: str) -> str:
@@ -91,7 +102,11 @@ def _tree(path: str) -> ast.Module:
 
 
 def _router(kind: str) -> str:
-    return os.path.join(_API, f"{kind}.py")
+    return _ROUTER_PATH.get(kind, os.path.join(_API, f"{kind}.py"))
+
+
+def _template(kind: str) -> str:
+    return _TEMPLATE_PATH.get(kind, os.path.join(_TEMPLATES, kind, "index.html"))
 
 
 def _function(tree: ast.Module, name: str):
@@ -159,6 +174,10 @@ def _agent_operation(kind: str, verb: str):
         return _vsphere_actions().get(verb)
     if kind in ("hyperv", "esxi"):
         return _literal(_SIBLING, "_PS_POWER").get(verb)
+    if kind == "workstation":
+        # vmrest is reached over HTTP with a bare-string body, so its actions live in
+        # their own table rather than in the per-kind columns of _POWER.
+        return _literal(_AGENT, "_VMREST_POWER").get(verb)
     return (_literal(_AGENT, "_POWER").get(verb) or {}).get(kind)
 
 
@@ -180,9 +199,23 @@ def test_every_agent_routed_power_endpoint_calls_agent_power_job():
 def test_the_agent_branch_comes_before_the_direct_call():
     """Order, not just presence: `create_job` for the direct path must not run first, or
     an agent-bound connection gets a local job row as well as (or instead of) the agent
-    one."""
+    one.
+
+    A kind with no direct path at all has no ordering to check. That is not a loophole
+    to be hardcoded: it is read from `AGENT_ONLY_KINDS`, the same constant
+    hypervisor_connection_service enforces at create time, so a kind that stops being
+    agent-only fails here until its router grows the fallback this test then pins.
+    """
+    agent_only = set(_literal(_CONNS, "AGENT_ONLY_KINDS"))
     for kind in _AGENT_ROUTED:
         body = ast.unparse(_function(_tree(_router(kind)), "_power_endpoint"))
+        if "create_job" not in body:
+            assert kind in agent_only, (
+                f"{kind}: its power endpoint has no direct path to fall back to, but "
+                f"{kind} is not in AGENT_ONLY_KINDS — either the fallback was dropped "
+                f"from a kind that needs one, or the constant is out of date")
+            assert "agent_power_job" in body, kind
+            continue
         assert body.index("agent_power_job") < body.index("create_job"), kind
 
 
@@ -224,6 +257,13 @@ AGENT_OP = {
     ("vsphere", "reset"): "power?action=reset",
     ("vsphere", "shutdown"): "guest/power?action=shutdown",
     ("vsphere", "suspend"): UNEXPRESSIBLE,       # needs power?action=suspend
+
+    # Workstation is vmrest: PUT /api/vms/{id}/power with a BARE STRING body, so the
+    # expected operation is that string. vmrest also offers shutdown/suspend/pause/
+    # unpause and has no reset, reboot or snapshot — none of which is mapped, so none
+    # appears here.
+    ("workstation", "start"): "on",
+    ("workstation", "stop"): "off",
 
     ("xcpng", "start"): "VM.start",
     ("xcpng", "stop"): "VM.hard_shutdown",
@@ -393,6 +433,8 @@ def test_the_ops_with_no_verb_are_the_ones_we_expect():
         "vsphere": {"suspend"},
         "xcpng": {"suspend", "resume", "pause", "unpause"},
         "hyperv": {"pause", "resume", "save"},
+        # Nothing refused: the page offers exactly the two ops vmrest can do.
+        "workstation": set(),
     }, refused
 
 
@@ -573,7 +615,7 @@ def test_every_router_that_brokers_power_has_a_table_of_its_own():
             continue
         src = _read(os.path.join(_API, name))
         if "agent_power_job(" in src and "def agent_power_job" not in src:
-            brokered.add(name[:-3])
+            brokered.add(_KIND_OF_MODULE.get(name[:-3], name[:-3]))
     assert brokered, "no router calls agent_power_job — was it renamed?"
     assert brokered == set(_AGENT_ROUTED), (
         f"the set of routers brokering agent power changed: {sorted(brokered)}")
@@ -594,7 +636,7 @@ def test_each_page_greys_exactly_the_ops_its_router_refuses():
     PAGE_OPS and not to the page stays dead, and one removed leaves a button that 501s.
     """
     for kind in _AGENT_ROUTED:
-        markup = _read(os.path.join(_TEMPLATES, kind, "index.html"))
+        markup = _read(_template(kind))
         match = re.search(r"agentOps:\s*\[([^\]]*)\]", markup)
         assert match, f"the {kind} page no longer declares agentOps"
         declared = {v.strip().strip("'\"") for v in match.group(1).split(",") if v.strip()}
@@ -609,7 +651,7 @@ def test_each_page_defines_the_helpers_its_bindings_call():
     """`canOp` and `opTitle` are referenced from markup, where a missing definition is a
     silent Alpine failure rather than an error."""
     for kind in _AGENT_ROUTED:
-        markup = _read(os.path.join(_TEMPLATES, kind, "index.html"))
+        markup = _read(_template(kind))
         for helper in ("canOp", "opTitle"):
             assert re.search(r"\n\s*" + helper + r"\(op\)\s*\{", markup), (
                 f"{kind} page calls {helper}() from its markup but never defines it")
@@ -641,7 +683,7 @@ def test_a_shutdown_button_is_not_gated_on_a_field_the_agent_never_syncs():
     page knows which one it means.
     """
     for kind, field in sorted(_GUEST_FIELD.items()):
-        markup = _read(os.path.join(_TEMPLATES, kind, "index.html"))
+        markup = _read(_template(kind))
         assert re.search(r"\n\s*guestToolsMaybeReady\(vm\)\s*\{", markup), (
             f"{kind} page has no guestToolsMaybeReady() — its Shutdown button is gated "
             f"on {field}, which an agent-synced row does not have")
@@ -665,7 +707,7 @@ def test_the_refused_buttons_are_actually_wired_to_canop():
     """A helper nothing calls greys nothing. Each refused op with a button must consult
     `canOp`, or the operator clicks it and reads a 501 instead of seeing it disabled."""
     for kind in _AGENT_ROUTED:
-        markup = _read(os.path.join(_TEMPLATES, kind, "index.html"))
+        markup = _read(_template(kind))
         for op in sorted(set(_registered_ops(kind)) - set(ahm.PAGE_OPS[kind])):
             if f"powerOp(vm, '{op}')" not in markup:
                 continue  # the route exists but this page has no button for it

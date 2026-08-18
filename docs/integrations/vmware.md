@@ -2,26 +2,33 @@
 
 ## What is it?
 
-The VMware integration lets you list, start, and stop VMware Workstation VMs
-on your **local Windows machine** directly from the dashboard web UI. No
-separate vSphere or ESXi licence is required — it works with the desktop
-hypervisor (Workstation Pro) you probably already have.
+The VMware integration lists your VMware Workstation VMs on the **Workstation** page,
+and starts and stops them from there. No vSphere or ESXi licence is required — it works
+with the desktop hypervisor (Workstation Pro) you probably already have.
 
-The dashboard container SSHes from inside Docker back to the Windows host and
-invokes a PowerShell wrapper script (`vm_cli_api_wrapper.ps1`) that drives
-VMware's `vmrun` CLI. The result is a VM management panel alongside your cloud
-resources.
+A **remote agent** runs on the Workstation host and talks to **`vmrest`**, the REST
+daemon that ships with Workstation Pro. The agent polls the dashboard outward, so nothing
+has to be opened toward that machine, and the dashboard needs no route to it.
+
+> **This replaced an SSH + PowerShell path**, in which the dashboard container SSHed back
+> to the Windows host and ran a `vm_cli_api_wrapper.ps1` wrapper around the `vmrun` CLI.
+> That path required the dashboard to be running on (or adjacent to) the machine holding
+> the VMs, and to hold an inbound SSH key to a Windows desktop. It has been removed. If
+> you are upgrading, `VM_CLI_WRAPPER_PATH` and the `SSH_*` settings no longer do anything
+> and can be deleted from your `.env`. Leave `POWERSHELL_EXECUTION_MODE` alone: it no
+> longer affects this integration, but Portainer still reads it to choose between
+> reaching containers directly and proxying through the Azure Automation Hybrid Worker.
 
 ---
 
 ## Use cases
 
-- **Lab environment management** — start and stop test VMs from the same
-  interface you use to spin up EC2 and Azure VMs, without switching tools.
-- **On-prem + cloud unified view** — see your VMware VMs and cloud instances
-  in one dashboard without logging into multiple consoles.
-- **Developer workflows** — quickly power VMs on before a demo or testing
-  session, and tear them back down after.
+- **Lab environment management** — start and stop test VMs from the same interface you
+  use to spin up EC2 and Azure VMs, without switching tools.
+- **On-prem + cloud unified view** — see your VMware VMs and cloud instances in one
+  dashboard without logging into multiple consoles.
+- **Developer workflows** — power VMs on before a demo or testing session, and back down
+  after.
 
 ---
 
@@ -29,87 +36,64 @@ resources.
 
 | Requirement | Notes |
 |---|---|
-| Windows host | The dashboard container SSHes to the **host machine**; VMware and PowerShell 7 must be on that machine |
-| VMware Workstation Pro | Free Personal Use licence is fine; `vmrun.exe` must be on `PATH` |
-| PowerShell 7+ | The wrapper script uses `??` (null-coalescing) — PS 5.1 will not work |
-| OpenSSH server (Windows) | The container authenticates to the host via SSH; must be running |
-| SSH key pair | The container needs an RSA/Ed25519 key whose public half is in the host's `authorized_keys` |
+| VMware Workstation **Pro** | `vmrest` ships with Pro. Workstation Player does not include it |
+| A remote agent on that host | See [remote agents](../remote-agents.md) |
+| Network | **Outbound HTTPS from the host to the dashboard.** Nothing inbound |
 
-### Enable OpenSSH server on Windows
-
-```powershell
-Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-Start-Service sshd
-Set-Service -Name sshd -StartupType Automatic
-```
-
-### Generate an SSH key for the container
-
-```powershell
-ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\dev_dashboard_key" -N ""
-# Add the public key to authorized_keys
-Add-Content "$env:USERPROFILE\.ssh\authorized_keys" `
-    (Get-Content "$env:USERPROFILE\.ssh\dev_dashboard_key.pub")
-```
+There is no requirement on where the dashboard itself runs — a container, a VM, or a
+managed platform are all equivalent, because the agent does the reaching.
 
 ---
 
 ## Setup
 
-### 1. Copy the Windows Compose override
+### 1. Start `vmrest` on the Workstation host
 
-```powershell
-Copy-Item docker-compose.override.windows.yml.example `
-          docker-compose.override.windows.yml
+```
+vmrest -C     # sets the API credentials, once
+vmrest        # runs the daemon on 127.0.0.1:8697
 ```
 
-### 2. Edit the override file
+Confirm it works **before** involving the agent. This separates vmrest setup from agent
+configuration, which is where the time otherwise goes:
 
-Open `docker-compose.override.windows.yml` and set `VM_CLI_WRAPPER_PATH` to the
-full path of `vm_cli_api_wrapper.ps1` on your host:
+```
+curl -u USER:PASS -H "Accept: application/vnd.vmware.vmw.rest-v1+json" http://127.0.0.1:8697/api/vms
+```
+
+You should get a JSON list of VM ids and paths. Note that `vmrest` **rejects
+`application/json`** — the vendor media type above is required.
+
+### 2. Enrol an agent on that host
+
+Follow [remote agents](../remote-agents.md). Then add a **workstation** connection bound
+to that agent, with a `policy.yaml` entry granting the verbs the page needs:
 
 ```yaml
-environment:
-  - VM_CLI_WRAPPER_PATH=C:\Scripts\VM_CLI\VM_DEMO_CLI\vm_cli_api_wrapper.ps1
-  - POWERSHELL_EXECUTION_MODE=ssh
+connections:
+  - name: my-workstation
+    verbs: [inventory_sync, power_on, power_off]
+    allow_loopback: true
 ```
 
-The `volumes:` section in the override bind-mounts your SSH private key into
-the container. Verify the path matches where you generated the key:
+Two things there are load-bearing:
 
-```yaml
-volumes:
-  - ${USERPROFILE}/.ssh/dev_dashboard_key:/root/.ssh/dev_dashboard_key:ro
-```
+- **`allow_loopback: true`** — vmrest binds `127.0.0.1`, and the agent denies loopback by
+  default. Without it the agent refuses to dial vmrest at all.
+- **`power_on` and `power_off`** — with only `inventory_sync`, the VMs list correctly and
+  the Start/Stop buttons are refused **by the agent**. That refusal names the file and
+  the line to add, but it is by far the most common "I set it all up and the buttons
+  still do not work" outcome. Grant them up front.
 
 ### 3. Enable the integration
 
-Enable **VMware** in the setup wizard (Step 5) or **Settings → Integrations →
-VMware**. The dashboard also needs to know the SSH user and host to reach the
-Windows host — configure these in the same Settings panel:
+Turn on **VMware** in **Settings → Integrations**, and make sure **remote agents** are
+enabled too. The **Workstation** link then appears in the navigation bar.
 
-| Setting | Value |
-|---|---|
-| SSH User | your Windows username |
-| SSH Host | `host.docker.internal` (Docker Desktop's built-in hostname for the Windows host) |
+### 4. Verify
 
-### 4. Start the stack with both Compose files
-
-```powershell
-docker compose `
-  -f docker-compose.yml `
-  -f docker-compose.override.windows.yml `
-  up -d
-```
-
-> **Note:** every restart must include both `-f` flags. The override file adds
-> the bind-mount and SSH env vars; without it the VMs tab is unavailable even
-> if the flag is set.
-
-### 5. Verify
-
-The **VMs** link should appear in the navigation bar. Click it — you should see
-any VMs in your configured workgroup paths within a few seconds.
+Open **Workstation** and press **Sync Now**. Within a few seconds the page should list
+the VMs on that host, badged with the agent's name.
 
 ---
 
@@ -117,91 +101,47 @@ any VMs in your configured workgroup paths within a few seconds.
 
 | Feature | Description |
 |---|---|
-| **VMs tab** | Lists all VMs in your configured `WORKGROUPS` paths |
-| **Start / Stop** | One-click power toggle per VM |
-| **VM detail** | OS type, memory, CPU count, VMX file path |
-| **Workgroup filter** | If you have multiple VM libraries (e.g. lab + dev), they appear as separate groups |
+| **Workstation page** | Every VM the agent reports, from every Workstation host you have enrolled |
+| **Start / Stop** | Per-VM power, queued as an agent job with live output on the Jobs page |
+| **OS and Path columns** | The guest OS and the VMX file's location on the agent's host |
+| **Workgroup assignment** | Admins select VMs and tag them into a workgroup, which is what makes them visible to non-admins |
+| **Sync Now** | Asks the agent to re-read its host immediately rather than waiting for the scheduled pass |
+| **Inventory** | Synced VMs also appear on the Deployment Inventory page |
 
-The feature is entirely **Windows host-only**. The flag is hidden and
-non-functional on macOS, Linux, and WSL hosts.
+### What it cannot do
+
+| | |
+|---|---|
+| Reset, reboot, shutdown, snapshot | **No.** vmrest's API has no reset, reboot or snapshot at all. It does offer a guest shutdown, but the agent does not map it — so the dashboard refuses out loud rather than substituting a power cut for a shutdown |
+| Auto-delete | **No.** A synced VM has no teardown path, so it can never carry an expiry timer |
+| Discovery | **No.** A desktop hypervisor exposes nothing on the network: vmrest binds `127.0.0.1` and is off until someone starts it, so there is nothing for a subnet sweep to find. Add the connection by hand |
 
 ---
 
 ## Troubleshooting
 
-**VMs tab is missing** — verify VMware is toggled on in **Settings → Integrations
-→ VMware** and that you started the stack with the Windows override file.
+**Workstation link is missing** — check **Settings → Integrations → VMware**.
 
-**"SSH connection refused"** — verify OpenSSH server is running:
-```powershell
-Get-Service sshd
-```
+**The page is empty, and Sync Now says the agent is not online** — the agent has not
+checked in. Look at the Agents page for its last-seen time.
 
-**"vmrun not found"** — `vmrun.exe` must be on the Windows `PATH`. It ships
-with VMware Workstation, typically at
-`C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe`. Add its
-directory to `PATH` via System Properties → Environment Variables.
+**The page is empty for a non-admin, but not for an admin** — this is the intended rule,
+not a fault. A VM with no workgroup is admin-only, because an agent can report any VM it
+likes and none of them should widen what a non-admin sees. Select the VMs as an admin and
+use **Assign workgroup**.
 
-**"Cannot dot-source"** — the wrapper script cuts content at the `# RUN MENU`
-marker before dot-sourcing. If you customised the CLI script and removed that
-marker, the wrapper will fail. Restore the marker or adjust
-`vm_cli_api_wrapper.ps1` to match.
+**"vmrest rejected the credential"** — set it with `vmrest -C` and check the username in
+the agent's `connections.yaml` matches.
 
-**Key permission errors on startup** — Docker Desktop mounts Windows files as
-mode `0777`; the container entrypoint copies the key to a `0600` path
-automatically. If you see `WARNING: UNPROTECTED PRIVATE KEY FILE`, check that
-`/usr/local/bin/entrypoint.sh` ran and that the key copy succeeded (check
-`docker compose logs app | head -20`).
+**"could not reach vmrest"** — `vmrest` is not running, or `allow_loopback: true` is
+missing from the connection's `policy.yaml` entry.
 
-## Over a co-located remote agent
+**Start/Stop is refused, naming a verb** — the connection's `policy.yaml` entry is
+missing `power_on` / `power_off`. See step 2.
 
-**This section previously said Workstation could not be managed by an agent. That was
-wrong, and it is worth saying why:** the reasoning was about `vmrun`, which is a local
-binary driving VMX paths on disk — correct as far as it went. Workstation **Pro** also
-ships **`vmrest`**, a REST daemon that is plain JSON over HTTP, and that changes the
-answer entirely. An agent on the Workstation host reaches it with no extra dependency and
-no container.
+**The OS column shows a dash for every VM** — the agent predates guest-OS reporting.
+Rebuild and re-pull the agent on that host; everything else works without it.
 
-This replaces `POWERSHELL_EXECUTION_MODE=ssh`, which does the same job today by having
-the dashboard hold an inbound SSH key to a Windows desktop. The agent polls outward
-instead, so nothing has to be opened toward that machine.
-
-### Setting it up
-
-On the Workstation host, once:
-
-```
-vmrest -C     # sets the API credentials
-vmrest        # runs the daemon on 127.0.0.1:8697
-```
-
-Confirm it works before involving the agent — this separates vmrest setup from agent
-configuration, which is where the time otherwise goes:
-
-```
-curl -u USER:PASS -H "Accept: application/vnd.vmware.vmw.rest-v1+json"      http://127.0.0.1:8697/api/vms
-```
-
-Then run an agent on that host and add a **workstation** connection bound to it. See
-[remote agents](../remote-agents.md#vmware-workstation-pro) for the connection and policy
-entries — including `allow_loopback: true`, which the agent needs because vmrest binds
-loopback and the agent denies loopback by default.
-
-### What it can do
-
-| | |
-|---|---|
-| Inventory sync | yes — name, power state, vCPU, memory, IP for running VMs |
-| Power on / off | yes |
-| Reset, reboot, snapshot | **no** — vmrest's API has none of them, and the agent refuses rather than substituting `shutdown` |
-
-Synced VMs appear on this page alongside the ones the dashboard scans locally, badged
-with the agent's name. They are tagged into workgroups exactly as Proxmox and Nutanix VMs
-are, and an untagged VM is admin-only.
-
-### Still local-only
-
-The **discovery** scan does not find Workstation, and that has not changed: a desktop
-hypervisor exposes nothing on the network by default. vmrest binds `127.0.0.1` and is off
-until someone runs it, so there is nothing for a subnet sweep to find. Add the connection
-by hand.
+**The OS column shows a raw code like `sles15-64`** — the dashboard has no label for that
+code yet, so it shows what the hypervisor said rather than "Unknown". Harmless, and worth
+reporting so the label table can grow.

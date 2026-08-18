@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # prod repo (which has the backing infra configured) works without
     # explicit opt-in. The community edition's .env.example ships all of
     # these set to false; users turn on what they have infra for.
-    vmware_enabled: bool = True         # VMs router + /vms page + VM cache warmers + VMware inventory scans
+    vmware_enabled: bool = True         # VMs router + /vms page
     # The three BeyondTrust products the dashboard drives are gated independently —
     # customers routinely license one or two, not all three. They replaced a single
     # `beyondtrust_enabled` flag; feature_flag_migration.seed_beyondtrust_split copies
@@ -266,15 +266,6 @@ class Settings(BaseSettings):
     # (CIDR arrived in uvicorn 0.31). Getting it wrong is not silent — the app logs a
     # warning naming the peer that sent the untrusted header. See main.py.
     trusted_proxy_hosts: str = "127.0.0.1"
-
-    # PowerShell
-    vm_cli_wrapper_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\vm_cli_api_wrapper.ps1"
-    powershell_timeout: int = 7200  # 2 hours max for long operations
-    # SSH execution mode (POWERSHELL_EXECUTION_MODE=ssh): container SSHes to the
-    # Windows host and runs pwsh there — mirrors the Hybrid Worker pattern for dev.
-    ssh_host: str = "host.docker.internal"   # Docker's name for the Windows host
-    ssh_user: str = ""                        # Windows username the container SSHes in as
-    ssh_key_file: str = "/root/.ssh/dev_dashboard_key"  # path inside the container
 
     # Logging
     log_dir: str = r"C:\Scripts\Logs\VM-Dashboard"

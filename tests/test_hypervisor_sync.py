@@ -138,8 +138,34 @@ def test_the_agent_sync_scenario():
     assert "not online" in (row.last_error or "")
     _ok("an offline agent is skipped with a visible reason, not silently queued")
 
+    # The manual sync is the SAME function the timed pass calls, minus the cadence
+    # check, so it refuses for the same reasons. The agent is still offline here.
+    job, reason = hss.sync_now(db, row)
+    assert job is None and "not online" in reason
+    _ok("a manual sync refuses an offline agent, with the reason the button shows")
+
+    agent.last_seen_at = datetime.utcnow()
+    db.commit()
+    job, reason = hss.sync_now(db, row)
+    assert job is not None and reason == ""
+    again, _ = hss.sync_now(db, row)
+    assert again is None, "a second sync must not queue while one is still open"
+    _ok("a manual sync queues once, ignoring the cadence but not the in-flight guard")
+
+    # `scope` was String(128): a longer VMX path raised StringDataRightTruncation inside
+    # _upsert on PostgreSQL, which api/agent.py swallows — so a whole page of VMs
+    # vanished with a log line and no user-visible failure.
+    deep = "C:/VMs/" + ("d" * 200) + "/vm.vmx"
+    hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled",
+                           "guest_os": "windows9-64", "scope": deep}],
+                datetime.utcnow())
+    stored = [v for v in hss.list_vms(db, cid) if v["vm_id"] == "OS01"][0]
+    assert stored["guest_os"] == "windows9-64"
+    assert stored["scope"] == deep, "a deep VMX path must survive the round trip"
+    _ok("the guest OS code and a long VMX path both round-trip through the cache")
+
     db.close()
-    assert len(_STEPS) == 10, f"expected 10 checkpoints, ran {len(_STEPS)}"
+    assert len(_STEPS) == 13, f"expected 13 checkpoints, ran {len(_STEPS)}"
 
 
 if __name__ == "__main__":

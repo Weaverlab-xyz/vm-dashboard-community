@@ -1,15 +1,22 @@
-"""Agent-synced Workstation VMs merged into the /vms page.
+"""Agent-synced Workstation VMs on the /vms page.
 
-A co-located agent reports its own host's Workstation VMs through vmrest; the local path
-scans this host with PowerShell. Both are Workstation VMs, so they share a page rather
-than getting a second one — with a `source` so it is always clear which host a row is on.
+Every row on that page now comes from a remote agent reporting its own host through
+vmrest. It used to be a merge: the dashboard also scanned ITS OWN host with PowerShell,
+back when it ran on the box that owned the VMs. That half is gone, and with it the
+workgroup-from-VMX-path inference that refused every button on the page.
 
-The property worth guarding is the permission one. An agent can report any VM it likes,
-so the merge must not become a way to widen what a non-admin sees. Agent rows are gated
-by `vm_workgroup_overrides` exactly as Proxmox and Nutanix rows are: no override means
-admin-only.
+Two properties are worth guarding here.
 
-Real throwaway SQLite; no PowerShell and no agent.
+**Permission.** An agent can report any VM it likes, so this must not become a way to
+widen what a non-admin sees. Agent rows are gated by `vm_workgroup_overrides` exactly as
+Proxmox and Nutanix rows are: no override means admin-only.
+
+**Acting on a row you can see.** The workgroup an action checks has to be the same one
+the listing filtered on, or the page shows a VM whose buttons refuse it — which is what
+happened for every VM on every install, because the inference the action used could only
+ever return "".
+
+Real throwaway SQLite; no agent.
 
 Runs under pytest, or standalone:  python tests/test_vms_agent_merge.py
 """
@@ -18,7 +25,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -28,13 +35,12 @@ os.environ.setdefault(
 os.environ.setdefault("JWT_SECRET_KEY", "x" * 32)
 
 try:
-    from fastapi import BackgroundTasks
+    from fastapi import HTTPException
 
     from web_dashboard.api import vms as vms_api
     from web_dashboard.database import (Base, HypervisorVMCache, RemoteAgent,
                                         SessionLocal, engine)
     from web_dashboard.services import hypervisor_connection_service as hcs
-    from web_dashboard.services import powershell, vm_inventory_service
     from web_dashboard.services import workgroup_override_service
 except Exception as exc:  # noqa: BLE001
     print(f"SKIP: {exc}")
@@ -42,8 +48,10 @@ except Exception as exc:  # noqa: BLE001
 
 Base.metadata.create_all(bind=engine)
 
+_SYNCED_AT = datetime(2026, 8, 18, 12, 0, 0)
 
-def _setup(db, *, synced=True):
+
+def _setup(db, *, synced=True, guest_os="windows9-64"):
     # Overrides too: they outlive a connection, so without this the tagging test leaks
     # into the admin-only one and the isolation failure looks like a logic bug.
     from web_dashboard.database import HypervisorConnection, VMWorkgroupOverride
@@ -68,14 +76,27 @@ def _setup(db, *, synced=True):
             power_state="poweredOn", vcpus=4, mem_mib=8192,
             ip_addresses=json.dumps(["192.168.72.130"]),
             scope=r"C:\VMs\win11\win11.vmx", vm_type="vm", tags="[]",
-            synced_at=datetime.utcnow()))
+            guest_os=guest_os, synced_at=_SYNCED_AT))
         db.commit()
     return conn
 
 
+def _tag(db, vm_id, workgroup):
+    """Tag through the real bulk-assign path, not a hand-written row."""
+    from web_dashboard.database import Workgroup
+    if not db.query(Workgroup.id).filter(Workgroup.name == workgroup).first():
+        db.add(Workgroup(id=f"wg-{workgroup}-test", name=workgroup,
+                         display_name=workgroup.title()))
+        db.commit()
+    workgroup_override_service.set_many(
+        db, provider="workstation", vm_ids=[vm_id], workgroup=workgroup)
+
+
+# ── Visibility ────────────────────────────────────────────────────────────────
+
 def test_an_untagged_agent_vm_is_admin_only():
-    """Same rule as every other hypervisor page. This is what stops an agent — which
-    can report anything — widening what a non-admin sees."""
+    """Same rule as every other hypervisor page. This is what stops an agent — which can
+    report anything — widening what a non-admin sees."""
     db = SessionLocal()
     try:
         _setup(db)
@@ -90,45 +111,56 @@ def test_a_tagged_agent_vm_reaches_the_workgroup_that_owns_it():
     db = SessionLocal()
     try:
         conn = _setup(db)
-        # set_many refuses a workgroup that does not exist, so create it first — which
-        # is itself worth exercising: it is what stops an override inventing one.
-        from web_dashboard.database import Workgroup
-        if not db.query(Workgroup.id).filter(Workgroup.name == "dev").first():
-            db.add(Workgroup(id="wg-dev-test", name="dev", display_name="Dev"))
-            db.commit()
-        # The same call the other hypervisor pages' bulk-assign uses, so this test
-        # exercises the real tagging path rather than a hand-written row.
-        workgroup_override_service.set_many(
-            db, provider="workstation", vm_ids=["AB12"], workgroup="dev")
+        _tag(db, "AB12", "dev")
         rows = vms_api._agent_workstation_vms(db, ["dev"])
         assert len(rows) == 1, "a tagged VM must reach its workgroup"
         assert rows[0].workgroup == "dev"
-        assert conn["id"]
+        assert rows[0].connection_id == conn["id"], (
+            "a power op has to know which connection to dial")
         # And still not to a workgroup that does not own it.
         assert vms_api._agent_workstation_vms(db, ["finance"]) == []
     finally:
         db.close()
 
 
-def test_an_agent_row_carries_the_agent_name_as_its_source():
+def test_an_agent_row_carries_everything_the_page_renders():
     db = SessionLocal()
     try:
         _setup(db)
         row = vms_api._agent_workstation_vms(db, None)[0]
         assert row.source == "desk-01", "the badge names the host the VM is really on"
         assert row.vm_id == "AB12", "vmrest's id is what a power verb needs"
-        assert row.vmx_path.endswith("win11.vmx")
+        assert row.vmx_path.endswith("win11.vmx"), "the Path column"
         assert row.is_running is True
         assert row.ip_address == "192.168.72.130"
+        assert row.synced_at, "the staleness line has nothing to read without this"
     finally:
         db.close()
 
 
-def test_a_local_row_keeps_the_default_source():
-    """Every existing row and caller predates this field, so the default has to be the
-    local one or the whole page starts claiming to be agent-synced."""
-    from web_dashboard.models.vm import VMInfo
-    assert VMInfo(vmx_path="/x.vmx", vm_name="x", workgroup="dev").source == "local"
+def test_the_os_column_is_labelled_from_the_code_the_agent_reported():
+    """End to end: a raw VMX code in the cache becomes a readable label on the row.
+
+    `windows9-64` is Windows 10 — the code kept VMware's internal name when Microsoft
+    skipped the number — so this also pins that the label is not derived by substring.
+    """
+    db = SessionLocal()
+    try:
+        _setup(db, guest_os="windows9-64")
+        assert vms_api._agent_workstation_vms(db, None)[0].os_type == "Windows 10 (64-bit)"
+    finally:
+        db.close()
+
+
+def test_an_agent_that_reports_no_os_leaves_the_column_empty():
+    """An agent older than the guest_os key syncs fine and renders a dash, rather than
+    claiming an OS it never reported."""
+    db = SessionLocal()
+    try:
+        _setup(db, guest_os=None)
+        assert vms_api._agent_workstation_vms(db, None)[0].os_type is None
+    finally:
+        db.close()
 
 
 def test_nothing_is_returned_when_no_connection_has_synced():
@@ -141,8 +173,7 @@ def test_nothing_is_returned_when_no_connection_has_synced():
 
 
 def test_no_workstation_connection_at_all_is_not_an_error():
-    """The overwhelmingly common case: an install with no agent Workstation. It must
-    cost the local list nothing."""
+    """The overwhelmingly common case: an install with no agent Workstation."""
     db = SessionLocal()
     try:
         from web_dashboard.database import HypervisorConnection
@@ -153,71 +184,118 @@ def test_no_workstation_connection_at_all_is_not_an_error():
         db.close()
 
 
+# ── The endpoint ──────────────────────────────────────────────────────────────
+
 class _Admin:
-    """Enough of a User for the endpoint: it reads these two and nothing else."""
+    """Enough of a User for the endpoint. Note the EMPTY workgroups list: that is the
+    normal state for an admin, and reading it instead of the admin flag is what used to
+    refuse them every button on the page."""
     is_admin = True
+    is_effective_admin = True
+    username = "admin"
     workgroups_list: list = []
 
 
-def _list_vms(db):
+class _Dev:
+    is_admin = False
+    is_effective_admin = False
+    username = "dev"
+    workgroups_list = ["dev"]
+
+
+def _list_vms(db, user=None):
     return asyncio.run(vms_api.list_vms(
-        BackgroundTasks(), workgroup=None, db=db, current_user=_Admin()))
+        workgroup=None, db=db, current_user=user or _Admin()))
 
 
-def _no_local_powershell(*a, **kw):
-    async def _raise(*_a, **_kw):
-        raise powershell.PowerShellError(
-            r"PowerShell wrapper not found: C:\Scripts\VM_CLI\vm_cli_api_wrapper.ps1",
-            "WRAPPER_NOT_FOUND")
-    return _raise
+def test_cached_at_is_the_oldest_sync_not_the_time_of_the_response():
+    """The staleness line's whole job. It used to be datetime.now(), so the page read
+    "Updated 0s ago" over data that could be a day old — and the sync button's poll
+    watched a value that changed on every request whether anything synced or not."""
+    db = SessionLocal()
+    try:
+        conn = _setup(db)
+        db.add(HypervisorVMCache(
+            connection_id=conn["id"], vm_id="CD34", name="older-vm",
+            power_state="poweredOff", ip_addresses="[]", tags="[]",
+            scope="", vm_type="vm", synced_at=_SYNCED_AT - timedelta(hours=6)))
+        db.commit()
+        out = _list_vms(db)
+        assert out.count == 2
+        assert out.cached_at == (_SYNCED_AT - timedelta(hours=6)).isoformat(), (
+            "a page merging several agents is only as fresh as its stalest row")
+    finally:
+        db.close()
 
 
-def test_agent_rows_survive_a_host_with_no_powershell():
-    """The regression that matters, and the one every test above missed by exercising the
-    merge helper instead of the endpoint that calls it.
+def test_an_empty_page_reports_no_sync_time_rather_than_now():
+    db = SessionLocal()
+    try:
+        _setup(db, synced=False)
+        assert _list_vms(db).cached_at is None
+    finally:
+        db.close()
 
-    A cloud-hosted dashboard has no local hypervisor, so `VMStateCache` never gets a row,
-    so `count == 0` on every request and the cold-start scan fires every time and fails.
-    That used to raise straight out of the endpoint — a 500 — and the merge below it never
-    ran, which made an agent-bound Workstation connection permanently invisible on a
-    hosted install no matter how healthy the agent was.
+
+# ── Acting on a row ───────────────────────────────────────────────────────────
+
+def test_the_workgroup_an_action_checks_is_the_one_the_listing_filtered_on():
+    """The bug behind every dead button, in the form it actually took.
+
+    The old code inferred a workgroup by matching the VMX path against
+    `settings.workgroups`, which is {} in the community edition — so it returned "" for
+    every VM and `_assert_workgroup_access` raised before anything ran. Reading the same
+    override table the listing reads is the only way the two can agree.
     """
     db = SessionLocal()
-    original = vm_inventory_service.populate_db_from_ps
     try:
         _setup(db)
-        vm_inventory_service.populate_db_from_ps = _no_local_powershell()
-        out = _list_vms(db)
-        assert out.count == 1, "the agent's rows must outlive a failed local scan"
-        assert out.vms[0].vm_name == "win11-lab"
-        assert out.vms[0].source == "desk-01"
+        assert vms_api._workstation_workgroup(db, "AB12") == "", "untagged"
+        _tag(db, "AB12", "dev")
+        assert vms_api._workstation_workgroup(db, "AB12") == "dev"
     finally:
-        vm_inventory_service.populate_db_from_ps = original
         db.close()
 
 
-def test_a_database_failure_in_the_local_scan_still_surfaces():
-    """The catch is scoped to PowerShellError on purpose. Swallowing everything here
-    would turn a broken database into a silently short page, which is the failure mode
-    this whole fix exists to remove — not one to reintroduce one layer up."""
-    db = SessionLocal()
-    original = vm_inventory_service.populate_db_from_ps
+def test_an_admin_with_no_workgroups_may_act():
+    """`_accessible` must read the admin flag, not the (normally empty) workgroups list.
+    It also has to be `is_effective_admin`, so a session- or Entitle-granted admin is not
+    left looking at a page of buttons that refuse them."""
+    vms_api._assert_workgroup_access(_Admin(), "")          # must not raise
+    vms_api._assert_workgroup_access(_Admin(), "anything")  # must not raise
 
-    async def _db_exploded(*_a, **_kw):
-        raise RuntimeError("connection pool exhausted")
 
+def test_a_non_admin_is_refused_an_untagged_vm_with_a_usable_reason():
     try:
-        _setup(db)
-        vm_inventory_service.populate_db_from_ps = _db_exploded
-        try:
-            _list_vms(db)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("a non-PowerShell failure must not be swallowed")
-    finally:
-        vm_inventory_service.populate_db_from_ps = original
-        db.close()
+        vms_api._assert_workgroup_access(_Dev(), "")
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        assert "Assign Workgroup" in exc.detail, (
+            "the refusal has to name the fix — it is the operator's whole diagnosis")
+    else:
+        raise AssertionError("an untagged VM must be refused to a non-admin")
+
+
+def test_a_non_admin_is_refused_a_workgroup_they_do_not_hold():
+    try:
+        vms_api._assert_workgroup_access(_Dev(), "finance")
+    except HTTPException as exc:
+        assert exc.status_code == 403
+    else:
+        raise AssertionError("a foreign workgroup must be refused")
+
+
+def test_workgroup_access_is_case_insensitive():
+    """Overrides are stored canonical-lowercase by set_many, but a user's list is
+    whatever it was typed as. Comparing raw would refuse the holder of their own
+    workgroup."""
+    class _Shouty:
+        is_admin = False
+        is_effective_admin = False
+        username = "dev"
+        workgroups_list = ["DEV"]
+
+    vms_api._assert_workgroup_access(_Shouty(), "dev")  # must not raise
 
 
 if __name__ == "__main__":

@@ -43,7 +43,8 @@ def _install_stubs():
     sys.modules.setdefault("sqlalchemy.orm", sa_orm)
 
     db = types.ModuleType("web_dashboard.database")
-    for name in ("CloudDatabase", "Job", "K8sCluster", "VirtualDesktop"):
+    for name in ("CloudDatabase", "Job", "K8sCluster", "VirtualDesktop",
+                 "HypervisorConnection", "HypervisorVMCache"):
         setattr(db, name, type(name, (), {}))
     sys.modules.setdefault("web_dashboard.database", db)
 
@@ -275,6 +276,44 @@ def test_accessible_workgroups_lowercases():
     to happen here or a workgroup named 'Hydra' silently matches nothing."""
     user = types.SimpleNamespace(is_effective_admin=False, workgroups_list=["Hydra", "WeaverLab"])
     assert inv.accessible_workgroups(user) == ["hydra", "weaverlab"]
+
+
+# ── Synced hypervisor VMs as Config-Management targets ───────────────────────
+
+
+def _hv_conn(**kw):
+    base = dict(id="c1", kind="workstation", name="my-ws", site="")
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def _hv_row(**kw):
+    base = dict(vm_id="AB12", name="win11-lab", power_state="poweredOn", scope="",
+                ip_addresses="[]", vcpus=4, mem_mib=8192)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_a_synced_vm_with_no_address_does_not_blame_a_deploy_job():
+    """It has no deploy job, so "its deploy job stored none" would be a lie — and the
+    operator would go looking for one."""
+    spec = inv._target_spec(inv._hv_item(_hv_conn(kind="proxmox"), _hv_row(scope="pve1"),
+                                         None, []))
+    assert isinstance(spec, str)
+    assert "deploy job" not in spec, spec
+    assert "group target" in spec, spec
+
+
+def test_a_workstation_vm_with_no_address_is_told_there_is_no_group_target_either():
+    """`workstation` has no group target in api/config_mgmt.py, so pointing at one would
+    send the operator somewhere that cannot help."""
+    spec = inv._target_spec(inv._hv_item(_hv_conn(kind="workstation"), _hv_row(), None, []))
+    assert "no group target for it either" in spec, spec
+
+
+def test_a_synced_vm_with_an_address_is_a_config_target():
+    spec = inv._target_spec(inv._hv_item(_hv_conn(), _hv_row(), None, ["10.0.0.5"]))
+    assert spec == {"target": "10.0.0.5", "cloud": ""}
 
 
 if __name__ == "__main__":

@@ -139,21 +139,15 @@
           <span class="text-xs bg-gray-100 text-gray-600 rounded-full px-2 py-0.5"
                 x-text="(wg.count ?? '…') + ' VMs'"></span>
         </div>
+        <!-- Bulk start/stop is gone with the PowerShell path that implemented it. Power
+             is per-VM through the agent now, so this links to the page that can do it
+             rather than offering a button that would 404. -->
         <div class="flex gap-3">
-          <button @click="bulkAction(wg.name, 'start')"
-                  :disabled="wg.loading"
-                  class="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white
-                         text-sm font-medium py-2 rounded-lg transition">
-            <span x-show="!wg.loading">▶ Bulk Start</span>
-            <span x-show="wg.loading" x-cloak>Starting…</span>
-          </button>
-          <button @click="bulkAction(wg.name, 'stop')"
-                  :disabled="wg.loading"
-                  class="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white
-                         text-sm font-medium py-2 rounded-lg transition">
-            <span x-show="!wg.loading">■ Bulk Stop</span>
-            <span x-show="wg.loading" x-cloak>Stopping…</span>
-          </button>
+          <a :href="'/vms?workgroup=' + encodeURIComponent(wg.name)"
+             class="flex-1 text-center bg-gray-100 hover:bg-gray-200 text-gray-700
+                    text-sm font-medium py-2 rounded-lg transition">
+            Manage VMs →
+          </a>
         </div>
       </div>
     </template>
@@ -577,14 +571,10 @@
       },
 
       // Workstation VMs, plus the per-workgroup badge counts below, from the one call.
-      // `/api/vms` is the list the Workstation page itself renders: the local VMX scan
-      // MERGED with the rows a remote agent syncs for its own host. The counts used to
-      // come from /api/vms/dashboard-stats, which counted VMStateCache alone — a table
-      // only the two PowerShell paths ever write — and 500d outright on a host with no
-      // local PowerShell. That endpoint has since been fixed to merge and degrade the
-      // same way this call does, so either would work now; this one stays because the
-      // tile then counts the exact list a click takes you to, and one request covers
-      // both the tile and the badges.
+      // `/api/vms` is the list the Workstation page itself renders — the rows the remote
+      // agents have synced. /api/vms/dashboard-stats now reads the same source and would
+      // work equally well; this one stays because the tile then counts the exact list a
+      // click takes you to, and one request covers both the tile and the badges.
       async _fetchWorkstationVms() {
         try {
           const r = await API.get('/api/vms');
@@ -815,31 +805,9 @@
         }
       },
 
-      async bulkAction(workgroup, action) {
-        const wg = this.workgroups.find(w => w.name === workgroup);
-        if (!wg) return;
-
-        const verb = action === 'start' ? 'start' : 'stop';
-        if (!confirm(`Bulk ${verb} all VMs in ${workgroup}?`)) return;
-
-        wg.loading = true;
-        try {
-          const endpoint = action === 'start' ? '/api/vms/bulk/start' : '/api/vms/bulk/stop';
-          const resp = await API.post(endpoint, { workgroup });
-          toast(`Bulk ${verb} queued (job: ${resp.job_id.slice(0,8)}…)`, 'success');
-          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 500);
-        } catch (e) {
-          toast(`Bulk ${verb} failed: ${e.message}`, 'error');
-          wg.loading = false;
-        }
-      },
-
       jobLabel(job) {
         const labels = {
-          vm_start: 'Start VM',
-          vm_stop: 'Stop VM',
-          bulk_start: `Bulk Start – ${job.workgroup}`,
-          bulk_stop: `Bulk Stop – ${job.workgroup}`,
+          agent_hypervisor: 'Hypervisor (agent)',
           ec2_deploy: 'EC2 Deploy',
           azure_deploy: 'Azure VM Deploy',
           gce_deploy: 'GCE Deploy',

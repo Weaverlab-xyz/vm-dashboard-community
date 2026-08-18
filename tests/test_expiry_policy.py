@@ -475,6 +475,38 @@ def test_parse_ts_reads_naive_iso_as_utc():
     assert pol.parse_ts("2026-07-28T14:00:00+02:00") == naive
 
 
+
+# ── Synced hypervisor VMs are never reapable ─────────────────────────────────
+
+def test_a_synced_hypervisor_vm_is_never_ttl_capable():
+    ok, why = pol.ttl_capable(_item(source=pol.SYNCED_HYPERVISOR_SOURCE,
+                                       cloud="proxmox"))
+    assert ok is False
+    assert "hypervisor" in why and "teardown" in why
+
+
+def test_the_hypervisor_refusal_does_not_call_itself_registered():
+    """It would be refused by the `source != provisioned` branch too, but that branch's
+    reason says "registered" — which this is not. A safety property that holds by
+    accident is one refactor away from not holding."""
+    _ok, why = pol.ttl_capable(_item(source=pol.SYNCED_HYPERVISOR_SOURCE,
+                                        cloud="aws"))
+    assert "registered" not in why, why
+
+
+def test_a_synced_hypervisor_vm_is_refused_even_with_a_past_expiry():
+    """Proves the guard does not merely depend on expires_at being None: an item that is
+    overdue, reapable-kind and in a reapable cloud is still refused."""
+    assert _reap(_item(source=pol.SYNCED_HYPERVISOR_SOURCE)) is None
+
+
+def test_a_hypervisor_power_state_is_never_an_idle_state():
+    """`running`/`stopped` are not `active`, so state_is_idle refuses them — a third
+    independent layer behind ttl_capable and the absent expires_at."""
+    assert pol.state_is_idle({"kind": "vm", "state": "running"}) is False
+    assert pol.state_is_idle({"kind": "vm", "state": "stopped"}) is False
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

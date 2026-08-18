@@ -19,7 +19,8 @@ if _ROOT not in sys.path:
 
 def _install_stubs():
     db = types.ModuleType("web_dashboard.database")
-    for name in ("Job", "CloudDatabase", "K8sCluster", "VirtualDesktop"):
+    for name in ("Job", "CloudDatabase", "K8sCluster", "VirtualDesktop",
+                 "HypervisorConnection", "HypervisorVMCache"):
         setattr(db, name, type(name, (), {}))
     sys.modules["web_dashboard.database"] = db
 
@@ -230,6 +231,116 @@ def test_in_flight_statuses_hold_a_name():
     assert "failed" not in svc._NAME_HOLDING_STATUSES
     assert "cancelled" not in svc._NAME_HOLDING_STATUSES
 
+
+
+# ── Synced hypervisor VMs ─────────────────────────────────────────────────────
+#
+# The pure mappers only. The join, the override lookup and the dedup need a database and
+# are covered in tests/test_inventory_hypervisor.py.
+
+def _conn(**kw):
+    base = dict(id="c1", kind="workstation", name="my-ws", site="")
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def _row(**kw):
+    base = dict(vm_id="AB12", name="win11-lab", power_state="poweredOn", scope="",
+                ip_addresses="[]", vcpus=4, mem_mib=8192)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_hv_item_workstation_shape():
+    it = svc._hv_item(_conn(site="home"), _row(scope=r"C:\VMs\win11\win11.vmx"),
+                      None, ["10.0.0.5"])
+    assert it["id"] == "hv:c1:AB12"
+    assert it["cloud"] == "workstation" and it["kind"] == "vm"
+    assert it["name"] == "win11-lab" and it["state"] == "running"
+    assert it["ip"] == "10.0.0.5" and it["detail_href"] == "/vms"
+    assert it["expires_at"] is None and it["job_id"] is None
+    assert it["created_at"] is None, "synced_at is not a creation date"
+    assert it["region"] == "home", (
+        "a VMX path is per-VM and would make one Region entry per row")
+
+
+def test_hv_item_proxmox_puts_the_node_in_region():
+    """A deployed Proxmox VM already reports its node as `region`, so a synced one has to
+    agree or the same node appears twice in the Region dropdown."""
+    it = svc._hv_item(_conn(kind="proxmox", id="c2"),
+                      _row(vm_id="100", name="web-01", power_state="running",
+                           scope="pve1"), "dev", [])
+    assert it["region"] == "pve1"
+    assert it["workgroup"] == "dev" and it["ip"] == ""
+
+
+def test_a_synced_row_declares_its_own_source_and_no_deployer():
+    it = svc._hv_item(_conn(), _row(), None, [])
+    assert it["source"] == "hypervisor", (
+        "not 'registered': the dashboard holds no record of this VM at all")
+    assert it["deployed_by"] is None, (
+        "load-bearing — visible_to compares this against the caller, so None is what "
+        "makes an untagged synced VM admin-only")
+
+
+def test_the_override_key_matches_each_api_modules_own():
+    """The highest-value guard here. If these drift, an admin's assignment on /proxmox
+    silently stops applying to the inventory and nothing else notices."""
+    import ast as _ast
+    api_dir = os.path.join(_ROOT, "web_dashboard", "api")
+    for module, vm, expected in (
+            ("proxmox", {"node": "pve1", "vmid": "100"}, "pve1/100"),
+            ("nutanix", {"uuid": "u-1"}, "u-1"),
+            ("hyperv", {"vmid": "g-1"}, "g-1"),
+            ("vsphere", {"moref": "vm-42"}, "vm-42"),
+            ("xcpng", {"uuid": "x-1"}, "x-1")):
+        with open(os.path.join(api_dir, f"{module}.py"), encoding="utf-8") as fh:
+            tree = _ast.parse(fh.read())
+        fn = next(n for n in tree.body
+                  if isinstance(n, _ast.FunctionDef) and n.name == "_override_key")
+        ns = {}
+        exec(compile(_ast.Module(body=[fn], type_ignores=[]), "<k>", "exec"), ns)
+        theirs = ns["_override_key"](vm)
+        assert theirs == expected, f"{module}: {theirs!r}"
+        scope = vm.get("node", "")
+        vm_id = vm.get("vmid") or vm.get("uuid") or vm.get("moref")
+        assert svc._hv_override_key(module, vm_id, scope) == theirs, (
+            f"{module}: inventory builds {svc._hv_override_key(module, vm_id, scope)!r}, "
+            f"api/{module}.py builds {theirs!r}")
+
+
+def test_a_completed_deploy_claims_the_vm_it_created():
+    """set_completed merges the deploy result into the job metadata, so a completed
+    proxmox_deploy carries its vmid — which makes the dedup exact rather than by name."""
+    job = _job(job_type="proxmox_deploy",
+               metadata_dict={"connection_id": "c2", "vmid": 100,
+                              "vm_name": "web-01", "node": "pve1"})
+    conn = _conn(id="c2", kind="proxmox")
+    row = _row(vm_id="100", name="web-01", scope="pve1")
+    assert svc._job_match_keys(job) & svc._hv_match_keys(conn, row), (
+        "an int vmid in metadata must still match a string vm_id in the cache")
+
+
+def test_an_older_deploy_still_claims_it_by_name_and_node():
+    job = _job(job_type="proxmox_deploy",
+               metadata_dict={"vm_name": "Web-01", "node": "PVE1"})
+    conn = _conn(id="c2", kind="proxmox")
+    row = _row(vm_id="100", name="web-01", scope="pve1")
+    assert svc._job_match_keys(job) & svc._hv_match_keys(conn, row), (
+        "casefolded, so capitalisation cannot produce a duplicate row")
+
+
+def test_a_deploy_for_a_different_vm_claims_nothing_of_this_one():
+    job = _job(job_type="proxmox_deploy",
+               metadata_dict={"connection_id": "c2", "vmid": 999, "vm_name": "other",
+                              "node": "pve1"})
+    conn = _conn(id="c2", kind="proxmox")
+    row = _row(vm_id="100", name="web-01", scope="pve1")
+    assert not (svc._job_match_keys(job) & svc._hv_match_keys(conn, row))
+
+
+def test_a_non_hypervisor_deploy_claims_nothing():
+    assert svc._job_match_keys(_job(job_type="ec2_deploy")) == set()
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

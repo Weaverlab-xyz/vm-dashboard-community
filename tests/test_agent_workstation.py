@@ -78,6 +78,8 @@ _ROUTES = {
     "/vms/CD34/power": {"power_state": "poweredOff"},
     "/vms/AB12/params/displayName": {"name": "displayName", "value": "win11-lab"},
     "/vms/CD34/params/displayName": {"name": "displayName", "value": "ubuntu-build"},
+    "/vms/AB12/params/guestOS": {"name": "guestOS", "value": "windows9-64"},
+    "/vms/CD34/params/guestOS": {"name": "guestOS", "value": "ubuntu-64"},
     "/vms/AB12/ip": {"ip": "192.168.72.130"},
 }
 
@@ -161,6 +163,35 @@ def test_inventory_carries_cpu_memory_and_the_vmx_path():
     assert vm["vcpus"] == 4 and vm["mem_mib"] == 8192
     assert vm["scope"].endswith("win11.vmx"), "the VMX path rides in scope, display-only"
     assert out["complete"] is True and out["next_cursor"] == ""
+
+
+def test_the_guest_os_is_reported_as_the_raw_vmx_code():
+    """The RAW code, not a label. The dashboard owns the label table
+    (hypervisor_view_service.guest_os_label) precisely because an agent is upgraded
+    separately and lags: a label shipped from here would freeze at whatever build the
+    customer's host last pulled, so correcting a display string would need a rebuild."""
+    out, _fake = _sync()
+    by_id = {v["vm_id"]: v for v in out["vms"]}
+    assert by_id["AB12"]["guest_os"] == "windows9-64"
+    assert by_id["CD34"]["guest_os"] == "ubuntu-64"
+
+
+def test_the_agent_ships_no_guest_os_label_table():
+    """Stated where someone would break it. Adding the mapping here would look like a
+    tidy-up and would quietly move a display concern behind a release boundary."""
+    src = open(_PATH, encoding="utf-8").read()
+    for label in ("Windows 10", "Red Hat Enterprise Linux", "SUSE Linux Enterprise"):
+        assert label not in src, (
+            f"the agent names the display label {label!r}: the label table belongs in "
+            f"hypervisor_view_service, which ships with the dashboard")
+
+
+def test_the_guest_os_is_asked_for_once_per_vm():
+    """One extra call per VM on top of the four already made. Worth keeping honest: this
+    is a per-VM cost on every sync."""
+    _out, fake = _sync()
+    calls = [c[1] for c in fake.calls if c[1].endswith("/params/guestOS")]
+    assert sorted(calls) == ["/vms/AB12/params/guestOS", "/vms/CD34/params/guestOS"]
 
 
 def test_an_ip_is_only_fetched_for_a_powered_on_vm():

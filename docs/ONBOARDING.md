@@ -742,44 +742,47 @@ Open a GitHub issue with:
 
 ## Appendix A — VMware Workstation integration
 
-Windows-only. Enables the dashboard to list, start, and stop VMware
-Workstation VMs on your local machine by SSHing from the container to
-the host.
+Lists, starts and stops VMware Workstation VMs. A **remote agent** runs on the
+Workstation host and talks to `vmrest`, the REST daemon that ships with
+Workstation Pro; the agent polls outward, so the dashboard needs no route to
+that machine and nothing has to be opened toward it.
 
 > **Full guide:** [docs/integrations/vmware.md](integrations/vmware.md)
 
 ### Prerequisites
 
-- VMware Workstation Pro installed
-- OpenSSH server enabled on Windows:
-  ```powershell
-  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-  Start-Service sshd
-  Set-Service -Name sshd -StartupType Automatic
-  ```
-- An SSH key for the container to authenticate with (use
-  `scripts/Setup-DevSsh.ps1` if provided, or generate manually:
-  `ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\dev_dashboard_key` and
-  append the `.pub` to `%USERPROFILE%\.ssh\authorized_keys`).
+- VMware Workstation **Pro** (Player does not include `vmrest`)
+- A remote agent enrolled on that host — see
+  [docs/remote-agents.md](remote-agents.md)
+- Outbound HTTPS from the host to the dashboard. Nothing inbound
 
 ### Enable the integration
 
-1. Copy the Windows override example:
+1. On the Workstation host, set the vmrest credentials once and start it:
    ```powershell
-   Copy-Item docker-compose.override.windows.yml.example docker-compose.override.windows.yml
+   vmrest -C
+   vmrest
    ```
-2. Edit `.env`:
+2. Enrol an agent on that host, then add a **workstation** connection bound to
+   it. Its `policy.yaml` entry needs:
+   ```yaml
+   connections:
+     - name: my-workstation
+       verbs: [inventory_sync, power_on, power_off]
+       allow_loopback: true
    ```
-   VMWARE_ENABLED=true
-   SSH_USER=<your Windows username>
-   ```
-3. Edit the override file and set `VM_CLI_WRAPPER_PATH` to the absolute
-   path of `vm_cli_api_wrapper.ps1` on your host.
-4. Restart the stack with both files:
-   ```powershell
-   docker compose -f docker-compose.yml -f docker-compose.override.windows.yml up -d
-   ```
-5. The "VMs" nav entry should now appear.
+   `allow_loopback` is required because vmrest binds `127.0.0.1`, and the
+   power verbs are required or the Start/Stop buttons are refused by the agent.
+3. Turn on **VMware** and **remote agents** in Settings → Integrations.
+4. The "Workstation" nav entry appears. Open it and press **Sync Now**.
+
+> **Upgrading?** This used to work by SSHing from the container to the Windows
+> host and running a PowerShell wrapper around `vmrun`. That path has been
+> removed: `VM_CLI_WRAPPER_PATH` and the `SSH_*` settings no longer do
+> anything, and `docker-compose.override.windows.yml` is no longer needed.
+> `POWERSHELL_EXECUTION_MODE` no longer affects this integration, but do **not**
+> delete it — Portainer still reads it to decide whether to reach containers
+> directly or through the Azure Automation Hybrid Worker.
 
 ---
 

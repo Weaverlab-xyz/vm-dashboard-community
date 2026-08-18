@@ -285,6 +285,33 @@ def test_the_agent_checks_policy_before_touching_a_connection():
     assert body.index("check_verb") < body.index("HypervisorConnections.load")
 
 
+
+# ── guest_os and the path cap ─────────────────────────────────────────────────
+
+def test_the_guest_os_code_survives_the_allowlist():
+    vm = ahm.sync_page({"vms": [{"vm_id": "AB12", "guest_os": "windows9-64"}]})["vms"][0]
+    assert vm["guest_os"] == "windows9-64"
+
+
+def test_a_long_vmx_path_survives_but_a_long_name_is_still_clipped():
+    """The cap is per key, not loosened globally. Windows MAX_PATH is 260, so a real VMX
+    path outgrows the 256-char text cap — but a NAME arriving as a page of prose is
+    exactly what that cap is for."""
+    long_path = "C:/VMs/" + ("d" * 400) + "/vm.vmx"
+    long_name = "n" * 400
+    vm = ahm.sync_page({"vms": [{"vm_id": "AB12", "scope": long_path,
+                                 "name": long_name}]})["vms"][0]
+    assert len(vm["scope"]) == len(long_path), "a VMX path must not be clipped at 256"
+    assert len(vm["scope"]) <= ahm.MAX_VM_PATH
+    assert len(vm["name"]) == ahm.MAX_VM_TEXT, "a name is still capped"
+
+
+def test_workstation_offers_exactly_the_two_ops_vmrest_implements():
+    """vmrest has no reset, reboot or snapshot. A third entry here would enqueue a job
+    the agent refuses — or worse, one normalize() turns into a discovery scan."""
+    assert set(ahm.PAGE_OPS["workstation"]) == {"start", "stop"}
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
