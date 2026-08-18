@@ -300,6 +300,46 @@ def test_every_bound_key_is_declared_on_its_own_panels_model():
             f"the operator types a value, Save reports success, and nothing is written")
 
 
+# Declared on a model but bound in no panel — the mirror of the check above. Empty on
+# purpose: a key that an operator is expected to set belongs on the page. A deliberately
+# env-only key goes here WITH a note saying why it is not operator-settable.
+PANEL_EXEMPT_KEYS = frozenset()
+
+
+def test_every_declared_key_is_bound_in_its_own_panel():
+    """The other direction of the same drift, and the one that actually shipped.
+
+    ``passwordsafe_azure_db_registration_method`` was declared on config.py's ``Settings``
+    *and* on ``PasswordSafeFeatureConfig``, was read at two runtime sites
+    (cloud_database_service, jumpoint_host_service), and had its own row in the
+    docs/databases.md config table — but nothing in settings.html bound it, so the only
+    ways to set it were the setup wizard, an env var, or a hand-rolled
+    ``PATCH /api/setup/feature/password_safe``. It is the only switch that turns Azure
+    database onboarding off while leaving the AWS SSM path on
+    (``clouddb_ps_onboarding_enabled`` is a master toggle shared by both clouds), so the
+    operator who wanted exactly that had no route through the UI at all.
+
+    Silent, which is why it lasted: the model round-trips the key, the panel saves cleanly,
+    and the control is simply absent from the page. The check above only catches the
+    reverse — bound but undeclared — and the union sweep in test_setup_feature_roundtrip
+    sees neither.
+    """
+    setup = _read(_SETUP)
+    blocks = _panel_blocks()
+    assert set(blocks) == set(PANELS), (
+        f"missing drawer markup for {sorted(set(PANELS) - set(blocks))}")
+    for key, block in blocks.items():
+        declared = _class_fields(setup, PANELS[key]) - {"enabled"} - PANEL_EXEMPT_KEYS
+        bound = set(re.findall(r"panelCfg\.([A-Za-z_][A-Za-z_0-9]*)", block))
+        missing = sorted(declared - bound)
+        assert not missing, (
+            f"{PANELS[key]} declares {missing}, which the {key} panel never binds — the "
+            f"key is settable only from the setup wizard, an env var or a config PATCH, "
+            f"and an operator cannot find it in Settings at all. Add an x-model control to "
+            f"the panel, or add the key to PANEL_EXEMPT_KEYS with a note saying why it is "
+            f"deliberately not operator-settable")
+
+
 def test_the_panel_slicer_really_sees_the_panels():
     """This file's own premise: if the x-if idiom changes, every per-panel check above
     silently degrades to checking an empty string."""
@@ -312,18 +352,25 @@ def test_the_panel_slicer_really_sees_the_panels():
     assert "pscli_api_url" not in blocks["pra"] + blocks["epml"]
 
 
-# ── 6. moved selects kept their x-init default ────────────────────────────────
+# ── 6. every string-key select keeps its x-init default ──────────────────────
 
-def test_moved_selects_keep_their_x_init_default():
+def test_string_selects_keep_their_x_init_default():
     """An unset string config key reads back as "" from /api/setup/feature, not as the
     model default, so a select without its x-init renders unselected and then saves "".
-    These five moved between panels during the split; the x-init has to travel with the
-    <select>, not stay behind in the old block."""
+    ``_read_feature`` special-cases ``bool`` and ``int`` fields back onto the model default
+    for exactly this reason; the ``str`` branch is a bare ``config_service.get(field)``.
+
+    The first five moved between panels during the split, where the x-init had to travel
+    with the <select> rather than stay behind in the old block.
+    ``passwordsafe_azure_db_registration_method`` needs it from the other end: the control
+    was added long after the key shipped, so its config row is unset on every install that
+    never set the env var."""
     html = _read(_SETTINGS)
     for key in ("passwordsafe_aws_registration_method",
                 "passwordsafe_azure_registration_method",
                 "passwordsafe_gcp_registration_method",
-                "azure_vm_jumpoint_mode", "gcp_vm_jumpoint_mode"):
+                "azure_vm_jumpoint_mode", "gcp_vm_jumpoint_mode",
+                "passwordsafe_azure_db_registration_method"):
         m = re.search(rf'x-model="panelCfg\.{key}"(.{{0,200}}?)x-init="panelCfg\.{key} =',
                       html, re.S)
         assert m, (
