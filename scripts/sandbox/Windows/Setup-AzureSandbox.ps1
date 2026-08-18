@@ -138,6 +138,31 @@ Write-Ok "Private DNS zone $DbSqlServerDnsZone linked to $VnetName"
 Set-StateValue azure db_sqlserver_subnet_id           $DbSqlServerSubnetId
 Set-StateValue azure db_sqlserver_private_dns_zone_id $DbSqlServerDnsZoneId
 
+# ── 2c. Functions subnet (delegated to Microsoft.Web/serverFarms) ─────────────
+# Twin of setup-azure.sh. network_mode=vpc Cloud Functions integrate with the VNet
+# through THIS subnet. It has to be its own: a delegated subnet hosts exactly one
+# service, so it can share neither db-subnet (DBforPostgreSQL) nor aci-subnet
+# (ContainerInstance).
+#
+# Deliberately NO NSG. The function module sets vnet_route_all_enabled whenever a
+# subnet is attached, so ALL app egress leaves here — including the Functions host's
+# own calls to AzureWebJobsStorage and WEBSITE_RUN_FROM_PACKAGE. Attaching the NSG
+# (which denies the Internet service tag outbound) would stop the host reaching them
+# and the app would boot to zero indexed functions.
+#
+# Service endpoints instead of a NAT gateway: Storage + KeyVault are free and keep
+# the two hops that MUST work (run-from-package blob, and the platform resolving
+# @Microsoft.KeyVault(SecretUri=...)) on the Azure backbone. Generic internet egress
+# from a vnet-mode function still needs a NAT gateway (~$32/mo) — not created here.
+$FnSubnet = 'functions-subnet'
+az network vnet subnet create -g $Rg --vnet-name $VnetName -n $FnSubnet `
+    --address-prefix 10.99.9.0/24 `
+    --delegations Microsoft.Web/serverFarms `
+    --service-endpoints Microsoft.Storage Microsoft.KeyVault | Out-Null
+Write-Ok "Functions subnet $FnSubnet (10.99.9.0/24, delegated to Microsoft.Web/serverFarms, service endpoints Storage+KeyVault)"
+$FnSubnetId = (az network vnet subnet show -g $Rg --vnet-name $VnetName -n $FnSubnet --query id -o tsv).Trim()
+Set-StateValue azure functions_subnet_id $FnSubnetId
+
 # ── 3. NSG: deny VM internet egress, allow VNet ──────────────────────────────
 Write-Section 'NSG (block VM internet egress)'
 az network nsg create -g $Rg -n $NsgName --tags $Tags | Out-Null
@@ -492,8 +517,15 @@ $cfg = @(
     "azure_aci_storage_account_rg=$Rg",
     "azure_aci_file_share=jpt",
     "azure_key_vault_url=$KvUrl",
+    "secrets_azure_kv_url=$KvUrl                            # Same vault — the key the Cloud Functions path reads",
     "azure_ssh_keypair_secret_name=$SshSecret               # JSON {public_key, private_key}",
     '',
+    "# Cloud Functions (preview) — Linux Function Apps on the sandbox storage account:",
+    "cloud_functions_enabled=true",
+    "function_package_azure_container=function-packages      # Blob container on $SaName (the app creates it)",
+    "azure_functions_plan_sku=B1                             # Cheapest SKU doing BOTH VNet integration and run-from-package (Y1 cannot)",
+    "azure_functions_subnet_id=$FnSubnetId  # network_mode=vpc: delegated to Microsoft.Web/serverFarms",
+    "",
     "# Per-region config set for $Location (multi-region — PR3). /api/setup/import",
     "# merges these into azure_region_configs[$Location] without clobbering other",
     "# regions, so re-running this script in a second region populates both. The",
@@ -549,7 +581,8 @@ Sandbox topology summary
 
   VNet $VnetName (10.99.0.0/16)
     ├─ aci-subnet (10.99.1.0/24, delegated to ACI) → internet egress  [Jumpoint]
-    └─ vm-subnet  (10.99.2.0/24, NSG-restricted)   → VirtualNetwork only  [user VMs]
+    ├─ vm-subnet  (10.99.2.0/24, NSG-restricted)   → VirtualNetwork only  [user VMs]
+    └─ functions-subnet (10.99.9.0/24, delegated to Microsoft.Web/serverFarms, no NSG)  [vpc-mode Cloud Functions]
 
 Service principal credentials cached at:
   $SpPath  (owner-only)

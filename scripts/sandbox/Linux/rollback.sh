@@ -93,6 +93,34 @@ rollback_aws() {
       return 0
     fi
 
+    # 2a-lambda. A network_mode=vpc Cloud Function is a VPC-attached Lambda, and its
+    # hyperplane ENIs hold BOTH the security group (2b) and the subnet (2d). Refuse
+    # rather than delete: the function lives in its own Terraform state, so removing
+    # it here would orphan that state (same reason 2a and 2a-peer refuse). Without
+    # this guard 2b/2d/2f each fail with an opaque DependencyViolation and leave a
+    # half-torn sandbox.
+    local fns
+    fns="$(aws lambda list-functions --region "$region" \
+      --query "Functions[?VpcConfig.VpcId=='$vpc_id'].FunctionName" --output text 2>/dev/null || true)"
+    if [[ -n "$fns" && "$fns" != "None" ]]; then
+      warn "VPC-attached Lambda function(s) in $vpc_id: $fns"
+      warn "Decommission them from the dashboard's Functions page first, then re-run rollback. Skipping VPC teardown."
+      return 0
+    fi
+
+    # Even after the last VPC function is destroyed, Lambda can take ~20 minutes to
+    # detach its ENIs. They still pin the SG and subnet, so check separately — the
+    # remedy is just to wait, which is worth saying out loud.
+    local lambda_enis
+    lambda_enis="$(aws ec2 describe-network-interfaces --region "$region" \
+      --filters "Name=vpc-id,Values=$vpc_id" "Name=interface-type,Values=lambda" \
+      --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null || true)"
+    if [[ -n "$lambda_enis" && "$lambda_enis" != "None" ]]; then
+      warn "Lambda ENIs still attached in $vpc_id: $lambda_enis"
+      warn "Lambda releases these up to ~20 min after the last VPC function is destroyed — re-run rollback shortly. Skipping VPC teardown."
+      return 0
+    fi
+
     # 2a-rds. RDS DB subnet groups in this VPC — RDS holds the subnets, so these
     # must go before the subnet sweep below or delete-subnet fails.
     local dbgs
@@ -105,9 +133,11 @@ rollback_aws() {
         || warn "Could not delete DB subnet group $g (a DB may still be provisioned — decommission it first)"
     done
 
-    # 2a-vpce. Interface VPC endpoints (SSM: ssm/ssmmessages/ec2messages). Created
-    # on-demand by the dashboard (or by older setup scripts). Each holds an ENI in
-    # the private subnet and references the ssm-vpce SG, so they MUST go before the
+    # 2a-vpce. Interface VPC endpoints — the on-demand SSM three
+    # (ssm/ssmmessages/ec2messages) plus the secretsmanager endpoint setup-aws.sh
+    # creates for vpc-mode Cloud Functions. The filter below is vpc-id only, so it
+    # already covers every endpoint in the VPC whoever made it. Each holds an ENI in
+    # the private subnet and references its own SG, so they MUST go before the
     # SG (2b) and subnet (2d) sweeps or those deletes fail — and each keeps billing
     # (~$7/mo) if left behind. There's no AWS waiter, so poll until they clear.
     local vpces

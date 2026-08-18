@@ -322,6 +322,56 @@ Set-StateValue aws nat_sg      $NatSg
 # aws_ssm_endpoints_enabled config emitted below — see
 # web_dashboard/services/ssm_endpoint_service.py.
 
+# ── 5c. Secrets Manager interface endpoint — for network_mode=vpc functions ────
+# Twin of setup-aws.sh. A VPC-attached Lambda reads its bearer secret from Secrets
+# Manager at cold start (web_dashboard/functions/fnruntime/secretref.py), and the
+# private route table is local-VPC-only: the NAT instance is on-demand and exists
+# only while an EC2 VM is up. Without a Secrets Manager path a vpc-mode function
+# deploys clean and then fails auth CLOSED — a 500 on every invoke, including the
+# dashboard's own Test invoke. Unlike the SSM endpoints in 5b this cannot be
+# on-demand: it has to be there whenever a function runs, not whenever a VM exists.
+# ~$7.30/mo; opt out with SANDBOX_SKIP_FN_VPCE=1 (public-mode functions are
+# unaffected either way).
+#
+# Side effect worth knowing: --private-dns-enabled is VPC-WIDE, so the Jumpoint
+# task and the ECS runners in the public subnet also start resolving
+# secretsmanager.* to this endpoint. That is why the SG admits the whole
+# 10.99.0.0/16 rather than just the private subnet — narrowing it breaks them.
+if ($env:SANDBOX_SKIP_FN_VPCE -eq '1') {
+    $FnVpceSg = ''; $FnVpceId = ''
+    Write-Warn 'Skipping Secrets Manager endpoint (SANDBOX_SKIP_FN_VPCE=1) — network_mode=vpc functions will only authenticate while the on-demand NAT instance is up'
+} else {
+    Write-Section 'Secrets Manager interface endpoint (Cloud Functions)'
+    # Deliberately NOT the ssm-vpce-sg name: ssm_endpoint_service.reclaim_ssm_endpoints
+    # deletes that SG by name when the last EC2/DB goes away, which would fail for as
+    # long as this endpoint referenced it.
+    $FnVpceSg = _MakeSG "$Name-fn-vpce-sg" 'Secrets Manager interface endpoint — 443 from VPC'
+    aws ec2 authorize-security-group-ingress --region $Region --group-id $FnVpceSg `
+        --ip-permissions '[{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' 2>$null | Out-Null
+
+    $FnVpceService = "com.amazonaws.$Region.secretsmanager"
+    $FnVpceId = (aws ec2 describe-vpc-endpoints --region $Region `
+        --filters "Name=vpc-id,Values=$VpcId" "Name=service-name,Values=$FnVpceService" `
+        --query 'VpcEndpoints[0].VpcEndpointId' --output text 2>$null)
+    if ($FnVpceId -and $FnVpceId -ne 'None') {
+        $FnVpceId = $FnVpceId.Trim()
+        Write-Ok "Reusing Secrets Manager endpoint $FnVpceId"
+    } else {
+        $FnVpceId = (aws ec2 create-vpc-endpoint --region $Region `
+            --vpc-id $VpcId --vpc-endpoint-type Interface `
+            --service-name $FnVpceService `
+            --subnet-ids $PrivateSubnetId `
+            --security-group-ids $FnVpceSg `
+            --private-dns-enabled `
+            --tag-specifications (_TagSpec 'vpc-endpoint' "$Name-secretsmanager-vpce") `
+            --query 'VpcEndpoint.VpcEndpointId' --output text).Trim()
+        Write-Ok "Created Secrets Manager endpoint $FnVpceId (private DNS, ~`$7.30/mo)"
+    }
+    Write-Ok "FN VPCE SG  $FnVpceSg (ingress 443/tcp from 10.99.0.0/16)"
+    Set-StateValue aws fn_vpce_sg $FnVpceSg
+    Set-StateValue aws fn_vpce_id $FnVpceId
+}
+
 # ── 6. SSH keypair JSON in Secrets Manager ────────────────────────────────────
 Write-Section 'SSH keypair (Secrets Manager)'
 $SshSecretName = 'dashboard/sandbox/ssh-keypair'
@@ -696,7 +746,8 @@ $DashboardPolicy = @"
         "arn:aws:iam::${AccountId}:role/ecsInstanceRole",
         "arn:aws:iam::${AccountId}:role/${PromoteTaskRoleName}",
         "arn:aws:iam::${AccountId}:role/k8s-*",
-        "arn:aws:iam::${AccountId}:role/ec2-ssm-*"
+        "arn:aws:iam::${AccountId}:role/ec2-ssm-*",
+        "arn:aws:iam::${AccountId}:role/*-role"
       ]
     },
     {
@@ -751,9 +802,13 @@ $DashboardPolicy = @"
         "secretsmanager:PutSecretValue",
         "secretsmanager:UpdateSecret",
         "secretsmanager:DeleteSecret",
-        "secretsmanager:TagResource"
+        "secretsmanager:TagResource",
+        "secretsmanager:GetResourcePolicy"
       ],
-      "Resource": "arn:aws:secretsmanager:*:${AccountId}:secret:dashboard/*"
+      "Resource": [
+        "arn:aws:secretsmanager:*:${AccountId}:secret:dashboard/*",
+        "arn:aws:secretsmanager:*:${AccountId}:secret:*-fn-secret-*"
+      ]
     },
     {
       "Sid": "DashboardSecretsManagerListAll",
@@ -783,13 +838,7 @@ $DashboardPolicy = @"
     {
       "Sid": "DashboardLogs",
       "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
-        "logs:GetLogEvents",
-        "logs:PutRetentionPolicy"
-      ],
+      "Action": "logs:*",
       "Resource": "*"
     },
     {
@@ -810,13 +859,19 @@ $DashboardPolicy = @"
       "Resource": "*"
     },
     {
+      "Sid": "DashboardLambda",
+      "Effect": "Allow",
+      "Action": "lambda:*",
+      "Resource": "*"
+    },
+    {
       "Sid": "DashboardEKS",
       "Effect": "Allow",
       "Action": "eks:*",
       "Resource": "*"
     },
     {
-      "Sid": "DashboardEKSRoles",
+      "Sid": "DashboardRoles",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
@@ -828,9 +883,16 @@ $DashboardPolicy = @"
         "iam:ListRolePolicies",
         "iam:ListInstanceProfilesForRole",
         "iam:TagRole",
-        "iam:UntagRole"
+        "iam:UntagRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:UpdateAssumeRolePolicy"
       ],
-      "Resource": "arn:aws:iam::${AccountId}:role/k8s-*"
+      "Resource": [
+        "arn:aws:iam::${AccountId}:role/k8s-*",
+        "arn:aws:iam::${AccountId}:role/*-role"
+      ]
     },
     {
       "Sid": "DashboardEKSServiceLinkedRole",
@@ -945,6 +1007,12 @@ $cfg = @(
     "# On-demand SSM interface endpoints — created on the first EC2 deploy / AWS cloud-DB provision, removed with the last one (private-subnet SSM reach for Password Safe onboarding; ~`$7/mo each while up, `$0 idle):",
     "aws_ssm_endpoints_enabled=true",
     "",
+    "# Cloud Functions (preview) — Lambda lifecycle. Packages reuse the image-hub bucket:",
+    "cloud_functions_enabled=true",
+    "function_package_s3_bucket=$StorageBucket                        # Same bucket as the image hub, under function-packages/",
+    "aws_functions_subnet_ids=$PrivateSubnetId                      # network_mode=vpc: the Lambda's ENIs land here",
+    "aws_functions_security_group_ids=$JumpointSg                    # egress 0.0.0.0/0; the DB SG already admits this SG on 5432/3306/1433",
+    "",
     "# Image-registry hub + automated cross-cloud promote:",
     "storage_s3_bucket=$StorageBucket                                       # Image hub + promote staging",
     "storage_active_backend=s3                                                  # Active asset backend",
@@ -991,6 +1059,11 @@ Sandbox topology summary
   VPC $VpcId (10.99.0.0/16)
     ├─ public  $PublicSubnetId  (10.99.1.0/24) → IGW → internet  [Jumpoint ECS]
     └─ private $PrivateSubnetId  (10.99.2.0/24) → no internet     [user EC2s]
+
+  Cloud Functions: network_mode=vpc Lambdas land in the private subnet and read
+  their bearer secret through the Secrets Manager interface endpoint $FnVpceId
+  (private DNS, VPC-wide). Without it a vpc-mode function deploys clean and then
+  500s on every invoke.
 
 To tear it down:
   .\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud aws

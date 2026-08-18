@@ -272,6 +272,21 @@ resource "aws_lambda_function_url" "this" {
   authorization_type = var.auth_mode
 }
 
+# A function URL with authorization_type = NONE still needs a resource-based policy
+# granting lambda:InvokeFunctionUrl to everyone. CreateFunctionUrlConfig does NOT add
+# it — the AWS console does, silently, which is why this is easy to miss. Without
+# this the public URL answers {"Message":"Forbidden"} on every request, including the
+# dashboard's own Test invoke, and it looks like a bad bearer secret rather than a
+# missing policy. The shared secret remains the actual gate (fnruntime.auth).
+resource "aws_lambda_permission" "public_url" {
+  count                  = var.auth_mode == "NONE" ? 1 : 0
+  statement_id           = "AllowPublicFunctionUrlInvoke"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.this.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
+}
+
 # ── Outputs ──────────────────────────────────────────────────────────────────
 
 output "resource_id" {

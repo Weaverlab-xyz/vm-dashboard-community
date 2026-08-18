@@ -1310,7 +1310,12 @@ class CloudFunctionsFeatureConfig(BaseModel):
     aws_functions_subnet_ids: str = ""
     aws_functions_security_group_ids: str = ""
     azure_functions_subnet_id: str = ""
+    gcp_functions_network: str = ""
+    gcp_functions_subnetwork: str = ""
     gcp_functions_vpc_connector: str = ""
+    gcp_functions_service_account: str = ""
+
+
 class NotificationsFeatureConfig(BaseModel):
     """Outbound notifications. Two brakes, both deliberate.
 

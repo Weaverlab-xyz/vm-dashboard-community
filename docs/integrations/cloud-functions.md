@@ -33,10 +33,10 @@ this adds** — an always-on, externally callable endpoint is.
 
 | Cloud | Needs |
 |---|---|
-| **AWS** | An S3 bucket for packages. The dashboard's IAM identity needs `s3:PutObject`, plus `lambda:*`, `iam:CreateRole`/`AttachRolePolicy`/`PutRolePolicy` (the execution role and its inline secrets policy), `secretsmanager:CreateSecret`/`PutSecretValue`/`DeleteSecret`/`DescribeSecret`/`TagResource` (every function keeps its bearer secret there) and `logs:*` on the function's log group. |
+| **AWS** | An S3 bucket for packages. The dashboard's IAM identity needs `s3:PutObject`, plus `lambda:*`, `iam:CreateRole`/`AttachRolePolicy`/`PutRolePolicy` (the execution role and its inline secrets policy), `secretsmanager:CreateSecret`/`PutSecretValue`/`DeleteSecret`/`DescribeSecret`/`TagResource` (every function keeps its bearer secret there) and `logs:*` on the function's log group (including `logs:DeleteLogGroup`, or destroy leaves it behind). Two that are easy to miss: **`iam:PassRole`** on the execution role (`lambda:CreateFunction` passes it to Lambda) and **`lambda:AddPermission`** — a function URL with `authorization_type = NONE` needs a resource policy that `CreateFunctionUrlConfig` does *not* write, so without it every public invoke returns `{"Message":"Forbidden"}`. The module creates that permission itself; the deploying identity just needs to be allowed to. |
 | **Azure** | The dashboard's existing storage account (`storage_azure_account`) and resource group, **plus a Key Vault** — every function keeps its bearer secret there. The service principal needs `Microsoft.Web/*`, `Microsoft.Storage/storageAccounts/listKeys/action`, `Microsoft.Web/sites/host/listKeys/action`, `Microsoft.ManagedIdentity/userAssignedIdentities/*`, secret `set` on the vault, and authority to grant on it (`Microsoft.Authorization/roleAssignments/write` for an RBAC vault, or `Microsoft.KeyVault/vaults/accessPolicies/write` for a policy-based one). |
-| **GCP** | A GCS bucket for sources, and a noticeably larger IAM surface: `roles/cloudfunctions.developer`, `roles/run.admin`, `roles/cloudbuild.builds.builder`, `roles/artifactregistry.writer`, `roles/storage.objectAdmin`, `roles/secretmanager.admin`, plus `roles/iam.serviceAccountUser` on the runtime service account. |
-| All | Terraform in the image (it is, by default). |
+| **GCP** | A GCS bucket for sources, the `cloudfunctions` + `artifactregistry` APIs enabled, and a noticeably larger IAM surface: `roles/cloudfunctions.developer`, `roles/run.admin`, `roles/cloudbuild.builds.builder`, `roles/artifactregistry.writer`, `roles/storage.objectAdmin` (project-wide, or bucket-scoped on the source bucket), `roles/secretmanager.admin`, plus `roles/iam.serviceAccountUser` on the runtime service account. Direct VPC egress itself needs **no extra grant** — those permissions belong to the Cloud Run service agent, which already holds them for a same-project VPC. |
+| All | Terraform in the image (it is, by default). GCP additionally needs the **google provider `>= 7.21`**, which the image pre-caches. |
 
 > A missing GCP role surfaces as a 403 roughly 90 seconds into the build, *after* the
 > plan succeeded. If a GCP deploy fails late, check the roles above first.
@@ -63,7 +63,9 @@ this adds** — an always-on, externally callable endpoint is.
 | `azure_functions_plan_sku` | App Service plan SKU, default `B1` |
 | `aws_functions_subnet_ids` / `aws_functions_security_group_ids` | Comma-separated; used when a function is deployed in `vpc` mode |
 | `azure_functions_subnet_id` | Must be delegated to `Microsoft.Web/serverFarms` |
-| `gcp_functions_vpc_connector` | An **existing** Serverless VPC Access connector |
+| `gcp_functions_network` / `gcp_functions_subnetwork` | GCP **Direct VPC egress** — no connector, nothing billed while idle. Give the subnet as a **bare name**: direct egress is region-locked, and a bare name resolves in whichever region the function lands in. |
+| `gcp_functions_service_account` | Runtime service account. Blank falls back to the broad default compute SA — and skips the per-secret accessor binding, so the function cannot read its own bearer secret. |
+| `gcp_functions_vpc_connector` | Legacy fallback: an **existing** Serverless VPC Access connector. Only needed to reach *another region* from a region-pinned function. Ignored when the two keys above are set. |
 
 ## What it enables in the dashboard
 
@@ -515,7 +517,8 @@ attaches the function to your network.
 |---|---|---|
 | AWS | `vpc_config` | A VPC-attached Lambda has **no outbound internet** unless its subnets route through NAT |
 | Azure | Regional VNet integration | Needs a subnet delegated to `Microsoft.Web/serverFarms`, and a plan that supports it — `Y1` does **not** (plan-time failure) |
-| GCP | Serverless VPC Access connector | Reference an existing one; a connector costs ~$26/mo whether invoked or not |
+| GCP | Direct VPC egress (`direct_vpc_network_interface`) | **Region-locked** — the subnet must be in the function's region, or traffic to an internal IP silently drops. Cloud Run reserves IPs in /28 blocks and needs a /26 minimum subnet; sharing one subnet across functions is supported. Needs provider `>= 7.21`. |
+| GCP (legacy) | Serverless VPC Access connector | Only for cross-region reach from a region-pinned function. Reference an existing one; a connector costs ~$26/mo whether invoked or not |
 
 ## Troubleshooting
 
@@ -533,7 +536,15 @@ target. `connect: refused` is different and *good news* — the network path wor
 nothing is listening on that port.
 
 **`egress` probe times out but the private probe succeeds.** Expected on a
-VPC-attached Lambda with no NAT. Only a problem for workloads that call outward.
+VPC-attached Lambda with no NAT. Harmless for workloads that only reach inward.
+
+**AWS: every invoke of a `vpc`-mode function returns 500, but the deploy was clean.**
+Auth failed closed. The handler resolves its bearer secret from **Secrets Manager at
+cold start**, so a VPC-attached Lambda needs a path to that API — and a private
+subnet with no NAT route has none. This is *not* only an outward-calling concern: it
+breaks the front door for every workload. Give the VPC a `secretsmanager` **interface
+endpoint** with private DNS (the sandbox scripts create one; `SANDBOX_SKIP_FN_VPCE=1`
+opts out), or keep a NAT route up. It looks exactly like a wrong bearer secret.
 
 **Azure: the app is up but every route 404s.** The v2 programming model registered
 zero functions. `GET https://<app>.azurewebsites.net/api/health` is anonymous and

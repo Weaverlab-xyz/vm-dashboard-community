@@ -152,11 +152,17 @@ Write-Section 'Enable APIs'
 # fail with a "403 Forbidden … :getIamPolicy" that is really a SERVICE_DISABLED.
 # bigquery.googleapis.com powers the Cloud Costs page: GCP has no cost API, so the
 # dashboard queries the Cloud Billing export table in BigQuery (see cost_service.py).
+# cloudfunctions.googleapis.com backs the Cloud Functions (preview) feature — the
+# gen2 module targets the Cloud Functions v2 API, and without it the apply dies at
+# plan with a SERVICE_DISABLED. artifactregistry.googleapis.com is where Cloud Build
+# pushes the function image (the gcf-artifacts repo); it is usually auto-enabled
+# alongside cloudfunctions, and pre-enabling turns that cold enable into a no-op.
 foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com','run.googleapis.com','cloudbuild.googleapis.com','container.googleapis.com',
-                   'gkehub.googleapis.com','connectgateway.googleapis.com','gkeconnect.googleapis.com','cloudresourcemanager.googleapis.com','bigquery.googleapis.com')) {
+                   'gkehub.googleapis.com','connectgateway.googleapis.com','gkeconnect.googleapis.com','cloudresourcemanager.googleapis.com','bigquery.googleapis.com',
+                   'cloudfunctions.googleapis.com','artifactregistry.googleapis.com')) {
     gcloud services enable $api --project $ProjectId --quiet | Out-Null
 }
-Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager, bigquery'
+Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager, bigquery, cloudfunctions, artifactregistry'
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 Write-Section 'VPC + subnets'
@@ -394,17 +400,29 @@ if ($LASTEXITCODE -ne 0) {
 # runs a query job (jobUser) against the Cloud Billing export table and reads its
 # rows (dataViewer). Both are granted at project scope — if your billing export
 # dataset lives in a DIFFERENT project, also grant dataViewer on that dataset there.
+# The last four roles are Cloud Functions (preview). cloudfunctions.developer
+# creates/updates/deletes the gen2 function. secretmanager.admin is needed because
+# the module CREATES each function's bearer secret and sets an IAM member on it —
+# secretAccessor above only reads, so it cannot do either. cloudbuild.builds.builder
+# is the build IDENTITY role (distinct from builds.editor above, which only submits).
+# artifactregistry.writer pushes the built image to gcf-artifacts. Note that
+# storage.objectAdmin is deliberately NOT here: the function source bucket is the
+# image-hub bucket, which already gets a BUCKET-SCOPED objectAdmin grant in 5b. If
+# you ever point function_package_gcs_bucket at a different bucket, grant it there
+# too — the feature docs list objectAdmin project-wide, which this narrows.
 foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/iam.serviceAccountUser','roles/run.admin','roles/run.developer',
                     'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin',
                     'roles/cloudbuild.builds.editor','roles/container.admin','roles/logging.viewer',
                     'roles/serviceusage.serviceUsageAdmin','roles/gkehub.admin','roles/resourcemanager.projectIamAdmin',
                     'roles/iam.roleAdmin',
-                    'roles/bigquery.jobUser','roles/bigquery.dataViewer')) {
+                    'roles/bigquery.jobUser','roles/bigquery.dataViewer',
+                    'roles/cloudfunctions.developer','roles/secretmanager.admin',
+                    'roles/cloudbuild.builds.builder','roles/artifactregistry.writer')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }
-Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, iam.roleAdmin, bigquery.jobUser, bigquery.dataViewer'
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, iam.roleAdmin, bigquery.jobUser, bigquery.dataViewer, cloudfunctions.developer, secretmanager.admin, cloudbuild.builds.builder, artifactregistry.writer'
 
 $SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
 if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {
@@ -469,13 +487,16 @@ Write-Ok "Granted $SaEmail storage.objectAdmin on gs://$StorageBucket"
 # is the legacy <num>@cloudbuild SA on older projects and the Compute Engine
 # default <num>-compute@developer SA on newer ones — grant both; best-effort
 # since a project may not have the legacy SA.
+# artifactregistry.writer is the Cloud Functions (preview) addition: a gen2 deploy
+# builds through the same Cloud Build identity and pushes the result to the in-region
+# gcf-artifacts repo, which fails ~90s in — AFTER a clean plan — without it.
 Write-Section 'Cloud Build image-export IAM'
 $ProjectNumber = "$(gcloud projects describe $ProjectId --format='value(projectNumber)')".Trim()
 foreach ($cbSa in @("${ProjectNumber}@cloudbuild.gserviceaccount.com",
                     "${ProjectNumber}-compute@developer.gserviceaccount.com")) {
     foreach ($role in @('roles/compute.admin','roles/iam.serviceAccountUser',
                         'roles/iam.serviceAccountTokenCreator','roles/storage.admin',
-                        'roles/logging.logWriter')) {
+                        'roles/logging.logWriter','roles/artifactregistry.writer')) {
         gcloud projects add-iam-policy-binding $ProjectId `
             --member "serviceAccount:$cbSa" --role $role --condition=None --quiet *> $null
         if ($LASTEXITCODE -ne 0) {
@@ -483,7 +504,7 @@ foreach ($cbSa in @("${ProjectNumber}@cloudbuild.gserviceaccount.com",
         }
     }
 }
-Write-Ok 'Granted Cloud Build export SA(s) compute.admin, iam.serviceAccountUser, iam.serviceAccountTokenCreator, storage.admin, logging.logWriter (best-effort)'
+Write-Ok 'Granted Cloud Build export SA(s) compute.admin, iam.serviceAccountUser, iam.serviceAccountTokenCreator, storage.admin, logging.logWriter, artifactregistry.writer (best-effort)'
 
 # ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────
 Write-Section 'Secret Manager — SSH keypair'
@@ -544,6 +565,13 @@ $cfg = @(
     '',
     '# BeyondTrust deploy key — set in /setup or /secrets:',
     'gcp_cloud_run_docker_deploy_key=…',
+    "",
+    "# Cloud Functions (preview) — Cloud Run functions (gen2). Sources reuse the image-hub bucket:",
+    "cloud_functions_enabled=true",
+    "function_package_gcs_bucket=$StorageBucket               # Same bucket as the image hub, under function-packages/",
+    "gcp_functions_service_account=$SaEmail   # Runtime SA; blank would fall back to the broad default compute SA",
+    "gcp_functions_network=$Vpc                                # network_mode=vpc: Direct VPC egress (no connector, no standing cost)",
+    "gcp_functions_subnetwork=$VmSubnet               # BARE NAME on purpose — direct egress is region-locked, and every region uses this name",
     "",
     "# ── Per-region set for $Region ──────────────────────────────────────────────",
     "# The flat keys above configure the DEFAULT region. These gcp_region.<region>.*",

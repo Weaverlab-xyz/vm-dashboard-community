@@ -223,7 +223,7 @@ def test_vpc_mode_errors_name_the_setting_to_fix():
     _reset()
     for cloud, needle in (("aws", "aws_functions_subnet_ids"),
                           ("azure", "azure_functions_subnet_id"),
-                          ("gcp", "gcp_functions_vpc_connector")):
+                          ("gcp", "gcp_functions_network")):
         try:
             svc._resolved_network(cloud, "r", network_mode="vpc", subnet_ids=None,
                                   subnet_id="", vpc_connector="",
@@ -232,6 +232,40 @@ def test_vpc_mode_errors_name_the_setting_to_fix():
             assert needle in str(exc), (cloud, str(exc))
         else:
             raise AssertionError(f"expected an error for {cloud}")
+
+
+def test_gcp_vpc_mode_prefers_direct_egress():
+    """Direct VPC egress: no connector, so nothing is billed while idle."""
+    _reset()
+    CONF["gcp_functions_network"] = "sandbox-vpc"
+    CONF["gcp_functions_subnetwork"] = "sandbox-vm-subnet"
+    CONF["gcp_functions_vpc_connector"] = "projects/p/locations/r/connectors/c"
+    got = svc._resolved_network("gcp", "us-east1", network_mode="vpc", subnet_ids=None,
+                               subnet_id="", vpc_connector="", security_group_ids=None)
+    assert got == {"vpc_network": "sandbox-vpc", "vpc_subnetwork": "sandbox-vm-subnet"}, got
+
+
+def test_gcp_connector_is_the_fallback_not_the_default():
+    """A pre-existing connector still works — it is the only way to reach another
+    region from a region-pinned function."""
+    _reset()
+    CONF["gcp_functions_vpc_connector"] = "projects/p/locations/r/connectors/c"
+    got = svc._resolved_network("gcp", "us-east1", network_mode="vpc", subnet_ids=None,
+                               subnet_id="", vpc_connector="", security_group_ids=None)
+    assert got == {"vpc_connector": "projects/p/locations/r/connectors/c"}, got
+
+
+def test_aws_vpc_fallback_never_uses_the_db_subnet_group_name():
+    """db_subnet_group_name is an RDS subnet-GROUP NAME. Using it as a subnet id
+    passes validation here and dies at apply on InvalidSubnetID.NotFound."""
+    _reset()
+    CONF["__region__aws"] = {"db_subnet_group_name": "dashboard-sandbox-db",
+                             "db_security_group_id": "sg-db",
+                             "default_subnet_id": "subnet-private"}
+    got = svc._resolved_network("aws", "us-east-1", network_mode="vpc", subnet_ids=None,
+                               subnet_id="", vpc_connector="", security_group_ids=None)
+    assert got["subnet_ids"] == ["subnet-private"], got
+    assert "dashboard-sandbox-db" not in got["subnet_ids"]
 
 
 def test_explicit_arguments_beat_config():
