@@ -1290,7 +1290,7 @@
           </div>
           <!-- Database Password Safe onboarding (provisioned cloud DBs only) -->
           <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS only)</span></p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS &amp; Azure)</span></p>
             <p class="text-xs text-gray-400 mb-3">
               When on, provisioning an AWS database creates a dedicated managed DB user, onboards the DB as a
               Password Safe managed system + managed account (via the <code class="bg-gray-100 px-1 rounded">{engine} SSM Custom Plugin</code>),
@@ -1408,6 +1408,22 @@
                   via Azure VM Run Command. The functional account is the minted DB admin bundled with an Azure service principal; it rotates a dedicated
                   managed user. The three custom plugins + the RSA keypair (public cert on the Resource Broker, private key below) are one-time manual setup.
                 </p>
+                <!-- x-init default is load-bearing: an unset string config key reads back
+                     as "" from /api/setup/feature, not as the model default. -->
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Azure onboarding method</label>
+                  <select x-model="panelCfg.passwordsafe_azure_db_registration_method"
+                          x-init="panelCfg.passwordsafe_azure_db_registration_method = panelCfg.passwordsafe_azure_db_registration_method || 'runcommand'"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="runcommand">Run Command plugins</option>
+                    <option value="off">Off — skip Azure, keep AWS</option>
+                  </select>
+                  <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_azure_db_registration_method || 'runcommand') === 'off'">
+                    Azure databases skip Password Safe onboarding and fall back to the legacy admin-credential staging;
+                    the AWS SSM path above stays on. The checkbox above is shared by both clouds, so this is the only
+                    way to disable Azure alone.
+                  </p>
+                </div>
                 <div class="grid grid-cols-3 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
