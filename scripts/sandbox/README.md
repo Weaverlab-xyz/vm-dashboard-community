@@ -372,6 +372,7 @@ AZURE_LOCATION=westus2        ./scripts/sandbox/Linux/setup-azure.sh
 GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/Linux/setup-gcp.sh
 SANDBOX_SKIP_ACR=1            ./scripts/sandbox/Linux/setup-azure.sh   # skip the Azure ACR image mirror
 SANDBOX_SKIP_FN_VPCE=1        ./scripts/sandbox/Linux/setup-aws.sh     # skip the Secrets Manager endpoint (breaks vpc-mode functions)
+AZURE_IMAGE_GALLERY_RG=corp-images ./scripts/sandbox/Linux/setup-azure.sh  # opt IN: grant the SP access to an external Compute Gallery RG
 ```
 
 ```powershell
@@ -380,7 +381,14 @@ $env:AWS_REGION = 'us-west-2';      .\scripts\sandbox\Windows\Setup-AwsSandbox.p
 $env:AZURE_LOCATION = 'westus2';    .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
 $env:GCP_PROJECT_ID = 'my-proj'
 $env:GCP_REGION = 'us-east1';       .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
+$env:AZURE_IMAGE_GALLERY_RG = 'corp-images'   # opt IN: external Compute Gallery RG access
+.\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
 ```
+
+The gallery opt-in also takes `AZURE_IMAGE_GALLERY_NAME`, `AZURE_IMAGE_GALLERY_ROLE`
+and `AZURE_IMAGE_GALLERY_SUBSCRIPTION_ID` — see
+[image-management](../../docs/image-management.md). Rollback removes only the role
+assignment it added; the external RG is never touched.
 
 CIDRs, subnet sizes, machine types, and IAM scope are intentionally not
 parameterised — the sandbox is opinionated. Edit the script directly if you

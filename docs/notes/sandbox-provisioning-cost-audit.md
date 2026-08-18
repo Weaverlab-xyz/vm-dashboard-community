@@ -282,11 +282,13 @@ unretried `ecsTaskExecutionRole` attach now uses it too.
    `region_config.py:64-75` only carries fields for `db_subnet_id`, `db_mysql_subnet_id`
    and `db_private_dns_zone_id`. A non-default-region MySQL or SQL Server DB gets the
    **default region's** zone/subnet.
-5. **`Setup-AzureSandbox.ps1`** omits the optional external image-gallery block
-   (`setup-azure.sh:406-479`). Low priority — it's gated behind `AZURE_IMAGE_GALLERY_RG`.
-   Because of it the PowerShell twin also emits neither `azure_region.<r>.gallery_name`
-   nor `gallery_resource_group`; both are listed in `_KNOWN_TWIN_GAPS` in
-   `tests/test_sandbox_region_keys.py`, which fails if the exemption outlives the gap.
+5. ~~**`Setup-AzureSandbox.ps1`** omits the optional external image-gallery block.~~
+   **Fixed.** The PowerShell twin now carries the §6c block (custom role definition +
+   RG-scoped assignment + state writes), emits all four gallery config keys, and
+   `Rollback-Sandbox.ps1` drops the assignment before deleting the SP — which it also
+   never did, so the PowerShell path would have left a role assignment behind on a
+   corp-owned RG it does not otherwise touch. `_KNOWN_TWIN_GAPS` in
+   `tests/test_sandbox_region_keys.py` is empty again as a result.
 6. **Dead config keys** `aws_k8s_subnet_a_id` / `aws_k8s_subnet_b_id`
    (`config.py:253-254`, already annotated "no longer consumed").
 

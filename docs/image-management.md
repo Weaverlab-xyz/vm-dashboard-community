@@ -667,6 +667,12 @@ AZURE_IMAGE_GALLERY_RG=myGalleryRG AZURE_IMAGE_GALLERY_NAME=corpImageGallery \
   ./scripts/sandbox/Linux/setup-azure.sh
 ```
 
+```powershell
+$env:AZURE_IMAGE_GALLERY_RG = 'myGalleryRG'
+$env:AZURE_IMAGE_GALLERY_NAME = 'corpImageGallery'
+.\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+```
+
 It creates the custom role (if missing) and assigns it to the SP
 scoped to that RG; override with `AZURE_IMAGE_GALLERY_ROLE=Contributor`,
 or set `AZURE_IMAGE_GALLERY_SUBSCRIPTION_ID` for a cross-subscription

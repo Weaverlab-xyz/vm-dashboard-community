@@ -349,6 +349,29 @@ function Invoke-AzureRollback {
     # Service principal — match by display name.
     $spName = "$($Script:SandboxNamePrefix)-sp"
     $spId   = (az ad sp list --display-name $spName --query '[0].appId' -o tsv 2>$null).Trim()
+
+    # Drop any external image-gallery role assignment we added (Setup-AzureSandbox.ps1's
+    # optional AZURE_IMAGE_GALLERY_RG step). Do this BEFORE deleting the SP so the
+    # assignee still resolves. The corp gallery RG itself is NEVER deleted here — only
+    # the assignment. The custom role definition is left in place (it may be shared /
+    # assignable to other RGs); remove it manually if desired with
+    #   az role definition delete --name 'Dashboard Image Promoter'
+    # .Trim() matters: bash's state_write appends a trailing newline and
+    # Get-Content -Raw keeps it, so a sandbox provisioned by setup-azure.sh and torn
+    # down here would otherwise build a scope string with an embedded newline.
+    $galleryRg = (Get-StateValue azure image_gallery_rg).Trim()
+    if ($galleryRg -and $spId -and $spId -ne 'null') {
+        $gallerySub = (Get-StateValue azure image_gallery_sub).Trim()
+        if (-not $gallerySub) { $gallerySub = (az account show --query id -o tsv 2>$null) }
+        if ($gallerySub) { $gallerySub = $gallerySub.Trim() }
+        & az role assignment delete --assignee $spId `
+            --scope "/subscriptions/$gallerySub/resourceGroups/$galleryRg" *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "Removed SP role assignment on external gallery RG $galleryRg"
+        } else {
+            Write-Warn "Could not remove gallery role assignment on $galleryRg (already gone or insufficient perms)"
+        }
+    }
     if ($spId -and $spId -ne 'null') {
         & az ad sp delete --id $spId *> $null
         if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted service principal $spName ($spId)" }
