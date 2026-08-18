@@ -228,6 +228,9 @@
       //   href:      target URL
       //   flag:      feature key from /api/features ('vmware', 'aws', etc.)
       //              tile hides when this flag is false. Omit for always-on.
+      //   anyFlag:   list of feature keys; tile hides unless at least one is true.
+      //              For a surface that serves several integrations rather than one
+      //              (the cross-cloud image registry). Combines with `flag` as AND.
       //   fetcher:   async () => ({value, secondary?})
       //   secondaryLabel / description: subtext shown below the value
       //   valueClass: optional Tailwind class override for the big number
@@ -266,7 +269,16 @@
             { key: 'gcp_images',    title: 'GCP Images',  href: '/gcp',           flag: 'gcp',   description: 'custom images' },
             { key: 'oci_instances', title: 'OCI Instances', href: '/oci',         flag: 'oci',   secondaryLabel: 'running' },
             { key: 'oci_images',    title: 'OCI Images',  href: '/oci',           flag: 'oci',   description: 'custom images' },
-            { key: 'ovas',          title: 'OVA Library', href: '/images',        flag: 'vmware', description: 'local OVA files' },
+            // The cross-cloud image registry behind /images. It counts registry rows —
+            // the dashboard's own record of which portable images exist and which clouds
+            // hold a promotion of each — not artefact files on any one host. It was
+            // titled "OVA Library" against a /api/images/ovas endpoint that does not
+            // exist, so the tile read "– local OVA files unavailable" on every install.
+            // Gated on having somewhere to promote TO rather than on `vmware`: the old
+            // flag hid the registry from every AWS-only operator while offering it to
+            // VMware-only ones, who have no valid promote target (see VALID_CLOUDS).
+            { key: 'registered_images', title: 'Image Registry', href: '/images',
+              anyFlag: ['aws', 'azure', 'gcp', 'oci'], secondaryLabel: 'promoted' },
             { key: 'cloud_cost',    title: 'Cloud Spend (MTD)', href: '/costs',   flag: 'cost',  secondaryRaw: true, valueClass: 'text-orange-600' },
           ],
         },
@@ -368,9 +380,16 @@
         this.featuresLoaded = true;
       },
 
-      // Tiles visible iff: no flag (always-on) OR features[flag] is truthy
+      // Tiles visible iff every gate they declare passes: `flag` must be truthy in
+      // features, and `anyFlag` needs at least one of its keys truthy. A tile with
+      // neither is always-on. Both stay false on a bare install, which is what keeps
+      // the "No integrations configured yet" empty state reachable.
       visibleTiles(tiles) {
-        return tiles.filter(t => !t.flag || this.features[t.flag]);
+        return tiles.filter(t => {
+          if (t.flag && !this.features[t.flag]) return false;
+          if (t.anyFlag && !t.anyFlag.some(f => this.features[f])) return false;
+          return true;
+        });
       },
 
       // Sections visible iff at least one tile is visible
@@ -386,7 +405,7 @@
 
       // [[region, {total, running}], …] sorted by descending total, for the
       // per-region line under a cloud instance tile. Empty for tiles with no
-      // region dimension (images, OVAs, on-prem), which hides the line.
+      // region dimension (images, registry rows, on-prem), which hides the line.
       regionBreakdown(stat) {
         const by = stat?.by_region;
         if (!by) return [];
@@ -603,7 +622,7 @@
         section.loaded = false;
         if (section.id === 'cloud') {
           // One aggregated stats call per cloud (instances+images) instead of a
-          // full list call per tile. cost + ovas keep their own fetchers.
+          // full list call per tile. cost + the image registry keep their own fetchers.
           await this._refreshCloudSection(section);
         } else {
           const visible = this.visibleTiles(section.tiles);
@@ -623,9 +642,10 @@
         if (this.features.azure) tasks.push(this._fetchCloudStats('/api/azure/dashboard-stats', 'azure_vms',     'azure_images'));
         if (this.features.gcp)   tasks.push(this._fetchCloudStats('/api/gcp/dashboard-stats',   'gcp_instances', 'gcp_images'));
         if (this.features.oci)   tasks.push(this._fetchCloudStats('/api/oci/dashboard-stats',   'oci_instances', 'oci_images'));
-        // ovas + cloud_cost aren't cloud-VM tiles — keep their per-tile fetchers.
+        // registered_images + cloud_cost aren't per-cloud tiles — they read the
+        // dashboard's own DB and the cost cache, so they keep per-tile fetchers.
         for (const t of this.visibleTiles(section.tiles)) {
-          if (t.key === 'ovas' || t.key === 'cloud_cost') {
+          if (t.key === 'registered_images' || t.key === 'cloud_cost') {
             tasks.push(this._fetchTile(t).then(r => { this.stats[t.key] = r; }).catch(() => { this.stats[t.key] = {value: -1}; }));
           }
         }
@@ -659,7 +679,11 @@
         if (k === 'gcp_images')       return this._fetchListCount('/api/gcp/custom-images',     'images');
         if (k === 'oci_instances')    return this._fetchListCount('/api/oci/instances',         'instances', i => (i.lifecycle_state || '').toUpperCase() === 'RUNNING');
         if (k === 'oci_images')       return this._fetchOciCustomImages();
-        if (k === 'ovas')             return this._fetchListCount('/api/images/ovas',           'ovas');
+        // Registry rows from the dashboard's own table. `secondary` counts the images
+        // carrying a *completed* promotion — a running/pending/manual/failed entry is
+        // not a promotion that landed, and green "N promoted" must not claim it did.
+        if (k === 'registered_images') return this._fetchListCount('/api/images', 'images',
+              i => Object.values(i.promotions || {}).some(p => p && p.status === 'completed'));
         if (k === 'cloud_cost')       return this._fetchCost();
         // Hypervisors
         if (k === 'workstation_vms')  return this._fetchWorkstationVms();
