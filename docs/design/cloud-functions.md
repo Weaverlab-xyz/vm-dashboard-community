@@ -330,6 +330,32 @@ The target (engine, host, port, database, flavor) also comes from the function's
 own configuration, never the request — otherwise every caller of this endpoint
 would be a lateral-movement primitive.
 
+### One adapter, several databases — and why not several servers
+
+`FN_DB_NAMES` lets one function serve N databases, each its own Entitle asset. The
+request's `asset.identifier` **selects** from that allowlist; it can never extend it,
+and with more than one database a missing identifier is a 400 rather than a default.
+
+The line is drawn at the **server**, for two independent reasons:
+
+1. **Blast radius does not actually widen.** The admin credential this adapter needs
+   is server-level on every managed engine here, so databases sharing a server
+   already share a blast radius. Consolidating them removes copies of that credential
+   from the fleet. A second *server* is a second credential, and one endpoint holding
+   both is a genuine widening.
+2. **The contract forbids it.** Entitle's `create_actor` and `delete_actor` carry no
+   asset — the actor is bound to the adapter — so an adapter spanning servers cannot
+   know where to mint. Within one server it does not need to: the principal is
+   server-scoped (MySQL user, SQL Server login) and only the grant is per-database.
+   `create_actor_plan`/`delete_actor_plan` take `databases` for exactly this, and a
+   delete must undo the create everywhere or it leaves orphaned users behind.
+
+Two guards were added with it, both of which were missing and both of which matter
+at one database too: `give_access`, `revoke_access` and `delete_actor` refuse any
+account outside the adapter's own `jit_` namespace (403). Without them `delete_actor`
+was a `DROP USER` for any name and `give_access` could grant a role to an existing
+application login — `portainer_access` already drew this line and `db_grant` had not.
+
 ### The Entitle contract (confirmed)
 
 Source: [Remote Adapter OpenAPI definition](https://docs.beyondtrust.com/entitle/docs/open-api-definition)

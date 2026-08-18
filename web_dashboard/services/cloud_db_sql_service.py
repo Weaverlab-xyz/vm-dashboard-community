@@ -379,6 +379,22 @@ def _merge(plan: list) -> list:
     return merged
 
 
+def _database_list(databases, fallback: str) -> list:
+    """Validated database names, in order, deduplicated, never empty.
+
+    Order is preserved rather than sorted: on SQL Server these become a statement
+    sequence on one connection, and a stable order keeps a dry-run plan diffable.
+    """
+    names = []
+    for raw in (databases or [fallback]):
+        name = _ident(str(raw or "").strip())
+        if name not in names:
+            names.append(name)
+    if not names:
+        raise CloudDbSqlError("no database names given")
+    return names
+
+
 def _prepare(engine: str, *, username: str, database: str, flavor: str,
              role: str = "", password: str = "") -> tuple:
     """Validate every input once and return the normalised pieces."""
@@ -393,12 +409,21 @@ def _prepare(engine: str, *, username: str, database: str, flavor: str,
 
 
 def create_actor_plan(engine: str, *, username: str, password: str,
-                      database: str, flavor: str = "") -> list:
+                      database: str, flavor: str = "", databases=None) -> list:
     """``[(database, [statements…])]`` creating the account with NO privileges.
 
     Entitle's ``create_actor``. An account with no grants is useless and harmless,
     which is exactly the point: if the subsequent ``give_access`` never arrives,
     what is left behind can reach nothing.
+
+    ``databases`` is for an adapter serving several databases on ONE server. Entitle's
+    ``create_actor`` carries no asset — the actor is bound to the adapter, not to an
+    asset — so the account has to be made before anything knows which database the
+    grant is for. On MySQL that is already how it works (``CREATE USER`` is
+    server-scoped and only the GRANT is per-database); on SQL Server the login is
+    server-scoped but the USER is per-database, so a role-less user is created in
+    each. Role-less is the same "no privileges" guarantee as the single-database
+    case — ``give_access`` remains the only thing that grants anything.
     """
     # Explicit, because _prepare only validates a password it was actually given —
     # and a login created with an empty one is a far worse hole than a rejected
@@ -408,38 +433,52 @@ def create_actor_plan(engine: str, *, username: str, password: str,
     user, db_name, _role, flavor, pwd = _prepare(
         engine, username=username, database=database, flavor=flavor, password=password)
     if engine == "mysql":
+        # Server-scoped principal; db_name only selects the connection.
         return [(db_name, _mysql_create(user=user, password=pwd))]
     if engine == "postgres":
         return [(db_name, _pg_create(user=user, password=pwd))]
+    names = _database_list(databases, db_name)
     login, db_user = _mssql_login(user=user, password=pwd), _mssql_user(user=user)
     if flavor in _SPLIT_LOGIN_FLAVORS:
-        # Azure SQL: two connections, and the order matters — the user cannot be
-        # created until the login exists on the logical server.
-        return [("master", login), (db_name, db_user)]
-    return [("master", login + [f"USE [{db_name}];"] + db_user)]
+        # Azure SQL: a connection per database, and the order matters — no user can
+        # be created until the login exists on the logical server.
+        return [("master", login)] + [(name, db_user) for name in names]
+    statements = list(login)
+    for name in names:
+        statements += [f"USE [{name}];"] + db_user
+    return [("master", statements)]
 
 
 def delete_actor_plan(engine: str, *, username: str, database: str,
-                      flavor: str = "") -> list:
+                      flavor: str = "", databases=None) -> list:
     """``[(database, [statements…])]`` dropping the account.
 
     Entitle's ``delete_actor``. Idempotent wherever the engine allows it: Entitle
     retries, and a delete that errors for an account a failed create never finished
     making would leave the caller retrying forever while access looks un-revoked.
+
+    ``databases`` mirrors :func:`create_actor_plan` — it must undo exactly what that
+    made, or a multi-database adapter leaves ORPHANED USERS behind: a database
+    principal whose login is gone, which a later login of the same name silently
+    re-adopts along with whatever it was granted.
     """
     user, db_name, _role, flavor, _pwd = _prepare(
         engine, username=username, database=database, flavor=flavor)
     if engine == "mysql":
+        # DROP USER is server-scoped and takes every grant with it.
         return [(db_name, _mysql_delete(user=user))]
     if engine == "postgres":
         return [(db_name, _pg_delete(user=user))]
+    names = _database_list(databases, db_name)
     if flavor in _SPLIT_LOGIN_FLAVORS:
-        # Drop the contained user first: on Azure SQL the login cannot be dropped
+        # Drop the contained users first: on Azure SQL the login cannot be dropped
         # while a database principal is still mapped to it.
-        return [(db_name, _mssql_drop_user(user=user)),
-                ("master", _mssql_drop_login(user=user))]
-    return [("master", [f"USE [{db_name}];"] + _mssql_drop_user(user=user)
-             + ["USE [master];"] + _mssql_drop_login(user=user))]
+        return ([(name, _mssql_drop_user(user=user)) for name in names]
+                + [("master", _mssql_drop_login(user=user))])
+    statements = []
+    for name in names:
+        statements += [f"USE [{name}];"] + _mssql_drop_user(user=user)
+    return [("master", statements + ["USE [master];"] + _mssql_drop_login(user=user))]
 
 
 def give_access_plan(engine: str, *, username: str, database: str,
