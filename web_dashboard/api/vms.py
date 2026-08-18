@@ -119,8 +119,24 @@ async def list_vms(
 
     count = vm_inventory_service.count_vms_in_db(db, accessible)
     if count == 0:
-        # Cold start — block until DB is populated
-        await vm_inventory_service.populate_db_from_ps(db, accessible)
+        # Cold start — block until the DB is populated.
+        #
+        # Best-effort, and that asymmetry is the point: the local scan is one SOURCE for
+        # this page, not a precondition for serving it. On a cloud-hosted dashboard there
+        # is no local hypervisor to scan, so this raises on EVERY request — nothing ever
+        # lands in VMStateCache to make the branch stop firing — and letting it propagate
+        # took the whole page down with it, including the agent-sourced rows merged in
+        # below, which need no PowerShell at all. That is the exact reverse of the rule
+        # `_agent_workstation_vms` already keeps for the other direction.
+        try:
+            await vm_inventory_service.populate_db_from_ps(db, accessible)
+        except powershell.PowerShellError as exc:
+            # Every "PowerShell is not reachable from here" case funnels into this one
+            # type — a missing wrapper, a launch failure, a timeout, an Automation error.
+            # A database failure inside the scan is NOT caught, and should still 500.
+            logger.warning(
+                "the local VMX scan is unavailable, serving agent-synced rows only: %s",
+                exc)
     else:
         # Warm path — return immediately, sync in background
         background_tasks.add_task(_bg_delta_sync, accessible)
