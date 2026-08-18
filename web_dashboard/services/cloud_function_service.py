@@ -352,6 +352,70 @@ def _secret_environment(cloud: str, refs: Optional[dict], *, vault: str = "") ->
     return out, {}
 
 
+def azure_bearer_key(fn_id: str) -> str:
+    """Key Vault secret name for a function's bearer secret. Derived from the id so
+    :func:`_reinject_secrets` can rebuild the reference at apply and destroy time
+    without writing to the vault again."""
+    return f"cloudfn-{fn_id}-bearer"
+
+
+def _azure_key_vault() -> tuple:
+    """``(name, url, resource_group)`` of the vault Azure functions resolve from.
+
+    The name and the URL are each derivable from the other, and operators have
+    historically set one or the other, so accept either. The resource group is only
+    needed for the module's ``data "azurerm_key_vault"`` lookup, which is what lets
+    it detect RBAC-vs-access-policy and grant the right one.
+    """
+    url = (_cfg("secrets_azure_kv_url") or "").strip().rstrip("/")
+    name = (_cfg("azure_key_vault_name") or _cfg("azure_keyvault_name") or "").strip()
+    if not name and url:
+        name = url.split("://", 1)[-1].split("/", 1)[0].split(".", 1)[0]
+    if not url and name:
+        url = f"https://{name}.vault.azure.net"
+    return name, url, (_cfg("azure_key_vault_resource_group")
+                       or _cfg("azure_resource_group") or "").strip()
+
+
+def azure_bearer_reference(fn_id: str) -> dict:
+    """The module variables that point an Azure function at its bearer secret.
+
+    Pure — no vault write. :func:`_stage_azure_bearer` does that once at deploy;
+    everything afterwards (apply, destroy) only needs to name the same secret again.
+    """
+    name, url, resource_group = _azure_key_vault()
+    if not name:
+        return {}
+    return {
+        "shared_secret_kv_uri":
+            f"@Microsoft.KeyVault(SecretUri={url}/secrets/{azure_bearer_key(fn_id)}/)",
+        "key_vault_name": name,
+        "key_vault_resource_group": resource_group,
+    }
+
+
+def _stage_azure_bearer(fn_id: str, secret: str) -> dict:
+    """Write the bearer secret to Key Vault and return the reference variables.
+
+    Azure ends up the strictest of the three: the value reaches neither an app
+    setting nor Terraform state, because the platform resolves the reference itself
+    and the module is handed only the URI. AWS and GCP still pass the value to the
+    resource that stores it, so it lands in state there.
+
+    Refuses rather than falling back to a literal app setting — a deploy that
+    quietly downgrades to a readable credential is the failure this is here to stop.
+    """
+    refs = azure_bearer_reference(fn_id)
+    if not refs:
+        raise CloudFunctionError(
+            "an Azure function keeps its bearer secret in Key Vault, and no vault is "
+            "configured — set the Azure Key Vault secrets backend "
+            "(Settings → Secrets → Azure Key Vault), or azure_key_vault_name")
+    from . import secrets_backend_service
+    secrets_backend_service.write_azure_kv(azure_bearer_key(fn_id), secret)
+    return refs
+
+
 def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
                         package: dict, network: dict, opts: dict) -> dict:
     """The ``-var`` set for the cloud's module. Pure: no config reads, no I/O —
@@ -405,6 +469,7 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
 
     # Azure: no bucket/key vars — run-from-package takes a single SAS URL, and the
     # object key still carries the content hash so terraform sees a real diff.
+    bearer = dict(opts.get("azure_bearer") or {})
     return {
         **common,
         "location": region,
@@ -415,6 +480,11 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
         "storage_account_name": package["storage_account"],
         "storage_account_access_key": package["storage_key"],
         "subnet_id": network.get("subnet_id", ""),
+        # A reference, not a value — so unlike the other two clouds the bearer
+        # secret never reaches Terraform at all. The module's precondition wants
+        # exactly one of the two, hence blanking the literal.
+        **bearer,
+        "shared_secret": "" if bearer else common["shared_secret"],
     }
 
 
@@ -707,6 +777,11 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
     config_service.set(f"cloudfn/{row.id}/bearer", shared_secret)
     row.invoke_secret_ref = f"config://cloudfn/{row.id}/bearer"
 
+    # Azure resolves the secret from Key Vault rather than from an app setting, so
+    # it has to exist there before terraform runs. Done once, here, where the secret
+    # is minted: apply and destroy only rebuild the reference.
+    azure_bearer = _stage_azure_bearer(row.id, shared_secret) if cloud == "azure" else {}
+
     # Build now to pin the hash (and to fail fast on a broken workload), but let the
     # background job do the UPLOAD: it is network I/O, and on Azure it needs async
     # credentials. Determinism makes the rebuild there free and exact.
@@ -757,6 +832,7 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
             "readable_secret_arns": readable_arns,
             "db_admin_secret": opts.get("db_admin_secret", ""),
             "secret_environment": secret_vars.get("secret_environment", {}),
+            "azure_bearer": azure_bearer,
         })
 
     # Build the vars BEFORE create_job so the secret-stripped copy is embedded
@@ -817,7 +893,13 @@ async def _reinject_secrets(row: CloudFunction, tf_variables: dict) -> dict:
     """
     variables = dict(tf_variables or {})
     secret = config_service.get(f"cloudfn/{row.id}/bearer") or ""
-    if secret:
+    if row.cloud == "azure":
+        # Rebuild the Key Vault reference rather than the value. Also covers a
+        # function deployed before the vault path existed: it has no persisted
+        # reference, so it keeps using its literal app setting until redeployed.
+        variables.update(azure_bearer_reference(row.id)
+                         if variables.get("shared_secret_kv_uri") else {})
+    if secret and not variables.get("shared_secret_kv_uri"):
         variables["shared_secret"] = secret
     if row.cloud == "azure" and row.package_sha256:
         account = _cfg("storage_azure_account")

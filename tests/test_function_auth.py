@@ -270,9 +270,12 @@ def test_the_unresolvable_response_tells_the_caller_nothing():
 
 
 def test_no_module_puts_the_bearer_secret_in_a_plaintext_setting():
-    """The property the three Terraform modules exist to hold. Read the modules
-    themselves: a regression here is invisible in Python and only shows up as a
-    readable credential in somebody's cloud console."""
+    """Read the modules themselves: a regression here is invisible in Python and
+    only shows up as a readable credential in somebody's cloud console.
+
+    Azure is checked at the service level instead (test_cloud_function_service.py),
+    not here: its module still accepts a literal for a caller driving it directly
+    with no vault, and the guarantee is that the DASHBOARD never passes one."""
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                         "terraform", "cloud_function")
     for module in ("aws_lambda", "gcp_cloudrun"):

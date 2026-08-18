@@ -34,7 +34,7 @@ this adds** — an always-on, externally callable endpoint is.
 | Cloud | Needs |
 |---|---|
 | **AWS** | An S3 bucket for packages. The dashboard's IAM identity needs `s3:PutObject`, plus `lambda:*`, `iam:CreateRole`/`AttachRolePolicy`/`PutRolePolicy` (the execution role and its inline secrets policy), `secretsmanager:CreateSecret`/`PutSecretValue`/`DeleteSecret`/`DescribeSecret`/`TagResource` (every function keeps its bearer secret there) and `logs:*` on the function's log group. |
-| **Azure** | The dashboard's existing storage account (`storage_azure_account`) and resource group. The service principal needs `Microsoft.Web/*`, `Microsoft.Storage/storageAccounts/listKeys/action`, and `Microsoft.Web/sites/host/listKeys/action`. |
+| **Azure** | The dashboard's existing storage account (`storage_azure_account`) and resource group, **plus a Key Vault** — every function keeps its bearer secret there. The service principal needs `Microsoft.Web/*`, `Microsoft.Storage/storageAccounts/listKeys/action`, `Microsoft.Web/sites/host/listKeys/action`, `Microsoft.ManagedIdentity/userAssignedIdentities/*`, secret `set` on the vault, and authority to grant on it (`Microsoft.Authorization/roleAssignments/write` for an RBAC vault, or `Microsoft.KeyVault/vaults/accessPolicies/write` for a policy-based one). |
 | **GCP** | A GCS bucket for sources, and a noticeably larger IAM surface: `roles/cloudfunctions.developer`, `roles/run.admin`, `roles/cloudbuild.builds.builder`, `roles/artifactregistry.writer`, `roles/storage.objectAdmin`, `roles/secretmanager.admin`, plus `roles/iam.serviceAccountUser` on the runtime service account. |
 | All | Terraform in the image (it is, by default). |
 
@@ -410,7 +410,7 @@ dashboard keeps it:
 |---|---|---|
 | **AWS** | a Secrets Manager secret the module creates (`<name>-fn-secret`); only its ARN is in the function's environment | the function's role, and principals you grant on that secret |
 | **GCP** | Secret Manager, injected as a `secret_environment_variables` entry | the runtime service account |
-| **Azure** | an app setting | anyone with `Microsoft.Web/sites/config/list/action` on the app |
+| **Azure** | Key Vault, referenced from an app setting the platform resolves | the function's own managed identity, and principals you grant on the vault |
 
 The AWS arrangement matters more than it looks: a Lambda's environment is returned
 in full by `lambda:GetFunctionConfiguration`, which the AWS-managed **ReadOnlyAccess**
@@ -418,10 +418,24 @@ policy grants — so a bearer token stored there is readable by every read-only
 principal in the account, and reading it is enough to call the function. It now costs
 one Secrets Manager secret per function (~$0.40/month).
 
-> The secret still passes through Terraform state on all three clouds, because the
-> resource that creates it takes the value. State lives in your configured backend;
-> treat it as sensitive. What changed is that the *function's own configuration* no
-> longer hands the credential to anyone who can describe it.
+**Azure needs a Key Vault, and a deploy without one is refused rather than
+downgraded to a readable app setting.** Configure it under Settings → Secrets →
+Azure Key Vault (`secrets_azure_kv_url`); set `azure_key_vault_resource_group` too if
+the vault does not live in the dashboard's own resource group. You do **not** grant
+anything per function: the module creates a user-assigned identity, grants it read on
+that vault, and points the app's Key Vault reference resolution at it.
+
+> Why a user-assigned identity rather than the app's system-assigned one: a
+> system-assigned identity does not exist until the app has been created, so the app
+> would boot with an unresolvable reference and only recover when Azure re-checks
+> references — up to 24 hours later. A user-assigned identity can be granted *before*
+> the app exists, so the first cold start resolves. The system-assigned identity is
+> still created, so an existing manual grant keeps working.
+
+> The secret passes through Terraform state on AWS and GCP, because the resource that
+> creates it takes the value. On Azure it does not — the dashboard writes it to the
+> vault and Terraform only ever sees the reference. State lives in your configured
+> backend; treat it as sensitive.
 
 ## Networking
 

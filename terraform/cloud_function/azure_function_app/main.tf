@@ -56,10 +56,42 @@ variable "storage_account_access_key" {
   description = "Access key for that storage account"
 }
 
+# The bearer secret arrives one of two ways, and exactly one of them at a time.
+#
+# `shared_secret_kv_uri` is the supported path: the dashboard has already written the
+# secret to Key Vault and passes a REFERENCE, so the value never becomes an app
+# setting and never enters Terraform state — which makes Azure the only one of the
+# three clouds where it does neither.
+#
+# `shared_secret` is the literal value, for a caller driving this module directly
+# with no vault. The precondition on the app refuses both-or-neither rather than
+# letting an empty setting deploy a function that fails auth closed on every request.
 variable "shared_secret" {
   type        = string
+  default     = ""
   sensitive   = true
-  description = "Bearer secret the handler verifies on every request (fnruntime.auth). Independent of the host key."
+  description = "Bearer secret the handler verifies on every request (fnruntime.auth). Leave empty when shared_secret_kv_uri is set."
+}
+
+variable "shared_secret_kv_uri" {
+  type        = string
+  default     = ""
+  description = "@Microsoft.KeyVault(SecretUri=…) reference to the bearer secret. Not sensitive: it is a name, not a value."
+}
+
+# Needed only to GRANT this app's identity read on the vault. Without the grant the
+# app setting stays the literal @Microsoft.KeyVault(...) string, the handler sees
+# nonsense, and every request fails closed — the failure this module exists to avoid.
+variable "key_vault_name" {
+  type        = string
+  default     = ""
+  description = "Key Vault holding the referenced secrets. Required with shared_secret_kv_uri."
+}
+
+variable "key_vault_resource_group" {
+  type        = string
+  default     = ""
+  description = "Resource group of key_vault_name. Empty = the function's own resource group."
 }
 
 # B1 is the default because it is the cheapest SKU that supports BOTH regional
@@ -95,6 +127,9 @@ variable "subnet_id" {
 locals {
   vnet_attached = length(trimspace(var.subnet_id)) > 0
 
+  kv_enabled = length(trimspace(var.shared_secret_kv_uri)) > 0
+  kv_rg      = var.key_vault_resource_group != "" ? var.key_vault_resource_group : var.resource_group_name
+
   base_settings = {
     FUNCTIONS_WORKER_RUNTIME = "python"
     # Pinned explicitly: the v2 programming model silently registers ZERO
@@ -104,7 +139,7 @@ locals {
     AzureWebJobsFeatureFlags    = "EnableWorkerIndexing"
     WEBSITE_RUN_FROM_PACKAGE    = var.package_sas_url
 
-    FN_SHARED_SECRET = var.shared_secret
+    FN_SHARED_SECRET = local.kv_enabled ? var.shared_secret_kv_uri : var.shared_secret
     FN_WORKLOAD      = var.workload
     FN_CLOUD         = "azure"
     FN_REGION        = var.location
@@ -138,6 +173,50 @@ resource "azurerm_service_plan" "this" {
   }
 }
 
+# A USER-assigned identity, and that is the whole point of it existing.
+#
+# A system-assigned identity does not exist until the app has been created, so the
+# app would boot with an unresolvable Key Vault reference and only recover when Azure
+# re-checks references — up to 24 hours later. A user-assigned identity can be
+# created and granted BEFORE the app, so the very first cold start resolves.
+resource "azurerm_user_assigned_identity" "kv" {
+  count               = local.kv_enabled ? 1 : 0
+  name                = "${var.name}-kv-id"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+
+  tags = {
+    ManagedBy = "vm-dashboard"
+  }
+}
+
+data "azurerm_key_vault" "shared" {
+  count               = local.kv_enabled ? 1 : 0
+  name                = var.key_vault_name
+  resource_group_name = local.kv_rg
+}
+
+# Which grant to create is not a preference. An RBAC vault ignores access policies
+# outright, and a policy-based vault ignores role assignments — pick the wrong one
+# and Terraform reports success while the function reads nothing. The data source
+# knows which mode the vault is in, so detect it instead of asking the operator.
+resource "azurerm_role_assignment" "kv_secrets_user" {
+  count                = local.kv_enabled && data.azurerm_key_vault.shared[0].enable_rbac_authorization ? 1 : 0
+  scope                = data.azurerm_key_vault.shared[0].id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_user_assigned_identity.kv[0].principal_id
+}
+
+resource "azurerm_key_vault_access_policy" "kv_get" {
+  count        = local.kv_enabled && !data.azurerm_key_vault.shared[0].enable_rbac_authorization ? 1 : 0
+  key_vault_id = data.azurerm_key_vault.shared[0].id
+  tenant_id    = azurerm_user_assigned_identity.kv[0].tenant_id
+  object_id    = azurerm_user_assigned_identity.kv[0].principal_id
+
+  # Get only. The app resolves references; it never writes or lists.
+  secret_permissions = ["Get"]
+}
+
 resource "azurerm_linux_function_app" "this" {
   name                = var.name
   resource_group_name = var.resource_group_name
@@ -149,16 +228,26 @@ resource "azurerm_linux_function_app" "this" {
 
   https_only = true
 
-  # Required for Key Vault references in app_settings. A workload needing a
-  # database credential gets it as @Microsoft.KeyVault(SecretUri=...) in
-  # `environment`: the PLATFORM resolves it before the worker starts, so the
-  # handler needs no SDK and the secret never enters Terraform state. That
-  # resolution is performed as this identity, so without it the setting silently
-  # stays the literal @Microsoft.KeyVault(...) string and the workload sees
-  # nonsense rather than a password. Grant it `get` on the vault's secrets.
+  # Key Vault references in app_settings — the bearer secret, and any credential a
+  # workload takes — are resolved by the PLATFORM before the worker starts, so the
+  # handler needs no SDK and the value never enters Terraform state. That resolution
+  # runs as an identity, and if the identity cannot read the vault the setting
+  # silently stays the literal @Microsoft.KeyVault(...) string and the handler sees
+  # nonsense rather than a secret.
+  #
+  # System-assigned is kept unconditionally: an operator may already have granted it
+  # directly, and removing it would break that. The user-assigned one is added when a
+  # vault is wired up, because only a user-assigned identity can be granted BEFORE
+  # the app exists.
   identity {
-    type = "SystemAssigned"
+    type         = local.kv_enabled ? "SystemAssigned, UserAssigned" : "SystemAssigned"
+    identity_ids = local.kv_enabled ? [azurerm_user_assigned_identity.kv[0].id] : []
   }
+
+  # Which identity resolves EVERY reference in app_settings. Pointing it at the
+  # granted user-assigned one is what makes a db_grant credential in the same vault
+  # resolve without a manual per-function grant as well.
+  key_vault_reference_identity_id = local.kv_enabled ? azurerm_user_assigned_identity.kv[0].id : null
 
   virtual_network_subnet_id = local.vnet_attached ? var.subnet_id : null
 
@@ -177,6 +266,24 @@ resource "azurerm_linux_function_app" "this" {
   tags = {
     ManagedBy = "vm-dashboard"
     Workload  = var.workload
+  }
+
+  # The grant must land before the app starts resolving references, and neither
+  # resource is referenced from here, so the dependency has to be explicit.
+  depends_on = [
+    azurerm_role_assignment.kv_secrets_user,
+    azurerm_key_vault_access_policy.kv_get,
+  ]
+
+  lifecycle {
+    precondition {
+      condition     = (local.kv_enabled != (trimspace(var.shared_secret) != ""))
+      error_message = "Set exactly one of shared_secret_kv_uri (the supported path) or shared_secret (a literal value, no vault). Neither leaves the function with no bearer secret, and it would fail auth closed on every request."
+    }
+    precondition {
+      condition     = !local.kv_enabled || trimspace(var.key_vault_name) != ""
+      error_message = "shared_secret_kv_uri needs key_vault_name too: without it the module cannot grant this app's identity read on the vault, and the reference would never resolve."
+    }
   }
 }
 
@@ -216,5 +323,10 @@ output "network_mode" {
 
 output "principal_id" {
   value       = azurerm_linux_function_app.this.identity[0].principal_id
-  description = "System-assigned identity — grant it `get` on a Key Vault's secrets for @Microsoft.KeyVault(...) app settings to resolve"
+  description = "System-assigned identity. Only needed for a vault this module was not told about — the one in key_vault_name is granted automatically, to the user-assigned identity below."
+}
+
+output "kv_identity_principal_id" {
+  value       = local.kv_enabled ? azurerm_user_assigned_identity.kv[0].principal_id : ""
+  description = "User-assigned identity that resolves every Key Vault reference in app_settings; already granted `get` on key_vault_name"
 }

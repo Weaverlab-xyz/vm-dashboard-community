@@ -498,6 +498,84 @@ def test_every_option_the_module_reads_is_one_deploy_actually_passes():
         "puts them in the dict it passes")
 
 
+# ── The bearer secret on Azure ────────────────────────────────────────────────
+#
+# The one cloud where it reaches neither an app setting NOR Terraform state: the
+# dashboard writes it to Key Vault and the module is handed only a reference.
+
+def test_the_azure_vault_is_derivable_from_either_setting():
+    """Operators have set one or the other historically, and the name and the URL
+    each determine the other."""
+    _reset()
+    CONF["secrets_azure_kv_url"] = "https://dash-kv.vault.azure.net/"
+    name, url, _rg = svc._azure_key_vault()
+    assert name == "dash-kv" and url == "https://dash-kv.vault.azure.net"
+
+    _reset()
+    CONF["azure_key_vault_name"] = "dash-kv"
+    name, url, _rg = svc._azure_key_vault()
+    assert name == "dash-kv" and url == "https://dash-kv.vault.azure.net"
+
+
+def test_the_vault_resource_group_falls_back_to_the_dashboard_one():
+    """Only needed for the module's data lookup, which is what lets it detect
+    RBAC-vs-access-policy; most vaults live beside everything else."""
+    _reset()
+    CONF["azure_key_vault_name"] = "dash-kv"
+    assert svc._azure_key_vault()[2] == "rg-dash"
+    CONF["azure_key_vault_resource_group"] = "rg-security"
+    assert svc._azure_key_vault()[2] == "rg-security"
+
+
+def test_the_azure_reference_names_a_secret_derived_from_the_function_id():
+    """Derived, not stored: apply and destroy rebuild it without touching the
+    vault again."""
+    _reset()
+    CONF["azure_key_vault_name"] = "dash-kv"
+    refs = svc.azure_bearer_reference("fn-123")
+    assert refs["shared_secret_kv_uri"] == (
+        "@Microsoft.KeyVault(SecretUri="
+        "https://dash-kv.vault.azure.net/secrets/cloudfn-fn-123-bearer/)")
+    assert refs["key_vault_name"] == "dash-kv"
+
+
+def test_azure_vars_carry_the_reference_and_blank_the_literal():
+    """The module's precondition wants exactly one of the two, and the literal is
+    the one that would end up in state."""
+    _reset()
+    CONF["azure_key_vault_name"] = "dash-kv"
+    got = _vars("azure", opts={"azure_bearer": svc.azure_bearer_reference("fn-1")})
+    assert got["shared_secret"] == "", "the literal value still reached terraform"
+    assert got["shared_secret_kv_uri"].startswith("@Microsoft.KeyVault(")
+    assert got["key_vault_name"] == "dash-kv"
+    assert "TOPSECRET" not in repr(got)
+
+
+def test_azure_without_a_vault_is_refused_not_downgraded():
+    """A deploy that quietly falls back to a readable app setting is the failure
+    this whole path exists to stop."""
+    _reset()
+    assert svc.azure_bearer_reference("fn-1") == {}
+    try:
+        svc._stage_azure_bearer("fn-1", "TOPSECRET")
+    except svc.CloudFunctionError as exc:
+        assert "Key Vault" in str(exc), exc
+        assert "TOPSECRET" not in str(exc)
+    else:
+        raise AssertionError("an Azure deploy proceeded with no vault configured")
+
+
+def test_the_azure_reference_survives_stripping_but_the_value_never_appears():
+    """The reference is needed at destroy time, and is a name rather than a
+    credential — so it is kept, and keeping it leaks nothing."""
+    _reset()
+    CONF["azure_key_vault_name"] = "dash-kv"
+    full = _vars("azure", opts={"azure_bearer": svc.azure_bearer_reference("fn-1")})
+    safe = svc.strip_secrets(full)
+    assert safe["shared_secret_kv_uri"] == full["shared_secret_kv_uri"]
+    assert "TOPSECRET" not in repr(safe)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
