@@ -1934,15 +1934,25 @@ class _UnixHTTP(http_client.HTTPConnection):
         self.sock = sock
 
 
-def _engine(method: str, path: str, body=None, timeout: float = 60.0):
-    """One Docker Engine API call. Returns (status, parsed-or-raw-body)."""
+def _engine(method: str, path: str, body=None, timeout: float = 60.0,
+            raw: bool = False):
+    """One Docker Engine API call. Returns (status, parsed-or-raw-body).
+
+    `raw=True` hands back the response bytes undecoded, and the container log stream is
+    the one caller that needs it. Its 8-byte frame headers carry the payload length as a
+    big-endian int32 — binary, not text — so the decode below turns any length byte >=
+    0x80 into U+FFFD, and re-encoding then yields three bytes where the frame had one.
+    That shifts every subsequent frame boundary and destroys the stream. It is not a rare
+    edge: it corrupts half of all payload sizes, and it cost a whole class of runner
+    result its error message (see the note in _run_sibling).
+    """
     conn = _UnixHTTP(DOCKER_SOCKET, timeout=timeout)
     try:
         payload = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"} if payload else {}
         conn.request(method, path, body=payload, headers=headers)
         resp = conn.getresponse()
-        raw = resp.read()
+        data = resp.read()
     except OSError as exc:
         raise PolicyRefusal(
             f"cannot reach the Docker socket at {DOCKER_SOCKET}: {exc}. The sibling "
@@ -1952,10 +1962,12 @@ def _engine(method: str, path: str, body=None, timeout: float = 60.0):
             conn.close()
         except Exception:  # noqa: BLE001
             pass
+    if raw:
+        return resp.status, data
     try:
-        return resp.status, json.loads(raw.decode("utf-8", "replace")) if raw else {}
+        return resp.status, json.loads(data.decode("utf-8", "replace")) if data else {}
     except ValueError:
-        return resp.status, raw.decode("utf-8", "replace")
+        return resp.status, data.decode("utf-8", "replace")
 
 
 def _demux(raw: bytes) -> str:
@@ -2053,9 +2065,11 @@ def _run_sibling(policy: "Policy", env: dict, emit, cancelled,
 
         status, _ = _engine("POST", f"/containers/{container}/wait",
                             timeout=timeout + 15)
-        status, raw = _engine(
-            "GET", f"/containers/{container}/logs?stdout=1&stderr=1")
-        text = _demux(raw.encode() if isinstance(raw, str) else raw)
+        # raw=True, never a str: re-encoding a decoded log stream mangles the frame
+        # headers and silently lost half of all results, successes included.
+        status, stream = _engine(
+            "GET", f"/containers/{container}/logs?stdout=1&stderr=1", raw=True)
+        text = _demux(stream)
     finally:
         try:
             _engine("DELETE", f"/containers/{container}?force=1&v=1")

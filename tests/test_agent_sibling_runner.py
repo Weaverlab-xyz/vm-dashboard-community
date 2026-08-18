@@ -60,7 +60,7 @@ class FakeEngine:
         self._start_status = start_status
         self.removed = []
 
-    def __call__(self, method, path, body=None, timeout=60.0):
+    def __call__(self, method, path, body=None, timeout=60.0, raw=False):
         self.calls.append((method, path))
         if path == "/containers/create":
             self.created = body
@@ -70,7 +70,13 @@ class FakeEngine:
         if path.endswith("/wait"):
             return 200, {"StatusCode": 0}
         if "/logs" in path:
-            return 200, _framed(self._logs)
+            # Mirror the real _engine both ways round, because the gap between them was
+            # the bug: this stub always handed back clean bytes, so the log read was
+            # tested on a path production never took. Without raw=True the real client
+            # decodes with errors="replace", and that is reproduced here rather than
+            # smoothed over — a caller that drops raw=True must fail a test, not ship.
+            framed = _framed(self._logs)
+            return 200, (framed if raw else framed.decode("utf-8", "replace"))
         if method == "DELETE":
             self.removed.append(path)
             return 204, {}
@@ -170,6 +176,53 @@ def test_the_container_is_removed_even_when_the_run_fails():
 def test_log_framing_is_stripped():
     engine = FakeEngine(logs=_OK)
     assert _run(engine)["complete"] is True
+
+
+def _result_of_length(size: int) -> str:
+    """A valid runner result whose encoded length is exactly `size` bytes."""
+    fields = {"ok": True, "vms": [], "next_cursor": "", "complete": True, "pad": ""}
+    fields["pad"] = "p" * (size - len(json.dumps(fields)))
+    out = json.dumps(fields)
+    assert len(out.encode()) == size, size
+    return out
+
+
+# The length the header carries is the payload's, and 0x180 == 384 puts 0x80 in its low
+# byte — on its own not valid UTF-8, which is the whole bug.
+_UNLUCKY = _result_of_length(0x180)
+
+
+def test_a_result_is_read_whatever_its_length():
+    """The log stream must never be decoded to str and re-encoded.
+
+    Docker frames each chunk with an 8-byte header whose last four bytes are the payload
+    length as a big-endian int32 — binary. `_engine` decodes a non-JSON body with
+    errors="replace", so any length byte >= 0x80 became U+FFFD and came back as three
+    bytes instead of one: every later frame boundary shifted and the payload was
+    unrecoverable. Half of all sizes hit it.
+
+    What the operator saw was not a parse error but "the sibling runner produced no
+    result", with a 300-character tail of the mangled JSON cut mid-word — so a Hyper-V
+    power failure reported the wrong cause, and a *successful* inventory_sync of an
+    unlucky length was reported as a failure too.
+
+    The old stub could not catch this: it returned clean bytes, and _OK is short enough
+    that its length bytes are all ASCII anyway.
+    """
+    assert len(_UNLUCKY.encode()) & 0xFF == 0x80, "this fixture no longer tests anything"
+    engine = FakeEngine(logs=_UNLUCKY)
+    assert _run(engine)["complete"] is True
+
+
+def test_the_log_read_asks_for_bytes():
+    """Named separately so the reason survives a refactor of the test above."""
+    engine = FakeEngine(logs=_OK)
+    _run(engine)
+    assert any("/logs" in path for _m, path in engine.calls)
+    source = ast.unparse(ast.parse(open(agent.__file__, encoding="utf-8").read()))
+    assert "raw=True" in source, (
+        "the container log read no longer passes raw=True to _engine — the frame headers "
+        "will be decoded and re-encoded, corrupting half of all runner results.")
 
 
 def test_output_that_is_not_json_is_a_refusal_not_a_crash():
