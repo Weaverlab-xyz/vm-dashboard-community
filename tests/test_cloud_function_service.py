@@ -576,6 +576,56 @@ def test_the_azure_reference_survives_stripping_but_the_value_never_appears():
     assert "TOPSECRET" not in repr(safe)
 
 
+# ── Updating a deployed function ──────────────────────────────────────────────
+
+def test_settings_merge_and_none_removes():
+    """Removal needs a spelling of its own: a merge can only add, so without it
+    there is no way to stop serving a database short of destroying the function."""
+    _reset()
+    current = {"FN_DB_NAMES": "appdb", "FN_DB_DRY_RUN": "1", "FN_DB_HOST": "db.internal"}
+    assert svc.merged_environment(current, {"FN_DB_NAMES": "appdb,reporting"}) == {
+        "FN_DB_NAMES": "appdb,reporting", "FN_DB_DRY_RUN": "1",
+        "FN_DB_HOST": "db.internal"}
+    assert svc.merged_environment(current, {"FN_DB_DRY_RUN": None}) == {
+        "FN_DB_NAMES": "appdb", "FN_DB_HOST": "db.internal"}
+    assert svc.merged_environment(current, {}) == current
+
+
+def test_an_update_cannot_smuggle_in_a_plaintext_credential():
+    """The deploy guard has to apply here too, or `environment` becomes the way
+    around it."""
+    _reset()
+    import inspect
+    source = inspect.getsource(svc.update_environment)
+    assert "_reject_plaintext_secrets" in source, \
+        "update_environment does not run the plaintext-credential guard"
+
+
+def test_the_package_variables_are_the_ones_each_module_declares():
+    """A mismatch is a 'no value for required variable' failure minutes into an
+    apply, on a function that was working before the update."""
+    _reset()
+    aws = svc._package_variables("aws", "f1", "abc", "YWJj")
+    assert aws == {"package_key": "function-packages/f1/abc.zip",
+                   "package_sha256_b64": "YWJj"}
+    assert svc._package_variables("gcp", "f1", "abc", "YWJj") == {
+        "package_object": "function-packages/f1/abc.zip"}
+    # Azure's is a SAS URL, which is a credential — stripped from persisted vars and
+    # rebuilt by _reinject_secrets, so it must NOT be set here.
+    assert svc._package_variables("azure", "f1", "abc", "YWJj") == {}
+
+
+def test_an_update_applies_where_the_function_already_is():
+    """The property that makes this an update rather than a second function: the
+    terraform state for a function lives under its DEPLOY job's key, so an apply
+    keyed on the update job's id would create a parallel one."""
+    _reset()
+    import inspect
+    source = inspect.getsource(svc.run_update_apply)
+    assert "_deploy_dir(row.deploy_job_id)" in source, \
+        "run_update_apply does not apply in the original deploy directory"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0

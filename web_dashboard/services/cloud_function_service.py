@@ -851,6 +851,138 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
             "tf_variables": safe_variables}
 
 
+def _package_variables(cloud: str, fn_id: str, sha256_hex: str, sha256_b64: str) -> dict:
+    """The module variables naming the package, per cloud.
+
+    Azure is absent on purpose: its module takes a single SAS URL, which is a
+    credential and is therefore stripped from persisted vars and rebuilt by
+    :func:`_reinject_secrets` from ``row.package_sha256``.
+    """
+    location = package_location(cloud, fn_id, sha256_hex)
+    if cloud == "aws":
+        return {"package_key": location["key"], "package_sha256_b64": sha256_b64}
+    if cloud == "gcp":
+        return {"package_object": location["key"]}
+    return {}
+
+
+def merged_environment(current: dict, changes: dict) -> dict:
+    """Settings merged over the current ones, with ``None`` meaning *remove*.
+
+    Removal needs an explicit spelling: a merge alone can only ever add keys, so
+    without this there would be no way to stop serving a database once FN_DB_NAMES
+    listed it, short of destroying the function.
+    """
+    return {key: value
+            for key, value in {**(current or {}), **(changes or {})}.items()
+            if value is not None}
+
+
+def update_environment(db: Session, *, fn_id: str, environment: dict,
+                       created_by: str = "") -> dict:
+    """Change a deployed function's NON-SECRET settings and re-apply in place.
+
+    Exists because the alternative is destroy-and-redeploy, and three things do not
+    survive that: the endpoint URL, the bearer secret, and the Entitle integration
+    registered against both. Adding a database to a ``db_grant`` adapter
+    (``FN_DB_NAMES``) is the case that needs it — the adapter's whole point is being
+    a stable endpoint something else already points at.
+
+    Settings are MERGED over the current ones; a key set to ``None`` is removed. The
+    package is rebuilt from the running image, so an update also brings the function
+    up to the code that image ships — deterministically a no-op when it is the same
+    image, and never a silent downgrade when it is not.
+    """
+    row = get_function(db, fn_id)
+    if not row:
+        raise CloudFunctionError(f"unknown function {fn_id!r}")
+    if row.status not in ("available", "failed"):
+        raise CloudFunctionError(
+            f"function is {row.status} — wait for the current job to finish")
+    if not row.deploy_job_id:
+        raise CloudFunctionError(
+            "this function has no deploy job recorded, so terraform has nothing to "
+            "update in place; redeploy it instead")
+    job = db.query(Job).filter(Job.id == row.deploy_job_id).first()
+    persisted = ((job.metadata_dict or {}).get("tf_variables") if job else None) or {}
+    if not persisted:
+        raise CloudFunctionError(
+            "the original deploy job's variables are gone, so the function cannot be "
+            "updated in place; redeploy it instead")
+
+    _reject_plaintext_secrets(environment)
+    merged = merged_environment(json.loads(row.env_ref or "{}"), environment)
+
+    # Rebuild to pin the hash, exactly as deploy does — the upload in the background
+    # job re-derives it and refuses to proceed if the source moved underneath.
+    _blob, sha256_hex, sha256_b64 = cloud_function_package.build(
+        cloud=row.cloud, workload=row.workload)
+    row.package_sha256 = sha256_hex
+    row.package_uri = package_location(row.cloud, row.id, sha256_hex)["uri"]
+    row.env_ref = json.dumps(merged)
+    provenance = _record_provenance(row)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+
+    environment_vars = dict(merged)
+    try:
+        from . import build_provenance as _bp
+        environment_vars.update(_bp.env_for_function(provenance))
+    except Exception:
+        pass
+
+    tf_variables = {**persisted, "environment": environment_vars,
+                    **_package_variables(row.cloud, row.id, sha256_hex, sha256_b64)}
+    update_job = job_service.create_job(
+        db, job_type="cloudfn_update", created_by=created_by,
+        metadata={"fn_id": row.id, "cloud": row.cloud, "workload": row.workload,
+                  "name": row.name, "tf_variables": strip_secrets(tf_variables)})
+    db.commit()
+    return {"ok": True, "fn_id": row.id, "job_id": update_job.id,
+            "environment": merged,
+            "tf_variables": strip_secrets(tf_variables)}
+
+
+async def run_update_apply(db: Session, *, fn_id: str, job_id: str,
+                           tf_variables: dict) -> None:
+    """Background task: re-apply the function with changed settings.
+
+    Applies in the ORIGINAL deploy job's directory, which is what makes this an
+    update rather than a second function — the terraform state for this function
+    lives under that job's key in the state backend.
+    """
+    row = get_function(db, fn_id)
+    if not row:
+        logger.warning("cloudfn update: row %s vanished", fn_id)
+        return
+    job_service.set_running(db, job_id)
+    try:
+        await _upload_package(cloud=row.cloud, fn_id=row.id,
+                              workload=row.workload, sha256_hex=row.package_sha256)
+        variables = await _reinject_secrets(row, tf_variables)
+        outputs = await terraform.apply(
+            _deploy_dir(row.deploy_job_id), variables,
+            template_dir=template_dir(row.cloud),
+            env=terraform_provider_env.provider_env(row.cloud),
+            on_line=_job_stream(job_id, 5, "Updating the function…"),
+        )
+        # Re-read rather than assume: an update must not leave the row describing
+        # something the cloud no longer matches.
+        row.resource_id = str(outputs.get("resource_id") or row.resource_id or "")
+        row.invoke_url = str(outputs.get("invoke_url") or row.invoke_url or "")
+        row.status = "available"
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        job_service.set_completed(db, job_id, result={
+            "fn_id": row.id, "invoke_url": row.invoke_url})
+    except Exception as exc:
+        # Deliberately NOT marking the row failed: a refused apply leaves the
+        # function serving its previous configuration, and flagging a working
+        # endpoint as broken sends people to redeploy something that is fine.
+        logger.error("cloudfn: update failed for %s: %s", fn_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+
+
 # Terraform line → (pct, message). GCP dominates this timeline: every deploy runs
 # Cloud Build, so "still creating" is the normal state for a minute or two and the
 # progress bar must not look stuck.

@@ -350,6 +350,13 @@ The line is drawn at the **server**, for two independent reasons:
    `create_actor_plan`/`delete_actor_plan` take `databases` for exactly this, and a
    delete must undo the create everywhere or it leaves orphaned users behind.
 
+Changing which databases an adapter serves is an **update**, not a redeploy:
+`update_environment` re-applies in the ORIGINAL deploy job's directory, because that
+is where the function's terraform state lives — applying under the update job's own
+id would build a second function beside the first. Destroy-and-redeploy is not an
+alternative here: the endpoint URL, the bearer secret and the Entitle integration
+registered against both are exactly what a redeploy discards.
+
 Two guards were added with it, both of which were missing and both of which matter
 at one database too: `give_access`, `revoke_access` and `delete_actor` refuse any
 account outside the adapter's own `jit_` namespace (403). Without them `delete_actor`

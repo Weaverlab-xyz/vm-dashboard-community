@@ -237,11 +237,27 @@ What changes with more than one database:
 | `delete_actor` | drops the account | drops it everywhere it was made, then the login — a database user left behind when its login goes is an orphaned user a later login of the same name re-adopts |
 | `get_asset_permissions/{id}` | the one asset | only that asset's accounts, read per database rather than inferred |
 
-> **Automatic pairing still deploys one adapter per database.** **Register in
-> Entitle** does not yet attach a newly provisioned database to an existing adapter —
-> that needs a way to update a deployed function's configuration, which the Functions
-> page has no path for today. To share one adapter, deploy it yourself with
-> `FN_DB_NAMES` via `POST /api/functions` and register it from the Functions page.
+To add a database to an adapter that is already running, change its settings rather
+than redeploying it:
+
+```
+POST /api/functions/{id}/environment
+{ "environment": { "FN_DB_NAMES": "appdb,reporting,billing" } }
+```
+
+Settings are merged over the current ones and a key set to `null` is removed. The
+function is re-applied **in place**, which is the point: destroy-and-redeploy loses
+the endpoint URL, the bearer secret, and the Entitle integration registered against
+both. An update also rebuilds the package from the running image, so it brings the
+function up to that image's handler code — a no-op when the image is unchanged,
+since packages are deterministic.
+
+> **Automatic pairing is unaffected, and that is correct.** **Register in Entitle**
+> deploys one adapter per database because each dashboard-provisioned database is its
+> own server instance — two of them never share one, so there is no adapter to share.
+> `FN_DB_NAMES` is for several databases on **one** server, which is the shape you get
+> from a server that was provisioned once and grew databases since, or from databases
+> registered rather than provisioned.
 
 ### portainer_access
 

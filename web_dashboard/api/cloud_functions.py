@@ -77,6 +77,13 @@ class InvokeRequest(BaseModel):
     payload: Optional[dict] = None
 
 
+class UpdateEnvironmentRequest(BaseModel):
+    # Merged over the function's current settings; a key set to null is removed.
+    # NON-secret only, same guard as deploy — credentials are changed by
+    # redeploying with secret_environment, not by editing settings.
+    environment: dict
+
+
 def _visible(db: Session, user: User):
     """Non-admins see only what they deployed — same rule as the DB page."""
     rows = cloud_function_service.list_functions(db)
@@ -231,6 +238,44 @@ async def invoke_function(fn_id: str, payload: InvokeRequest,
             status_code=502,
             detail={"code": "invoke_failed",
                     "message": f"could not reach the function ({type(exc).__name__})"}) from exc
+
+
+@router.post("/{fn_id}/environment")
+def update_environment(fn_id: str, payload: UpdateEnvironmentRequest,
+                       background: BackgroundTasks, db: Session = Depends(get_db),
+                       user: User = Depends(require_permission("cloud_function", "write"))):
+    """Change a deployed function's settings and re-apply it in place.
+
+    In place, because destroy-and-redeploy loses the endpoint URL, the bearer secret
+    and any Entitle integration registered against them. Adding a database to a
+    db_grant adapter (FN_DB_NAMES) is the case this exists for.
+    """
+    _require_enabled()
+    if not cloud_function_service.terraform_available():
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "terraform_unavailable",
+                    "message": "terraform is not installed in this image"})
+    try:
+        result = cloud_function_service.update_environment(
+            db, fn_id=fn_id, environment=payload.environment,
+            created_by=user.username)
+    except CloudFunctionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    background.add_task(
+        _run_update, fn_id=result["fn_id"], job_id=result["job_id"],
+        tf_variables=result["tf_variables"])
+    return result
+
+
+async def _run_update(*, fn_id: str, job_id: str, tf_variables: dict) -> None:
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        await cloud_function_service.run_update_apply(
+            db, fn_id=fn_id, job_id=job_id, tf_variables=tf_variables)
+    finally:
+        db.close()
 
 
 @router.post("/{fn_id}/entitle-register")

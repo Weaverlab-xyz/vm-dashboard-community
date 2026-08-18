@@ -238,7 +238,16 @@ _DEFAULT_FLAVOR = {"sqlserver": "rds", "mysql": "", "postgres": ""}
 # Which flavors need the login created on a SEPARATE connection to `master`.
 _SPLIT_LOGIN_FLAVORS = ("azure_sql",)
 
-_MSSQL_ROLE = {"read": "db_datareader", "readwrite": "db_datawriter"}
+# SQL Server's fixed database roles do NOT nest: db_datawriter grants INSERT,
+# UPDATE and DELETE and no SELECT at all, so a "readwrite" account that got only
+# that role could write rows it could not read back. MySQL's readwrite is
+# SELECT+INSERT+UPDATE+DELETE and db_grant advertises exactly that to Entitle, so
+# both roles are needed here for the two engines to mean the same thing by the same
+# role_code. A tuple per code, because a role that maps to one is the special case.
+_MSSQL_ROLES = {
+    "read": ("db_datareader",),
+    "readwrite": ("db_datareader", "db_datawriter"),
+}
 
 
 def _check_role(role: str) -> str:
@@ -341,11 +350,22 @@ def _mssql_user(*, user: str) -> list:
 
 
 def _mssql_add_role(*, user: str, role: str) -> list:
-    return [f"ALTER ROLE {_MSSQL_ROLE[role]} ADD MEMBER [{user}];"]
+    return [f"ALTER ROLE {name} ADD MEMBER [{user}];" for name in _MSSQL_ROLES[role]]
 
 
 def _mssql_drop_role(*, user: str, role: str) -> list:
-    return [f"ALTER ROLE {_MSSQL_ROLE[role]} DROP MEMBER [{user}];"]
+    """Reversed, so a revoke undoes a grant in the opposite order it was made, and
+    guarded, so it is idempotent.
+
+    The guard is not only for Entitle's retries. An account granted `readwrite`
+    before that code mapped to two roles holds only db_datawriter, and its revoke
+    now names db_datareader as well — an unguarded DROP MEMBER for a role the
+    account was never in would fail the whole revoke and leave the access it *does*
+    hold in place. Same reason _mssql_drop_user and _mssql_drop_login are guarded.
+    """
+    return [f"IF IS_ROLEMEMBER('{name}', '{user}') = 1 "
+            f"ALTER ROLE {name} DROP MEMBER [{user}];"
+            for name in reversed(_MSSQL_ROLES[role])]
 
 
 def _mssql_drop_login(*, user: str) -> list:

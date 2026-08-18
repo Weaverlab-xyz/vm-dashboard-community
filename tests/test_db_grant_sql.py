@@ -373,6 +373,44 @@ def test_composition_merges_adjacent_connections():
         appdb.index(next(s for s in appdb if "ALTER ROLE" in s))
 
 
+def test_readwrite_can_actually_read_on_every_engine():
+    """SQL Server's fixed database roles do not nest: db_datawriter grants INSERT,
+    UPDATE and DELETE and no SELECT. A readwrite account holding only that role can
+    write rows it cannot read back — and db_grant advertises readwrite to Entitle as
+    SELECT, INSERT, UPDATE, DELETE, so the adapter would be granting less than it
+    said it did."""
+    for engine, flavor in (("mysql", ""), ("postgres", ""),
+                           ("sqlserver", "rds"), ("sqlserver", "azure_sql")):
+        give = _flat(sql.give_access_plan(engine, username="jit_a_1",
+                                          database="appdb", role="readwrite",
+                                          flavor=flavor))
+        reads = "SELECT" in give or "db_datareader" in give
+        assert reads, f"{engine}/{flavor} readwrite grants no read: {give}"
+
+
+def test_revoking_a_role_the_account_never_held_is_a_no_op():
+    """An account granted readwrite before that mapped to two roles holds only
+    db_datawriter, and its revoke now names db_datareader too. Unguarded, that
+    DROP MEMBER fails the whole revoke and leaves the access it does hold in place."""
+    take = _flat(sql.revoke_access_plan("sqlserver", username="jit_a_1",
+                                        database="appdb", role="readwrite",
+                                        flavor="azure_sql"))
+    for name in ("db_datareader", "db_datawriter"):
+        assert f"IS_ROLEMEMBER('{name}'" in take, (name, take)
+
+
+def test_read_grants_only_read():
+    """The other half: readwrite gaining a role must not hand write access to the
+    read code."""
+    for engine, flavor in (("mysql", ""), ("postgres", ""),
+                           ("sqlserver", "rds"), ("sqlserver", "azure_sql")):
+        give = _flat(sql.give_access_plan(engine, username="jit_a_1",
+                                          database="appdb", role="read",
+                                          flavor=flavor))
+        for write in ("INSERT", "UPDATE", "DELETE", "db_datawriter"):
+            assert write not in give, f"{engine}/{flavor} read grants {write}: {give}"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
