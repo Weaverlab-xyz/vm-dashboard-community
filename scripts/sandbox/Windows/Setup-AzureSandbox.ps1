@@ -412,7 +412,94 @@ if ($AciState -ne 'Registered') {
     Write-Ok "Microsoft.ContainerInstance already registered"
 }
 
-# ── 6c. Container Registry (ACR) — mirror public images to dodge Docker Hub limits ──
+# ── 6c. Optional: grant the SP access to an EXTERNAL Shared Image Gallery RG ──
+# Twin of setup-azure.sh. The dashboard reads private images from a Compute Gallery
+# and, for promote, writes managed images / gallery image versions. That gallery
+# usually lives in a corp-owned RG *outside* this sandbox, where the SP has no rights
+# by default (see web_dashboard/services/azure_service.py: list_private_images +
+# create_image_from_blob). Opt in by setting AZURE_IMAGE_GALLERY_RG; leave it unset to
+# skip this block entirely.
+#
+#   AZURE_IMAGE_GALLERY_RG               external RG holding the gallery (triggers this step)
+#   AZURE_IMAGE_GALLERY_NAME             Compute Gallery name (optional; emits config key)
+#   AZURE_IMAGE_GALLERY_ROLE             role to grant (default: custom 'Dashboard Image Promoter')
+#   AZURE_IMAGE_GALLERY_SUBSCRIPTION_ID  gallery's subscription (default: current)
+#
+# Defaults to a least-privilege custom role scoped to read galleries/images + write
+# managed images and gallery image versions — created here if missing. Set
+# AZURE_IMAGE_GALLERY_ROLE=Contributor (or any existing role) to use that instead and
+# skip custom-role creation. Whoever runs this needs role-assignment rights on the
+# gallery RG (Owner / User Access Administrator) — a plain Contributor cannot grant
+# roles.
+$GalleryRg = $env:AZURE_IMAGE_GALLERY_RG
+if ($GalleryRg) {
+    Write-Section "Optional: external image-gallery RG access ($GalleryRg)"
+    $GalleryPromoterRole = 'Dashboard Image Promoter'
+    $GallerySub = if ($env:AZURE_IMAGE_GALLERY_SUBSCRIPTION_ID) { $env:AZURE_IMAGE_GALLERY_SUBSCRIPTION_ID } else { $SubscriptionId }
+    $GalleryRole = if ($env:AZURE_IMAGE_GALLERY_ROLE) { $env:AZURE_IMAGE_GALLERY_ROLE } else { $GalleryPromoterRole }
+    $GalleryScope = "/subscriptions/$GallerySub/resourceGroups/$GalleryRg"
+
+    # Create the custom role definition if we're using the default and it's absent.
+    # AssignableScopes is the whole subscription so re-runs targeting other RGs in the
+    # same sub reuse it; the *assignment* below is still scoped to just the gallery RG,
+    # so effective access stays RG-local.
+    if ($GalleryRole -eq $GalleryPromoterRole) {
+        $existingRoleDef = (az role definition list --name $GalleryRole `
+            --query '[0].roleName' -o tsv 2>$null)
+        if (-not $existingRoleDef) {
+            # Written to a temp file rather than passed inline: az on Windows mangles
+            # embedded-quote JSON on the command line.
+            $roleDefPath = Join-Path ([System.IO.Path]::GetTempPath()) "dashboard-gallery-role-$PID.json"
+            $roleDef = [ordered]@{
+                Name        = $GalleryPromoterRole
+                Description = 'Read galleries/images and publish managed images + gallery image versions for the VM Dashboard promote flow.'
+                Actions     = @(
+                    'Microsoft.Compute/galleries/read',
+                    'Microsoft.Compute/galleries/images/read',
+                    'Microsoft.Compute/galleries/images/write',
+                    'Microsoft.Compute/galleries/images/versions/read',
+                    'Microsoft.Compute/galleries/images/versions/write',
+                    'Microsoft.Compute/galleries/images/versions/delete',
+                    'Microsoft.Compute/images/read',
+                    'Microsoft.Compute/images/write',
+                    'Microsoft.Compute/images/delete',
+                    'Microsoft.Storage/storageAccounts/read'
+                )
+                AssignableScopes = @("/subscriptions/$GallerySub")
+            }
+            try {
+                $roleDef | ConvertTo-Json -Depth 5 | Set-Content -Path $roleDefPath -Encoding utf8
+                az role definition create --role-definition $roleDefPath | Out-Null
+                Write-Ok "Created custom role '$GalleryPromoterRole' (assignable in subscription $GallerySub)"
+            } finally {
+                Remove-Item $roleDefPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # Grant the SP the role on the gallery RG. Invoke-Retry absorbs both the custom-role
+    # definition's propagation delay and ARM's PrincipalNotFound race; the assignment is
+    # idempotent, so the existence check + retry are both safe.
+    $existingGalleryRole = (az role assignment list --assignee $SpObjectId --scope $GalleryScope `
+        --role $GalleryRole --query '[0].id' -o tsv 2>$null)
+    if ($existingGalleryRole) {
+        Write-Ok "SP already has '$GalleryRole' on $GalleryRg"
+    } else {
+        Invoke-Retry -Attempts 8 -DelaySeconds 5 -What "grant '$GalleryRole' on $GalleryRg" -Script {
+            az role assignment create --assignee-object-id $SpObjectId `
+                --assignee-principal-type ServicePrincipal `
+                --role $GalleryRole --scope $GalleryScope 2>&1 | Out-Null
+        } | Out-Null
+        Write-Ok "Granted SP '$GalleryRole' on $GalleryRg (subscription $GallerySub)"
+    }
+    # Recorded so rollback can drop this assignment (the corp gallery RG itself is never
+    # deleted by rollback — only the assignment we added here).
+    Set-StateValue azure image_gallery_rg   $GalleryRg
+    Set-StateValue azure image_gallery_sub  $GallerySub
+    Set-StateValue azure image_gallery_role $GalleryRole
+}
+
+# ── 6d. Container Registry (ACR) — mirror public images to dodge Docker Hub limits ──
 # Azure rate-limits anonymous Docker Hub pulls, and every ACI runner (Shell-Jump
 # Jumpoint, config-mgmt Ansible, cross-cloud promote) pulls a public image at deploy
 # time. Stand up a small ACR, mirror the three images into it once (az acr import is
@@ -573,6 +660,27 @@ if ($AcrLoginServer) {
         "k8s_runner_image_azure=$AcrLoginServer/dtzar/helm-kubectl:latest   # AKS k8s runner (ACI); full path, no server prepend"
     )
 }
+
+# Surface the external gallery in the pasteable config when opted in. (Comment lines
+# must not contain '=' — Export-ConfigJson would mis-parse them as keys.)
+if ($GalleryRg) {
+    $cfg += @(
+        '',
+        '# External Shared Image Gallery (SP granted access above):',
+        "azure_gallery_resource_group=$GalleryRg",
+        "azure_region.${Location}.gallery_resource_group=$GalleryRg"
+    )
+    if ($env:AZURE_IMAGE_GALLERY_NAME) {
+        $cfg += @(
+            "azure_shared_image_gallery=$($env:AZURE_IMAGE_GALLERY_NAME)              # Compute Gallery name",
+            "azure_region.${Location}.gallery_name=$($env:AZURE_IMAGE_GALLERY_NAME)"
+        )
+    }
+    $cfg += @(
+        "# Tip: point promote_runner_azure_target_resource_group at $GalleryRg to land promoted images in the gallery RG"
+    )
+}
+
 Write-DashboardConfig 'Azure sandbox configuration' $cfg
 Export-ConfigJson -Cloud azure -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1
 

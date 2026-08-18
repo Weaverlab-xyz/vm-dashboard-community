@@ -8,9 +8,10 @@ emitting a field the resolver doesn't know produces a sandbox that looks
 multi-region and isn't — with no error anywhere. This test fails loudly instead.
 
 Twin parity is hand-maintained (no shellcheck, no PSScriptAnalyzer, no parity job),
-and both failure shapes have shipped: `Setup-AwsSandbox.ps1` omitted the two DB
-parameter groups entirely, and pointed `db_security_group_id` at the VM security
-group instead of the DB one.
+and every failure shape below has actually shipped: `Setup-AwsSandbox.ps1` omitted the
+two DB parameter groups entirely and pointed `db_security_group_id` at the VM security
+group instead of the DB one, and `Setup-AzureSandbox.ps1` emitted neither gallery key
+because it had never carried the external image-gallery block at all.
 
 It reads the shell + PowerShell scripts as text, so it needs neither a cloud
 account nor fastapi.
@@ -53,14 +54,11 @@ _PAIRS = {
 # Known, separately-tracked twin gaps. Listed explicitly so a NEW gap fails loudly
 # rather than hiding behind an old one, and so the list shrinks as they close.
 #
-# azure gallery_*: Setup-AzureSandbox.ps1 has never carried the external
-# image-gallery block that setup-azure.sh provisions, so it emits neither key.
-# Closing it means porting that whole section, not adding two lines — tracked in
-# docs/notes/sandbox-provisioning-cost-audit.md ("Open — not addressed here", item 5).
-_KNOWN_TWIN_GAPS = {
-    ("azure", "gallery_name"),
-    ("azure", "gallery_resource_group"),
-}
+# Empty, and worth keeping that way: the azure gallery_* pair lived here until
+# Setup-AzureSandbox.ps1 gained the external image-gallery block its bash twin had
+# always carried. The stale-exemption check below is what forced this to be cleaned
+# up rather than left behind.
+_KNOWN_TWIN_GAPS: set = set()
 
 # One `key=value` line out of a config array, in either dialect. The value keeps its
 # variable reference ($DB_SG / $DbSg) so it can be compared with the flat key's.
