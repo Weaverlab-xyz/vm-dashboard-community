@@ -506,24 +506,16 @@ class Settings(BaseSettings):
     epml_site_id: str = ""       # Pathfinder site UUID; PATs are bound to the site active at creation
     epml_pat: str = ""           # Personal Access Token (PAT_ prefix); encrypted at rest when set via the UI
 
-    # Image Management (OVA / ISO / AMI building)
-    # Environment-specific paths — override in .env (or the settings panel) to
-    # match where your ISOs/OVAs live and where Packer should stage builds.
-    ova_search_path: str = r"C:\packer\ova"
-    iso_source_path: str = r"\\nas\ISO"
-    packer_work_root: str = r"C:\packer\work"
-    vmx_output_path: str = r"C:\packer\vmx"
-    s3_bucket_prefix: str = "vm-import-ova"
-    aws_iam_instance_profile: str = ""  # IAM instance profile for Packer surrogate EC2 (needs S3 read access)
+    # EC2 deploy — instance profile + SSH keypair for dashboard-provisioned instances.
+    # This block used to carry the local Packer/OVF image-building pipeline too: OVA +
+    # ISO search paths, the Packer work/VMX roots, the VMware ovftool path, the
+    # vm-import S3 prefix, the Packer surrogate instance profile and the ps-cli
+    # guest/ISO-share secret titles. None of them had a reader left — image handling is
+    # the cross-cloud registry behind /images now — so all eleven are gone. The five
+    # *path* keys stay named in classify.py's _LOCAL_PATHS on purpose; see the comment
+    # there before deleting them as stale.
     ec2_ssm_instance_profile: str = ""  # IAM instance profile to attach to dashboard-deployed EC2 instances (SSM access)
     ec2_ssh_key_secret: str = ""  # Secrets Manager secret name holding the SSH public key for EC2 deploy
-    ovf_tool_path: str = r"C:\Program Files (x86)\VMware\VMware Workstation\OVFTool\ovftool.exe"
-    # Guest OS credentials for cloud-prep (retrieved from Password Safe via ps-cli)
-    guest_user_secret_title: str = "Guest_User"
-    guest_pass_secret_title: str = "Guest_Pass"
-    # ISO network share credentials (retrieved from Password Safe via ps-cli)
-    iso_share_user_secret_title: str = "ISO_Share_User"
-    iso_share_pass_secret_title: str = "ISO_Share_Pass"
 
     # ECS Jumpoint container (beyondtrust/sra-jumpoint)
     bt_ecs_cluster: str = "bt-jumpoint"
