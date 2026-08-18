@@ -1292,11 +1292,12 @@
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS &amp; Azure)</span></p>
             <p class="text-xs text-gray-400 mb-3">
-              When on, provisioning an AWS database creates a dedicated managed DB user, onboards the DB as a
-              Password Safe managed system + managed account (via the <code class="bg-gray-100 px-1 rounded">{engine} SSM Custom Plugin</code>),
+              When on, provisioning an AWS or Azure database creates a dedicated managed DB user, onboards the DB as a
+              Password Safe managed system + managed account (via the <code class="bg-gray-100 px-1 rounded">{engine} SSM Custom Plugin</code>
+              on AWS, the <code class="bg-gray-100 px-1 rounded">{engine} Azure Run Command Plugin</code> on Azure),
               and onboards the PRA Vault credential (via the <code class="bg-gray-100 px-1 rounded">PRA Vault Username Password</code> plugin)
-              so Password Safe propagates rotations into the tunnel-injected credential. The custom plugins + jump-host RSA
-              key prep are one-time manual setup — see the <a href="/docs/databases#layer-2--password-safe-aws--azure" class="underline" target="_blank">database onboarding guide</a>.
+              so Password Safe propagates rotations into the tunnel-injected credential. GCP and OCI are not supported.
+              The custom plugins + the RSA key prep are one-time manual setup — see the <a href="/docs/databases#layer-2--password-safe-aws--azure" class="underline" target="_blank">database onboarding guide</a>.
             </p>
             <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
               <input type="checkbox" x-model="panelCfg.clouddb_ps_onboarding_enabled"
