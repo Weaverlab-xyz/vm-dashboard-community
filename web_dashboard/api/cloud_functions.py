@@ -53,17 +53,22 @@ class DeployRequest(BaseModel):
     subnet_id: Optional[str] = None                 # azure
     vpc_connector: Optional[str] = None             # gcp
     auth_mode: Optional[str] = None
-    environment: Optional[dict] = None              # NON-secret env only
+    # NON-secret settings only. A credential-shaped value here is refused — see
+    # secret_environment below, which is where credentials go.
+    environment: Optional[dict] = None
     timeout_seconds: Optional[int] = None
     memory_mb: Optional[int] = None
     resource_group_name: Optional[str] = None       # azure
     sku_name: Optional[str] = None                  # azure
     service_account_email: Optional[str] = None     # gcp
-    # Credential access for workloads that need one (db_grant). Each cloud resolves
-    # it differently and none of them takes the secret VALUE: AWS grants the
-    # function read on named Secrets Manager ARNs, GCP injects a Secret Manager
-    # secret as an env var, and Azure resolves an @Microsoft.KeyVault(...) reference
-    # placed in `environment` using the app's system-assigned identity.
+    # Credentials for workloads that need one (db_grant, portainer_access,
+    # azure_role_grant), as ``{ENV_VAR: reference}``. None of the three clouds takes
+    # the secret VALUE here: pass a Secrets Manager ARN on AWS, a Secret Manager
+    # secret id on GCP, or a Key Vault secret name on Azure, and the service wires up
+    # that cloud's own resolution mechanism.
+    secret_environment: Optional[dict] = None
+    # The original per-workload spellings of the same thing, still accepted so an
+    # existing caller keeps working. secret_environment covers both.
     readable_secret_arns: Optional[list[str]] = None   # aws
     db_admin_secret: Optional[str] = None              # gcp
 
@@ -168,6 +173,7 @@ def deploy_function(payload: DeployRequest, background: BackgroundTasks,
             vpc_connector=payload.vpc_connector or "",
             auth_mode=payload.auth_mode or "",
             environment=payload.environment or {},
+            secret_environment=payload.secret_environment or {},
             timeout_seconds=payload.timeout_seconds,
             memory_mb=payload.memory_mb,
             resource_group_name=payload.resource_group_name,

@@ -304,14 +304,27 @@ connection; `tests/test_db_grant_workload.py` pins both properties.
 
 ### Credentials
 
-The admin password is never a request field. Each cloud resolves a **reference**,
-so the value never enters Terraform state:
+The admin password is never a request field, and never a plaintext setting either.
+Every credential any workload needs is declared once, as `secret_environment`
+(`{ENV_VAR: reference}`), and `cloud_function_service._secret_environment` turns it
+into that cloud's own mechanism. Terraform sees a reference; the value never enters
+plan output, state, or the function's describe output:
 
 | Cloud | Mechanism |
 |---|---|
-| GCP | `secret_environment_variables` → `FN_DB_ADMIN_PASSWORD` |
-| Azure | `@Microsoft.KeyVault(SecretUri=…)` app setting, resolved by the platform using the app's system-assigned identity (which is why the module now declares one) |
-| AWS | no platform equivalent for Lambda — the function reads Secrets Manager itself with the boto3 the runtime already ships, scoped to named ARNs |
+| GCP | `secret_environment_variables` — the module takes a map, and binds `roles/secretmanager.secretAccessor` on each referenced secret to the runtime SA |
+| Azure | `@Microsoft.KeyVault(SecretUri=…)` app setting, resolved by the platform using the app's system-assigned identity (which is why the module declares one) |
+| AWS | no platform equivalent for Lambda — the id goes in `<NAME>_SECRET_ID` and the ARN on the role, and `fnruntime.secretref` reads Secrets Manager at cold start with the boto3 the runtime already ships |
+
+`fnruntime.secretref` is the workload-side half: **the value env var wins if set**
+(GCP and Azure have already put it there), otherwise resolve an id (AWS). One
+implementation, so the JSON-payload rules and the read caching are right once rather
+than per workload.
+
+The counterpart guard is on the way in: `environment` is for non-secret settings, and
+`_reject_plaintext_secrets` refuses a credential-shaped value there before the row and
+the Job are written. It has to be a hard error — `environment` is deliberately not in
+`_SECRET_TF_KEYS`, so there is no state between "accepted" and "leaked".
 
 The target (engine, host, port, database, flavor) also comes from the function's
 own configuration, never the request — otherwise every caller of this endpoint
@@ -396,4 +409,9 @@ A wrong value fails at apply as a 404 "Application not found".
   garbage-collected, a `data "google_storage_bucket_object"` would make `destroy`
   unrecoverable.
 - Terraform variables holding secrets are marked `sensitive = true`.
+- No credential is passed to a function as a plaintext env var on any cloud. The
+  deploy path refuses one (`_reject_plaintext_secrets`), using a superset of
+  `fnruntime.logs`' redaction rule — what the runtime will not log is what the
+  dashboard will not store. `tests/test_cloud_function_service.py` pins the
+  relationship so the two cannot drift.
 - Auth fails closed; see §2.4.

@@ -1,9 +1,11 @@
 """Cloud Functions: the pure half of cloud_function_service.
 
-Covers the two things that are cheap to get wrong and expensive to discover in the
-cloud: the per-cloud ``-var`` set, and the guarantee that no secret is persisted to
-job metadata. Both are pure functions, so they are tested with the heavy imports
-(config, database, SQLAlchemy) stubbed out — the repo's sys.modules idiom.
+Covers the things that are cheap to get wrong and expensive to discover in the
+cloud: the per-cloud ``-var`` set, the guarantee that no secret is persisted to job
+metadata, and the credential wiring — which cloud mechanism each reference turns
+into, and the refusal to accept a credential VALUE anywhere. All pure functions, so
+they are tested with the heavy imports (config, database, SQLAlchemy) stubbed out —
+the repo's sys.modules idiom.
 """
 import os
 import sys
@@ -336,6 +338,164 @@ def test_package_location_requires_the_bucket_to_be_configured():
 def test_package_location_is_content_addressed():
     _reset()
     assert svc.package_location("aws", "f1", "deadbeef")["key"].endswith("deadbeef.zip")
+
+
+# ── Credential references ─────────────────────────────────────────────────────
+#
+# The rule the whole feature rests on: a credential reaches a function BY REFERENCE
+# on every cloud, and a credential VALUE is refused before anything is written.
+
+def test_a_credential_in_the_plaintext_environment_is_refused():
+    """`environment` is not in _SECRET_TF_KEYS, so a value here reaches
+    jobs.extra_data, the job's Live Output and the function's console page. There is
+    no state between accepted and leaked, hence a hard error."""
+    _reset()
+    for key in ("FN_DB_ADMIN_PASSWORD", "FN_PORTAINER_API_KEY",
+                "FN_AZURE_CLIENT_SECRET", "MY_API_TOKEN", "FN_DB_CONNECTION_STRING",
+                "FN_SIGNING_PRIVATE_KEY", "FN_UPSTREAM_CREDENTIALS"):
+        try:
+            svc._reject_plaintext_secrets({key: "hunter2"})
+        except svc.CloudFunctionError as exc:
+            assert "secret_environment" in str(exc), exc
+            assert "hunter2" not in str(exc), "the error quoted the credential"
+        else:
+            raise AssertionError(f"{key} was accepted as a plaintext setting")
+
+
+def test_a_reference_in_the_environment_is_allowed():
+    """Three things name a credential without carrying one, and all three are how
+    the feature is meant to be used."""
+    _reset()
+    svc._reject_plaintext_secrets({
+        "FN_DB_ADMIN_SECRET_ID": "arn:aws:secretsmanager:us-east-1:1:secret:db-Ab12Cd",
+        "FN_DB_ADMIN_PASSWORD":
+            "@Microsoft.KeyVault(SecretUri=https://v.vault.azure.net/secrets/db/)",
+        "FN_PORTAINER_API_KEY": "",
+        "FN_DB_HOST": "db.internal",
+    })
+
+
+def test_the_guard_does_not_refuse_ordinary_settings():
+    """A guard that fires on FN_AUTH_HEADER — a real, non-secret fnruntime setting —
+    teaches people to route around it, which is worse than not having one."""
+    _reset()
+    svc._reject_plaintext_secrets({
+        "FN_AUTH_HEADER": "x-entitle-auth", "FN_AUTH_PREFIX": "",
+        "FN_DB_ADMIN_USER": "dbadmin", "FN_PORTAINER_URL": "https://portainer.internal",
+        "FN_AZURE_ROLES": "Reader", "FN_EGRESS_PROBE": "example.com:443",
+    })
+
+
+def test_the_guard_matches_what_the_runtime_refuses_to_log():
+    """One rule, two enforcement points: what fnruntime.logs will not LOG is what
+    the deploy path will not STORE. Drift means a key redacted in the function's
+    logs still sitting in cleartext in the dashboard."""
+    _reset()
+    from web_dashboard import functions  # noqa: F401  (puts fnruntime on sys.path)
+    from fnruntime import logs
+    missing = set(logs._REDACT_SUBSTRINGS) - set(svc._SECRET_ENV_SUBSTRINGS)
+    assert not missing, f"the deploy guard does not cover {sorted(missing)}"
+
+
+def test_gcp_turns_a_reference_into_a_platform_injected_secret():
+    _reset()
+    env, tfvars = svc._secret_environment("gcp", {"FN_PORTAINER_API_KEY": "portainer-key"})
+    assert env == {}, "nothing should reach the plaintext settings on GCP"
+    assert tfvars == {"secret_environment": {"FN_PORTAINER_API_KEY": "portainer-key"}}
+
+
+def test_aws_turns_a_reference_into_an_id_plus_a_grant():
+    """Lambda has no platform-resolved secret, so the id goes in the environment and
+    the ARN goes on the role — the function reads it itself at cold start."""
+    _reset()
+    arn = "arn:aws:secretsmanager:us-east-1:1:secret:portainer-Ab12Cd"
+    env, tfvars = svc._secret_environment("aws", {"FN_PORTAINER_API_KEY": arn})
+    assert env == {"FN_PORTAINER_API_KEY_SECRET_ID": arn}
+    assert tfvars == {"readable_secret_arns": [arn]}
+
+
+def test_the_aws_id_variable_is_the_one_the_runtime_actually_reads():
+    """The two halves are written in different languages in different files; if they
+    disagree the function deploys and then cannot find its credential."""
+    _reset()
+    from web_dashboard import functions  # noqa: F401
+    from fnruntime import secretref
+    arn = "arn:aws:secretsmanager:us-east-1:1:secret:thing-Ab12Cd"
+    env, _ = svc._secret_environment("aws", {"FN_THING": arn})
+    assert list(env) == [secretref.id_env_for("FN_THING")]
+
+
+def test_aws_refuses_a_bare_secret_name():
+    """AWS appends a random suffix to every secret ARN, so a name cannot be turned
+    into the ARN the IAM policy needs."""
+    _reset()
+    try:
+        svc._secret_environment("aws", {"FN_PORTAINER_API_KEY": "portainer-key"})
+    except svc.CloudFunctionError as exc:
+        assert "ARN" in str(exc), exc
+    else:
+        raise AssertionError("a bare name was accepted on AWS")
+
+
+def test_azure_turns_a_name_into_a_key_vault_reference():
+    _reset()
+    env, tfvars = svc._secret_environment(
+        "azure", {"FN_PORTAINER_API_KEY": "portainer-key"}, vault="dash-kv")
+    assert env == {
+        "FN_PORTAINER_API_KEY":
+            "@Microsoft.KeyVault(SecretUri="
+            "https://dash-kv.vault.azure.net/secrets/portainer-key/)"}
+    assert tfvars == {}
+    # A caller that already built the reference keeps it verbatim.
+    full = "@Microsoft.KeyVault(SecretUri=https://other.vault.azure.net/secrets/k/)"
+    env, _ = svc._secret_environment("azure", {"FN_X": full}, vault="dash-kv")
+    assert env == {"FN_X": full}
+
+
+def test_azure_says_which_setting_is_missing():
+    _reset()
+    try:
+        svc._secret_environment("azure", {"FN_PORTAINER_API_KEY": "portainer-key"})
+    except svc.CloudFunctionError as exc:
+        assert "azure_key_vault_name" in str(exc), exc
+    else:
+        raise AssertionError("an Azure reference resolved with no vault configured")
+
+
+def test_an_invalid_environment_name_is_refused_by_name():
+    """Two of the three clouds reject this at apply time, without saying which key."""
+    _reset()
+    try:
+        svc._secret_environment("gcp", {"not-a-var": "x"})
+    except svc.CloudFunctionError as exc:
+        assert "not-a-var" in str(exc), exc
+    else:
+        raise AssertionError("an invalid environment variable name was accepted")
+
+
+def test_no_references_means_no_variables():
+    _reset()
+    for cloud in ("aws", "azure", "gcp"):
+        assert svc._secret_environment(cloud, None) == ({}, {}), cloud
+        assert svc._secret_environment(cloud, {"FN_X": ""}) == ({}, {}), cloud
+
+
+def test_every_option_the_module_reads_is_one_deploy_actually_passes():
+    """The regression this pins cost the feature its credential path on two clouds:
+    readable_secret_arns and db_admin_secret were accepted by deploy(), read by
+    _build_tf_variables, and dropped in the gap between them — so the AWS role got no
+    secretsmanager:GetSecretValue and GCP injected nothing, and a paired db_grant
+    adapter deployed cleanly and then failed every grant at cold start."""
+    import inspect
+    import re as _re
+    builder = inspect.getsource(svc._build_tf_variables)
+    read = set(_re.findall(r'opts\.get\("([a-z_]+)"', builder))
+    read |= set(_re.findall(r'opts\["([a-z_]+)"\]', builder))
+    passed = set(_re.findall(r'^\s+"([a-z_]+)":', inspect.getsource(svc.deploy), _re.M))
+    missing = read - passed
+    assert not missing, (
+        f"_build_tf_variables reads {sorted(missing)} from opts, but deploy() never "
+        "puts them in the dict it passes")
 
 
 if __name__ == "__main__":

@@ -136,12 +136,16 @@ def _database_name(tf_variables: dict, engine: str) -> str:
 
 def _stage_admin_secret(row: CloudDatabase, admin_password: str) -> dict:
     """Write the admin credential to the cloud's own secret store and return the
-    references the function and its Terraform module need.
+    ``secret_environment`` entry the function resolves it through.
 
     The dashboard holds this password encrypted in ``app_config``, which the function
     cannot read — it is in a different trust domain by design. Staging it in the
     cloud's store is what lets each platform resolve it for the function without the
-    value ever passing through Terraform state.
+    value ever passing through Terraform state, the job record, or the function's own
+    settings page.
+
+    Only the REFERENCE differs per cloud, and turning it into the right mechanism is
+    ``cloud_function_service._secret_environment``'s job, not this one's.
     """
     from . import secrets_backend_service
 
@@ -152,23 +156,12 @@ def _stage_admin_secret(row: CloudDatabase, admin_password: str) -> dict:
     name = secrets_backend_service.write_sync(backend, key, admin_password)
 
     if row.cloud == "aws":
-        # IAM needs the ARN, and write_sync returns the NAME — AWS appends a random
-        # six-character suffix to every secret ARN, so the name cannot be turned into
+        # The ARN, not the name: the role's policy names ARNs, and AWS appends a
+        # random six-character suffix to every one, so the name cannot be turned into
         # one by string concatenation. Ask for it rather than wildcarding the policy.
-        return {"secret_id": name, "readable_secret_arns": [_aws_secret_arn(name)]}
-    if row.cloud == "gcp":
-        # Injected by the platform as FN_DB_ADMIN_PASSWORD via secret_environment_variables.
-        return {"db_admin_secret": name}
-    # Azure: a Key Vault reference in an app setting, resolved by the platform using
-    # the Function App's system-assigned identity before the worker starts.
-    vault = config_service.get("azure_key_vault_name") or config_service.get("azure_keyvault_name")
-    if not vault:
-        raise AdapterPairingError(
-            "azure_key_vault_name is not configured — the adapter resolves its "
-            "database credential through a Key Vault reference")
-    return {"environment_extra": {
-        "FN_DB_ADMIN_PASSWORD":
-            f"@Microsoft.KeyVault(SecretUri=https://{vault}.vault.azure.net/secrets/{name}/)"}}
+        return {"FN_DB_ADMIN_PASSWORD": _aws_secret_arn(name)}
+    # GCP takes the Secret Manager secret id; Azure takes the Key Vault secret name.
+    return {"FN_DB_ADMIN_PASSWORD": name}
 
 
 def _aws_secret_arn(name: str) -> str:
@@ -213,13 +206,10 @@ async def run_pairing(db: Session, *, db_id: str, job_id: str,
         database = _database_name(tf_variables, row.engine)
 
         job_service.update_progress(db, job_id, 15, "Staging the admin credential…")
-        refs = _stage_admin_secret(row, admin_password)
+        secret_environment = _stage_admin_secret(row, admin_password)
 
         environment = build_environment(row, admin_username=admin_username,
                                         database=database, dry_run=dry_run)
-        environment.update(refs.pop("environment_extra", {}))
-        if refs.get("secret_id"):
-            environment["FN_DB_ADMIN_SECRET_ID"] = refs.pop("secret_id")
 
         job_service.update_progress(db, job_id, 30, "Deploying the adapter function…")
         deployed = cloud_function_service.deploy(
@@ -229,7 +219,7 @@ async def run_pairing(db: Session, *, db_id: str, job_id: str,
             # endpoint. A public adapter would deploy fine and fail every grant.
             network_mode="vpc",
             environment=environment,
-            **refs)
+            secret_environment=secret_environment)
         fn_id = deployed["fn_id"]
         await cloud_function_service.run_deploy_apply(
             db, fn_id=fn_id, job_id=deployed["job_id"],

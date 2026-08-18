@@ -79,6 +79,34 @@ _DEFAULT_AUTH_MODE = {"aws": "NONE", "azure": "function_key", "gcp": "none"}
 # jobs.extra_data AND streams into the job's Live Output line by line.
 _SECRET_TF_KEYS = ("shared_secret", "package_sas_url", "storage_account_access_key")
 
+# Environment keys whose VALUE would be a credential. Every workload that needs one
+# takes it BY REFERENCE (``secret_environment`` below), on all three clouds, so a
+# plaintext one in `environment` is always an operator mistake — and an expensive
+# one, because `environment` is deliberately not in _SECRET_TF_KEYS: it lands in
+# jobs.extra_data, streams into the job's Live Output as terraform renders the plan,
+# and stays readable on the function's own console page for the life of the deploy.
+#
+# A superset of fnruntime.logs' redaction substrings (pinned by
+# tests/test_cloud_function_service.py), so what the runtime refuses to LOG is at
+# least what the deploy path refuses to STORE. It also folds in the credential names
+# that module matches EXACTLY rather than by substring — `api_key` and friends —
+# because an environment variable is always prefixed (FN_PORTAINER_API_KEY), so an
+# exact match would never fire here.
+#
+# Deliberately NOT included, for the same reason logs.py leaves out "key": "auth",
+# which would refuse the legitimate FN_AUTH_HEADER / FN_AUTH_PREFIX settings and
+# teach people to work around the guard.
+_SECRET_ENV_SUBSTRINGS = (
+    "password", "passwd", "pwd", "secret", "token", "credential", "authorization",
+    "api_key", "apikey", "private_key", "connection_string", "cookie", "sas_url",
+)
+
+# Two things that carry a credential's NAME rather than its value, and are therefore
+# fine in cleartext: the id variable fnruntime.secretref reads on AWS, and the app
+# setting the Azure platform resolves before the worker starts.
+_REFERENCE_SUFFIX = "_SECRET_ID"
+_AZURE_KV_PREFIX = "@Microsoft.KeyVault("
+
 _DEFAULT_TIMEOUT_SECONDS = 60
 _DEFAULT_MEMORY_MB = 256
 
@@ -86,6 +114,11 @@ _DEFAULT_MEMORY_MB = 256
 # an Azure Function App name becomes a DNS label, so lowercase alphanumeric + '-'
 # only, <= 60). Normalising to the strictest rule keeps one name valid everywhere.
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{2,59}$")
+
+# Environment variable names, checked before they reach a module: all three clouds
+# reject an invalid one, but two of them do it at apply time with a message that
+# does not name the offending key.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class CloudFunctionError(Exception):
@@ -236,6 +269,89 @@ def _csv(raw) -> list:
     return [part.strip() for part in str(raw or "").split(",") if part.strip()]
 
 
+def _reject_plaintext_secrets(environment: Optional[dict]) -> None:
+    """Refuse a credential VALUE in the plaintext ``environment`` map.
+
+    Deliberately a hard error rather than a warning: the damage is done the moment
+    the deploy is recorded (see _SECRET_ENV_SUBSTRINGS), so there is no useful state
+    between "accepted" and "leaked", and rotating whatever was pasted is a worse
+    afternoon than reading this message.
+    """
+    for key, value in (environment or {}).items():
+        name = str(key)
+        if not any(s in name.lower() for s in _SECRET_ENV_SUBSTRINGS):
+            continue
+        if name.upper().endswith(_REFERENCE_SUFFIX):
+            continue                                    # an id, not a value
+        text = str(value or "")
+        if not text or text.startswith(_AZURE_KV_PREFIX):
+            continue                                    # unset, or a Key Vault reference
+        raise CloudFunctionError(
+            f"{name} looks like a credential, and `environment` is stored and logged "
+            "in cleartext. Pass it as secret_environment instead — a Secrets Manager "
+            "ARN on AWS, a Secret Manager secret id on GCP, a Key Vault secret name "
+            "on Azure — so only the reference is ever recorded.")
+
+
+def _secret_environment(cloud: str, refs: Optional[dict], *, vault: str = "") -> tuple:
+    """``(extra_environment, extra_tf_variables)`` for ``{ENV_NAME: <reference>}``.
+
+    One deploy field, three mechanisms, because only two of the clouds resolve a
+    secret for you:
+
+      * **GCP** — ``secret_environment_variables``; Terraform passes the secret id
+        and the platform injects the value.
+      * **Azure** — an ``@Microsoft.KeyVault(...)`` app setting, resolved by the
+        platform using the app's system-assigned identity.
+      * **AWS** — nothing platform-side, so the id goes in the function's
+        environment and the ARN goes on its role; ``fnruntime.secretref`` reads it
+        at cold start. ``<NAME>_SECRET_ID`` is the name that module derives, which
+        is what lets one entry here work on all three clouds with no per-workload
+        mapping table.
+
+    In every case Terraform sees a reference and never a value.
+    """
+    cleaned = {}
+    for key, value in (refs or {}).items():
+        name, ref = str(key).strip(), str(value).strip()
+        if not name or not ref:
+            continue
+        if not _ENV_NAME_RE.match(name):
+            raise CloudFunctionError(
+                f"{name!r} is not a valid environment variable name")
+        cleaned[name] = ref
+    if not cleaned:
+        return {}, {}
+
+    if cloud == "gcp":
+        return {}, {"secret_environment": cleaned}
+
+    if cloud == "aws":
+        for name, ref in cleaned.items():
+            if not ref.startswith("arn:"):
+                raise CloudFunctionError(
+                    f"secret_environment[{name}] must be a full Secrets Manager ARN "
+                    "on AWS — the role's policy names the ARN, and AWS appends a "
+                    f"random suffix to every one, so {ref!r} cannot be turned into "
+                    "one by concatenation")
+        return ({f"{name}{_REFERENCE_SUFFIX}": ref for name, ref in cleaned.items()},
+                {"readable_secret_arns": list(cleaned.values())})
+
+    out = {}
+    for name, ref in cleaned.items():
+        if ref.startswith(_AZURE_KV_PREFIX):
+            out[name] = ref                             # already a full reference
+            continue
+        if not vault:
+            raise CloudFunctionError(
+                "azure_key_vault_name is not configured — an Azure function resolves "
+                "its credentials through a Key Vault reference, so there is nowhere "
+                f"for {name} to come from")
+        out[name] = (f"@Microsoft.KeyVault(SecretUri="
+                     f"https://{vault}.vault.azure.net/secrets/{ref}/)")
+    return out, {}
+
+
 def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
                         package: dict, network: dict, opts: dict) -> dict:
     """The ``-var`` set for the cloud's module. Pure: no config reads, no I/O —
@@ -262,8 +378,9 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
             "subnet_ids": network.get("subnet_ids", []),
             "security_group_ids": network.get("security_group_ids", []),
             # AWS is the only cloud with no platform-resolved env-var secret for
-            # functions, so a credential-using workload reads it itself and needs
-            # the grant. Named ARNs only — never a wildcard.
+            # functions, so a credential-using workload reads it itself (via
+            # fnruntime.secretref, from the <NAME>_SECRET_ID env var deploy() sets)
+            # and needs the grant. Named ARNs only — never a wildcard.
             "readable_secret_arns": _csv(opts.get("readable_secret_arns")),
         }
 
@@ -278,8 +395,11 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
             "package_object": package["key"],
             "service_account_email": opts.get("service_account_email", ""),
             "vpc_connector": network.get("vpc_connector", ""),
-            # Injected as FN_DB_ADMIN_PASSWORD by the platform, so the value never
+            # Secret Manager ids, injected as env vars by the platform, so no value
             # reaches Terraform state or the function's describe output.
+            # db_admin_secret is the original db_grant-specific spelling; the module
+            # merges the two.
+            "secret_environment": dict(opts.get("secret_environment") or {}),
             "db_admin_secret": opts.get("db_admin_secret", ""),
         }
 
@@ -530,6 +650,7 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
            subnet_ids: Optional[list] = None, subnet_id: str = "",
            vpc_connector: str = "", security_group_ids: Optional[list] = None,
            auth_mode: str = "", environment: Optional[dict] = None,
+           secret_environment: Optional[dict] = None,
            timeout_seconds: Optional[int] = None, memory_mb: Optional[int] = None,
            **opts) -> dict:
     """Record and stage a function deploy: validate, mint the bearer secret, build
@@ -552,6 +673,21 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
                                 subnet_ids=subnet_ids, subnet_id=subnet_id,
                                 vpc_connector=vpc_connector,
                                 security_group_ids=security_group_ids)
+
+    # Same reason, and the more important one: a credential pasted into `environment`
+    # is leaked the instant the row and the Job are written, so it has to be refused
+    # here rather than anywhere downstream.
+    _reject_plaintext_secrets(environment)
+    secret_env, secret_vars = _secret_environment(
+        cloud, secret_environment,
+        vault=_cfg("azure_key_vault_name") or _cfg("azure_keyvault_name"))
+    environment = {**(environment or {}), **secret_env}
+    # The union of what the caller granted explicitly and what secret_environment
+    # implies, deduplicated: the same ARN twice is a policy statement that reads
+    # like a mistake.
+    readable_arns = _csv(opts.get("readable_secret_arns"))
+    readable_arns += [arn for arn in secret_vars.get("readable_secret_arns", [])
+                      if arn not in readable_arns]
 
     row = CloudFunction(
         name=fn_name, workload=workload, cloud=cloud, region=region,
@@ -612,6 +748,15 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
             "sku_name": opts.get("sku_name") or _cfg("azure_functions_plan_sku"),
             "service_account_email": opts.get("service_account_email")
             or _cfg("gcp_functions_service_account"),
+            # Credential references. Both spellings reach the module: the generic
+            # secret_environment, and the two workload-specific options the pairing
+            # path passes. Without this they were dropped silently — the AWS role
+            # got no secretsmanager:GetSecretValue and GCP injected nothing, so a
+            # paired db_grant adapter deployed cleanly and then failed every grant
+            # at cold start.
+            "readable_secret_arns": readable_arns,
+            "db_admin_secret": opts.get("db_admin_secret", ""),
+            "secret_environment": secret_vars.get("secret_environment", {}),
         })
 
     # Build the vars BEFORE create_job so the secret-stripped copy is embedded

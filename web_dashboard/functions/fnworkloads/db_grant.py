@@ -38,7 +38,7 @@ import os
 import secrets
 import string
 
-from fnruntime import logs
+from fnruntime import logs, secretref
 from fnruntime.contract import Context, Request, Response
 
 NAME = "db_grant"
@@ -124,28 +124,22 @@ def _asset(target: dict) -> dict:
 def _admin_password() -> str:
     """The DB admin password, resolved without it ever being a request field.
 
-    GCP injects it as a secret env var and Azure resolves a Key Vault reference in
-    app settings — both land in FN_DB_ADMIN_PASSWORD before this code runs. AWS has
-    no platform-resolved equivalent for Lambda, so read Secrets Manager directly
-    with the boto3 the runtime already ships.
+    Always a reference, never a plaintext setting: GCP injects a Secret Manager
+    secret and Azure resolves a Key Vault reference (both land in
+    FN_DB_ADMIN_PASSWORD before this code runs), and on AWS the function reads
+    Secrets Manager itself. ``fnruntime.secretref`` owns that fan-out.
+
+    FN_DB_ADMIN_SECRET_ID is the id variable this workload shipped with, so it is
+    still accepted ahead of the conventional name and existing deployments keep
+    resolving unchanged.
     """
-    direct = _env("FN_DB_ADMIN_PASSWORD")
-    if direct:
-        return direct
-    secret_id = _env("FN_DB_ADMIN_SECRET_ID")
-    if not secret_id:
+    password = secretref.resolve("FN_DB_ADMIN_PASSWORD", "FN_DB_ADMIN_SECRET_ID")
+    if not password:
         raise RuntimeError(
             "no database admin credential available: set FN_DB_ADMIN_PASSWORD "
             "(GCP secret env var / Azure Key Vault reference) or FN_DB_ADMIN_SECRET_ID "
             "(AWS Secrets Manager)")
-    import boto3  # noqa: PLC0415 — Lambda ships it; the other clouds never reach here
-    client = boto3.client("secretsmanager", region_name=_env("AWS_REGION") or None)
-    payload = client.get_secret_value(SecretId=secret_id).get("SecretString") or ""
-    if payload.startswith("{"):
-        import json
-        parsed = json.loads(payload)
-        return str(parsed.get("password") or parsed.get("admin_password") or "")
-    return payload
+    return password
 
 
 def _generate_password(length: int = 24) -> str:

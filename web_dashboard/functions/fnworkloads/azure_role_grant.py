@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from fnruntime import logs
+from fnruntime import logs, secretref
 from fnruntime.contract import Context, Request, Response
 
 NAME = "azure_role_grant"
@@ -71,7 +71,11 @@ def _config() -> dict:
     return {
         "tenant_id": _env("FN_AZURE_TENANT_ID"),
         "client_id": _env("FN_AZURE_CLIENT_ID"),
-        "client_secret": _env("FN_AZURE_CLIENT_SECRET"),
+        # By reference on every cloud (fnruntime.secretref). This one holds
+        # User Access Administrator, so it is the last credential that should
+        # ever sit in a plaintext setting.
+        "client_secret": secretref.resolve(
+            "FN_AZURE_CLIENT_SECRET", "FN_AZURE_CLIENT_SECRET_ID"),
         "subscription_id": subscription,
         "scopes": _env("FN_AZURE_SCOPES"),
         "roles": _env("FN_AZURE_ROLES"),
@@ -86,6 +90,11 @@ def _token(config: dict) -> str:
         return _TOKEN["value"]
     for key in ("tenant_id", "client_id", "client_secret"):
         if not config.get(key):
+            if key == "client_secret":
+                raise RuntimeError(
+                    "no Azure client secret available: set FN_AZURE_CLIENT_SECRET "
+                    "(GCP secret env var / Azure Key Vault reference) or "
+                    "FN_AZURE_CLIENT_SECRET_ID (AWS Secrets Manager)")
             raise RuntimeError(f"FN_AZURE_{key.upper()} is not set")
     body = urllib.parse.urlencode({
         "grant_type": "client_credentials",
