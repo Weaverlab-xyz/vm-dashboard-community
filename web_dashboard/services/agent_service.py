@@ -33,6 +33,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
@@ -418,6 +419,50 @@ def allowed_job_types(agent: RemoteAgent) -> tuple:
     if not per_agent:
         return AGENT_JOB_TYPES
     return tuple(t for t in AGENT_JOB_TYPES if t in per_agent)
+
+
+# The agent build that first understood `dashboard_secret` in its connections.yaml and
+# could open a sealed credential. Below this, that key is an unknown key the agent ignores.
+MIN_DASHBOARD_SECRET_VERSION = (2, 1)
+
+
+def supports_dashboard_secret(agent: RemoteAgent) -> bool:
+    """Whether this agent can fetch a credential the dashboard holds for it.
+
+    Read at ENQUEUE time, because the failure it prevents is quiet and expensive. An older
+    agent does not error on `dashboard_secret: true` — it does not know the key, so it
+    falls through its precedence chain to a local password that the operator has just
+    deleted, sends an **empty** one, and gets back the hypervisor's own "wrong username or
+    password". That reads as a credential problem rather than a version problem, and on the
+    30-minute sync schedule it retries until the service account locks out.
+
+    Honest about its own limits: ``agent_version`` arrives on the lease body and is stored
+    exactly as reported (see :func:`record_self_report`), so this is a compatibility guard
+    for an honest fleet, not a security boundary — and nothing downstream trusts it. It
+    fails *safe*: a refused enqueue, never a job that completes green. A `reported_features`
+    column alongside `reported_job_types` would be the precise channel if this ever needs
+    to gate something that matters.
+    """
+    match = re.match(r"\s*(\d+)\.(\d+)", str(agent.agent_version or ""))
+    if not match:
+        # Never reported one, so it has never leased under a build that reports one.
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= MIN_DASHBOARD_SECRET_VERSION
+
+
+def dashboard_secret_upgrade_hint(agent: RemoteAgent, conn_name: str) -> str:
+    """The refusal an operator sees, with the remedy in it.
+
+    A failed job renders ``error_message`` and nothing else, and this refusal happens
+    before a job row exists at all — so whatever it does not say is not recoverable from.
+    """
+    return (f"Connection '{conn_name}' takes its credential from the dashboard, but agent "
+            f"'{agent.name}' reports version "
+            f"{agent.agent_version or 'unknown'} and needs at least "
+            f"{'.'.join(str(p) for p in MIN_DASHBOARD_SECRET_VERSION)}. Pull "
+            f"chrweav/dashboard-agent:latest on that host and restart the container — "
+            f"re-enrolment is not needed, the agent keeps its identity. Nothing was "
+            f"queued.")
 
 
 def set_allowed_job_types(db: Session, agent: RemoteAgent, types) -> RemoteAgent:

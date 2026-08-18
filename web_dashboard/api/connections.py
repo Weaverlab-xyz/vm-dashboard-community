@@ -28,9 +28,15 @@ class ConnectionRequest(BaseModel):
     """A connection to create.
 
     ``secret`` is write-only and never echoed back — :func:`hcs.serialize` has no field
-    for it, only a ``has_secret`` boolean. An **agent-bound** connection (``agent_id``
-    set) ignores ``host``/``username``/``secret`` entirely: the credential lives in that
-    agent's own connections.yaml and ``agent_connection_name`` is the whole join.
+    for it, only a ``has_secret`` boolean.
+
+    An **agent-bound** connection (``agent_id`` set) always ignores ``host`` and
+    ``username``: those aim the connection, and they stay the customer's to choose in that
+    agent's own connections.yaml, with ``agent_connection_name`` as the join. It may carry
+    ``secret`` or ``secret_ref`` so the agent can fetch the credential per job instead of
+    storing it on the on-prem host — inert until that agent's file sets
+    ``dashboard_secret: true``, so setting one here cannot change behaviour by itself. A
+    ``secret_ref`` of ``ps_account://<id>`` means the dashboard holds no password either.
     """
     kind: str
     name: str

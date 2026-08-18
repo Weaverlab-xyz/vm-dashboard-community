@@ -13,6 +13,13 @@ Secrets reuse ``config_service``'s Fernet (``encrypt_value``/``decrypt_value``),
 exists for exactly this case — a secret held in a table other than ``app_config``. One
 secret-at-rest story and one rotation hazard rather than two. ``secret_ref`` sits
 alongside for operators who want no secrets in the dashboard database at all.
+
+An **agent-bound** row may now carry a credential too, which it could not before. See the
+``HypervisorConnection`` docstring for where that line falls — the dashboard may hold the
+secret, never the target — and :func:`agent_secret_row` for the one authorized way to read
+it. A ``ps_account://`` ref is the exception to "single reader": it has a checkout that
+must be checked back in, so ``agent_ps_credential_service`` owns it and this module only
+recognises it and refuses to treat it as a value.
 """
 import json
 import logging
@@ -56,6 +63,14 @@ OPTION_KEYS = {
 }
 
 _SEED_MARK = "hypervisor_connections_seeded"
+
+# A `secret_ref` scheme meaning "the dashboard holds no password either — check one out
+# of Password Safe per job and check it back in". Handled ONLY by
+# `services/agent_ps_credential_service`, and deliberately NOT added to
+# `config_service._EXT_PREFIXES`: the four prefixes there are stateless reads, whereas
+# this one opens a request that somebody has to close. Registered there, every incidental
+# `config_service.get()` would leak an open Password Safe request.
+PS_ACCOUNT_PREFIX = "ps_account://"
 
 
 class HypervisorConnectionError(Exception):
@@ -190,13 +205,136 @@ def resolve(db: Session, kind: str, connection_id: Optional[str] = None) -> Conn
 
 
 def to_connection(row: HypervisorConnection) -> Connection:
+    # An agent-bound row's credential is NOT resolved here. Every hypervisor router
+    # reaches `to_connection` through `conn_or_error` before it checks `conn.agent_id`,
+    # so resolving unconditionally would decrypt the credential — or, for a `secret_ref`,
+    # make a live vault round-trip, or for `ps_account://` open a Password Safe request
+    # nobody closes — on every page load, into a `Connection` that request will not use.
+    # The one path that legitimately wants it is `agent_secret()`, which asks for it by
+    # name after proving the job owns it.
     return Connection(
         id=row.id, kind=row.kind, name=row.name,
         host=row.host or "", port=int(row.port or DEFAULT_PORTS.get(row.kind, 443)),
-        username=row.username or "", secret=_resolve_secret(row),
+        username=row.username or "",
+        secret="" if row.agent_id else _resolve_secret(row),
         verify_ssl=bool(row.verify_ssl), options=row.options_dict,
         agent_id=row.agent_id, agent_connection_name=row.agent_connection_name or "",
         site=row.site or "")
+
+
+# ── credentials the dashboard holds on an agent's behalf ──────────────────────
+#
+# One reader for the whole feature, so the authorization lives in a single function
+# rather than being restated at a call site that forgets a clause. The endpoint that
+# calls this has already proven, via `agent_service.owned_job`, that the *job* belongs to
+# the calling agent; everything below proves the *connection* does too.
+
+def is_ps_account(row: HypervisorConnection) -> bool:
+    """Whether this row's credential is a Password Safe checkout rather than a value."""
+    return str(row.secret_ref or "").strip().startswith(PS_ACCOUNT_PREFIX)
+
+
+def ps_account_id(row: HypervisorConnection) -> str:
+    """The managed-account id behind a ``ps_account://`` ref."""
+    return str(row.secret_ref or "").strip()[len(PS_ACCOUNT_PREFIX):].strip()
+
+
+def agent_secret_row(db: Session, *, agent_id: str, connection_id: str,
+                     ref: str) -> HypervisorConnection:
+    """The connection an agent may fetch a credential for, or a refusal.
+
+    Deliberately does **not** resolve the credential: a ``ps_account://`` row has a
+    checkout lifecycle that only ``agent_ps_credential_service`` should drive, and mixing
+    the two here is how a request ends up opened by a caller with no path to close it.
+
+    ``agent_id`` is checked against the row as well as the job, because job ownership
+    alone is not the same claim — a job row could exist against a connection bound to a
+    different agent, and a stolen key must not turn that into a credential read.
+    """
+    row = db.query(HypervisorConnection).filter(
+        HypervisorConnection.id == connection_id).first()
+    # One refusal for "no such row", "not yours" and "wrong name", matching
+    # `agent_service.owned_job`: an agent must not be able to probe for the existence of
+    # connections it has no claim on.
+    if row is None or not row.agent_id or row.agent_id != agent_id:
+        raise HypervisorConnectionError("No such connection for this agent.")
+    if (row.agent_connection_name or "") != (ref or ""):
+        raise HypervisorConnectionError("No such connection for this agent.")
+    if not row.is_active:
+        raise HypervisorConnectionError(f"Connection {row.name!r} is disabled.")
+    if not (row.secret_enc or row.secret_ref):
+        raise HypervisorConnectionError(
+            f"connection {row.name!r} declares 'dashboard_secret: true' in this agent's "
+            f"connections.yaml, but the dashboard holds no credential for it. On the "
+            f"Connections page, edit this connection and set a password, a secret "
+            f"reference, or a Password Safe account — or remove 'dashboard_secret' from "
+            f"connections.yaml and restore the local credential. Nothing was attempted "
+            f"against the hypervisor.")
+    return row
+
+
+def resolve_agent_secret(row: HypervisorConnection) -> tuple:
+    """``(secret, source_label)`` for a row whose credential is a stored value or a
+    stateless vault reference.
+
+    An empty result is a **hard error, not an empty password.**
+    ``config_service._resolve_external`` swallows a backend failure and returns ``""``, so
+    a vault outage otherwise arrives at a hypervisor as a blank credential — which reads
+    as "wrong username or password" and, retried on a schedule, risks locking the service
+    account out. Failing here names the backend instead.
+    """
+    if is_ps_account(row):
+        raise HypervisorConnectionError(
+            f"connection {row.name!r} uses a Password Safe account and must be acquired "
+            f"through agent_ps_credential_service, not resolved as a value")
+    secret = _resolve_secret(row)
+    if not secret:
+        if row.secret_ref:
+            raise HypervisorConnectionError(
+                f"Connection {row.name!r}: its secret reference "
+                f"({row.secret_ref}) resolved to an empty value — check that the secret "
+                f"exists in that backend and that the dashboard can reach it.")
+        raise HypervisorConnectionError(
+            f"Connection {row.name!r}: its stored credential is empty.")
+    source = f"secret_ref:{row.secret_ref.split('://', 1)[0]}" if row.secret_ref \
+        else "secret_enc"
+    return secret, source
+
+
+def dashboard_secret_blockers(db: Session, connection_id: str, agent) -> list:
+    """Reasons this connection's dashboard-held credential could not be delivered.
+
+    Empty for the overwhelming majority of rows, including every agent-bound row that
+    holds no credential — that is the original behaviour and there is nothing to gate.
+
+    Called at **enqueue** time by both paths that create an ``agent_hypervisor`` job. The
+    failures below are the ones that would otherwise surface as a hypervisor
+    authentication error, which sends the operator to look at the wrong thing entirely and,
+    on the sync schedule, retries until a service account locks out.
+
+    Imports are local: this module is deliberately importable without the agent or Password
+    Safe layers, and a top-level import here would make ``agent_ps_credential_service`` —
+    which imports *this* — a cycle.
+    """
+    from . import agent_service, ps_api_service
+
+    row = db.query(HypervisorConnection).filter(
+        HypervisorConnection.id == connection_id).first()
+    if row is None or not row.agent_id or not (row.secret_enc or row.secret_ref):
+        return []
+
+    problems = []
+    if agent is not None and not agent_service.supports_dashboard_secret(agent):
+        problems.append(
+            agent_service.dashboard_secret_upgrade_hint(agent, row.name))
+    if is_ps_account(row) and not ps_api_service.configured():
+        problems.append(
+            f"Connection {row.name!r} takes its credential from Password Safe "
+            f"({row.secret_ref}), but this dashboard has no Password Safe API client "
+            f"configured. Set the BeyondTrust API URL, client id and client secret under "
+            f"Settings, or point the connection at a stored password instead. Nothing was "
+            f"queued.")
+    return problems
 
 
 # ── the legacy singletons ─────────────────────────────────────────────────────
@@ -389,14 +527,20 @@ def create(db: Session, *, kind: str, name: str, created_by: str,
             f"a {kind} connection must be reached through a remote agent — the "
             f"dashboard has no way to dial one directly")
     if agent_id:
-        # An agent-bound connection is defined ENTIRELY by the name it has in that
+        # An agent-bound connection is ADDRESSED entirely by the name it has in that
         # agent's own file. Accepting a host here would invite someone to fill it in and
-        # assume it is what gets dialled, when nothing reads it.
+        # assume it is what gets dialled, when nothing reads it — and worse, a dashboard
+        # that could aim the agent could point it at an endpoint of its choosing and
+        # collect whatever credential the agent presents. See the model docstring: the
+        # dashboard may hold the secret, never the target.
         if not agent_connection_name:
             raise HypervisorConnectionError(
                 "an agent-bound connection needs the name it has in that agent's "
-                "connections.yaml — the dashboard never holds its credential")
-        host, username, secret, secret_ref = "", "", "", ""
+                "connections.yaml — that name is the whole join")
+        host, username = "", ""
+        # `secret` / `secret_ref` deliberately survive. They are inert until that agent's
+        # connections.yaml opts the entry in with `dashboard_secret: true`, so setting one
+        # here cannot change behaviour on its own.
     elif not (host or "").strip():
         raise HypervisorConnectionError("a host is required")
 
@@ -439,6 +583,13 @@ def update(db: Session, connection_id: str, **fields) -> dict:
         row.is_active = bool(fields["is_active"])
     if fields.get("agent_id") is not None:
         row.agent_id = str(fields["agent_id"]).strip() or None
+    if row.agent_id:
+        # Applied AFTER agent_id so this catches a row that just *became* agent-bound,
+        # not only one that already was. Without it `create`'s invariant held on insert
+        # and drifted on the first edit: nothing read `host` on an agent row, so a value
+        # set here sat there looking authoritative. Now that such a row can carry a
+        # credential, an aiming field on it is no longer merely misleading.
+        row.host, row.username = "", None
     # A blank secret means "leave it alone", never "clear it" — otherwise every edit of
     # an unrelated field through a form that does not echo the password wipes it.
     if fields.get("secret"):

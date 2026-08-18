@@ -605,6 +605,11 @@ async def _checkout(client: httpx.AsyncClient, account_id: int, *,
 
     got = await client.get(f"Credentials/{int(request_id)}")
     if got.status_code != 200:
+        # Check the request back in before giving up. It was created a line ago and is
+        # unusable, but leaving it open held the account's concurrent-request slot for the
+        # whole DurationMinutes — so a pending-approval account would trip 4035 on the
+        # next attempt and report a cap problem instead of the approval it was waiting on.
+        await _checkin(client, int(request_id))
         raise PSApiError(
             f"Password Safe would not release the credential ({got.status_code}) — the "
             f"request may be awaiting approval, or the access policy may not auto-release.")
@@ -614,7 +619,8 @@ async def _checkout(client: httpx.AsyncClient, account_id: int, *,
     return int(request_id), str(credential)
 
 
-async def _checkin(client: httpx.AsyncClient, request_id: int) -> None:
+async def _checkin(client: httpx.AsyncClient, request_id: int,
+                   reason: str = "k8s ServiceAccount token read complete") -> None:
     """Release the request. Best-effort — it expires on its own duration anyway.
 
     Plain ``Checkin`` ONLY — never the rotate-on-release variant that
@@ -625,7 +631,7 @@ async def _checkin(client: httpx.AsyncClient, request_id: int) -> None:
     asserts that endpoint is named nowhere in this module."""
     try:
         await client.put(f"Requests/{int(request_id)}/Checkin",
-                         json={"Reason": "k8s ServiceAccount token read complete"})
+                         json={"Reason": reason})
     except Exception:  # noqa: BLE001 — never log the request id (CodeQL taints it)
         logger.debug("Password Safe credential check-in was refused")
 

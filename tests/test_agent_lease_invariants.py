@@ -193,7 +193,15 @@ def test_the_operator_half_is_admin_only():
     """Every route that is not part of the agent protocol must require an admin."""
     src = _read(_AGENT_API)
     tree = ast.parse(src)
-    agent_half = {"enroll_agent", "lease_job", "heartbeat", "push_logs", "complete"}
+    # `job_secret` joins the protocol half deliberately, and it is the one addition worth
+    # pausing over: it is the only agent route that hands *out* a credential. It is not
+    # admin-gated because no admin is present on an agent poll — it is gated instead by a
+    # signature, by `owned_job` proving the job is this agent's, by the connection row
+    # naming this agent, and by deriving the connection from the job rather than the
+    # request. See `job_secret`'s docstring. If a future route lands here without that
+    # much, this list is the wrong place to silence it.
+    agent_half = {"enroll_agent", "lease_job", "heartbeat", "push_logs", "complete",
+                  "job_secret"}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue

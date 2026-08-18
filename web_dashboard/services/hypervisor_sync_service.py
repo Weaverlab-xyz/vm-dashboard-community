@@ -84,10 +84,23 @@ def enqueue_due_syncs(db: Session) -> int:
         if "agent_hypervisor" not in agent_service.allowed_job_types(agent):
             _note(db, conn, "the bound agent is not granted the agent_hypervisor job type")
             continue
+        # A dashboard-held credential the bound agent could not collect. Recorded on the
+        # row rather than raised, like the two skips above — this sweep runs unattended, and
+        # queueing anyway would fail every thirty minutes against the hypervisor's own
+        # "wrong username or password" until the service account locked out.
+        blockers = hcs_blockers(db, conn.id, agent)
+        if blockers:
+            _note(db, conn, blockers[0])
+            continue
 
         _queue(db, conn, cursor="", batch_id=None)
         queued += 1
     return queued
+
+
+def hcs_blockers(db: Session, connection_id: str, agent) -> list:
+    from . import hypervisor_connection_service as hcs
+    return hcs.dashboard_secret_blockers(db, connection_id, agent)
 
 
 def _has_open_job(db: Session, connection_id: str) -> bool:

@@ -15,8 +15,9 @@
     Where each on-premises hypervisor lives and how to authenticate to it. You can have
     more than one of each kind — a second vCenter, a Proxmox cluster per site — and the
     <strong>default</strong> is what a page uses when it isn't told otherwise.
-    A connection bound to a <strong>remote agent</strong> holds no host and no credential
-    here: the agent has them, and this row only names which of its connections to use.
+    A connection bound to a <strong>remote agent</strong> never holds the host or username
+    here — the agent has those, and this row names which of its connections to use. It
+    <em>may</em> hold the credential, so the agent can fetch it per job and store nothing.
   </p>
 
   <div x-show="toast" x-cloak x-transition
@@ -122,14 +123,14 @@
           Reached through a remote agent
         </label>
 
-        <!-- Agent-bound: a name, never a credential. -->
+        <!-- Agent-bound: always a name and never a target; optionally a credential. -->
         <template x-if="form.viaAgent">
           <div class="space-y-3 border-l-2 border-purple-200 pl-3">
             <p class="text-xs text-gray-500">
-              The dashboard cannot dial this endpoint, so it stores no host and no
-              credential. Both live in the agent's own
-              <code class="bg-gray-100 px-1 rounded">connections.yaml</code>; this row
-              only names which entry to use.
+              The dashboard cannot dial this endpoint, so it never stores the host or the
+              username — those always come from the agent's own
+              <code class="bg-gray-100 px-1 rounded">connections.yaml</code>, and this row
+              names which entry to use.
             </p>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
@@ -147,6 +148,66 @@
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
               <p class="text-xs text-gray-400 mt-1">Must match the <code>name:</code> of an entry in that agent's file exactly.</p>
             </div>
+
+            <!-- Optional, and inert until the agent's own file opts in. The dashboard
+                 cannot read that file, so this is said at save time rather than implied. -->
+            <div class="pt-2 border-t border-gray-100">
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="form.agentSecret"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                Hold the credential here instead of on the agent host
+              </label>
+              <p class="text-xs text-gray-500 mt-1">
+                The agent then fetches it for each job, encrypted to a key that exists only
+                for that fetch, and stores nothing. Takes effect once that agent's
+                <code class="bg-gray-100 px-1 rounded">connections.yaml</code> sets
+                <code class="bg-gray-100 px-1 rounded">dashboard_secret: true</code> on this
+                entry — until then the agent keeps using its own credential and this is
+                ignored.
+              </p>
+            </div>
+
+            <template x-if="form.agentSecret">
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Password Safe managed account</label>
+                  <input type="text" x-model="form.psAccountId" placeholder="4242"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  <p class="text-xs text-gray-400 mt-1">
+                    Recommended. The managed account id — the dashboard then holds no
+                    password either: it checks one out per job, checks it back in, and
+                    rotates it on release. Leave blank to use one of the two below.
+                  </p>
+                </div>
+                <template x-if="!form.psAccountId">
+                  <div class="space-y-3">
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Secret reference</label>
+                      <input type="text" x-model="form.secret_ref"
+                             placeholder="bt_safe://hv/dc1-vcenter"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                      <p class="text-xs text-gray-400 mt-1">
+                        <code>bt_safe://</code>, <code>aws_sm://</code>,
+                        <code>azure_kv://</code> or <code>gcp_sm://</code> — the dashboard
+                        stores a pointer and resolves it per job.
+                      </p>
+                    </div>
+                    <template x-if="!form.secret_ref">
+                      <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                        <input type="password" x-model="form.secret" autocomplete="new-password"
+                               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        <p class="text-xs text-gray-400 mt-1">
+                          Stored encrypted, but a standing hypervisor password in this
+                          database is the weakest of the three — prefer a managed account or
+                          a reference above. Leave blank to keep the existing one.
+                        </p>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
           </div>
         </template>
 
@@ -308,8 +369,9 @@ function connectionsPage() {
 
     _blank() {
       return {kind: this.kinds[0] || 'proxmox', name: '', host: '', port: null,
-              username: '', secret: '', verify_ssl: false, site: '', is_default: false,
-              viaAgent: false, agent_id: '', agent_connection_name: '',
+              username: '', secret: '', secret_ref: '', verify_ssl: false, site: '',
+              is_default: false, viaAgent: false, agent_id: '',
+              agent_connection_name: '', agentSecret: false, psAccountId: '',
               token_id: '', datacenter: '', transport: 'ntlm', use_ssl: false};
     },
 
@@ -322,10 +384,16 @@ function connectionsPage() {
 
     openEdit(c) {
       const o = c.options || {};
+      const ref = c.secret_ref || '';
+      const psId = ref.startsWith('ps_account://') ? ref.slice('ps_account://'.length) : '';
       this.form = {kind: c.kind, name: c.name, host: c.host, port: c.port,
                    username: c.username, secret: '', verify_ssl: c.verify_ssl,
                    site: c.site, is_default: c.is_default, viaAgent: c.via_agent,
                    agent_id: c.agent_id || '', agent_connection_name: c.agent_connection_name || '',
+                   // `has_secret` is the only signal the API gives -- it never echoes the
+                   // credential, not even masked, so there is nothing to prefill.
+                   agentSecret: !!(c.via_agent && c.has_secret),
+                   psAccountId: psId, secret_ref: psId ? '' : ref,
                    token_id: o.token_id || '', datacenter: o.datacenter || '',
                    transport: o.transport || 'ntlm', use_ssl: !!o.use_ssl};
       this.editingId = c.id;
@@ -361,6 +429,15 @@ function connectionsPage() {
         if (this.form.viaAgent) {
           body.agent_id = this.form.agent_id;
           body.agent_connection_name = this.form.agent_connection_name.trim();
+          // host/username are never sent for an agent row -- the API strips them anyway,
+          // and the point is that the dashboard may hold the secret, never the target.
+          if (this.form.agentSecret) {
+            const ps = (this.form.psAccountId || '').trim();
+            const ref = (this.form.secret_ref || '').trim();
+            if (ps) body.secret_ref = 'ps_account://' + ps;
+            else if (ref) body.secret_ref = ref;
+            else if (this.form.secret) body.secret = this.form.secret;
+          }
         } else {
           body.host = (this.form.host || '').trim();
           body.port = this.form.port || null;

@@ -459,11 +459,27 @@ class HypervisorConnection(Base):
     a remote agent on that network does the talking.
 
     Credentials: exactly one of ``secret_enc`` (Fernet, via ``config_service``) or
-    ``secret_ref`` (an external backend reference) is set. For an **agent-bound**
-    connection both are NULL and so are ``host``/``username`` — the credential lives in
-    the agent's own connections.yaml, and ``agent_connection_name`` is the whole join.
-    That is deliberate: a dashboard compromise then yields a verb and a name, not a
-    vCenter administrator password.
+    ``secret_ref`` (an external backend reference) is set.
+
+    For an **agent-bound** connection the rule is narrower than "no credential", and the
+    line is worth stating precisely: **the dashboard may hold the secret, never the
+    target.** ``host`` and ``username`` are always NULL on such a row and always come
+    from the agent's own connections.yaml, because those are the fields that *aim* the
+    connection — a dashboard able to set ``host`` could redirect the agent's
+    authenticated session at an endpoint of its choosing and harvest the credential on
+    first use, and one able to set ``username`` could spray a known password across
+    accounts. ``agent_connection_name`` remains the whole join.
+
+    The secret itself is optional and opt-in. Left NULL, the agent resolves the
+    credential locally and a dashboard compromise yields a verb and a name — the original
+    behaviour. Set, the agent may instead fetch it just-in-time for one job over its own
+    signed poll channel, sealed to a per-fetch key (``services/agent_sealing``), which is
+    what lets an on-prem host hold no standing hypervisor credential at all. Which of the
+    two applies is decided by ``dashboard_secret`` in the *customer's* connections.yaml,
+    not here: this row can offer a credential, it cannot impose one.
+
+    A ``secret_ref`` of ``ps_account://<id>`` means the dashboard holds no password
+    either — it checks one out of Password Safe per job and checks it back in.
     """
     __tablename__ = "hypervisor_connections"
 

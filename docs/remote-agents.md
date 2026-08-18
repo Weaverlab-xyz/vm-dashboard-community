@@ -76,12 +76,21 @@ an operator already queued *for that agent*, heartbeat them, push log lines, and
 them. They cannot create a job (that needs an admin session), learn anything about what
 else the dashboard manages, reach any user-facing route, or touch another agent's jobs —
 `owned_job` filters on `agent_id` and answers "not found" identically for "not yours", so
-the API is not even an oracle for their existence. In this phase the agent holds no target
-credentials, so there is nothing on the LAN to inherit either.
+the API is not even an oracle for their existence.
 
-That leaves two real consequences: denial of service against that one agent's queue, and
-the ability to **report false findings**. Findings are data a human reads and acts on, so
-treat them as untrusted input — which is the other reason nothing is auto-registered.
+Once the agent brokers hypervisor connections it does hold target credentials, so be precise
+about what the holder inherits. Where the credential sits in `connections.yaml`, they have it
+outright — but then so does anyone who can read that file, and the stolen key is beside the
+point. Where the connection uses `dashboard_secret`, the key lets them **request** a
+credential, and that is a narrower and much noisier thing: only for a connection bound to
+that agent, only while a job it can lease is actually running, one audited event per release,
+and revocable by clearing the agent's public key. A leaked file is none of those.
+
+That leaves three real consequences: denial of service against that one agent's queue; the
+ability to **report false findings** — data a human reads and acts on, so treat it as
+untrusted input, which is the other reason nothing is auto-registered; and, for
+`dashboard_secret` connections, credential requests that show up in the audit log and stop
+the moment the key is revoked.
 
 Revocation does not depend on reaching the container. **Revoke** clears the stored public
 key, so the next poll fails verification whatever that container is still doing, and any
@@ -544,34 +553,87 @@ is [its own table](#what-the-agent-can-and-cannot-reach); Nutanix syncs but cann
 powered, and a page whose button has no agent verb says so rather than sending the
 nearest one.
 
-### The credential is the agent's, never the dashboard's
+### The dashboard may hold the secret, never the target
 
-A dashboard connection row bound to an agent stores the agent's **name for it** and
-nothing else: no host, no username, no password. The job says *"run `inventory_sync` on
-`dc1-vcenter`"* and the agent resolves the rest from its own
+A dashboard connection row bound to an agent stores the agent's **name for it** and never a
+host or a username. The job says *"run `inventory_sync` on `dc1-vcenter`"* and the agent
+resolves the endpoint from its own
 [`connections.yaml`](../examples/remote-agent/connections.example.yaml).
 
-That is the difference between this and a proxy. Shipping credentials in the job
-envelope would put a standing vCenter administrator password in the dashboard's
-database, in every job payload, in the agent's memory — and, because **envelopes are
-signed rather than encrypted**, in the logs of any TLS-inspecting proxy in between. The
-[whole feature is sold](#behind-a-tls-inspecting-proxy) on the opposite property.
+That asymmetry is the difference between this and a proxy, and it is not about secrecy — it
+is about aiming. A dashboard that could set `host` could redirect the agent's authenticated
+session at an endpoint of its choosing and harvest the credential on first use; one that
+could set `username` could spray a known password across accounts. So those stay yours, in
+your file, gated by your `policy.yaml`, which no dashboard API can reach.
+
+The credential is the part that can move, and there is no single right answer:
+
+| Where the credential lives | An attacker who reads files on the agent host gets | An attacker who compromises the dashboard gets |
+|---|---|---|
+| `password` / `password_file` | **the hypervisor password.** Offline, permanent, and a file read is not an event anybody sees | a verb and a name |
+| `ps_managed_account` | a Password Safe OAuth client — usually entitled to more than the one account | a verb and a name |
+| `dashboard_secret` + a stored password | the agent's identity key: the ability to *request* a credential while a job runs, audited and revocable | the password |
+| `dashboard_secret` + `ps_account://` | the same narrow request ability | a Password Safe account id, subject to its policy, approval workflow and rotation |
+
+The default is unchanged and stays available. The last row is the only configuration in which
+**neither** side holds a standing hypervisor credential.
 
 The cost is two files joined by a string, and a typo in either yields
 `unknown connection 'dc1-vcenter'`. The connection form mitigates that by offering an
 agent picker rather than a free-text uuid.
 
-### Three grants, all required
+### The credential the dashboard holds
 
-Nothing runs unless all three agree, and they belong to different people:
+Set `dashboard_secret: true` on a connection in your `connections.yaml` and the agent stops
+reading a credential locally. Instead, for each job, it asks the dashboard.
+
+Two things make that safe to do over the same channel the agent polls on:
+
+* **It is scoped to the job.** The route is `POST /api/agent/jobs/{job_id}/secret`, and the
+  connection it answers for is derived from *the job row*, not from anything the request
+  says. The agent cannot name a different connection, so a stolen identity cannot enumerate
+  what else the dashboard holds. The job must also be `running` — a cancelled job may still
+  log and complete, but it gets no fresh credential.
+* **It is encrypted, not merely transported.** The agent generates an X25519 keypair per
+  fetch and sends the public half in the request body, which its Ed25519 signature already
+  covers. The dashboard seals the credential to it (X25519 → HKDF-SHA256 → AES-256-GCM). So
+  the guarantee in [Behind a TLS-inspecting proxy](#behind-a-tls-inspecting-proxy) still
+  holds for a *response* body, not just a request: the inspecting proxy sees a ciphertext.
+  The private half never touches disk and dies with the fetch, so unlike an enrolment-bound
+  key there is nothing on the host to steal and use on traffic captured earlier.
+
+The seal is bound to the agent, the job **and the connection ref**. That last one is the
+least obvious and the most important: without it a credential released for `dc1-vcenter`
+could be relabelled as the credential for a connection pointing somewhere else, which turns
+credential confusion into credential exfiltration.
+
+The credential is held in memory for the job and scrubbed out of anything the agent sends
+back — Live Output and the job's error string both — because `str(exc)` from an arbitrary
+library can carry it, and that string is the only text a failed job renders. Nothing here
+claims to wipe it from memory: a Python string cannot be zeroed, and the bound is scope.
+
+**Requires an agent image of 2.1.0 or newer.** The dashboard refuses to *queue* work for an
+older one rather than let it fail: a 2.0 agent does not know the key, so it would fall
+through to a password you had just deleted, send an empty one, and get back the hypervisor's
+own "wrong username or password" — the wrong diagnosis, and on the 30-minute sync schedule
+it retries until the service account locks out. Pull the image and restart; re-enrolment is
+not needed.
+
+### Four grants, all required
+
+Nothing runs unless all four agree, and they belong to different people:
 
 | Grant | Who owns it | Where |
 |---|---|---|
 | this agent may run `agent_hypervisor` | the dashboard operator | Agents page |
 | this verb is allowed on this connection | **you** | `policy.yaml` → `connections:` |
-| this connection exists, with a credential | **you** | `connections.yaml` |
+| this connection exists, and where its credential comes from | **you** | `connections.yaml` |
+| the credential itself, when `dashboard_secret` is set | the dashboard operator | Connections page |
 
-Withhold any one and nothing happens. A refusal from the second or third arrives in
+Withhold any one and nothing happens. The fourth is the only one the dashboard owns, and it
+owns it only because you said so in the third — a credential set on the Connections page for
+an agent-bound connection does nothing at all until your file opts that entry in. A refusal
+from the second or third arrives in
 Live Output naming the file and the line to add — the dashboard cannot fix it and does
 not pretend to.
 
@@ -680,9 +742,18 @@ inert — the property `test_the_agent_imports_no_execution_machinery` protects.
 
 ### Where the credential comes from
 
-Three sources, and the order matters: `ps_managed_account` beats `password_file` beats an
-inline `password`. An operator who has moved a connection to Password Safe should not
-silently keep authenticating with a stale literal left in the file underneath it.
+Four sources. A *remote* source beats a local one — `ps_managed_account` or
+[`dashboard_secret`](#the-credential-the-dashboard-holds), then `password_file`, then an
+inline `password` — because an operator who has moved a connection off local storage should
+not silently keep authenticating with a stale literal left in the file underneath it. A
+leftover is warned about on every job rather than ignored quietly, since it means plaintext
+is still sitting on a host you meant to clear.
+
+The two remote sources are **mutually exclusive rather than ordered**. They are different
+authorities — the agent asking Password Safe, versus the dashboard asking on its behalf —
+there is no stale-leftover story that makes preferring one kind, and choosing quietly would
+leave nobody able to say which credential a job actually used. Declare both and the agent
+refuses the job and names the file.
 
 `password_file` — and `client_secret_file` in `passwordsafe.yaml` — are read with the same
 encoding rules as the enrolment code file: a UTF-8 BOM is stripped, and a UTF-16 file is
@@ -692,8 +763,15 @@ Write them with `Set-Content -Encoding ascii -NoNewline` on Windows.
 With `ps_managed_account`, **the agent holds no hypervisor credential at all** — only a
 Password Safe OAuth client whose single power is to ask for one. Each job checks a
 credential out and checks it back in, so every use lands in Password Safe's audit trail
-and is subject to its policy and approval workflow. That is the end state this design was
-heading for: an on-prem agent with zero standing target credentials.
+and is subject to its policy and approval workflow. That gets the agent close to the end
+state this design was heading for: no standing *hypervisor* credential on the host.
+
+It does not get all the way there, and the remaining gap is worth naming: the Password Safe
+OAuth client is itself a credential on this host, and its entitlements are usually broader
+than the single account it is being used for.
+[`dashboard_secret`](#the-credential-the-dashboard-holds) closes that gap by moving the
+asking to the dashboard, which already holds such a client for other features. Pick one —
+declaring both is a refusal, not a precedence.
 
 Mount the client alongside the other two files — see
 [`passwordsafe.example.yaml`](../examples/remote-agent/passwordsafe.example.yaml). The
@@ -876,6 +954,13 @@ what an unauthenticated internet-facing endpoint actually needs.
 
 ## Behind a TLS-inspecting proxy
 
+The property this section describes is the reason the agent signs requests instead of
+carrying a bearer token, and it extends to credential *responses*: a credential fetched with
+[`dashboard_secret`](#the-credential-the-dashboard-holds) is sealed to a per-fetch key inside
+the TLS session, so an inspecting proxy that reads the whole body reads a ciphertext. That
+was the objection to holding credentials centrally at all, and it is why this is encrypted at
+the application layer rather than trusted to TLS.
+
 Mount the inspection CA and point `AGENT_CA_BUNDLE` at it —
 [`docker-compose.corp-ca.yml`](../docker-compose.corp-ca.yml) is the same pattern for
 the dashboard. `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are honoured automatically.
@@ -939,6 +1024,12 @@ an objection into a demonstration.
 | `the sibling image … is not present on this host` | `docker pull chrweav/hypervisor-runner:latest`. The agent will not pull it for you, deliberately. |
 | `cannot reach the Docker socket` | The overlay is not applied, or `AGENT_DOCKER_SOCKET` does not match the mount's container-side path. Settle which with `docker compose -f docker-compose.yml -f docker-compose.sibling.yml config`: the output must show **one** service, `agent`, carrying both the bind mount and the variable. Two services means an overlay whose service key does not match the base file's — Compose merges by service key, not by `container_name`. |
 | A Password Safe checkout fails `4031 … 403` | The OAuth client's user needs the **Requestor** role plus a View access policy on a Smart Rule containing that managed account. Membership is recomputed on a schedule, so a new account is not requestable immediately. |
+| A Password Safe checkout fails `4034 … 403` | The request is awaiting human approval. An unattended agent does not wait — the job fails rather than hanging. Use an auto-approve access policy for accounts an agent needs. The request it opened is checked straight back in, so it does not hold the account's concurrent-request slot while you fix the policy. |
+| `the dashboard refused to release the credential for 'x' (409)` | Read the rest of that line: it carries the dashboard's own reason, and it says explicitly that this is **not** a policy.yaml or connections.yaml problem. Usually the connection has `dashboard_secret: true` here but no credential set on the Connections page. |
+| `did not authenticate — sealed to a different key, or for a different agent, job or connection` | The seal was built for something other than what this agent asked for. Almost always a dashboard and agent mid-upgrade against a changed audience; check `AGENT_BASE_URL`/the pinned audience matches on both sides. |
+| The dashboard refuses to queue: *"needs at least 2.1"* | This connection takes its credential from the dashboard and the agent image predates that. Pull `chrweav/dashboard-agent:latest` and restart the container; the agent keeps its identity, so no re-enrolment. |
+| A connection shows `takes its credential from Password Safe, but this dashboard has no Password Safe API client configured` | Set the BeyondTrust API URL, client id and client secret under Settings. Refused at enqueue rather than as a failed job, because a checkout that cannot authenticate is a configuration state, not a run failure. |
+| A job logs *"the `password` left in connections.yaml is IGNORED"* | Exactly what it says — the entry has `dashboard_secret: true` and a leftover local credential. Not fatal, but that plaintext is still sitting on this host, which is the thing you moved the credential to avoid. Delete it. |
 | `could not reach vmrest at 127.0.0.1:8697` | Either `vmrest` is not running, or the connection lacks `allow_loopback: true` in policy.yaml — the agent denies loopback by default. **On Docker Desktop `allow_loopback` cannot fix this**, because `127.0.0.1` inside the container is the container: point the connection at `host.docker.internal` and add it as a target instead. See [VMware Workstation Pro](#vmware-workstation-pro). |
 | `vmrest rejected the credential` | Set them with `vmrest -C`, and check the username matches connections.yaml. |
 | `vmrest has no 'restart' operation` | Working as intended — its API has no reset, reboot or snapshot. Use power_off then power_on. |
@@ -954,9 +1045,11 @@ Hypervisor brokering followed it and is described above. Next:
   `chrweav/ansible-cloud` siblings and reusing the existing
   `PLAYBOOK_B64` / `CONN_VARS_B64` env contract byte for byte, plus a just-in-time
   secret fetch gated on refs the job declared at enqueue time.
-- **Password Safe JIT checkout by the agent**, so it holds exactly one credential whose
-  only power is to ask Password Safe — subject to its policy, approval workflow and
-  session recording. An on-prem agent with zero standing target credentials.
+- ~~**Password Safe JIT checkout by the agent**~~ — shipped, and then superseded for the
+  case it was aimed at. See [Where the credential comes from](#where-the-credential-comes-from)
+  for the agent-side checkout, and
+  [the credential the dashboard holds](#the-credential-the-dashboard-holds) for the variant
+  that leaves *no* credential on the on-prem host, not even a Password Safe client.
 - **Nutanix power verbs and snapshots.** Both are full spec PUTs carrying a metadata
   version rather than simple actions, so getting one wrong writes to the VM instead of
   failing. Worth doing carefully rather than quickly.

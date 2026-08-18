@@ -37,13 +37,16 @@ import re
 from typing import NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, RemoteAgent, User, get_db
 from ..services import (agent_guard, agent_hypervisor_meta, agent_job_meta,
-                        agent_service, agent_signing, config_service,
+                        agent_ps_credential_service, agent_sealing, agent_service,
+                        agent_signing, config_service, hypervisor_connection_service,
                         hypervisor_sync_service, job_service, public_url)
+from ..services.hypervisor_connection_service import HypervisorConnectionError
 from ..services.agent_guard import AgentThrottled
 from ..services.agent_service import AgentError
 from .auth import require_admin
@@ -470,7 +473,121 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
                                          result=result, error=body.error)
     agent_service.audit(db, agent, "agent.complete", ip=_client_ip(request),
                         details={"job_id": job.id, "status": applied})
+
+    # Release a Password Safe credential this job checked out. The fast path only — a job
+    # whose agent was killed never gets here, which is why `agent_ps_credential_service.
+    # sweep` and not this hook is the authority. Ref-counted inside, so a sibling job
+    # sharing the request keeps it open. Never allowed to fail a finished job.
+    try:
+        if await agent_ps_credential_service.release_for_job(db, job):
+            agent_service.audit(db, agent, "agent.connection_secret_released",
+                                ip=_client_ip(request),
+                                details={"job_id": job.id, "rotated": True})
+    except Exception:  # noqa: BLE001
+        logger.exception("could not release a Password Safe credential for job %s", job.id)
     return {"job_id": job.id, "status": applied}
+
+
+class SecretRequest(BaseModel):
+    """What the agent must say to be handed a credential.
+
+    ``connection_ref`` is checked against the job's *own* metadata rather than trusted, and
+    ``reply_key`` is the ephemeral X25519 public half the response is sealed to. Both are
+    covered by the request signature — ``canonical_request`` hashes the body — so neither
+    can be substituted in flight by whatever sits between the agent and here.
+    """
+    connection_ref: str = ""
+    reply_key: str = ""
+
+
+@router.post("/jobs/{job_id}/secret")
+async def job_secret(job_id: str, body: SecretRequest, request: Request,
+                     agent: RemoteAgent = Depends(signed_agent),
+                     db: Session = Depends(get_db)):
+    """Hand this job's hypervisor credential to the agent, sealed, once it has proven it
+    owns the job the credential belongs to.
+
+    This is the route that lets an on-prem host keep no standing hypervisor credential at
+    all. Everything about it is scoped down to that one purpose:
+
+    * ``statuses=("running",)`` rather than the ``WINDING_DOWN`` default every other
+      per-job route uses. A *cancelled* job may still heartbeat, log and complete so
+      cooperative cancel stays reachable — but it has no business being handed a fresh
+      credential.
+    * The connection is **derived from the job row**, never from the request. The ref in
+      the body must equal the derived one, but it cannot select anything: without that,
+      a stolen agent identity could enumerate every credential the dashboard holds by
+      asking for arbitrary refs against a job it legitimately owns. That is the most
+      important property here and it is not a cryptographic one.
+    * The response is sealed to ``reply_key`` (``services/agent_sealing``) rather than
+      returned in the clear. An inspecting corporate proxy is the deployment this whole
+      feature exists for, and it reads response bodies.
+    """
+    job = _owned(db, agent, job_id, statuses=("running",))
+    if job.job_type != "agent_hypervisor":
+        # Equality against the one type that has a connection, not a truthy test. A
+        # discovery job has none, and by design carries no credential anywhere.
+        raise HTTPException(
+            status_code=409,
+            detail="This job type does not use a hypervisor credential.")
+
+    meta = job.metadata_dict or {}
+    ref = str(meta.get("connection_ref") or "")
+    connection_id = str(meta.get("connection_id") or "")
+    if not ref or not connection_id:
+        raise HTTPException(
+            status_code=409,
+            detail="This job names no connection, so there is no credential to fetch.")
+    if (body.connection_ref or "") != ref:
+        # The body cannot *choose* the connection, so this can only mean the agent and the
+        # job row disagree — a rewritten job row, or a confused agent. Either way, refusing
+        # loudly beats handing over a credential for a connection the agent did not mean.
+        raise HTTPException(
+            status_code=409,
+            detail="That connection is not the one this job was queued for.")
+
+    # Checked BEFORE the credential is obtained, not after. For a Password Safe account,
+    # obtaining it opens a real request that is then checked in and rotated on release — so
+    # answering a request that could never be sealed would let a caller burn checkouts and
+    # rotations on that account at will.
+    try:
+        agent_sealing.check_reply_key(body.reply_key)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+
+    try:
+        row = hypervisor_connection_service.agent_secret_row(
+            db, agent_id=agent.id, connection_id=connection_id, ref=ref)
+        if hypervisor_connection_service.is_ps_account(row):
+            secret, source = await agent_ps_credential_service.acquire(db, job, row)
+        else:
+            secret, source = hypervisor_connection_service.resolve_agent_secret(row)
+    except (HypervisorConnectionError,
+            agent_ps_credential_service.PSCredentialError) as exc:
+        # 409 with the detail passed through, matching `_owned`. The agent puts this
+        # straight into the job's error_message, which is the only text a failed job
+        # renders — so the remedy has to survive the trip intact.
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    try:
+        envelope = agent_sealing.seal(
+            body.reply_key, secret, agent_id=agent.id,
+            audience=_resolve_audience(request), job_id=job.id, ref=ref)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+
+    agent_service.audit(db, agent, "agent.connection_secret", ip=_client_ip(request),
+                        details={"job_id": job.id, "connection_id": row.id,
+                                 "connection_ref": ref, "source": source})
+    # Explicit, because nothing else in this app sets it. `no-store` and not `no-cache`:
+    # the latter permits a proxy to store the body so long as it revalidates.
+    return JSONResponse(
+        content={"sealed": envelope},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
 def _owned(db: Session, agent: RemoteAgent, job_id: str, *,
