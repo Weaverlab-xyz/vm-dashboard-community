@@ -173,7 +173,8 @@
             <tr class="hover:bg-gray-50 transition">
               <td class="px-4 py-3">
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
-                      :class="statusBadge(g.status)" x-text="g.status"></span>
+                      :class="gatewayBadge(g.status)" x-text="g.status"
+                      :title="g.error || ''"></span>
               </td>
               <td class="px-4 py-3 font-medium text-gray-800">
                 <span x-text="g.name"></span>
@@ -200,7 +201,22 @@
     </div>
     <p x-show="gateways.some(g => g.error)" x-cloak class="mt-3 text-xs text-gray-500">
       A gateway in <span class="font-medium">error</span> kept its row so the reason stays
-      visible — open its job for the detail.
+      visible — open its job for the detail. Hover any status for the reason behind it.
+    </p>
+    <!-- This list is checked against the clouds on every load, so it agrees with the Cloud
+         tab rather than reporting what the dashboard last did. -->
+    <p x-show="gateways.some(g => g.status === 'missing')" x-cloak
+       class="mt-2 text-xs text-gray-500">
+      <span class="font-medium">missing</span> means the host is no longer in the cloud and
+      nothing asked for it to be removed. Remove the row, or deploy a replacement to take
+      over its share of the session load.
+    </p>
+    <p x-show="gateways.some(g => g.status === 'degraded')" x-cloak
+       class="mt-2 text-xs text-gray-500">
+      <span class="font-medium">degraded</span> means the host is up but is not running the
+      gateway task, so it cannot broker a session — the Cloud tab's
+      <span class="font-medium">ECS Tasks</span> list shows the same thing. The next deploy
+      that needs this gateway starts the task.
     </p>
   </div>
   {% endif %}
@@ -2126,6 +2142,15 @@ function containersDashboard() {
 
     // ── Managed Portainer server ─────────────────────────────────────────────
     // ── BeyondTrust Gateways ───────────────────────────────────────────────
+    // `missing` and `degraded` are gateway states, not job states, so they get a local
+    // badge rather than entries in the shared statusBadge() map every job list reads.
+    // Both mean "not carrying sessions", so both read as a warning, not a failure.
+    gatewayBadge(status) {
+      if (status === 'missing')  return 'bg-orange-100 text-orange-800';
+      if (status === 'degraded') return 'bg-amber-100 text-amber-800';
+      return statusBadge(status);
+    },
+
     async loadGateways() {
       this.gatewaysLoading = true;
       this.gwError = null;

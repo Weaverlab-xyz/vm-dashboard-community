@@ -778,6 +778,49 @@ async def find_instances_by_tag(region: str, *, name_tag: str, states: list) -> 
         raise AWSError("AWS credentials not configured.")
 
 
+def _find_instances_by_name_tags_sync(region: str, name_tags: list, states: list) -> dict:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_instances(Filters=[
+        {"Name": "tag:Name", "Values": list(name_tags)},
+        {"Name": "instance-state-name", "Values": states},
+    ])
+    out: dict = {}
+    for r in resp.get("Reservations", []):
+        for i in r.get("Instances", []):
+            name = next((t.get("Value") or "" for t in i.get("Tags", [])
+                         if t.get("Key") == "Name"), "")
+            if not name:
+                continue
+            # Two hosts sharing a Name tag shouldn't happen, but if it does, let the
+            # liveliest one answer — the singular lookup above takes [0] and the ensure
+            # paths reuse whatever it returns.
+            prev = out.get(name)
+            if prev and prev["state"] in ("running", "pending"):
+                continue
+            out[name] = {"instance_id": i["InstanceId"], "state": i["State"]["Name"],
+                         "public_ip": i.get("PublicIpAddress")}
+    return out
+
+
+async def find_instances_by_name_tags(region: str, *, name_tags: list, states: list) -> dict:
+    """``{Name tag: {instance_id, state, public_ip}}`` for instances carrying any of
+    ``name_tags`` in ``states`` — one DescribeInstances for the whole set.
+
+    :func:`find_instances_by_tag` stays the find-or-create primitive the ensure paths
+    use. This exists for the gateway reconcile pass, which asks about every gateway in a
+    region at once: a call per name would turn one page load into N round trips and, on a
+    throttled account, make the answer depend on how many gateways you happen to have."""
+    if not name_tags:
+        return {}
+    try:
+        return await _to_thread(_find_instances_by_name_tags_sync, region,
+                                list(name_tags), states)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to list instances by name tag: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 # ── NAT instance primitives (shared on-demand egress; see nat_instance_service) ──
 
 def _find_nat_ami_sync(region: str, arch: str) -> str:

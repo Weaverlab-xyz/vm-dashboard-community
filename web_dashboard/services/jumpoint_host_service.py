@@ -214,6 +214,16 @@ def _aws_region_cfg(region: str) -> dict:
     return resolve_region("aws", region)
 
 
+def _gateway_tasks(tasks: list, family: str) -> list:
+    """The live gateway tasks among ``tasks``. Shared by the per-host lookup below and the
+    batched map :func:`gateway_tasks_by_host` builds, so the rule for "is this task one of
+    ours?" cannot drift between the two — the family match is the whole of that rule, and
+    getting it wrong reads as every gateway serving nothing."""
+    return [t for t in tasks
+            if t.get("lastStatus") in ("PROVISIONING", "PENDING", "RUNNING")
+            and f"task-definition/{family}:" in (t.get("taskDefinitionArn") or "")]
+
+
 async def _live_gateway_tasks(region: str, cluster: str, family: str,
                               host_instance_id: str = "") -> list[dict]:
     """Live gateway tasks in ``cluster``, optionally only those running on one
@@ -225,9 +235,7 @@ async def _live_gateway_tasks(region: str, cluster: str, family: str,
     """
     from . import aws_service
     tasks = await aws_service.list_ecs_tasks(region, cluster)
-    live = [t for t in tasks
-            if t.get("lastStatus") in ("PROVISIONING", "PENDING", "RUNNING")
-            and f"task-definition/{family}:" in (t.get("taskDefinitionArn") or "")]
+    live = _gateway_tasks(tasks, family)
     if not host_instance_id:
         return live
     instances = await aws_service.list_container_instances(region, cluster)
@@ -515,6 +523,123 @@ async def find_gateway_host_id(cloud: str, region: str, name: str) -> str:
         return ""
 
 
+async def live_gateway_hosts(cloud: str, targets) -> dict:
+    """Which of the gateway hosts in ``targets`` — ``(region, name)`` pairs — are really
+    in ``cloud`` right now. Returns ``{name: {"host_id", "state"}}``; a name absent from
+    the result does not exist.
+
+    The plural counterpart to :func:`find_gateway_host_id`, with the opposite error
+    contract, and that contract is the point. This one RAISES: the reconcile pass reading
+    it rewrites registry rows, so "the lookup failed" must never be able to look like
+    "the host is gone" — that would retire live inventory and pull a working gateway's
+    /32 out of every node firewall on a transient API error.
+
+    ``stopped``/``stopping`` count as present. A stopped host still exists, still bills
+    its volume, and can be started again; calling it missing is the one direction of
+    error that loses information.
+
+    ``egress_ip`` comes back where the cloud reports one, because it is the other half of
+    the same drift: a gateway host that was recreated keeps its NAME and takes a FRESH
+    address, so a registry row that only ever learns an IP at ensure time hands the node
+    firewalls a /32 that admits the previous host.
+    """
+    by_region: dict[str, list[str]] = {}
+    for region, name in targets:
+        by_region.setdefault(region or "", []).append(name)
+
+    if cloud == "gcp":
+        # One aggregated list covers every zone and both kinds of gateway: the managed
+        # and requested paths share run_gce_jumpoint, so both carry purpose=bt-jumpoint —
+        # the same label the Containers tab's GCE list filters on.
+        from . import gcp_service
+        project = _gcp_project()
+        if not project:
+            raise GatewayHostError("GCP project is not configured.")
+        wanted = {n for names in by_region.values() for n in names}
+        return {i["name"]: {"host_id": i["name"], "state": (i.get("status") or "").lower(),
+                            "egress_ip": i.get("external_ip") or ""}
+                for i in await gcp_service.list_gce_jumpoints(project)
+                if i.get("name") in wanted}
+
+    if cloud == "azure":
+        # describe_vms, not get_vm: get_vm swallows its lookup failure and returns None,
+        # which here would be indistinguishable from "no such VM" — a 403 on the read
+        # would retire every Azure gateway. describe_vms raises, and one call per resource
+        # group covers every gateway in it. Both kinds carry managed-by=vm-dashboard, so
+        # its managed-only filter keeps them.
+        from . import azure_service
+        from .region_config import resolve_region
+        out: dict = {}
+        for region, names in by_region.items():
+            rg = resolve_region("azure", _azure_gateway_location(region))["resource_group"]
+            if not rg:
+                raise GatewayHostError("Azure resource group is not configured.")
+            found = {vm.get("name"): vm for vm in await azure_service.describe_vms(rg)}
+            for name in names:
+                vm = found.get(name)
+                if vm:
+                    out[name] = {"host_id": name, "state": (vm.get("state") or "").lower(),
+                                 "egress_ip": vm.get("public_ip") or ""}
+        return out
+
+    from . import aws_service
+    out = {}
+    for region, names in by_region.items():
+        found = await aws_service.find_instances_by_name_tags(
+            region or _ui_jumpoint_region("aws"), name_tags=names,
+            states=["pending", "running", "stopping", "stopped"])
+        for name, info in found.items():
+            out[name] = {"host_id": info["instance_id"], "state": info["state"],
+                         "egress_ip": info.get("public_ip") or ""}
+    return out
+
+
+async def gateway_tasks_by_host(region: str, host_ids) -> Optional[dict]:
+    """``{host_id: bool}`` — whether each of ``host_ids`` has a live gateway task on it —
+    or None when that cannot be determined for ``region`` at all, which is NOT the same as
+    False.
+
+    AWS is the one cloud where "the host is up" and "the gateway is up" are separate facts
+    behind separate APIs: the gateway is an ECS task placed on the container instance, and
+    the host outlives the task dying. That gap is exactly what makes a registry row read
+    ``running`` next to a Containers tab reporting zero tasks. On GCP and Azure the
+    container is konlet/docker inside the VM with no API to ask, so there the host's
+    existence is the whole answer.
+
+    Batched because both underlying calls are per-CLUSTER, not per-host: asking once per
+    gateway would issue 2N round trips to answer one question about N hosts sharing a
+    cluster, and the reconcile pass reading this runs on a page load with a deadline.
+
+    Best-effort by contract — None everywhere it is unsure — because a downgrade is only
+    ever safe on a definite No.
+    """
+    family = _cfg("bt_ecs_task_family")
+    if not family:
+        # The task filter keys off the family name. Without it every task looks like
+        # somebody else's and every host like it is serving nothing.
+        return None
+    host_ids = [h for h in host_ids if h]
+    if not host_ids:
+        return {}
+    try:
+        from . import aws_service
+        cluster = _aws_region_cfg(region)["ecs_cluster"]
+        if not cluster:
+            return None
+        live = _gateway_tasks(await aws_service.list_ecs_tasks(region, cluster), family)
+        instances = await aws_service.list_container_instances(region, cluster)
+        arn_by_host = {c.get("ec2_instance_id"): c.get("arn") for c in instances}
+        # Falsy ARNs are dropped on both sides: a Fargate task carries no container
+        # instance, and a host whose ECS agent never joined has no ARN to match — without
+        # this the two Nones would meet and call that host "serving".
+        serving = {t.get("containerInstanceArn") for t in live if t.get("containerInstanceArn")}
+        return {h: bool(arn_by_host.get(h)) and arn_by_host[h] in serving for h in host_ids}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gateway-host: checking gateway tasks in %s failed (non-fatal): %s",
+                       region, exc)
+        return None
+
+
 async def teardown_gateway(cloud: str, region: str, name: str, zone: str = "") -> None:
     """Delete one named Gateway host unconditionally.
 
@@ -701,6 +826,11 @@ async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
         hosts = await aws_service.find_instances_by_tag(
             region, name_tag=name, states=["pending", "running", "stopping", "stopped"])
         if not hosts:
+            # Already gone — but the registry may still say otherwise, and this is the
+            # only place that would ever have said so. Returning straight out of here is
+            # how a row stayed `running` indefinitely, keeping a dead /32 in every node
+            # firewall. Nothing left to terminate is still an idle-teardown outcome.
+            _clear_managed_egress_ip("aws", name)
             return
         # Stop this host's gateway task(s) first (graceful PRA deregistration), then
         # terminate the host. Never touches a task on any other container instance.
@@ -864,6 +994,12 @@ async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
             return
         project = _gcp_project()
         if not project:
+            # Without the project nothing can be deleted OR verified, so the registry row
+            # is deliberately left alone: `gateway_service.reconcile` retires a gateway
+            # only on a lookup that succeeded and came back empty, never on one it could
+            # not perform. Logged because a silent return here reads as "nothing to do".
+            logger.warning("gateway-host(gcp): no project configured — cannot tear down "
+                           "the idle gateway")
             return
         name = managed_host_name("gcp")
         await gcp_service.stop_gce_jumpoint(project, _gcp_jumpoint_zone(region), name)
@@ -996,6 +1132,10 @@ async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
             return
         rg = _cfg("azure_resource_group")
         if not rg:
+            # Same reasoning as the GCP guard above: unverifiable is not the same as
+            # gone, so the row stays as it is and the reason gets logged.
+            logger.warning("gateway-host(azure): no resource group configured — cannot "
+                           "tear down the idle gateway")
             return
         name = managed_host_name("azure")
         await azure_service.stop_vm_jumpoint(rg, name)

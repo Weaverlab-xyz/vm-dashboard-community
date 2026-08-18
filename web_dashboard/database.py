@@ -1367,6 +1367,13 @@ class Gateway(Base):
     name = Column(String(200), nullable=False, index=True)   # cloud resource name
     status = Column(String(32), nullable=False, default="provisioning", index=True)
     # provisioning | running | error | deleting | deleted
+    # …plus two the reconcile pass writes from what it observed rather than from what the
+    # dashboard did (see gateway_service.reconcile):
+    #   degraded — the host is up but no gateway task is running on it (AWS only, the one
+    #              cloud where host and gateway are separate facts behind separate APIs)
+    #   missing  — a REQUESTED gateway whose host is gone without anything having asked.
+    #              A managed one goes to `deleted` instead: its host coming and going with
+    #              demand is the normal life of that lifecycle, not an anomaly to report.
     managed = Column(Boolean, nullable=False, default=False, index=True)
 
     host_id = Column(String(128), nullable=True)             # EC2 instance id / VM name

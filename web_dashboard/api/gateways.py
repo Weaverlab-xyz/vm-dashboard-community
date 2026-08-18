@@ -1,6 +1,7 @@
 """BeyondTrust Gateway API.
 
-  GET    /api/gateways              — every gateway the dashboard deployed
+  GET    /api/gateways              — every gateway the dashboard deployed, reconciled
+                                      against what is actually in the cloud
   GET    /api/gateways/suggest-name — a free, cloud-legal default for the form
   POST   /api/gateways/deploy       — stand up another gateway host
   DELETE /api/gateways/{id}         — remove a requested gateway
@@ -71,11 +72,31 @@ def _placement(req: "DeployGatewayRequest") -> tuple[str, str]:
 @router.get("")
 async def list_gateways(
     cloud: str = "",
+    reconcile: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Every gateway, managed and requested. Read-only, so any authenticated user may
-    see what exists — deploying and removing need admin."""
+    """Every gateway, managed and requested. Read-only for the caller, so any
+    authenticated user may see what exists — deploying and removing need admin.
+
+    Reconciled against the cloud first, because the registry records what the dashboard
+    *did* and several things remove a gateway host without telling it. Without this the
+    tab happily reported a running gateway beside a Containers tab that showed no
+    containers at all, which is how the drift was found. The pass is bounded and
+    fail-quiet: a cloud that errors or times out leaves its rows as they were, so the
+    worst case is the stale reading this used to give unconditionally.
+
+    ``reconcile=false`` serves the rows as stored — for a caller that wants the registry
+    itself rather than the cloud's opinion of it.
+    """
+    if reconcile:
+        try:
+            await gateway_service.reconcile(db, cloud)
+        except Exception as exc:  # noqa: BLE001
+            # Belt and braces: reconcile already contains its own per-cloud failures, so
+            # reaching here means something structural. Serving stored rows still beats
+            # failing the page.
+            logger.warning("gateway reconcile failed (serving stored rows): %s", exc)
     return {"gateways": gateway_service.list_gateways(db, cloud)}
 
 
