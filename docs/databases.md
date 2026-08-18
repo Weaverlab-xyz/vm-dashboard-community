@@ -317,7 +317,7 @@ DB/VM/cluster is gone.
 | `aws_db_subnet_group_name` | — | RDS subnet group (import-only key) |
 | `aws_db_parameter_group_name` | — | `rds.force_ssl=0` Postgres group (Settings field) |
 | `aws_db_mysql_parameter_group_name` | — | `require_secure_transport=0` MySQL-8.4 group (import-only) |
-| `aws_db_security_group_id` | — | DB SG allowing tunnel ingress (import-only) |
+| `aws_db_security_group_id` | — | DB SG allowing tunnel ingress. Attached to the instance when the provision form selects no security group; unset → the VPC *default* SG, which has no ingress on the engine port |
 | `aws_ecs_docker_deploy_key` | — | Gateway Docker deploy key |
 | `bt_ecs_cluster` / `bt_ecs_launch_type` | `bt-jumpoint` / `EC2` | Gateway cluster (Fargate can't tunnel) |
 | `bt_ecs_host_instance_type` / `bt_ecs_host_instance_profile` | `t3.small` / `ecsInstanceRole` | Gateway EC2 host |
