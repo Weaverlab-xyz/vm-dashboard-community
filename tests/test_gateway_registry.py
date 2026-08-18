@@ -278,8 +278,17 @@ def test_a_torn_down_gateway_stops_being_allowed():
             f"the {cloud} idle teardown leaves the deleted gateway's IP in the firewall")
     svc = _read("web_dashboard", "services", "gateway_service.py")
     live = svc[svc.index("def live_egress_ips("):svc.index("def record_egress_ip(")]
-    assert 'status != "deleted"' in live, (
-        "live_egress_ips counts deleted gateways, so their /32s never leave the rule")
+    # Asserted on the intent rather than one spelling of it: the filter has to drop every
+    # status that means "not in the cloud". That is now two of them — `missing` joined
+    # `deleted` when the reconcile pass started retiring hosts nothing had recorded, and a
+    # filter that only knew about `deleted` would keep re-applying those /32s.
+    assert ('status.notin_(GONE_STATUSES)' in live
+            or 'status != "deleted"' in live), (
+        "live_egress_ips counts gateways that are gone, so their /32s never leave the rule")
+    if "GONE_STATUSES" in live:
+        gone = svc[svc.index("GONE_STATUSES = ("):svc.index(")", svc.index("GONE_STATUSES = ("))]
+        for status in ("deleted", "missing"):
+            assert status in gone, f"a {status} gateway's /32 stays in the rule"
 
 
 def test_a_web_jump_keeps_the_shared_gateway_alive():

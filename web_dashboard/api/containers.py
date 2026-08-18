@@ -692,10 +692,11 @@ async def list_gce_jumpoints_endpoint(
 async def stop_gce_jumpoint_endpoint(
     name: str,
     zone: str = Query(..., description="GCE zone the instance lives in"),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "delete")),
 ):
     """Stop (delete) a Jumpoint instance. It is recreated on the next VM deploy."""
-    from ..services import gcp_service
+    from ..services import gateway_service, gcp_service
     from ..services.gcp_service import GCPError
 
     project_id = _gcp_project_id()
@@ -703,6 +704,11 @@ async def stop_gce_jumpoint_endpoint(
         raise HTTPException(status_code=503, detail="GCP project not configured.")
     try:
         await gcp_service.stop_gce_jumpoint(project_id, zone, name)
+        # This button deletes a gateway host, so the Gateways tab has to hear about it.
+        # That tab reads the registry, and a row nobody updated goes on reporting the
+        # gateway as running while this very page shows the instance gone — with its dead
+        # /32 still in every node firewall. Best-effort inside gateway_service.
+        gateway_service.mark_deleted(db, "gcp", name)
         return ContainerActionResponse(ok=True, message="Jumpoint instance deleted")
     except GCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc))

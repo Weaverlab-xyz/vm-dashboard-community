@@ -20,6 +20,7 @@ the Gateway by name as it always did, and PRA distributes across the cluster.
 
 Dispatched by ``jobs_worker`` as ``gateway_deploy`` / ``gateway_teardown``.
 """
+import asyncio
 import logging
 import uuid
 from typing import Optional
@@ -27,6 +28,19 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 CLOUDS = ("aws", "azure", "gcp")
+
+# Statuses a reconcile pass may overwrite. A row in any other state belongs to the job
+# driving it: `provisioning` legitimately has no host yet and `deleting` is about to have
+# none, so verifying either would just race its owner. `error` states its own reason and
+# keeps it.
+VERIFIABLE_STATUSES = ("running", "degraded", "missing")
+
+# Statuses that mean "this gateway is not in the cloud". Expressed as an exclusion rather
+# than a list of live states so that a status added later still counts as live — the
+# firewall readers below fail toward allowing a gateway through, not toward locking it out.
+GONE_STATUSES = ("deleted", "missing")
+
+_RECONCILE_TIMEOUT_S = 12
 
 # Deliberately absent: a cap. "Three in us-central1 and two in us-east-2" is the
 # stated use case, and the right number is a function of session load, which the
@@ -75,11 +89,13 @@ def live_egress_ips(db, cloud: str) -> list[str]:
 
     Every gateway host in a cloud joins the same PRA Gateway *cluster*, and PRA
     distributes sessions across its nodes: the broker for any given session may be ANY
-    of them, so allowing one remembered IP is a coin flip. Deleted rows are excluded so
-    a torn-down gateway's /32 leaves the rule."""
+    of them, so allowing one remembered IP is a coin flip. Rows for gateways that are
+    gone are excluded so a torn-down gateway's /32 leaves the rule — including the
+    `missing` ones the reconcile pass found gone without anything having recorded it,
+    which is half of why that pass exists."""
     from ..database import Gateway
     rows = (db.query(Gateway)
-              .filter(Gateway.cloud == cloud, Gateway.status != "deleted",
+              .filter(Gateway.cloud == cloud, Gateway.status.notin_(GONE_STATUSES),
                       Gateway.egress_ip.isnot(None)).all())
     return sorted({(r.egress_ip or "").strip() for r in rows if (r.egress_ip or "").strip()})
 
@@ -130,7 +146,12 @@ def mark_deleted(db, cloud: str, name: str) -> None:
 
 def existing_names(db, cloud: str) -> list[str]:
     """Names already taken in ``cloud`` — registry rows plus the managed name, which
-    may have no row yet if the auto-ensure has never run."""
+    may have no row yet if the auto-ensure has never run.
+
+    A ``missing`` gateway keeps its name reserved even though its host is gone. The name
+    is unique per ``(cloud, name)`` in the registry, not just in the cloud: freeing it
+    would let a redeploy add a second row under the same name, and the lookups in
+    :func:`record_egress_ip` / :func:`mark_deleted` take the first match."""
     from ..database import Gateway
     from . import jumpoint_host_service
     names = [g.name for g in db.query(Gateway)
@@ -169,6 +190,149 @@ def adopt_managed(db, cloud: str, region: str, name: str, host_id: str = "",
         logger.warning("gateway registry: adopting managed gateway %s failed (non-fatal): %s",
                        name, exc)
         db.rollback()
+
+
+# ── reconciliation ────────────────────────────────────────────────────────────
+
+async def reconcile(db, cloud: str = "") -> None:
+    """Bring registry statuses back in line with what is actually in the cloud.
+
+    Every other writer in this module records what the dashboard *did*. Nothing recorded
+    what is *there*, and several things remove a gateway host without going through the
+    ensure/teardown pair that owns the row: the Containers tab's own Stop button, an idle
+    teardown that found the host already gone, a deletion in the cloud console, a
+    capacity reaper. The row then reads ``running`` forever — next to a Containers tab
+    correctly showing nothing — and its dead /32 stays in every node firewall.
+
+    Two outcomes, matching the two lifecycles this module is built around:
+
+      * a **managed** gateway whose host is gone becomes ``deleted``. That is what its
+        idle teardown would have written; coming and going as resources need it is the
+        normal life of that host, not an anomaly to report. The next ensure re-adopts
+        the row.
+      * a **requested** gateway whose host is gone becomes ``missing``. Nobody asked for
+        it to go away, so the row stays on the page with the reason on it.
+
+    A lookup that FAILS leaves every row in that cloud exactly as it was. That property
+    is what the whole function rests on: ``missing`` has to mean "we looked and it wasn't
+    there", never "we couldn't tell".
+    """
+    from ..database import Gateway
+    q = db.query(Gateway).filter(Gateway.status.in_(VERIFIABLE_STATUSES))
+    if cloud:
+        q = q.filter(Gateway.cloud == cloud)
+    rows = q.all()
+    if not rows:
+        return
+
+    by_cloud: dict[str, list] = {}
+    for row in rows:
+        by_cloud.setdefault(row.cloud, []).append(row)
+    items = list(by_cloud.items())
+
+    # Per cloud concurrently, but bounded: this runs on a page load, and the cloud SDKs
+    # are sync calls on a small thread pool. A cloud that has gone slow must cost the
+    # Gateways tab a stale reading, not the request.
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(_live_hosts(c, rs) for c, rs in items),
+                           return_exceptions=True),
+            timeout=_RECONCILE_TIMEOUT_S)
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.warning("gateway reconcile: timed out after %ds — statuses left as they are",
+                       _RECONCILE_TIMEOUT_S)
+        return
+
+    changed = False
+    for (cloud_name, cloud_rows), live in zip(items, results):
+        if isinstance(live, BaseException):
+            logger.warning("gateway reconcile: the %s lookup failed — leaving %d row(s) "
+                           "as they are: %s", cloud_name, len(cloud_rows), live)
+            continue
+        for row in cloud_rows:
+            changed = _apply_live(row, live.get(row.name)) or changed
+    if changed:
+        db.commit()
+
+
+async def _live_hosts(cloud: str, rows: list) -> dict:
+    """``{name: info}`` for the gateways in ``rows`` that exist, with AWS rows annotated
+    by whether the gateway task is actually running on the host.
+
+    The annotation is asked per REGION, not per gateway: the ECS calls behind it are
+    cluster-wide, so one round trip answers for every gateway sharing that cluster."""
+    from . import jumpoint_host_service
+    live = await jumpoint_host_service.live_gateway_hosts(
+        cloud, [(r.region or "", r.name) for r in rows])
+    if cloud != "aws":
+        return live
+
+    by_region: dict[str, list] = {}
+    for row in rows:
+        if row.name in live:
+            by_region.setdefault(row.region or "", []).append(row)
+    for region, region_rows in by_region.items():
+        serving = await jumpoint_host_service.gateway_tasks_by_host(
+            region, [live[r.name]["host_id"] for r in region_rows])
+        if serving is None:
+            continue    # unanswerable for this region; leave `serving` unset
+        for row in region_rows:
+            live[row.name]["serving"] = serving.get(live[row.name]["host_id"])
+    return live
+
+
+_MISSING_REASON = (
+    "The host for this gateway is no longer in the cloud, and nothing asked for it to be "
+    "removed. The row was kept so the gap is visible — remove it here, or deploy a "
+    "replacement to take over its share of the session load.")
+
+_DEGRADED_REASON = (
+    "The host is up but no gateway task is running on it, so this gateway cannot broker a "
+    "session. The Containers tab's ECS Tasks list shows the same thing. The next deploy "
+    "that needs this gateway starts the task.")
+
+
+def _apply_live(row, info: Optional[dict]) -> bool:
+    """Reconcile one row against its live host (``None`` when it has none). Returns
+    whether the row changed, so the caller can commit once for the whole pass."""
+    if info is None:
+        want = "deleted" if row.managed else "missing"
+        reason = None if row.managed else _MISSING_REASON
+        if row.status == want:
+            return False
+        logger.info("gateway reconcile: %s gateway %s has no host in the cloud — %s",
+                    row.cloud, row.name, want)
+        row.status = want
+        # The address outlived the host it described; drop it so the node firewalls stop
+        # re-applying a /32 that admits nothing.
+        row.egress_ip = None
+        row.error = reason
+        return True
+
+    # `serving` is None on the clouds (and configurations) where it can't be determined,
+    # and unknown must never downgrade a row — only a definite No does.
+    want = "degraded" if info.get("serving") is False else "running"
+    reason = _DEGRADED_REASON if want == "degraded" else None
+
+    # A recreated gateway host keeps its NAME and takes a FRESH address, so the row's
+    # remembered /32 can point at a host that is gone while this one goes unallowed. Only
+    # overwrite when we actually learned an address: a cloud that reports none (an Azure
+    # gateway has no public IP) must not blank a good value.
+    ip = info.get("egress_ip") or ""
+    ip_changed = bool(ip) and ip != (row.egress_ip or "")
+    if ip_changed:
+        logger.info("gateway reconcile: %s gateway %s egress IP %s → %s",
+                    row.cloud, row.name, row.egress_ip, ip)
+        row.egress_ip = ip
+
+    if row.status == want and (row.error or None) == reason and not ip_changed:
+        return False
+    if row.status != want:
+        logger.info("gateway reconcile: %s gateway %s is %s", row.cloud, row.name, want)
+    row.status = want
+    row.error = reason
+    row.host_id = info.get("host_id") or row.host_id
+    return True
 
 
 # ── naming ────────────────────────────────────────────────────────────────────

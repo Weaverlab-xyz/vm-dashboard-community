@@ -85,13 +85,19 @@ def test_the_gateways_tile_exists_in_the_containers_section():
 
 def test_the_tile_counts_managed_and_requested_together():
     """The point of the tile is one number for both kinds of gateway. `/api/gateways`
-    is the only endpoint that returns both, and it already omits deleted rows."""
+    is the only endpoint that returns both, and it already omits deleted rows.
+
+    Query parameters are allowed — the tile passes `reconcile=false` so the home page
+    doesn't fan a per-cloud SDK call out per tile — as long as none of them narrows which
+    rows come back."""
     m = re.search(r"k === 'gateways'\)\s*return ([^\n]+)", DASHBOARD)
     assert m, "no fetcher is wired for the gateways tile — it would read 'unavailable'"
     fetcher = m.group(1)
-    assert "'/api/gateways'" in fetcher, (
+    assert re.search(r"'/api/gateways(\?[^']*)?'", fetcher), (
         "the tile must count the whole registry; a per-cloud or per-kind endpoint "
         "would make it a partial total")
+    assert "cloud=" not in fetcher, (
+        "a cloud filter would make the tile a partial total")
     assert "'gateways'" in fetcher, "the list key in the /api/gateways response is 'gateways'"
 
 

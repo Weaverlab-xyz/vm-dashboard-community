@@ -678,8 +678,13 @@
         if (k === 'portainer_node')   return this._fetchListCount('/api/containers/portainer/node', 'nodes', n => (n.status || '').toUpperCase() === 'RUNNING');
         // Both kinds in one count — the auto-managed gateway per cloud and the ones
         // operators deploy. The registry already omits deleted rows, so the total is
-        // what exists; `running` excludes provisioning/deleting/errored hosts.
-        if (k === 'gateways')         return this._fetchListCount('/api/gateways', 'gateways', g => g.status === 'running');
+        // what exists; `running` excludes provisioning/deleting/errored hosts, and the
+        // `missing`/`degraded` ones a reconcile found are not carrying sessions either.
+        // reconcile=false deliberately: this home page already fans out a per-cloud call
+        // per tile against a small thread pool, and one slow cloud wedging the whole page
+        // is a failure this dashboard has actually had. The Gateways tab reconciles on
+        // open; the tile reports what that last found.
+        if (k === 'gateways')         return this._fetchListCount('/api/gateways?reconcile=false', 'gateways', g => g.status === 'running');
         // Managed services (creator-scoped server-side; no count field → list.length)
         if (k === 'cloud_databases')  return this._fetchListCount('/api/databases',    'databases');
         if (k === 'k8s_clusters')     return this._fetchListCount('/api/k8s/clusters',  'clusters');
