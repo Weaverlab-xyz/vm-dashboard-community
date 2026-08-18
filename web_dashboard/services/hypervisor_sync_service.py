@@ -73,27 +73,16 @@ def enqueue_due_syncs(db: Session) -> int:
         interval = _interval_minutes(conn)
         if conn.last_sync_at and (now - conn.last_sync_at).total_seconds() < interval * 60:
             continue
-        if _has_open_job(db, conn.id):
+        # Everything past the cadence check is `sync_now`'s job, and the cadence check is
+        # the ONLY thing the manual path drops — which is the whole point of a manual
+        # sync. Two copies of "is this connection syncable" would drift, and the one that
+        # drifted would be the one the operator reaches for when the timed pass is not
+        # producing rows.
+        job, reason = sync_now(db, conn)
+        if job is None:
+            if reason:
+                _note(db, conn, reason)
             continue
-
-        from ..database import RemoteAgent
-        agent = db.query(RemoteAgent).filter(RemoteAgent.id == conn.agent_id).first()
-        if agent is None or agent_service.status_of(agent) != "online":
-            _note(db, conn, "the bound agent is not online, so the sync was skipped")
-            continue
-        if "agent_hypervisor" not in agent_service.allowed_job_types(agent):
-            _note(db, conn, "the bound agent is not granted the agent_hypervisor job type")
-            continue
-        # A dashboard-held credential the bound agent could not collect. Recorded on the
-        # row rather than raised, like the two skips above — this sweep runs unattended, and
-        # queueing anyway would fail every thirty minutes against the hypervisor's own
-        # "wrong username or password" until the service account locked out.
-        blockers = hcs_blockers(db, conn.id, agent)
-        if blockers:
-            _note(db, conn, blockers[0])
-            continue
-
-        _queue(db, conn, cursor="", batch_id=None)
         queued += 1
     return queued
 
@@ -101,6 +90,42 @@ def enqueue_due_syncs(db: Session) -> int:
 def hcs_blockers(db: Session, connection_id: str, agent) -> list:
     from . import hypervisor_connection_service as hcs
     return hcs.dashboard_secret_blockers(db, connection_id, agent)
+
+
+def sync_now(db: Session, conn: HypervisorConnection):
+    """Queue an inventory_sync for ONE connection, ignoring its cadence.
+
+    Returns ``(job, "")`` when queued, or ``(None, reason)`` when it cannot be — the
+    reason being operator-facing prose, because both callers surface it: the timed pass
+    records it on the connection, and the manual one puts it in front of whoever pressed
+    the button. A silent skip is what makes a sync look like it ran.
+
+    Every refusal the timed pass makes lives here, and the cadence check is the only
+    thing that does not: the manual path exists precisely to skip the clock, not the
+    guards. Two copies would drift, and the one that drifted would be the one an operator
+    reaches for when the timed pass is not producing rows.
+    """
+    if not getattr(conn, "agent_id", None):
+        return None, ("this connection is not bound to an agent, and the dashboard has "
+                      "no route to it")
+    if _has_open_job(db, conn.id):
+        return None, ""      # already queued or running — not a fault, and not news
+
+    from ..database import RemoteAgent
+    agent = db.query(RemoteAgent).filter(RemoteAgent.id == conn.agent_id).first()
+    if agent is None or agent_service.status_of(agent) != "online":
+        return None, "the bound agent is not online, so the sync was skipped"
+    if "agent_hypervisor" not in agent_service.allowed_job_types(agent):
+        return None, "the bound agent is not granted the agent_hypervisor job type"
+    # A dashboard-held credential the bound agent could not collect. Queueing anyway
+    # fails against the hypervisor's own "wrong username or password" — every thirty
+    # minutes on the timed pass, until the service account locks out. A button that
+    # queued it on demand would do the same thing faster, so this guard belongs to both.
+    blockers = hcs_blockers(db, conn.id, agent)
+    if blockers:
+        return None, blockers[0]
+
+    return _queue(db, conn, cursor="", batch_id=None), ""
 
 
 def _has_open_job(db: Session, connection_id: str) -> bool:
@@ -209,6 +234,7 @@ def _upsert(db: Session, connection_id: str, vms: list, started: datetime) -> No
         row.scope = vm.get("scope")
         row.vm_type = vm.get("vm_type")
         row.tags = json.dumps(vm.get("tags") or [])
+        row.guest_os = vm.get("guest_os")
         row.synced_at = max(started, datetime.utcnow())
     db.commit()
 
@@ -238,6 +264,7 @@ def list_vms(db: Session, connection_id: str = "") -> list:
             "ip_addresses": json.loads(row.ip_addresses or "[]"),
             "scope": row.scope or "", "vm_type": row.vm_type or "",
             "tags": json.loads(row.tags or "[]"),
+            "guest_os": row.guest_os or "",
             "synced_at": row.synced_at.isoformat() if row.synced_at else None,
         })
     return out

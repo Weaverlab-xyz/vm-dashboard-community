@@ -1896,6 +1896,20 @@ def _vmrest_name(conn, vm_id, path, checkins):
     return base[:-4] if base.lower().endswith(".vmx") else base
 
 
+def _vmrest_guest_os(conn, vm_id, checkins):
+    """The VMX `guestOS` code (e.g. `windows9-64`), or "" when vmrest will not say.
+
+    The RAW code, deliberately: the dashboard owns the label table
+    (hypervisor_view_service.guest_os_label). An agent is upgraded separately and lags
+    whatever the dashboard runs, so a label shipped from here would freeze at the build
+    the host last pulled — and correcting a display string would then need an agent
+    rebuild. Same reason every other value in a sync row is an id or an enum.
+    """
+    got = _vmrest(conn, "GET", f"/vms/{vm_id}/params/guestOS", checkins=checkins)
+    value = (got or {}).get("value") if isinstance(got, dict) else ""
+    return str(value or "")
+
+
 def _sync_workstation(conn, payload, policy, emit, checkins=None):
     host, port = _conn_endpoint(conn, 8697)
     _check_endpoint(policy, host, port, str(payload.get("connection_ref") or ""))
@@ -1925,6 +1939,10 @@ def _sync_workstation(conn, payload, policy, emit, checkins=None):
             # column. It is display-only: identity is vmrest's opaque id.
             "scope": str(entry.get("path") or ""),
             "vm_type": "vm",
+            # A fifth call per VM, on top of /vms/{id}, /power, /params/displayName and
+            # (when running) /ip. Affordable: this is a desktop hypervisor with tens of
+            # VMs and no cursor, and the OS column is blank without it.
+            "guest_os": _vmrest_guest_os(conn, vm_id, checkins),
         }
         # Only a powered-on VM has an address, and only with tools installed. Asking a
         # stopped VM costs a call per VM to learn nothing.

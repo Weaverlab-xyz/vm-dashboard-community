@@ -1,14 +1,14 @@
 """
 Azure Automation service — executes PowerShell runbooks on the on-prem Hybrid Runbook Worker.
 
-Used when POWERSHELL_EXECUTION_MODE=automation (cloud deployment).
-Provides the same interface as the local subprocess path in powershell.py so
-callers need no changes:
+Used when POWERSHELL_EXECUTION_MODE=automation (cloud deployment). Its caller today is
+portainer_service; it used to mirror the local subprocess path in powershell.py, which
+was deleted along with the VMware wrapper it drove. The interface is kept as it was:
   - execute(action, params) → dict
   - execute_streaming(action, params) → AsyncGenerator yielding progress/result events
 
 All jobs target the "on-prem-powershell-workers" Hybrid Worker group so they
-run on the on-prem Windows machine that has PowerShell + VMware access.
+run on the on-prem Windows machine that can reach the private network.
 """
 import asyncio
 import base64

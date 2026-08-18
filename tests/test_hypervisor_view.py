@@ -190,6 +190,52 @@ def test_every_supported_kind_has_a_projector():
     assert not missing, f"no projection for {missing}"
 
 
+
+# ── guest OS labels ───────────────────────────────────────────────────────────
+
+def test_the_lying_windows_codes_are_mapped_exactly():
+    """`windows9-64` is Windows 10. VMware kept the internal name when Microsoft skipped
+    the number, so the single most common Workstation guest is the one a substring rule
+    gets wrong — which is why exact codes are consulted first."""
+    assert view.guest_os_label("windows9-64") == "Windows 10 (64-bit)"
+    assert view.guest_os_label("windows11-64") == "Windows 11"
+
+
+def test_server_is_matched_before_windows():
+    """Every Windows Server code also contains "windows", so the looser rule ordered
+    first would label a domain controller "Windows"."""
+    assert view.guest_os_label("windows2019srv-64") == "Windows Server 2019"
+    assert view.guest_os_label("windows2016srv-64").startswith("Windows Server")
+
+
+def test_a_family_code_is_labelled_and_keeps_its_bitness():
+    assert view.guest_os_label("ubuntu-64") == "Ubuntu (64-bit)"
+    assert view.guest_os_label("rhel9-64") == "Red Hat Enterprise Linux (64-bit)"
+    assert view.guest_os_label("freebsd") == "FreeBSD"
+
+
+def test_an_unknown_code_falls_back_to_itself_not_to_unknown():
+    """`nonesuch-99` at least tells an operator what the hypervisor said and tells a
+    maintainer the table wants an entry. "Unknown" says neither, and hides the difference
+    between "the agent reported nothing" and "we have no row for what it reported"."""
+    assert view.guest_os_label("nonesuch-99") == "nonesuch-99"
+
+
+def test_no_os_reported_is_empty_not_a_label():
+    """An agent older than the guest_os key must render a dash, not a claim."""
+    assert view.guest_os_label(None) == ""
+    assert view.guest_os_label("") == ""
+
+
+def test_the_workstation_projection_carries_the_os_and_the_sync_time():
+    out = view.project("workstation", [_row(vm_id="AB12", power_state="poweredOn",
+                                            guest_os="windows9-64",
+                                            synced_at="2026-08-18T12:00:00")])[0]
+    assert out["os_type"] == "Windows 10 (64-bit)"
+    assert out["synced_at"] == "2026-08-18T12:00:00", (
+        "the page's staleness line has nothing to read without this")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

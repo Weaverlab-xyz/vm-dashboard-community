@@ -1,7 +1,9 @@
-"""Cross-provider deployment inventory API — a read-only aggregation of every
-resource the dashboard has deployed, built from its own DB records (no live cloud
-calls). Cached (a handful of indexed queries) and filtered to the caller's
-workgroups; admins see everything.
+"""Cross-provider deployment inventory API — a read-only aggregation of every resource
+the dashboard knows about, built from its own DB records (no live cloud calls). That is
+mostly what it deployed, plus what it was told about: a registered cloud database, a
+registered K8s cluster, and every VM a remote agent has synced from a hypervisor.
+Cached (a handful of indexed queries) and filtered to the caller's workgroups; admins
+see everything.
 """
 import logging
 from typing import List, Optional
@@ -25,12 +27,14 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
 
 @router.get("")
 async def list_inventory(
-    provider: Optional[str] = Query(None, description="Filter by cloud/provider (aws, azure, gcp, proxmox, nutanix)"),
+    provider: Optional[str] = Query(None, description=(
+        "Filter by cloud/provider (aws, azure, gcp, oci, and the hypervisor kinds "
+        "proxmox, nutanix, vsphere, xcpng, hyperv, workstation)")),
     kind: Optional[str] = Query(None, description="Filter by kind (vm, database, k8s, desktop)"),
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """All dashboard-deployed resources visible to the caller. Cached; RBAC +
-    optional provider/kind filters applied per request."""
+    """Every resource visible to the caller. Cached; RBAC + optional provider/kind
+    filters applied per request."""
     cache_key = cache_service.key_global("deployment_inventory")
     ttl = cache_service.TTL["deployment_inventory"]
 

@@ -54,18 +54,29 @@ def get(db: Session, provider: str, vm_id: str) -> Optional[str]:
     return row[0] if row else None
 
 
+# Ids per IN (...) clause. Every caller passes EVERY VM on a hypervisor, so an unbounded
+# clause is one large vCenter away from SQLITE_MAX_VARIABLE_NUMBER (999 before SQLite
+# 3.32) — which raises rather than degrading, taking the whole page with it. Chunked here
+# rather than at each call site so all of them get it.
+_IN_CHUNK = 500
+
+
 def get_many(db: Session, provider: str, vm_ids: Iterable[str]) -> Dict[str, str]:
     """Return a {vm_id: workgroup} dict for all assigned VMs in the input list."""
     _check_provider(provider)
     ids = list(vm_ids)
     if not ids:
         return {}
-    rows = (
-        db.query(VMWorkgroupOverride.vm_id, VMWorkgroupOverride.workgroup)
-        .filter(VMWorkgroupOverride.provider == provider, VMWorkgroupOverride.vm_id.in_(ids))
-        .all()
-    )
-    return {vm_id: wg for vm_id, wg in rows}
+    out: Dict[str, str] = {}
+    for start in range(0, len(ids), _IN_CHUNK):
+        rows = (
+            db.query(VMWorkgroupOverride.vm_id, VMWorkgroupOverride.workgroup)
+            .filter(VMWorkgroupOverride.provider == provider,
+                    VMWorkgroupOverride.vm_id.in_(ids[start:start + _IN_CHUNK]))
+            .all()
+        )
+        out.update({vm_id: wg for vm_id, wg in rows})
+    return out
 
 
 # ── Mutations ─────────────────────────────────────────────────────────────────

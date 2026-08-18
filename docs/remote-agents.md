@@ -877,6 +877,12 @@ agent is attached to the network:
   That exempts **that connection**, on the port its `connections.yaml` entry names, and
   nothing else. Discovery still refuses loopback however this is set.
 
+  **`power_on` and `power_off` are not optional if you want the buttons.** With only
+  `inventory_sync` the VMs list correctly on the Workstation page and Start/Stop are
+  refused **by the agent** — the refusal names this file and the verb to add, but it is
+  the most common "I set it all up and the buttons still do not work" outcome. Grant them
+  when you write the entry, not after.
+
 If you can make `vmrest` listen on a routable address instead, do that and skip both
 exceptions — it is the only one of the three that needs nothing special from the container
 runtime. Note that `vmrest` documents a `-p` port option but no bind-address option, so on a

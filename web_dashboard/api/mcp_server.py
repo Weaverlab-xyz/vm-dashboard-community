@@ -168,19 +168,50 @@ async def get_job(job_id: str) -> dict:
 @mcp.tool()
 async def list_vms(workgroup: Optional[str] = None) -> dict:
     """
-    List VMware VMs via the PowerShell CLI. Returns a list of VMs with their
-    state (running/stopped). Only available when VMware is enabled.
+    List VMware Workstation VMs a remote agent has synced, with their power state.
+    Only available when VMware is enabled.
     """
     if not config_service.get_bool("vmware_enabled", False):
         return {"error": "VMware integration is not enabled on this dashboard"}
+    # This used to import `..services.vm_service`, which has never existed in this repo —
+    # so `except ImportError` returned "VMware service not available" on every call and
+    # the tool has never once listed a VM. It reads the synced cache now, the same source
+    # /api/vms lists from.
+    db = SessionLocal()
     try:
-        from ..services import vm_service  # type: ignore
-        vms = await vm_service.list_vms(workgroup=workgroup)
-        return {"vms": vms}
-    except ImportError:
-        return {"error": "VMware service not available"}
+        from ..services import hypervisor_sync_service, hypervisor_view_service
+        from ..database import HypervisorConnection
+
+        conns = (db.query(HypervisorConnection)
+                 .filter(HypervisorConnection.kind == "workstation",
+                         HypervisorConnection.is_active.is_(True)).all())
+        vms = []
+        for conn in conns:
+            for vm in hypervisor_view_service.project(
+                    "workstation", hypervisor_sync_service.list_vms(db, conn.id)):
+                vms.append({
+                    "vm_id": vm.get("vm_id"),
+                    "name": vm.get("name"),
+                    "state": "running" if vm.get("is_running") else "stopped",
+                    "os_type": vm.get("os_type") or "",
+                    "ip_addresses": vm.get("ip_addresses") or [],
+                    "vmx_path": vm.get("vmx_path") or "",
+                    "connection": conn.name,
+                })
+        # A workgroup on these rows is an admin-assigned override, so filtering happens
+        # here rather than in the query.
+        if workgroup:
+            from ..services import workgroup_override_service
+            overrides = workgroup_override_service.get_many(
+                db, "workstation", [v["vm_id"] for v in vms])
+            wanted = workgroup.strip().lower()
+            vms = [v for v in vms
+                   if (overrides.get(v["vm_id"]) or "").lower() == wanted]
+        return {"vms": vms, "count": len(vms)}
     except Exception as exc:
         return {"error": str(exc)}
+    finally:
+        db.close()
 
 
 @mcp.tool()

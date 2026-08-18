@@ -828,6 +828,11 @@ def _resolve_row(db: Session, inv_id: str):
 
     The id scheme is inventory_service's, so this stays the one place that knows a
     ``job:`` prefix means the deploy Job row carries the timer.
+
+    ``hv:`` is absent deliberately, not by omission. A synced hypervisor VM has no
+    dashboard row to stamp a timer on and no teardown to run, so there is nothing to
+    resolve — ``expiry_policy.ttl_capable`` refuses it first, and this is the second of
+    the two places that would have to agree before one could ever be reaped.
     """
     prefix, _, rid = (inv_id or "").partition(":")
     if not rid:

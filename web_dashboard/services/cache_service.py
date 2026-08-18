@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 # ── TTL constants (seconds) ───────────────────────────────────────────────────
 TTL = {
-    "vms_running":         1800,  # 30 min — now only triggered by explicit user action
     # AWS / boto3-backed
     "aws_amis":            300,   # 5 min
     "aws_network_opts":    600,   # 10 min

@@ -46,6 +46,67 @@ _HYPERV_STATE_INTS = {"unknown": 0, "running": 2, "off": 3, "stopping": 4, "save
 def is_running(kind: str, power_state: str) -> bool:
     return str(power_state or "").strip().lower() in _RUNNING.get(kind, set())
 
+# VMX guestOS code -> what to show in the OS column.
+#
+# This table is HERE, on the dashboard, and the agent reports the raw code. An agent is
+# deployed separately and lags whatever the dashboard is running, so a label table baked
+# into it would freeze at the build the customer last pulled — and a new Windows release
+# would then need an agent rebuild to fix a *display string*. It is also the direction
+# the trust boundary points: agent_hypervisor_meta.VM_KEYS carries enums and opaque ids,
+# never display prose. services/os_detection.py already does exactly this server-side for
+# AWS and Azure image strings.
+#
+# Exact codes first, because the codes lie: `windows9-64` is Windows 10, not Windows 9 —
+# VMware kept the internal name when Microsoft skipped the number — so a substring rule
+# alone gets the single most common Workstation guest wrong.
+_GUEST_OS = {
+    "windows9-64": "Windows 10 (64-bit)",
+    "windows9": "Windows 10 (32-bit)",
+    "windows11-64": "Windows 11",
+    "windows9srv-64": "Windows Server 2016",
+    "windows2019srv-64": "Windows Server 2019",
+    "windows2019srvnext-64": "Windows Server 2022",
+    "windows2022srvnext-64": "Windows Server 2025",
+    "windows8-64": "Windows 8 (64-bit)",
+    "windows7-64": "Windows 7 (64-bit)",
+    "other-64": "Other (64-bit)",
+    "other": "Other",
+}
+
+# Then family substrings, in order. `srv` MUST precede `windows`: every Windows Server
+# code also contains "windows", so the looser rule would swallow it and label a domain
+# controller "Windows".
+_GUEST_OS_FAMILY = (
+    ("ubuntu", "Ubuntu"), ("debian", "Debian"), ("rhel", "Red Hat Enterprise Linux"),
+    ("centos", "CentOS"), ("fedora", "Fedora"), ("oracle", "Oracle Linux"),
+    ("rocky", "Rocky Linux"), ("almalinux", "AlmaLinux"), ("alma", "AlmaLinux"),
+    ("sles", "SUSE Linux Enterprise"), ("opensuse", "openSUSE"), ("suse", "SUSE"),
+    ("arch", "Arch Linux"), ("freebsd", "FreeBSD"), ("darwin", "macOS"),
+    ("solaris", "Solaris"), ("srv", "Windows Server"), ("windows", "Windows"),
+    ("linux", "Linux"),
+)
+
+
+def guest_os_label(code: str) -> str:
+    """A readable OS name for a hypervisor's guest-OS code.
+
+    Falls back to the RAW CODE, never to "Unknown". `sles15-64` tells an operator what
+    the VM is and tells a maintainer this table wants an entry; "Unknown" says neither,
+    and hides the difference between "the agent reported nothing" and "we have no row
+    for what it reported". Empty in, empty out — the column renders its own dash.
+    """
+    code = str(code or "").strip()
+    if not code:
+        return ""
+    lowered = code.lower()
+    if lowered in _GUEST_OS:
+        return _GUEST_OS[lowered]
+    for needle, label in _GUEST_OS_FAMILY:
+        if needle in lowered:
+            return f"{label} (64-bit)" if lowered.endswith("-64") else label
+    return code
+
+
 
 def project(kind: str, rows: list) -> list:
     """Cache rows in the shape ``kind``'s page and template expect."""
@@ -149,6 +210,11 @@ def _workstation(row: dict) -> dict:
         "vcpus": row.get("vcpus"),
         "mem_mib": row.get("mem_mib"),
         "ip_addresses": row.get("ip_addresses") or [],
+        "os_type": guest_os_label(row.get("guest_os")),
+        # Not a live-only measurement, so this does not breach the "absent, never zero"
+        # rule above: it is when the CACHE was written, which is exactly what the page's
+        # staleness line needs and the only honest source for it.
+        "synced_at": row.get("synced_at"),
     }
 
 

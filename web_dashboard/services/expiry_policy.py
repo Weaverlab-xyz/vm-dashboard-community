@@ -61,6 +61,14 @@ REAPABLE_KINDS = ("vm", "database", "k8s")
 # `cloud` values).
 REAPABLE_VM_CLOUDS = ("aws", "azure", "gcp", "oci")
 
+# `source` on a row that inventory_service read out of the hypervisor sync cache.
+#
+# Its own value rather than reusing "registered": a registered database is one the
+# dashboard holds a RECORD for and could deregister, whereas this is a read-through
+# cache of somebody else's hypervisor, where the dashboard holds no record at all and
+# expiring a row would delete a cache entry and leave the VM running.
+SYNCED_HYPERVISOR_SOURCE = "hypervisor"
+
 # Per-kind states that mean "healthy and idle" — the only ones a reap may act on. Never
 # a row mid-provision, mid-decommission, or failed.
 #
@@ -493,6 +501,16 @@ def ttl_capable(item: dict) -> tuple:
     cloud = (item.get("cloud") or "").lower()
     source = item.get("source") or "provisioned"
 
+    # FIRST, and by its own rule rather than falling through the `source != "provisioned"`
+    # test below. That test would refuse this too, but its reason says "registered", which
+    # is not what this is — and a safety property that holds by accident is one refactor
+    # away from not holding. This one branch covers both the reaper (reap_target calls
+    # ttl_capable) and the operator (expiry_reaper.set_expiry calls it before writing), so
+    # a timer cannot be stamped on one of these by hand either.
+    if source == SYNCED_HYPERVISOR_SOURCE:
+        return False, ("this VM was discovered on a hypervisor, not deployed by the "
+                       "dashboard — there is no teardown to run, so it can never be "
+                       "auto-deleted. Delete it from its hypervisor instead.")
     if kind not in REAPABLE_KINDS:
         return False, (f"{kind!r} resources have no auto-delete timer — a virtual-desktop "
                        f"seat is torn down with its pool, not individually.")
