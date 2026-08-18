@@ -116,8 +116,13 @@ def test_per_resource_prefixes_do_not_swallow_real_settings():
 
 
 def test_local_paths_are_denied():
+    """The five image-pipeline paths are here deliberately even though config.py no
+    longer declares any of them: the denylist is keyed on the key name, so it must keep
+    refusing rows that an older source instance exported. Don't drop them as "stale"."""
     for key in ("vm_cli_wrapper_path", "ssh_key_file", "storage_local_path",
-                "ova_search_path", "epml_rpm_path"):
+                "epml_rpm_path",
+                "ova_search_path", "iso_source_path", "packer_work_root",
+                "vmx_output_path", "ovf_tool_path"):
         assert classify.exclusion_reason(key, "v") == classify.LOCAL_PATH, key
 
 

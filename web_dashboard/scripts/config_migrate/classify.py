@@ -186,6 +186,11 @@ _LOCAL_PATHS = frozenset({
     "log_dir",
     "ssh_key_file",
     "ssh_host",
+    # These five are declared nowhere in config.py any more — the local Packer/OVF
+    # image-building pipeline they configured is gone. They stay because this denylist
+    # is keyed on the KEY NAME, not on Settings (see the module docstring): a bundle
+    # exported from an older instance still carries these rows, and fail-open would
+    # apply a Windows path to a target container that has no such filesystem.
     "ova_search_path",
     "iso_source_path",
     "packer_work_root",
