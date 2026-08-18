@@ -594,7 +594,9 @@ VPC) — registration raises if it isn't configured for a private target. **AWS 
 reachable directly from the agent; **GCP Cloud SQL** is not (the agent's GKE VPC can't
 reach Cloud SQL's private IP over non-transitive peering), so the dashboard stands up an
 on-demand **socat forwarder** in the sandbox VPC and points Entitle at it — enable it with
-`gcp_entitle_db_proxy_enabled`.
+`gcp_entitle_db_proxy_enabled`. The forwarder is placed in the **database's own region**
+(zone and `db_network` from that region's config set), because the Cloud SQL private IP it
+relays to is only reachable from there.
 
 > Entitle here is independent of Password Safe (Layer 2): a DB can be registered in Entitle
 > whether or not Password Safe manages its credential. The two solve different problems —
