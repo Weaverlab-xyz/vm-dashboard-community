@@ -1451,8 +1451,13 @@ class PasswordSafe:
         try:
             self._call("PUT", f"Requests/{int(request_id)}/Checkin",
                        json={"Reason": "vm-dashboard agent finished"})
-        except Exception:  # noqa: BLE001
-            log.debug("Password Safe check-in failed for request %s", request_id)
+        except Exception:  # noqa: BLE001 — never log the request id (CodeQL taints it)
+            # The id is reachable from the same per-job object that holds a fetched
+            # credential (see JobSecrets), so taint analysis treats it as secret-derived
+            # and a `%s` here is a clear-text-logging error. It is no loss: the id is
+            # worth nothing diagnostically, and the dashboard-side twin
+            # (ps_api_service._checkin) dropped it for exactly this reason.
+            log.debug("a Password Safe credential check-in was refused")
 
 
 class JobSecrets(list):
@@ -1469,6 +1474,12 @@ class JobSecrets(list):
 
     The alternative, if this ever grates: rename the last parameter to ``ctx`` at all
     thirteen sites and take the test churn.
+
+    One consequence of holding both the credential and the Password Safe request ids on
+    one object: taint analysis treats anything read out of it as secret-derived, so a
+    request id must not be logged. ``PasswordSafe.checkin`` says the same at the point it
+    matters. That is a fair price — a request id has no diagnostic value — but it is a
+    real constraint rather than a style preference, so it is written down here too.
     """
 
     def __init__(self, *, job_id: str = "", dashboard=None, ref: str = ""):
