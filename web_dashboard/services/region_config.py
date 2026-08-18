@@ -68,6 +68,13 @@ _SPECS: dict[str, _Spec] = {
             "db_subnet_id":           "azure_db_subnet_id",
             "db_mysql_subnet_id":     "azure_db_mysql_subnet_id",
             "db_private_dns_zone_id": "azure_db_private_dns_zone_id",
+            # MySQL and SQL Server each need their OWN subnet + zone (a delegated
+            # subnet hosts one flexible-server type, and Azure fixes the SQL zone
+            # name at privatelink.database.windows.net), so all three are per-region
+            # like the Postgres pair above — the sandbox emits every one of them.
+            "db_mysql_private_dns_zone_id": "azure_db_mysql_private_dns_zone_id",
+            "db_sqlserver_subnet_id": "azure_db_sqlserver_subnet_id",
+            "db_sqlserver_private_dns_zone_id": "azure_db_sqlserver_private_dns_zone_id",
             # Gateway hosts are per-region like every other subnet here; AWS and GCP
             # already carried this field and Azure was the only cloud without it.
             "jumpoint_subnet_id":     "azure_jumpoint_subnet_id",

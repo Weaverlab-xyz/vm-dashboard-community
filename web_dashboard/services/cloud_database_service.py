@@ -202,6 +202,7 @@ def _build_tf_variables(
     unchanged. An explicit value passed in ``opts`` always wins.
     """
     if (engine, cloud) == ("postgres", "aws"):
+        _aws = resolve_region("aws", region)
         return {
             "region": region,
             "identifier": f"clouddb-{db_id[:8]}",
@@ -211,16 +212,19 @@ def _build_tf_variables(
             "instance_class": opts.get("instance_class", "db.t3.micro"),
             "allocated_storage": opts.get("allocated_storage", 20),
             "db_subnet_group_name": opts.get("db_subnet_group_name")
-                or resolve_region("aws", region)["db_subnet_group_name"],
+                or _aws["db_subnet_group_name"],
             "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
             # Attach the force_ssl=0 parameter group the sandbox pre-created, so the
             # PRA protocol tunnel's cleartext gateway→RDS connection isn't rejected.
-            # Empty config → "" → module falls back to the RDS default group.
-            "parameter_group_name": _cfg("aws_db_parameter_group_name"),
+            # Per-region: the sandbox creates one group per region and emits it as
+            # aws_region.<r>.db_parameter_group_name. Empty config → "" → module
+            # falls back to the RDS default group.
+            "parameter_group_name": _aws["db_parameter_group_name"],
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
     if (engine, cloud) == ("mysql", "aws"):
+        _aws = resolve_region("aws", region)
         return {
             "region": region,
             "identifier": f"clouddb-{db_id[:8]}",
@@ -230,12 +234,13 @@ def _build_tf_variables(
             "instance_class": opts.get("instance_class", "db.t3.micro"),
             "allocated_storage": opts.get("allocated_storage", 20),
             "db_subnet_group_name": opts.get("db_subnet_group_name")
-                or resolve_region("aws", region)["db_subnet_group_name"],
+                or _aws["db_subnet_group_name"],
             "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
             # MySQL's cleartext knob is require_secure_transport=0 (not
             # rds.force_ssl) — its own mysql8.0-family group the sandbox
-            # pre-creates. Empty config → "" → module falls back to RDS default.
-            "parameter_group_name": _cfg("aws_db_mysql_parameter_group_name"),
+            # pre-creates per region. Empty config → "" → module falls back to
+            # the RDS default.
+            "parameter_group_name": _aws["db_mysql_parameter_group_name"],
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -362,8 +367,7 @@ def _build_tf_variables(
             "storage_mb": opts.get("storage_mb", 32768),
             "db_name": db_name,
             "delegated_subnet_id": opts.get("delegated_subnet_id") or _az["db_mysql_subnet_id"],
-            # MySQL has its own DNS zone flat key (not a region-config field) — unchanged.
-            "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_mysql_private_dns_zone_id"),
+            "private_dns_zone_id": opts.get("private_dns_zone_id") or _az["db_mysql_private_dns_zone_id"],
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -380,18 +384,18 @@ def _build_tf_variables(
         sqlserver_sku = opts.get("sku_name") or "Basic"
         if "_Standard_" in sqlserver_sku:
             sqlserver_sku = "Basic"
+        _az = resolve_region("azure", region)
         return {
-            "resource_group_name": opts.get("resource_group_name") or resolve_region("azure", region)["resource_group"],
+            "resource_group_name": opts.get("resource_group_name") or _az["resource_group"],
             "location": region,
             "identifier": f"clouddb-{db_id[:8]}",
             "administrator_login": master_username,
             "administrator_password": master_password,
             "sku_name": sqlserver_sku,
             "db_name": db_name,
-            # SQL Server has its own PE subnet + DNS zone flat keys (not region-config
-            # fields) — unchanged.
-            "subnet_id": opts.get("subnet_id") or _cfg("azure_db_sqlserver_subnet_id"),
-            "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_sqlserver_private_dns_zone_id"),
+            # SQL Server gets its own PE subnet + privatelink zone, per region.
+            "subnet_id": opts.get("subnet_id") or _az["db_sqlserver_subnet_id"],
+            "private_dns_zone_id": opts.get("private_dns_zone_id") or _az["db_sqlserver_private_dns_zone_id"],
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 

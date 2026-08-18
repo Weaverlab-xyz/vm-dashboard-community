@@ -277,11 +277,27 @@ unretried `ecsTaskExecutionRole` attach now uses it too.
    `_DEPLOYMENTS_DIR` (`k8s_service.py:202`) is only ever created; every `shutil.rmtree`
    in that file targets a runner `tmpdir` instead. `storage_service.py:639` scans that
    same root for local-backend state.
-4. **Azure multi-region DB hole.** The MySQL DNS zone and the SQL Server PE subnet + zone
-   are read from flat config (`cloud_database_service.py:328`, `:355-356`) while
-   `region_config.py:64-75` only carries fields for `db_subnet_id`, `db_mysql_subnet_id`
-   and `db_private_dns_zone_id`. A non-default-region MySQL or SQL Server DB gets the
-   **default region's** zone/subnet.
+4. ~~**Azure multi-region DB hole.**~~ **Fixed.** The MySQL DNS zone and the SQL Server
+   PE subnet + zone were read from flat config while `region_config.py` carried fields
+   only for `db_subnet_id`, `db_mysql_subnet_id` and `db_private_dns_zone_id`, so a
+   non-default-region MySQL or SQL Server DB got the **default region's** zone/subnet.
+   All three are now region-config fields, emitted per-region by both azure twins, and —
+   the half that declaring the fields alone would NOT have fixed — read through
+   `resolve_region()` rather than `_cfg()`. The same read-path bug was found one cloud
+   over: the AWS parameter groups had been per-region in `_SPECS` and emitted by the
+   sandbox since the per-region pass, but `cloud_database_service` still read them flat,
+   which is the shape worth remembering — a field can be declared, emitted, stored, shown
+   in the Multi-region panel, and still never reach Terraform.
+
+   `azure_region.<loc>.jumpoint_subnet_id` went in at the same time: it was the one
+   remaining Azure field whose flat key the sandbox emits but whose per-region line it
+   did not. `tests/test_sandbox_region_keys.py` gained the guard that would have caught
+   all four — *if a script emits a declared field's flat fallback, it must emit the
+   per-region line too*. Gating on "this script emits the flat key" makes it
+   exemption-free: `aws ssm_instance_profile`, `gcp ecs_subnetwork` and
+   `azure default_vm_size` name resources the sandbox does not create, emit neither half,
+   and are skipped. It is also the only one of the four sandbox guards that catches a gap
+   present in **both** twins — the twin-parity check passes when they are wrong together.
 5. ~~**`Setup-AzureSandbox.ps1`** omits the optional external image-gallery block.~~
    **Fixed.** The PowerShell twin now carries the §6c block (custom role definition +
    RG-scoped assignment + state writes), emits all four gallery config keys, and
