@@ -223,11 +223,15 @@
                   </button>
                 </template>
                 <!-- Shutdown (graceful) -->
-                <template x-if="vm.is_running && vm.tools_status === 'toolsOk'">
+                <template x-if="vm.is_running && guestToolsMaybeReady(vm)">
                   <button @click="powerOp(vm, 'shutdown')"
                           :disabled="pending.has(vm.moref) || !canOp('shutdown')"
-                          :title="canOp('shutdown') ? 'Graceful shutdown via VMware Tools'
-                                                    : opTitle('shutdown')"
+                          :title="!canOp('shutdown') ? opTitle('shutdown')
+                            : (vm.tools_status === undefined
+                               ? 'Graceful shutdown via VMware Tools — this connection is '
+                                 + 'agent-bound, so Tools status is not synced; vCenter '
+                                 + 'answers if Tools is not running'
+                               : 'Graceful shutdown via VMware Tools')"
                           class="text-xs px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600
                                  disabled:opacity-40 text-white font-medium transition">
                     <span x-text="pending.has(vm.moref) ? '…' : 'Shutdown'"></span>
@@ -391,7 +395,7 @@ function vsphereDashboard() {
     // refuses the rest with a 501 — this is only so the operator sees why a button is
     // dead instead of clicking it and reading an error.
     viaAgent: {{ 'true' if via_agent else 'false' }},
-    agentOps: ['start', 'stop', 'reset'],
+    agentOps: ['start', 'stop', 'reset', 'shutdown'],
 
     get connectionLabel() {
       if (this.loading) return 'Connecting…';
@@ -528,9 +532,25 @@ function vsphereDashboard() {
 
     opTitle(op) {
       if (this.canOp(op)) return '';
-      return 'Not available through a remote agent — a graceful vCenter shutdown is a '
-           + 'separate guest-power call, and the nearest power action is a hard reset. '
-           + 'Available: ' + this.agentOps.join(', ') + '.';
+      return 'Not available through a remote agent — no verb in the agent\'s allowlist '
+           + 'performs this operation, and the endpoint refuses rather than approximate '
+           + 'it. Available: ' + this.agentOps.join(', ') + '.';
+    },
+
+    // UNKNOWN is not ABSENT. A row synced by an agent carries no `tools_status` at all:
+    // hypervisor_view_service drops live-only fields rather than fabricate them, so the
+    // value is `undefined`, and `undefined === 'toolsOk'` is false. Gating Shutdown on
+    // that comparison alone hid the button on precisely the connections the `shutdown`
+    // verb was added for — a dead button on every agent-bound vCenter, which looks like
+    // the feature was never wired up.
+    //
+    // So: show it unless we positively know Tools is not running. If it turns out not to
+    // be, vCenter answers 503 and the agent says so in Live Output, naming Tools — which
+    // is a better outcome than a button that cannot be pressed for a reason the page
+    // never measured.
+    guestToolsMaybeReady(vm) {
+      return vm.tools_status === undefined || vm.tools_status === null
+          || vm.tools_status === 'toolsOk';
     },
 
     powerLabel(state) {

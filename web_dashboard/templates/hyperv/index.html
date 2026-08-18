@@ -159,7 +159,11 @@
               <button @click="openDetail(vm)"
                       class="font-medium text-gray-900 hover:text-blue-600 text-left truncate block w-full"
                       x-text="vm.name"></button>
-              <span x-show="vm.is_running && !vm.integration_services_state"
+              <!-- Only when we positively know. On an agent-synced row
+                   `integration_services_state` is absent, and `!undefined` would badge
+                   every running VM as missing Integration Services — a claim about
+                   something this page never measured. -->
+              <span x-show="vm.is_running && !guestToolsMaybeReady(vm)"
                     class="text-xs text-orange-500 mt-0.5 block"
                     title="Integration Services not installed — graceful shutdown unavailable">
                 ⚠ No Integration Services
@@ -263,11 +267,15 @@
                   <div class="flex items-center gap-1.5">
                     <button @click="powerOp(vm, 'shutdown')"
                             :disabled="vm._busy || !canOp('shutdown')
-                                       || !vm.integration_services_state"
+                                       || !guestToolsMaybeReady(vm)"
                             :title="!canOp('shutdown') ? opTitle('shutdown')
-                              : (vm.integration_services_state
-                                 ? 'Graceful shutdown via Integration Services'
-                                 : 'Requires Integration Services to be installed')"
+                              : (vm.integration_services_state === undefined
+                                 ? 'Graceful shutdown (Stop-VM) — this connection is '
+                                   + 'agent-bound, so Integration Services state is not '
+                                   + 'synced; the host answers if it is not running'
+                                 : (vm.integration_services_state
+                                    ? 'Graceful shutdown via Integration Services'
+                                    : 'Requires Integration Services to be installed'))"
                             class="px-2.5 py-1 text-xs font-medium rounded
                                    bg-blue-600 hover:bg-blue-700 text-white
                                    disabled:opacity-50 transition-colors">
@@ -461,7 +469,7 @@ function hypervDashboard() {
     // Hyper-V. Mirrors api/hyperv.py::_AGENT_VERBS, which refuses the rest with a 501 —
     // this is only so the operator sees why the button is dead instead of clicking it.
     viaAgent: {{ 'true' if via_agent else 'false' }},
-    agentOps: ['start', 'stop', 'restart'],
+    agentOps: ['start', 'stop', 'restart', 'shutdown'],
 
     get filteredVms() {
       const q = this.search.toLowerCase();
@@ -582,6 +590,18 @@ function hypervDashboard() {
       if (this.canOp(op)) return '';
       return 'Not available through a remote agent — the agent implements '
            + this.agentOps.join(', ') + ' for Hyper-V only.';
+    },
+
+    // UNKNOWN is not ABSENT. A row synced by an agent carries no
+    // `integration_services_state` at all: hypervisor_view_service drops live-only
+    // fields rather than fabricate them, so `!vm.integration_services_state` is true and
+    // Shutdown stays disabled on precisely the connections the `shutdown` verb was added
+    // for. Show it unless we positively know Integration Services is absent; if it is,
+    // Stop-VM says so and the job fails with that message.
+    guestToolsMaybeReady(vm) {
+      return vm.integration_services_state === undefined
+          || vm.integration_services_state === null
+          || !!vm.integration_services_state;
     },
 
     stateDot(state) {

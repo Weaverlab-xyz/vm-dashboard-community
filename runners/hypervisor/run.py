@@ -27,7 +27,20 @@ import ssl
 import sys
 
 VALID_KINDS = ("hyperv", "esxi")
-VALID_VERBS = ("inventory_sync", "power_on", "power_off", "power_reset", "restart")
+# This list is the dashboard's write-verb allowlist minus two, and neither absence is a
+# to-do:
+#
+#   snapshot  needs per-kind APIs this runner has no path to.
+#   reboot    Hyper-V has no graceful-reboot cmdlet at all — Restart-VM is documented as
+#             a "hard" restart, "like powering the computer down, then back up again",
+#             which is already what `power_reset` runs. ESXi *can* reboot a guest
+#             gracefully, and does: that is `restart` below, RebootGuest(). So there is
+#             no verb left over for either kind to want.
+#
+# The agent refuses `reboot` for Hyper-V before a job reaches this file, so the operator
+# reads why rather than "unknown verb", which would look like a version mismatch.
+VALID_VERBS = ("inventory_sync", "power_on", "power_off", "power_reset", "restart",
+               "shutdown")
 
 
 def _fail(message: str) -> None:
@@ -56,11 +69,28 @@ _PS_LIST = (
 )
 
 # A closed map, not a format string: the verb never reaches PowerShell as text.
+#
+# The switches are the whole meaning here, and the two on Stop-VM do NOT mean the same
+# kind of thing — which is how `power_off` once shipped as a graceful shutdown:
+#
+#   -TurnOff  cuts the virtual power. This is the hard stop, and the only one.
+#   -Force    on Stop-VM means "shut down regardless of any unsaved application data",
+#             giving the guest five minutes before it is forced. It is a DATA promise,
+#             not a prompt setting, so `shutdown` below must not carry it.
+#   -Force    on Restart-VM really is only the confirmation-prompt suppressor — which a
+#             non-interactive WinRM session could not answer — and Restart-VM is a hard
+#             restart with or without it.
+#
+# So `shutdown` is bare Stop-VM: Microsoft's own example for that exact call is "shuts
+# down … through the guest operating system". It matches, switch for switch, the direct
+# WinRM path in hyperv_service._POWER_OPS_PS['shutdown'] — one button, one behaviour,
+# either route, which tests/test_hyperv_power_parity.py pins.
 _PS_POWER = {
     "power_on":    "Start-VM -Id '{vm}'",
     "power_off":   "Stop-VM -Id '{vm}' -TurnOff -Force",
     "power_reset": "Restart-VM -Id '{vm}' -Force",
     "restart":     "Restart-VM -Id '{vm}'",
+    "shutdown":    "Stop-VM -Id '{vm}'",
 }
 
 _STATE = {0: "Unknown", 2: "Running", 3: "Off", 4: "Stopping", 6: "Saved",
@@ -171,8 +201,14 @@ def _esxi(verb: str, host: str, port: int, user: str, secret: str,
         elif verb == "power_reset":
             match.ResetVM_Task()
         elif verb == "restart":
-            # The graceful one, and the only verb here that needs the guest agent.
             match.RebootGuest()
+        elif verb == "shutdown":
+            match.ShutdownGuest()
+        # The two above are the graceful pair, and the only verbs here that need the
+        # guest agent: both go through VMware Tools and both fail if it is not running.
+        # `shutdown` is reachable on this kind and not only on vCenter — the dashboard
+        # has no `esxi` connection kind, so a vSphere page's Shutdown button becomes a
+        # `vsphere` job that an agent may serve from an `esxi` connection.
         else:
             _fail(f"{verb!r} is not available for ESXi")
         # Deliberately not waiting on the task: the agent's job is "issued", and a

@@ -579,23 +579,38 @@ not pretend to.
 
 `inventory_sync` is read-only and runs on a schedule (default every 30 minutes;
 override per connection with `options.sync_interval_minutes`). `power_on`, `power_off`,
-`power_reset` and `restart` are on-demand, issued by the existing power buttons on the
-hypervisor pages when the resolved connection is agent-bound.
+`power_reset`, `shutdown`, `reboot` and `restart` are on-demand, issued by the existing
+power buttons on the hypervisor pages when the resolved connection is agent-bound.
 
 Not every button on those pages has one of them behind it, and the ones that do not are
-**refused rather than approximated**. `restart` is why: each kind resolves it
-differently — Proxmox `/status/shutdown` (graceful), vSphere `?action=reset` (a hard
-reset), XCP-ng `VM.clean_reboot` (a reboot), Hyper-V nothing at all. It is a graceful
-shutdown on Proxmox and nothing of the sort anywhere else, so which buttons work is per
-product:
+**refused rather than approximated**. `restart` is why the mapping is per product rather
+than shared: each kind resolves it differently — Proxmox `/status/shutdown` (graceful),
+vSphere `?action=reset` (a hard reset), XCP-ng `VM.clean_reboot` (a reboot), Hyper-V
+nothing at all. `shutdown` and `reboot` exist because that made every Shutdown button
+unmappable, and one Reboot button too:
 
 | Button | Proxmox | vCenter | XCP-ng | Hyper-V |
 |---|---|---|---|---|
 | Power On / Force Off | yes | yes | yes | yes |
-| Shutdown (graceful) | yes — `restart` is `/status/shutdown` here | **refused** — would hard-reset the guest | **refused** — would reboot it | **refused** — would be a hard power cut |
-| Reboot / Restart | **refused** — would shut it down and leave it off | not offered | yes — `restart` is `VM.clean_reboot` here | yes — `Restart-VM -Force` |
+| Shutdown (graceful) | yes — `/status/shutdown` | yes — `guest/power?action=shutdown`, **needs VMware Tools** | yes — `VM.clean_shutdown` | yes — `Stop-VM`, **needs Integration Services** |
+| Reboot / Restart | yes — `/status/reboot` | not offered | yes — `VM.clean_reboot` | yes — `Restart-VM -Force`, a **hard** restart |
 | Reset / Hard Reboot | not offered | yes | yes | not offered |
 | Suspend / Resume / Pause / Unpause / Save | not offered | **refused** | **refused** | **refused** |
+
+Two of those are graceful in the strict sense — they ask software *inside* the guest. A
+vCenter Shutdown is not a power action at all but a call to `/api/vcenter/vm/{vm}/guest/
+power`, and it answers 503 when VMware Tools is not running; the agent turns that into a
+message saying so, because "answered 503" on a plainly-running VM points nowhere. Hyper-V
+Shutdown is bare `Stop-VM`, which Microsoft documents as shutting down "through the guest
+operating system" — it carries neither `-TurnOff` (the power cut) nor `-Force`, which on
+`Stop-VM` means "regardless of any unsaved application data" and would quietly make it a
+different promise. Use Force Off when the guest cannot answer.
+
+Hyper-V is the one product with **no graceful reboot at all**: `Restart-VM` is documented
+as a "hard" restart, "like powering the computer down, then back up again", so it is what
+the Restart button's `power_reset` runs and there is nothing left for `reboot` to be. The
+agent refuses that combination by name rather than letting the runner answer "unknown
+verb", which would read as an agent too old for the dashboard.
 
 The mapping is one table, [`agent_hypervisor_meta.PAGE_OPS`][page-ops], keyed by kind —
 it was once a copy per router, and three identical copies is how `shutdown` came to hard
@@ -604,12 +619,25 @@ tooltip, and the endpoint answers 501 naming the substitution that would have be
 and the buttons that do work. The refusal happens before a job row exists, so nothing
 appears on /jobs.
 
-Same principle as the Workstation note further down: mapping a verb onto a neighbouring
-operation quietly does something other than what was asked, and on a power button
-quietly is the whole problem. Adding a real `shutdown` verb means adding it to the
-dashboard's allowlist **and** to the agent's per-kind maps and the sibling runner in the
-same change — the dashboard normalizes an unrecognised verb to `inventory_sync`, so a
-half-landed one would run a discovery scan and report success.
+**Adding a verb is a three-file change, and a partial one is worse than none.** The
+dashboard normalizes an unrecognised verb to `inventory_sync`, so a verb granted here but
+missing from an agent would run a discovery scan and report success. The three are this
+allowlist, the agent's per-kind maps, and the sibling runner.
+
+Version skew across them is safe in the direction it actually happens — the agent is
+deployed separately and lags. An old agent given a new verb refuses it out loud: it reads
+the verb raw and never normalizes, so `policy.check_verb` rejects it first, naming
+`policy.yaml` and the line to add. **This is why `shutdown` and `reboot` are new verbs
+rather than a redefinition of `restart`:** redefining a verb an old agent already
+implements, and an old `policy.yaml` already grants, would silently change what that
+agent does with a button — the exact failure the whole table exists to prevent.
+
+The corollary is operational: after upgrading the dashboard, **every deployed agent must
+be re-pulled** before its Shutdown button works, and until then those agents refuse the
+verb in Live Output. Proxmox Shutdown is the one button this affects that worked before —
+it used to ride `restart`, which really is `/status/shutdown` on Proxmox alone. It was
+moved anyway, because leaving it would have kept "restart means shutdown here" alive as a
+per-kind special case, and that reading is what made Reboot unmappable in the first place.
 
 [page-ops]: ../web_dashboard/services/agent_hypervisor_meta.py
 
@@ -630,13 +658,13 @@ flag, because a boolean on a destructive verb gets defaulted wrong exactly once.
 
 | Product | Transport | Inventory | Power |
 |---|---|---|---|
-| vCenter | vSphere Automation REST API | yes | on/off/reset — no graceful shutdown, see above |
-| Proxmox VE | `/api2/json` + API token | yes | on/off/shutdown — no reboot, see above |
-| XCP-ng | XAPI (stdlib XML-RPC) | yes | on/off/reboot/hard reboot — no graceful shutdown, see above |
+| vCenter | vSphere Automation REST API | yes | on/off/reset, plus shutdown via the separate `guest/power` endpoint (needs VMware Tools) — Suspend is refused, see above |
+| Proxmox VE | `/api2/json` + API token | yes | on/off/shutdown/reboot — the full set the page offers |
+| XCP-ng | XAPI (stdlib XML-RPC) | yes | on/off/shutdown/reboot/hard reboot — Suspend, Resume, Pause and Unpause are refused, see above |
 | Nutanix Prism | Prism v3 REST | yes | no — a v3 power change is a full spec PUT with a metadata version, not an action |
 | VMware Workstation Pro | `vmrest`, on the same host | yes | on/off only — vmrest has no reset, reboot or snapshot |
-| bare ESXi | SOAP, via the [sibling runner](#the-sibling-runner) | yes | the same four verbs |
-| Hyper-V | WinRM, via the [sibling runner](#the-sibling-runner) | yes | Start, Force Off and Restart — the allowlist has no graceful-shutdown or suspend verb, so Shutdown, Pause, Resume and Save are refused rather than approximated |
+| bare ESXi | SOAP, via the [sibling runner](#the-sibling-runner) | yes | the same verbs as the runner carries |
+| Hyper-V | WinRM, via the [sibling runner](#the-sibling-runner) | yes | Start, Force Off, Shutdown (`Stop-VM`, needs Integration Services) and Restart (`Restart-VM -Force`, a hard restart). Reboot has no cmdlet at all; Pause, Resume and Save have no verb — all refused rather than approximated, see above |
 
 `esxi` is a distinct connection kind from `vsphere` on the agent's side even though the
 dashboard has only `vsphere`: same product, different transport, and the agent is the only

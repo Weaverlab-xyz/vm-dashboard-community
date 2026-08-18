@@ -215,4 +215,10 @@ disk) are blank there rather than zero: they were never measured, and a fabricat
 worse than an empty cell.
 
 Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
-with Live Output, exactly like a discovery scan.
+with Live Output, exactly like a discovery scan. Every button this page offers — Start,
+Stop, Shutdown and Reboot — maps to a verb, so nothing here is refused; see
+[the verbs](../remote-agents.md#the-verbs) for how the other products differ.
+
+One upgrade note: Shutdown and Reboot use the `shutdown` and `reboot` verbs, which are
+newer than the agent image many installs are running. Until an agent is re-pulled it
+refuses them by name in Live Output, pointing at its `policy.yaml`.

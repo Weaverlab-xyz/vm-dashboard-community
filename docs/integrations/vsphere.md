@@ -109,6 +109,11 @@ Templates are automatically excluded from the VM list.
 The **Graceful Shutdown** button is only enabled when the `tools_status` for the
 VM is `toolsOk` (i.e., VMware Tools are installed and running inside the guest).
 
+One exception, and it is the difference between *unknown* and *absent*: an
+[agent-bound connection](#over-a-remote-agent) shows a synced inventory that carries no
+`tools_status` at all, so the button is offered rather than hidden. If Tools turns out not
+to be running, vCenter answers 503 and the job fails saying so.
+
 To install VMware Tools in a Linux VM:
 
 ```bash
@@ -227,4 +232,12 @@ disk) are blank there rather than zero: they were never measured, and a fabricat
 worse than an empty cell.
 
 Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
-with Live Output, exactly like a discovery scan.
+with Live Output, exactly like a discovery scan. Power On, Force Off, Reset and Shutdown
+all map to a verb; **Suspend** does not, and is refused with a 501 naming what is
+available rather than approximated onto a neighbouring operation — see
+[the verbs](../remote-agents.md#the-verbs).
+
+Shutdown is the one that needs the guest: it is not a power action but a call to
+vCenter's separate `guest/power` endpoint, through VMware Tools. The synced inventory
+carries no `tools_status`, so the button is offered rather than hidden, and vCenter
+answers 503 if Tools is not running.

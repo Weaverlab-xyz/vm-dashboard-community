@@ -40,6 +40,14 @@ suspended.
 the hypervisor must actually receive, transcribed from each product's own API rather than
 derived from the maps under test.
 
+The three inverted Shutdowns and the inverted Reboot were then repaired by adding the
+verbs that express them — `shutdown` and `reboot` — rather than by re-pointing `restart`,
+which a deployed agent already implements and a deployed policy.yaml already grants.
+That is the second thing this file guards, and the reason it reaches into all three
+maps at once: a verb the dashboard grants but an agent does not implement is the silent
+scan again, so the allowlist here and the per-kind maps in `runners/` have to move in
+the same commit.
+
 AST and source reads only — no imports of the routers (FastAPI, hypervisor SDKs) or the
 agent (requests, yaml, cryptography), so this file cannot skip on the machine where
 someone edits one of these maps. Runs under pytest, or standalone:
@@ -115,11 +123,15 @@ def _literal(path: str, name: str):
 
 
 def _vsphere_actions() -> dict:
-    """The verb -> ``?action=`` map inside the agent's ``_power_vsphere``.
+    """The verb -> URL sub-path map inside the agent's ``_power_vsphere``.
 
     A dict literal local to the function rather than a module constant, so there is
     nothing to import even in principle. Reading it here is what lets this test pin the
     vSphere link of the chain — the one that hard-reset a VM.
+
+    The values are sub-paths (``power?action=stop``, ``guest/power?action=shutdown``)
+    rather than bare actions, because vCenter's graceful ops live on a different
+    endpoint from its power ops and a bare action cannot say which one was used.
     """
     for node in ast.walk(_tree(_AGENT)):
         if not (isinstance(node, ast.FunctionDef) and node.name == "_power_vsphere"):
@@ -176,9 +188,11 @@ def test_the_agent_branch_comes_before_the_direct_call():
 
 # ── The promise each button makes ─────────────────────────────────────────────
 
-# A promise the five allowlisted verbs cannot keep. The op must therefore be refused —
-# and the comment beside each one records the operation it *would* need, which is the
-# specification a future `shutdown` verb has to be built and checked against.
+# A promise no allowlisted verb can keep. The op must therefore be refused — and the
+# comment beside each one records the operation it *would* need, which is the
+# specification whichever change adds that verb has to be built and checked against.
+# That is not hypothetical: `shutdown` and `reboot` were both UNEXPRESSIBLE here, and
+# the comments beside them are what the verbs that replaced them were written from.
 UNEXPRESSIBLE = "«no verb in the allowlist expresses this»"
 
 # (kind, page op) -> the operation the hypervisor must actually receive.
@@ -197,32 +211,44 @@ AGENT_OP = {
     ("proxmox", "start"): "start",
     ("proxmox", "stop"): "stop",                 # /status/stop, the force-stop
     ("proxmox", "shutdown"): "shutdown",         # /status/shutdown, graceful
-    ("proxmox", "reboot"): UNEXPRESSIBLE,        # needs /status/reboot
+    ("proxmox", "reboot"): "reboot",             # /status/reboot — a real endpoint, and
+                                                 # NOT what `restart` resolves to here
 
-    ("vsphere", "start"): "start",
-    ("vsphere", "stop"): "stop",                 # ?action=stop, a hard power off
-    ("vsphere", "reset"): "reset",
-    ("vsphere", "shutdown"): UNEXPRESSIBLE,      # needs /guest/power?action=shutdown —
-                                                 # a different endpoint, and VMware Tools
-    ("vsphere", "suspend"): UNEXPRESSIBLE,       # needs ?action=suspend
+    # vSphere entries are the sub-path under /api/vcenter/vm/{vm}, not the bare action,
+    # because the graceful pair is on a different endpoint. `power` is the virtual power
+    # button; `guest/power` asks the guest OS via VMware Tools. An entry of just
+    # "shutdown" would have been satisfied by `power?action=shutdown`, which vCenter
+    # does not accept — the table has to be able to tell the two endpoints apart.
+    ("vsphere", "start"): "power?action=start",
+    ("vsphere", "stop"): "power?action=stop",    # a hard power off, which is the op
+    ("vsphere", "reset"): "power?action=reset",
+    ("vsphere", "shutdown"): "guest/power?action=shutdown",
+    ("vsphere", "suspend"): UNEXPRESSIBLE,       # needs power?action=suspend
 
     ("xcpng", "start"): "VM.start",
     ("xcpng", "stop"): "VM.hard_shutdown",
+    ("xcpng", "shutdown"): "VM.clean_shutdown",
     ("xcpng", "reboot"): "VM.clean_reboot",
     ("xcpng", "hard_reboot"): "VM.hard_reboot",
-    ("xcpng", "shutdown"): UNEXPRESSIBLE,        # needs VM.clean_shutdown
     ("xcpng", "suspend"): UNEXPRESSIBLE,         # needs VM.suspend
     ("xcpng", "resume"): UNEXPRESSIBLE,          # needs VM.resume
     ("xcpng", "pause"): UNEXPRESSIBLE,           # needs VM.pause
     ("xcpng", "unpause"): UNEXPRESSIBLE,         # needs VM.unpause
 
-    # Hyper-V runs through the sibling runner, so these are PowerShell, not URLs.
-    # `-Force` on Restart-VM only suppresses the confirmation prompt — which a
-    # non-interactive WinRM session cannot answer — so it is the honest Restart here.
+    # Hyper-V runs through the sibling runner, so these are PowerShell, not URLs, and
+    # the switches carry the meaning. Straight from Microsoft's cmdlet reference:
+    #   Stop-VM, bare      "shuts down … through the guest operating system"
+    #   Stop-VM -TurnOff   "equivalent to disconnecting the power"
+    #   Stop-VM -Force     shuts down "regardless of any unsaved application data",
+    #                      forcing it after five minutes — a DATA promise, not a prompt
+    #                      setting, so the graceful op must not carry it
+    #   Restart-VM         a "hard" restart, "like powering the computer down, then back
+    #                      up again", with or without -Force (which only suppresses the
+    #                      confirmation prompt) — hence `power_reset`, not `restart`
     ("hyperv", "start"): "Start-VM -Id '{vm}'",
     ("hyperv", "stop"): "Stop-VM -Id '{vm}' -TurnOff -Force",
+    ("hyperv", "shutdown"): "Stop-VM -Id '{vm}'",
     ("hyperv", "restart"): "Restart-VM -Id '{vm}' -Force",
-    ("hyperv", "shutdown"): UNEXPRESSIBLE,       # needs Stop-VM with no -TurnOff
     ("hyperv", "pause"): UNEXPRESSIBLE,          # needs Suspend-VM
     ("hyperv", "resume"): UNEXPRESSIBLE,         # needs Resume-VM
     ("hyperv", "save"): UNEXPRESSIBLE,           # needs Save-VM
@@ -267,28 +293,52 @@ def test_every_button_on_every_page_has_a_stated_promise():
 
 # ── The inverted mappings, named ──────────────────────────────────────────────
 
-def test_shutdown_is_not_mapped_onto_a_reset_or_a_reboot():
-    """vSphere is the data-loss one: `reset` is a hard reset of a running guest."""
-    assert ahm.agent_verb("vsphere", "shutdown") is None, (
-        "vSphere has no graceful-shutdown verb — vCenter's is "
-        "/guest/power?action=shutdown, not a power action — so mapping this button to "
-        "anything available hard-resets the guest")
-    assert ahm.agent_verb("xcpng", "shutdown") is None, (
-        "XCP-ng's `restart` is VM.clean_reboot, which brings the VM back up")
-    assert ahm.agent_verb("hyperv", "shutdown") is None, (
-        "Hyper-V's only stop script is Stop-VM -TurnOff -Force, a hard power cut")
-    # Proxmox is the one kind where `restart` really is a graceful shutdown, so its
-    # Shutdown button is the single mapping that was right and must stay.
-    assert ahm.agent_verb("proxmox", "shutdown") == "restart"
+def test_shutdown_is_never_mapped_onto_a_reset_or_a_reboot():
+    """The four inversions, named individually so no one of them can come back alone.
+
+    Each Shutdown button now has the `shutdown` verb; what this pins is the thing that
+    must not happen again — `shutdown` resolving to a reset or a reboot on any kind.
+    Stated as the resolved operation rather than as `verb != "restart"`, because the
+    fault was never the verb's name.
+    """
+    for kind in ("proxmox", "vsphere", "xcpng", "hyperv"):
+        verb = ahm.agent_verb(kind, "shutdown")
+        assert verb == "shutdown", (
+            f"{kind} Shutdown maps to {verb!r}; the graceful verb is `shutdown`")
+        got = _agent_operation(kind, verb)
+        assert got == AGENT_OP[(kind, "shutdown")], got
+        for wrong in ("reset", "reboot", "hard_reboot", "TurnOff"):
+            assert wrong not in str(got), (
+                f"{kind} Shutdown resolves to {got!r}, which is a {wrong} — this is the "
+                f"bug the `shutdown` verb was added to fix, arriving from the other side")
 
 
-def test_reboot_is_not_mapped_onto_a_shutdown():
-    """The same fault mirrored: Proxmox Reboot left the VM off."""
-    assert ahm.agent_verb("proxmox", "reboot") is None, (
-        "the agent's `restart` is Proxmox's /status/shutdown, so this reboots nothing "
-        "and leaves the VM off; /status/reboot needs a verb of its own")
-    # XCP-ng's Reboot is honest, because there `restart` is a clean reboot.
+def test_reboot_is_never_mapped_onto_a_shutdown():
+    """The same fault mirrored: Proxmox Reboot gracefully shut the VM down, and left it
+    off. Both Reboot buttons must resolve to something that brings the VM back up."""
+    assert _agent_operation("proxmox", ahm.agent_verb("proxmox", "reboot")) == "reboot"
+    # XCP-ng's Reboot still rides `restart`, because there `restart` IS the clean reboot
+    # and re-pointing a correct, working button would only break it until every deployed
+    # agent is re-pulled. What matters is where it lands, which is asserted either way.
     assert ahm.agent_verb("xcpng", "reboot") == "restart"
+    assert _agent_operation("xcpng", "restart") == "VM.clean_reboot"
+
+
+def test_hyperv_reboot_is_refused_by_the_agent_rather_than_the_verb_list():
+    """The one gap that is not the dashboard's to close.
+
+    Hyper-V has no graceful-reboot cmdlet — Restart-VM is the hard one — so `reboot` has
+    no script. The runner's verb list would answer "unknown verb 'reboot'", which reads
+    as an agent too old for the dashboard; the agent refuses first and says why instead.
+    """
+    assert "reboot" not in _literal(_SIBLING, "VALID_VERBS")
+    assert "reboot" not in _literal(_SIBLING, "_PS_POWER")
+    assert "reboot" not in ahm.PAGE_OPS["hyperv"], (
+        "the Hyper-V page cannot offer Reboot: nothing implements it")
+    body = ast.unparse(_function(_tree(_AGENT), "_run_verb"))
+    assert "reboot" in body and "hyperv" in body, (
+        "_run_verb no longer refuses `reboot` for Hyper-V, so it would reach the runner "
+        "and come back as 'unknown verb'")
 
 
 # ── The silent scan ───────────────────────────────────────────────────────────
@@ -315,27 +365,34 @@ def test_no_page_op_can_degrade_into_an_inventory_scan():
 
 
 def test_the_ops_with_no_verb_are_the_ones_we_expect():
-    """Names the refusals, so widening or narrowing the set is a deliberate diff."""
+    """Names the refusals, so widening or narrowing the set is a deliberate diff.
+
+    Every Shutdown button has come off this list, and Proxmox's Reboot with them. What
+    is left is the suspend family — a suspend writes guest RAM to the datastore, so it
+    is a storage operation wearing a power button's clothes, and no verb covers it.
+    """
     refused = {kind: {op for op in _registered_ops(kind)
                       if ahm.agent_verb(kind, op) is None}
                for kind in _AGENT_ROUTED}
     assert refused == {
-        "proxmox": {"reboot"},
-        "vsphere": {"shutdown", "suspend"},
-        "xcpng": {"shutdown", "suspend", "resume", "pause", "unpause"},
-        "hyperv": {"shutdown", "pause", "resume", "save"},
+        "proxmox": set(),
+        "vsphere": {"suspend"},
+        "xcpng": {"suspend", "resume", "pause", "unpause"},
+        "hyperv": {"pause", "resume", "save"},
     }, refused
 
 
 def test_an_unmapped_verb_would_become_an_inventory_sync():
     """The behaviour the guard exists for, stated once so the reason survives.
 
-    `shutdown` is a plausible thing for a router to pass through — every one of these
-    pages has a Shutdown button — and this is what it would do.
+    `suspend` is a plausible thing for a router to pass through — three of these pages
+    have a Suspend button — and this is what it would do. `shutdown` used to be the
+    example here, which is the point: the danger is not any particular word, it is that
+    an unrecognised one is silently accepted.
     """
-    assert ahm.normalize({"verb": "shutdown"})["verb"] == "inventory_sync"
     assert ahm.normalize({"verb": "suspend"})["verb"] == "inventory_sync"
-    assert "shutdown" not in ahm.VALID_VERBS
+    assert ahm.normalize({"verb": "save"})["verb"] == "inventory_sync"
+    assert "suspend" not in ahm.VALID_VERBS
 
 
 # ── The refusal ───────────────────────────────────────────────────────────────
@@ -349,17 +406,39 @@ def test_agent_power_job_refuses_a_verb_outside_the_allowlist():
         "the verb must be refused BEFORE normalize() can fall it back to inventory_sync"
 
 
-def test_the_refusal_names_the_wrong_substitution_and_the_working_buttons():
-    for kind, op in (("vsphere", "shutdown"), ("xcpng", "shutdown"),
-                     ("proxmox", "reboot")):
-        reason = ahm.no_verb_reason(kind, op)
-        assert op in reason and kind in reason, reason
-        # The substitution that would have been wrong is the whole diagnosis: without it
-        # the operator's next move is to file the refusal as a bug.
-        assert "restart" in reason, reason
-        for available in ahm.PAGE_OPS[kind]:
-            assert available in reason, f"{kind}/{op}: does not offer {available}: {reason}"
-        assert f"Available here: {op}" not in reason, reason
+def test_every_refused_op_names_the_buttons_that_do_work():
+    """Every refusal an operator can actually reach, not a sample.
+
+    The message is the whole diagnosis — they are looking at a page whose button just
+    failed and cannot see any of this code — so it has to name the op, the kind, and
+    what they can press instead.
+    """
+    for kind in _AGENT_ROUTED:
+        for op in sorted(_registered_ops(kind)):
+            if ahm.agent_verb(kind, op) is not None:
+                continue
+            reason = ahm.no_verb_reason(kind, op)
+            assert op in reason and kind in reason, reason
+            for available in ahm.PAGE_OPS[kind]:
+                assert available in reason, (
+                    f"{kind}/{op}: does not offer {available}: {reason}")
+            assert f"Available here: {op}" not in reason, (
+                f"{kind}/{op}: offers the very op it just refused: {reason}")
+
+
+def test_no_stated_reason_outlives_the_gap_it_described():
+    """A stale `_NO_EQUIVALENT` entry is a lie told at the worst moment.
+
+    Each one names a substitution that would be wrong — "the nearest verb resolves to a
+    HARD reset here". Once that op HAS a verb, the sentence is false, and it is read by
+    an operator with no way to check it. This change emptied the table for exactly that
+    reason, so the guard is what keeps the next one from being left behind.
+    """
+    stale = {(kind, op) for kind, op in ahm._NO_EQUIVALENT
+             if ahm.agent_verb(kind, op) is not None}
+    assert not stale, (
+        f"{sorted(stale)} still carry a 'no equivalent' explanation but are mapped to a "
+        f"verb now — the reason is no longer true, and it is what the operator reads")
 
 
 def test_an_op_with_no_stated_reason_still_gets_a_usable_message():
@@ -501,6 +580,49 @@ def test_each_page_defines_the_helpers_its_bindings_call():
         assert "get canOp" not in markup, f"{kind}: canOp must be a method, not a getter"
 
 
+# The guest-agent field each page's Shutdown button consults, and which is ABSENT from an
+# agent-synced row — hypervisor_view_service drops live-only values rather than fabricate
+# them, and test_hypervisor_view.py::test_live_only_fields_are_absent_rather_than_zero
+# pins that it keeps doing so.
+_GUEST_FIELD = {"vsphere": "tools_status", "hyperv": "integration_services_state",
+                "xcpng": "tools_installed"}
+
+
+def test_a_shutdown_button_is_not_gated_on_a_field_the_agent_never_syncs():
+    """The second gate, which `agentOps` cannot open.
+
+    Every Shutdown button has a guest-agent condition as well as `canOp`, and the field
+    behind it is one an agent-bound row does not carry. Compared directly — `!vm.tools_
+    installed`, `vm.tools_status === 'toolsOk'` — `undefined` reads as "no guest agent",
+    so adding `shutdown` to PAGE_OPS and to `agentOps` would still leave the button dead
+    on every agent-bound connection: the exact "feature looks present" shape this file
+    exists for, arriving one gate further down.
+
+    So the condition has to distinguish UNKNOWN from ABSENT, which is what the helper
+    does. Pinned per page because each product names the field differently and only the
+    page knows which one it means.
+    """
+    for kind, field in sorted(_GUEST_FIELD.items()):
+        markup = _read(os.path.join(_TEMPLATES, kind, "index.html"))
+        assert re.search(r"\n\s*guestToolsMaybeReady\(vm\)\s*\{", markup), (
+            f"{kind} page has no guestToolsMaybeReady() — its Shutdown button is gated "
+            f"on {field}, which an agent-synced row does not have")
+        body = markup[markup.index("guestToolsMaybeReady(vm) {"):]
+        body = body[:body.index("\n    },")]
+        assert "undefined" in body and field in body, (
+            f"{kind}: guestToolsMaybeReady must treat an absent {field} as unknown")
+        # And no raw truthiness test may survive anywhere on the page, or the helper is
+        # dead code sitting beside the gate it was written to replace. Both spellings:
+        # `|| !vm.x` disables a button, `&& !vm.x` shows a "no guest tools" badge — and
+        # on an agent-bound row the badge fires on every running VM, asserting something
+        # the page never measured.
+        for spelling in (f"|| !vm.{field}", f"&& !vm.{field}"):
+            assert spelling not in markup, (
+                f"{kind} page still treats an absent {field} as a negative: {spelling}")
+        assert f"vm.{field} === 'toolsOk'\">" not in markup, (
+            f"{kind} page still renders Shutdown only when {field} is positively known")
+
+
 def test_the_refused_buttons_are_actually_wired_to_canop():
     """A helper nothing calls greys nothing. Each refused op with a button must consult
     `canOp`, or the operator clicks it and reads a 501 instead of seeing it disabled."""
@@ -516,25 +638,58 @@ def test_the_refused_buttons_are_actually_wired_to_canop():
 
 # ── The sibling runner shares the allowlist, so it shares the gap ─────────────
 
+# Verbs the sibling runner does not carry, and why each one is a property of the
+# transport rather than an unfinished job. Anything NOT listed here has to be present in
+# the runner the moment it enters WRITE_VERBS, or an agent-bound Hyper-V connection gets
+# its refusal from a place the operator has no reason to look.
+_NOT_IN_SIBLING = {
+    # Needs per-kind snapshot APIs the runner has no path to.
+    "snapshot",
+    # Hyper-V has no graceful-reboot cmdlet at all: Restart-VM is documented as a "hard"
+    # restart, "like powering the computer down, then back up again", which is already
+    # what `power_reset` runs. There is no second script to give `reboot`.
+    "reboot",
+}
+
+
 def test_the_sibling_runner_implements_exactly_the_shared_verbs():
     """Hyper-V and bare ESXi go through `runners/hypervisor/run.py`, not the agent.
 
     It keeps its own verb list, so it is another copy of the same contract and drifts the
-    same way. `shutdown` is absent from both sides today; whichever change adds it has to
-    add it here too, or an agent-bound Hyper-V connection gets a refusal from a place the
-    operator has no reason to look.
+    same way — which is why the exclusions above have to be stated rather than inferred
+    from whatever the runner happens to contain.
     """
     runner_verbs = set(_literal(_SIBLING, "VALID_VERBS"))
     ps_power = set(_literal(_SIBLING, "_PS_POWER"))
-    # Snapshot is agent-only (it needs per-kind API support the sibling has no path to),
-    # so the runner's list is the rest of the shared allowlist plus the read verb.
-    expected = (set(ahm.WRITE_VERBS) - {"snapshot"}) | set(ahm.READ_VERBS)
+    expected = (set(ahm.WRITE_VERBS) - _NOT_IN_SIBLING) | set(ahm.READ_VERBS)
     assert runner_verbs == expected, (
         f"the sibling runner accepts {sorted(runner_verbs)} but the dashboard's "
         f"allowlist is {sorted(expected)}")
     assert ps_power == expected - set(ahm.READ_VERBS), (
         f"_PS_POWER implements {sorted(ps_power)}, which is not the runner's own "
         f"power-verb list {sorted(expected - set(ahm.READ_VERBS))}")
+    assert _NOT_IN_SIBLING <= set(ahm.WRITE_VERBS), (
+        f"{sorted(_NOT_IN_SIBLING - set(ahm.WRITE_VERBS))} is excused from the runner "
+        f"but is not a verb any more — drop it from _NOT_IN_SIBLING")
+
+
+def test_the_graceful_stop_is_the_same_call_on_both_hyperv_paths():
+    """One button, one behaviour, either route — the drift that made Force Off graceful,
+    arriving from the other side.
+
+    `Stop-VM -Force` is not the prompt suppressor it is on `Restart-VM`: Microsoft
+    documents it as shutting down "regardless of any unsaved application data", forcing
+    it after five minutes. So it changes what Shutdown promises, and neither path may
+    grow it while the other has not.
+    """
+    agent = _literal(_SIBLING, "_PS_POWER")["shutdown"]
+    direct = _literal(os.path.join(_ROOT, "web_dashboard", "services",
+                                   "hyperv_service.py"), "_POWER_OPS_PS")["shutdown"]
+    for switch in ("-TurnOff", "-Force"):
+        assert switch not in agent and switch not in direct, (
+            f"{switch} is on a graceful Hyper-V shutdown: agent={agent!r} "
+            f"direct={direct!r}")
+    assert "Stop-VM" in agent and "Stop-VM" in direct
 
 
 def test_hyperv_maps_only_the_ops_the_sibling_runner_implements():
