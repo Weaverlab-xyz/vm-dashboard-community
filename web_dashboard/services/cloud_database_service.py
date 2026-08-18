@@ -186,6 +186,27 @@ def _oracle_db_name(db_id: str) -> str:
     return ("adb" + re.sub(r"[^a-z0-9]", "", db_id.lower()))[:14]
 
 
+def _aws_db_security_groups(regional: dict, opts: dict) -> list[str]:
+    """Security groups to attach to an RDS instance. ``regional`` is that region's
+    already-resolved config set (``resolve_region("aws", region)``).
+
+    An explicit selection from the provision form always wins. When the caller
+    picks none, fall back to the sandbox's DB-tier security group for that region
+    (``aws_db_security_group_id`` / ``aws_region.<region>.db_security_group_id``)
+    instead of letting Terraform attach the VPC *default* SG — which allows no
+    ingress on 5432/3306/1433 from the Gateway, so the PRA tunnel to the new
+    database times out. That group exists precisely to carry those rules.
+
+    Blank config (no sandbox run) still yields ``[]`` → the VPC default group, the
+    historical behaviour.
+    """
+    chosen = [sg for sg in (opts.get("vpc_security_group_ids") or []) if sg]
+    if chosen:
+        return chosen
+    configured = regional["db_security_group_id"]
+    return [configured] if configured else []
+
+
 def _build_tf_variables(
     *, engine: str, cloud: str, region: str, db_id: str, db_name: str,
     master_username: str, master_password: str, opts: dict,
@@ -195,11 +216,12 @@ def _build_tf_variables(
     The module itself hardcodes ``publicly_accessible = false`` — the private-only
     guarantee lives in the .tf, not in a toggle-able variable.
 
-    Per-region resource ids (subnets, DB networks, resource group) resolve through
-    ``region_config.resolve_region(cloud, region)`` so a database provisioned in a
-    non-default region picks up that region's network; a blank field (or the default
-    region) falls back to the flat config keys, so single-region installs are
-    unchanged. An explicit value passed in ``opts`` always wins.
+    Per-region resource ids (subnets, security groups, DB networks, resource group)
+    resolve through ``region_config.resolve_region(cloud, region)`` so a database
+    provisioned in a non-default region picks up that region's network; a blank
+    field (or the default region) falls back to the flat config keys, so
+    single-region installs are unchanged. An explicit value passed in ``opts``
+    always wins.
     """
     if (engine, cloud) == ("postgres", "aws"):
         _aws = resolve_region("aws", region)
@@ -213,7 +235,7 @@ def _build_tf_variables(
             "allocated_storage": opts.get("allocated_storage", 20),
             "db_subnet_group_name": opts.get("db_subnet_group_name")
                 or _aws["db_subnet_group_name"],
-            "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
+            "vpc_security_group_ids": _aws_db_security_groups(_aws, opts),
             # Attach the force_ssl=0 parameter group the sandbox pre-created, so the
             # PRA protocol tunnel's cleartext gateway→RDS connection isn't rejected.
             # Per-region: the sandbox creates one group per region and emits it as
@@ -235,7 +257,7 @@ def _build_tf_variables(
             "allocated_storage": opts.get("allocated_storage", 20),
             "db_subnet_group_name": opts.get("db_subnet_group_name")
                 or _aws["db_subnet_group_name"],
-            "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
+            "vpc_security_group_ids": _aws_db_security_groups(_aws, opts),
             # MySQL's cleartext knob is require_secure_transport=0 (not
             # rds.force_ssl) — its own mysql8.0-family group the sandbox
             # pre-creates per region. Empty config → "" → module falls back to
@@ -257,6 +279,7 @@ def _build_tf_variables(
         sqlserver_class = opts.get("instance_class") or "db.t3.small"
         if sqlserver_class.endswith(".micro"):
             sqlserver_class = "db.t3.small"
+        _aws = resolve_region("aws", region)
         return {
             "region": region,
             "identifier": f"clouddb-{db_id[:8]}",
@@ -265,8 +288,8 @@ def _build_tf_variables(
             "instance_class": sqlserver_class,
             "allocated_storage": opts.get("allocated_storage", 20),
             "db_subnet_group_name": opts.get("db_subnet_group_name")
-                or resolve_region("aws", region)["db_subnet_group_name"],
-            "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
+                or _aws["db_subnet_group_name"],
+            "vpc_security_group_ids": _aws_db_security_groups(_aws, opts),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 

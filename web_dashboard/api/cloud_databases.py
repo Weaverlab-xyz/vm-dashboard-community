@@ -30,6 +30,7 @@ from ..database import CloudDatabase, User, get_db
 from ..services import (aws_service, cache_service, cloud_database_service, config_service,
                         job_service, ps_api_service, ps_database_catalog, region_catalog)
 from ..services.aws_service import AWSError
+from ..services.region_config import resolve_region
 from .auth import require_permission
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,13 @@ class DatabaseOptions(BaseModel):
     instance_classes: list[str]
     db_subnet_groups: list[dict]
     security_groups: list[dict]
+    # The sandbox's DB-tier security group for this region (aws_db_security_group_id
+    # / aws_region.<region>.db_security_group_id). Not a picker — the form names it
+    # in the "none selected" hint because _build_tf_variables attaches it when the
+    # operator selects nothing. Blank on non-AWS clouds and on an unconfigured AWS.
+    # NB: named for the region_config field it carries, NOT `default_security_group_id`
+    # — that name already means the VM-tier SG (aws_default_security_group_id).
+    db_security_group_id: str = ""
     vault_account_groups: list[dict] = []
     # PRA Jump Groups / Jumpoints for the per-DB tunnel pickers (cloud-agnostic —
     # PRA objects aren't region/cloud-scoped). Empty when PRA isn't configured.
@@ -273,8 +281,11 @@ async def database_options(
     except AWSError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    # Resolved OUTSIDE the cached _fetch: that cache holds the EC2/RDS API result
+    # keyed on region, and the configured DB SG can change without invalidating it.
     return DatabaseOptions(
         **opts, regions=_region_choices("aws", region),
+        db_security_group_id=resolve_region("aws", region)["db_security_group_id"],
         cached_at=cached_at, **(await _pra_pickers()))
 
 

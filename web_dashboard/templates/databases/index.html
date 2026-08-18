@@ -536,8 +536,22 @@
               </label>
             </template>
           </div>
-          <p x-show="form.vpc_security_group_ids.length === 0"
-             class="text-xs text-gray-400 mt-1">None selected — the VPC default security group will be attached.</p>
+          <!-- Deliberately NOT pre-checked. submit() omits vpc_security_group_ids when the
+               list is empty, and the backend then falls back to this same group — so a
+               pre-ticked box the operator UNticked would send nothing and get the group
+               attached anyway. Naming it here is honest in both directions instead. -->
+          <p x-show="!loadingOptions && form.vpc_security_group_ids.length === 0 && options.db_security_group_id"
+             class="text-xs text-gray-500 mt-1">
+            None selected — the configured DB security group
+            <code class="font-mono" x-text="options.db_security_group_id"></code>
+            will be attached.
+          </p>
+          <p x-show="!loadingOptions && form.vpc_security_group_ids.length === 0 && !options.db_security_group_id"
+             x-cloak class="text-xs text-amber-600 mt-1">
+            None selected and no DB security group is configured — the VPC default security
+            group will be attached, which permits no ingress on the engine port, so the
+            tunnel to this database will time out.
+          </p>
         </div>
         <!-- GCP: storage + private network -->
         <div class="grid grid-cols-2 gap-3" x-show="form.cloud === 'gcp'" x-cloak>
@@ -722,7 +736,7 @@ function databasesPage() {
     impCloud: 'local',
     impResult: null,
 
-    options: { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] },
+    options: { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], db_security_group_id: '', vault_account_groups: [], jump_groups: [], gateways: [] },
     loadingOptions: false, optionsError: '',
     form: { engine: 'postgres', cloud: 'aws', region: '', name: '', master_username: 'dbadmin',
             instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
@@ -964,7 +978,7 @@ function databasesPage() {
                     tier: 'db-f1-micro', disk_size: null, private_network: '',
                     sku_name: 'B_Standard_B1ms', storage_gb: 32,
                     jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' };
-      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] };
+      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], db_security_group_id: '', vault_account_groups: [], jump_groups: [], gateways: [] };
       this.optionsError = '';
       this.showForm = true;
       this.loadOptions();   // fire-and-forget — the modal opens immediately, EC2-style
@@ -1029,7 +1043,7 @@ function databasesPage() {
       this.form.region = '';
       this.form.db_subnet_group_name = '';
       this.form.vpc_security_group_ids = [];
-      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] };
+      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], db_security_group_id: '', vault_account_groups: [], jump_groups: [], gateways: [] };
       this.optionsError = '';
       this.loadOptions();
     },

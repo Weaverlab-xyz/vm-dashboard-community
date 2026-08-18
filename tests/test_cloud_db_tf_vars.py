@@ -296,6 +296,69 @@ def test_aws_db_uses_non_default_region_parameter_groups():
         CONF.clear()
 
 
+def test_aws_db_falls_back_to_configured_security_group():
+    """No SG selected in the provision form → attach the sandbox's DB-tier group.
+
+    The regression this pins: every AWS branch used to pass opts' list straight
+    through, so an unattended provision got the VPC DEFAULT security group, which
+    has no ingress on 5432/3306/1433 from the Gateway SG — the tunnel to the new
+    database then times out. All three AWS engines share the fallback.
+    """
+    CONF.clear()
+    CONF["aws_db_security_group_id"] = "sg-db"
+    try:
+        for engine in ("postgres", "mysql", "sqlserver"):
+            assert _build(engine, "aws")["vpc_security_group_ids"] == ["sg-db"], engine
+    finally:
+        CONF.clear()
+
+
+def test_aws_db_explicit_security_groups_win_over_config():
+    CONF.clear()
+    CONF["aws_db_security_group_id"] = "sg-db"
+    try:
+        for engine in ("postgres", "mysql", "sqlserver"):
+            tf = _build(engine, "aws", opts={"vpc_security_group_ids": ["sg-1", "sg-2"]})
+            assert tf["vpc_security_group_ids"] == ["sg-1", "sg-2"], engine
+    finally:
+        CONF.clear()
+
+
+def test_aws_db_security_groups_empty_when_unconfigured():
+    """No sandbox run → no configured SG → [] → the VPC default, as before. The
+    fallback must not invent an empty-string SG id, which fails at apply."""
+    CONF.clear()
+    for engine in ("postgres", "mysql", "sqlserver"):
+        assert _build(engine, "aws")["vpc_security_group_ids"] == [], engine
+    # A blank selection is not a selection either — an empty-string SG id would
+    # reach Terraform and fail at apply.
+    assert _build("postgres", "aws", opts={"vpc_security_group_ids": [""]})[
+        "vpc_security_group_ids"] == []
+    # Defensive: the provision route strips None from opts (`if v is not None`), so
+    # the key is absent in practice — but the builder must not trip if that changes.
+    assert _build("postgres", "aws", opts={"vpc_security_group_ids": None})[
+        "vpc_security_group_ids"] == []
+
+
+def test_aws_db_uses_non_default_region_security_group():
+    """The SG is VPC-scoped, so a non-default region must get ITS group, never the
+    default region's (which does not exist in that VPC)."""
+    import json
+    CONF.clear()
+    CONF.update({
+        "aws_region": "us-east-1",                     # configured default region
+        "aws_db_security_group_id": "sg-default",      # flat = default region
+        "aws_region_configs": json.dumps({"us-west-2": {"db_security_group_id": "sg-west"}}),
+    })
+    try:
+        assert _build("postgres", "aws", region="us-west-2")["vpc_security_group_ids"] == ["sg-west"]
+        assert _build("mysql", "aws", region="us-west-2")["vpc_security_group_ids"] == ["sg-west"]
+        # The default region still resolves to the flat key.
+        assert _build("postgres", "aws", region="us-east-1")["vpc_security_group_ids"] == ["sg-default"]
+    finally:
+        CONF.clear()
+
+
 def test_gcp_db_uses_non_default_region_network():
     import json
     CONF.clear()
