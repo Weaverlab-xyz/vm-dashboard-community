@@ -85,12 +85,20 @@ _PS_LIST = (
 # down … through the guest operating system". It matches, switch for switch, the direct
 # WinRM path in hyperv_service._POWER_OPS_PS['shutdown'] — one button, one behaviour,
 # either route, which tests/test_hyperv_power_parity.py pins.
+#
+# Every script resolves the VM object first and passes it with -VM, which is not a style
+# choice: -Id exists ONLY on Get-VM. Start-VM, Stop-VM, Restart-VM, Suspend-VM, Resume-VM
+# and Save-VM each take -Name or -VM and nothing else, so `Start-VM -Id '<guid>'` — which
+# is what every verb here shipped as — could not bind and failed on the host with
+# "NamedParameterNotFound ... Microsoft.HyperV.PowerShell.Commands.StartVM". Addressing
+# the VM by -Name instead would be a second bug: names are not unique across a host and,
+# unlike the id, are not validated against a closed charset before they meet the shell.
 _PS_POWER = {
-    "power_on":    "Start-VM -Id '{vm}'",
-    "power_off":   "Stop-VM -Id '{vm}' -TurnOff -Force",
-    "power_reset": "Restart-VM -Id '{vm}' -Force",
-    "restart":     "Restart-VM -Id '{vm}'",
-    "shutdown":    "Stop-VM -Id '{vm}'",
+    "power_on":    "$vm = Get-VM -Id '{vm}' -EA Stop; Start-VM   -VM $vm -ErrorAction Stop",
+    "power_off":   "$vm = Get-VM -Id '{vm}' -EA Stop; Stop-VM    -VM $vm -TurnOff -Force -ErrorAction Stop",
+    "power_reset": "$vm = Get-VM -Id '{vm}' -EA Stop; Restart-VM -VM $vm -Force -ErrorAction Stop",
+    "restart":     "$vm = Get-VM -Id '{vm}' -EA Stop; Restart-VM -VM $vm -ErrorAction Stop",
+    "shutdown":    "$vm = Get-VM -Id '{vm}' -EA Stop; Stop-VM    -VM $vm -ErrorAction Stop",
 }
 
 _STATE = {0: "Unknown", 2: "Running", 3: "Off", 4: "Stopping", 6: "Saved",

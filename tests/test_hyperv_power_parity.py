@@ -81,9 +81,16 @@ def test_the_runner_power_off_is_a_hard_power_cut():
 def test_both_implementations_of_force_off_agree():
     """The assertion this file exists for: one button, one behaviour, either route.
 
-    Compared as a set of switches rather than as text, because the two call forms
-    legitimately differ — the service resolves a VM object first (`-VM $vm`), the runner
-    addresses the VM by id (`-Id '{vm}'`).
+    Compared as a set of switches rather than as text, because the two strings differ in
+    whitespace and in how they name the id placeholder.
+
+    This docstring used to record the call forms as "legitimately" different — the
+    service resolving a VM object (`-VM $vm`), the runner addressing the VM by id
+    (`-Id '{vm}'`). That was not a difference, it was the bug, written down as a
+    justification: -Id is a Get-VM parameter and no power cmdlet has one, so every
+    agent-bound Hyper-V power button died on the host with NamedParameterNotFound. Both
+    paths now resolve the object first, which is what
+    test_no_power_cmdlet_is_addressed_by_id pins.
     """
     direct = _service_ops()["stop"]
     agent = _runner_ops()["power_off"]
@@ -92,6 +99,38 @@ def test_both_implementations_of_force_off_agree():
             f"{switch} is on only one of the two Force Off paths: "
             f"direct={direct!r} agent={agent!r}")
     assert "Stop-VM" in direct and "Stop-VM" in agent
+
+
+def test_no_power_cmdlet_is_addressed_by_id():
+    """The bug that outlived a parity test built to compare switches.
+
+    `-Id` exists on Get-VM alone. Start-VM, Stop-VM, Restart-VM, Suspend-VM, Resume-VM
+    and Save-VM take -Name or -VM, so `Start-VM -Id '<guid>'` is not a wrong-behaviour
+    bug but an unbindable command: PowerShell rejects it before touching the VM, with
+    "NamedParameterNotFound ... Microsoft.HyperV.PowerShell.Commands.StartVM". Every verb
+    in the runner shipped that way while both this file and the routing table stayed
+    green, because one compared only switches and the other had copied the call form out
+    of the code.
+
+    Checked as text on both maps: the switches are what the buttons promise, but a script
+    that cannot bind keeps no promise at all.
+    """
+    for label, ops in (("hyperv_service._POWER_OPS_PS", _service_ops()),
+                       ("runner._PS_POWER", _runner_ops())):
+        for op, script in sorted(ops.items()):
+            head, _, tail = script.partition(";")
+            # Get-VM legitimately carries -Id; it is the only cmdlet that may.
+            assert "Get-VM" in head and "-Id" in head, (
+                f"{label}[{op}] does not resolve the VM with Get-VM -Id first: "
+                f"{script!r}. Passing the id straight to the power cmdlet cannot bind.")
+            body = tail or ""
+            assert "-Id" not in body, (
+                f"{label}[{op}] passes -Id to a power cmdlet: {script!r}. -Id is a "
+                f"Get-VM parameter only — this fails with NamedParameterNotFound before "
+                f"the VM is touched. Resolve it with Get-VM and pass -VM $vm.")
+            assert "-VM $vm" in body, (
+                f"{label}[{op}] does not pass the resolved object with -VM $vm: "
+                f"{script!r}")
 
 
 # ── the graceful op must stay graceful ────────────────────────────────────────

@@ -245,10 +245,24 @@ AGENT_OP = {
     #   Restart-VM         a "hard" restart, "like powering the computer down, then back
     #                      up again", with or without -Force (which only suppresses the
     #                      confirmation prompt) — hence `power_reset`, not `restart`
-    ("hyperv", "start"): "Start-VM -Id '{vm}'",
-    ("hyperv", "stop"): "Stop-VM -Id '{vm}' -TurnOff -Force",
-    ("hyperv", "shutdown"): "Stop-VM -Id '{vm}'",
-    ("hyperv", "restart"): "Restart-VM -Id '{vm}' -Force",
+    #
+    # Each one resolves the VM object with Get-VM first and passes it with -VM. That is
+    # part of the promise, not formatting: -Id is a Get-VM parameter and nothing else, so
+    # the `Start-VM -Id '<guid>'` these entries used to read could not bind at all. This
+    # table was described as transcribed from Microsoft's cmdlet reference, but the call
+    # form was copied from the code it exists to check, so it asserted the code equalled
+    # itself and every Hyper-V power button failed on the host while this file was green.
+    # The switch reasoning above was transcribed properly and was right all along; verify
+    # a parameter EXISTS, not only that it means what you think.
+    ("hyperv", "start"):
+        "$vm = Get-VM -Id '{vm}' -EA Stop; Start-VM   -VM $vm -ErrorAction Stop",
+    ("hyperv", "stop"):
+        "$vm = Get-VM -Id '{vm}' -EA Stop; Stop-VM    -VM $vm -TurnOff -Force "
+        "-ErrorAction Stop",
+    ("hyperv", "shutdown"):
+        "$vm = Get-VM -Id '{vm}' -EA Stop; Stop-VM    -VM $vm -ErrorAction Stop",
+    ("hyperv", "restart"):
+        "$vm = Get-VM -Id '{vm}' -EA Stop; Restart-VM -VM $vm -Force -ErrorAction Stop",
     ("hyperv", "pause"): UNEXPRESSIBLE,          # needs Suspend-VM
     ("hyperv", "resume"): UNEXPRESSIBLE,         # needs Resume-VM
     ("hyperv", "save"): UNEXPRESSIBLE,           # needs Save-VM
