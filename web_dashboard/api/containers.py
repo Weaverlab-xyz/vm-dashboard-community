@@ -13,7 +13,11 @@ Portainer CE container management endpoints.
                                            ECS / ACI / GCE via job
   GET  /api/containers/gce-compose       — list GCE compose COS instances
   POST /api/containers/gce-compose/{name}/stop — delete a GCE compose instance
+  POST /api/containers/portainer/import  — merge a migration bundle via job
 """
+import base64
+import binascii
+import json
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -41,6 +45,7 @@ from ..models.containers import (
     PortainerDeployRequest,
     PortainerEndpoint,
     PortainerEndpointList,
+    PortainerImportRequest,
     PortainerNodeInfo,
     PortainerNodeResponse,
     RancherDeployRequest,
@@ -55,13 +60,16 @@ from ..services import (
     aws_service,
     azure_service,
     compose_service,
+    config_service,
     container_inventory_service,
     job_service,
+    portainer_import_service,
     portainer_service,
     region_catalog,
     region_config,
     storage_service,
 )
+from ..scripts.portainer_migrate import bundle as portainer_bundle
 from ..services.aws_service import AWSError
 from ..services.azure_service import AzureError
 from ..services.compose_service import ComposeError
@@ -1172,16 +1180,91 @@ async def deploy_portainer_node(
 async def stop_portainer_node(
     name: str,
     zone: str = Query("", description="GCE zone (blank → configured Portainer zone)"),
+    delete_data_disk: bool = Query(
+        False, description="Also delete the persistent data disk (irreversible)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "delete")),
 ):
-    """Tear down the Portainer node (VM + firewall) and clear the URL/token config.
-    Enqueues a durable `portainer_node_teardown` job. The node is EPHEMERAL — this
-    discards all Portainer state (users, environments, settings)."""
+    """Tear down the Portainer node (VM + firewall) and clear the URL config.
+    Enqueues a durable `portainer_node_teardown` job.
+
+    Without a persistent data disk the node is EPHEMERAL and this discards all
+    Portainer state (users, environments, settings). With one, the state survives and
+    the next deploy reattaches it — unless `delete_data_disk` is set, which is the one
+    irreversible part of a teardown."""
     if not _gcp_project_id():
         raise HTTPException(status_code=503, detail="GCP project not configured.")
     job = job_service.create_job(
         db, job_type="portainer_node_teardown", created_by=current_user.username,
-        metadata={"name": name, "zone": zone})
+        metadata={"name": name, "zone": zone,
+                  "delete_data_disk": bool(delete_data_disk)})
     return DeployContainerResponse(
         job_id=job.id, status="pending", message=f"Tearing down Portainer node '{name}'…")
+
+
+# ── Bundle import ────────────────────────────────────────────────────────────
+# The bundle is produced by `python -m web_dashboard.scripts.portainer_migrate` on
+# the operator's machine. It arrives as base64-in-JSON rather than multipart because
+# that is the one file-upload shape this app already has (see api/storage.py) — and
+# unlike a Portainer .tar.gz, a bundle is small, structured and free of credentials.
+
+#: Hard cap on a decoded bundle. This app has no request-body limit anywhere and its
+#: rate limiter is inert, so an unbounded base64 body would be held in RAM twice and
+#: then written into a job row. A real bundle is tens of KB; 5 MiB is generous.
+_MAX_BUNDLE_BYTES = 5 * 1024 * 1024
+
+
+@router.post("/portainer/import", response_model=DeployContainerResponse)
+async def import_portainer_bundle(
+    req: PortainerImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Merge a Portainer migration bundle into the configured Portainer.
+
+    Validates the bundle synchronously — a bad file should be a 400 the operator sees
+    immediately, not a failed job — then enqueues a durable `portainer_import`.
+
+    This never creates environment connections: the bundle records them for reference
+    only, because they address a local Docker socket or a LAN host this deployment
+    cannot route to. Pass `endpoint_id` to also deploy the bundle's stacks onto an
+    environment that already exists.
+    """
+    if not config_service.get("portainer_url"):
+        raise HTTPException(
+            status_code=503,
+            detail="No Portainer server is configured. Deploy a managed node, or set "
+                   "the URL and API token in Settings → Containers.")
+    try:
+        raw = base64.b64decode(req.content_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="content_b64 is not valid base64.")
+    if len(raw) > _MAX_BUNDLE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"That bundle is {len(raw) // 1024} KiB; the limit is "
+                   f"{_MAX_BUNDLE_BYTES // 1024} KiB. A migration bundle should be far "
+                   f"smaller — check you did not upload a Portainer .tar.gz backup, "
+                   f"which cannot be imported directly.")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(
+            status_code=400,
+            detail="That file is not a JSON migration bundle. A Portainer .tar.gz "
+                   "backup cannot be imported directly — open it with a throwaway "
+                   "Portainer and export a bundle first (see the Portainer docs page).")
+    problems = portainer_bundle.validate(doc)
+    if problems:
+        raise HTTPException(status_code=400,
+                            detail="This bundle cannot be imported: " + "; ".join(problems))
+
+    meta: dict = {"bundle": doc}
+    if req.endpoint_id:
+        meta["endpoint_id"] = int(req.endpoint_id)
+    job = job_service.create_job(
+        db, job_type="portainer_import", created_by=current_user.username, metadata=meta)
+    summary = portainer_import_service.summarize(doc)
+    return DeployContainerResponse(
+        job_id=job.id, status="pending",
+        message=f"Importing {summary['total']} object(s) into Portainer…")

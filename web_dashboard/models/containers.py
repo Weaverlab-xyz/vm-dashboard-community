@@ -262,3 +262,19 @@ class PortainerDeployRequest(BaseModel):
     jump_group: Optional[str] = None         # PRA Jump Group name
     jumpoint_name: Optional[str] = None      # PRA Jumpoint name
     vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
+
+
+class PortainerImportRequest(BaseModel):
+    """A Portainer migration bundle, produced by
+    ``python -m web_dashboard.scripts.portainer_migrate export``.
+
+    base64-in-JSON rather than multipart, matching the one upload shape this app
+    already has (``api/storage.py``). The route enforces a size cap and validates the
+    decoded document before queuing anything.
+    """
+    filename: str = ""                       # for the job result only; not trusted as a path
+    content_b64: str                         # the bundle JSON, base64-encoded
+    # Stacks are DEPLOYED, not stored — Portainer has no save-without-running call —
+    # so they are skipped unless the operator names an environment that already
+    # exists. Environment connections themselves are never imported.
+    endpoint_id: Optional[int] = None        # target environment for the bundle's stacks

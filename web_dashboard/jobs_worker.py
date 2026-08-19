@@ -56,7 +56,7 @@ HANDLED_TYPES = (
     "k8s_tunnel", "k8s_api_tunnel", "k8s_group_binding", "k8s_impersonator_binding",
     "k8s_entra_federation", "k8s_ps_token",
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
-    "portainer_node_deploy", "portainer_node_teardown",
+    "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
@@ -120,6 +120,9 @@ MEDIUM_TYPES = (
     # cloud SDK + HTTP readiness poll + an OPT-IN short terraform for the PRA Web Jump
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown",
+    # A serial run of small Portainer API writes — no local process, but it holds the
+    # decoded bundle in memory and must not be starved behind a build.
+    "portainer_import",
     # cloud SDK + a short terraform for the per-VM PRA Shell Jump. These do NOT stream and
     # run no long subprocess — worth stating because their names suggest otherwise.
     "ec2_deploy", "ec2_bulk_deploy", "ec2_destroy",
@@ -162,9 +165,16 @@ LIGHT_TYPES = (
 # One at a time bounds the worker's peak at a single package instead of multiplying it by
 # the light cap, which matters on a container with a hard memory limit: an OOM there kills
 # the container, and with it every OTHER job in flight.
+#
+# portainer_import is here for a third reason: IDEMPOTENCE. Two concurrent imports
+# would each look up "does this user/team exist yet" against the same Portainer and
+# both decide no, so a name that should have been matched gets created twice — and a
+# duplicate team membership makes the FIRST revoke look successful while access
+# remains (see portainer_service.add_team_member). One at a time is what makes the
+# match-then-create pattern in run_import safe.
 SINGLETON_TYPES = frozenset((
     "rancher_node_deploy", "rancher_node_teardown",
-    "portainer_node_deploy", "portainer_node_teardown",
+    "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "expiry_sweep",
     "epml_sync",
 ))
@@ -353,6 +363,9 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "portainer_node_teardown":
             from .services import portainer_node_service
             await portainer_node_service.run_teardown(db, job_id=job_id, meta=meta)
+        elif job_type == "portainer_import":
+            from .services import portainer_import_service
+            await portainer_import_service.run_import(db, job_id=job_id, meta=meta)
         elif job_type == "clouddb_provision":
             await cloud_database_service.run_provision_apply(
                 db, db_id=meta["db_id"], job_id=job_id,

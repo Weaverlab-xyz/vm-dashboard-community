@@ -655,6 +655,52 @@ async def remove_team_member(user_id: int, team_id: int) -> bool:
     return True
 
 
+# ── Registries ───────────────────────────────────────────────────────────────
+#
+# Read + create only, and deliberately no password parameter. A registry's
+# credential never survives a migration: Portainer does not return it from
+# GET /api/registries, and the migration bundle scrubs credential-shaped fields on
+# the way out anyway. So a registry created here is UNAUTHENTICATED, and the caller
+# has to say so — a registry that looks configured but cannot pull is worse than an
+# absent one.
+
+
+@_wrap_transport_errors
+async def list_registries() -> list:
+    """Every registry (GET /api/registries)."""
+    data = await _api("GET", "/api/registries", ok=(200,), context="list_registries")
+    return data if isinstance(data, list) else []
+
+
+async def find_registry(name: str) -> dict:
+    """The registry with this name, or ``{}`` (case-insensitive, as for users/teams)."""
+    target = (name or "").strip().lower()
+    if not target:
+        return {}
+    for reg in await list_registries():
+        if str(reg.get("Name") or "").strip().lower() == target:
+            return reg
+    return {}
+
+
+@_wrap_transport_errors
+async def create_registry(name: str, url: str, registry_type: int = 3) -> dict:
+    """Create an UNAUTHENTICATED registry (POST /api/registries).
+
+    ``registry_type`` is Portainer's numeric kind (3 = custom, which is the only one
+    that is meaningful without credentials). Anything else is passed through as given
+    — Portainer validates it — because a Docker Hub or ECR entry still carries a
+    useful name and URL for the operator to finish by hand.
+    """
+    body = await _api("POST", "/api/registries",
+                      context=f"create_registry({name})",
+                      json_body={"Name": name, "URL": url,
+                                 "Type": int(registry_type),
+                                 "Authentication": False})
+    logger.info("Portainer registry '%s' created (unauthenticated)", name)
+    return body or {}
+
+
 # ── First-run bootstrap for a dashboard-DEPLOYED node ────────────────────────
 # These helpers target a specific base_url and do NOT go through _client() /
 # _resolve_connection(): a freshly launched node has no PAT yet — minting one is
