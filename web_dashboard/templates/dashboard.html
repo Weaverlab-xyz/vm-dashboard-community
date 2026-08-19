@@ -351,9 +351,23 @@
         this.refreshSection(this.tileSections.find(s => s.id === 'containers'));
 
         // Live updates: poll the cheap, status-bearing surfaces (jobs + attention)
-        // every 10s; tick `now` every 30s so "updated Xm ago" labels stay current.
+        // every 20s; tick `now` every 30s so "updated Xm ago" labels stay current.
         // Cloud/hypervisor tiles stay manual-refresh (they hit live cloud APIs).
-        setInterval(() => { this.loadJobs(true); this.loadActiveJobs(); this.loadAttention(); }, 10000);
+        //
+        // Skipped while the tab is hidden, which is not a nicety: `setInterval` fires in
+        // background tabs too, so three requests per tick per open tab went on landing on
+        // a DB pool of `db_pool_size + db_max_overflow` (10 by default, and sized against
+        // the Postgres tier — see database.py). Several forgotten tabs were enough to
+        // exhaust it, and every page then 500s on `QueuePool limit ... reached` after a
+        // 30s wait. A hidden tab has no one reading it; it refreshes on focus below.
+        setInterval(() => {
+          if (document.hidden) return;
+          this.loadJobs(true); this.loadActiveJobs(); this.loadAttention();
+        }, 20000);
+        // Catch up immediately on return, so hiding a tab costs nothing but the pause.
+        document.addEventListener('visibilitychange', () => {
+          if (!document.hidden) { this.loadJobs(true); this.loadActiveJobs(); this.loadAttention(); }
+        });
         setInterval(() => { this.now = Date.now(); }, 30000);
       },
 

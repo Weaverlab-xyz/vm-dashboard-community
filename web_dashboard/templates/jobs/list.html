@@ -170,7 +170,11 @@
         this.filterBatch = new URLSearchParams(window.location.search).get('batch_id') || '';
         await this.loadJobs();
         // Poll every 5s for running job updates
-        setInterval(() => this.loadJobs(), 5000);
+        // 5s is right for a list someone is watching a job on, and wasted otherwise —
+        // a background tab polling this every 5s is pure DB-pool pressure. See the note
+        // in dashboard.html; refreshes on focus so the pause is invisible.
+        setInterval(() => { if (!document.hidden) this.loadJobs(); }, 5000);
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) this.loadJobs(); });
       },
 
       async loadJobs() {
