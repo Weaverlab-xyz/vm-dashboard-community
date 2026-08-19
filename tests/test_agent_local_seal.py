@@ -165,13 +165,22 @@ def test_the_host_binding_stops_the_value_being_relabelled():
     the next sync. Same reasoning as `seal_aad`'s `ref`, and as the rule that the dashboard
     may hold the secret but never the target.
     """
+    # Mixed case on purpose: the refusal has to echo the address as the BINDING saw it,
+    # normalised, or an operator comparing it against their file sees two different strings
+    # and concludes the message is about something else.
+    decoy = "Attacker.Example.COM"
     token = _sealed()
     try:
-        agent.local_unseal(token, host="attacker.example.com",
-                           purpose=agent.LOCAL_PURPOSE_PASSWORD)
+        agent.local_unseal(token, host=decoy, purpose=agent.LOCAL_PURPOSE_PASSWORD)
     except agent.LocalSealError as exc:
         assert "did not authenticate" in str(exc), exc
-        assert "attacker.example.com" in str(exc), "name the address it was asked for"
+        # Derived through `seal_host_key` rather than compared against a host-shaped
+        # literal. That is the stronger assertion — it pins that the message is built from
+        # the normalised host and not the raw input — and it keeps CodeQL's
+        # py/incomplete-url-substring-sanitization off a line that is asserting on an error
+        # string, not sanitising a URL.
+        assert repr(agent.seal_host_key(decoy)) in str(exc), (
+            "name the address it was asked for, as the binding normalised it")
         assert "moved here from another entry" in str(exc), "say what this defends"
     else:
         raise AssertionError("a sealed value must not open against a different host")
