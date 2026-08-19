@@ -96,13 +96,31 @@ _STOPPABLE_STATES = {2, 10}        # can be force-stopped / restarted
 
 # ── WinRM helpers ─────────────────────────────────────────────────────────────
 
+def _text(value) -> str:
+    """One decode for both of the shapes pywinrm hands back.
+
+    `Session.run_ps` does not leave `std_err` alone: whenever it is non-empty it is
+    REPLACED with the return of `_clean_error_msg`, which unwraps PowerShell's CLIXML
+    error envelope and yields a **str**. It stays `bytes` only while it is empty — that
+    is, only when there is nothing to report. So `.decode()` on it raised
+    `AttributeError: 'str' object has no attribute 'decode'` on the one path whose whole
+    job is to report the PowerShell error, and the operator read a type error from this
+    file instead of the message PowerShell had already written for them.
+
+    Mirrors `runners/hypervisor/run.py::_text` — same trap, same fix, both transports.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value or "")
+
+
 def _run_ps(sess, script: str) -> str:
     """Execute a PowerShell script and return stdout. Raises HyperVError on failure."""
     result = sess.run_ps(textwrap.dedent(script).strip())
     if result.status_code != 0:
-        stderr = result.std_err.decode("utf-8", errors="replace").strip()
+        stderr = _text(result.std_err).strip()
         raise HyperVError(f"PowerShell error: {stderr or 'non-zero exit'}")
-    return result.std_out.decode("utf-8", errors="replace").strip()
+    return _text(result.std_out).strip()
 
 
 # ── List VMs ──────────────────────────────────────────────────────────────────
@@ -172,8 +190,28 @@ def _normalise_vm(raw: dict) -> dict:
 def _list_vms_sync(conn) -> list[dict]:
     sess = _session(conn)
     output = _run_ps(sess, _LIST_VMS_PS)
+    # A host with no VMs is not silence. `_LIST_VMS_PS` prints a literal '[]' for that
+    # case and a JSON array in every other branch, so empty stdout — or a bare 'null' —
+    # means the script never got as far as printing, and returning [] for it renders an
+    # empty VM table with no error at all: indistinguishable from a host that really has
+    # no VMs. The two ways it happens both leave the exit code at 0, which is how they
+    # reach here past _run_ps: the Hyper-V PowerShell module not loading on the host, and
+    # an account that can open a WinRM session but cannot enumerate VMs.
+    #
+    # Less costly than the same mistake on the agent path, where a zero-VM page pruned
+    # the cache and still recorded the connection as synced — the `enumerated` envelope in
+    # runners/hypervisor/run.py::_PS_LIST and hypervisor_sync_service is that half. This
+    # one is a live read: no cached row is destroyed and a Refresh self-corrects once the
+    # cause is fixed. Same wrong answer though, so it gets the same treatment.
     if not output or output.lower() == "null":
-        return []
+        raise HyperVError(
+            f"{conn.name!r} returned no VM data — Get-VM printed nothing. The host "
+            f"answered, so this is not the connection itself: either the Hyper-V "
+            f"PowerShell module is not available to it (a Windows client host needs the "
+            f"Hyper-V Management Tools feature), or "
+            f"{conn.username or 'the configured account'} cannot enumerate VMs — add it "
+            f"to the host's local Hyper-V Administrators group."
+        )
     try:
         data = json.loads(output)
     except json.JSONDecodeError as e:
