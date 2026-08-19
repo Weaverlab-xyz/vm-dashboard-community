@@ -216,7 +216,17 @@ def _db_tiles(db: Session, user: User) -> dict:
         running = sum(1 for v in rows if getattr(v, "is_running", False))
         # Oldest sync among the rows shown, never now() — api/vms.py's own rule.
         stamps = [v.synced_at for v in rows if getattr(v, "synced_at", None)]
-        return _tile(len(rows), secondary=running, as_of=min(stamps) if stamps else None)
+        tile = _tile(len(rows), secondary=running, as_of=min(stamps) if stamps else None)
+        # Per-workgroup counts for the page's workgroup badges. They used to come from the
+        # client looping the full /api/vms payload; computing them from the same rows here
+        # is one fewer request and keeps the badges consistent with the tile above them.
+        counts: dict = {}
+        for vm in rows:
+            wg = getattr(vm, "workgroup", None)
+            if wg:
+                counts[wg] = counts.get(wg, 0) + 1
+        tile["by_workgroup"] = counts
+        return tile
     _safe("workstation_vms", _workstation)
 
     def _gateways():
@@ -294,3 +304,58 @@ async def dashboard_stats(
         "stale": any(t.get("stale") for t in tiles.values()),
         "generated_at": store._iso(now),
     }
+
+
+@router.post("/refresh", status_code=202)
+async def dashboard_refresh(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Ask the collector for a fresh pass. Returns immediately.
+
+    **Refresh triggers the collector; it does NOT read the live endpoints.** Reverting to a
+    live fan-out here would rebuild the ~22-request burst this whole change removes, fired
+    from the one button an operator presses when the page already looks wrong. That is the
+    cost-cache incident in miniature: the page shows an error, which makes the admin click
+    Refresh, which issues more queries into the window already rejecting them.
+
+    It also does not fetch synchronously in THIS process. The app serves requests on two
+    gunicorn workers against a ten-connection pool and eight threads per provider; doing
+    thirty tiles' worth of cloud calls inside a request handler is the 2026-08-12 outage
+    with a button on it.
+
+    ``mark_stale`` rather than a delete, for the same reason ``cost_cache`` uses it: the
+    current numbers keep serving while the next pass re-collects. Deleting first trades a
+    working value for a maybe — which is exactly what made one throttle into a blank page.
+
+    ``cooldown_until`` is deliberately NOT cleared. A saturated provider stays left alone no
+    matter how many times the button is pressed.
+    """
+    now = store._utcnow()
+    newest = max((s["fetched_at"] for snaps in store.read_all(db).values()
+                  for s in snaps if s["fetched_at"]), default=None)
+    floor = store.min_refresh_interval_seconds()
+    if newest and (now - newest).total_seconds() < floor:
+        # Say so rather than appearing to do nothing.
+        waited = int((now - newest).total_seconds())
+        return {"ok": True, "queued": False,
+                "reason": f"collected {waited}s ago; minimum interval is {floor}s"}
+
+    store.mark_stale(db)
+    # Fire and forget: the response is already composed, and whichever process wins the
+    # claim does the work once — the other's next pass claims nothing.
+    import asyncio
+    asyncio.create_task(_forced_pass())
+    return {"ok": True, "queued": True}
+
+
+async def _forced_pass() -> None:
+    """Run one forced collection, swallowing everything.
+
+    Detached from the request, so it must never raise into the event loop — and it holds no
+    session: ``collect_once`` opens its own, per tile, around each provider call.
+    """
+    try:
+        await dashboard_collect.collect_once(force=True)
+    except Exception as exc:                           # noqa: BLE001
+        logger.warning("dashboard stats: forced pass failed: %s", exc)
