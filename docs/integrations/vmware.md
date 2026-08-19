@@ -102,10 +102,10 @@ the VMs on that host, badged with the agent's name.
 | Feature | Description |
 |---|---|
 | **Workstation page** | Every VM the agent reports, from every Workstation host you have enrolled |
-| **Start / Stop** | Per-VM power, queued as an agent job with live output on the Jobs page |
+| **Start / Stop** | Per-VM power, queued as an agent job with live output on the Jobs page. When the job finishes the dashboard queues an inventory sync of its own, so the page reflects the new state without a manual Sync Now |
 | **OS and Path columns** | The guest OS and the VMX file's location on the agent's host |
 | **Workgroup assignment** | Admins select VMs and tag them into a workgroup, which is what makes them visible to non-admins |
-| **Sync Now** | Asks the agent to re-read its host immediately rather than waiting for the scheduled pass |
+| **Sync Now** | Asks the agent to re-read its host immediately rather than waiting for the scheduled pass. Rarely needed after a Start or a Stop — those re-sync themselves |
 | **Inventory** | Synced VMs also appear on the Deployment Inventory page |
 
 ### What it cannot do

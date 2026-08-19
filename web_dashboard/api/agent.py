@@ -474,6 +474,24 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
     agent_service.audit(db, agent, "agent.complete", ip=_client_ip(request),
                         details={"job_id": job.id, "status": applied})
 
+    # Re-read the inventory the operator just changed, on their behalf. The dashboard
+    # has no route to an agent-bound hypervisor, so a start or a stop left the page
+    # showing the old state until someone pressed Sync Now or the timed pass came round
+    # up to half an hour later — the button worked and the page said it had not.
+    #
+    # AFTER complete_job, not before: until this row is terminal it is itself the
+    # connection's open agent_hypervisor job, and the in-flight guard inside sync_now
+    # would read it and skip. A no-op for every other verb, including each page of a
+    # sync — see hypervisor_sync_service.sync_after_power.
+    try:
+        follow, reason = hypervisor_sync_service.sync_after_power(db, job)
+        if follow is not None:
+            logger.info("queued inventory sync %s after power job %s", follow.id, job.id)
+        elif reason:
+            logger.info("no inventory sync after power job %s: %s", job.id, reason)
+    except Exception:  # noqa: BLE001 — a finished job must not fail on its follow-up
+        logger.exception("could not queue an inventory sync after job %s", job.id)
+
     # Release a Password Safe credential this job checked out. The fast path only — a job
     # whose agent was killed never gets here, which is why `agent_ps_credential_service.
     # sweep` and not this hook is the authority. Ref-counted inside, so a sibling job

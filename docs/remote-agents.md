@@ -644,6 +644,17 @@ override per connection with `options.sync_interval_minutes`). `power_on`, `powe
 `power_reset`, `shutdown`, `reboot` and `restart` are on-demand, issued by the existing
 power buttons on the hypervisor pages when the resolved connection is agent-bound.
 
+One `inventory_sync` is also queued automatically whenever a power job finishes, against
+the connection it acted on, so the page reflects a Start or a Stop without anyone pressing
+Sync Now. It is attributed to whoever pressed the button and appears on the Jobs page as
+`Inventory sync: <connection> (page 1) — after power_off`. Two things follow from where it
+sits: a power op that *failed* queues one too (an agent that lost the response to a call
+it did make is indistinguishable from one that never made it, and the VM may well have
+moved), and a burst of power ops queues **one** sync rather than one each — the last op to
+finish queues it, and it sees everything the burst moved. A graceful `shutdown` or
+`reboot` is the case where one press is not enough: the sync runs seconds later, while the
+guest is still on its way down, so it honestly records a VM that is still running.
+
 Not every button on those pages has one of them behind it, and the ones that do not are
 **refused rather than approximated**. `restart` is why the mapping is per product rather
 than shared: each kind resolves it differently — Proxmox `/status/shutdown` (graceful),

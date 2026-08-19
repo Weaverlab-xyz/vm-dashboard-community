@@ -214,7 +214,16 @@ async def sync_inventory(
             # Both lists, always. A response that says "0 queued" and nothing else is
             # precisely the silence this endpoint exists to break — the operator needs to
             # know it was the agent being offline, not the button being broken.
+            #
+            # `in_flight` splits the one skip that is not a fault away from the ones that
+            # are. `sync_now` says so by returning an EMPTY reason ("not a fault, and not
+            # news"), which this route then papers over with prose — so the page had no
+            # way to tell "the agent is offline" from "your sync is already running" and
+            # showed both in red. That distinction stopped being academic when a power op
+            # started queueing a sync of its own: pressing Sync Now straight after a Start
+            # is now the common case, not the rare one.
             skipped.append({"connection": conn.name,
+                            "in_flight": not reason,
                             "reason": reason or "a sync is already in flight"})
     return {"queued": queued, "skipped": skipped}
 

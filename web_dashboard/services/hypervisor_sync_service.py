@@ -12,6 +12,12 @@ chain is capped at :data:`MAX_SYNC_PAGES`, which is what stops a lying agent mak
 dashboard enqueue work forever. Every page of one sync shares a ``batch_id`` so the N
 job rows roll up as one run.
 
+**Why a power op queues one of these.** The dashboard cannot see a hypervisor it reaches
+through an agent, so a start or a stop leaves the cache saying the opposite of the truth
+until the next timed pass — up to ``hypervisor_sync_interval_minutes`` later. Operators
+were pressing Sync Now by hand after every button. :func:`sync_after_power` closes that
+loop from the completion path instead; see it for why it fires on a failed op too.
+
 **Why this is not a worker handler.** ``agent_hypervisor`` must stay disjoint from
 ``jobs_worker.HANDLED_TYPES`` or the local worker would race the agent for the row. So
 the periodic pass is an asyncio loop in ``main`` (the same shape as the expiry sweeper),
@@ -92,7 +98,8 @@ def hcs_blockers(db: Session, connection_id: str, agent) -> list:
     return hcs.dashboard_secret_blockers(db, connection_id, agent)
 
 
-def sync_now(db: Session, conn: HypervisorConnection):
+def sync_now(db: Session, conn: HypervisorConnection, *, created_by: str = "",
+             trigger: str = ""):
     """Queue an inventory_sync for ONE connection, ignoring its cadence.
 
     Returns ``(job, "")`` when queued, or ``(None, reason)`` when it cannot be — the
@@ -125,7 +132,62 @@ def sync_now(db: Session, conn: HypervisorConnection):
     if blockers:
         return None, blockers[0]
 
-    return _queue(db, conn, cursor="", batch_id=None), ""
+    return _queue(db, conn, cursor="", batch_id=None, created_by=created_by,
+                  trigger=trigger), ""
+
+
+# The verbs after which the cached row is a lie. Every one of them moves a VM's power
+# state, which is the only thing on this page an operator watches change.
+#
+# `snapshot` is the one WRITE verb deliberately absent: it creates something the
+# inventory cache does not store a single column of, so re-reading a whole vCenter for
+# it would be minutes of work with nothing to show for it.
+# tests/test_power_resync.py pins that split, so a verb added to WRITE_VERBS later has
+# to be classified here rather than silently defaulting to "no resync".
+RESYNC_VERBS = ("power_on", "power_off", "power_reset", "restart", "shutdown", "reboot")
+
+
+def sync_after_power(db: Session, job: Job):
+    """Queue an inventory sync for the connection a just-finished power job acted on.
+
+    Returns the same ``(job, reason)`` pair as :func:`sync_now`, and ``(None, "")`` when
+    the finished job was not a power op at all — which is most of them, since every
+    inventory_sync page is also an ``agent_hypervisor`` row.
+
+    **Why it runs on a FAILED op too.** A refusal is cheap to re-read and an *uncertain*
+    outcome is the case that matters: the agent issuing the power call and then losing
+    the response is indistinguishable, from here, from one that never left — and the VM
+    may well have moved. "Make the cache match the hypervisor" is the right answer to
+    both, and the wrong time to ask for it is exactly when nobody is sure.
+
+    **Why the in-flight guard is not bypassed.** ``sync_now`` refuses while another sync
+    is open on the connection, and for a burst of power ops that is the behaviour worth
+    having: the LAST one to finish queues the sync, and it sees every VM the earlier ones
+    moved. Bypassing it would queue N syncs of the same inventory instead.
+
+    Called after the job row reaches a terminal status, never before — until then the
+    power job is itself the connection's open ``agent_hypervisor`` row, and the guard
+    above would read it and skip.
+    """
+    if getattr(job, "job_type", "") != "agent_hypervisor":
+        return None, ""
+    meta = job.metadata_dict or {}
+    if str(meta.get("verb") or "") not in RESYNC_VERBS:
+        return None, ""
+
+    # The job's own metadata first, `cloud_resource_id` as the fallback: both are
+    # written by `agent_power_job`, and the meta copy is the one that survives a row
+    # whose resource id was never stamped.
+    connection_id = str(meta.get("connection_id") or job.cloud_resource_id or "")
+    if not connection_id:
+        return None, ""
+    conn = db.query(HypervisorConnection).filter(
+        HypervisorConnection.id == connection_id).first()
+    if conn is None or not conn.is_active:
+        return None, ""
+
+    return sync_now(db, conn, created_by=job.created_by or "",
+                    trigger=f"after {meta['verb']}")
 
 
 def _has_open_job(db: Session, connection_id: str) -> bool:
@@ -143,12 +205,20 @@ def _has_open_job(db: Session, connection_id: str) -> bool:
 
 
 def _queue(db: Session, conn: HypervisorConnection, *, cursor: str, batch_id,
-           page: int = 1, started: datetime = None) -> Job:
+           page: int = 1, started: datetime = None, created_by: str = "",
+           trigger: str = "") -> Job:
     """One inventory_sync job. Bookkeeping fields ride alongside the allowlisted meta.
 
     ``sync_started_at`` is carried forward through the whole chain rather than being
     re-derived per page, so the prune at the end removes rows that predate the *pass*
-    rather than the last page.
+    rather than the last page. ``created_by`` and ``trigger`` are carried the same way,
+    for a plainer reason: a non-admin only sees their OWN rows on /jobs, so a sync
+    attributed to ``system:sync`` is one they cannot see at all — and pages 2..N of the
+    sync they caused would drop out from under them mid-run.
+
+    ``trigger`` reaches the description and nothing else. It is composed here from a
+    closed verb allowlist, never from a VM name: a hypervisor's own strings are the one
+    thing on this path the dashboard did not write.
     """
     meta = agent_hypervisor_meta.normalize({
         "verb": "inventory_sync",
@@ -157,11 +227,13 @@ def _queue(db: Session, conn: HypervisorConnection, *, cursor: str, batch_id,
         "kind": conn.kind,
         "cursor": cursor,
     })
-    meta["description"] = f"Inventory sync: {conn.name} (page {page})"
+    meta["description"] = (f"Inventory sync: {conn.name} (page {page})"
+                           + (f" — {trigger}" if trigger else ""))
     meta["sync_page"] = page
     meta["sync_started_at"] = (started or datetime.utcnow()).isoformat()
+    meta["sync_trigger"] = trigger
     job = job_service.create_job(
-        db, job_type="agent_hypervisor", created_by="system:sync",
+        db, job_type="agent_hypervisor", created_by=created_by or "system:sync",
         metadata=meta, agent_id=conn.agent_id, batch_id=batch_id)
     job_service.set_cloud_resource_id(db, job.id, conn.id)
     return job
@@ -191,7 +263,8 @@ def apply_page(db: Session, job: Job, result: dict) -> dict:
     page_no = int(meta.get("sync_page") or 1)
     if page["next_cursor"] and not page["complete"] and page_no < MAX_SYNC_PAGES:
         _queue(db, conn, cursor=page["next_cursor"], batch_id=job.batch_id or job.id,
-               page=page_no + 1, started=started)
+               page=page_no + 1, started=started, created_by=job.created_by or "",
+               trigger=str(meta.get("sync_trigger") or ""))
         logger.info("hypervisor sync: queued page %d for %s", page_no + 1, conn.name)
     else:
         if page_no >= MAX_SYNC_PAGES and page["next_cursor"]:

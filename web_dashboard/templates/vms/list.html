@@ -275,10 +275,20 @@
         const before = this.cachedAt;
         try {
           const r = await API.post('/api/vms/sync', {});
-          (r?.skipped || []).forEach(s => toast(`${s.connection}: ${s.reason}`, 'error'));
+          // A sync that is ALREADY running is not a failure, and since a power op queues
+          // one of its own, pressing this straight after a Start is the common case. Only
+          // the real refusals — an offline agent, a missing grant — go out in red; the
+          // rest fall through to the same poll, which is what the operator wanted anyway.
+          const skipped = r?.skipped || [];
+          skipped.filter(s => !s.in_flight)
+                 .forEach(s => toast(`${s.connection}: ${s.reason}`, 'error'));
           const queued = (r?.queued || []).length;
-          if (!queued) { toast('No connection could be synced', 'error'); return; }
-          toast(`Inventory sync queued for ${queued} connection(s)`, 'success');
+          const running = skipped.filter(s => s.in_flight).length;
+          if (!queued && !running) { toast('No connection could be synced', 'error'); return; }
+          toast(queued
+                  ? `Inventory sync queued for ${queued} connection(s)`
+                  : `A sync is already running for ${running} connection(s) — waiting for it`,
+                'success');
 
           // Poll the listing until cached_at moves. It can move now: it is the oldest
           // synced_at among the rows, not the time the response was built.
@@ -342,7 +352,11 @@
             name: vm.vm_name,
             connection_id: vm.connection_id || '',
           });
-          toast(`${op === 'start' ? 'Start' : 'Stop'} queued for ${vm.vm_name}`, 'success');
+          // Says the sync is automatic because it IS — api/agent.py queues one when the
+          // power job finishes. Without that sentence the operator's next move is Sync
+          // Now, which is the habit this whole change exists to break.
+          toast(`${op === 'start' ? 'Start' : 'Stop'} queued for ${vm.vm_name} — the `
+              + `inventory re-syncs on its own when the job finishes`, 'success');
           setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
         } catch (e) {
           toast(`${op} failed: ${e.message}`, 'error');
