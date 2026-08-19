@@ -9,12 +9,22 @@
 # host could point this agent at an endpoint of its choosing and collect whatever
 # credential the agent presented there.
 #
-# The credential is the one part you can choose to move. Three options, weakest first:
+# The credential is the one part you can choose to move. Four options, weakest first:
 #
 #   password / password_file    it lives on this host. Simple, and the historical
 #                               default — but anyone who can read files here has a
 #                               standing hypervisor administrator password, offline and
 #                               forever, and a file read is not an event anybody sees.
+#
+#   password_sealed             it still lives on this host, encrypted against a key in
+#                               the agent's state volume. Be clear about what that does
+#                               and does not buy: it is NOT protection from root here,
+#                               because the key is on the same machine — unavoidable for
+#                               a container that has to restart unattended. What it
+#                               protects is this FILE, which travels: into a git repo,
+#                               an Ansible role, a runbook, a ticket, a screenshot, a
+#                               backup. The key goes into none of those, so a copy of
+#                               this file is worthless anywhere else.
 #
 #   ps_managed_account          this agent asks Password Safe per job. No hypervisor
 #                               password here, but a Password Safe OAuth client is here
@@ -96,6 +106,42 @@ connections:
   #   username: root
   #   password_file: /run/secrets/xcpng
   #   verify_ssl: false
+
+  # ── The credential kept here, but not in cleartext ─────────────────────────
+  #
+  # Seal it with the agent image itself. Mount the SAME state volume the agent runs
+  # with — that is where the key is, and a key created anywhere else dies with the
+  # container and takes every value sealed against it:
+  #
+  #   docker run --rm -it -v dashboard_agent_state:/var/lib/dashboard-agent \      # bash
+  #       chrweav/dashboard-agent:latest seal --host vcenter4.lab.internal
+  #
+  #   docker run --rm -it -v dashboard_agent_state:/var/lib/dashboard-agent `      # PowerShell
+  #       chrweav/dashboard-agent:latest seal --host vcenter4.lab.internal
+  #
+  # It prompts for the password without echoing it, prints one line, and that line is
+  # what goes below. Delete the plaintext afterwards — a leftover `password` under a
+  # `password_sealed` is ignored, and warned about on every job, because it means a
+  # credential is still sitting here in the clear.
+  #
+  # THE ADDRESS IS PART OF THE SEAL. `--host` must match `host:` below, and if you ever
+  # change the address you have to seal the credential again. That is the point rather
+  # than an inconvenience: this file takes effect per job with no restart, so without
+  # the binding anyone who can edit it — but who cannot read the state volume — could
+  # move this value onto an entry pointing at a host of their own and read the password
+  # off the next sync. Same reasoning as the dashboard never being allowed to set `host`.
+  #
+  # Requires an agent image of 2.2.0 or newer. Unlike `dashboard_secret` the dashboard
+  # cannot warn you about an older one, because it never sees this file — but you cannot
+  # get into that state by accident either, since the `seal` command comes from the same
+  # image that reads the key.
+  #
+  # - name: dc4-vcenter
+  #   kind: vsphere
+  #   host: vcenter4.lab.internal
+  #   username: svc-dashboard@vsphere.local
+  #   password_sealed: sealed.v1.58e64387.REPLACE-WITH-THE-LINE-THAT-SEAL-PRINTED
+  #   verify_ssl: true
 
   # ── Password Safe, instead of a stored credential ──────────────────────────
   # The end state: this agent holds NO hypervisor credential at all, only a Password

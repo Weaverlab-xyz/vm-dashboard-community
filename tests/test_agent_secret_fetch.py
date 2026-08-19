@@ -148,7 +148,14 @@ def test_the_local_chain_is_unchanged_when_the_key_is_absent():
     have disturbed the ordering `test_agent_ps_checkout` pins."""
     dash = _FakeDashboard()
     assert agent._secret_for({"name": "c", "password": "inline"}, _ctx(dash)) == "inline"
-    assert agent._secret_for({"name": "c"}, _ctx(dash)) == ""
+    # No credential at all is a refusal rather than `""` — see
+    # tests/test_agent_local_seal.py for why an empty password is the dangerous answer.
+    try:
+        agent._secret_for({"name": "c"}, _ctx(dash))
+    except agent.PolicyRefusal as exc:
+        assert "declares no credential" in str(exc), exc
+    else:
+        raise AssertionError("an empty password must not be sent")
 
 
 # ── memoisation ───────────────────────────────────────────────────────────────

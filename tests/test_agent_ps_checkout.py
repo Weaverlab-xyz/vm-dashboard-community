@@ -236,7 +236,28 @@ def test_password_file_still_beats_an_inline_password():
 
 def test_an_inline_password_is_the_last_resort():
     assert agent._secret_for({"name": "dc1", "password": "inline"}) == "inline"
-    assert agent._secret_for({"name": "dc1"}) == ""
+
+
+def test_a_connection_with_no_credential_is_refused_not_answered_with_an_empty_one():
+    """This used to return `""`, and the empty string was the whole bug.
+
+    A hypervisor answers an empty password with its own "wrong username or password", so a
+    connection that simply declared no credential was indistinguishable from one with a bad
+    one — and the inventory sync retries on a schedule until the service account locks out.
+    It is also the shape an agent too old to know `password_sealed` produces against a file
+    that declares only that, which is what this refusal stands in for: the dashboard never
+    sees a sealed value, so unlike `dashboard_secret` there is nothing it can gate on.
+    """
+    try:
+        agent._secret_for({"name": "dc1"})
+    except agent.PolicyRefusal as exc:
+        assert "declares no credential" in str(exc), exc
+        assert "dc1" in str(exc), "the operator needs to know which connection"
+        for key in ("dashboard_secret", "ps_managed_account", "password_sealed",
+                    "password_file", "password"):
+            assert key in str(exc), f"the refusal should name every source, missing {key}"
+    else:
+        raise AssertionError("an empty password must never be sent to a hypervisor")
 
 
 # ── the client file ───────────────────────────────────────────────────────────
