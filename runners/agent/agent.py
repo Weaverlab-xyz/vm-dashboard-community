@@ -2196,6 +2196,26 @@ def _check_endpoint(policy: "Policy", host: str, port: int,
         policy.check(addr, port)
 
 
+# ── Inventory, and the `enumerated` flag every one of these sets ──────────────
+#
+# `enumerated: True` says one thing: this list is what the product's API returned, not
+# what was left over after something went wrong. The dashboard needs it because an empty
+# `vms` is otherwise unreadable — a zero-VM pass prunes the whole cached inventory for
+# the connection, which is how a DELETED VM stops being listed, so a host the agent
+# could not read looked exactly like a host with nothing on it and emptied a good cache
+# with the sync recorded as a success.
+#
+# Every function below can set it honestly because every one of them parses a structured
+# document and raises when it cannot: a list from vCenter, `data` from Proxmox,
+# `entities` from Prism, `get_all_records` from XAPI, a JSON array from vmrest. It is
+# NOT a claim that the credential could see everything — nothing here can know that —
+# only that an enumeration came back rather than nothing at all.
+#
+# Absent, it reads as False on the dashboard, which then refuses to empty a populated
+# cache. So a new `_sync_*` that forgets it costs an operator stale rows and a stated
+# reason, never a silently wiped page — and
+# tests/test_hyperv_inventory_envelope.py sweeps every producer here for it.
+
 def _sync_vsphere(conn, payload, policy, emit, checkins=None):
     """vCenter inventory via the vSphere Automation REST API (7.0U2+).
 
@@ -2220,7 +2240,8 @@ def _sync_vsphere(conn, payload, policy, emit, checkins=None):
                     "power_state": vm.get("power_state"),
                     "vcpus": vm.get("cpu_count"), "mem_mib": vm.get("memory_size_MiB"),
                     "vm_type": "vm"})
-    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
+    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out),
+            "enumerated": True}
 
 
 def _sync_proxmox(conn, payload, policy, emit, checkins=None):
@@ -2249,7 +2270,8 @@ def _sync_proxmox(conn, payload, policy, emit, checkins=None):
                     "mem_mib": int((vm.get("maxmem") or 0) / (1024 * 1024)),
                     "scope": vm.get("node"), "vm_type": vm.get("type")})
     emit(f"read {len(out)} guest(s) from Proxmox at {host}")
-    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
+    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out),
+            "enumerated": True}
 
 
 def _sync_nutanix(conn, payload, policy, emit, checkins=None):
@@ -2286,7 +2308,7 @@ def _sync_nutanix(conn, payload, policy, emit, checkins=None):
     complete = nxt >= int(total or 0) or not entities
     emit(f"read {len(out)} VM(s) from Prism at {host} (offset {offset})")
     return {"vms": out, "next_cursor": "" if complete else str(nxt),
-            "complete": complete, "scanned": len(out)}
+            "complete": complete, "scanned": len(out), "enumerated": True}
 
 
 def _sync_xcpng(conn, payload, policy, emit, checkins=None):
@@ -2325,7 +2347,8 @@ def _sync_xcpng(conn, payload, policy, emit, checkins=None):
                     "mem_mib": int(int(vm.get("memory_static_max") or 0) / (1024 * 1024)),
                     "vm_type": "vm"})
     emit(f"read {len(out)} VM(s) from XCP-ng at {host}")
-    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
+    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out),
+            "enumerated": True}
 
 
 # ── VMware Workstation Pro, via vmrest ────────────────────────────────────────
@@ -2469,7 +2492,8 @@ def _sync_workstation(conn, payload, policy, emit, checkins=None):
 
     emit(f"read {len(out)} VM(s) from Workstation at {host}")
     # One page: a desktop hypervisor does not have 10 000 VMs, and vmrest has no cursor.
-    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
+    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out),
+            "enumerated": True}
 
 
 def _power_workstation(conn, payload, policy, emit, verb, checkins=None):
