@@ -247,6 +247,13 @@ class PortainerNodeResponse(BaseModel):
     server_url: str = ""   # the pinned portainer_url (if a node is deployed)
     token_configured: bool = False  # a portainer_pat is stored, so the Containers tab can talk to it
     login_hint: str = ""   # how to log in; the auto-generated password is echoed, an operator-set one never is
+    # Durable state. The teardown confirmation has to differ on this: with a data disk
+    # the users/environments/settings SURVIVE, without one they are gone for good.
+    data_disk_enabled: bool = False  # /data is on a persistent disk that outlives the VM
+    data_disk_name: str = ""         # that disk's name (blank when durable state is off)
+    # Set when the stored URL no longer matches the running node: Edge keys are derived
+    # from the node URL, so every agent joined before the change has stopped checking in.
+    stale_edge_keys: str = ""
 
 
 class PortainerDeployRequest(BaseModel):

@@ -1095,9 +1095,14 @@ async def get_portainer_node(
         )
         for i in raw
     ]
+    data_disk_enabled = config_service.get_bool("portainer_data_disk_enabled", False)
+    node_name = config_service.get("gcp_portainer_name") or settings.gcp_portainer_name
     return PortainerNodeResponse(
         nodes=nodes, project_id=project_id, count=len(nodes), configured=configured,
-        server_url=server_url, token_configured=token_configured, login_hint=login_hint)
+        server_url=server_url, token_configured=token_configured, login_hint=login_hint,
+        data_disk_enabled=data_disk_enabled,
+        data_disk_name=f"{node_name}-data" if data_disk_enabled else "",
+        stale_edge_keys=portainer_edge_service.stale_keys_warning(raw))
 
 
 @router.get("/portainer/node/firewall")
