@@ -60,6 +60,12 @@ exists world-readable even for an instant. It is **not** encrypted at rest: no p
 no TPM, no keyring. That is a deliberate limit rather than an oversight — a passphrase an
 unattended container must read at boot has to be stored next to the key it protects.
 
+That reasoning still holds, and it is worth reading alongside
+[Sealing a credential this host keeps](#sealing-a-credential-this-host-keeps), which *does*
+encrypt a hypervisor credential on this host. The two are not in tension: sealing is not
+offered as protection from `root` here either. It exists because `connections.yaml` is a file
+you copy into repos, tickets and backups, and this one never leaves its volume.
+
 Who can read it:
 
 | Who | Can read the key |
@@ -571,6 +577,7 @@ The credential is the part that can move, and there is no single right answer:
 | Where the credential lives | An attacker who reads files on the agent host gets | An attacker who compromises the dashboard gets |
 |---|---|---|
 | `password` / `password_file` | **the hypervisor password.** Offline, permanent, and a file read is not an event anybody sees | a verb and a name |
+| `password_sealed` | **the hypervisor password**, if they can read the state volume as well as the config file — and **nothing** from a copy of the config file alone. See [Sealing a credential this host keeps](#sealing-a-credential-this-host-keeps) | a verb and a name |
 | `ps_managed_account` | a Password Safe OAuth client — usually entitled to more than the one account | a verb and a name |
 | `dashboard_secret` + a stored password | the agent's identity key: the ability to *request* a credential while a job runs, audited and revocable | the password |
 | `dashboard_secret` + `ps_account://` | the same narrow request ability | a Password Safe account id, subject to its policy, approval workflow and rotation |
@@ -618,6 +625,72 @@ through to a password you had just deleted, send an empty one, and get back the 
 own "wrong username or password" — the wrong diagnosis, and on the 30-minute sync schedule
 it retries until the service account locks out. Pull the image and restart; re-enrolment is
 not needed.
+
+### Sealing a credential this host keeps
+
+Some sites will not move a credential to the dashboard — that being the point of an on-prem
+agent for them — but do not want it sitting in a YAML file as text. `password_sealed:` in
+`connections.yaml`, and `client_secret_sealed:` in `passwordsafe.yaml`, hold a value
+encrypted against a key in the agent's state volume.
+
+**Be precise about what this defends against**, because [The agent's private
+key](#the-agents-private-key) argues the opposite for `identity.json` and both statements are
+true. Sealing is **not** protection from `root` on the agent host. The key is on the same
+machine, which is unavoidable for a process that has to restart unattended — a passphrase an
+unattended container must read at boot has to be stored next to the key it protects, and that
+has not changed.
+
+What it protects is the **file travelling.** `connections.yaml` is a file you author, edit,
+version and copy: into a git repo, an Ansible role, a runbook, a support ticket, a
+screenshot, a config backup. `identity.json` does none of that — it is written by the agent
+into a 0700 volume and never leaves it. The key lives in that volume, so it goes into none of
+those copies, and **a copy of the config is worthless anywhere else.** That is the whole
+claim. If your threat model is a compromised agent host, use
+[`dashboard_secret`](#the-credential-the-dashboard-holds) or `ps_managed_account` instead;
+those are the rows in the table above that change what host compromise yields.
+
+Seal a value with the agent image itself. Mount the **same state volume the agent runs with**:
+
+```bash
+docker run --rm -it -v dashboard_agent_state:/var/lib/dashboard-agent \
+    chrweav/dashboard-agent:latest seal --host vcenter.lab.internal
+```
+
+```powershell
+docker run --rm -it -v dashboard_agent_state:/var/lib/dashboard-agent `
+    chrweav/dashboard-agent:latest seal --api-url https://passwordsafe.corp.internal
+```
+
+It prompts for the value without echoing it, prints one line on stdout, and that line is what
+you paste in. Everything else it says goes to stderr, so `seal … > value.txt` gives you the
+token alone. A prompt rather than an argument is deliberate: on Windows it is the only way to
+keep the value out of the shell's on-disk history, the same reason the enrolment code has a
+file form.
+
+Three things about it that are load-bearing rather than incidental:
+
+- **The address is part of the seal.** `--host` must match the entry's `host:`, and changing
+  the address means sealing again. `connections.yaml` is re-read *per job*, so an edit takes
+  effect with no restart and without Docker access — and without the binding, somebody who
+  can edit that file but cannot read the state volume could move a sealed vCenter password
+  onto an entry pointing at a host of their own, with `verify_ssl: false`, and read the
+  plaintext off the next sync. This is the same reason the dashboard is never allowed to set
+  `host`. For `--api-url` only the host part is bound, so either accepted form of `api_url`
+  works.
+- **Mount the volume, or the key is thrown away.** Run `seal` without `-v` and it refuses
+  outright rather than sealing against a key that dies with the container. If a value somehow
+  was sealed elsewhere, the agent says which key sealed it and which key is present instead
+  of "decryption failed".
+- **Delete the plaintext.** A leftover `password` or `password_file` under a `password_sealed`
+  is ignored and warned about on every job, because it means a credential is still here in
+  the clear. Same rule as a leftover under `dashboard_secret`.
+
+**Requires an agent image of 2.2.0 or newer, and the dashboard cannot warn you** — unlike
+`dashboard_secret` it never sees this file, so it has nothing to gate on. You cannot reach
+that state by accident either, because `seal` ships in the same image that reads the key. The
+backstop is that the agent now **refuses** a connection declaring no credential at all rather
+than sending an empty password, which is the shape an older image on a sealed-only entry
+would otherwise produce.
 
 ### Four grants, all required
 
@@ -753,12 +826,24 @@ inert — the property `test_the_agent_imports_no_execution_machinery` protects.
 
 ### Where the credential comes from
 
-Four sources. A *remote* source beats a local one — `ps_managed_account` or
-[`dashboard_secret`](#the-credential-the-dashboard-holds), then `password_file`, then an
+Five sources. A *remote* source beats a local one — `ps_managed_account` or
+[`dashboard_secret`](#the-credential-the-dashboard-holds), then
+[`password_sealed`](#sealing-a-credential-this-host-keeps), then `password_file`, then an
 inline `password` — because an operator who has moved a connection off local storage should
 not silently keep authenticating with a stale literal left in the file underneath it. A
 leftover is warned about on every job rather than ignored quietly, since it means plaintext
 is still sitting on a host you meant to clear.
+
+`password_sealed` is not a fourth *authority*; it is the same local credential, not written
+down in the clear. That is why it is ordered against the two plaintext forms rather than being
+exclusive with them, and why a sealed value found in `password:` — or in the file
+`password_file` points at — is **refused** rather than sent. Sent as a literal it would come
+back as a wrong password, which reads as the wrong problem entirely.
+
+**A connection that declares none of the five is refused**, naming all five keys. It used to
+fall through to an empty password, which the endpoint answers as a wrong one, so a connection
+that simply had no credential looked like a connection with a bad one — and on the inventory
+sync schedule it retried until the service account locked out.
 
 The two remote sources are **mutually exclusive rather than ordered**. They are different
 authorities — the agent asking Password Safe, versus the dashboard asking on its behalf —
@@ -1026,6 +1111,11 @@ an objection into a demonstration.
 | Agent stuck at `enrolling`, *Last seen: never*, no policy hash — and **no `/api/agent/enroll` line in the dashboard log at all**, while the container log shows it *reaching* a URL and getting 404 | The signing audience is pinned to a hostname that does not serve `/api/agent` — on a split-vhost install, almost always the UI hostname, because that is the origin the admin's browser was on when the first code was minted. Every dashboard-side signal here is identical to the SELinux policy-mount row above, so **read the container log to tell them apart**: SELinux exits 2 on `Cannot read the policy file` before any network call, whereas this one dials out and is refused. Settings → Integrations → Remote Agents now shows the pin; fix `PUBLIC_BASE_URL`, reset the audience, and re-enrol. See [The signing audience](#the-signing-audience-is-pinned-by-that-first-code). |
 | **Register Agent** returns 409 naming two URLs | Deliberate: the pinned audience contradicts Public base URL, so the command would have carried the stale one. Nothing was created. Set Public base URL back to the pinned value, reset the audience, or confirm the prompt to issue against the pin anyway. |
 | `The state directory … is not writable` | No volume mounted, or one not writable by uid 10001. Caught before enrolling, so **the code is still good** — fix the mount and start again. |
+| `seal` says the state directory `is inside this container rather than a mounted volume` | You ran it without `-v dashboard_agent_state:/var/lib/dashboard-agent`. It refuses rather than sealing, because the key it would create dies with the container and the value could never be opened again. Nothing was written. |
+| `this … was sealed with key aabbccdd, but the key in … is 11223344` | The value was sealed against a *different* key — nearly always a `seal` run without the volume, on an image that predates the refusal above, or a state volume that has since been recreated. Seal it again with the volume mounted and paste the new line in. Not a permissions or mount-flag problem. |
+| `this sealed … did not authenticate. It is bound to '…'` | Either the entry's `host:` (or `api_url:`) changed since the value was sealed — seal it again against the new address — or the sealed value was moved here from a different entry, which is what the binding exists to stop. See [Sealing a credential this host keeps](#sealing-a-credential-this-host-keeps). |
+| `connection '…' declares no credential` | None of the five sources is set on that entry. Previously this sent an *empty* password and read back as a wrong one; it is now refused up front. If the entry declares only `password_sealed`, the agent image predates 2.2.0 — pull a newer one. |
+| `… is a sealed value, and this is not the field for one` | A `sealed.v1.…` line pasted into `password:`, `client_secret:`, or a `password_file`. Move it to `password_sealed:` / `client_secret_sealed:`. |
 | `AGENT_INSECURE_TLS` appears to be ignored | Case-sensitive: only `1`, `true` or `yes`. `True` and `on` are read as unset. |
 | `dashboard unreachable (404 …)` on an agent that was working | Not a network fault — `remote_agents_enabled` was turned off. The agent reports every non-2xx this way. |
 | `enrolment refused (400) … Invalid enrolment code` repeating | The code is single-use with a 15-minute TTL, and a crash loop re-spends it on every restart. `docker stop` first, fix the cause, then issue **one** code and start **once**. |

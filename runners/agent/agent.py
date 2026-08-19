@@ -34,11 +34,13 @@ from __future__ import annotations
 
 import base64
 import errno
+import getpass
 import hashlib
 import ipaddress
 import json
 import logging
 import os
+import posixpath
 import random
 import re
 import http.client as http_client
@@ -77,7 +79,17 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # deleted — sending an empty one — so the dashboard refuses to QUEUE for an agent below
 # this (agent_service.supports_dashboard_secret) rather than let it fail against the
 # hypervisor, where an empty password reads as a wrong one and retries risk a lockout.
-AGENT_VERSION = "2.1.0"
+# 2.2 added `password_sealed` / `client_secret_sealed`: a credential the customer keeps on
+# THIS host, encrypted against a key in the state volume rather than sitting in their YAML
+# as text. Deliberately NOT gated from the dashboard, and it is worth knowing why the
+# asymmetry is correct rather than an omission — `dashboard_secret` could be gated because
+# the dashboard holds that credential and therefore knows the connection uses it, whereas a
+# sealed value exists only in the customer's own file and the dashboard cannot see it at
+# all. What replaces the gate: `seal` ships in the same image that reads the key, so a
+# sealed value cannot be produced by a build that would ignore it; and `_secret_for` now
+# REFUSES a connection with no credential instead of sending an empty password, which is
+# the failure an ungated old agent would otherwise produce.
+AGENT_VERSION = "2.2.0"
 
 log = logging.getLogger("agent")
 
@@ -360,6 +372,389 @@ def open_sealed(private_b64: str, envelope: dict, *, agent_id: str, audience: st
     if not isinstance(payload, dict) or "secret" not in payload:
         raise SealError("the sealed payload carries no 'secret' field")
     return str(payload["secret"])
+
+
+# ── Locally sealed credentials (a secret this host keeps, but not in cleartext) ─
+#
+# For the customer who will not move a credential to the dashboard — that being the
+# point of an on-prem agent for them — but does not want it sitting in a YAML file as
+# text. `seal` encrypts one value against a key in this container's state volume and
+# prints it; the operator pastes the result into `password_sealed:` and deletes the
+# plaintext. `_secret_for` opens it per job.
+#
+# BE PRECISE ABOUT WHAT THIS DEFENDS AGAINST, because docs/remote-agents.md argues the
+# opposite for identity.json and both statements have to stay true. This is NOT
+# protection from root on this host: the key is on the same machine, which is unavoidable
+# for a process that must restart unattended. What it protects is the file TRAVELLING.
+# connections.yaml is authored, edited, versioned and copied — into a git repo, an
+# Ansible role, a runbook, a support ticket, a screenshot, a backup — and identity.json
+# is not. The key lives in the state volume, which none of those copies carry, so a copy
+# of the config is worthless anywhere else.
+#
+# The AAD binds the connection's HOST, for the same reason `seal_aad` binds `ref`.
+# HypervisorConnections.load() runs per job, so an edit takes effect with no restart and
+# without Docker access; unbound, somebody who can write connections.yaml but not read
+# the state volume could move a sealed vCenter password onto an entry whose host they
+# control, with verify_ssl: false, and read the plaintext off the next sync. The cost is
+# that changing `host` means re-sealing, and the refusal below says so.
+
+LOCAL_SEAL_VERSION = 1
+LOCAL_SEAL_PREFIX = f"sealed.v{LOCAL_SEAL_VERSION}."
+LOCAL_PURPOSE_PASSWORD = "connection.password"
+LOCAL_PURPOSE_PS_CLIENT = "passwordsafe.client_secret"
+_LOCAL_KEY_FILE = os.path.join(STATE_DIR, "sealing.key")
+_LOCAL_KEY_BYTES = 32
+_LOCAL_NONCE_BYTES = 12
+_MOUNTINFO = "/proc/self/mountinfo"
+# Two roles, two labels, one file. The bytes in `sealing.key` are never used directly as
+# either the AES key or the fingerprint — both are HKDF'd out of them under distinct `info`
+# strings, the same domain separation `SEAL_INFO` gives the transport seal. It costs two
+# hash calls and buys the thing that matters once a customer has sealed a value: the key
+# file's contents stop being load-bearing on their own, so the id derivation can change, and
+# a future operator-supplied passphrase can go in the same file without either role
+# borrowing the other's material.
+_LOCAL_CIPHER_INFO = b"vm-dashboard/agent-local-seal/v1/cipher"
+_LOCAL_KEYID_INFO = b"vm-dashboard/agent-local-seal/v1/keyid"
+# Lab escape hatch, in the shape of AGENT_INSECURE_TLS: seal against a key that will not
+# survive the container. Case-sensitive for the same reason.
+SEAL_EPHEMERAL_OK = os.environ.get(
+    "AGENT_SEAL_EPHEMERAL_KEY_OK", "").strip() in ("1", "true", "yes")
+
+# Read once per process. `_secret_for` has thirteen call sites and `_vmrest` reaches it on
+# EVERY HTTP call — the same fact that made JobSecrets.dashboard_secret memoise — so an
+# uncached read is one file open per API request. A module-level global is right here and
+# not the usual per-worker hazard: the agent is a single process, not `gunicorn -w 2`.
+_LOCAL_KEY_CACHE: Optional[bytes] = None
+
+
+class LocalSealError(Exception):
+    """A locally sealed value that could not be sealed or opened, and why.
+
+    Separate from ``SealError`` — the dashboard-to-agent transport seal — because the two
+    have nothing in common operationally: that one means "pull a newer image", this one
+    means "you sealed against a different key, or moved the value, or changed the host".
+    """
+
+
+def _local_derive(material: bytes, info: bytes, length: int = 32) -> bytes:
+    """HKDF-SHA256 one role out of the key file's bytes. See the two ``_INFO`` labels."""
+    return HKDF(algorithm=hashes.SHA256(), length=length, salt=None,
+                info=info).derive(material)
+
+
+def _key_id(material: bytes) -> str:
+    """A short fingerprint of the sealing key, derived under its own label.
+
+    Carried in the token in the clear, and it earns its place: the mistake this feature
+    will actually produce is running ``seal`` without mounting the same state volume, so
+    the value is sealed against a key that dies with that container. Without an id the
+    symptom is "decryption failed"; with one the agent can say which key sealed it and
+    which key is here, which names the cause.
+
+    Four bytes. It only has to distinguish two keys an operator might confuse, not resist
+    a search — and it must not be a handle worth attacking, which is what the separate
+    ``info`` guarantees: it shares no derivation with the key that does the encrypting.
+    """
+    return _local_derive(material, _LOCAL_KEYID_INFO, 4).hex()
+
+
+def seal_host_key(host: str) -> str:
+    """One address, one binding, however it was typed.
+
+    Case and surrounding whitespace are obvious. The trailing dot is not: ``vc.lab.local.``
+    is the same name as ``vc.lab.local`` to DNS, and a refusal over it would be
+    indistinguishable from the relabelling this binding exists to catch.
+    """
+    return str(host or "").strip().rstrip(".").lower()
+
+
+def local_seal_aad(*, host: str, purpose: str) -> bytes:
+    """Rebuilt from the config file on both sides, never carried in the token.
+
+    ``purpose`` keeps a sealed hypervisor password from being pasted in as a Password Safe
+    client secret; ``host`` is the anti-redirect binding. Uses the same canonical
+    ``serialize`` as everything else here so the byte encoding cannot drift. ``v`` is
+    ``LOCAL_SEAL_VERSION``, the same number the token prefix is built from —
+    ``tests/test_agent_local_seal.py`` pins them equal, because two independent "version 1"s
+    in one construction is how a format change ships half-applied.
+    """
+    return serialize({"host": seal_host_key(host), "purpose": str(purpose),
+                      "v": LOCAL_SEAL_VERSION})
+
+
+def ps_seal_host(api_url: str) -> str:
+    """The host component of a Password Safe ``api_url``, whichever form it was written in.
+
+    passwordsafe.example.yaml accepts both the bare host and the full
+    ``/BeyondTrust/api/public/v3`` path, and ``PasswordSafe.__init__`` normalises by
+    appending. Binding the raw string would mean a value sealed against one form failing
+    against the other for no reason the operator can see.
+
+    ``hostname`` rather than ``netloc``, and the scheme is supplied when it is missing, for
+    two failures that both look like tampering. ``netloc`` keeps the port, so
+    ``https://ps:443`` and ``https://ps`` — the same server, written two legitimate ways —
+    would not open each other's values. And with no scheme, ``urlparse`` reads
+    ``ps.example.com:443/…`` as scheme ``ps.example.com``, leaving a *port number* as the
+    binding: every such host would bind to ``443`` and the anti-relabel property would be
+    gone for that form.
+    """
+    raw = str(api_url or "").strip()
+    if raw and "://" not in raw:
+        raw = "https://" + raw
+    try:
+        return seal_host_key(urlparse(raw).hostname or "")
+    except ValueError:
+        return ""  # an unparseable authority binds to nothing, and `local_seal` refuses it
+
+
+def _state_dir_is_ephemeral() -> bool:
+    """Whether a key written to STATE_DIR would die with this container.
+
+    Two questions, because neither alone is the one that matters. ``st_dev`` against ``/``
+    answers *"is this a different filesystem from the container's own layer"*, which catches
+    the common case — no volume mounted at all. It does not answer *"will it still be there
+    tomorrow"*: a ``--tmpfs`` mount is a different device and is gone on exit, and losing the
+    key is unrecoverable, since the operator has been told to delete the plaintext. So the
+    fstype is checked too.
+
+    **Stat the directory, never a file inside it.** On overlayfs a non-directory inode can
+    report the *lower* layer's ``st_dev``, which is the whole reason ``xino`` exists — so
+    stat'ing ``sealing.key`` would sometimes report the image layer and conclude the opposite
+    of the truth.
+
+    ``st_dev`` is the primary check rather than ``/proc/self/mountinfo`` because it needs no
+    parsing and cannot get the subdirectory-of-a-mount case wrong: with
+    ``-v vol:/data -e AGENT_STATE_DIR=/data/agent`` the subdirectory inherits the volume's
+    device, whereas an exact-match on mountinfo would report no mount. (A longest-prefix
+    match on mountinfo would get that right too — this is a simplicity argument, not a
+    correctness one.) The fstype lookup below *does* use mountinfo, with a longest-prefix
+    match, and fails **open**: a wrong refusal here blocks a legitimate operator, which is
+    the more expensive direction to be wrong in.
+    """
+    try:
+        if os.stat(STATE_DIR).st_dev != os.stat("/").st_dev:
+            # realpath here rather than inside _mount_fstype: symlink resolution is an OS
+            # question and belongs with the stat calls, while the parser below is pure.
+            return _mount_fstype(os.path.realpath(STATE_DIR)) in ("tmpfs", "ramfs")
+        return True
+    except OSError:
+        return False  # cannot tell — never block on a question we could not answer
+
+
+def _mount_fstype(path: str) -> str:
+    """The filesystem type backing ``path``, or ``""`` when it cannot be determined.
+
+    Longest-prefix match over ``/proc/self/mountinfo``, which is the only place a container
+    can see this. Absent or unparseable — a non-Linux host, a restricted ``/proc`` — returns
+    ``""``, and every caller treats that as "no objection".
+
+    Takes an already-resolved path and normalises it with ``posixpath``, never
+    ``os.path`` — mount points are POSIX whatever the interpreter is running on, and
+    ``os.path`` on Windows rewrites ``/var/lib`` as ``C:\\var\\lib``, so every comparison
+    here would silently fail to match. That is only reachable from a test, since ``_MOUNTINFO``
+    does not exist on Windows, and a test that can only pass on one platform is the thing
+    ``tests/test_open_encoding.py`` exists to stamp out.
+
+    The source path is a module constant rather than a literal so a test can drive the parser
+    against a real mountinfo fixture; there is nowhere else this file runs.
+    """
+    try:
+        with open(_MOUNTINFO, encoding="utf-8") as fh:
+            entries = fh.read().splitlines()
+    except OSError:
+        return ""
+    target = posixpath.normpath(path)
+    best_len, best_type = -1, ""
+    for line in entries:
+        head, sep, tail = line.partition(" - ")
+        fields = head.split()
+        if not sep or len(fields) < 5 or not tail.split():
+            continue
+        point = fields[4]
+        if (target == point or target.startswith(point.rstrip("/") + "/")) \
+                and len(point) > best_len:
+            best_len, best_type = len(point), tail.split()[0]
+    return best_type
+
+
+def _generate_local_key() -> str:
+    """Create the sealing key, once, refusing when it would not survive the container.
+
+    ``O_EXCL`` rather than the write-temp-and-rename ``Identity.save`` uses, because this
+    file is only ever created and never replaced: two ``seal`` runs racing must not have
+    the second silently overwrite the key the first already sealed a value against. The
+    loser re-reads instead. Nothing recovers a lost key — the values sealed with it are
+    gone too — so this is worth four lines.
+
+    Returns the key text, or ``""`` when another process created it first.
+    """
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    if _state_dir_is_ephemeral() and not SEAL_EPHEMERAL_OK:
+        raise LocalSealError(
+            f"{STATE_DIR} is not on a volume that outlives this container — either nothing "
+            f"is mounted there, or what is mounted is a tmpfs. A sealing key created here "
+            f"would be destroyed when the container exits, and anything sealed with it "
+            f"could never be opened again. Mount the SAME volume the agent uses and run "
+            f"this again: -v dashboard_agent_state:{STATE_DIR}. For a throwaway lab, set "
+            f"AGENT_SEAL_EPHEMERAL_KEY_OK=1.")
+    text = base64.b64encode(os.urandom(_LOCAL_KEY_BYTES)).decode("ascii")
+    try:
+        fd = os.open(_LOCAL_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return ""
+    except OSError as exc:
+        raise LocalSealError(
+            f"cannot create the sealing key at {_LOCAL_KEY_FILE} ({exc}). The volume has "
+            f"to be writable by uid 10001.")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return text
+
+
+def local_key(*, create: bool = False) -> bytes:
+    """The sealing key file's bytes — created on first use by ``seal``, then only read.
+
+    Not the AES key: that and the fingerprint are both HKDF'd out of this under separate
+    labels. See ``_LOCAL_CIPHER_INFO``.
+
+    ``create`` is False on every job path on purpose. An agent that generated a key
+    because it could not find one would turn "the wrong volume is mounted" into a silent
+    new key and a pile of values it can no longer open; a refusal naming the file is the
+    useful answer.
+
+    Cached for the life of the process, which is right for one agent on one volume but means
+    redirecting ``_LOCAL_KEY_FILE`` does nothing until the cache is cleared — worth knowing
+    if you are writing a test.
+    """
+    global _LOCAL_KEY_CACHE
+    if _LOCAL_KEY_CACHE is not None:
+        return _LOCAL_KEY_CACHE
+
+    try:
+        text = _read_secret_file(_LOCAL_KEY_FILE)
+    except FileNotFoundError:
+        if not create:
+            raise LocalSealError(
+                f"a sealed value needs the sealing key, and there is none at "
+                f"{_LOCAL_KEY_FILE}. That path is the state volume — check the agent is "
+                f"running with the same -v the value was sealed with, and that the volume "
+                f"has not been recreated.")
+        text = _generate_local_key()
+        if not text:
+            # Another process won the O_EXCL race. Re-read inside its own guard, so a
+            # surprise here still arrives as a LocalSealError rather than a raw chained
+            # traceback thrown from inside an except block.
+            try:
+                text = _read_secret_file(_LOCAL_KEY_FILE)
+            except (OSError, ValueError) as exc:
+                raise LocalSealError(
+                    f"another process created {_LOCAL_KEY_FILE} at the same moment and it "
+                    f"cannot be read back ({exc}). Run this again.")
+    except ValueError:
+        raise LocalSealError(_secret_file_undecodable("the sealing key",
+                                                     _LOCAL_KEY_FILE))
+    except OSError as exc:
+        raise LocalSealError(
+            f"cannot read the sealing key at {_LOCAL_KEY_FILE} ({exc}). The container "
+            f"runs as uid 10001 and the file is mode 0600, so a key owned by another user "
+            f"is unreadable inside it.")
+
+    try:
+        key = base64.b64decode(text.encode("ascii"), validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise LocalSealError(
+            f"{_LOCAL_KEY_FILE} is not base64. It should be one line holding "
+            f"{_LOCAL_KEY_BYTES} base64-encoded random bytes.") from exc
+    if len(key) != _LOCAL_KEY_BYTES:
+        raise LocalSealError(
+            f"{_LOCAL_KEY_FILE} decodes to {len(key)} bytes, not {_LOCAL_KEY_BYTES}. If "
+            f"nothing has been sealed with it yet, delete it and seal again; if something "
+            f"has, restore the file — a truncated key cannot open it.")
+    _LOCAL_KEY_CACHE = key
+    return key
+
+
+def local_seal(value: str, *, host: str, purpose: str) -> str:
+    """Seal one operator-supplied value. Creates the key if this is the first one."""
+    if not str(value):
+        raise LocalSealError(
+            "there is nothing to seal — the value read back empty. If you ran `docker run` "
+            "without `-it`, the container had no stdin to read from and nothing was typed.")
+    if not seal_host_key(host):
+        # A seal bound to nothing has no anti-relabel property, which is most of the reason
+        # to seal at all. Unreachable through `seal` (it requires an address) and through a
+        # job (`_conn_endpoint` refuses a hostless connection first), so this is the guard
+        # for a future caller rather than for today's.
+        raise LocalSealError("a sealed value must be bound to an address, and none was "
+                             "given.")
+    material = local_key(create=True)
+    nonce = os.urandom(_LOCAL_NONCE_BYTES)
+    ciphertext = AESGCM(_local_derive(material, _LOCAL_CIPHER_INFO)).encrypt(
+        nonce, str(value).encode("utf-8"), local_seal_aad(host=host, purpose=purpose))
+    blob = base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
+    return f"{LOCAL_SEAL_PREFIX}{_key_id(material)}.{blob}"
+
+
+def looks_locally_sealed(value) -> bool:
+    """Is this a sealed token? Used to refuse one that is in the wrong field.
+
+    A string starting with the prefix is not proof of anything, which is exactly why
+    finding one somewhere it does not belong is answered with a refusal naming the right
+    key rather than an attempt to open it.
+    """
+    return isinstance(value, str) and value.strip().startswith(LOCAL_SEAL_PREFIX)
+
+
+def local_unseal(token: str, *, host: str, purpose: str, what: str = "value") -> str:
+    """Open a sealed value, or say which of the five things went wrong."""
+    text = str(token or "").strip()
+    if not looks_locally_sealed(text):
+        # The likeliest mistake in a paste-it-in workflow is pasting the wrong thing, so this
+        # must not be reported as a truncated token. It used to say "starts with sealed.v1.
+        # but is not a sealed value" about a value that plainly does not, and sent the
+        # operator after a truncation that never happened.
+        raise LocalSealError(
+            f"this {what} is not a sealed value: it has to be the whole "
+            f"{LOCAL_SEAL_PREFIX}… line that `seal` printed, on one line. If that is the "
+            f"credential itself, either seal it — which is the point of this field — or put "
+            f"it back in the plaintext field it belongs to.")
+    sealed_id, _, blob = text[len(LOCAL_SEAL_PREFIX):].partition(".")
+    if not sealed_id or not blob:
+        raise LocalSealError(
+            f"this {what} begins as a sealed value but is not a complete one — the form is "
+            f"{LOCAL_SEAL_PREFIX}<key id>.<data>. Most likely it was truncated on the way "
+            f"into the file.")
+    try:
+        raw = base64.urlsafe_b64decode(blob.encode("ascii"))
+    except Exception as exc:  # noqa: BLE001
+        raise LocalSealError(
+            f"this sealed {what} is not valid base64 — most likely it was wrapped onto a "
+            f"second line, or characters were dropped pasting it in. It has to be one "
+            f"unbroken line.") from exc
+    if len(raw) <= _LOCAL_NONCE_BYTES:
+        raise LocalSealError(f"this sealed {what} is too short to be one.")
+
+    material = local_key()
+    here = _key_id(material)
+    if sealed_id != here:
+        raise LocalSealError(
+            f"this {what} was sealed with key {sealed_id}, but the key in "
+            f"{_LOCAL_KEY_FILE} is {here}. Almost always that means `seal` was run "
+            f"WITHOUT mounting the agent's state volume, so it sealed against a key that "
+            f"no longer exists. Seal it again with "
+            f"-v dashboard_agent_state:{STATE_DIR} and paste the new value in.")
+    try:
+        plaintext = AESGCM(_local_derive(material, _LOCAL_CIPHER_INFO)).decrypt(
+            raw[:_LOCAL_NONCE_BYTES], raw[_LOCAL_NONCE_BYTES:],
+            local_seal_aad(host=host, purpose=purpose))
+    except Exception as exc:  # noqa: BLE001
+        raise LocalSealError(
+            f"this sealed {what} did not authenticate. It is bound to "
+            f"{seal_host_key(host)!r}, so either that address has changed "
+            f"since it was sealed — in which case seal it again against the new one — or "
+            f"the value was moved here from another entry, which is what the binding "
+            f"exists to stop.") from exc
+    return plaintext.decode("utf-8")
 
 
 # ── Policy ────────────────────────────────────────────────────────────────────
@@ -1335,8 +1730,34 @@ class PasswordSafe:
             raise PolicyRefusal(f"{path} is not valid YAML: {exc}")
         if not isinstance(doc, dict) or not doc.get("api_url"):
             raise PolicyRefusal(f"{path} needs api_url, client_id and client_secret")
-        secret = doc.get("client_secret") or ""
-        if doc.get("client_secret_file"):
+
+        # Same three-way precedence as a connection's credential, in the same order and for
+        # the same reasons: sealed beats a leftover literal, and a sealed value found in a
+        # plaintext field is refused rather than sent. This file is the remaining plaintext
+        # credential on a host that has otherwise moved to `ps_managed_account` — the gap
+        # docs/remote-agents.md names — so it gets the same treatment, or the strongest
+        # local configuration still ships a secret in the clear.
+        #
+        # Sealed is checked FIRST rather than last, so an unreadable leftover
+        # `client_secret_file` underneath it cannot raise before the value actually in use
+        # is even looked at.
+        api_url = str(doc["api_url"])
+        secret = ""
+        if doc.get("client_secret_sealed"):
+            for stale in ("client_secret", "client_secret_file"):
+                if doc.get(stale):
+                    log.warning(
+                        "%s takes its client secret from 'client_secret_sealed'; the %r "
+                        "left in it is IGNORED and is still plaintext on this host — "
+                        "delete it", path, stale)
+            try:
+                secret = local_unseal(str(doc["client_secret_sealed"]),
+                                      host=ps_seal_host(api_url),
+                                      purpose=LOCAL_PURPOSE_PS_CLIENT,
+                                      what=f"'client_secret_sealed' in {path}")
+            except LocalSealError as exc:
+                raise PolicyRefusal(str(exc))
+        elif doc.get("client_secret_file"):
             try:
                 secret = _read_secret_file(doc["client_secret_file"])
             except ValueError:
@@ -1344,7 +1765,16 @@ class PasswordSafe:
                     "client_secret_file", str(doc["client_secret_file"])))
             except OSError as exc:
                 raise PolicyRefusal(f"cannot read client_secret_file: {exc}")
-        return cls(str(doc["api_url"]), str(doc.get("client_id") or ""), str(secret),
+            _refuse_sealed_in_the_wrong_place(
+                secret,
+                what=f"the contents of client_secret_file {doc['client_secret_file']}",
+                belongs_in="client_secret_sealed")
+        else:
+            secret = str(doc.get("client_secret") or "")
+            _refuse_sealed_in_the_wrong_place(
+                secret, what=f"'client_secret' in {path}",
+                belongs_in="client_secret_sealed")
+        return cls(api_url, str(doc.get("client_id") or ""), secret,
                    verify=bool(doc.get("verify_ssl", True)))
 
     def _call(self, method: str, path: str, **kw):
@@ -1510,12 +1940,13 @@ class JobSecrets(list):
 
 
 def _secret_for(conn: dict, checkins: list = None) -> str:
-    """The connection's password, by whichever of the four means it declares.
+    """The connection's password, by whichever of the five means it declares.
 
     Precedence is deliberate: a *remote* source first, because an operator who has moved a
     connection off local storage should not silently keep authenticating with a stale
-    literal left in the file underneath it. Then `password_file` (so a Docker/Podman secret
-    can be mounted), then an inline `password`.
+    literal left in the file underneath it. Then `password_sealed`, for the same reason one
+    step down — someone who sealed a value has finished with the plaintext. Then
+    `password_file` (so a Docker/Podman secret can be mounted), then an inline `password`.
 
     ``ps_managed_account`` and ``dashboard_secret`` are the two remote sources and they are
     **mutually exclusive** rather than ordered. They are different authorities — one has
@@ -1523,11 +1954,16 @@ def _secret_for(conn: dict, checkins: list = None) -> str:
     no stale-leftover story that makes silently preferring one over the other kind. Picking
     quietly would leave nobody able to say which credential a job actually used.
 
+    ``password_sealed`` is not a fourth authority; it is the same local credential, not
+    written down in the clear. So it is *ordered* against the plaintext forms rather than
+    exclusive with them, and a leftover is warned about exactly as it is above.
+
     When `checkins` is provided, a just-in-time checkout appends its request id so the
     caller can check the credential back in when the job finishes. Without it the
     request simply expires on its own duration — which is safe, just untidy.
     """
     account = conn.get("ps_managed_account")
+    sealed = conn.get("password_sealed")
     if conn.get("dashboard_secret"):
         if account:
             raise PolicyRefusal(
@@ -1535,12 +1971,13 @@ def _secret_for(conn: dict, checkins: list = None) -> str:
                 f"'dashboard_secret: true'. Those are two different authorities and this "
                 f"agent will not choose between them — remove one from connections.yaml "
                 f"and restart the agent.")
-        for stale in ("password", "password_file"):
+        for stale in ("password", "password_sealed", "password_file"):
             if conn.get(stale):
                 # Warned, not refused, so this matches the rule already in force for
                 # `ps_managed_account` over a leftover literal — and warned rather than
-                # silent because the operator has left a plaintext credential on this host
-                # believing they had moved it to the dashboard.
+                # silent because the operator has left a credential on this host believing
+                # they had moved it to the dashboard. A sealed leftover is named too: it is
+                # better than plaintext, but it is still a credential here.
                 log.warning(
                     "connection %r takes its credential from the dashboard; the %r left "
                     "in connections.yaml is IGNORED and should be deleted",
@@ -1550,7 +1987,7 @@ def _secret_for(conn: dict, checkins: list = None) -> str:
                 f"connection {conn.get('name')!r} declares 'dashboard_secret: true', but "
                 f"this code path has no job context to fetch it with. This is an agent "
                 f"bug — please report it.")
-        return checkins.dashboard_secret(conn)
+        return _held(checkins, checkins.dashboard_secret(conn))
     if account:
         ps = PasswordSafe.from_file()
         ps.sign_in()
@@ -1565,12 +2002,28 @@ def _secret_for(conn: dict, checkins: list = None) -> str:
             raise PolicyRefusal(
                 f"connection {conn.get('name')!r}: Password Safe released an empty "
                 f"credential for account {account}")
-        return credential
+        return _held(checkins, credential)
+
+    if sealed:
+        for stale in ("password", "password_file"):
+            if conn.get(stale):
+                log.warning(
+                    "connection %r takes its credential from 'password_sealed'; the %r "
+                    "left in connections.yaml is IGNORED and is still plaintext on this "
+                    "host — delete it", conn.get("name"), stale)
+        try:
+            # The connection name goes on the outside only. `what` naming it too produced
+            # "connection 'dc1': this 'password_sealed' for connection 'dc1' …".
+            return _held(checkins, local_unseal(
+                str(sealed), host=str(conn.get("host") or ""),
+                purpose=LOCAL_PURPOSE_PASSWORD, what="'password_sealed'"))
+        except LocalSealError as exc:
+            raise PolicyRefusal(f"connection {conn.get('name')!r}: {exc}")
 
     path = conn.get("password_file")
     if path:
         try:
-            return _read_secret_file(path)
+            secret = _read_secret_file(path)
         except ValueError:
             raise PolicyRefusal(
                 f"connection {conn.get('name')!r}: "
@@ -1578,7 +2031,69 @@ def _secret_for(conn: dict, checkins: list = None) -> str:
         except OSError as exc:
             raise PolicyRefusal(
                 f"connection {conn.get('name')!r}: cannot read password_file {path}: {exc}")
-    return str(conn.get("password") or "")
+        _refuse_sealed_in_the_wrong_place(
+            secret, what=f"the contents of password_file {path}",
+            belongs_in="password_sealed", name=str(conn.get("name") or ""))
+        return _held(checkins, secret)
+
+    literal = str(conn.get("password") or "")
+    _refuse_sealed_in_the_wrong_place(
+        literal, what="'password'", belongs_in="password_sealed",
+        name=str(conn.get("name") or ""))
+    if not literal:
+        # Never an empty string. This used to fall through to `""`, which the hypervisor
+        # answers as "wrong username or password" — so a connection that simply declares no
+        # credential looks like a bad one, and on the inventory sync schedule it retries
+        # until the service account locks out. It is also the shape an agent too old to
+        # know `password_sealed` would produce against a file that only declares it, which
+        # is what stands in for a dashboard-side version gate that cannot exist here: the
+        # dashboard never sees the sealed value, so it has nothing to gate on.
+        raise PolicyRefusal(
+            f"connection {conn.get('name')!r} declares no credential — none of "
+            f"'dashboard_secret', 'ps_managed_account', 'password_sealed', "
+            f"'password_file' or 'password' is set on it in connections.yaml. Refusing "
+            f"rather than sending an empty password, which the endpoint would report as a "
+            f"wrong one and which repeats on every sync until the account locks out. If "
+            f"this agent image predates 'password_sealed' (2.2.0), that is the likely "
+            f"cause: pull a newer chrweav/dashboard-agent and restart.")
+    return _held(checkins, literal)
+
+
+def _held(checkins, secret: str) -> str:
+    """Register a credential for outbound redaction, then hand it back.
+
+    Every source goes through this, not just the dashboard fetch. ``hold_secret`` used to
+    have exactly one caller — ``Dashboard.job_secret`` — so a credential from a local file
+    or a Password Safe checkout was *not* scrubbed, and a hypervisor that echoes it into an
+    error string could carry it into a job log the dashboard stores and renders. Sealing a
+    value and then leaking it that way would defeat the point.
+
+    Guarded because ``checkins`` is legitimately ``None`` or a bare ``list`` at several call
+    sites — and in tests — and because ``hold_secret`` lives on the dashboard client, which
+    is the thing that owns the outbound direction.
+    """
+    if isinstance(checkins, JobSecrets) and checkins.dashboard:
+        checkins.dashboard.hold_secret(secret)
+    return secret
+
+
+def _refuse_sealed_in_the_wrong_place(value, *, what: str, belongs_in: str,
+                                      name: str = "") -> None:
+    """Refuse a sealed value found in a plaintext field, rather than using it as a literal.
+
+    The one mistake the paste-it-in workflow invites. Sending the ciphertext as a password
+    would be answered by the endpoint as a wrong password — the misleading failure this
+    whole file works to avoid — and quietly opening it instead would create a second
+    undocumented way to configure the same thing, with none of the ordering or leftover
+    warnings that the declared key gets.
+    """
+    if not looks_locally_sealed(value):
+        return
+    where = f"connection {name!r}: " if name else ""
+    raise PolicyRefusal(
+        f"{where}{what} is a sealed value, and this is not the field for one. Move it to "
+        f"{belongs_in!r} — sent as a literal it would be rejected by the endpoint as a "
+        f"wrong password, which reads as the wrong problem entirely.")
 
 
 def _checkin_all(request_ids: list) -> None:
@@ -2692,10 +3207,106 @@ def _check_state_dir_writable() -> None:
             f"uid 10001, then start again. The code you have is still good.")
 
 
+_SEAL_USAGE = """usage:
+  seal --host <hypervisor address>        seal a connection's `password_sealed`
+  seal --api-url <password safe url>      seal passwordsafe.yaml's `client_secret_sealed`
+
+Mount the SAME state volume the agent runs with, or the key is thrown away with the
+container and the value can never be opened:
+
+  docker run --rm -it -v dashboard_agent_state:%(state)s \\
+      chrweav/dashboard-agent:latest seal --host vcenter.lab.internal
+
+The address matters: the sealed value is bound to it, so it cannot be moved onto an entry
+pointing somewhere else. It must match the entry's `host:` (or `api_url:`), and changing that
+address later means sealing the credential again. Seal once per connection ENTRY, not once
+per credential — two entries sharing one password need two sealed values.
+
+`-it` is not optional. Without `-i` the container has no stdin, and this reads an empty
+value. A piped value has leading and trailing whitespace stripped; a typed one does not."""
+
+
+def _seal_command(argv: list) -> int:
+    """``seal`` — encrypt one credential against this host's key and print the result.
+
+    A subcommand that PRINTS rather than a startup pass that rewrites connections.yaml,
+    which is what "the agent encrypts it" would most obviously mean. Three reasons, and the
+    first is the one that decides it: that file is mounted `:ro,Z` in every documented
+    install command, and an agent able to write it is an agent able to rewrite its own
+    `host:` and re-aim the connection — the single property the file exists to hold, and the
+    stated difference between this design and a proxy. Also, a PyYAML round-trip would
+    discard every comment in a file that is mostly comments; and `os.replace` onto a
+    bind-mounted *file* does not work, because the mount is on the inode, so the rewrite
+    could not even be atomic.
+
+    Reads the value from a TTY without echo when there is one, and from stdin when there is
+    not. Prompting is the point rather than a nicety: on Windows an editor or a prompt is
+    the only way to keep the value out of the shell's on-disk history, which is already why
+    the enrolment code has a file form.
+    """
+    host = ""
+    purpose = ""
+    flags = 0
+    i = 0
+    while i < len(argv):
+        value = argv[i + 1] if i + 1 < len(argv) else ""
+        if argv[i] == "--host" and value:
+            host, purpose, flags = value, LOCAL_PURPOSE_PASSWORD, flags + 1
+        elif argv[i] == "--api-url" and value:
+            host, purpose, flags = (ps_seal_host(value), LOCAL_PURPOSE_PS_CLIENT,
+                                    flags + 1)
+        else:
+            log.error("%s", _SEAL_USAGE % {"state": STATE_DIR})
+            return 2
+        i += 2
+    if flags != 1 or not host:
+        log.error("%s", _SEAL_USAGE % {"state": STATE_DIR})
+        return 2
+
+    what = ("hypervisor password" if purpose == LOCAL_PURPOSE_PASSWORD
+            else "Password Safe client secret")
+    try:
+        if sys.stdin.isatty():
+            value = getpass.getpass(f"{what} for {host}: ")
+        else:
+            value = sys.stdin.read().strip()
+    except (EOFError, KeyboardInterrupt):
+        log.error("nothing was sealed.")
+        return 2
+
+    try:
+        token = local_seal(value, host=host, purpose=purpose)
+    except LocalSealError as exc:
+        log.error("%s", exc)
+        return 2
+
+    key = local_key()
+    log.info("sealed for %s with key %s. Paste the line below into %s and delete the "
+             "plaintext:", host, _key_id(key),
+             "connections.yaml as `password_sealed:`"
+             if purpose == LOCAL_PURPOSE_PASSWORD
+             else "passwordsafe.yaml as `client_secret_sealed:`")
+    # stdout, alone, so `seal ... > value.txt` yields the token and nothing else. Every
+    # other line this command emits goes to stderr for exactly that reason.
+    print(token)
+    return 0
+
+
 def main() -> int:
     global POLICY
+    # Before _preflight, which hard-requires DASHBOARD_URL that `seal` has no use for — and
+    # on stderr, so the token is the only thing on stdout.
+    if sys.argv[1:2] == ["seal"]:
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+        return _seal_command(sys.argv[2:])
+
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)-7s %(message)s")
+    if sys.argv[1:]:
+        log.error("unknown argument %r. This container takes no arguments except the "
+                  "`seal` subcommand; everything else is configured by environment "
+                  "variable. See runners/agent/README.md.", sys.argv[1])
+        return 2
     try:
         _preflight()
         POLICY = Policy.load(POLICY_FILE)

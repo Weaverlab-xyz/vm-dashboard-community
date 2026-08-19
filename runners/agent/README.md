@@ -49,7 +49,7 @@ reads like credential spraying in a customer's SIEM.
 | `DASHBOARD_URL` | — | Required. Must be `https://` unless `AGENT_INSECURE_TLS=1`. |
 | `AGENT_ENROLLMENT_CODE` | — | Required on first start only; the identity persists. Stays readable via `docker inspect` for the container's life — prefer the file below. |
 | `AGENT_ENROLLMENT_CODE_FILE` | — | Path to a mounted file holding the code. Wins over the variable above. Must be readable by uid 10001, and mounted `:ro,Z`. Read as text, so it must be ASCII or UTF-8 with no BOM — see [Running on a Windows host](#running-on-a-windows-host). |
-| `AGENT_STATE_DIR` | `/var/lib/dashboard-agent` | Holds the 0600 private key. Mount a volume. |
+| `AGENT_STATE_DIR` | `/var/lib/dashboard-agent` | Holds the 0600 private key, and `sealing.key` if you use [`seal`](#sealing-a-credential-kept-on-this-host). Mount a volume. |
 | `AGENT_POLICY_FILE` | `/etc/dashboard-agent/policy.yaml` | Mount read-only, as `:ro,Z`. |
 | `AGENT_MODE` | `normal` | `audit` logs what it would do and executes nothing. |
 | `AGENT_POLL_INTERVAL` | `5` | Seconds, jittered. |
@@ -59,6 +59,35 @@ reads like credential spraying in a customer's SIEM.
 
 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are honoured. Set `NO_PROXY` for your private
 ranges, or probes get routed to the corporate proxy and fail confusingly.
+
+## Sealing a credential kept on this host
+
+`seal` is the one subcommand this image takes; everything else is an environment variable.
+It encrypts a single value against a key in the state volume and prints the result, which
+you paste into `password_sealed:` in `connections.yaml` or `client_secret_sealed:` in
+`passwordsafe.yaml`.
+
+```bash
+docker run --rm -it -v dashboard_agent_state:/var/lib/dashboard-agent \
+    chrweav/dashboard-agent:latest seal --host vcenter.lab.internal
+
+docker run --rm -it -v dashboard_agent_state:/var/lib/dashboard-agent \
+    chrweav/dashboard-agent:latest seal --api-url https://passwordsafe.corp.internal
+```
+
+The value is read from a prompt without echo, or from stdin when there is no TTY. Only the
+token goes to stdout, so `seal … > value.txt` works.
+
+**Mount the same volume the agent runs with.** Without it the key would be created inside
+the container and destroyed on exit, taking every value sealed against it — so `seal`
+refuses instead. The sealed value is also bound to the address you pass, so `--host` must
+match the entry's `host:` and changing that address means sealing again.
+
+This is not protection from `root` on this host: the key is on the same machine, which is
+unavoidable for a container that restarts unattended. It protects the *config file*, which
+gets copied into repos, tickets and backups in a way the state volume does not. See
+[docs/remote-agents.md](../../docs/remote-agents.md#sealing-a-credential-this-host-keeps)
+for the full trade against `ps_managed_account` and `dashboard_secret`.
 
 ## Bind mounts need `:ro,Z` on SELinux hosts
 

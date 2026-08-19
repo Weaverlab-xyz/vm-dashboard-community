@@ -52,7 +52,11 @@ services:
       # AGENT_CA_BUNDLE: /etc/dashboard-agent/corp-ca.crt
 
     volumes:
-      # Holds the Ed25519 private key. Losing it just means re-enrolling.
+      # Holds the Ed25519 private key — losing that just means re-enrolling. It ALSO holds
+      # `sealing.key` if you use `password_sealed:` / `client_secret_sealed:`, and losing
+      # that is not recoverable: every sealed value becomes permanently unopenable, and you
+      # will have deleted the plaintext, which is the point. Back this volume up, or be
+      # ready to re-seal from the source of truth. Do not use a tmpfs here.
       - agent_state:/var/lib/dashboard-agent
       # `,Z` is the SELinux relabel, and on Fedora/RHEL/CentOS/Rocky/Alma it is what makes
       # the difference between an agent that runs and one that crash-loops on `Permission
