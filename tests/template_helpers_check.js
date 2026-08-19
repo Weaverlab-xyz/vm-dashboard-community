@@ -74,20 +74,41 @@ for (const [file, fn, arr, field] of [
   ['databases/index.html','regions','databases','region'],
   ['azure/index.html','vmLocations','vms','location'],
   ['inventory/list.html','regions','items','region'],
+  ['inventory/list.html','states','items','state'],
+  ['inventory/list.html','workgroups','items','workgroup'],
 ]) {
   const rows = [{[field]:'r2'},{[field]:'r1'},{[field]:'r1'},{},{[field]:''}];
   ok(file+' '+fn+'() distinct+sorted, blanks dropped',
      JSON.stringify(build(file, fn, {[arr]:rows})[fn]()) === JSON.stringify(['r1','r2']));
 }
 
-const inv = build('inventory/list.html', 'filtered', {
-  items: [
-    {cloud:'aws', kind:'vm', region:'us-east-2'},
-    {cloud:'aws', kind:'vm', region:'us-west-2'},
-    {cloud:'gcp', kind:'vm', region:'us-east-2'},
-  ],
-  filterProvider:'aws', filterKind:'vm', filterRegion:'us-east-2'});
-ok('inventory filtered() ANDs provider+kind+region', inv.filtered().length === 1);
+const INV_ROWS = [
+  {cloud:'aws', kind:'vm', region:'us-east-2', state:'running', workgroup:'hydra'},
+  {cloud:'aws', kind:'vm', region:'us-west-2', state:'stopped', workgroup:'hydra'},
+  {cloud:'gcp', kind:'vm', region:'us-east-2', state:'running', workgroup:'shield'},
+  // A workstation row: no region, no workgroup. Every filter must leave it alone
+  // unless that filter is the one set.
+  {cloud:'workstation', kind:'vm', region:null, state:'stopped', workgroup:null},
+];
+const invFilter = (over) => build('inventory/list.html', 'filtered', Object.assign(
+  {items: INV_ROWS, filterProvider:'', filterKind:'', filterRegion:'',
+   filterState:'', filterWorkgroup:''}, over)).filtered();
+
+ok('inventory filtered() ANDs provider+kind+region',
+   invFilter({filterProvider:'aws', filterKind:'vm', filterRegion:'us-east-2'}).length === 1);
+ok('inventory filtered() unset returns all', invFilter({}).length === 4);
+ok('inventory filtered() filters on state alone',
+   invFilter({filterState:'stopped'}).length === 2);
+ok('inventory filtered() filters on workgroup alone',
+   invFilter({filterWorkgroup:'hydra'}).length === 2);
+ok('inventory filtered() ANDs state with workgroup',
+   invFilter({filterState:'stopped', filterWorkgroup:'hydra'}).length === 1);
+ok('inventory filtered() ANDs state and workgroup with the older three',
+   invFilter({filterProvider:'aws', filterKind:'vm', filterRegion:'us-east-2',
+              filterState:'running', filterWorkgroup:'hydra'}).length === 1);
+// A null workgroup must not match a named one — the row is dropped, not kept.
+ok('inventory filtered() excludes a null workgroup from a named pick',
+   invFilter({filterWorkgroup:'shield'}).every(r => r.workgroup === 'shield'));
 
 // --- admission allow-list picker (settings.html) ---
 // The gate reads a comma-separated string, so the chips UI must round-trip it
