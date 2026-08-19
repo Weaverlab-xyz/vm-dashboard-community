@@ -717,6 +717,17 @@ override per connection with `options.sync_interval_minutes`). `power_on`, `powe
 `power_reset`, `shutdown`, `reboot` and `restart` are on-demand, issued by the existing
 power buttons on the hypervisor pages when the resolved connection is agent-bound.
 
+A sync that comes back with **no VMs at all** is not applied to a connection that already
+has some. A zero-VM pass is how a *deleted* VM stops being listed — the sync removes every
+row it did not just write — and it is also exactly what an agent hands back when it could
+not read the host: on Hyper-V, an unloaded PowerShell module and a service account that
+cannot enumerate VMs both produce the same empty list. The agent therefore states which
+one it is, and an agent too old to say so never empties a cache. The rows stay, and the
+connection carries the reason on the Connections page (hover the red **Error**) instead
+of the page going quietly blank. The cost is the mirror image: a host you have genuinely
+emptied keeps showing its last VMs until you re-pull the agent — and, for Hyper-V or
+ESXi, the `chrweav/hypervisor-runner` image with it.
+
 One `inventory_sync` is also queued automatically whenever a power job finishes, against
 the connection it acted on, so the page reflects a Start or a Stop without anyone pressing
 Sync Now. It is attributed to whoever pressed the button and appears on the Jobs page as

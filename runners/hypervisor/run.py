@@ -54,6 +54,21 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default) or default
 
 
+def _text(value) -> str:
+    """Decode a WinRM stream to str, whichever type pywinrm handed back.
+
+    `Session.run_ps` REPLACES `std_err` with a cleaned *str* when it is non-empty and
+    leaves it as *bytes* when it is not, so a bare `.decode()` raised AttributeError on
+    exactly the path meant to report the error — the runner died with a traceback and
+    the agent reported "the sibling runner produced unparseable output" instead of the
+    message PowerShell had already written. `std_out` stays bytes; this covers both so
+    neither has to be remembered at the call site.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value or "")
+
+
 def _take_secret() -> str:
     value = os.environ.get("HV_PASSWORD", "")
     os.environ.pop("HV_PASSWORD", None)
@@ -62,10 +77,33 @@ def _take_secret() -> str:
 
 # ── Hyper-V over WinRM ────────────────────────────────────────────────────────
 
+# A bare `Get-VM | ConvertTo-Json` cannot say "this host has no VMs": PowerShell pipes
+# nothing into ConvertTo-Json for an empty result, so stdout comes back EMPTY — which is
+# also what a host whose Hyper-V module never loaded produces, and what an account that
+# cannot enumerate VMs produces. All three read here as a successful scan of zero VMs,
+# and on the dashboard a zero-VM pass prunes the connection's entire cached inventory
+# and stamps it as synced. A Hyper-V page went from a full list to "No VMs" with no
+# error anywhere and a good cache destroyed.
+#
+# So the script returns an ENVELOPE. An empty host is `{"enumerated":true,"count":0,
+# "vms":[]}` — a positive statement the dashboard may act on — and empty stdout is a
+# failure with a message rather than a zero-VM success.
+#
+# `Import-Module Hyper-V` is explicit because an implicit load that fails is the
+# likeliest way to reach the ambiguity in the first place, and $ErrorActionPreference
+# makes that a non-zero exit with a stderr line rather than a warning and a blank pipe.
+# `Hyper-V\Get-VM` is module-qualified for a second reason: Az.Compute and VMware
+# PowerCLI each export a `Get-VM` of their own, and on a host where one of those was
+# imported later an unqualified call resolves to it.
+#
+# -Depth 4, not 3: the envelope adds a level above the VM objects and their properties.
 _PS_LIST = (
-    "Get-VM | Select-Object -Property "
-    "Id,Name,State,ProcessorCount,@{N='MemoryMB';E={[int]($_.MemoryAssigned/1MB)}} "
-    "| ConvertTo-Json -Compress -Depth 3"
+    "$ErrorActionPreference = 'Stop'; "
+    "Import-Module Hyper-V; "
+    "$vms = @(Hyper-V\\Get-VM | Select-Object -Property "
+    "Id,Name,State,ProcessorCount,@{N='MemoryMB';E={[int]($_.MemoryAssigned/1MB)}}); "
+    "ConvertTo-Json -Compress -Depth 4 -InputObject "
+    "@{enumerated=$true; count=$vms.Count; vms=$vms}"
 )
 
 # A closed map, not a format string: the verb never reaches PowerShell as text.
@@ -122,9 +160,21 @@ def _hyperv(verb: str, host: str, port: int, user: str, secret: str,
     if verb == "inventory_sync":
         result = session.run_ps(_PS_LIST)
         if result.status_code != 0:
-            _fail(f"Get-VM failed: {result.std_err.decode('utf-8', 'replace')[:400]}")
-        raw = (result.std_out or b"").decode("utf-8", "replace").strip()
-        rows = json.loads(raw) if raw else []
+            _fail(f"Get-VM failed: {_text(result.std_err)[:400]}")
+        raw = _text(result.std_out).strip()
+        if not raw:
+            _fail("Get-VM produced no output at all. The script prints a JSON envelope "
+                  "even for a host with no VMs, so this is a session that could not "
+                  "read the host rather than a host with nothing on it — check that "
+                  "the Hyper-V PowerShell module is present and that this account may "
+                  "enumerate VMs.")
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            _fail(f"Get-VM returned output that is not JSON: {raw[:300]}")
+        if not isinstance(doc, dict) or "vms" not in doc:
+            _fail(f"Get-VM returned an unexpected shape: {raw[:300]}")
+        rows = doc.get("vms") or []
         if isinstance(rows, dict):          # a single VM is not wrapped in a list
             rows = [rows]
         vms = []
@@ -140,8 +190,12 @@ def _hyperv(verb: str, host: str, port: int, user: str, secret: str,
             })
         # Hyper-V has no cursor: Get-VM returns the whole host in one call, and a host
         # with enough VMs to need paging is not a Hyper-V host.
+        #
+        # `enumerated` is the envelope's whole point: the host answered, and this is its
+        # answer — so an empty `vms` really does mean an empty host and the dashboard may
+        # prune its cache to nothing. Every way of failing to read the host exits above.
         return {"ok": True, "vms": vms, "next_cursor": "", "complete": True,
-                "scanned": len(vms)}
+                "scanned": len(vms), "enumerated": True}
 
     script = _PS_POWER.get(verb)
     if script is None:
@@ -152,7 +206,7 @@ def _hyperv(verb: str, host: str, port: int, user: str, secret: str,
         _fail("target_id is missing or not a valid Hyper-V VM id")
     result = session.run_ps(script.format(vm=target))
     if result.status_code != 0:
-        _fail(f"{verb} failed: {result.std_err.decode('utf-8', 'replace')[:400]}")
+        _fail(f"{verb} failed: {_text(result.std_err)[:400]}")
     return {"ok": True, "verb": verb, "target_id": target}
 
 
@@ -196,8 +250,11 @@ def _esxi(verb: str, host: str, port: int, user: str, secret: str,
                     "vm_type": "vm",
                 })
             # A standalone ESXi host tops out in the low hundreds of VMs, so one page.
+            # `enumerated` is unconditional here because there is no quiet empty to
+            # guard against: the container view either enumerated the host or pyVmomi
+            # raised on the way.
             return {"ok": True, "vms": vms, "next_cursor": "", "complete": True,
-                    "scanned": len(vms)}
+                    "scanned": len(vms), "enumerated": True}
 
         match = next((vm for vm in machines if vm._moId == target), None)
         if match is None:

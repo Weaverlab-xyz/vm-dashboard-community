@@ -18,6 +18,14 @@ until the next timed pass — up to ``hypervisor_sync_interval_minutes`` later. 
 were pressing Sync Now by hand after every button. :func:`sync_after_power` closes that
 loop from the completion path instead; see it for why it fires on a failed op too.
 
+**Why an empty page is not simply believed.** Pruning by ``synced_at`` is what makes
+a DELETED VM disappear from the page, so a pass that legitimately sees nothing must be
+able to empty the cache. Applied to a page an agent returned empty because it could not
+READ the host, that same prune is a silent wipe of a good inventory, recorded as a
+successful sync. Both are the identical empty list, so the agent has to say which one it
+is: :func:`_empty_prune_refusal` prunes for a pass that wrote rows, or one the agent
+marked ``enumerated``, and for nothing else.
+
 **Why this is not a worker handler.** ``agent_hypervisor`` must stay disjoint from
 ``jobs_worker.HANDLED_TYPES`` or the local worker would race the agent for the row. So
 the periodic pass is an asyncio loop in ``main`` (the same shape as the expiry sweeper),
@@ -39,6 +47,20 @@ logger = logging.getLogger(__name__)
 
 MAX_SYNC_PAGES = agent_hypervisor_meta.MAX_SYNC_PAGES
 DEFAULT_INTERVAL_MINUTES = 30
+
+# What the operator reads on the connection when a zero-VM pass is refused. It carries
+# the whole diagnosis because nothing else will: the job itself COMPLETED — the agent
+# did exactly what it was asked — so there is no failed job row to open, and the
+# hypervisor page this is about has no error line at all, only rows or no rows.
+EMPTY_SYNC_REFUSAL = (
+    "the last sync returned no VMs at all and the agent did not confirm the host is "
+    "empty, so the {count} cached VM(s) were kept rather than deleted. An agent that "
+    "cannot read a host hands back exactly the same empty list a genuinely empty host "
+    "does — on Hyper-V an unloaded PowerShell module and an account that cannot see "
+    "the VMs both look like this. Upgrade the agent, and for Hyper-V or ESXi its "
+    "sibling runner image, so it can say which one it was; until then this connection's "
+    "cache is never emptied automatically."
+)
 
 
 def _interval_minutes(conn: HypervisorConnection) -> int:
@@ -272,9 +294,16 @@ def apply_page(db: Session, job: Job, result: dict) -> dict:
                 "hypervisor sync for %s stopped at the %d-page cap with a cursor still "
                 "outstanding — the inventory is larger than the chain allows",
                 conn.name, MAX_SYNC_PAGES)
-        _prune(db, connection_id, started)
         from . import hypervisor_connection_service as hcs
-        hcs.record_result(db, connection_id, synced=True)
+        refusal = _empty_prune_refusal(db, conn, page, started)
+        if refusal:
+            logger.warning(
+                "hypervisor sync for %s returned no VMs and did not confirm the host is "
+                "empty — kept the cached inventory rather than pruning it", conn.name)
+            hcs.record_result(db, connection_id, error=refusal)
+        else:
+            _prune(db, connection_id, started)
+            hcs.record_result(db, connection_id, synced=True)
     return page
 
 
@@ -310,6 +339,40 @@ def _upsert(db: Session, connection_id: str, vms: list, started: datetime) -> No
         row.guest_os = vm.get("guest_os")
         row.synced_at = max(started, datetime.utcnow())
     db.commit()
+
+
+def _empty_prune_refusal(db: Session, conn: HypervisorConnection, page: dict,
+                         started: datetime) -> str:
+    """Why this pass must not prune, as operator-facing prose — or "" when it may.
+
+    A pass that touched no rows at all is about to delete every VM this connection has
+    cached. That is exactly right for a host whose last VM was genuinely removed, and it
+    is silent data loss for an agent that could not read the host — and the list is the
+    same empty list either way. Only the agent knows which, so only an agent that SAYS
+    so (``page["enumerated"]``, see agent_hypervisor_meta) may empty a populated cache.
+    An agent too old to carry the field never does, which is the safe direction to be
+    wrong in: it keeps stale rows and explains itself, rather than deleting good ones
+    and reporting success.
+
+    Keyed on what the whole PASS wrote rather than on this page's list, deliberately:
+    pages 2..N of a paged sync are each allowed to be empty, and the last page of a
+    large vCenter routinely is.
+
+    The refusal leaves ``last_sync_at`` alone, so the next timed pass re-queues
+    immediately instead of waiting out the interval — the same way an offline agent or
+    an outright failed job already behaves. A connection stuck here re-reads its host
+    every poll and heals the moment the host answers.
+    """
+    if page["enumerated"]:
+        return ""
+    rows = db.query(HypervisorVMCache).filter(
+        HypervisorVMCache.connection_id == conn.id)
+    if rows.filter(HypervisorVMCache.synced_at >= started).count():
+        return ""                     # the pass wrote rows: an ordinary sync, prune
+    doomed = rows.filter(HypervisorVMCache.synced_at < started).count()
+    if not doomed:
+        return ""                     # nothing to lose — an empty cache stays empty
+    return EMPTY_SYNC_REFUSAL.format(count=doomed)
 
 
 def _prune(db: Session, connection_id: str, started: datetime) -> None:

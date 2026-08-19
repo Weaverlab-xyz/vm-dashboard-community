@@ -384,6 +384,27 @@ MAX_IPS = 16
 MAX_TAGS = 32
 
 
+# ── "the host has no VMs" vs "I could not read the host" ──────────────────────
+#
+# `vms: []` cannot tell those two apart, and the difference is a whole inventory: a
+# zero-VM pass is what makes the sync prune every cached row for the connection, which
+# is also how a DELETED VM stops being listed. A Hyper-V host whose `Get-VM` printed
+# nothing — because the module was never loaded, or because the service account cannot
+# see the VMs — therefore emptied a good cache and stamped the connection as
+# successfully synced. The page said "No VMs" and nothing anywhere said why.
+#
+# `enumerated` is the producer stating "this list is what the host reported", and it is
+# the ONLY thing that lets an empty page prune a populated cache; see
+# hypervisor_sync_service.apply_page. It is not a claim that the read was *right* —
+# nothing here can know that — only that a well-formed enumeration came back, which is
+# exactly what the ambiguous cases above cannot say.
+#
+# It defaults to **False**, which is the answer for an agent too old to carry the field.
+# That direction costs a genuinely empty host on an old agent a visible refusal until
+# the agent is upgraded. The other default costs every one of them a silent wipe, which
+# is the bug this exists for — and a refusal an operator can read is the recoverable
+# half of that trade.
+
 def sync_page(result: dict) -> dict:
     """The allowlisted projection of one inventory_sync page."""
     result = result or {}
@@ -398,6 +419,7 @@ def sync_page(result: dict) -> dict:
         "next_cursor": _constrained(result.get("next_cursor"), _CURSOR_RE),
         "complete": bool(result.get("complete", True)),
         "scanned": _non_negative(result.get("scanned")),
+        "enumerated": bool(result.get("enumerated", False)),
     }
 
 
