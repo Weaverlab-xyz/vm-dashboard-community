@@ -372,7 +372,9 @@
         // their own fetchers below and are loaded separately.
         await Promise.all([this.loadActiveJobs(), this.loadJobs(), this.loadAttention()]);
         this.loadSnapshot();
-        this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'));
+        // false: loadSnapshot() is already in flight one line above, and the tiles the
+        // fan-out skips are exactly the ones it fills.
+        this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'), false);
 
         // Live updates: poll the cheap, status-bearing surfaces (jobs + attention)
         // every 20s; tick `now` every 30s so "updated Xm ago" labels stay current.
@@ -701,14 +703,43 @@
 
       // Only the hypervisor section still fans out per tile. Those endpoints are a live
       // host call unless the connection is agent-backed, so they are not in the snapshot.
-      async refreshSection(section) {
+      //
+      // But not every tile in the section is one of them. `workstation_vms` sits here for
+      // layout — it is a hypervisor kind, and tile order matches the nav — while being
+      // answered by the aggregate, because an agent-bound Workstation connection is a
+      // plain DB read. `_fetchTile` therefore has no branch for it, and its fallthrough
+      // used to be `{value: -1}`: so this fan-out OVERWROTE the snapshot's real count with
+      // "unavailable" on every load and on every press of this section's Refresh, while
+      // /vms behind the tile listed those same VMs perfectly well. A fetcher that does not
+      // handle a key must say "not mine" (null), never assert unavailability about it.
+      //
+      // `reread` re-pulls the aggregate so the button also refreshes the tiles it answers;
+      // init passes false, having just called loadSnapshot() itself.
+      async refreshSection(section, reread = true) {
         if (!section) return;
         if (section.id !== 'hypervisors') return this.loadSnapshot();
         section.loaded = false;
         const visible = this.visibleTiles(section.tiles);
         const tasks = visible.map(t => this._fetchTile(t).then(r => [t.key, r]).catch(() => [t.key, {value: -1}]));
-        for (const [key, val] of await Promise.all(tasks)) {
+        const results = await Promise.all(tasks);
+        // Tiles this fan-out has no fetcher for come from /api/dashboard/stats instead.
+        const missed = results.filter(([, val]) => val === null).map(([key]) => key);
+        if (reread && missed.length) await this.loadSnapshot();
+        for (const [key, val] of results) {
+          if (val === null) continue;                  // not ours — leave the snapshot's
           this.stats[key] = val;
+        }
+        // Still null AFTER a re-read means nobody answers this tile: no fetcher here and
+        // absent from the aggregate too. Say unavailable rather than spin on '…' forever.
+        // Only when we actually awaited the re-read — on init the aggregate is still in
+        // flight, and concluding "unavailable" about a request that has not returned is
+        // how a working number turns into a dash for a beat.
+        if (reread) {
+          for (const key of missed) {
+            if (this.stats[key]?.value === null || this.stats[key]?.value === undefined) {
+              this.stats[key] = { value: -1 };
+            }
+          }
         }
         section.loaded = true;
         section.loadedAt = Date.now();
@@ -737,7 +768,11 @@
         if (k === 'hyperv_vms')       return this._fetchListCount('/api/hyperv/vms',            'vms',       v => v.state === 'Running' || v.state === 'running');
         if (k === 'nutanix_vms')      return this._fetchListCount('/api/nutanix/vms',           'vms',       v => v.power_state === 'ON' || v.state === 'running');
         if (k === 'xcpng_vms')        return this._fetchListCount('/api/xcpng/vms',             'vms',       v => v.power_state === 'Running' || v.state === 'running');
-        return { value: -1 };
+        // "Not mine", NOT "unavailable". This used to return {value: -1}, which is the
+        // same shape a dead cloud API produces — so the Workstation tile, whose number the
+        // aggregate supplies, read "– unavailable" while its own page listed the VMs.
+        // refreshSection leaves a null alone and takes that tile from the snapshot.
+        return null;
       },
 
 
