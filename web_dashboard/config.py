@@ -61,6 +61,19 @@ class Settings(BaseSettings):
     cost_query_lease_seconds: int = 120           # single-flight claim expiry
     cost_query_gap_seconds: int = 2               # min spacing between queries to ONE cloud
     cost_cold_wait_seconds: int = 5               # cold-miss wait for the claim winner
+    # Durable dashboard tile snapshot (services/dashboard_stat_cache.py). Env/config.py
+    # only, for the same reason as the cost knobs above: they pace a collector, they are
+    # not features, and a Settings field that isn't bound both ways is silently discarded
+    # on save.
+    dashboard_stats_ttl_seconds: int = 120         # how old a tile may get before a refetch
+    dashboard_stats_interval_seconds: int = 60     # how often the collector wakes
+    dashboard_stats_lease_seconds: int = 120       # single-flight claim expiry
+    dashboard_stats_gap_seconds: int = 2           # min spacing between calls to ONE provider
+    # The app-side fallback collector only claims a tile older than this. With dash-worker
+    # running, every pass claims nothing and costs one SELECT; with no worker at all, the
+    # app takes over within one window. Must stay comfortably above the worker's interval.
+    dashboard_stats_stale_after_seconds: int = 300
+    dashboard_refresh_min_interval_seconds: int = 30  # floor between two forced refreshes
     # Action-level policy guardrails (pre-action admission control via OPA). Master
     # flag; when off, admission_service.enforce() is a no-op. Which actions are gated
     # is the list `admission_gated_actions` (default none). The caps below are injected

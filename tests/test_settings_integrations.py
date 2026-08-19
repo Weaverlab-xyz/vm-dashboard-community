@@ -28,6 +28,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SETTINGS = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _SETUP = os.path.join(_ROOT, "web_dashboard", "api", "setup.py")
 _MAIN = os.path.join(_ROOT, "web_dashboard", "main.py")
+# The feature map moved out of main.py so dash-worker could read it without importing
+# the FastAPI app; /api/features is now a thin delegate. The two assertions below
+# follow it here rather than to a route body that no longer contains it.
+_FLAGS = os.path.join(_ROOT, "web_dashboard", "services", "feature_flags.py")
 
 
 def _read(path):
@@ -108,10 +112,10 @@ def test_the_api_supplies_every_field_the_map_reads():
     end = html.index("};", start)
     read_fields = set(re.findall(r":\s*features\.([a-z_0-9]+)", html[start:end]))
 
-    main = _read(_MAIN)
-    body_start = main.index('return {\n        "vmware":')
-    body_end = main.index("\n    }", body_start)
-    supplied = set(re.findall(r'"([a-z_0-9]+)":', main[body_start:body_end]))
+    flags = _read(_FLAGS)
+    body_start = flags.index('return {\n        "vmware":')
+    body_end = flags.index("\n    }", body_start)
+    supplied = set(re.findall(r'"([a-z_0-9]+)":', flags[body_start:body_end]))
 
     missing = read_fields - supplied
     assert not missing, (
@@ -190,9 +194,9 @@ def test_the_remote_agents_key_derives_the_existing_flag():
         "the key-derivation rule changed; re-check that remote_agents still maps to " \
         "remote_agents_enabled"
     # And that flag is what the nav gate and the router gate both read.
-    main = _read(_MAIN)
-    assert '"remote_agents_enabled": config_service.get_bool("remote_agents_enabled"' in main
-    assert '_feature_gate("remote_agents_enabled")' in main
+    assert ('"remote_agents_enabled": config_service.get_bool("remote_agents_enabled"'
+            in _read(_FLAGS))
+    assert '_feature_gate("remote_agents_enabled")' in _read(_MAIN)
     nav = _read(os.path.join(_ROOT, "web_dashboard", "templates", "_nav_links.html"))
     assert "remote_agents_enabled" in nav, "the nav link lost its gate"
 

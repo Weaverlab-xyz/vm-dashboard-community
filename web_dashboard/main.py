@@ -25,7 +25,7 @@ from .logging_context import (
 )
 from .database import SessionLocal, User, create_admin_user, init_db
 from .services import cache_service
-from .services import config_service
+from .services import config_service, feature_flags
 from .services import public_url
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -113,6 +113,11 @@ async def lifespan(app: FastAPI):
     # cost feature is off, so flipping the flag in Settings warms the next pass.
     warmers.append(
         asyncio.create_task(_warm_cost_summary(), name="warm_cost_summary")
+    )
+    # Dashboard tile snapshot — SECONDARY collector. dash-worker is the primary; this one
+    # only takes over where there is no worker at all. See _warm_dashboard_stats.
+    warmers.append(
+        asyncio.create_task(_warm_dashboard_stats(), name="warm_dashboard_stats")
     )
 
     # Ephemeral-secret GC — reap any managed-account ephemeral cloud secrets a prior
@@ -382,6 +387,48 @@ async def _warm_cost_summary() -> None:
         await asyncio.sleep(cost_cache.warm_interval_seconds())
 
 
+async def _warm_dashboard_stats() -> None:
+    """Secondary collector for the dashboard tile snapshot.
+
+    ``dash-worker`` is the PRIMARY: it runs the same loop as a peer of the job runner. This
+    one exists for the installs that have no worker at all — a bare ``uvicorn``, a SQLite
+    dev box, a ``docker-compose`` without the ``worker`` service — and it must be a no-op
+    whenever the worker is doing its job.
+
+    Two mechanisms, and the second is what makes the first safe:
+
+      * the SAME advisory lock, lease and per-provider pacing as the worker, so a
+        simultaneous pass is CORRECT rather than merely unlikely. That property is what
+        tests/test_dashboard_stat_cache proves with two module loads standing in for two
+        processes.
+      * a DEFERENCE WINDOW: this loop only claims a tile older than
+        ``dashboard_stats_stale_after_seconds`` — older than the worker would ever let one
+        get. With a worker present every pass here claims nothing and costs one SELECT.
+        Without one, it takes over within a single window.
+
+    Deliberately NOT gated on a worker-liveness probe. The worker does publish a heartbeat
+    (worker_policy / api.worker), and that is the right thing to show an operator — but a
+    liveness signal that flaps would flap the collector, and the lock already makes
+    concurrency correct rather than merely unlikely.
+
+    Runs in BOTH gunicorn workers, as every warmer here does, and that is harmless for the
+    same reason _warm_cost_summary is: whichever process wins the claim does the work and
+    the other reads the row.
+    """
+    from .services import dashboard_collect, dashboard_stat_cache
+    # De-burst: both gunicorn workers start within milliseconds of each other.
+    await asyncio.sleep(random.uniform(0, 10))
+    while True:
+        try:
+            await dashboard_collect.collect_once(
+                min_age_s=dashboard_stat_cache.stale_after_seconds())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("dashboard stats fallback collector failed: %s", exc)
+        await asyncio.sleep(dashboard_stat_cache.collect_interval_seconds())
+
+
 async def _warm_aws_amis() -> None:
     from .api import aws as aws_api
     # Scoped, not flat: an AMI id only resolves in its own region, so this key now
@@ -619,44 +666,11 @@ templates.env.globals["app_env"] = settings.app_env
 
 
 def _feature_flags() -> dict:
-    """Read feature flags from config_service (DB) with env-var fallback.
-    Called per-request so wizard changes are visible without a restart."""
-    return {
-        "vmware_enabled":       config_service.get_bool("vmware_enabled",        settings.vmware_enabled),
-        "portainer_enabled":    config_service.get_bool("portainer_enabled",     settings.portainer_enabled),
-        "ansible_enabled":      config_service.get_bool("ansible_enabled",       settings.ansible_enabled),
-        "entitle_enabled":      config_service.get_bool("entitle_enabled",       settings.entitle_enabled),
-        # The three BeyondTrust products gate independently — a Password Safe-only
-        # deployment should not render Gateway tabs or EPM-L sections it cannot use.
-        "password_safe_enabled": config_service.get_bool("password_safe_enabled", settings.password_safe_enabled),
-        "pra_enabled":          config_service.get_bool("pra_enabled",           settings.pra_enabled),
-        "epml_enabled":         config_service.get_bool("epml_enabled",          settings.epml_enabled),
-        "proxmox_enabled":      config_service.get_bool("proxmox_enabled",       settings.proxmox_enabled),
-        "vsphere_enabled":      config_service.get_bool("vsphere_enabled",       settings.vsphere_enabled),
-        "hyperv_enabled":       config_service.get_bool("hyperv_enabled",        settings.hyperv_enabled),
-        "nutanix_enabled":      config_service.get_bool("nutanix_enabled",       settings.nutanix_enabled),
-        "xcpng_enabled":        config_service.get_bool("xcpng_enabled",         settings.xcpng_enabled),
-        "vdesktops_enabled":    config_service.get_bool("vdesktops_enabled",     settings.vdesktops_enabled),
-        "cloud_database_enabled": config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled),
-        "entitle_registration_enabled": config_service.get_bool("entitle_registration_enabled", settings.entitle_registration_enabled),
-        "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
-        "cloud_functions_enabled": config_service.get_bool("cloud_functions_enabled", settings.cloud_functions_enabled),
-        "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
-        "remote_agents_enabled": config_service.get_bool("remote_agents_enabled", settings.remote_agents_enabled),
-        "admission_control_enabled": config_service.get_bool("admission_control_enabled", settings.admission_control_enabled),
-        # Auto-delete timer — gates the Expires column on /inventory and the dashboard's
-        # "expiring soon" warning. Deletion has its own second gate
-        # (resource_expiry_enforce), read server-side only.
-        "resource_expiry_enabled": config_service.get_bool("resource_expiry_enabled", settings.resource_expiry_enabled),
-        # Was missing, so Settings → Integrations rendered the Notifications toggle
-        # permanently off: the switch saved fine, but its initial state is read from
-        # /api/features and this key never reached it.
-        "notifications_enabled": config_service.get_bool("notifications_enabled", settings.notifications_enabled),
-        # Entitle user-JIT Phase 4 UI affordances — surfaces the
-        # "Request access" nav link + portal URL when both are configured.
-        "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
-        "entitle_request_portal_url": config_service.get("entitle_request_portal_url",   settings.entitle_request_portal_url),
-    }
+    """Raw ``*_enabled`` flags for the ~30 template responses below.
+
+    Lives in services/feature_flags so the job worker can read the same map without
+    importing this module (and with it the whole FastAPI app)."""
+    return feature_flags.flags()
 
 
 # ── Register API routers ──────────────────────────────────────────────────────
@@ -901,6 +915,15 @@ try:
     app.include_router(inventory.router)
 except ImportError as exc:
     logger.warning("API router 'inventory' not loaded: %s", exc)
+
+try:
+    # The dashboard home page's one aggregate read. Always-on and NOT feature-gated: it
+    # answers for whichever tiles this install has, and a tile with nothing collected
+    # reports unavailable rather than 404ing the whole page.
+    from .api import dashboard as dashboard_api  # noqa: E402
+    app.include_router(dashboard_api.router)
+except ImportError as exc:
+    logger.warning("API router 'dashboard' not loaded: %s", exc)
 
 # Auto-delete timer (extend/pin + sweeper surface). Not feature-gated at the router:
 # GET /status has to answer "disabled" so the pages can hide the column, and the
@@ -1234,83 +1257,38 @@ async def health():
 @app.get("/api/features", tags=["health"])
 async def features():
     """Expose the enabled feature set to the frontend (reads from config_service
-    so wizard changes are reflected immediately without a restart)."""
-    flags = _feature_flags()
-    # AWS/Azure/GCP aren't gated by a feature flag — they're "configured" iff
-    # credentials are present. The dashboard uses these to hide tiles on bare installs.
-    aws_configured = bool(
-        config_service.get("aws_access_key_id")
-        or os.environ.get("AWS_ACCESS_KEY_ID", "")
-    )
-    azure_configured = bool(
-        (config_service.get("azure_client_id") or settings.azure_client_id)
-        and (config_service.get("azure_subscription_id") or settings.azure_subscription_id)
-    )
-    gcp_configured = bool(config_service.get("gcp_project_id") or settings.gcp_project_id)
-    # OCI is "configured" iff the API-key signing quad (tenancy + user + key +
-    # region) is present — mirrors the AWS/Azure/GCP credential-presence check.
-    oci_configured = bool(
-        (config_service.get("oci_tenancy_ocid") or settings.oci_tenancy_ocid)
-        and (config_service.get("oci_user_ocid") or settings.oci_user_ocid)
-        and (config_service.get("oci_private_key") or settings.oci_private_key)
-        and (config_service.get("oci_region") or settings.oci_region)
-    )
-    # Portainer needs both the toggle AND a URL — enabled-but-unconfigured should
-    # hide the dashboard tile rather than show a permanently "unavailable" one.
-    portainer_configured = flags["portainer_enabled"] and bool(
-        config_service.get("portainer_url") or settings.portainer_url
-    )
-    return {
-        "vmware":       flags["vmware_enabled"],
-        # Named to match the Settings panel keys, so settings.html's flag map needs no
-        # translation layer. There is deliberately no combined "beyondtrust" key: an
-        # OR would tell a caller the integration is on when only one of three products
-        # is, and every consumer wants a specific product.
-        "password_safe": flags["password_safe_enabled"],
-        "pra":          flags["pra_enabled"],
-        "epml":         flags["epml_enabled"],
-        "portainer":    flags["portainer_enabled"],
-        # Distinct from the enabled toggle: the dashboard tile hides unless
-        # Portainer is both enabled AND has a URL configured.
-        "portainer_configured": portainer_configured,
-        "ansible":      flags["ansible_enabled"],
-        "entitle":      flags["entitle_enabled"],
-        "aws":          aws_configured,
-        "azure":        azure_configured,
-        "gcp":          gcp_configured,
-        "oci":          oci_configured,
-        "proxmox":      flags["proxmox_enabled"],
-        "vsphere":      flags["vsphere_enabled"],
-        "hyperv":       flags["hyperv_enabled"],
-        "nutanix":      flags["nutanix_enabled"],
-        "xcpng":        flags["xcpng_enabled"],
-        "cost":         flags["cost_explorer_enabled"],
-        "admission":    flags["admission_control_enabled"],
-        "cloud_database": flags["cloud_database_enabled"],
-        "k8s_management": flags["k8s_management_enabled"],
-        "cloud_functions": flags["cloud_functions_enabled"],
-        "resource_expiry": flags["resource_expiry_enabled"],
-        "remote_agents": flags["remote_agents_enabled"],
-        "notifications": flags["notifications_enabled"],
-    }
+    so wizard changes are reflected immediately without a restart).
+
+    A thin delegate: services/dashboard_collect reads the same map to decide which tiles
+    to collect, and it must agree with what the page renders."""
+    return feature_flags.feature_map()
 
 
 @app.get("/api/cache/status", tags=["health"])
 async def cache_status():
     """Return metadata for all cached keys (debug / admin).
 
-    Two stores, deliberately: the in-memory one below is per-process and dies with the
-    container, while `cost_cache` rows are shared across every worker and survive a
-    rebuild. Comparing `fetched_at` across replicas is how you confirm the cost cache is
-    actually shared rather than silently per-worker."""
+    Three stores, deliberately: the in-memory one below is per-process and dies with the
+    container, while `cost_cache` and `dashboard_stats` rows are shared across every worker
+    and survive a rebuild. Comparing `fetched_at` across replicas is how you confirm those
+    two are actually shared rather than silently per-worker.
+
+    `dashboard_stats` is also the only place the tile collector is visible at all: it runs
+    in dash-worker, writes no job rows, and logs only on failure. An empty list here on a
+    running install means no collector is reaching the database."""
     entries = await cache_service.all_entries()
-    from .services import cost_cache
+    from .services import cost_cache, dashboard_stat_cache
     db = SessionLocal()
     try:
         cost_rows = cost_cache.snapshot(db)
     except Exception as exc:  # noqa: BLE001 — a health endpoint must not 500 on a detail
         logger.warning("cache status: cost cache snapshot failed: %s", exc)
         cost_rows = []
+    try:
+        stat_rows = dashboard_stat_cache.snapshot(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cache status: dashboard stats snapshot failed: %s", exc)
+        stat_rows = []
     finally:
         db.close()
     return {
@@ -1318,6 +1296,7 @@ async def cache_status():
         "entry_count": len(entries),
         "entries": entries,
         "cost_cache": cost_rows,
+        "dashboard_stats": stat_rows,
     }
 
 

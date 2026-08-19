@@ -900,7 +900,7 @@ async def _main() -> None:
     multiply those caps (the claim is atomic), so replica-based scale-out is unchanged;
     the caps exist because replicas are not a free, or even an available, knob everywhere.
     """
-    from .services import cloud_executor, notification_service
+    from .services import cloud_executor, dashboard_collect, notification_service
 
     loop = asyncio.get_running_loop()
     threads = _executor_size(_limits())
@@ -919,12 +919,24 @@ async def _main() -> None:
     _install_signal_handlers(loop, shutdown)
 
     drain = asyncio.create_task(notification_service.drain_loop(), name="notify-drain")
+    # Peer of the job runner, for the same reason the drain is one — and emphatically NOT
+    # a job type. Every HANDLED_TYPES entry must appear in exactly one tier tuple (pinned
+    # by tests/test_worker_tiers), an untiered type raises in the supervisor and takes the
+    # loop down for every job, a pass would spend a LIGHT slot that belongs to real work,
+    # and a row every 60s would flood the jobs table. It self-schedules, owns a try/except
+    # per pass, and its failures are its own.
+    #
+    # This worker is the PRIMARY collector; the app's lifespan runs the same loop with a
+    # long deference window as a fallback for installs with no worker at all.
+    stats = asyncio.create_task(dashboard_collect.collect_loop(), name="dash-stats")
     try:
         await _run_loop(shutdown=shutdown)   # returns once shutdown is set and jobs drain
     finally:
-        drain.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await drain
+        for task in (drain, stats):
+            task.cancel()
+        for task in (drain, stats):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         # Non-blocking: a poller's thread still parked in time.sleep() would otherwise
         # hold shutdown open for its full remaining wait.
         executor.shutdown(wait=False, cancel_futures=True)
