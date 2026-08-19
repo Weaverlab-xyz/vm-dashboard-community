@@ -61,6 +61,32 @@ class K8sError(Exception):
     pass
 
 
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking kubernetes call on k8s's OWN bounded thread pool.
+
+    These calls used to go to the event loop's default ThreadPoolExecutor — one unbounded
+    queue shared by every provider, about 8 threads in-container, with no deadline. That is
+    the shape that took the whole dashboard down for 30 minutes on 2026-08-12 when two
+    clouds went slow upstream: requests that needed nothing from k8s queued behind
+    calls that never returned. See services/cloud_executor.py, which is explicit that a
+    bigger shared pool is not the fix, because a shared pool of any size is still a shared
+    failure domain.
+
+    Refusals become K8sError so every existing ``except K8sError`` — which is what turns a
+    failure into a 503 or an unavailable tile — keeps working unchanged. Anything kubernetes
+    itself raises propagates untouched.
+
+    ``cloud_executor`` is imported INSIDE the function on purpose: this module is loaded by
+    file path under a non-dotted name in its own tests, and a top-level relative import
+    fails there with "attempted relative import with no known parent package".
+    """
+    from . import cloud_executor
+    try:
+        return await cloud_executor.run("k8s", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise K8sError(str(exc)) from exc
+
+
 def _parse_api_server(kubeconfig: str) -> str:
     """The current-context cluster's API server URL from a kubeconfig (or "")."""
     try:
@@ -1310,7 +1336,7 @@ async def _run_cluster_command(kubeconfig: str, command: str, target_cloud: str 
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
             env = _helm_env(tmpdir)  # exports KUBECONFIG into the tmpdir
-            return await asyncio.to_thread(_run_sync, ["sh", "-c", command], None, env)
+            return await _to_thread(_run_sync, ["sh", "-c", command], None, env)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
     return await k8s_runner_service.run(
@@ -1321,9 +1347,10 @@ async def _run_cluster_command(kubeconfig: str, command: str, target_cloud: str 
 def _run_sync(cmd: list, stdin_data: Optional[str] = None, env: Optional[dict] = None) -> str:
     """Run a command, returning stdout; raise K8sError with stderr on failure.
     asyncio's subprocess support is unreliable under uvicorn's SelectorEventLoop
-    on Windows, so callers wrap this in asyncio.to_thread (same as the rest of
-    the codebase). ``stdin_data`` is streamed to the process stdin (used to pipe
-    secret-bearing manifests to ``kubectl apply -f -`` without touching disk)."""
+    on Windows, so callers wrap this in this module's ``_to_thread`` — the k8s
+    pool, not the shared default executor. ``stdin_data`` is streamed to the
+    process stdin (used to pipe secret-bearing manifests to
+    ``kubectl apply -f -`` without touching disk)."""
     proc = subprocess.run(cmd, capture_output=True, text=True, input=stdin_data, env=env)
     if proc.returncode != 0:
         raise K8sError(f"command failed ({proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
@@ -1438,7 +1465,7 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str, target_
                 cmd = ["kubectl", "--kubeconfig", kpath, "apply", "-f", "-"]
                 stdin_data = manifest_ref
             logger.info("k8s apply: source=%s", "url" if is_url else "inline")
-            return await asyncio.to_thread(_run_sync, cmd, stdin_data)
+            return await _to_thread(_run_sync, cmd, stdin_data)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1466,7 +1493,7 @@ async def _delete_manifest_via_runner(kubeconfig: str, manifest: str, target_clo
         try:
             kpath = os.path.join(tmpdir, "kubeconfig")
             cmd = ["kubectl", "--kubeconfig", kpath, "delete", "--ignore-not-found", "-f", "-"]
-            return await asyncio.to_thread(_run_sync, cmd, manifest)
+            return await _to_thread(_run_sync, cmd, manifest)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1491,13 +1518,13 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
         try:
             env = _helm_env(tmpdir)
             if add_eso_repo:
-                await asyncio.to_thread(
+                await _to_thread(
                     _run_sync, ["helm", "repo", "add", _ESO_HELM_REPO_NAME, _ESO_HELM_REPO_URL], None, env)
-                await asyncio.to_thread(_run_sync, ["helm", "repo", "update"], None, env)
+                await _to_thread(_run_sync, ["helm", "repo", "update"], None, env)
             # NB: don't log helm_args — they can carry --set secrets
             # (operator-supplied entitle_agent_helm_extra_set, etc.).
             logger.info("k8s helm: local in-process (%d args)", len(helm_args))
-            return await asyncio.to_thread(_run_sync, ["helm", *helm_args], values_stdin, env)
+            return await _to_thread(_run_sync, ["helm", *helm_args], values_stdin, env)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -2173,7 +2200,7 @@ async def _get_secret_b64_via_runner(kubeconfig: str, namespace: str, secret: st
             cmd = ["kubectl", "--kubeconfig", kpath, "-n", namespace,
                    "get", "secret", secret, "-o", "jsonpath=" + jsonpath]
             try:
-                return (await asyncio.to_thread(_run_sync, cmd)).strip()
+                return (await _to_thread(_run_sync, cmd)).strip()
             except K8sError:
                 return ""
         finally:
@@ -2468,7 +2495,7 @@ async def _mint_pra_sa_token(kubeconfig: str, target_cloud: str = "") -> str:
     if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
-            out = await asyncio.to_thread(_run_sync, ["sh", "-c", command], manifest, _helm_env(tmpdir))
+            out = await _to_thread(_run_sync, ["sh", "-c", command], manifest, _helm_env(tmpdir))
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
     else:
@@ -3182,7 +3209,7 @@ async def apply_impersonator_binding(db: Session, cluster_id: str, *,
         if not project:
             raise K8sError("gcp_project_id is not configured — GKE impersonation needs "
                            "the project to grant container.clusters.impersonate")
-        await asyncio.to_thread(gcp_service.grant_impersonate_iam, subject, project)
+        await _to_thread(gcp_service.grant_impersonate_iam, subject, project)
     from . import config_service
     config_service.set(f"k8s_impersonator_{cluster_id}", gid)
     logger.info("Applied Entitle impersonator binding (group %s) on cluster %s", gid, row.name)
@@ -3219,7 +3246,7 @@ async def remove_impersonator_binding(db: Session, cluster_id: str) -> dict:
         else:
             try:
                 from . import gcp_service
-                await asyncio.to_thread(gcp_service.revoke_impersonate_iam,
+                await _to_thread(gcp_service.revoke_impersonate_iam,
                                         _workforce_principalset(gid), _cfg("gcp_project_id"))
                 iam_revoked = True
             except Exception as exc:  # noqa: BLE001
@@ -3330,7 +3357,7 @@ async def enable_entra_federation(db: Session, cluster_id: str) -> dict:
                            "— is this an EKS cluster with an `aws eks get-token` kubeconfig?")
         region = region or _cfg("aws_region")
         from . import aws_service
-        res = await asyncio.to_thread(
+        res = await _to_thread(
             aws_service.associate_eks_oidc, name, region,
             issuer_url=oidc["issuer"], client_id=oidc["client_id"],
             username_claim=oidc["username_claim"], groups_claim=oidc["groups_claim"])
@@ -3353,12 +3380,12 @@ async def enable_entra_federation(db: Session, cluster_id: str) -> dict:
             raise K8sError("no Entra group configured — set entra_rbac_group_id on Settings "
                            "(k8s panel); GKE grants the Connect Gateway IAM to that group")
         principal = _workforce_principalset(gid)   # also validates gcp_workforce_pool_id
-        name, location = await asyncio.to_thread(
+        name, location = await _to_thread(
             gcp_service.find_gke_cluster, _gke_name(f"k8s-{row.name}"), project)
-        await asyncio.to_thread(gcp_service.enable_connect_gateway_apis, project)
-        membership = await asyncio.to_thread(
+        await _to_thread(gcp_service.enable_connect_gateway_apis, project)
+        membership = await _to_thread(
             gcp_service.register_fleet_membership, project, location, name)
-        await asyncio.to_thread(gcp_service.grant_gateway_iam, principal, project)
+        await _to_thread(gcp_service.grant_gateway_iam, principal, project)
         config_service.set(f"k8s_entra_fed_{cluster_id}", "1")
         config_service.set(f"k8s_entra_fed_gke_{cluster_id}", membership)
         logger.info("Enabled GKE WIF federation for %s (membership %s, principalSet=%s)",
@@ -3384,7 +3411,7 @@ async def disable_entra_federation(db: Session, cluster_id: str) -> dict:
                 name, region = _eks_name_region(resolve_kubeconfig(db, cluster_id))
                 region = region or _cfg("aws_region")
             from . import aws_service
-            await asyncio.to_thread(aws_service.disassociate_eks_oidc, name, region)
+            await _to_thread(aws_service.disassociate_eks_oidc, name, region)
         except Exception as exc:
             logger.warning("EKS OIDC disassociate for %s failed (non-fatal): %s", cluster_id, exc)
     elif row.cloud == "gcp":
@@ -3394,7 +3421,7 @@ async def disable_entra_federation(db: Session, cluster_id: str) -> dict:
             gid = _cfg("entra_rbac_group_id")
             if gid:
                 from . import gcp_service
-                await asyncio.to_thread(
+                await _to_thread(
                     gcp_service.revoke_gateway_iam, _workforce_principalset(gid), _cfg("gcp_project_id"))
         except Exception as exc:
             logger.warning("GKE gateway IAM revoke for %s failed (non-fatal): %s", cluster_id, exc)
@@ -3569,7 +3596,7 @@ async def run_entra_federation(db: Session, *, cluster_id: str, job_id: str,
                 job_id, 40,
                 "Associating the Entra OIDC provider — EKS makes this ACTIVE in a few minutes…")
             for i in range(60):  # ~10 min at 10s
-                status = await asyncio.to_thread(aws_service.describe_eks_oidc_status, name, region)
+                status = await _to_thread(aws_service.describe_eks_oidc_status, name, region)
                 if status == "ACTIVE":
                     break
                 await broadcast_progress(job_id, min(40 + i, 95),

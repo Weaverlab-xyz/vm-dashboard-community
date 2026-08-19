@@ -6,9 +6,8 @@ Credential priority:
   2. Password   (PROXMOX_USER + PROXMOX_PASSWORD) — legacy
 
 Supports QEMU VMs and LXC containers.  All blocking SDK calls run in
-asyncio.to_thread() so the FastAPI event loop is never blocked.
+_to_thread() so the FastAPI event loop is never blocked.
 """
-import asyncio
 import logging
 import time
 import urllib.parse
@@ -73,6 +72,32 @@ _CLOUD_IMAGES = [
 
 class ProxmoxError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking proxmoxer call on proxmox's OWN bounded thread pool.
+
+    These calls used to go to the event loop's default ThreadPoolExecutor — one unbounded
+    queue shared by every provider, about 8 threads in-container, with no deadline. That is
+    the shape that took the whole dashboard down for 30 minutes on 2026-08-12 when two
+    clouds went slow upstream: requests that needed nothing from proxmox queued behind
+    calls that never returned. See services/cloud_executor.py, which is explicit that a
+    bigger shared pool is not the fix, because a shared pool of any size is still a shared
+    failure domain.
+
+    Refusals become ProxmoxError so every existing ``except ProxmoxError`` — which is what turns a
+    failure into a 503 or an unavailable tile — keeps working unchanged. Anything proxmoxer
+    itself raises propagates untouched.
+
+    ``cloud_executor`` is imported INSIDE the function on purpose: this module is loaded by
+    file path under a non-dotted name in its own tests, and a top-level relative import
+    fails there with "attempted relative import with no known parent package".
+    """
+    from . import cloud_executor
+    try:
+        return await cloud_executor.run("proxmox", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise ProxmoxError(str(exc)) from exc
 
 
 # No _cfg here any more. This module used to read the singleton config keys directly,
@@ -447,7 +472,7 @@ def list_cloud_images() -> list[dict]:
 
 async def list_nodes(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_nodes_sync, conn)
+        return await _to_thread(_list_nodes_sync, conn)
     except ProxmoxError:
         raise
     except Exception as e:
@@ -456,7 +481,7 @@ async def list_nodes(conn) -> list[dict]:
 
 async def list_resources(conn, nodes: Optional[list[str]] = None) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_all_resources_sync, conn, nodes)
+        return await _to_thread(_list_all_resources_sync, conn, nodes)
     except ProxmoxError:
         raise
     except Exception as e:
@@ -465,7 +490,7 @@ async def list_resources(conn, nodes: Optional[list[str]] = None) -> list[dict]:
 
 async def list_storage(conn, node: str) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_storage_sync, conn, node)
+        return await _to_thread(_list_storage_sync, conn, node)
     except ProxmoxError:
         raise
     except Exception as e:
@@ -474,7 +499,7 @@ async def list_storage(conn, node: str) -> list[dict]:
 
 async def list_templates(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_templates_sync, conn)
+        return await _to_thread(_list_templates_sync, conn)
     except ProxmoxError:
         raise
     except Exception as e:
@@ -494,7 +519,7 @@ async def import_and_create_template(
     username: str = "ubuntu",
 ) -> dict:
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _import_and_create_template_sync,
             conn, node, storage, image_url, image_filename,
             template_name, vcpus, memory_mb, disk_size, username,
@@ -515,7 +540,7 @@ async def deploy_from_template(
     full_clone: bool = True,
 ) -> dict:
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _deploy_from_template_sync,
             conn, node, template_vmid, vm_name, username, ssh_public_key, full_clone,
         )
@@ -527,7 +552,7 @@ async def deploy_from_template(
 
 async def delete_vm(conn, node: str, vmid: int, vm_type: str = "qemu") -> dict:
     try:
-        return await asyncio.to_thread(_delete_vm_sync, conn, node, vmid, vm_type)
+        return await _to_thread(_delete_vm_sync, conn, node, vmid, vm_type)
     except ProxmoxError:
         raise
     except Exception as e:
@@ -536,7 +561,7 @@ async def delete_vm(conn, node: str, vmid: int, vm_type: str = "qemu") -> dict:
 
 async def get_vm_detail(conn, node: str, vmid: int, vm_type: str) -> dict:
     try:
-        return await asyncio.to_thread(_get_config_sync, conn, node, vmid, vm_type)
+        return await _to_thread(_get_config_sync, conn, node, vmid, vm_type)
     except ProxmoxError:
         raise
     except Exception as e:
@@ -556,7 +581,7 @@ async def power_op(conn, node: str, vmid: int, vm_type: str, op: str) -> dict:
     if vm_type == "lxc" and op in ("reset", "suspend"):
         raise ProxmoxError(f"Operation '{op}' is not supported for LXC containers.")
     try:
-        return await asyncio.to_thread(_power_op_sync, conn, node, vmid, vm_type, op)
+        return await _to_thread(_power_op_sync, conn, node, vmid, vm_type, op)
     except ProxmoxError:
         raise
     except Exception as e:

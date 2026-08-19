@@ -230,13 +230,32 @@ async def secret_staleness(request: Request):
     ``secret_max_age_days`` (0 = disabled). Admin-only, read-only.
     """
     _require_admin(request)
-    from ..database import SessionLocal
+    from ..services import cloud_executor
 
-    db = SessionLocal()
+    def _collect() -> dict:
+        # Session opened and closed on the worker thread, so its whole lifecycle stays on
+        # one thread rather than being handed across.
+        from ..database import SessionLocal
+        db = SessionLocal()
+        try:
+            return secret_hygiene.collect(db)
+        finally:
+            db.close()
+
+    # Off the event loop, and under a deadline. `secret_hygiene.collect` is a plain
+    # blocking function that fans out one describe_reference per registered secret, each a
+    # Key Vault / Secrets Manager / GCP SM / Password Safe round-trip. Called directly from
+    # this `async def` it stalled the ENTIRE gunicorn worker's event loop — every other
+    # request on that worker, cloud or not — for as long as those vault calls took. It is
+    # memoised for 300s in config_service, so it was not every request; but the dashboard's
+    # attention panel polls this every 20s, so an admin with the page open hit it several
+    # times an hour. No thread pool was involved: there was no pool at all.
     try:
-        return secret_hygiene.collect(db)
-    finally:
-        db.close()
+        return await cloud_executor.run("secrets", _collect)
+    except cloud_executor.CloudCallError as exc:
+        # Saturated or over deadline. 503 matches what a vault failure already returns, so
+        # the page's existing handling is unchanged.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/migrate")

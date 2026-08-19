@@ -26,7 +26,6 @@ background task by the API). The real apply needs cloud creds — dev mocks it.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -159,6 +158,32 @@ _SECRET_TF_KEYS = ("master_password", "administrator_password", "admin_password"
 
 class CloudDatabaseError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking cloud-database call on clouddb's OWN bounded thread pool.
+
+    These calls used to go to the event loop's default ThreadPoolExecutor — one unbounded
+    queue shared by every provider, about 8 threads in-container, with no deadline. That is
+    the shape that took the whole dashboard down for 30 minutes on 2026-08-12 when two
+    clouds went slow upstream: requests that needed nothing from clouddb queued behind
+    calls that never returned. See services/cloud_executor.py, which is explicit that a
+    bigger shared pool is not the fix, because a shared pool of any size is still a shared
+    failure domain.
+
+    Refusals become CloudDatabaseError so every existing ``except CloudDatabaseError`` — which is what turns a
+    failure into a 503 or an unavailable tile — keeps working unchanged. Anything cloud-database
+    itself raises propagates untouched.
+
+    ``cloud_executor`` is imported INSIDE the function on purpose: this module is loaded by
+    file path under a non-dotted name in its own tests, and a top-level relative import
+    fails there with "attempted relative import with no known parent package".
+    """
+    from . import cloud_executor
+    try:
+        return await cloud_executor.run("clouddb", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise CloudDatabaseError(str(exc)) from exc
 
 
 def terraform_available() -> bool:
@@ -1001,7 +1026,7 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
             "username": admin_username,
             "password": admin_password,
         })
-        ref = await asyncio.to_thread(
+        ref = await _to_thread(
             secrets_backend_service.write_bt_secrets_safe, name, secret_doc)
         stash["bt_secret_ref"] = ref
         logger.info("clouddb: Secrets Safe secret stored at %r db_id=%s", ref, row.id)
@@ -1594,7 +1619,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
         job_service.update_progress(db, job_id, 45, "Removing Secrets Safe secret…")
         try:
             from . import secrets_backend_service
-            await asyncio.to_thread(secrets_backend_service.delete_bt_secrets_safe, secret_ref)
+            await _to_thread(secrets_backend_service.delete_bt_secrets_safe, secret_ref)
             logger.info("clouddb Secrets Safe secret %r deleted db_id=%s", secret_ref, db_id)
         except Exception as exc:
             errors.append(f"Secrets Safe secret: {exc}")
