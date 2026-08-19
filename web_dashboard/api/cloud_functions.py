@@ -26,7 +26,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
-from ..services import cloud_function_service, config_service, region_catalog
+from ..services import (cloud_function_service, config_service, region_catalog,
+                        region_config)
 from ..services.cloud_function_service import CloudFunctionError
 from .auth import require_admin, require_permission
 
@@ -124,7 +125,15 @@ def deploy_options(user: User = Depends(require_permission("cloud_function", "re
             ready, reason = False, str(exc)
         clouds.append({
             "cloud": cloud,
+            # Two lists for two jobs, the same split /api/regions makes: `regions` is
+            # the catalog — what an operator may CONFIGURE — while
+            # `configured_regions` is what the deploy form may OFFER. A vpc-mode
+            # function placed in a region with no config set of its own resolves every
+            # regional id back to the flat keys and lands on the DEFAULT region's
+            # subnet, so the picker offers only the latter. Same list the gateway and
+            # Rancher node pickers use, so there is one definition of "deployable".
             "regions": region_catalog.regions(cloud),
+            "configured_regions": region_config.deployable_regions(cloud),
             "default_region": region_catalog.default_region(cloud),
             "package_store_ready": ready,
             "reason": reason,
