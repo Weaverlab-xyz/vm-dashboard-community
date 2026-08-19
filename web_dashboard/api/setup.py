@@ -820,6 +820,10 @@ class PortainerFeatureConfig(BaseModel):
     gcp_portainer_boot_disk_gb: int = 20
     gcp_portainer_network_tag: str = "portainer"
     gcp_portainer_allow_open: bool = False     # open 0.0.0.0/0 when the CIDR list is empty (fail-open opt-in)
+    # Durable state: /data on a separate persistent disk that survives a teardown.
+    # Off by default — the disk outlives the node and bills until something deletes it.
+    portainer_data_disk_enabled: bool = False
+    gcp_portainer_data_disk_gb: int = 10
     # Optional PRA Web Jump brokering the node's UI (chosen per-deploy on the form;
     # these are the Settings-level defaults)
     portainer_ui_web_jump_enabled: bool = False

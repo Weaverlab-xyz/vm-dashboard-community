@@ -13,9 +13,17 @@ A successful deploy writes ``portainer_url`` / ``portainer_pat`` /
 Portainer integration reads — so the Containers page starts working against the
 new server with no manual Settings step.
 
-The node is EPHEMERAL: an ephemeral external IP + auto-delete boot disk. A
-teardown (or stop/recreate) wipes ``/var/lib/portainer``, so users, environments
+By default the node is EPHEMERAL: an ephemeral external IP + auto-delete boot disk.
+A teardown (or stop/recreate) wipes ``/var/lib/portainer``, so users, environments
 and settings are lost and the node must re-bootstrap.
+
+Set ``portainer_data_disk_enabled`` to make it DURABLE instead: /data moves to a
+separate persistent disk that outlives the VM. Three consequences worth knowing
+before reading the deploy path — a persistent disk is zonal, so an existing disk
+pins the node's zone and blocks a region move; Portainer ignores
+``--admin-password`` once its DB holds an admin, so the stored credential must be
+reused rather than regenerated; and the external IP still changes on every
+recreate, so ``portainer_url`` is still rewritten each deploy.
 """
 import logging
 
@@ -123,11 +131,22 @@ def _node_params(region=None, zone=None) -> dict:
                            or settings.gcp_portainer_boot_disk_gb)
     except (TypeError, ValueError):
         boot_disk_gb = settings.gcp_portainer_boot_disk_gb
+    try:
+        data_disk_gb = int(config_service.get("gcp_portainer_data_disk_gb")
+                           or settings.gcp_portainer_data_disk_gb)
+    except (TypeError, ValueError):
+        data_disk_gb = settings.gcp_portainer_data_disk_gb
+    node_name = config_service.get("gcp_portainer_name") or settings.gcp_portainer_name
+    # Blank when durable state is off — that blank is what selects the legacy
+    # boot-disk host path all the way down in the container declaration.
+    data_disk_name = (f"{node_name}-data"
+                      if config_service.get_bool("portainer_data_disk_enabled", False)
+                      else "")
     return {
         "project_id":   config_service.get("gcp_project_id") or settings.gcp_project_id,
         "region":       eff_region,
         "zone":         eff_zone,
-        "name":         config_service.get("gcp_portainer_name") or settings.gcp_portainer_name,
+        "name":         node_name,
         "image":        config_service.get("gcp_portainer_image") or settings.gcp_portainer_image,
         "machine_type": (config_service.get("gcp_portainer_machine_type")
                          or settings.gcp_portainer_machine_type),
@@ -138,6 +157,8 @@ def _node_params(region=None, zone=None) -> dict:
         "subnetwork":   subnetwork,
         "network_tag":  (config_service.get("gcp_portainer_network_tag")
                          or settings.gcp_portainer_network_tag),
+        "data_disk_name": data_disk_name,
+        "data_disk_gb":   data_disk_gb,
     }
 
 
@@ -455,11 +476,16 @@ def _admin_password_hash(password: str) -> str:
     return hashed
 
 
-async def _bootstrap(db, job_id: str, url: str, password: str) -> tuple[str, str]:
+async def _bootstrap(db, job_id: str, url: str, password: str,
+                     *, state_preexisting: bool = False) -> tuple[str, str]:
     """Sign in as the admin and mint an API token; initialize the admin if needed.
 
     Returns ``(pat, note)``. ``note`` is a human-readable caveat for the job result
     (empty on the clean path).
+
+    ``state_preexisting`` marks a Portainer DB that outlived the VM (a durable data
+    disk). Such a DB may already hold a token minted under the default description, so
+    the new one is given a distinct description rather than colliding with it.
 
     Login comes FIRST because a node launched by this dashboard initializes its admin
     at container start (``--admin-password``) — there is nothing left to init. The
@@ -486,7 +512,12 @@ async def _bootstrap(db, job_id: str, url: str, password: str) -> tuple[str, str
         jwt = await portainer_service.login(url, _ADMIN_USERNAME, password)
 
     job_service.update_progress(db, job_id, 85, "Minting an API token")
-    pat = await portainer_service.create_access_token(url, jwt, password)
+    if state_preexisting:
+        import time
+        pat = await portainer_service.create_access_token(
+            url, jwt, password, description=f"vm-dashboard-{int(time.time())}")
+    else:
+        pat = await portainer_service.create_access_token(url, jwt, password)
     return pat, ""
 
 
@@ -549,6 +580,20 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             nzone = node.get("zone") or ""
             if region_catalog.region_from_zone(nzone) == target_region:
                 p["zone"] = nzone   # reuse the live in-region node's exact zone
+            elif p["data_disk_name"]:
+                # A persistent disk is zonal: it cannot follow the node to another
+                # region. Deleting the VM here would leave the launcher to pin straight
+                # back to the disk's zone, so the "relocation" would silently not
+                # happen. Refuse instead of pretending.
+                job_service.set_failed(
+                    db, job_id,
+                    f"The Portainer node is in {region_catalog.region_from_zone(nzone)} "
+                    f"and durable state is enabled, so it cannot be moved to "
+                    f"{target_region}: its data disk '{p['data_disk_name']}' is zonal and "
+                    f"cannot be attached in another region. Move it with a disk snapshot, "
+                    f"or tear the node down with 'delete the data disk' to rebuild in "
+                    f"{target_region} from scratch.")
+                return
             else:
                 logger.info("Relocating Portainer: deleting node '%s' in %s → region %s",
                             node.get("name"), nzone, target_region)
@@ -572,13 +617,38 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             generated = True
         pw_hash = _admin_password_hash(password)
 
+        # With a persistent data disk the DB can outlive the VM, and Portainer ignores
+        # --admin-password once an admin exists. Generating one here for a disk that
+        # already holds an admin would bake in a password that was never real, so check
+        # BEFORE launching and fail with the remedy instead of deploying a node we
+        # cannot sign into.
+        if p["data_disk_name"] and generated:
+            prior = await gcp_service.find_portainer_data_disk(
+                p["project_id"], p["data_disk_name"])
+            if prior:
+                job_service.set_failed(
+                    db, job_id,
+                    f"The Portainer data disk '{p['data_disk_name']}' already exists in "
+                    f"{prior['zone']} and holds an admin user, but no admin password is "
+                    f"stored in Settings — Portainer ignores --admin-password on a disk "
+                    f"that is already initialized, so the node would come up with a "
+                    f"password nobody knows. Set portainer_admin_password in Settings → "
+                    f"Containers to the password that disk was created with, or delete "
+                    f"the disk to start clean.")
+                return
+
         job_service.update_progress(db, job_id, 30, "Launching COS VM")
         res = await gcp_service.run_gce_portainer(
             p["project_id"], p["zone"], p["name"], p["image"],
             network=p["network"], subnetwork=p["subnetwork"],
             machine_type=p["machine_type"], boot_disk_gb=p["boot_disk_gb"],
             network_tag=p["network_tag"], create_external_ip=True, region=p["region"],
-            admin_password_hash=pw_hash)
+            admin_password_hash=pw_hash,
+            data_disk_name=p["data_disk_name"], data_disk_gb=p["data_disk_gb"])
+        # True when Portainer's DB pre-dates this launch: a reused VM, or a fresh VM
+        # that picked up an existing data disk. Both mean "do not treat the credential
+        # we just computed as authoritative".
+        state_preexisting = bool(res.get("reused") or res.get("data_disk_reused"))
         external_ip = res.get("external_ip") or ""
         url = res.get("url") or ""
         if not external_ip:
@@ -599,7 +669,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         # A fresh VM was created WITH this password baked in, so persist it now — the
         # credential is real from the moment the container starts, and losing it would
         # leave a node we can't log into even though its admin exists.
-        if pw_hash and not res.get("reused"):
+        if pw_hash and not state_preexisting:
             config_service.set("portainer_admin_password", password)
             config_service.set("portainer_admin_password_generated", "1" if generated else "0")
 
@@ -619,13 +689,17 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
 
         note = ""
         existing_pat = config_service.get("portainer_pat")
-        if res.get("reused") and existing_pat:
-            # Node already bootstrapped and we still hold a token — nothing to mint.
+        if state_preexisting and existing_pat:
+            # The DB that issued this token is still there — a reused VM, or a fresh VM
+            # back on its data disk — so the token is still valid and there is nothing
+            # to mint. Preferring it also avoids re-minting under the same fixed
+            # description on every durable redeploy.
             job_service.update_progress(db, job_id, 85, "Reusing the existing API token")
             pat = existing_pat
         else:
             try:
-                pat, note = await _bootstrap(db, job_id, url, password)
+                pat, note = await _bootstrap(db, job_id, url, password,
+                                             state_preexisting=state_preexisting)
             except portainer_service.PortainerInitWindowClosed as exc:
                 job_service.set_failed(db, job_id, f"{exc} {_LOCKED_NODE_REMEDY}")
                 return
@@ -697,24 +771,47 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
             except Exception as exc:
                 logger.warning("Portainer PRA web-jump removal failed (continuing): %s", exc)
 
+        # Deleting the data disk is opt-in per teardown: it is the only copy of the
+        # node's users, environments and settings, and it is the one part of a teardown
+        # that cannot be undone.
+        delete_data_disk = bool(meta.get("delete_data_disk"))
+        data_disk_name = p["data_disk_name"]
+
         job_service.update_progress(db, job_id, 30, f"Deleting {name} in {zone}")
         await gcp_service.stop_gce_portainer(
             p["project_id"], zone, name,
-            delete_firewall=True, firewall_name=_firewall_name(p["name"]))
+            delete_firewall=True, firewall_name=_firewall_name(p["name"]),
+            data_disk_name=data_disk_name, delete_data_disk=delete_data_disk)
 
         job_service.update_progress(db, job_id, 80, "Clearing Portainer configuration")
-        # Drop everything the deploy populated. The URL/PAT go too: leaving them would
-        # point the Containers page at a VM that no longer exists.
-        for key in ("portainer_url", "portainer_pat", "gcp_portainer_zone",
-                    "portainer_admin_password", "portainer_admin_password_generated",
-                    "portainer_ui_web_jump_id", "portainer_ui_web_jump_tfstate",
-                    "portainer_ui_vault_account_id", "portainer_ui_jumpoint_egress_ip"):
+        # Drop everything the deploy populated. The URL goes too: leaving it would point
+        # the Containers page at a VM that no longer exists.
+        cleared = ["portainer_url", "gcp_portainer_zone",
+                   "portainer_ui_web_jump_id", "portainer_ui_web_jump_tfstate",
+                   "portainer_ui_vault_account_id", "portainer_ui_jumpoint_egress_ip"]
+        # The admin password and PAT live in Portainer's DB, so they survive exactly as
+        # long as the data disk does. Clearing them alongside a PRESERVED disk is what
+        # would break the next deploy: Portainer ignores --admin-password on an
+        # already-initialized DB, so a regenerated password could never sign in.
+        state_survives = bool(data_disk_name) and not delete_data_disk
+        if not state_survives:
+            cleared += ["portainer_pat", "portainer_admin_password",
+                        "portainer_admin_password_generated"]
+        for key in cleared:
             try:
                 config_service.set(key, "")
             except Exception as exc:
                 logger.warning("Failed to clear config key '%s' (continuing): %s", key, exc)
 
-        job_service.set_completed(db, job_id, {"name": name, "zone": zone, "deleted": True})
+        result = {"name": name, "zone": zone, "deleted": True,
+                  "data_disk_deleted": bool(delete_data_disk and data_disk_name)}
+        if state_survives:
+            result["note"] = (
+                f"The data disk '{data_disk_name}' was kept, so the admin credential and "
+                f"API token are still valid — the next deploy reattaches it and comes "
+                f"back with its users, environments and settings. It keeps costing "
+                f"storage until it is deleted.")
+        job_service.set_completed(db, job_id, result)
     except Exception as exc:
         logger.exception("Portainer node teardown failed")
         job_service.set_failed(db, job_id, str(exc))
