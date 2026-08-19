@@ -1094,6 +1094,76 @@ class CloudCostCache(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class DashboardStatCache(Base):
+    """One dashboard tile's last-known-good counts, plus the state that decides whether we
+    are allowed to ask that provider again.
+
+    Same three reasons as :class:`CloudCostCache`, and the same invariants — read that
+    class and ``services/cost_cache``'s module docstring first, because this is
+    deliberately the same shape. The app runs ``gunicorn -w 2`` and ``jobs_worker`` is a
+    third process, so a process-local dict gives each one its own copy and its own idea of
+    the throttle; and every image rebuild throws all of them away.
+
+    What it buys: the dashboard home page fans out to ~33 endpoints, ~22 of them at once,
+    and every one holds a pooled connection for its whole duration — against
+    ``pool_size=5 + max_overflow=5``. That is the ``QueuePool limit ... reached`` failure
+    the 26.8.5 mitigation could only reduce, not remove. Reading tiles from this table
+    makes a page load ONE indexed query and no cloud calls at all.
+
+    ``payload`` is written ONLY on a successful collection. A failure writes the error and
+    cooldown columns and leaves ``payload``/``fetched_at`` exactly where they were. That
+    asymmetry is the reason this is a table and not a cache entry with a TTL: it is a
+    last-known-good value plus an expiry *opinion*.
+
+    NO ``period`` column, unlike CloudCostCache — a VM count is not month-scoped, so a
+    calendar rollover is not a miss. ``payload_version`` is the only shape gate.
+    """
+    __tablename__ = "dashboard_stat_cache"
+
+    # Matches the tile `key` in templates/dashboard.html's tileSections.
+    tile_key = Column(String(48), primary_key=True)
+    # "" for a tile with one global source. Reserved for per-connection tiles: the
+    # hypervisor routers resolve `conn_or_error(db, kind, "")` to the DEFAULT connection,
+    # so an install with two Proxmox clusters has a tile describing one of them. Summing a
+    # tile's scopes is how that gets fixed. It is in the PRIMARY KEY from the start
+    # deliberately — adding a column later is an ALTER, but widening a primary key is not.
+    scope = Column(String(64), primary_key=True, default="")
+
+    # Which provider this tile calls, e.g. "gcp" / "proxmox" / "local". A COLUMN rather
+    # than a lookup in the collector's spec table, so pacing is a self-contained
+    # `UPDATE ... WHERE provider = :p` and this module needs to import nothing to do it.
+    provider = Column(String(24), nullable=False, default="", index=True)
+
+    # ── last-known-good (written ONLY on a successful collection) ────────────
+    payload = Column(Text, nullable=True)          # JSON, shape owned by the collector
+    payload_version = Column(Integer, nullable=False, default=0)
+    fetched_at = Column(DateTime, nullable=True, index=True)
+    # Set by a Setup save. Read as "not fresh" while the payload is still SERVED, so
+    # fixing a credential re-collects without blanking the tile in the meantime.
+    stale = Column(Boolean, nullable=False, default=False)
+
+    # ── failure / backoff (written ONLY on a failed attempt) ─────────────────
+    last_attempt_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    # Hard gate: while this is in the future nothing collects this tile, including an
+    # explicit refresh. Mashing Refresh at a saturated provider must not compound it.
+    cooldown_until = Column(DateTime, nullable=True, index=True)
+
+    # ── single-flight ────────────────────────────────────────────────────────
+    # A liveness bound, not a mutex: a process that dies mid-collection releases its claim
+    # by expiry. The advisory lock only makes the claim's read-modify-write atomic; it is
+    # never held across the network call.
+    lease_until = Column(DateTime, nullable=True)
+    lease_owner = Column(String(64), nullable=True)   # "host:pid" — diagnostics only
+    # Per-PROVIDER pacing, written to every tile of that provider: GCP alone owns seven
+    # tiles against an 8-thread pool, so pacing per tile would let one pass hand itself
+    # CloudProviderBusy.
+    next_query_allowed_at = Column(DateTime, nullable=True)
+
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RegisteredImage(Base):
     """Operator-registered image artefacts. The dashboard's source-of-truth
     record for "this image exists, here's where the artefact lives, here's
@@ -1555,6 +1625,9 @@ def init_db():
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.
+            # `dashboard_stat_cache` needs no entry for the same two reasons: create_all
+            # makes it, and an empty table means "nothing collected yet", which every tile
+            # already renders as unavailable.
         ]
         for stmt in _migrations:
             if _is_sqlite:
