@@ -230,19 +230,30 @@ def test_a_narrowed_tile_stops_trusting_the_server_count():
 # ── 3. the phantom scope parameter ────────────────────────────────────────────
 
 def test_portainer_tile_makes_one_call_and_does_not_sum_workgroups():
-    body = _code_only(_js_method("_fetchPortainer"))
+    """The tile moved into the collector, and must still cost exactly one call.
 
-    assert "workgroup" not in body, (
-        "_fetchPortainer still scopes by workgroup, but list_endpoints "
-        "(api/containers.py) has no workgroup parameter — every call returns the same "
-        "full list, so summing them reported endpoints x workgroups")
+    It originally lived in the template as `_fetchPortainer`, issuing one request per
+    workgroup with `?workgroup=<name>` and SUMMING them — but list_endpoints has no
+    workgroup parameter, so every request returned the same list and a user in three
+    workgroups saw 3x the count. It is now collected server-side; the overcount must not
+    come back with it.
+    """
+    src = _read("web_dashboard", "services", "dashboard_collect.py")
+    body = src[src.index("async def _portainer_endpoints():"):]
+    body = body[:body.index("\n\n\n")] if "\n\n\n" in body else body
+    # Comments stripped: the code's own note about the old per-workgroup fan-out contains
+    # the word, so an absence check over raw source fails the very fix it describes.
+    code = "\n".join(ln.split("#", 1)[0] for ln in body.splitlines())
 
-    assert "total +=" not in body and "online +=" not in body, (
-        "_fetchPortainer still accumulates across calls; with one unscoped endpoint "
-        "there is nothing to accumulate and any loop is an overcount")
-
-    assert len(re.findall(r"API\.get\(", body)) == 1, (
-        "the Portainer tile should cost exactly one request; it previously cost one per "
+    assert "workgroup" not in code, (
+        "the Portainer collector scopes by workgroup, but list_endpoints "
+        "(api/containers.py) has no workgroup parameter — every call returns the same full "
+        "list, so summing them reports endpoints x workgroups")
+    assert "for " not in code, (
+        "the collector loops. With one unscoped endpoint there is nothing to iterate, and "
+        "any loop over calls is an overcount")
+    assert code.count("list_endpoints(") == 1, (
+        "the Portainer tile should cost exactly one call; it previously cost one per "
         "workgroup for a list that is not workgroup-scoped")
 
 

@@ -84,10 +84,16 @@
       <div class="flex items-center justify-between mb-3">
         <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide" x-text="section.label"></p>
         <div class="flex items-center gap-2">
-          <span x-show="section.refreshable && section.loadedAt" class="text-xs text-gray-400"
-                x-text="freshness(section.loadedAt)"></span>
-          <button @click="refreshSection(section)"
+          <!-- The label describes the DATA, not the response: sectionFreshness reads the
+               snapshot's server-side as_of for every section the snapshot answers, and
+               falls back to the fetch time only for the hypervisor section, which still
+               loads live. A "0s ago" that is true of the response and silent about the
+               data is the exact bug api/vms.py records for its own cached_at. -->
+          <span x-show="section.refreshable && sectionFreshness(section)" class="text-xs text-gray-400"
+                x-text="sectionFreshness(section)"></span>
+          <button @click="section.id === 'hypervisors' ? refreshSection(section) : forceRefresh()"
                   class="text-xs text-blue-500 hover:underline"
+                  :disabled="refreshing"
                   x-show="section.refreshable && section.loaded">Refresh</button>
         </div>
       </div>
@@ -210,6 +216,17 @@
       // Item ids the user has dismissed (persisted per-browser). Filtered out of
       // `attention` on every rebuild so they stay hidden across polls/reloads.
       dismissedAttention: JSON.parse(localStorage.getItem('attention_dismissed') || '[]'),
+
+      // The snapshot's own freshness, from the server. `snapshotAsOf` is the OLDEST
+      // contributing tile — the page is only as fresh as its stalest number — and is
+      // deliberately not a client-side timestamp of when we fetched.
+      snapshotAsOf: null,
+      snapshotStale: false,
+      snapshotLoading: false,
+      // Separate from snapshotLoading on purpose: forceRefresh POLLS loadSnapshot, and
+      // loadSnapshot clears snapshotLoading in its finally — so sharing one flag
+      // re-enabled the Refresh button on the first poll iteration, mid-pass.
+      refreshing: false,
 
       // Bumped on a timer so relative "updated Xm ago" labels stay current
       now: Date.now(),
@@ -341,14 +358,21 @@
         }
 
         await this.loadFeatures();
-        // Jobs + inventory + attention up front; cloud/managed/hypervisor/container tiles
-        // in the background. Workstation counts — the tile and the workgroup badges —
-        // come with the hypervisor section now, not a call of their own.
-        await Promise.all([this.loadActiveJobs(), this.loadJobs(), this.loadInventoryCount(), this.loadAttention()]);
-        this.refreshSection(this.tileSections.find(s => s.id === 'cloud'));
-        this.refreshSection(this.tileSections.find(s => s.id === 'managed'));
+        // ONE call for almost every tile. This used to be four un-awaited section
+        // fan-outs — each a Promise.all over its tiles — which put ~22 requests in flight
+        // simultaneously, every one of them holding a pooled connection for its whole
+        // duration against a pool of ten. That is what produced
+        // `QueuePool limit of size 5 overflow 5 reached` on every authenticated page while
+        // /login stayed fast. Caching could not fix it: a cache hit is still a request,
+        // still a connection, still a slot.
+        //
+        // /api/dashboard/stats answers from a snapshot dash-worker collects, so it makes
+        // no cloud call at all. It omits the five hypervisor tiles — those are a live
+        // WinRM/pyVmomi/XAPI call unless the connection is agent-backed — so those keep
+        // their own fetchers below and are loaded separately.
+        await Promise.all([this.loadActiveJobs(), this.loadJobs(), this.loadAttention()]);
+        this.loadSnapshot();
         this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'));
-        this.refreshSection(this.tileSections.find(s => s.id === 'containers'));
 
         // Live updates: poll the cheap, status-bearing surfaces (jobs + attention)
         // every 20s; tick `now` every 30s so "updated Xm ago" labels stay current.
@@ -369,6 +393,18 @@
           if (!document.hidden) { this.loadJobs(true); this.loadActiveJobs(); this.loadAttention(); }
         });
         setInterval(() => { this.now = Date.now(); }, 30000);
+      },
+
+      // Per-section freshness. Snapshot-backed sections report the server's as_of; the
+      // hypervisor section, which still fetches live, reports when it last fetched.
+      sectionFreshness(section) {
+        if (!section) return '';
+        if (section.id === 'hypervisors') {
+          return section.loadedAt ? this.freshness(section.loadedAt) : '';
+        }
+        if (!this.snapshotAsOf) return '';
+        const label = this.freshness(this.snapshotAsOf);
+        return this.snapshotStale ? label + ' (stale)' : label;
       },
 
       // Relative "updated Xm ago" label; reads `now` so it re-renders on each tick.
@@ -574,41 +610,7 @@
         this.attention = this.attention.filter(a => a.id !== id);
       },
 
-      async loadInventoryCount() {
-        // Cross-provider count of dashboard-deployed resources (RBAC-filtered server-side).
-        try {
-          const r = await API.get('/api/inventory');
-          this.stats.deployed_resources = { value: r?.count ?? 0 };
-        } catch (e) {
-          this.stats.deployed_resources = { value: -1 };
-        }
-      },
 
-      // Workstation VMs, plus the per-workgroup badge counts below, from the one call.
-      // `/api/vms` is the list the Workstation page itself renders — the rows the remote
-      // agents have synced. /api/vms/dashboard-stats now reads the same source and would
-      // work equally well; this one stays because the tile then counts the exact list a
-      // click takes you to, and one request covers both the tile and the badges.
-      async _fetchWorkstationVms() {
-        try {
-          const r = await API.get('/api/vms');
-          if (!r) return { value: -1 };
-          const vms = r.vms || [];
-          // The badges ride along on this call rather than costing a second one; the block
-          // that renders them is gated on the same `vmware` flag as this tile, so it is
-          // visible exactly when this fetcher runs.
-          const counts = {};
-          for (const vm of vms) {
-            const wg = vm.workgroup || '';
-            counts[wg] = (counts[wg] || 0) + 1;
-          }
-          for (const wg of this.workgroups) wg.count = counts[wg.name] ?? 0;
-          return { value: r.count ?? vms.length,
-                   secondary: vms.filter(v => v.is_running).length };
-        } catch (e) {
-          return { value: -1 };
-        }
-      },
 
       async loadActiveJobs() {
         // Always-on: pending + running jobs across every integration (RBAC-scoped
@@ -621,76 +623,109 @@
         }
       },
 
+      // Every tile the server can answer for, in one request. Keys it omits (the five
+      // hypervisor tiles) keep their own fetchers and are loaded by refreshSection.
+      async loadSnapshot() {
+        this.snapshotLoading = true;
+        try {
+          const r = await API.get('/api/dashboard/stats');
+          if (!r || !r.tiles) throw new Error('no tiles in response');
+          for (const [key, t] of Object.entries(r.tiles)) {
+            this.stats[key] = t;
+          }
+          // The page's freshness label reads the OLDEST contributing tile, not the moment
+          // we fetched. `as_of` from the server describes the DATA; Date.now() would
+          // describe the response and say nothing at all — the same mistake api/vms.py
+          // documents for its own cached_at.
+          this.snapshotAsOf = r.oldest_as_of || null;
+          this.snapshotStale = Boolean(r.stale);
+          // Workgroup badges come off the workstation tile's own per-workgroup counts
+          // rather than a second pass over the full /api/vms payload — one fewer request,
+          // and the badges cannot disagree with the tile above them.
+          const byWg = r.tiles.workstation_vms?.by_workgroup || {};
+          for (const wg of this.workgroups) wg.count = byWg[wg.name] ?? 0;
+          this.markSectionsLoaded();
+        } catch (e) {
+          // One failed aggregate must not leave every tile spinning on '…' forever: the
+          // dash means "unavailable", which is at least a state the page renders.
+          for (const section of this.tileSections) {
+            for (const tile of section.tiles) {
+              if (this.stats[tile.key]?.value === null) this.stats[tile.key] = { value: -1 };
+            }
+          }
+          // snapshotAsOf is deliberately left alone: on a failed REFRESH the previous
+          // numbers are still on screen, and their as_of still describes them. Clearing it
+          // would strip the label off data that is being rendered.
+          this.markSectionsLoaded();
+        } finally {
+          this.snapshotLoading = false;
+        }
+      },
+
+      // Sections no longer load independently, so their per-section spinners resolve
+      // together. Kept as a loop rather than removing `loaded` so the existing markup and
+      // its refresh affordance are untouched.
+      markSectionsLoaded() {
+        for (const section of this.tileSections) {
+          if (section.id === 'hypervisors') continue;   // has its own loader
+          section.loaded = true;
+          section.loadedAt = Date.now();
+        }
+      },
+
+      // Force a fresh collection, then re-read. POSTing rather than re-fetching the live
+      // endpoints is the point: reverting to a per-tile fan-out here would rebuild the
+      // ~22-request burst, fired from the one button an operator presses when the page
+      // already looks wrong.
+      async forceRefresh() {
+        if (this.refreshing) return;
+        this.refreshing = true;
+        try {
+          const r = await API.post('/api/dashboard/refresh');
+          if (r && r.queued === false && r.reason) toast(r.reason, 'info');
+        } catch (e) {
+          // A refusal is not fatal — fall through and re-read what is already stored.
+        }
+        // Poll briefly for the collector's result, then stop and show what there is.
+        // Bounded on purpose: an unreachable provider must not leave a spinner running.
+        const started = Date.now();
+        const before = this.snapshotAsOf;
+        for (let i = 0; i < 7; i++) {
+          await new Promise(res => setTimeout(res, 1500));
+          await this.loadSnapshot();
+          if (this.snapshotAsOf && this.snapshotAsOf !== before) break;
+          if (Date.now() - started > 11000) break;
+        }
+        this.refreshing = false;
+      },
+
+      // Only the hypervisor section still fans out per tile. Those endpoints are a live
+      // host call unless the connection is agent-backed, so they are not in the snapshot.
       async refreshSection(section) {
         if (!section) return;
+        if (section.id !== 'hypervisors') return this.loadSnapshot();
         section.loaded = false;
-        if (section.id === 'cloud') {
-          // One aggregated stats call per cloud (instances+images) instead of a
-          // full list call per tile. cost + the image registry keep their own fetchers.
-          await this._refreshCloudSection(section);
-        } else {
-          const visible = this.visibleTiles(section.tiles);
-          const tasks = visible.map(t => this._fetchTile(t).then(r => [t.key, r]).catch(() => [t.key, {value: -1}]));
-          const results = await Promise.all(tasks);
-          for (const [key, val] of results) {
-            this.stats[key] = val;
-          }
+        const visible = this.visibleTiles(section.tiles);
+        const tasks = visible.map(t => this._fetchTile(t).then(r => [t.key, r]).catch(() => [t.key, {value: -1}]));
+        for (const [key, val] of await Promise.all(tasks)) {
+          this.stats[key] = val;
         }
         section.loaded = true;
         section.loadedAt = Date.now();
       },
 
-      async _refreshCloudSection(section) {
-        const tasks = [];
-        if (this.features.aws)   tasks.push(this._fetchCloudStats('/api/aws/dashboard-stats',   'aws_instances', 'aws_amis'));
-        if (this.features.azure) tasks.push(this._fetchCloudStats('/api/azure/dashboard-stats', 'azure_vms',     'azure_images'));
-        if (this.features.gcp)   tasks.push(this._fetchCloudStats('/api/gcp/dashboard-stats',   'gcp_instances', 'gcp_images'));
-        if (this.features.oci)   tasks.push(this._fetchCloudStats('/api/oci/dashboard-stats',   'oci_instances', 'oci_images'));
-        // registered_images + cloud_cost aren't per-cloud tiles — they read the
-        // dashboard's own DB and the cost cache, so they keep per-tile fetchers.
-        for (const t of this.visibleTiles(section.tiles)) {
-          if (t.key === 'registered_images' || t.key === 'cloud_cost') {
-            tasks.push(this._fetchTile(t).then(r => { this.stats[t.key] = r; }).catch(() => { this.stats[t.key] = {value: -1}; }));
-          }
-        }
-        await Promise.all(tasks);
-      },
-
-      // One call → counts for a cloud's instance + image tiles. Null section → unavailable.
-      async _fetchCloudStats(url, instKey, imgKey) {
-        try {
-          const r = await API.get(url);
-          this.stats[instKey] = r?.instances
-            ? { value: r.instances.total, secondary: r.instances.running,
-                by_region: r.instances.by_region || null }
-            : { value: -1 };
-          this.stats[imgKey]  = r?.images ? { value: r.images.total } : { value: -1 };
-        } catch (e) {
-          this.stats[instKey] = { value: -1 };
-          this.stats[imgKey]  = { value: -1 };
-        }
-      },
-
       // Per-tile data fetcher — keyed by tile.key. Each returns {value, secondary?}.
+      // Per-tile fetcher — now ONLY for the five hypervisor tiles.
+      //
+      // Everything else comes from /api/dashboard/stats. These five do not, because
+      // /api/{hyperv,vsphere,xcpng,nutanix}/vms and /api/proxmox/resources are a live
+      // WinRM / pyVmomi / XAPI / Prism call unless that connection is agent-backed, and
+      // the aggregate endpoint makes no live calls by construction. Collecting them needs
+      // the per-connection `scope` dashboard_stat_cache reserves but nothing writes yet —
+      // conn_or_error(db, kind, "") resolves to the DEFAULT connection, so an install with
+      // two Proxmox clusters would otherwise get a tile describing one of them.
       async _fetchTile(tile) {
         const k = tile.key;
-        // Cloud
-        if (k === 'aws_instances')    return this._fetchListCount('/api/aws/instances',         'instances', i => i.state === 'running');
-        if (k === 'aws_amis')         return this._fetchListCount('/api/aws/amis',              'amis');
-        if (k === 'azure_vms')        return this._fetchListCount('/api/azure/vms',             'vms',       v => v.state === 'running');
-        if (k === 'azure_images')     return this._fetchListCount('/api/azure/images',          'images');
-        if (k === 'gcp_instances')    return this._fetchListCount('/api/gcp/instances',         'instances', i => (i.status || '').toUpperCase() === 'RUNNING');
-        if (k === 'gcp_images')       return this._fetchListCount('/api/gcp/custom-images',     'images');
-        if (k === 'oci_instances')    return this._fetchListCount('/api/oci/instances',         'instances', i => (i.lifecycle_state || '').toUpperCase() === 'RUNNING');
-        if (k === 'oci_images')       return this._fetchOciCustomImages();
-        // Registry rows from the dashboard's own table. `secondary` counts the images
-        // carrying a *completed* promotion — a running/pending/manual/failed entry is
-        // not a promotion that landed, and green "N promoted" must not claim it did.
-        if (k === 'registered_images') return this._fetchListCount('/api/images', 'images',
-              i => Object.values(i.promotions || {}).some(p => p && p.status === 'completed'));
-        if (k === 'cloud_cost')       return this._fetchCost();
-        // Hypervisors
-        if (k === 'workstation_vms')  return this._fetchWorkstationVms();
         // No `?type=vm` on the URL: get_resources (api/proxmox.py) declares only
         // connection_id and node, so FastAPI dropped the parameter and the tile counted
         // LXC containers as VMs. Proxmox rows carry the discriminator themselves
@@ -702,65 +737,10 @@
         if (k === 'hyperv_vms')       return this._fetchListCount('/api/hyperv/vms',            'vms',       v => v.state === 'Running' || v.state === 'running');
         if (k === 'nutanix_vms')      return this._fetchListCount('/api/nutanix/vms',           'vms',       v => v.power_state === 'ON' || v.state === 'running');
         if (k === 'xcpng_vms')        return this._fetchListCount('/api/xcpng/vms',             'vms',       v => v.power_state === 'Running' || v.state === 'running');
-        // Containers
-        if (k === 'portainer_endpoints') return this._fetchPortainer();
-        if (k === 'ecs_tasks')        return this._fetchListCount('/api/containers/ecs-tasks',  'tasks');
-        if (k === 'aci_containers')   return this._fetchListCount('/api/containers/aci-containers', 'containers', c => c.state === 'Running');
-        if (k === 'gce_containers')   return this._fetchGceInstances();
-        if (k === 'cloud_run_jobs')   return this._fetchListCount('/api/containers/gce-cloud-run-jobs', 'jobs');
-        if (k === 'rancher_nodes')    return this._fetchListCount('/api/containers/rancher', 'nodes', n => (n.status || '').toUpperCase() === 'RUNNING');
-        if (k === 'portainer_node')   return this._fetchListCount('/api/containers/portainer/node', 'nodes', n => (n.status || '').toUpperCase() === 'RUNNING');
-        // Both kinds in one count — the auto-managed gateway per cloud and the ones
-        // operators deploy. The registry already omits deleted rows, so the total is
-        // what exists; `running` excludes provisioning/deleting/errored hosts, and the
-        // `missing`/`degraded` ones a reconcile found are not carrying sessions either.
-        // reconcile=false deliberately: this home page already fans out a per-cloud call
-        // per tile against a small thread pool, and one slow cloud wedging the whole page
-        // is a failure this dashboard has actually had. The Gateways tab reconciles on
-        // open; the tile reports what that last found.
-        if (k === 'gateways')         return this._fetchListCount('/api/gateways?reconcile=false', 'gateways', g => g.status === 'running');
-        // Managed services (creator-scoped server-side; no count field → list.length)
-        if (k === 'cloud_databases')  return this._fetchListCount('/api/databases',    'databases');
-        if (k === 'k8s_clusters')     return this._fetchListCount('/api/k8s/clusters',  'clusters');
         return { value: -1 };
       },
 
-      async _fetchCost() {
-        // Cross-cloud month-to-date spend. value = formatted total; secondary =
-        // per-cloud breakdown for the clouds that returned ok. -1 → unavailable.
-        try {
-          const r = await API.get('/api/costs/summary');
-          if (!r || r.total_mtd == null) return { value: -1 };
-          const cur = r.currency || 'USD';
-          const sym = cur === 'USD' ? '$' : (cur + ' ');
-          const fmt = n => sym + Math.round(n).toLocaleString();
-          const parts = (r.clouds || [])
-            .filter(c => c.status === 'ok' && c.amount != null)
-            .map(c => c.cloud + ' ' + fmt(c.amount));
-          // A cloud that is throttled or unreachable keeps serving its last known figure,
-          // so the tile has to say the total is not current — otherwise it reads as fresh.
-          if (r.stale && r.oldest_as_of) {
-            const d = new Date(r.oldest_as_of);
-            if (!isNaN(d)) parts.push('as of ' + d.toLocaleTimeString([], { hour: '2-digit',
-                                                                           minute: '2-digit' }));
-          }
-          return { value: fmt(r.total_mtd), secondary: parts.join(' · ') };
-        } catch (e) {
-          return { value: -1 };
-        }
-      },
 
-      async _fetchOciCustomImages() {
-        // OCI images come from one endpoint tagged source=platform|custom; the
-        // tile counts custom images only (parity with the GCP custom-images tile).
-        try {
-          const r = await API.get('/api/oci/images');
-          if (!r) return { value: -1 };
-          return { value: (r.images || []).filter(i => i.source === 'custom').length };
-        } catch (e) {
-          return { value: -1 };
-        }
-      },
 
       async _fetchListCount(url, listKey, runningPredicate, totalPredicate) {
         try {
@@ -787,38 +767,7 @@
         }
       },
 
-      async _fetchGceInstances() {
-        // GCE COS instances = gateways + compose (mirrors the merged
-        // "GCE Container Instances" table on the Containers page).
-        try {
-          const [jp, cp] = await Promise.all([
-            API.get('/api/containers/gce-jumpoints').catch(() => null),
-            API.get('/api/containers/gce-compose').catch(() => null),
-          ]);
-          if (!jp && !cp) return { value: -1 };
-          const all = [...(jp?.instances || []), ...(cp?.instances || [])];
-          return {
-            value: all.length,
-            secondary: all.filter(i => (i.status || '').toUpperCase() === 'RUNNING').length,
-          };
-        } catch (e) {
-          return { value: -1 };
-        }
-      },
 
-      async _fetchPortainer() {
-        // ONE call. This used to issue one request per workgroup with
-        // `?workgroup=<name>` and SUM the results — but list_endpoints
-        // (api/containers.py) declares no workgroup parameter, and containers.py has no
-        // per-row workgroup filtering at all; its only gate is
-        // require_permission('containers','read'). So every call returned the same full
-        // list and the tile reported endpoints x workgroups: a user in three workgroups
-        // saw 3x the real count, and the home page paid three requests for it.
-        const r = await API.get('/api/containers/endpoints').catch(() => null);
-        if (!r) return { value: -1 };
-        const eps = r.endpoints || [];
-        return { value: eps.length, secondary: eps.filter(e => e.status === 1).length };
-      },
 
       async loadJobs(silent = false) {
         if (!silent) this.loadingJobs = true;  // silent on poll → no list flicker

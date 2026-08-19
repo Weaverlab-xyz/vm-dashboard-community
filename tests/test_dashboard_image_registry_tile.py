@@ -67,13 +67,29 @@ def _field(tile_src, name):
     return m.group(1) if m else None
 
 
-def _fetcher(key):
-    """The `_fetchTile` line wired for `key`, through to the end of its statement."""
-    m = re.search(rf"k === '{key}'\)\s*return (?P<body>.*?);\n", DASHBOARD, re.S)
+DASHBOARD_API = _read("web_dashboard", "api", "dashboard.py")
+
+
+def _server_tile(name):
+    """The body of api/dashboard.py's builder for one DB-backed tile.
+
+    The dashboard reads every tile it can from GET /api/dashboard/stats now, so a tile's
+    wiring is a function here rather than a `_fetchTile` branch in the template. The failure
+    this guards against is unchanged: a tile with no wiring renders 'unavailable' on every
+    install, which is indistinguishable from a throttled cloud API.
+    """
+    m = re.search(rf"    def {name}\(\):\n(?P<body>(?:        .*\n|\n)+)", DASHBOARD_API)
     assert m, (
-        f"no fetcher is wired for the '{key}' tile — it would render 'unavailable' "
-        f"on every install, which looks exactly like a throttled cloud API")
+        f"api/dashboard.py has no {name}() builder — the tile it serves would render "
+        "'unavailable' on every install, which looks exactly like a throttled cloud API")
     return m.group("body")
+
+
+def _tile_is_registered(key):
+    """That `key` actually reaches the response, not just that a builder exists."""
+    assert f'_safe("{key}"' in DASHBOARD_API, (
+        f"'{key}' is not registered with _safe() in api/dashboard.py, so it never reaches "
+        "the response and the tile stays on 'unavailable'")
 
 
 def _images_router_paths():
@@ -104,11 +120,11 @@ def test_the_tile_counts_registered_images():
     assert TILE_KEY in tiles, (
         "the dashboard lost its Image Registry tile — /images has no count on the home page")
 
-    body = _fetcher(TILE_KEY)
-    assert "'/api/images'" in body, (
-        "the tile must count the registry list endpoint — the same call the /images "
-        "page renders from")
-    assert "'images'" in body, "the list lives under the `images` key in the response"
+    _tile_is_registered(TILE_KEY)
+    body = _server_tile("_registry")
+    assert "image_registry_service.list_images" in body, (
+        "the tile must count the registry through the same service the /images page "
+        "renders from, not a second query")
 
 
 def test_the_tile_is_labelled_for_the_page_it_opens():
@@ -162,10 +178,10 @@ def test_visible_tiles_honours_any_flag():
 
 def test_promoted_counts_only_completed_promotions():
     """The secondary renders green. running/pending/manual/failed are not landed images."""
-    body = _fetcher(TILE_KEY)
+    body = _server_tile("_registry")
     assert "promotions" in body, (
         "the secondary count must come off each image's promotions map")
-    assert "'completed'" in body, (
+    assert '"completed"' in body, (
         "counting every promotion regardless of status reports failed and in-flight "
         "promotions as landed images, in green")
 

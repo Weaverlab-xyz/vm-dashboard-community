@@ -94,11 +94,24 @@ def test_stale_figures_are_visually_distinct():
 
 def test_the_dashboard_tile_surfaces_staleness():
     """The tile shows one cross-cloud total. If one cloud is serving a last-known-good
-    figure, the total is not current and the tile has to say so."""
-    src = _src(_DASH)
-    block = src[src.index("async _fetchCost("):src.index("async _fetchOciCustomImages(")]
-    assert "oldest_as_of" in block and "r.stale" in block, (
-        "_fetchCost renders a possibly-stale total with no as-of marker")
+    figure, the total is not current and the tile has to say so.
+
+    The tile moved server-side: the dashboard now reads every tile from
+    /api/dashboard/stats instead of fetching /api/costs/summary itself, so the as-of and
+    stale markers are built in api/dashboard.py::_cost_tile and rendered from the response.
+    This used to slice `_fetchCost` out of dashboard.html; that fetcher is gone.
+    """
+    api = _src(os.path.join(_ROOT, "web_dashboard", "api", "dashboard.py"))
+    block = api[api.index("async def _cost_tile("):api.index("# ── the endpoint")]
+    assert "oldest_as_of" in block and 'payload.get("stale")' in block, (
+        "_cost_tile builds a possibly-stale total with no as-of or stale marker — the tile "
+        "would read as current while one cloud serves a last-known-good figure")
+
+    # And the page has to render it. `snapshotStale` is what marks the label.
+    dash = _src(_DASH)
+    assert "snapshotStale" in dash and "snapshotAsOf" in dash, (
+        "the dashboard no longer renders the snapshot's staleness, so a stale total looks "
+        "fresh")
 
 
 def test_the_refresh_button_reports_a_declined_requery():

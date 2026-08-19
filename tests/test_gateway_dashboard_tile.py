@@ -87,18 +87,32 @@ def test_the_tile_counts_managed_and_requested_together():
     """The point of the tile is one number for both kinds of gateway. `/api/gateways`
     is the only endpoint that returns both, and it already omits deleted rows.
 
-    Query parameters are allowed — the tile passes `reconcile=false` so the home page
-    doesn't fan a per-cloud SDK call out per tile — as long as none of them narrows which
-    rows come back."""
-    m = re.search(r"k === 'gateways'\)\s*return ([^\n]+)", DASHBOARD)
-    assert m, "no fetcher is wired for the gateways tile — it would read 'unavailable'"
-    fetcher = m.group(1)
-    assert re.search(r"'/api/gateways(\?[^']*)?'", fetcher), (
-        "the tile must count the whole registry; a per-cloud or per-kind endpoint "
-        "would make it a partial total")
-    assert "cloud=" not in fetcher, (
-        "a cloud filter would make the tile a partial total")
-    assert "'gateways'" in fetcher, "the list key in the /api/gateways response is 'gateways'"
+    The tile moved server-side — the page reads every tile it can from
+    GET /api/dashboard/stats — so the count is built in api/dashboard.py rather than fetched
+    from `/api/gateways?reconcile=false`. What must not change is that it counts the WHOLE
+    registry and does not reconcile: reconciling dials every cloud, and that endpoint makes
+    no cloud calls.
+    """
+    with open(os.path.join(_ROOT, "web_dashboard", "api", "dashboard.py"),
+              encoding="utf-8") as fh:
+        api = fh.read()
+
+    assert '_safe("gateways"' in api, (
+        "gateways is not registered with _safe() in api/dashboard.py, so it never reaches "
+        "the response and the tile reads 'unavailable'")
+
+    body = api[api.index("    def _gateways():"):api.index('    _safe("gateways"')]
+    assert "gateway_service.list_gateways(db)" in body, (
+        "the tile must count the whole registry through the same service the Gateways tab "
+        "lists from; a per-cloud call would make it a partial total")
+
+    # Comments stripped before the absence check: the code's own note explaining why it
+    # does NOT reconcile contains the word, so matching raw source fails the fix.
+    code = "\n".join(ln.split("#", 1)[0] for ln in body.splitlines())
+    assert "cloud=" not in code, "a cloud filter would make the tile a partial total"
+    assert "reconcile" not in code, (
+        "the aggregate must not reconcile — that dials every cloud, and this endpoint's "
+        "whole contract is that it makes no cloud call. The Gateways tab reconciles on open")
 
 
 def test_every_containers_hash_a_tile_links_to_is_a_tab_that_page_honours():

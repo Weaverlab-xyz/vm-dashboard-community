@@ -53,15 +53,26 @@ def _field(tile_src, name):
     return m.group(1) if m else None
 
 
+with open(os.path.join(_ROOT, "web_dashboard", "api", "dashboard.py"),
+          encoding="utf-8") as _f:
+    DASHBOARD_API = _f.read()
+
+
 def _fetcher_body():
-    """The body of `_fetchWorkstationVms` — the tile's fetcher, which also fills the
-    per-workgroup badge counts."""
-    marker = "async _fetchWorkstationVms()"
-    assert marker in DASHBOARD, (
-        "_fetchWorkstationVms is gone — the Workstation tile has no fetcher and the "
-        "workgroup badges have no counts")
-    body = DASHBOARD[DASHBOARD.index(marker):]
-    return body[:body.index("\n      },")]
+    """The body of api/dashboard.py's `_workstation` builder.
+
+    The tile moved server-side: the page reads every tile it can from
+    GET /api/dashboard/stats, so the Workstation count and the per-workgroup badge counts
+    are built here, from one query, instead of by the client looping the full /api/vms
+    payload. What this file guards is unchanged — that the count comes from the MERGED
+    rows and not from /api/vms/dashboard-stats, which counts a PowerShell-only table.
+    """
+    marker = "    def _workstation():"
+    assert marker in DASHBOARD_API, (
+        "api/dashboard.py has no _workstation() builder — the Workstation tile would read "
+        "'unavailable' and the workgroup badges would have no counts")
+    body = DASHBOARD_API[DASHBOARD_API.index(marker):]
+    return body[:body.index('    _safe("workstation_vms"')]
 
 
 def _sections():
@@ -114,15 +125,15 @@ def test_only_one_section_counts_on_prem_vms():
 def test_the_tile_counts_the_merged_list_not_the_powershell_only_stats():
     """`/api/vms` merges the local VMX scan with the rows an agent syncs;
     /api/vms/dashboard-stats counts `VMStateCache`, which only PowerShell writes."""
-    m = re.search(r"k === 'workstation_vms'\)\s*return ([^\n]+)", DASHBOARD)
-    assert m, "no fetcher is wired for the Workstation tile — it would read 'unavailable'"
-    fetcher = m.group(1)
-    assert "_fetchWorkstationVms()" in fetcher, (
-        "the Workstation tile needs its own fetcher: it feeds the workgroup badges too")
+    assert '_safe("workstation_vms"' in DASHBOARD_API, (
+        "workstation_vms is not registered with _safe(), so it never reaches the response "
+        "and the tile reads 'unavailable'")
 
     body = _fetcher_body()
-    assert "'/api/vms'" in body, "the tile must count the list endpoint"
-    assert "dashboard-stats" not in body, (
+    assert "_agent_workstation_vms" in body, (
+        "the tile must count the MERGED rows — api/vms.py::_agent_workstation_vms is the "
+        "same source the /vms page lists from")
+    assert "dashboard-stats" not in body and "dashboard_stats(" not in body, (
         "/api/vms/dashboard-stats counts VMStateCache alone — a table written only by the "
         "two PowerShell paths, so on a host with no local PowerShell it 500s and its "
         "total can never include an agent's Workstation VMs")
@@ -136,9 +147,14 @@ def test_the_workgroup_badges_still_get_their_counts():
     assert re.search(r"wg\.count = ", DASHBOARD), (
         "nothing assigns wg.count any more, so every workgroup badge renders '…' forever")
 
-    assert "wg.count = " in _fetcher_body(), (
-        "the badge counts must come off the same /api/vms call as the tile — a second "
-        "call for the same list is what folding them together removed")
+    assert "by_workgroup" in _fetcher_body(), (
+        "the badge counts must be built from the same rows as the tile. They used to come "
+        "from the client looping the full /api/vms payload; the server now sends "
+        "by_workgroup on the workstation tile, so the badges cannot disagree with the "
+        "number above them")
+    assert "by_workgroup" in DASHBOARD, (
+        "the page no longer reads by_workgroup off the snapshot, so the badges have no "
+        "source at all")
 
     # The premise: the badge block is gated on the same flag as the tile, so the fetcher
     # that fills it runs whenever the block is on screen.
