@@ -50,12 +50,45 @@ with a public, source-restricted IP (the konlet mechanism, same as the Rancher n
 | VM label | `purpose=portainer` (how the dashboard finds it) |
 | Ports | **9443** HTTPS UI/API, **8000** Edge agent tunnel |
 | Privileges | **Unprivileged**, no Docker socket — the server administers *remote* Docker hosts over the API, so it needs neither |
-| State | `/data` bind-mounted from the VM's boot disk |
+| State | `/data` on the VM's boot disk, or on a persistent disk — see [Durable state](#durable-state) |
 | TLS | self-signed certificate on 9443 |
 
-> **The node is ephemeral.** The boot disk auto-deletes, so tearing the node down —
-> or recreating it — wipes `/data`: users, environments and settings are all lost, and
-> the external IP changes. It is a disposable-lab tool, not a durable Portainer.
+> **By default the node is ephemeral.** The boot disk auto-deletes, so tearing the node
+> down — or recreating it — wipes `/data`: users, environments and settings are all
+> lost, and the external IP changes. Turn on [durable state](#durable-state) to keep
+> them.
+
+### Durable state
+
+Tick **Keep Portainer's data on a persistent disk** in **Settings → Containers**
+(`portainer_data_disk_enabled`) and `/data` moves to a separate disk named
+`<node-name>-data`, attached with `auto_delete=false`. A teardown then keeps the
+users, environments and settings, and the next deploy reattaches them.
+
+The mount is a konlet `gcePersistentDisk` volume rather than a cloud-init mount unit,
+because konlet formats the disk (`mkfs.ext4` on a blank one, `fsck` on a used one),
+mounts it, and only *then* starts the container. There is no window in which Portainer
+could come up against an unmounted directory and write its database to the boot disk
+instead.
+
+Four things follow from this, and they are the whole reason it is opt-in:
+
+- **The disk pins the node's zone.** A persistent disk is zonal and cannot attach
+  outside its own zone, so an existing disk overrides the region/zone pick and the
+  same-region capacity fallback is disabled. Deploying into a *different region* is
+  refused outright rather than silently landing back in the old one — move it with a
+  disk snapshot, or tear down with the disk deleted and rebuild.
+- **The external IP still changes.** Only `/data` is durable; the node takes a fresh
+  ephemeral IP on every recreate, so `portainer_url` is rewritten each deploy. This
+  matters for Edge agents — see [the warning below](#connect-a-docker-host-edge-agent).
+- **The admin password must be the one the disk already knows.** Portainer ignores
+  `--admin-password` once its database holds an admin, so a deploy onto an existing
+  disk keeps the *old* credential. Teardown therefore preserves
+  `portainer_admin_password` and `portainer_pat` whenever the disk is preserved. If the
+  disk exists but no password is stored, the deploy **fails up front** rather than
+  launching a node nobody can sign into.
+- **The disk keeps billing** until something deletes it. Teardown asks separately; see
+  [Teardown](#teardown).
 
 ### Prerequisites
 
@@ -139,8 +172,14 @@ the fieldset stays hidden otherwise.
 ### Teardown
 
 **Stop** on the node row removes the PRA Web Jump (when one exists), deletes the VM
-and its firewall rule, then clears `portainer_url`, `portainer_pat` and the node's
-other runtime config. Because the node is ephemeral, all Portainer state goes with it.
+and its firewall rule, then clears `portainer_url` and the node's other runtime config.
+
+- **Without a data disk** all Portainer state goes with the VM, and the admin password
+  and API token are cleared too.
+- **With a data disk** the disk is *kept* by default and the credential keys are
+  preserved with it, so the next deploy comes back with the same users, environments
+  and settings. A second confirmation offers to delete the disk as well — that is the
+  one part of a teardown that cannot be undone.
 
 ### Firewall
 
@@ -155,6 +194,100 @@ The node's ingress rule opens **tcp 9443 and 8000** to a merged source set:
 It is **fail-closed**: an empty merged set opens nothing, and deletes any existing
 rule. Set `gcp_portainer_allow_open` to open `0.0.0.0/0` when no CIDRs are set — a
 deliberate opt-in. **Settings → Containers** shows the live merged allow-list.
+
+---
+
+## Connect a Docker host (Edge agent)
+
+A managed node **cannot reach into your network.** It runs unprivileged with no Docker
+socket of its own, and it sits on a public IP with no route to a LAN address. So it can
+manage a Docker host only if that host comes to *it*.
+
+That is what an Edge agent does: the agent runs on the Docker host and polls **outbound**
+to the node's tunnel port 8000 — which the node's firewall already opens — so nothing
+inbound to your network is required, and no VPN.
+
+1. Open **Containers → Portainer**. Under **Connect a Docker host**, type an environment
+   name and click **Generate join command**.
+2. Run the generated `docker run` on the Docker host you want managed.
+3. The environment appears within a few seconds; **Refresh** lists it.
+
+The command sets `EDGE_INSECURE_POLL=1`, because the node serves a self-signed
+certificate. Without it the agent's first poll fails certificate verification and the
+environment simply never appears — with no error in a place you would think to look.
+
+> **The Edge key is shown once and is tied to the node's URL.** Portainer derives the
+> key from the node URL, its tunnel host and the new environment's id. The managed node
+> takes an **ephemeral external IP**, so recreating it changes the URL and every agent
+> joined beforehand stops being able to check in — which shows up as environments quietly
+> going offline, not as an error. The Containers page warns when the stored URL no longer
+> matches the running node; re-run **Generate join command** and re-join each host.
+
+---
+
+## Import from another Portainer
+
+Merges **users, teams, team memberships and registries** from another Portainer into the
+configured one. Existing names are matched rather than duplicated, so re-importing the
+same bundle is a no-op.
+
+### What a Portainer backup can and cannot do
+
+Portainer's own **Backup** produces a `tar.gz` of its `/data` volume. Two limits matter:
+
+- It **only restores into a pristine instance** with an empty data volume, during first
+  run. A managed node initializes its admin at container start (to dodge the
+  init-timeout lockout above), so it is *never* pristine — a `.tar.gz` cannot be
+  restored into one, and the dashboard will not pretend otherwise.
+- It never covered what is *deployed* on your environments — containers, volumes,
+  images. Portainer's docs say so explicitly.
+
+So the archive is opened where it already lives, and the dashboard imports a small
+reviewable JSON bundle instead.
+
+### Step 1 — turn a backup into a bundle (on your own machine)
+
+Skip to step 2 if the source Portainer is still running — point the exporter straight at
+it.
+
+```bash
+docker run -d --name portainer-scratch -p 9443:9443 portainer/portainer-ce:latest
+curl -k -X POST https://localhost:9443/api/restore \
+     -F "file=@portainer_backup.tar.gz" -F "password=<only if encrypted>"
+python -m web_dashboard.scripts.portainer_migrate export \
+     --url https://localhost:9443 --username admin --insecure --out bundle.json
+docker rm -f portainer-scratch
+```
+
+The restore must be the **first** thing that scratch instance is asked to do — Portainer
+closes its first-run window a short time after the container starts.
+
+The exporter is stdlib-only, so it needs no virtualenv. `inspect` reviews a bundle
+offline:
+
+```bash
+python -m web_dashboard.scripts.portainer_migrate inspect --bundle bundle.json
+```
+
+### Step 2 — import it
+
+**Containers → Portainer → Import from another Portainer** → choose the `.json`. This
+enqueues a `portainer_import` job; follow it at `/jobs/{job_id}`.
+
+Optionally pick an environment under **Deploy stacks onto**. Be deliberate: Portainer has
+no "save a stack without running it" API, so this **deploys** the bundle's stacks and
+starts containers.
+
+### What does not come across
+
+| Not migrated | Why |
+|---|---|
+| **Environment connections** | They address a local Docker socket or a LAN host this node cannot route to. The bundle records them under `reference` so you can see what existed; re-establish them as [Edge agents](#connect-a-docker-host-edge-agent). |
+| **User passwords** | Portainer's API never returns them, and the bundle scrubs credential-shaped fields regardless. Imported users get fresh generated passwords, reported **once** in the job result. |
+| **Registry credentials** | Same reason. A registry is recreated with its name and URL but **unauthenticated**, and the job names each one that needs its password re-entered. |
+| **Administrator role** | An imported user is always created as *standard*, even if the source had it as an administrator — a bundle is a hand-editable file from another server. The job says which users were downgraded; promote them in Portainer deliberately. |
+| **The node's own `admin`** | Skipped outright. The dashboard holds that credential; colliding with it is how you lose access to the node. |
+| **Anything deployed on the environments** | Portainer's backup never covered this either. |
 
 ---
 
@@ -203,6 +336,8 @@ list loads.
 | **Start / Stop** | One-click container power toggle |
 | **Deploy** | Launch a container from an image, or a stack from a compose file |
 | **Managed server** | Deploy / tear down a dashboard-run Portainer CE node (Option A) |
+| **Edge agent join** | Register an Edge environment and get the `docker run` for a host the dashboard can't reach |
+| **Bundle import** | Merge users, teams, memberships and registries from another Portainer |
 
 ---
 
@@ -237,7 +372,9 @@ on the run form is irrelevant — nothing is installed on it.
 | `gcp_portainer_machine_type` | `e2-small` | VM size — Portainer is light |
 | `gcp_portainer_name` | `portainer-server` | VM name |
 | `gcp_portainer_zone` | `""` | Blank auto-picks a zone in the region |
-| `gcp_portainer_boot_disk_gb` | `20` | COS boot disk (holds `/data`; auto-deletes) |
+| `gcp_portainer_boot_disk_gb` | `20` | COS boot disk (holds `/data` when no data disk; auto-deletes) |
+| `portainer_data_disk_enabled` | `false` | Put `/data` on a persistent disk that survives a teardown |
+| `gcp_portainer_data_disk_gb` | `10` | Size of that data disk |
 | `gcp_portainer_network_tag` | `portainer` | VM network tag = firewall target tag |
 | `gcp_portainer_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs are set |
 | `portainer_ui_web_jump_enabled` | `false` | Broker the UI via a PRA Web Jump (opt-in) |
@@ -293,6 +430,25 @@ inside the container: `docker compose exec app curl -Isk <portainer-url>/api/sys
 **"Unauthorized" error** — the PAT may have expired or been deleted. Regenerate a
 token in Portainer and update it in **Settings → Integrations → Portainer CE** (or
 update the vault secret if you stored a reference).
+
+**An Edge environment never comes online** — the agent polls outbound to the node's
+port 8000, so check that egress is allowed from the Docker host. If the node was
+recreated since the key was minted, the key is dead: Edge keys encode the node URL and
+the node's external IP is ephemeral. Generate a new join command and re-join the host.
+
+**An imported user can't log in** — imported users get a freshly generated password,
+shown once in the `portainer_import` job result. If that job output is gone, reset the
+password in Portainer.
+
+**"That file is not a JSON migration bundle"** — a Portainer `.tar.gz` backup was
+uploaded. It cannot be imported directly (it only restores into a pristine Portainer);
+open it with a throwaway Portainer and export a bundle first.
+
+**A deploy fails with "the Portainer data disk … already exists"** — durable state is on
+and the disk holds an admin whose password isn't in Settings. Portainer ignores
+`--admin-password` on an initialized database, so the node would come up with a password
+nobody knows. Set `portainer_admin_password` to the one the disk was created with, or
+delete the disk to start clean.
 
 **SSL certificate errors** — for self-signed certificates (including a managed node's)
 turn off **Verify SSL certificate** in the Portainer panel. For production, add your

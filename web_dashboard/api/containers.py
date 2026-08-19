@@ -13,7 +13,12 @@ Portainer CE container management endpoints.
                                            ECS / ACI / GCE via job
   GET  /api/containers/gce-compose       — list GCE compose COS instances
   POST /api/containers/gce-compose/{name}/stop — delete a GCE compose instance
+  POST /api/containers/portainer/import  — merge a migration bundle via job
+  POST /api/containers/portainer/edge-endpoint — register an Edge agent env
 """
+import base64
+import binascii
+import json
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -39,8 +44,11 @@ from ..models.containers import (
     GCEJumpointInfo,
     GCEJumpointListResponse,
     PortainerDeployRequest,
+    PortainerEdgeRequest,
+    PortainerEdgeResponse,
     PortainerEndpoint,
     PortainerEndpointList,
+    PortainerImportRequest,
     PortainerNodeInfo,
     PortainerNodeResponse,
     RancherDeployRequest,
@@ -55,13 +63,17 @@ from ..services import (
     aws_service,
     azure_service,
     compose_service,
+    config_service,
     container_inventory_service,
     job_service,
+    portainer_edge_service,
+    portainer_import_service,
     portainer_service,
     region_catalog,
     region_config,
     storage_service,
 )
+from ..scripts.portainer_migrate import bundle as portainer_bundle
 from ..services.aws_service import AWSError
 from ..services.azure_service import AzureError
 from ..services.compose_service import ComposeError
@@ -1083,9 +1095,14 @@ async def get_portainer_node(
         )
         for i in raw
     ]
+    data_disk_enabled = config_service.get_bool("portainer_data_disk_enabled", False)
+    node_name = config_service.get("gcp_portainer_name") or settings.gcp_portainer_name
     return PortainerNodeResponse(
         nodes=nodes, project_id=project_id, count=len(nodes), configured=configured,
-        server_url=server_url, token_configured=token_configured, login_hint=login_hint)
+        server_url=server_url, token_configured=token_configured, login_hint=login_hint,
+        data_disk_enabled=data_disk_enabled,
+        data_disk_name=f"{node_name}-data" if data_disk_enabled else "",
+        stale_edge_keys=portainer_edge_service.stale_keys_warning(raw))
 
 
 @router.get("/portainer/node/firewall")
@@ -1172,16 +1189,123 @@ async def deploy_portainer_node(
 async def stop_portainer_node(
     name: str,
     zone: str = Query("", description="GCE zone (blank → configured Portainer zone)"),
+    delete_data_disk: bool = Query(
+        False, description="Also delete the persistent data disk (irreversible)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "delete")),
 ):
-    """Tear down the Portainer node (VM + firewall) and clear the URL/token config.
-    Enqueues a durable `portainer_node_teardown` job. The node is EPHEMERAL — this
-    discards all Portainer state (users, environments, settings)."""
+    """Tear down the Portainer node (VM + firewall) and clear the URL config.
+    Enqueues a durable `portainer_node_teardown` job.
+
+    Without a persistent data disk the node is EPHEMERAL and this discards all
+    Portainer state (users, environments, settings). With one, the state survives and
+    the next deploy reattaches it — unless `delete_data_disk` is set, which is the one
+    irreversible part of a teardown."""
     if not _gcp_project_id():
         raise HTTPException(status_code=503, detail="GCP project not configured.")
     job = job_service.create_job(
         db, job_type="portainer_node_teardown", created_by=current_user.username,
-        metadata={"name": name, "zone": zone})
+        metadata={"name": name, "zone": zone,
+                  "delete_data_disk": bool(delete_data_disk)})
     return DeployContainerResponse(
         job_id=job.id, status="pending", message=f"Tearing down Portainer node '{name}'…")
+
+
+# ── Bundle import ────────────────────────────────────────────────────────────
+# The bundle is produced by `python -m web_dashboard.scripts.portainer_migrate` on
+# the operator's machine. It arrives as base64-in-JSON rather than multipart because
+# that is the one file-upload shape this app already has (see api/storage.py) — and
+# unlike a Portainer .tar.gz, a bundle is small, structured and free of credentials.
+
+#: Hard cap on a decoded bundle. This app has no request-body limit anywhere and its
+#: rate limiter is inert, so an unbounded base64 body would be held in RAM twice and
+#: then written into a job row. A real bundle is tens of KB; 5 MiB is generous.
+_MAX_BUNDLE_BYTES = 5 * 1024 * 1024
+
+
+@router.post("/portainer/import", response_model=DeployContainerResponse)
+async def import_portainer_bundle(
+    req: PortainerImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Merge a Portainer migration bundle into the configured Portainer.
+
+    Validates the bundle synchronously — a bad file should be a 400 the operator sees
+    immediately, not a failed job — then enqueues a durable `portainer_import`.
+
+    This never creates environment connections: the bundle records them for reference
+    only, because they address a local Docker socket or a LAN host this deployment
+    cannot route to. Pass `endpoint_id` to also deploy the bundle's stacks onto an
+    environment that already exists.
+    """
+    if not config_service.get("portainer_url"):
+        raise HTTPException(
+            status_code=503,
+            detail="No Portainer server is configured. Deploy a managed node, or set "
+                   "the URL and API token in Settings → Containers.")
+    try:
+        raw = base64.b64decode(req.content_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="content_b64 is not valid base64.")
+    if len(raw) > _MAX_BUNDLE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"That bundle is {len(raw) // 1024} KiB; the limit is "
+                   f"{_MAX_BUNDLE_BYTES // 1024} KiB. A migration bundle should be far "
+                   f"smaller — check you did not upload a Portainer .tar.gz backup, "
+                   f"which cannot be imported directly.")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(
+            status_code=400,
+            detail="That file is not a JSON migration bundle. A Portainer .tar.gz "
+                   "backup cannot be imported directly — open it with a throwaway "
+                   "Portainer and export a bundle first (see the Portainer docs page).")
+    problems = portainer_bundle.validate(doc)
+    if problems:
+        raise HTTPException(status_code=400,
+                            detail="This bundle cannot be imported: " + "; ".join(problems))
+
+    meta: dict = {"bundle": doc}
+    if req.endpoint_id:
+        meta["endpoint_id"] = int(req.endpoint_id)
+    job = job_service.create_job(
+        db, job_type="portainer_import", created_by=current_user.username, metadata=meta)
+    summary = portainer_import_service.summarize(doc)
+    return DeployContainerResponse(
+        job_id=job.id, status="pending",
+        message=f"Importing {summary['total']} object(s) into Portainer…")
+
+
+# ── Edge agent registration ──────────────────────────────────────────────────
+
+@router.post("/portainer/edge-endpoint", response_model=PortainerEdgeResponse)
+async def register_portainer_edge_endpoint(
+    req: PortainerEdgeRequest,
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Register an Edge-agent environment and return the command that joins it.
+
+    This is how a Docker host the dashboard cannot reach becomes a managed
+    environment: the agent runs ON that host and polls OUT to the node's tunnel port
+    (8000, already open in the node's firewall), so nothing inbound is needed.
+
+    Inline rather than a job — two HTTP calls against a node we already hold a token
+    for, with nothing to poll. The Edge key is shown ONCE, in this response: it is
+    derived from the node's current URL, so it is never cached and a node whose
+    external IP changes invalidates every key issued before the change.
+    """
+    try:
+        return PortainerEdgeResponse(
+            **await portainer_edge_service.register(
+                req.name, image=req.agent_image or "",
+                checkin_interval=req.checkin_interval
+                or portainer_edge_service.DEFAULT_CHECKIN_INTERVAL))
+    except PortainerNotConfigured as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "portainer_not_configured", "message": str(exc)})
+    except PortainerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))

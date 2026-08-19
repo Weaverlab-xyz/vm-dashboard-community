@@ -1194,6 +1194,14 @@ class Settings(BaseSettings):
     gcp_portainer_boot_disk_gb: int = 20  # COS boot disk (holds /var/lib/portainer; auto-deletes on delete)
     gcp_portainer_network_tag: str = "portainer"  # network tag on the VM = firewall target tag
     gcp_portainer_allow_open: bool = False  # opt-in to open 0.0.0.0/0 when portainer_allowed_source_cidrs is empty; otherwise empty = firewall NOT opened (fail closed)
+    # Optional DURABLE state: back /data with a separate persistent disk (konlet
+    # gcePersistentDisk volume) instead of the auto-delete boot disk, so users,
+    # environments and settings survive a teardown/recreate. A PD is ZONAL, so an
+    # existing disk PINS the node's zone — moving region needs a snapshot, not a
+    # redeploy. Off by default: the disk outlives the node and costs money until
+    # something deletes it.
+    portainer_data_disk_enabled: bool = False   # back /data with a persistent disk that survives teardown
+    gcp_portainer_data_disk_gb: int = 10        # size of that data disk (Portainer's DB is small; 10 GB is ample)
 
     # ── Oracle Cloud Infrastructure (OCI) ─────────────────────────────────────
     # The fourth cloud provider. Compute VM CRUD is SDK-based (the `oci` Python

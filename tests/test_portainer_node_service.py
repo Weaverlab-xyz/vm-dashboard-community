@@ -36,6 +36,7 @@ _settings = types.SimpleNamespace(
     gcp_portainer_image="portainer/portainer-ce:latest",
     gcp_portainer_machine_type="e2-small", gcp_portainer_boot_disk_gb=20,
     gcp_portainer_network_tag="portainer", portainer_ready_timeout_s=300,
+    gcp_portainer_data_disk_gb=10,
 )
 _cfg_mod = types.ModuleType("web_dashboard.config")
 _cfg_mod.settings = _settings
@@ -341,6 +342,166 @@ def test_the_init_timeout_is_not_mistaken_for_an_existing_admin():
 def test_portainer_url_uses_9443():
     assert gcp_service._portainer_url("203.0.113.9") == "https://203.0.113.9:9443"
     assert gcp_service._portainer_url("") == ""
+
+
+# ── Durable state: the optional persistent data disk ─────────────────────────────
+
+def _node_service_src() -> str:
+    return open(os.path.join(_ROOT, "web_dashboard", "services",
+                             "portainer_node_service.py"), encoding="utf-8").read()
+
+
+def _gcp_service_src() -> str:
+    return open(os.path.join(_ROOT, "web_dashboard", "services",
+                             "gcp_service.py"), encoding="utf-8").read()
+
+
+def test_the_data_disk_is_off_by_default():
+    """Durability is opt-in: the disk outlives the node and bills until deleted, and
+    every pre-existing install must keep the ephemeral behaviour it was built with."""
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a")
+    assert _node_params()["data_disk_name"] == ""
+    assert _node_params()["data_disk_gb"] == 10
+
+
+def test_the_data_disk_name_derives_from_the_node_name():
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_data_disk_enabled="1")
+    assert _node_params()["data_disk_name"] == "portainer-server-data"
+    # A renamed node gets its own disk rather than silently adopting another's.
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_data_disk_enabled="1", gcp_portainer_name="lab-portainer")
+    assert _node_params()["data_disk_name"] == "lab-portainer-data"
+
+
+def test_container_spec_uses_konlets_persistent_disk_keys_when_durable():
+    """konlet's schema, not Kubernetes': gcePersistentDisk/pdName/fsType, and NO
+    readOnly inside it. A misspelled key is not a validation error — konlet mounts
+    nothing and Portainer writes its DB to the boot disk instead, which looks like a
+    working deploy right up until the teardown loses everything."""
+    import yaml
+    spec = yaml.safe_load(gcp_service._portainer_container_spec_yaml(
+        "portainer/portainer-ce:latest", data_pd_name="portainer-data"))
+    vol = spec["spec"]["volumes"][0]
+    assert set(vol) == {"name", "gcePersistentDisk"}, vol
+    assert vol["gcePersistentDisk"] == {"pdName": "portainer-data", "fsType": "ext4"}, vol
+    assert "hostPath" not in vol, "the durable spec must not also carry a host path"
+    # The mount point Portainer actually reads is unchanged.
+    assert spec["spec"]["containers"][0]["volumeMounts"][0]["mountPath"] == "/data"
+
+
+def test_the_pd_name_matches_the_attached_device_name():
+    """konlet resolves a gcePersistentDisk as /dev/disk/by-id/google-<pdName>, so the
+    disk MUST be attached with device_name == pdName or the container never starts."""
+    src = _gcp_service_src()
+    launcher = src[src.index("def _run_gce_portainer_sync"):]
+    assert "data_disk.device_name = _PORTAINER_DATA_DEVICE" in launcher, launcher[:0]
+    spec_fn = src[src.index("def _portainer_container_spec_yaml"):
+                  src.index("def _ensure_portainer_firewall_sync")]
+    assert 'data_pd_name=_PORTAINER_DATA_DEVICE' in launcher or \
+           '"pdName": data_pd_name' in spec_fn, "pdName is not wired to the device name"
+
+
+def test_the_data_disk_outlives_the_vm():
+    """auto_delete=False on the data disk is the whole feature — the boot disk keeps
+    auto_delete=True so the OS is still disposable."""
+    src = _gcp_service_src()
+    launcher = src[src.index("def _run_gce_portainer_sync"):]
+    assert "data_disk.auto_delete = False" in launcher
+    assert "disk.auto_delete = True" in launcher, "the boot disk should stay ephemeral"
+
+
+def test_a_preexisting_data_disk_pins_the_zone():
+    """A persistent disk is zonal. Falling back to a sibling zone on capacity would
+    launch a node with a fresh empty disk and strand the real state next door, so an
+    existing disk collapses the candidate list to exactly its own zone."""
+    src = _gcp_service_src()
+    launcher = src[src.index("def _run_gce_portainer_sync"):]
+    find_at = launcher.index("_find_portainer_data_disk_sync(project_id, data_disk_name)")
+    cand_at = launcher.index("_rancher_candidate_zones(")
+    assert find_at < cand_at, (
+        "the disk lookup must precede zone selection — it overrides the region pick")
+    assert "candidate_zones = [pinned]" in launcher
+
+
+def test_an_empty_disk_is_removed_when_its_zone_is_exhausted():
+    """Retrying the next zone would otherwise leave a blank disk behind in every
+    exhausted zone — but a PRE-EXISTING disk must never be deleted, because it is the
+    state we are trying to keep."""
+    src = _gcp_service_src()
+    launcher = src[src.index("def _run_gce_portainer_sync"):]
+    assert "if disk_created_here:" in launcher, (
+        "the cleanup is not gated on the disk having been created by this attempt")
+    guard_at = launcher.index("if disk_created_here:")
+    del_at = launcher.index("_delete_portainer_data_disk_sync(project_id, cand, data_disk_name)")
+    assert guard_at < del_at
+
+
+def test_a_preexisting_db_never_gets_a_regenerated_password():
+    """Portainer ignores --admin-password once its DB holds an admin. A fresh VM back on
+    an existing data disk therefore comes up with the OLD password, so persisting a
+    newly generated one would store a credential that was never real and the deploy
+    would fail to sign in."""
+    src = _node_service_src()
+    body = src[src.index("async def run_deploy"):]
+    assert "state_preexisting = bool(res.get(\"reused\") or res.get(\"data_disk_reused\"))" in body, (
+        "the deploy does not treat a reattached data disk as pre-existing state")
+    assert 'if pw_hash and not state_preexisting:' in body, (
+        "the password is persisted without checking for a pre-existing DB")
+    # And it must refuse BEFORE launching when it has no password for an existing disk.
+    guard_at = body.index("already exists in")
+    launch_at = body.index("run_gce_portainer(")
+    assert guard_at < launch_at, (
+        "the missing-password guard must run before the VM is created")
+
+
+def test_a_preexisting_db_reuses_its_token_instead_of_reminting():
+    """The PAT lives in Portainer's DB, so it survives with the disk. Re-minting under
+    the same fixed description on every durable redeploy is the avoidable risk."""
+    body = _node_service_src()
+    deploy = body[body.index("async def run_deploy"):]
+    assert "if state_preexisting and existing_pat:" in deploy, (
+        "a fresh VM on an existing disk (reused=False) would re-mint needlessly")
+    boot = body[body.index("async def _bootstrap"):body.index("async def run_deploy")]
+    assert "state_preexisting" in boot and "description=f\"vm-dashboard-" in boot, (
+        "a forced re-mint must not collide with the token already in the restored DB")
+
+
+def test_teardown_keeps_the_credential_when_the_disk_survives():
+    """This is the coupling that silently bricks the feature: clear the password while
+    keeping the disk and the NEXT deploy can never log in."""
+    src = _node_service_src()
+    body = src[src.index("async def run_teardown"):]
+    assert "state_survives = bool(data_disk_name) and not delete_data_disk" in body
+    keep_at = body.index("state_survives = ")
+    clear_at = body.index('cleared += ["portainer_pat", "portainer_admin_password"')
+    assert keep_at < clear_at
+    assert "if not state_survives:" in body, (
+        "the credential keys are cleared unconditionally")
+
+
+def test_teardown_preserves_the_data_disk_unless_asked():
+    """Deleting the only copy of the node's users and environments must be an explicit
+    act, not the default a routine teardown takes."""
+    gsrc = _gcp_service_src()
+    sig = gsrc[gsrc.index("async def stop_gce_portainer"):]
+    sig = sig[:sig.index('"""')]
+    assert "delete_data_disk: bool = False" in sig, sig
+    nsrc = _node_service_src()
+    body = nsrc[nsrc.index("async def run_teardown"):]
+    assert 'delete_data_disk = bool(meta.get("delete_data_disk"))' in body
+    # The disk delete has to follow the VM delete — an attached disk can't be removed.
+    order = gsrc[gsrc.index("async def stop_gce_portainer"):]
+    assert order.index("_terminate_instance_sync") < order.index("_delete_portainer_data_disk_sync")
+
+
+def test_a_region_move_is_refused_when_state_is_durable():
+    """The launcher pins to the disk's zone, so a region pick would silently not happen.
+    Failing loudly beats a deploy that reports a region it didn't move to."""
+    body = _node_service_src()
+    deploy = body[body.index("async def run_deploy"):]
+    assert 'elif p["data_disk_name"]:' in deploy
+    assert "cannot be attached in another region" in deploy
 
 
 if __name__ == "__main__":

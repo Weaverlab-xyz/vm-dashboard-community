@@ -2743,17 +2743,26 @@ async def list_gce_rancher(project_id: str) -> list[dict]:
 # capabilities. COS runs it on the HOST network, so 9443 (HTTPS UI) and 8000 (Edge
 # agent tunnel) bind on the VM and reachability is governed by the firewall.
 #
-# The node is EPHEMERAL like Rancher's: /data lives on the auto-delete boot disk,
-# so a teardown wipes users, endpoints and settings — a disposable-lab posture.
+# By DEFAULT the node is EPHEMERAL like Rancher's: /data lives on the auto-delete
+# boot disk, so a teardown wipes users, endpoints and settings — a disposable-lab
+# posture. Pass ``data_disk_name`` to instead back /data with a SEPARATE persistent
+# disk that survives a teardown (see :func:`_ensure_portainer_data_disk_sync`).
 
 _PORTAINER_LABEL = "portainer"
 
-# Host path backing the container's /data volume (Portainer's whole state dir).
+# Host path backing the container's /data volume (Portainer's whole state dir) when
+# no persistent data disk is used.
 _PORTAINER_DATA_HOSTPATH = "/var/lib/portainer"
+
+# Device name of the optional persistent data disk. konlet resolves a
+# gcePersistentDisk volume as /dev/disk/by-id/google-<pdName>, so the disk MUST be
+# attached with device_name == pdName or the container never starts.
+_PORTAINER_DATA_DEVICE = "portainer-data"
 
 
 def _portainer_container_spec_yaml(container_image: str,
-                                   admin_password_hash: str = "") -> str:
+                                   admin_password_hash: str = "",
+                                   data_pd_name: str = "") -> str:
     """Generate the gce-container-declaration konlet YAML for the Portainer server.
 
     No ``privileged`` and no Docker-socket mount — the managed server administers
@@ -2770,7 +2779,20 @@ def _portainer_container_spec_yaml(container_image: str,
     initialization timeout" — a window the dashboard was racing (and losing) while it
     waited for the node to serve, leaving a node nobody could ever log into. Passing
     the hash up front means there is no window to lose. konlet hands ``args`` straight
-    to the entrypoint (no shell), so the ``$`` in a bcrypt hash needs no escaping."""
+    to the entrypoint (no shell), so the ``$`` in a bcrypt hash needs no escaping.
+
+    ``data_pd_name`` switches the /data volume from a boot-disk host path to a
+    ``gcePersistentDisk`` volume, which is what makes the node's state durable. konlet
+    owns the whole mount: it resolves ``/dev/disk/by-id/google-<pdName>``, runs
+    ``mkfs.ext4`` when the disk has no filesystem and ``fsck`` when it does, mounts it,
+    and only then starts the container. That ordering is why this is a declaration
+    change rather than a cloud-init mount unit — there is no window where Portainer
+    could come up against an unmounted directory and write its DB to the boot disk.
+
+    The key names here are konlet's, not Kubernetes': ``gcePersistentDisk`` takes
+    ``pdName``/``fsType``/``partition`` and has NO ``readOnly`` (that lives on the
+    volumeMount). A misspelled key is not a validation error — konlet sees an empty
+    volume and the container starts with nothing mounted."""
     import yaml
     spec = {
         "spec": {
@@ -2786,6 +2808,9 @@ def _portainer_container_spec_yaml(container_image: str,
                 "tty": False,
             }],
             "volumes": [{
+                "name": "portainer-data",
+                "gcePersistentDisk": {"pdName": data_pd_name, "fsType": "ext4"},
+            } if data_pd_name else {
                 "name": "portainer-data",
                 "hostPath": {"path": _PORTAINER_DATA_HOSTPATH},
             }],
@@ -2874,6 +2899,81 @@ def _portainer_url(external_ip: str) -> str:
     return f"https://{external_ip}:9443" if external_ip else ""
 
 
+def _find_portainer_data_disk_sync(project_id: str, disk_name: str) -> dict:
+    """Locate an existing Portainer data disk anywhere in the project.
+
+    A persistent disk is ZONAL and can only attach to an instance in its own zone, so
+    an existing disk PINS the node's zone. Returning the zone lets the launcher refuse
+    to fall back to a sibling zone, which would otherwise silently launch a node with
+    a brand-new empty disk and leave the real state orphaned in the old zone."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.DisksClient(credentials=creds)
+    request = compute_v1.AggregatedListDisksRequest(
+        project=project_id, filter=f'name = "{disk_name}"')
+    for zone_path, scoped in client.aggregated_list(request=request):
+        for disk in (scoped.disks or []):
+            if disk.name == disk_name:
+                return {"name": disk.name, "zone": zone_path.split("/")[-1],
+                        "self_link": disk.self_link, "size_gb": int(disk.size_gb or 0)}
+    return {}
+
+
+def _ensure_portainer_data_disk_sync(project_id: str, zone: str, disk_name: str,
+                                     size_gb: int = 10) -> dict:
+    """Create the Portainer data disk in ``zone`` if it isn't there already.
+
+    Idempotent: an existing disk is returned untouched (never resized, never
+    reformatted — konlet's fsck path expects to find the filesystem it made). The disk
+    is created blank; konlet formats it ext4 on first boot."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import Conflict, NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.DisksClient(credentials=creds)
+    try:
+        existing = client.get(project=project_id, zone=zone, disk=disk_name)
+        return {"name": existing.name, "zone": zone, "self_link": existing.self_link,
+                "size_gb": int(existing.size_gb or 0), "created": False}
+    except NotFound:
+        pass
+
+    disk = compute_v1.Disk()
+    disk.name = disk_name
+    disk.size_gb = size_gb
+    disk.type_ = f"zones/{zone}/diskTypes/pd-balanced"
+    disk.labels = {"managed-by": "vm-dashboard", "purpose": _PORTAINER_LABEL}
+    logger.info("Creating Portainer data disk '%s' in %s (%d GB)", disk_name, zone, size_gb)
+    try:
+        op = client.insert(project=project_id, zone=zone, disk_resource=disk)
+        op.result(timeout=180)
+    except Conflict:
+        # Raced another deploy — the disk now exists, which is all we needed.
+        logger.info("Portainer data disk '%s' already created concurrently", disk_name)
+    info = client.get(project=project_id, zone=zone, disk=disk_name)
+    return {"name": info.name, "zone": zone, "self_link": info.self_link,
+            "size_gb": int(info.size_gb or 0), "created": True}
+
+
+def _delete_portainer_data_disk_sync(project_id: str, zone: str, disk_name: str) -> None:
+    """Delete the Portainer data disk. A missing disk is success."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.DisksClient(credentials=creds)
+    try:
+        op = client.delete(project=project_id, zone=zone, disk=disk_name)
+        op.result(timeout=180)
+        logger.info("Deleted Portainer data disk '%s' in %s", disk_name, zone)
+    except NotFound:
+        logger.info("Portainer data disk '%s' already absent in %s", disk_name, zone)
+
+
 def _run_gce_portainer_sync(
     project_id: str,
     zone: str,
@@ -2888,6 +2988,8 @@ def _run_gce_portainer_sync(
     create_external_ip: bool = True,
     region: str = "",
     admin_password_hash: str = "",
+    data_disk_name: str = "",
+    data_disk_gb: int = 10,
 ) -> dict:
     """Launch (or reuse) a COS GCE instance running the Portainer CE server.
     Idempotent on existence: a RUNNING same-named VM is returned as-is; a stopped
@@ -2902,7 +3004,14 @@ def _run_gce_portainer_sync(
     ``zone`` may be blank — the launcher then auto-picks a valid zone in ``region``
     (falling back to ``region_of(zone)`` when only a zone is given). On a fresh
     launch it tries sibling zones in the same region on ``ZONE_RESOURCE_POOL_EXHAUSTED``
-    so a single capacity-exhausted zone doesn't fail the deploy."""
+    so a single capacity-exhausted zone doesn't fail the deploy.
+
+    ``data_disk_name`` backs /data with a separate persistent disk that OUTLIVES the
+    VM, which is what makes the node durable. Two rules fall out of a PD being zonal:
+    an EXISTING disk pins the zone (the sibling-zone fallback is disabled, because
+    launching next door would abandon the real state), and a disk this call created
+    only to hit a capacity failure is deleted again before moving on, so an exhausted
+    zone doesn't litter empty disks."""
     _require_compute()
     from google.cloud import compute_v1
     from google.api_core.exceptions import NotFound
@@ -2934,12 +3043,31 @@ def _run_gce_portainer_sync(
                 "status": status, "external_ip": external_ip,
                 "internal_ip": _internal_ip_of(existing),
                 "url": _portainer_url(external_ip), "reused": True,
+                # The VM survived, so its Portainer DB did too — the caller must treat
+                # the admin credential as pre-existing whether or not a PD is in play.
+                "data_disk_name": data_disk_name,
+                "data_disk_reused": bool(data_disk_name),
             }
         except NotFound:
             pass
 
-    candidate_zones = _rancher_candidate_zones(project_id, region, zone, creds,
-                                               log_label="portainer")
+    # An existing data disk pins the zone: attaching is only possible in its own zone,
+    # and launching elsewhere would strand the state. Do this BEFORE picking candidate
+    # zones so the pin also overrides a caller-supplied region.
+    existing_disk = (_find_portainer_data_disk_sync(project_id, data_disk_name)
+                     if data_disk_name else {})
+    if existing_disk:
+        pinned = existing_disk["zone"]
+        if zone and zone != pinned:
+            logger.warning(
+                "Portainer data disk '%s' lives in %s but zone %s was requested — "
+                "pinning to %s to keep the existing state (a zone move needs a "
+                "snapshot, not a relaunch)", data_disk_name, pinned, zone, pinned)
+        candidate_zones = [pinned]
+        region = pinned.rsplit("-", 1)[0] or region
+    else:
+        candidate_zones = _rancher_candidate_zones(project_id, region, zone, creds,
+                                                   log_label="portainer")
     if not candidate_zones:
         raise GCPError(
             f"No available zone found in region '{region or '(unknown)'}' for the "
@@ -2977,7 +3105,9 @@ def _run_gce_portainer_sync(
         )]
     instance.network_interfaces = [nic]
 
-    container_yaml = _portainer_container_spec_yaml(container_image, admin_password_hash)
+    container_yaml = _portainer_container_spec_yaml(
+        container_image, admin_password_hash,
+        data_pd_name=_PORTAINER_DATA_DEVICE if data_disk_name else "")
     instance.metadata = compute_v1.Metadata(items=[
         compute_v1.Items(key="gce-container-declaration", value=container_yaml),
         compute_v1.Items(key="google-logging-enabled", value="true"),
@@ -2991,6 +3121,19 @@ def _run_gce_portainer_sync(
     last_err = None
     for cand in candidate_zones:
         instance.machine_type = f"zones/{cand}/machineTypes/{machine_type}"
+        # The data disk must exist before the insert that attaches it, and it is zonal
+        # — so it is created per candidate zone, not once up front.
+        disk_created_here = False
+        if data_disk_name:
+            ensured = _ensure_portainer_data_disk_sync(
+                project_id, cand, data_disk_name, data_disk_gb)
+            disk_created_here = ensured.get("created", False)
+            data_disk = compute_v1.AttachedDisk()
+            data_disk.boot = False
+            data_disk.auto_delete = False   # the whole point: outlive the VM
+            data_disk.source = ensured["self_link"]
+            data_disk.device_name = _PORTAINER_DATA_DEVICE  # must match pdName
+            instance.disks = [disk, data_disk]
         logger.info("Starting GCE COS Portainer '%s' in %s (image=%s, machine=%s)",
                     name, cand, container_image, machine_type)
         try:
@@ -3002,6 +3145,14 @@ def _run_gce_portainer_sync(
             if _should_try_next_zone(e) and cand != candidate_zones[-1]:
                 logger.warning("Portainer zone %s could not take the instance (%s) — trying "
                                "the next zone in %s", cand, e, region)
+                # Only a disk THIS iteration created is safe to remove; a pre-existing
+                # one holds real state and is why the zone list is pinned to one entry.
+                if disk_created_here:
+                    try:
+                        _delete_portainer_data_disk_sync(project_id, cand, data_disk_name)
+                    except Exception as disk_err:
+                        logger.warning("Could not clean up the empty Portainer data disk "
+                                       "in %s (continuing): %s", cand, disk_err)
                 last_err = e
                 continue
             raise
@@ -3015,6 +3166,12 @@ def _run_gce_portainer_sync(
         "status": info.status, "external_ip": external_ip,
         "internal_ip": _internal_ip_of(info),
         "url": _portainer_url(external_ip), "reused": False,
+        "data_disk_name": data_disk_name,
+        # A FRESH VM on a PRE-EXISTING disk is the durable-redeploy case: the VM is new
+        # but Portainer's DB (admin user, tokens, environments) came back with the disk.
+        # The caller must not mint a new admin password for it — Portainer ignores
+        # --admin-password once an admin exists, so the new password would be a fiction.
+        "data_disk_reused": bool(existing_disk),
     }
 
 
@@ -3031,6 +3188,8 @@ async def run_gce_portainer(
     create_external_ip: bool = True,
     region: str = "",
     admin_password_hash: str = "",
+    data_disk_name: str = "",
+    data_disk_gb: int = 10,
 ) -> dict:
     """Async wrapper for _run_gce_portainer_sync."""
     try:
@@ -3039,6 +3198,7 @@ async def run_gce_portainer(
             project_id, zone, name, container_image,
             network, subnetwork, machine_type, boot_disk_gb, network_tag,
             "cos-stable", create_external_ip, region, admin_password_hash,
+            data_disk_name, data_disk_gb,
         )
     except GCPError:
         raise
@@ -3059,9 +3219,16 @@ async def ensure_portainer_firewall(project_id: str, network: str, tag: str,
 
 
 async def stop_gce_portainer(project_id: str, zone: str, name: str, *,
-                             delete_firewall: bool = False, firewall_name: str = "") -> None:
+                             delete_firewall: bool = False, firewall_name: str = "",
+                             data_disk_name: str = "",
+                             delete_data_disk: bool = False) -> None:
     """Delete the Portainer node VM (quiet no-op if absent). Optionally delete its
-    ingress firewall rule too."""
+    ingress firewall rule too.
+
+    The data disk is PRESERVED unless ``delete_data_disk`` is set. That default is the
+    durable posture: a teardown is how you move or resize the node, and the disk is the
+    only copy of the users, environments and settings. Deleting it is a separate,
+    explicit act because it is the one irreversible part of a teardown."""
     try:
         await _to_thread(_terminate_instance_sync, project_id, zone, name)
     except Exception as e:
@@ -3074,6 +3241,31 @@ async def stop_gce_portainer(project_id: str, zone: str, name: str, *,
         except Exception as e:
             logger.warning("Portainer firewall '%s' delete failed (continuing): %s",
                            firewall_name, e)
+    if delete_data_disk and data_disk_name:
+        # Must follow the VM delete — an attached disk cannot be removed. The disk may
+        # live in a different zone than the caller thinks, so resolve it rather than
+        # trusting ``zone``.
+        found = await _to_thread(_find_portainer_data_disk_sync, project_id, data_disk_name)
+        if found:
+            try:
+                await _to_thread(_delete_portainer_data_disk_sync,
+                                 project_id, found["zone"], data_disk_name)
+            except Exception as e:
+                raise GCPError(
+                    f"The Portainer node was deleted but its data disk "
+                    f"'{data_disk_name}' in {found['zone']} could not be removed: {e}"
+                ) from e
+
+
+async def find_portainer_data_disk(project_id: str, disk_name: str) -> dict:
+    """The Portainer data disk (``{}`` when there is none), for reporting whether the
+    node's state is durable and which zone it pins."""
+    try:
+        return await _to_thread(_find_portainer_data_disk_sync, project_id, disk_name)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to look up Portainer data disk '{disk_name}': {e}") from e
 
 
 def _list_gce_portainer_sync(project_id: str) -> list[dict]:

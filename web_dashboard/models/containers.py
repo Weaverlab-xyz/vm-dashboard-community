@@ -247,6 +247,13 @@ class PortainerNodeResponse(BaseModel):
     server_url: str = ""   # the pinned portainer_url (if a node is deployed)
     token_configured: bool = False  # a portainer_pat is stored, so the Containers tab can talk to it
     login_hint: str = ""   # how to log in; the auto-generated password is echoed, an operator-set one never is
+    # Durable state. The teardown confirmation has to differ on this: with a data disk
+    # the users/environments/settings SURVIVE, without one they are gone for good.
+    data_disk_enabled: bool = False  # /data is on a persistent disk that outlives the VM
+    data_disk_name: str = ""         # that disk's name (blank when durable state is off)
+    # Set when the stored URL no longer matches the running node: Edge keys are derived
+    # from the node URL, so every agent joined before the change has stopped checking in.
+    stale_edge_keys: str = ""
 
 
 class PortainerDeployRequest(BaseModel):
@@ -262,3 +269,41 @@ class PortainerDeployRequest(BaseModel):
     jump_group: Optional[str] = None         # PRA Jump Group name
     jumpoint_name: Optional[str] = None      # PRA Jumpoint name
     vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
+
+
+class PortainerEdgeRequest(BaseModel):
+    """Register an Edge-agent environment on the configured Portainer."""
+    name: str                                # environment name shown in Portainer
+    agent_image: Optional[str] = None        # blank -> portainer/agent:latest
+    checkin_interval: Optional[int] = None   # seconds; blank -> Portainer's default (5)
+
+
+class PortainerEdgeResponse(BaseModel):
+    """Everything needed to join the host, including the one-time Edge key.
+
+    The key is derived from the node's CURRENT url and is never stored — a node whose
+    external IP changes invalidates every key issued before the change.
+    """
+    endpoint_id: int
+    name: str
+    edge_id: str
+    edge_key: str                            # shown once; not persisted anywhere
+    server_url: str                          # the address the agent will dial
+    tunnel_port: int                         # 8000, already open in the node firewall
+    join_command: str                        # docker run ... to paste on the host
+
+
+class PortainerImportRequest(BaseModel):
+    """A Portainer migration bundle, produced by
+    ``python -m web_dashboard.scripts.portainer_migrate export``.
+
+    base64-in-JSON rather than multipart, matching the one upload shape this app
+    already has (``api/storage.py``). The route enforces a size cap and validates the
+    decoded document before queuing anything.
+    """
+    filename: str = ""                       # for the job result only; not trusted as a path
+    content_b64: str                         # the bundle JSON, base64-encoded
+    # Stacks are DEPLOYED, not stored — Portainer has no save-without-running call —
+    # so they are skipped unless the operator names an environment that already
+    # exists. Environment connections themselves are never imported.
+    endpoint_id: Optional[int] = None        # target environment for the bundle's stacks
