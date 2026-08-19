@@ -479,7 +479,11 @@ function functionsPage() {
 
     // Only workloads implementing the Entitle Remote Adapter contract can be
     // registered; offering it on echo_diag would just produce a broken integration.
-    isAdapter(fn) { return ['db_grant', 'portainer_access', 'azure_role_grant', 'entitle_webhook_echo'].includes(fn.workload); },
+    // Read from the catalog (each module's own ENTITLE_ADAPTER flag) rather than a
+    // list here, which is what this was and drifted from the modules it named.
+    isAdapter(fn) {
+      return !!(this.workloads.find(w => w.name === fn.workload) || {}).entitle_adapter;
+    },
 
     async toggleEntitle(fn) {
       const action = fn.entitle_integration_id ? 'deregister' : 'register';

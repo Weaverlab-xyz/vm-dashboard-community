@@ -248,6 +248,17 @@ def test_an_unconfigured_adapter_still_lists_its_routes_on_a_bad_path():
         os.environ.update(saved)
 
 
+def test_every_adapter_flags_itself_as_one():
+    """The page and the register gate both read ENTITLE_ADAPTER off the module. A
+    contract-serving workload that does not set it silently loses its button."""
+    for module in _adapters():
+        assert getattr(module, "ENTITLE_ADAPTER", False) is True, module.NAME
+    from fnworkloads import entitle_webhook_echo as echo
+    assert echo.ENTITLE_ADAPTER is True
+    # echo_diag answers on / with a probe payload, not the eight contract routes.
+    assert getattr(echo_diag, "ENTITLE_ADAPTER", False) is False
+
+
 def test_every_adapter_declares_what_it_cannot_run_without():
     """REQUIRED_ENV is what stops the deploy form producing an inert function; an
     adapter that reads settings but declares none is the gap reopening."""

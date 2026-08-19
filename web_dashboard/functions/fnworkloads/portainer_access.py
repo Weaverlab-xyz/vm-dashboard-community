@@ -62,6 +62,11 @@ DESCRIPTION = "Entitle Remote Adapter: just-in-time Portainer access via team me
 # always passes them, so nothing else caught it.
 REQUIRED_ENV = ("FN_PORTAINER_URL",)
 
+# Serves the Entitle Remote Adapter contract (the eight routes in _ROUTES), so the
+# dashboard may register it as a REST integration. Declared on the module rather than
+# listed in the page's JavaScript, which is where this used to live and could drift.
+ENTITLE_ADAPTER = True
+
 # Vendored beside this module at package time; in-repo it is the service module.
 try:
     import portainerrules as _rules  # noqa: E402

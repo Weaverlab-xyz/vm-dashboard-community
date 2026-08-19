@@ -28,6 +28,11 @@ from fnruntime.contract import Context, Request, Response
 NAME = "entitle_webhook_echo"
 DESCRIPTION = "No-op Entitle Remote Adapter — proves the path without granting anything."
 
+# Serves the Entitle Remote Adapter contract (the eight routes in _ROUTES), so the
+# dashboard may register it as a REST integration. Declared on the module rather than
+# listed in the page's JavaScript, which is where this used to live and could drift.
+ENTITLE_ADAPTER = True
+
 # The documented contract. Kept as data so `handle` can both route on it and report
 # it in a 404, which is what turns a path-config mistake into a self-explaining
 # error rather than a silent one.

@@ -55,6 +55,11 @@ DESCRIPTION = ("Entitle Remote Adapter: ephemeral just-in-time database accounts
 # always passes them, so nothing else caught it.
 REQUIRED_ENV = ("FN_DB_ENGINE", "FN_DB_HOST", "FN_DB_NAME|FN_DB_NAMES")
 
+# Serves the Entitle Remote Adapter contract (the eight routes in _ROUTES), so the
+# dashboard may register it as a REST integration. Declared on the module rather than
+# listed in the page's JavaScript, which is where this used to live and could drift.
+ENTITLE_ADAPTER = True
+
 # See the note in the previous revision: in the zip the packager copies
 # web_dashboard/services/cloud_db_sql_service.py in as sqlplan.py, so the SQL is the
 # file under test rather than a reimplementation. In-repo that name does not exist.

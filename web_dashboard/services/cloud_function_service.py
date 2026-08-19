@@ -204,8 +204,36 @@ def workload_catalog() -> list:
             # So the picker can say what a workload needs BEFORE you deploy it,
             # rather than the operator discovering it from a function that 500s.
             "required_env": list(required_env(name)),
+            # And so the page offers "Register in Entitle" on exactly the workloads
+            # that serve the contract, instead of a hand-maintained list in its JS.
+            "entitle_adapter": is_entitle_adapter(name),
         })
     return catalog
+
+
+def _workload_module(workload: str):
+    """The workload module, or ``None`` if it will not import.
+
+    Neither the catalog nor a deploy may fail because of this — a workload we cannot
+    read simply declares nothing.
+    """
+    try:
+        import importlib
+        from .. import functions  # noqa: F401  (puts fnworkloads on sys.path)
+        return importlib.import_module(f"fnworkloads.{workload}")
+    except Exception as exc:
+        logger.debug("cloudfn: workload %s did not import: %s", workload, exc)
+        return None
+
+
+def is_entitle_adapter(workload: str) -> bool:
+    """Whether ``workload`` serves the Entitle Remote Adapter contract.
+
+    From the module's own ``ENTITLE_ADAPTER`` flag. Registering a workload that does
+    not serve it produces a live integration in the tenant that can never resolve an
+    asset — visible only in Entitle, which is a bad place to discover it.
+    """
+    return bool(getattr(_workload_module(workload), "ENTITLE_ADAPTER", False))
 
 
 def required_env(workload: str) -> tuple:
@@ -214,16 +242,7 @@ def required_env(workload: str) -> tuple:
     ``"A|B"`` means either satisfies the requirement (``FN_DB_NAME|FN_DB_NAMES``).
     Empty for a workload that needs no configuration, which is most of them.
     """
-    try:
-        import importlib
-        from .. import functions  # noqa: F401  (puts fnworkloads on sys.path)
-        module = importlib.import_module(f"fnworkloads.{workload}")
-    except Exception as exc:
-        # Same rule as the catalog: never let this be the thing that breaks a
-        # deploy. A workload we cannot import declares no requirements.
-        logger.debug("cloudfn: workload %s did not import for required_env: %s",
-                     workload, exc)
-        return ()
+    module = _workload_module(workload)
     return tuple(str(name) for name in getattr(module, "REQUIRED_ENV", ()) or ())
 
 
@@ -1315,7 +1334,9 @@ async def run_entitle_register(db: Session, *, fn_id: str, job_id: str,
             if not secret:
                 raise CloudFunctionError(
                     "function has no shared secret; redeploy it before registering")
-            job_service.update_progress(db, job_id, 30, "Registering adapter in Entitle…")
+            job_service.update_progress(db, job_id, 20, "Checking the adapter's config…")
+            await _refuse_unconfigured_adapter(db, row)
+            job_service.update_progress(db, job_id, 40, "Registering adapter in Entitle…")
             result = await entitle.register_rest(
                 name=f"{row.name} ({row.workload})",
                 base_url=row.invoke_url,
@@ -1353,6 +1374,13 @@ def start_entitle_register(db: Session, fn_id: str, *, action: str = "register",
         raise CloudFunctionError(f"unknown function {fn_id!r}")
     if action not in ("register", "deregister"):
         raise CloudFunctionError(f"unknown action {action!r}")
+    # Deregister stays unconditional: a registration that should not have happened is
+    # exactly the one that most needs removing.
+    if action == "register" and not is_entitle_adapter(row.workload):
+        raise CloudFunctionError(
+            f"the {row.workload!r} workload does not serve the Entitle Remote Adapter "
+            "contract, so registering it would create an integration that can never "
+            "resolve an asset")
     job = job_service.create_job(
         db, job_type="cloudfn_entitle_register", created_by=created_by,
         metadata={"fn_id": row.id, "action": action, "name": row.name})
@@ -1407,6 +1435,54 @@ async def invoke(db: Session, *, fn_id: str, payload: Optional[dict] = None,
         body = response.text[:4000]
     return {"status": response.status_code, "body": body, "url": url,
             "elapsed_ms": int(response.elapsed.total_seconds() * 1000)}
+
+
+async def _refuse_unconfigured_adapter(db: Session, row: CloudFunction) -> None:
+    """Ask the adapter's own ``/check_config`` before publishing it to the tenant.
+
+    Registration is outward-facing: it creates a live integration in Entitle, and an
+    adapter with no target resolves no assets — so the integration looks healthy in
+    the dashboard and is useless in Entitle, which is the worst place to find out.
+    Nothing else catches it. REQUIRED_ENV is a deploy-time check and cannot see a
+    setting that is present but wrong, an admin credential the function cannot read,
+    or an environment edited after the deploy.
+
+    The adapter answers for itself rather than this re-deriving the rules, which is
+    what ``/check_config`` is for. Only an explicit refusal blocks: an unrecognisable
+    body is not treated as a failure, so this can never become the reason a working
+    pairing job stops working.
+    """
+    try:
+        result = await invoke(db, fn_id=row.id, method="POST", path="/check_config",
+                              payload={})
+    except CloudFunctionError:
+        raise
+    except Exception as exc:
+        # Unreachable is disqualifying on its own: Entitle would be pointed at an
+        # endpoint that does not answer.
+        raise CloudFunctionError(
+            f"could not reach {row.name} to check its configuration "
+            f"({type(exc).__name__}) — Entitle would be pointed at a dead endpoint"
+        ) from exc
+
+    status = int(result.get("status") or 0)
+    body = result.get("body")
+    data = body.get("data") if isinstance(body, dict) else None
+    if status != 200:
+        detail = ""
+        if isinstance(body, dict):
+            detail = str(body.get("problem") or body.get("error") or "")
+        raise CloudFunctionError(
+            f"{row.name} answered HTTP {status} to its own /check_config"
+            + (f": {detail}" if detail else "")
+            + " — fix that before registering it in Entitle")
+    if isinstance(data, dict) and data.get("valid") is False:
+        problems = [str(p) for p in (data.get("problems") or []) if p]
+        raise CloudFunctionError(
+            f"{row.name} reports it is not configured"
+            + (": " + "; ".join(problems) if problems else "")
+            + f". Set what it needs on the function ({', '.join(required_env(row.workload))})"
+            " and register it once /check_config reports valid.")
 
 
 def _invoke_url(base: str, path: str) -> str:

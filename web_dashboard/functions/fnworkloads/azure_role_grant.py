@@ -50,6 +50,11 @@ DESCRIPTION = "Entitle Remote Adapter: time-boxed Azure RBAC for machine identit
 # always passes them, so nothing else caught it.
 REQUIRED_ENV = ("FN_AZURE_SUBSCRIPTION_ID",)
 
+# Serves the Entitle Remote Adapter contract (the eight routes in _ROUTES), so the
+# dashboard may register it as a REST integration. Declared on the module rather than
+# listed in the page's JavaScript, which is where this used to live and could drift.
+ENTITLE_ADAPTER = True
+
 try:
     import azureroles as _rules  # noqa: E402
 except ImportError:  # pragma: no cover - exercised in-repo, never in the zip
