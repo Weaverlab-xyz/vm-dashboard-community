@@ -8,6 +8,30 @@ serialization overhead), and the cache warmers already repopulate on
 every startup, so no data is lost when a container restarts.
 
 Public interface is identical to the Redis version — no callers change.
+
+TWO EXPIRIES, AND WHY
+---------------------
+Each entry carries a SOFT expiry (``_expires_at``, at ``ttl``) meaning "refresh this" and a
+HARD expiry (``_hard_expires_at``, at ``ttl + STALE_GRACE_S``) meaning "stop serving this".
+Between them the entry is stale-but-servable, which is the whole point of
+``get_or_refresh``.
+
+They used to be the same instant, and that made the stale-serve branch dead code: ``get()``
+evicts at the soft expiry, so by the time ``get_or_refresh`` computed ``age >= ttl`` there
+was nothing left to serve stale. Every TTL boundary was therefore a SYNCHRONOUS fetch on a
+user's request — a full cloud round-trip in the request path, on a 60s TTL, for the
+dashboard's instance tiles.
+
+``get()`` still evicts at the soft expiry and that is deliberate — do NOT "fix" it. Eleven
+call sites in ``api/gcp.py`` and ``api/oci.py`` read this store with a bare ``get()`` and
+have **no refresh path at all**; if ``get()`` started serving stale entries, each of them
+would serve up to ``ttl + STALE_GRACE_S`` old data with nothing ever refreshing it. Stale
+tolerance therefore lives in ``_get_entry``, which only ``get_or_refresh`` uses.
+
+That split means a key should not have both a ``get_or_refresh`` reader and a bare-``get()``
+reader: whichever ran first would decide whether the other sees the entry at all. No key
+does today. If one ever gains both, the consequence is a lost stale-serve — today's
+behaviour — not wrong data.
 """
 import asyncio
 import logging
@@ -47,6 +71,21 @@ TTL = {
     # Keyed on the workgroup filter — see SCOPED_CACHES in tests/test_cache_key_scoping.py.
     "ps_db_candidates":    300,   # 5 min
 }
+
+# How long past its TTL an entry stays SERVABLE to get_or_refresh. Additive and global,
+# not a per-key table and not a multiplier:
+#   * a second dict parallel to TTL is two numbers per key that must agree — the drift
+#     shape tests/test_cache_warmer_parity.py exists to prevent;
+#   * a multiplier scales with the TTL, which is the wrong axis. The grace only has to
+#     cover HOW LONG A REFRESH CAN TAKE, and that is deadline-shaped: cloud_executor's
+#     request-path budget is 60s. 300s covers two full-length failed attempts plus slack.
+# So worst-case staleness is `ttl + 300` uniformly, which is one sentence rather than a
+# table. A key that genuinely needs its own window passes `hard_ttl=` at the call site.
+#
+# The cost, stated plainly: a permanently-failing refresh now shows a stale number for up
+# to ttl+300 where it used to show an unavailable tile. _refresh_task logs a WARNING on
+# every failed pass, and the grace is bounded, which is what makes that trade acceptable.
+STALE_GRACE_S = 300
 
 # ── Internal store ────────────────────────────────────────────────────────────
 _store: dict = {}
@@ -95,6 +134,11 @@ async def get(cache_key: str) -> Optional[dict]:
     """
     Return the stored envelope {"data": ..., "cached_at": "ISO"} or None.
     Returns None (and evicts the entry) if the TTL has expired.
+
+    STRICT TTL, deliberately. Eleven call sites in api/gcp.py and api/oci.py serve this
+    return value directly with no refresh path of any kind, so relaxing the check here
+    would silently serve them stale data forever. Stale tolerance belongs to
+    ``_get_entry``/``get_or_refresh``, which have somewhere to put the refresh.
     """
     async with _lock:
         entry = _store.get(cache_key)
@@ -110,12 +154,54 @@ async def get(cache_key: str) -> Optional[dict]:
     return {"data": entry["data"], "cached_at": entry["cached_at"]}
 
 
-async def set(cache_key: str, payload: Any, ttl: int) -> None:
-    """Store payload with a TTL and a cached_at timestamp."""
+async def _get_entry(cache_key: str) -> Optional[dict]:
+    """Stale-tolerant read for ``get_or_refresh`` only.
+
+    Returns ``{"data", "cached_at", "stale"}``, or None once the HARD expiry has passed.
+    ``stale`` is True between the soft and hard expiries: serve it, and refresh behind it.
+
+    ``stale`` is computed from ``monotonic()`` alone. The previous code decided staleness by
+    comparing ``_age_seconds(cached_at)`` — a WALL-CLOCK age — against the ttl, while
+    eviction used ``monotonic()``. Two clocks meant an NTP step could flip the branch, so
+    the behaviour was not just wrong but nondeterministic. One clock decides.
+    """
+    async with _lock:
+        entry = _store.get(cache_key)
+
+    if entry is None:
+        return None
+
+    now = monotonic()
+    # Entries written before this field existed cannot occur (the store is process-local
+    # and dies with the process), but defaulting keeps a partially-reloaded module safe.
+    if now >= entry.get("_hard_expires_at", entry["_expires_at"]):
+        async with _lock:
+            _store.pop(cache_key, None)
+        return None
+
+    return {"data": entry["data"], "cached_at": entry["cached_at"],
+            "stale": now >= entry["_expires_at"]}
+
+
+async def set(cache_key: str, payload: Any, ttl: int, *, hard_ttl: Optional[int] = None) -> None:
+    """Store payload with a TTL and a cached_at timestamp.
+
+    ``hard_ttl`` is how long the entry stays servable-while-stale to ``get_or_refresh``;
+    it defaults to ``ttl + STALE_GRACE_S``.
+
+    It is KEYWORD-ONLY with a default, and that is load-bearing rather than stylistic:
+    ``tests/test_cache_warmer_parity.py`` monkeypatches this function with a fake declared
+    ``async def _fake_set(key, payload, ttl)``. A required or positional fourth parameter
+    breaks that fake and reds out five tests in that file.
+    """
+    now = monotonic()
     entry = {
         "data": payload,
         "cached_at": datetime.now(timezone.utc).isoformat(),
-        "_expires_at": monotonic() + ttl,
+        "_expires_at": now + ttl,
+        # Soft and hard must not be the same instant — see the module docstring. When they
+        # were, get_or_refresh's stale-serve branch was unreachable.
+        "_hard_expires_at": now + (ttl + STALE_GRACE_S if hard_ttl is None else hard_ttl),
         "_ttl": ttl,
     }
     async with _lock:
@@ -156,27 +242,37 @@ async def get_or_refresh(
     Returns (payload, cached_at_iso_string).
 
     Behaviour:
-      - Cache HIT, age < ttl  → return immediately, no background work.
-      - Cache HIT, age >= ttl → return stale data immediately + fire background
+      - Cache HIT, fresh      → return immediately, no background work.
+      - Cache HIT, stale      → return stale data immediately + fire background
                                 refresh so next request gets fresh data.
       - Cache MISS            → fetch synchronously, store, return.
+
+    "Stale" means past the soft expiry but inside STALE_GRACE_S; past that it is a MISS.
+    Reads through ``_get_entry``, not ``get()`` — ``get()`` evicts at the soft expiry, which
+    is what made this branch unreachable and turned every TTL boundary into a blocking
+    cloud call on a user's request.
 
     Set background=False to force a synchronous refresh (used by the scheduled
     warmers — they are already running in the background).
     """
-    cached = await get(cache_key)
+    cached = await _get_entry(cache_key)
 
     if cached is not None:
         cached_at = cached.get("cached_at", "")
-        age = _age_seconds(cached_at)
 
-        if age < ttl:
+        if not cached["stale"]:
             return cached["data"], cached_at
 
         # Stale — return immediately and refresh asynchronously
         if background:
+            # Claim BEFORE create_task, not inside _refresh_task. The task body does not
+            # run until the loop next schedules it, so a check-then-create here let N
+            # concurrent stale readers each spawn a refresh for the same key — N cloud
+            # calls and N sessions off one page load. Harmless while this branch was dead;
+            # a fan-out amplifier the moment it is live.
             if cache_key not in _inflight:
-                asyncio.create_task(_refresh_task(cache_key, ttl, fetcher))
+                _inflight.add(cache_key)
+                asyncio.create_task(_refresh_task(cache_key, ttl, fetcher, claimed=True))
         else:
             await _refresh_task(cache_key, ttl, fetcher)
         return cached["data"], cached_at
@@ -208,9 +304,16 @@ async def _refresh_task(
     cache_key: str,
     ttl: int,
     fetcher: Callable[[], Coroutine[Any, Any, Any]],
+    claimed: bool = False,
 ) -> None:
-    """Run fetcher and update cache. Swallows all exceptions."""
-    _inflight.add(cache_key)
+    """Run fetcher and update cache. Swallows all exceptions.
+
+    ``claimed=True`` means the caller already added the key to ``_inflight`` (it must, to
+    close the check-then-create race — see get_or_refresh). Either way the key is
+    discarded here, so ownership of the release stays in one place.
+    """
+    if not claimed:
+        _inflight.add(cache_key)
     try:
         data = await fetcher()
         await set(cache_key, data, ttl)
@@ -234,11 +337,18 @@ async def all_entries() -> list:
         if not k.startswith("vmcli:"):
             continue
         ttl_remaining = max(0.0, entry["_expires_at"] - now)
+        hard_expires_at = entry.get("_hard_expires_at", entry["_expires_at"])
         result.append({
             "key": k,
             "cached_at": entry["cached_at"],
             "ttl_remaining_s": round(ttl_remaining, 1),
             "age_s": round(_age_seconds(entry["cached_at"]), 1),
+            # Past its TTL but still being served while a refresh runs behind it. This is
+            # the only place that state is visible, and it is what you want the first time
+            # someone reports a number that will not move.
+            "stale": now >= entry["_expires_at"],
+            "hard_ttl_remaining_s": round(max(0.0, hard_expires_at - now), 1),
+            "refresh_in_flight": k in _inflight,
         })
     return result
 
