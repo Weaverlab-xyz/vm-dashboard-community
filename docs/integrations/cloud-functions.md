@@ -53,6 +53,16 @@ this adds** — an always-on, externally callable endpoint is.
 4. Go to **Functions → Deploy function**, pick `echo_diag`, and deploy. Then use
    **Test invoke** to confirm it works.
 
+> The **adapter** workloads (`db_grant`, `portainer_access`, `azure_role_grant`) read
+> their target out of the function's environment and do nothing without it — the
+> deploy form names what each one needs and refuses a deploy that omits it, because
+> the alternative is a function that builds successfully and then fails on every
+> request. `db_grant` in particular is normally deployed *for* you: see
+> [Cloud databases](../databases.md) and the `clouddb_adapter_pair` job.
+> `POST /check_config` is the route to ask an already-deployed adapter whether it is
+> configured; it answers `{"data": {"valid": false, "problems": [...]}}` rather than
+> failing when it is not.
+
 ### Field reference
 
 | Field | Notes |
@@ -73,7 +83,7 @@ this adds** — an always-on, externally callable endpoint is.
 |---|---|
 | Deploy / list / destroy functions | **Functions** page, `/api/functions` |
 | Workload catalog | `GET /api/functions/workloads` |
-| Test invoke with credentials attached | **Test invoke** button, `POST /api/functions/{id}/invoke` |
+| Test invoke with credentials attached | **Test invoke** button, `POST /api/functions/{id}/invoke` (takes `method` + `path`, so an adapter's own routes are reachable) |
 | Endpoint + secret for an external caller | **Endpoint** button (admin only), `GET /api/functions/{id}/invoke-info` |
 | Progress + logs for a deploy | **Jobs** page (`cloudfn_deploy` / `cloudfn_decommission`) |
 

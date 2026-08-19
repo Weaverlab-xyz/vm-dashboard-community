@@ -7,6 +7,7 @@ into, and the refusal to accept a credential VALUE anywhere. All pure functions,
 they are tested with the heavy imports (config, database, SQLAlchemy) stubbed out —
 the repo's sys.modules idiom.
 """
+import asyncio
 import os
 import sys
 import types
@@ -356,6 +357,212 @@ def test_the_catalog_covers_every_workload_on_disk():
 def test_restricted_table_only_names_real_clouds():
     for workload, clouds in svc._CLOUD_RESTRICTED.items():
         assert set(clouds) <= set(svc.VALID_CLOUDS), (workload, clouds)
+
+
+# ── Required settings: what stops the deploy form building an inert function ──
+#
+# The three adapters read their target out of the environment. Deployed without it
+# they are not degraded, they are inert — every request fails, for the life of the
+# function — and finding out costs a real cloud build. The picker reads the same
+# declaration this validates against, so the warning and the refusal cannot disagree.
+
+def test_the_catalog_carries_what_each_workload_requires():
+    catalog = {entry["name"]: entry for entry in svc.workload_catalog()}
+    for name, entry in catalog.items():
+        assert isinstance(entry["required_env"], list), (name, entry)
+        assert entry["required_env"] == list(svc.required_env(name)), name
+    # The adapters need configuration; the diagnostic workloads deliberately do not.
+    for name in ("db_grant", "portainer_access", "azure_role_grant"):
+        assert catalog[name]["required_env"], name
+    for name in ("echo_diag", "entitle_webhook_echo"):
+        assert catalog[name]["required_env"] == [], name
+
+
+def test_required_env_survives_a_workload_that_does_not_import():
+    """The catalog must never be the thing that breaks the page — same rule as the
+    description lookup, which already tolerates an unimportable module."""
+    assert svc.required_env("no_such_workload_here") == ()
+
+
+def test_a_missing_required_setting_is_refused_and_names_itself():
+    for missing, supplied in (
+        ("FN_DB_ENGINE", {"FN_DB_HOST": "db.internal", "FN_DB_NAME": "appdb"}),
+        ("FN_DB_HOST", {"FN_DB_ENGINE": "mysql", "FN_DB_NAME": "appdb"}),
+        ("FN_DB_NAME or FN_DB_NAMES",
+         {"FN_DB_ENGINE": "mysql", "FN_DB_HOST": "db.internal"}),
+    ):
+        try:
+            svc._check_required_env("db_grant", supplied)
+        except svc.CloudFunctionError as exc:
+            assert missing in str(exc), (missing, str(exc))
+        else:
+            raise AssertionError(f"accepted a deploy missing {missing}")
+
+
+def test_either_spelling_satisfies_an_alternation():
+    for name_key in ("FN_DB_NAME", "FN_DB_NAMES"):
+        svc._check_required_env("db_grant", {
+            "FN_DB_ENGINE": "mysql", "FN_DB_HOST": "db.internal", name_key: "appdb"})
+
+
+def test_a_blank_value_does_not_count_as_supplied():
+    """`FN_DB_HOST=""` reaches the function as an empty string and fails there
+    exactly as an absent one does, so it must fail here too."""
+    try:
+        svc._check_required_env("db_grant", {
+            "FN_DB_ENGINE": "mysql", "FN_DB_HOST": "  ", "FN_DB_NAME": "appdb"})
+    except svc.CloudFunctionError as exc:
+        assert "FN_DB_HOST" in str(exc), str(exc)
+    else:
+        raise AssertionError("accepted a blank required setting")
+
+
+def test_a_workload_with_no_requirements_is_never_refused():
+    svc._check_required_env("echo_diag", None)
+    svc._check_required_env("echo_diag", {})
+
+
+def _run(coro):
+    """Drive one coroutine to completion. The register preflight is async because the
+    thing it asks is an HTTP call."""
+    return asyncio.run(coro)
+
+
+# ── Registering in Entitle: don't publish an adapter that resolves nothing ────
+#
+# A db_grant function with no FN_DB_* registered CLEANLY and produced a live REST
+# integration in the tenant with no assets behind it. Nothing in the dashboard looked
+# wrong — the failure was only visible in Entitle, which is the worst place for it.
+
+def test_only_a_contract_serving_workload_is_an_adapter():
+    for name in ("db_grant", "portainer_access", "azure_role_grant",
+                 "entitle_webhook_echo"):
+        assert svc.is_entitle_adapter(name), name
+    # echo_diag serves / and a probe payload, not the eight contract routes.
+    assert not svc.is_entitle_adapter("echo_diag")
+    assert not svc.is_entitle_adapter("no_such_workload_here")
+
+
+def test_the_catalog_says_which_workloads_can_be_registered():
+    """The page reads this instead of keeping its own list, which is what it used to
+    do — so the flag and the button cannot disagree."""
+    for entry in svc.workload_catalog():
+        assert entry["entitle_adapter"] is svc.is_entitle_adapter(entry["name"]), entry
+
+
+def test_an_unconfigured_adapter_is_refused_before_it_reaches_entitle():
+    row = types.SimpleNamespace(id="fn1", name="my-grant-broker", workload="db_grant")
+    calls = []
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        calls.append((method, path))
+        return {"status": 200, "body": {"data": {
+            "valid": False, "problems": ["FN_DB_ENGINE must be mysql or sqlserver (got '')"]}}}
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row))
+    except svc.CloudFunctionError as exc:
+        assert "not configured" in str(exc), str(exc)
+        assert "FN_DB_ENGINE" in str(exc), str(exc)
+    else:
+        raise AssertionError("registered an adapter that reports itself unconfigured")
+    finally:
+        svc.invoke = real
+    # It asked the adapter rather than re-deriving the rules.
+    assert calls == [("POST", "/check_config")], calls
+
+
+def test_a_configured_adapter_is_allowed_through():
+    row = types.SimpleNamespace(id="fn1", name="my-grant-broker", workload="db_grant")
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        return {"status": 200, "body": {"data": {"valid": True, "problems": []}}}
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row))     # must not raise
+    finally:
+        svc.invoke = real
+
+
+def test_an_unrecognisable_check_config_body_does_not_block():
+    """Only an explicit refusal blocks. This must never become the reason a working
+    pairing job stops working."""
+    row = types.SimpleNamespace(id="fn1", name="fn", workload="entitle_webhook_echo")
+    for body in ({"data": {"valid": True}}, {"data": {}}, {}, "not json at all", None):
+        async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None,
+                               _b=body):
+            return {"status": 200, "body": _b}
+
+        real, svc.invoke = svc.invoke, _fake_invoke
+        try:
+            _run(svc._refuse_unconfigured_adapter(None, row))
+        finally:
+            svc.invoke = real
+
+
+def test_an_unreachable_adapter_is_refused_too():
+    row = types.SimpleNamespace(id="fn1", name="fn", workload="db_grant")
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        raise OSError("connection refused")
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row))
+    except svc.CloudFunctionError as exc:
+        assert "dead endpoint" in str(exc), str(exc)
+    else:
+        raise AssertionError("registered an adapter that cannot be reached")
+    finally:
+        svc.invoke = real
+
+
+def test_a_non_200_from_check_config_is_refused():
+    row = types.SimpleNamespace(id="fn1", name="fn", workload="db_grant")
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        return {"status": 500, "body": {"error": "function not configured",
+                                        "problem": "FN_DB_HOST is not set"}}
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row))
+    except svc.CloudFunctionError as exc:
+        assert "HTTP 500" in str(exc) and "FN_DB_HOST" in str(exc), str(exc)
+    else:
+        raise AssertionError("registered an adapter whose check_config fails")
+    finally:
+        svc.invoke = real
+
+
+# ── Test invoke: reaching the route the operator actually meant ───────────────
+
+def test_the_invoke_path_is_appended_not_substituted():
+    """Azure's base URL already carries /api/<name>, and the adapters' routes are
+    relative to whatever the platform's root is — so this appends."""
+    base = "https://fn.example.com/api/my-fn"
+    assert svc._invoke_url(base, "/check_config") == f"{base}/check_config"
+    assert svc._invoke_url(base, "check_config") == f"{base}/check_config"
+    assert svc._invoke_url(base + "/", "/check_config") == f"{base}/check_config"
+    # An empty or root path is the old behaviour, byte for byte.
+    for path in ("", "/", None):
+        assert svc._invoke_url(base, path) == base, path
+
+
+def test_the_invoke_path_cannot_repoint_the_request():
+    """This value reaches an outbound request, so an absolute URL or a climb out of
+    the function's own path is refused rather than normalized."""
+    base = "https://fn.example.com/api/my-fn"
+    for path in ("https://evil.example.com/", "//evil.example.com/",
+                 "/../../other-fn/check_config", "/a/../../b"):
+        try:
+            svc._invoke_url(base, path)
+        except svc.CloudFunctionError:
+            pass
+        else:
+            raise AssertionError(f"accepted path {path!r}")
 
 
 def test_package_location_requires_the_bucket_to_be_configured():

@@ -45,6 +45,21 @@ NAME = "db_grant"
 DESCRIPTION = ("Entitle Remote Adapter: ephemeral just-in-time database accounts "
                "(MySQL / SQL Server).")
 
+# Settings this workload cannot run without, in the form the dashboard's deploy
+# validation reads: ``"A|B"`` means either satisfies the requirement. Declared here,
+# beside the code that reads them, so the picker and the validator cannot drift from
+# what db_grant actually needs.
+#
+# Without this a hand-deploy from the Cloud Functions page produced a function that
+# 500-ed on every request for the life of the install — the automated pairing path
+# always passes them, so nothing else caught it.
+REQUIRED_ENV = ("FN_DB_ENGINE", "FN_DB_HOST", "FN_DB_NAME|FN_DB_NAMES")
+
+# Serves the Entitle Remote Adapter contract (the eight routes in _ROUTES), so the
+# dashboard may register it as a REST integration. Declared on the module rather than
+# listed in the page's JavaScript, which is where this used to live and could drift.
+ENTITLE_ADAPTER = True
+
 # See the note in the previous revision: in the zip the packager copies
 # web_dashboard/services/cloud_db_sql_service.py in as sqlplan.py, so the SQL is the
 # file under test rather than a reimplementation. In-repo that name does not exist.
@@ -591,8 +606,34 @@ _ROUTES = {
 }
 
 
+def _unconfigured(exc: Exception, ctx: Context, *, reporting: bool) -> Response:
+    """What to answer when the ``FN_DB_*`` settings cannot be resolved.
+
+    :func:`_targets` used to run BEFORE routing, which made this unreachable: any
+    raise out of ``handle`` becomes dispatch's opaque
+    ``500 {"error": "internal error"}`` on EVERY route — including
+    ``/check_config``, whose entire job is to name what is missing. A function
+    deployed without ``FN_DB_ENGINE``/``FN_DB_HOST``/``FN_DB_NAME`` therefore had
+    no way to say so, on any path.
+
+    The detail is safe in the body here, unlike auth's deliberately blank
+    ``function not configured``: dispatch verifies the shared secret before it
+    calls ``handle``, so only an authenticated caller ever reads this.
+    """
+    problem = str(exc) or type(exc).__name__
+    if reporting:
+        # check_config's contract is to REPORT problems, so settings it cannot
+        # resolve are a valid answer rather than a failure. Same body shape as the
+        # success path, so a consumer needs no special case for it.
+        return Response(200, {"data": {
+            "valid": False, "assets": [], "engine": "", "flavor": "",
+            "dry_run": _dry_run(), "problems": [problem],
+        }})
+    return Response(500, {"error": "function not configured",
+                          "problem": problem, "request_id": ctx.request_id})
+
+
 def handle(req: Request, ctx: Context) -> Response:
-    targets = _targets()
     path = (req.path or "/").rstrip("/") or "/"
 
     handler = _ROUTES.get((req.method, path))
@@ -605,4 +646,11 @@ def handle(req: Request, ctx: Context) -> Response:
             # means the integration's *_path fields disagree with these.
             "routes": sorted(f"{method} {route}" for method, route in _ROUTES),
         })
+
+    # AFTER routing, so an unknown path still gets the route list and a
+    # misconfiguration still gets named — see _unconfigured.
+    try:
+        targets = _targets()
+    except Exception as exc:
+        return _unconfigured(exc, ctx, reporting=handler is _check_config)
     return handler(req, ctx, targets)

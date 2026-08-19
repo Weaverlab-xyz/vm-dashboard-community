@@ -201,8 +201,73 @@ def workload_catalog() -> list:
             "name": name,
             "description": description,
             "clouds": list(clouds_for(name)),
+            # So the picker can say what a workload needs BEFORE you deploy it,
+            # rather than the operator discovering it from a function that 500s.
+            "required_env": list(required_env(name)),
+            # And so the page offers "Register in Entitle" on exactly the workloads
+            # that serve the contract, instead of a hand-maintained list in its JS.
+            "entitle_adapter": is_entitle_adapter(name),
         })
     return catalog
+
+
+def _workload_module(workload: str):
+    """The workload module, or ``None`` if it will not import.
+
+    Neither the catalog nor a deploy may fail because of this — a workload we cannot
+    read simply declares nothing.
+    """
+    try:
+        import importlib
+        from .. import functions  # noqa: F401  (puts fnworkloads on sys.path)
+        return importlib.import_module(f"fnworkloads.{workload}")
+    except Exception as exc:
+        logger.debug("cloudfn: workload %s did not import: %s", workload, exc)
+        return None
+
+
+def is_entitle_adapter(workload: str) -> bool:
+    """Whether ``workload`` serves the Entitle Remote Adapter contract.
+
+    From the module's own ``ENTITLE_ADAPTER`` flag. Registering a workload that does
+    not serve it produces a live integration in the tenant that can never resolve an
+    asset — visible only in Entitle, which is a bad place to discover it.
+    """
+    return bool(getattr(_workload_module(workload), "ENTITLE_ADAPTER", False))
+
+
+def required_env(workload: str) -> tuple:
+    """Settings ``workload`` cannot run without, from its own ``REQUIRED_ENV``.
+
+    ``"A|B"`` means either satisfies the requirement (``FN_DB_NAME|FN_DB_NAMES``).
+    Empty for a workload that needs no configuration, which is most of them.
+    """
+    module = _workload_module(workload)
+    return tuple(str(name) for name in getattr(module, "REQUIRED_ENV", ()) or ())
+
+
+def _check_required_env(workload: str, environment: Optional[dict]) -> None:
+    """Refuse a deploy that could only produce a function which fails on every call.
+
+    The adapter workloads read their target out of the environment, so one deployed
+    without it is not degraded — it is inert, and it costs a real build to find out.
+    The automated pairing path (cloud_db_adapter_service) always passes these, so
+    this only ever fires on a hand-deploy that omitted them.
+    """
+    present = {str(k) for k, v in (environment or {}).items() if str(v or "").strip()}
+    missing = [req for req in required_env(workload)
+               if not any(alt in present for alt in req.split("|"))]
+    if not missing:
+        return
+    hint = ("Provisioning a MySQL or SQL Server database with 'Register in Entitle' "
+            "checked deploys and configures one of these for you."
+            if workload == "db_grant" else
+            "Deploy echo_diag instead if you only want to test the endpoint.")
+    raise CloudFunctionError(
+        f"the {workload!r} workload needs "
+        + ", ".join(req.replace("|", " or ") for req in missing)
+        + " in `environment` — without them the function deploys and then fails on "
+        f"every request. {hint}")
 
 
 # ── Terraform variables (PURE — the main unit-test target) ───────────────────
@@ -790,6 +855,10 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
         cloud, secret_environment,
         vault=_cfg("azure_key_vault_name") or _cfg("azure_keyvault_name"))
     environment = {**(environment or {}), **secret_env}
+    # Against the MERGED map, so a setting supplied as a secret reference counts as
+    # supplied. Before the row is written, for the same reason the network is
+    # resolved above: no half-created row.
+    _check_required_env(workload, environment)
     # The union of what the caller granted explicitly and what secret_environment
     # implies, deduplicated: the same ARN twice is a policy statement that reads
     # like a mistake.
@@ -1265,7 +1334,9 @@ async def run_entitle_register(db: Session, *, fn_id: str, job_id: str,
             if not secret:
                 raise CloudFunctionError(
                     "function has no shared secret; redeploy it before registering")
-            job_service.update_progress(db, job_id, 30, "Registering adapter in Entitle…")
+            job_service.update_progress(db, job_id, 20, "Checking the adapter's config…")
+            await _refuse_unconfigured_adapter(db, row)
+            job_service.update_progress(db, job_id, 40, "Registering adapter in Entitle…")
             result = await entitle.register_rest(
                 name=f"{row.name} ({row.workload})",
                 base_url=row.invoke_url,
@@ -1303,17 +1374,31 @@ def start_entitle_register(db: Session, fn_id: str, *, action: str = "register",
         raise CloudFunctionError(f"unknown function {fn_id!r}")
     if action not in ("register", "deregister"):
         raise CloudFunctionError(f"unknown action {action!r}")
+    # Deregister stays unconditional: a registration that should not have happened is
+    # exactly the one that most needs removing.
+    if action == "register" and not is_entitle_adapter(row.workload):
+        raise CloudFunctionError(
+            f"the {row.workload!r} workload does not serve the Entitle Remote Adapter "
+            "contract, so registering it would create an integration that can never "
+            "resolve an asset")
     job = job_service.create_job(
         db, job_type="cloudfn_entitle_register", created_by=created_by,
         metadata={"fn_id": row.id, "action": action, "name": row.name})
     return {"ok": True, "fn_id": row.id, "job_id": job.id, "action": action}
 
 
-async def invoke(db: Session, *, fn_id: str, payload: Optional[dict] = None) -> dict:
+async def invoke(db: Session, *, fn_id: str, payload: Optional[dict] = None,
+                 method: str = "POST", path: str = "/") -> dict:
     """Call the function from the dashboard with the right credentials attached.
 
     This is what makes Phase 1 demoable without a terminal, and it is the fastest
     way to tell "the function is broken" from "my curl was wrong".
+
+    ``method``/``path`` exist because the adapter workloads route on both: every one
+    of their operations lives under a sub-path (``/check_config``, ``/get_assets``,
+    …) and two are GETs. Hard-coding ``POST /`` made those functions untestable from
+    here — the request could only ever come back as the 404 the workload correctly
+    returns for an unrouted path.
     """
     row = get_function(db, fn_id)
     if not row:
@@ -1322,8 +1407,12 @@ async def invoke(db: Session, *, fn_id: str, payload: Optional[dict] = None) -> 
         raise CloudFunctionError(
             f"{row.name} has no endpoint yet (status: {row.status})")
 
+    verb = (method or "POST").strip().upper()
+    if verb not in ("GET", "POST"):
+        raise CloudFunctionError(f"method must be GET or POST (got {method!r})")
+
     import httpx
-    url = row.invoke_url
+    url = _invoke_url(row.invoke_url, path)
     secret = config_service.get(f"cloudfn/{row.id}/bearer") or ""
     headers = {"content-type": "application/json"}
     if secret:
@@ -1334,10 +1423,82 @@ async def invoke(db: Session, *, fn_id: str, payload: Optional[dict] = None) -> 
         headers["x-functions-key"] = key
 
     async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post(url, json=payload or {}, headers=headers)
+        if verb == "GET":
+            # No body on a GET: the adapters' two read routes take none, and sending
+            # one makes the request look different from what Entitle actually sends.
+            response = await client.get(url, headers=headers)
+        else:
+            response = await client.post(url, json=payload or {}, headers=headers)
     try:
         body = response.json()
     except ValueError:
         body = response.text[:4000]
-    return {"status": response.status_code, "body": body,
+    return {"status": response.status_code, "body": body, "url": url,
             "elapsed_ms": int(response.elapsed.total_seconds() * 1000)}
+
+
+async def _refuse_unconfigured_adapter(db: Session, row: CloudFunction) -> None:
+    """Ask the adapter's own ``/check_config`` before publishing it to the tenant.
+
+    Registration is outward-facing: it creates a live integration in Entitle, and an
+    adapter with no target resolves no assets — so the integration looks healthy in
+    the dashboard and is useless in Entitle, which is the worst place to find out.
+    Nothing else catches it. REQUIRED_ENV is a deploy-time check and cannot see a
+    setting that is present but wrong, an admin credential the function cannot read,
+    or an environment edited after the deploy.
+
+    The adapter answers for itself rather than this re-deriving the rules, which is
+    what ``/check_config`` is for. Only an explicit refusal blocks: an unrecognisable
+    body is not treated as a failure, so this can never become the reason a working
+    pairing job stops working.
+    """
+    try:
+        result = await invoke(db, fn_id=row.id, method="POST", path="/check_config",
+                              payload={})
+    except CloudFunctionError:
+        raise
+    except Exception as exc:
+        # Unreachable is disqualifying on its own: Entitle would be pointed at an
+        # endpoint that does not answer.
+        raise CloudFunctionError(
+            f"could not reach {row.name} to check its configuration "
+            f"({type(exc).__name__}) — Entitle would be pointed at a dead endpoint"
+        ) from exc
+
+    status = int(result.get("status") or 0)
+    body = result.get("body")
+    data = body.get("data") if isinstance(body, dict) else None
+    if status != 200:
+        detail = ""
+        if isinstance(body, dict):
+            detail = str(body.get("problem") or body.get("error") or "")
+        raise CloudFunctionError(
+            f"{row.name} answered HTTP {status} to its own /check_config"
+            + (f": {detail}" if detail else "")
+            + " — fix that before registering it in Entitle")
+    if isinstance(data, dict) and data.get("valid") is False:
+        problems = [str(p) for p in (data.get("problems") or []) if p]
+        raise CloudFunctionError(
+            f"{row.name} reports it is not configured"
+            + (": " + "; ".join(problems) if problems else "")
+            + f". Set what it needs on the function ({', '.join(required_env(row.workload))})"
+            " and register it once /check_config reports valid.")
+
+
+def _invoke_url(base: str, path: str) -> str:
+    """``base`` with ``path`` appended, without letting a path escape the function.
+
+    Azure serves under ``/api/<name>`` and the base URL already carries that prefix,
+    so this appends rather than replaces — the adapters' routes are relative to
+    whatever the platform's own root is, which is exactly what the handler sees
+    after ``adapters.from_azure`` strips the prefix.
+    """
+    suffix = (path or "/").strip()
+    # Refuse anything that could re-point the request at another host or climb out
+    # of the function's own path; this value reaches an outbound request.
+    if "://" in suffix or suffix.startswith("//") or ".." in suffix:
+        raise CloudFunctionError(f"invalid path {path!r}")
+    suffix = suffix.lstrip("/")
+    if not suffix:
+        return base
+    return base.rstrip("/") + "/" + suffix

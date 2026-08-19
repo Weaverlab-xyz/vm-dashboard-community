@@ -271,16 +271,52 @@ def test_missing_required_fields_are_400s():
     assert _call("POST", "/delete_actor", {}).status == 400
 
 
+_BAD_CONFIGS = ({"FN_DB_ENGINE": "postgres"}, {"FN_DB_HOST": ""},
+                {"FN_DB_PORT": "not-a-number"}, {"FN_DB_NAME": ""})
+
+
 def test_misconfiguration_surfaces_rather_than_silently_defaulting():
-    for env in ({"FN_DB_ENGINE": "postgres"}, {"FN_DB_HOST": ""},
-                {"FN_DB_PORT": "not-a-number"}, {"FN_DB_NAME": ""}):
+    """Never a default, and never a raise either.
+
+    A raise out of handle() is what dispatch turns into ``500 internal error`` — so
+    it surfaces to the LOG and not to the operator. This asserts the settings error
+    reaches the caller, named, on an ordinary route.
+    """
+    for env in _BAD_CONFIGS:
         _env(**env)
-        try:
-            _call("GET", "/get_assets")
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError(f"accepted a bad config: {env}")
+        resp = _call("GET", "/get_assets")
+        assert resp.status == 500, (env, resp.status)
+        assert resp.body["error"] == "function not configured", (env, resp.body)
+        assert resp.body["problem"], f"unnamed problem for {env}"
+
+
+def test_check_config_reports_a_broken_config_instead_of_500ing_on_it():
+    """The regression that hid this for the life of the feature.
+
+    _targets() used to run BEFORE routing, so an under-configured function raised on
+    EVERY path — including this one, whose only job is to say what is wrong. The
+    operator got ``{"error": "internal error"}`` from the diagnostic endpoint.
+    """
+    for env in _BAD_CONFIGS:
+        _env(**env)
+        resp = _call("POST", "/check_config")
+        assert resp.status == 200, (env, resp.status, resp.body)
+        data = resp.body["data"]
+        assert data["valid"] is False, (env, data)
+        assert data["problems"] and all(data["problems"]), (env, data)
+        # Same keys as the healthy answer, so a consumer needs no special case.
+        _env()
+        assert set(data) == set(_call("POST", "/check_config").body["data"]), env
+
+
+def test_an_unrouted_path_still_lists_the_routes_when_unconfigured():
+    """Routing happens first now, so the single most common setup mistake (Entitle's
+    *_path fields disagreeing with these) is still diagnosable on a function whose
+    DB settings have not been filled in yet."""
+    _env(FN_DB_HOST="")
+    resp = _call("POST", "/")
+    assert resp.status == 404, resp.status
+    assert "POST /check_config" in resp.body["routes"], resp.body
 
 
 def test_no_route_carries_a_ttl():

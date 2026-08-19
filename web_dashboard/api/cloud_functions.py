@@ -78,6 +78,11 @@ class DeployRequest(BaseModel):
 
 class InvokeRequest(BaseModel):
     payload: Optional[dict] = None
+    # The adapter workloads route on method AND path — every operation is a
+    # sub-path and two of them are GETs — so a test invoke has to be able to say
+    # which one. Defaults reproduce the old behaviour exactly.
+    method: str = "POST"
+    path: str = "/"
 
 
 class UpdateEnvironmentRequest(BaseModel):
@@ -239,8 +244,9 @@ async def invoke_function(fn_id: str, payload: InvokeRequest,
     """
     _require_enabled()
     try:
-        return await cloud_function_service.invoke(db, fn_id=fn_id,
-                                                   payload=payload.payload or {})
+        return await cloud_function_service.invoke(
+            db, fn_id=fn_id, payload=payload.payload or {},
+            method=payload.method, path=payload.path)
     except CloudFunctionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

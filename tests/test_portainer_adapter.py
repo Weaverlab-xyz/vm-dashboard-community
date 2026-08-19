@@ -286,13 +286,27 @@ def test_dry_run_touches_nothing():
 
 
 def test_a_missing_url_surfaces_rather_than_defaulting():
+    """Never a default, and never a raise either.
+
+    A raise out of handle() is what dispatch turns into ``500 internal error``, so it
+    surfaces to the LOG and not to the operator. The setting has to reach the caller.
+    """
     _env(FN_PORTAINER_URL="")
-    try:
-        _call("GET", "/get_assets")
-    except RuntimeError as exc:
-        assert "FN_PORTAINER_URL" in str(exc)
-    else:
-        raise AssertionError("accepted a missing Portainer URL")
+    resp = _call("GET", "/get_assets")
+    assert resp.status == 500, resp.status
+    assert resp.body["error"] == "function not configured", resp.body
+    assert "FN_PORTAINER_URL" in resp.body["problem"], resp.body
+
+
+def test_check_config_reports_a_missing_url_instead_of_500ing_on_it():
+    """_config() used to run BEFORE routing, so an unconfigured adapter raised on
+    every path — including this one, whose only job is to say what is wrong."""
+    _env(FN_PORTAINER_URL="")
+    resp = _call("POST", "/check_config")
+    assert resp.status == 200, (resp.status, resp.body)
+    data = resp.body["data"]
+    assert data["valid"] is False, data
+    assert any("FN_PORTAINER_URL" in p for p in data["problems"]), data
 
 
 if __name__ == "__main__":
