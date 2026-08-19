@@ -213,7 +213,7 @@ def test_launchable_shape_rows_narrow_to_the_images_compatible_shapes():
 
 
 def test_launchable_shape_rows_carry_the_metadata_the_form_renders():
-    """Bare names (what _launchable_shapes_sync returns for the launch gate) are not
+    """Bare names (what _ShapeScope carries for the launch gate) are not
     enough here: the picker renders the Always-Free flag and switches its OCPU/memory
     inputs on is_flexible."""
     calls = _Calls()
