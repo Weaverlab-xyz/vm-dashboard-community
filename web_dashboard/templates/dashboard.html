@@ -691,7 +691,13 @@
         if (k === 'cloud_cost')       return this._fetchCost();
         // Hypervisors
         if (k === 'workstation_vms')  return this._fetchWorkstationVms();
-        if (k === 'proxmox_vms')      return this._fetchListCount('/api/proxmox/resources?type=vm', 'resources', v => v.status === 'running');
+        // No `?type=vm` on the URL: get_resources (api/proxmox.py) declares only
+        // connection_id and node, so FastAPI dropped the parameter and the tile counted
+        // LXC containers as VMs. Proxmox rows carry the discriminator themselves
+        // (proxmox_service.py sets type = "qemu" | "lxc"), so filter on that.
+        if (k === 'proxmox_vms')      return this._fetchListCount('/api/proxmox/resources', 'resources',
+                                            v => v.status === 'running',
+                                            v => v.type === 'qemu');
         if (k === 'vsphere_vms')      return this._fetchListCount('/api/vsphere/vms',           'vms',       v => v.power_state === 'poweredOn' || v.state === 'running');
         if (k === 'hyperv_vms')       return this._fetchListCount('/api/hyperv/vms',            'vms',       v => v.state === 'Running' || v.state === 'running');
         if (k === 'nutanix_vms')      return this._fetchListCount('/api/nutanix/vms',           'vms',       v => v.power_state === 'ON' || v.state === 'running');
@@ -756,12 +762,24 @@
         }
       },
 
-      async _fetchListCount(url, listKey, runningPredicate) {
+      async _fetchListCount(url, listKey, runningPredicate, totalPredicate) {
         try {
           const r = await API.get(url);
           if (!r) return { value: -1 };
-          const list = r[listKey] || [];
-          const out = { value: r.count ?? list.length };
+          // Tolerate a bare array as well as a {listKey, count} envelope. Every
+          // hypervisor listing answers with a bare list (api/hyperv.py, vsphere.py,
+          // xcpng.py, nutanix.py all `return out`; proxmox returns its resources),
+          // so `r[listKey]` was undefined and `r.count ?? list.length` came out
+          // `undefined ?? 0` — all five hypervisor tiles read 0. Zero is a plausible
+          // number rather than the "unavailable" dash, which is why it went unseen.
+          // The detail pages consume the bare array directly (`(data || []).map(...)`,
+          // `resources.filter(...)`), so the shape is theirs to keep; read both here.
+          let list = Array.isArray(r) ? r : (r[listKey] || []);
+          // A tile counting a SUBSET must also stop trusting a server-sent count, which
+          // describes the whole collection. Narrow first, then count what is left.
+          const narrowed = Boolean(totalPredicate);
+          if (narrowed) list = list.filter(totalPredicate);
+          const out = { value: narrowed ? list.length : (r.count ?? list.length) };
           if (runningPredicate) out.secondary = list.filter(runningPredicate).length;
           return out;
         } catch (e) {
@@ -789,22 +807,17 @@
       },
 
       async _fetchPortainer() {
-        // One call per workgroup so endpoints are visible to non-admin users
-        const wgNames = this.workgroups.map(w => w.name.toLowerCase());
-        const calls = wgNames.length
-          ? wgNames.map(wg => API.get(`/api/containers/endpoints?workgroup=${encodeURIComponent(wg)}`).catch(() => null))
-          : [API.get('/api/containers/endpoints').catch(() => null)];
-        const results = await Promise.all(calls);
-        let total = 0, online = 0, anyOk = false;
-        for (const r of results) {
-          if (r) {
-            anyOk = true;
-            const eps = r.endpoints || [];
-            total += eps.length;
-            online += eps.filter(e => e.status === 1).length;
-          }
-        }
-        return anyOk ? { value: total, secondary: online } : { value: -1 };
+        // ONE call. This used to issue one request per workgroup with
+        // `?workgroup=<name>` and SUM the results — but list_endpoints
+        // (api/containers.py) declares no workgroup parameter, and containers.py has no
+        // per-row workgroup filtering at all; its only gate is
+        // require_permission('containers','read'). So every call returned the same full
+        // list and the tile reported endpoints x workgroups: a user in three workgroups
+        // saw 3x the real count, and the home page paid three requests for it.
+        const r = await API.get('/api/containers/endpoints').catch(() => null);
+        if (!r) return { value: -1 };
+        const eps = r.endpoints || [];
+        return { value: eps.length, secondary: eps.filter(e => e.status === 1).length };
       },
 
       async loadJobs(silent = false) {

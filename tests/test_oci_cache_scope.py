@@ -296,6 +296,78 @@ def test_instances_write_key_matches_read_key_and_prefix_clears_it():
     asyncio.run(_exercise())
 
 
+def test_dashboard_stats_reads_the_cache_instead_of_refetching():
+    """The tile must reuse the cache /instances and the warmer already write.
+
+    `oci_dashboard_stats` called `_build_oci_instances` UNCONDITIONALLY, with no
+    `cache_service.get` first — alone among the four clouds (aws/azure go through
+    `get_or_refresh`, gcp through `_gcp_instances_unfiltered`, and this endpoint's own
+    *images* half already read the cache two lines below). So every dashboard load made
+    a live OCI `describe_instances` plus a Job table scan, holding a pooled connection
+    across the network call. Nothing surfaced it: the numbers were correct, just bought
+    at full price on every page view.
+    """
+    _install_stubs()
+    _reset()
+
+    calls = []
+
+    async def _fake_describe(compartment_id, ocids):
+        calls.append(compartment_id)
+        return []
+
+    async def _fake_list_images(compartment_id):
+        raise AssertionError("the images half must read its cache, not dial OCI")
+
+    oci.oci_service.describe_instances = _fake_describe
+    oci.oci_service.list_images = _fake_list_images
+
+    async def _exercise():
+        # Prime the key exactly as a /instances load or a warmer pass leaves it.
+        await oci._build_oci_instances(_FakeDB(), oci._compartment())
+        assert len(calls) == 1, "priming should have made exactly one live describe call"
+        await cache_service.set(oci._cache_key("oci_images"), {"images": []}, ttl=300)
+
+        out = await oci.oci_dashboard_stats(db=_FakeDB(), current_user=_AdminUser())
+
+        assert len(calls) == 1, (
+            f"oci_dashboard_stats made {len(calls) - 1} extra live describe_instances "
+            "call(s) — it is refetching instead of reading the cache that "
+            "_build_oci_instances just wrote")
+        assert out["instances"] == {"total": 0, "running": 0}, out
+
+    asyncio.run(_exercise())
+
+
+def test_dashboard_stats_still_builds_when_the_cache_is_cold():
+    """Cache-first must not become cache-only — a cold key still has to produce a
+    number, or the tile would read 0 until something else happened to warm it."""
+    _install_stubs()
+    _reset()
+
+    calls = []
+
+    async def _fake_describe(compartment_id, ocids):
+        calls.append(compartment_id)
+        return []
+
+    async def _fake_list_images(compartment_id):
+        return []
+
+    oci.oci_service.describe_instances = _fake_describe
+    oci.oci_service.list_images = _fake_list_images
+
+    async def _exercise():
+        assert await cache_service.get(oci._cache_key("oci_instances")) is None
+        out = await oci.oci_dashboard_stats(db=_FakeDB(), current_user=_AdminUser())
+        assert len(calls) == 1, "a cold cache must fall through to a live build"
+        assert out["instances"] == {"total": 0, "running": 0}, out
+        # …and the build must have populated the key for the next caller.
+        assert await cache_service.get(oci._cache_key("oci_instances")) is not None
+
+    asyncio.run(_exercise())
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
