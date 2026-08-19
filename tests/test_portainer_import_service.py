@@ -102,6 +102,9 @@ class FakePortainer:
         self.teams.append(rec)
         return rec
 
+    async def list_team_memberships(self):
+        return list(self.memberships)
+
     async def add_team_member(self, user_id, team_id, role=2):
         for m in self.memberships:                      # idempotent, like the real one
             if m["UserID"] == user_id and m["TeamID"] == team_id:
@@ -276,6 +279,24 @@ def test_an_out_of_range_team_role_falls_back_to_member():
 
 
 # ── merge semantics ──────────────────────────────────────────────────────────
+
+def test_an_existing_membership_is_reported_as_matched_not_created():
+    """add_team_member is idempotent and returns the EXISTING row rather than raising,
+    so it gives the caller no way to tell "created" from "was already a member". Without
+    a pre-read, a re-import reports memberships as created and the operator cannot see
+    that nothing actually changed."""
+    fake = FakePortainer(users=[{"Id": 11, "Username": "alice", "Role": 2}],
+                         teams=[{"Id": 22, "Name": "lab"}])
+    fake.memberships.append({"Id": 1, "UserID": 11, "TeamID": 22, "Role": 2})
+    svc = _install(fake)
+    doc = _bundle(users=[{"Id": 7, "Username": "alice", "Role": 2}],
+                  teams=[{"Id": 3, "Name": "lab"}],
+                  team_memberships=[{"Id": 9, "UserID": 7, "TeamID": 3, "Role": 2}])
+    jobs = _run(svc, doc)
+    assert len(fake.memberships) == 1, fake.memberships
+    assert jobs["completed"]["counts"]["created"] == 0, jobs["completed"]
+    assert any("membership 11->22" in m for m in jobs["completed"]["matched"]),         jobs["completed"]["matched"]
+
 
 def test_existing_names_are_matched_so_a_reimport_is_a_no_op():
     fake = FakePortainer(users=[{"Id": 1, "Username": "Alice", "Role": 2}],

@@ -140,6 +140,18 @@ async def _import_memberships(db, job_id: str, memberships: list,
     address whatever unrelated object happens to hold that number here.
     """
     job_service.update_progress(db, job_id, 55, "Importing team memberships")
+    if not memberships:
+        return
+    # Read what is already there ONCE. add_team_member is idempotent and returns the
+    # existing row rather than raising, so it gives the caller no way to tell "created"
+    # from "was already a member" — without this, a re-import reports memberships as
+    # created and the operator can't see that nothing actually changed.
+    try:
+        seen = {(int(m.get("UserID") or -1), int(m.get("TeamID") or -1))
+                for m in await portainer_service.list_team_memberships()}
+    except portainer_service.PortainerError as exc:
+        result["failed"].append(f"could not read existing team memberships: {exc}")
+        return
     for m in memberships:
         old_user, old_team = m.get("UserID"), m.get("TeamID")
         new_user, new_team = user_map.get(old_user), team_map.get(old_team)
@@ -148,16 +160,18 @@ async def _import_memberships(db, job_id: str, memberships: list,
                 f"membership user={old_user} team={old_team} (its user or team was "
                 f"not imported, and a source id means nothing on this server)")
             continue
+        pair = (int(new_user), int(new_team))
+        if pair in seen:
+            result["matched"].append(f"membership {new_user}->{new_team}")
+            continue
         role = m.get("Role")
         if int(role or 0) not in (portainer_service.TEAM_ROLE_LEADER,
                                  portainer_service.TEAM_ROLE_MEMBER):
             role = portainer_service.TEAM_ROLE_MEMBER
         try:
-            # add_team_member is itself idempotent — it returns an existing membership
-            # rather than creating a duplicate, which matters because a duplicate makes
-            # the first revoke look successful while access remains.
             await portainer_service.add_team_member(new_user, new_team, role)
             result["created"].append(f"membership {new_user}->{new_team}")
+            seen.add(pair)
         except portainer_service.PortainerError as exc:
             result["failed"].append(f"membership {old_user}->{old_team}: {exc}")
 
