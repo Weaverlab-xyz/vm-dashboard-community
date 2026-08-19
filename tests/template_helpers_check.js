@@ -349,13 +349,15 @@ ok('ttlWhyNot names the deletion arming deadline',
 // that cannot launch there, on the deploy form and the Packer build form both.
 // A server-side placement check now backs all of these paths (the Packer build
 // route/runner and both deploy endpoints reject an unlaunchable pairing with 400
-// shape_not_launchable — tests/test_oci_deploy_placement.py), but it fails open by
-// design, so the picker is still what keeps a bad pick from reaching it.
+// shape_not_launchable — tests/test_oci_deploy_placement.py). It refuses a pairing
+// OCI positively contradicts, but still fails open when a lookup says nothing, so
+// the picker is what keeps a bad pick from reaching it in the cases it can't judge.
 const OCI = 'oci/index.html';
 const ociComp = (over) => {
   const o = {};
   for (const m of ['_shapeScopeKey', 'shapesFor', 'shapeScopeBusy', 'shapeScopeEmpty',
                    '_shapeMeta', '_reconcileShape', '_emptyScopeMessage',
+                   'shapeScopeNote',
                    'deployShapes', 'deployShapeNotice', 'selectedShapeMeta',
                    'selectedShapeIsFlex', 'onShapeChange', 'deployReady',
                    'freeTierWarnings', '_freeTierWarnings',
@@ -365,7 +367,7 @@ const ociComp = (over) => {
     Object.assign(o, eval('({' + extract(OCI, m) + '})'));
   return Object.assign(o, {
     networkOpts: { shapes: [], free_tier: {} },
-    shapeScopes: {}, shapeScopeLoading: {},
+    shapeScopes: {}, shapeScopeLoading: {}, shapeScopeNotes: {},
     packerShapeNote: '', deployShapeNote: '',
     deployForm: { shape: '', availability_domain: '', acknowledge_charges: false },
     ociPackerForm: { shape: '', availability_domain: '', base_image_ocid: '',
@@ -441,6 +443,17 @@ ok(OCI + ' _shapeMeta is null for a shape in neither list',
 ok(OCI + ' _emptyScopeMessage names the AD and offers a next step',
    /AD-2/.test(oc._emptyScopeMessage('AD-2'))
    && /refresh/i.test(oc._emptyScopeMessage('AD-2')));
+// An empty dropdown has two causes needing opposite fixes, and only the server can
+// tell them apart (it holds both shape lists). When it sends a reason, that reason
+// wins — telling someone to try another AD when every AD in the tenancy offers the
+// same Ampere-only three is how the us-chicago-1 build burned an afternoon.
+ok(OCI + ' _emptyScopeMessage prefers the server reason over the AD guess',
+   oc._emptyScopeMessage('AD-2', 'No shape offered here can launch this image.')
+   === 'No shape offered here can launch this image.');
+oc = ociComp({ shapeScopeNotes: { 'AD-2|ocid1.image..x86': 'pick an aarch64 image' } });
+ok(OCI + ' shapeScopeNote reads the note for that exact scope',
+   oc.shapeScopeNote('AD-2', 'ocid1.image..x86') === 'pick an aarch64 image'
+   && oc.shapeScopeNote('AD-3', 'ocid1.image..x86') === '');
 
 // The region hint annotates the picker, so it has to read the same list. Sourced
 // from networkOpts.shapes it would claim the free micro is missing while the

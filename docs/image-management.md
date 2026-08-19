@@ -123,14 +123,30 @@ into the build:
 2. the base image doesn't support the shape,
 3. a genuine IAM policy denial.
 
+Case 2 can instead come back as `400 InvalidParameter` naming both
+("Shape VM.Standard.A1.Flex is not valid for image ocid1.image…"), which
+is the one legible failure of the three — but only after Packer has
+already created a key pair and started the build.
+
 The first is the easy trap, because the default build shape is
 `VM.Standard.E2.1.Micro`, the Always-Free AMD micro — and **E2 shapes
 exist only in the older OCI regions.** A newer region such as
 `us-chicago-1` offers no E2 shape at all, so the out-of-the-box default
 is unlaunchable there. Worse, the free tier has no x86 substitute: the
 other Always-Free shape, `VM.Standard.A1.Flex`, is Ampere, so it pairs
-only with an `aarch64` base image. An x86 Oracle Linux 10 image in
-`us-chicago-1` has exactly four usable shapes, none of them free.
+only with an `aarch64` base image.
+
+There is a harder version of this trap, because **`ListShapes` is scoped
+by your service limits, not just by what hardware the region has.** A
+trial tenancy sees only the shapes it holds quota for — measured live in
+`us-chicago-1` on 2026-08-19: all three availability domains returned
+exactly three shapes, every one of them Ampere (`BM.Standard.A1.160`,
+`VM.Standard.A1.Flex`, `VM.Standard.A2.Flex`), while the x86
+`Oracle-Autonomous-Linux-10.1` image listed 69 compatible shapes. The
+two lists are **disjoint**, so *no* x86 image can be built anywhere in
+that region under that tenancy, at any price. Switching to an `aarch64`
+base image is the only way forward, not a matter of paying for a bigger
+shape.
 
 The build form fills its shape list live and drops a default the region
 can't launch, and both the API route and the job runner precheck the
@@ -138,16 +154,25 @@ placement before Packer starts
 (`oci_service.check_launch_placement`) — so cases 1 and 2 now fail
 with a message naming the shape and listing what would work. The two
 OCI *deploy* endpoints run the same check for the same reason — see the
-`shape_not_launchable` entry in [cloud-vms.md](cloud-vms.md). That
-precheck deliberately **fails open**: if the lookup itself can't reach
-OCI, the build proceeds. So a bare 404 that survives all of the above
-is most likely case 3 — check the policies on the compartment holding
-the subnet and the image.
+`shape_not_launchable` entry in [cloud-vms.md](cloud-vms.md).
+
+That precheck **fails open when a lookup is silent** — it can't reach
+OCI, or one of the two lists (`ListShapes`, or the image's compatibility
+entries) comes back empty and so tells us nothing. It does **not** fail
+open when both lists answer and share nothing: an empty intersection
+between two non-empty lists is OCI saying plainly that nothing offered
+here boots this image, and reading that as "unknown" is exactly what let
+an Ampere shape under an x86 image on 2026-08-19. So a bare 404 that
+survives all of the above is most likely case 3 — check the policies on
+the compartment holding the subnet and the image.
 
 To build an x86 image in a region without E2, pick a paid shape
 (`VM.Standard.E5.Flex` at 1 OCPU costs cents for a build that lasts
-minutes) and acknowledge the free-tier warning. To stay inside the free
-tier, use an `aarch64` base image with `VM.Standard.A1.Flex`.
+minutes) and acknowledge the free-tier warning — but check the shape
+picker first: if the only shapes offered are `A1`/`A2`, your tenancy has
+no x86 quota there and no amount of paying will change it. To stay
+inside the free tier, or to build at all in an Ampere-only tenancy, use
+an `aarch64` base image with `VM.Standard.A1.Flex`.
 
 Set `storage_oci_bucket` on the Storage page to have builds export to
 VHD and register in the image hub; without it the build still produces

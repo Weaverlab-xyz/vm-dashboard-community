@@ -15,7 +15,8 @@ OCI isn't configured (community-edition invariant).
 import base64
 import json
 import logging
-from typing import List, Optional
+import re
+from typing import List, NamedTuple, Optional
 
 from . import cloud_executor, oci_freetier
 
@@ -167,25 +168,50 @@ def _list_shapes_sync(compartment_id: str, availability_domain: str = "") -> lis
     return sorted(seen.values(), key=lambda x: (not x["free_tier"], x["shape"]))
 
 
-def _launchable_shapes_sync(
+class _ShapeScope(NamedTuple):
+    """What can launch one image in one AD — and the two lists that decided it.
+
+    ``usable`` cannot be read on its own. An empty intersection means two
+    completely different things depending on where it came from, and collapsing
+    them into "no shapes" is what let an Ampere shape through for an x86 image:
+    see ``conclusive``.
+    """
+    usable: list[str]        # offered ∩ compatible, ranked by _shape_sort_key
+    offered: list[str]       # everything the AD offers this tenancy, ranked
+    compatible: list[str]    # everything the image supports, ranked
+
+    @property
+    def conclusive(self) -> bool:
+        """True when both lookups said something, so ``usable`` is a real answer.
+
+        An empty ``offered`` or ``compatible`` is OCI declining to tell us — an
+        image that publishes no compatibility entries, a listing a policy trims to
+        nothing. An empty ``usable`` computed from two NON-empty lists is the
+        opposite: OCI stating plainly that nothing offered here can boot this
+        image. Only the first is a reason to fail open.
+        """
+        return bool(self.offered) and bool(self.compatible)
+
+
+def _shape_scope_sync(
     compartment_id: str, availability_domain: str, image_ocid: str,
-) -> list[str]:
-    """Shapes that can actually launch ``image_ocid`` in ``availability_domain``.
+) -> _ShapeScope:
+    """Both constraints on launching ``image_ocid`` in ``availability_domain``.
 
-    Two independent constraints, and a shape has to clear both:
+      • ``list_shapes`` — what this AD offers *to this tenancy*. Not merely a
+        hardware-availability list: it is scoped by service limits, so a trial
+        tenancy sees only the shapes it holds quota for. Measured live in this
+        tenancy on 2026-08-19: every AD of us-chicago-1 returned exactly three
+        shapes, all Ampere — BM.Standard.A1.160, VM.Standard.A1.Flex,
+        VM.Standard.A2.Flex. Shape *families* also vary by region age: the
+        Always-Free AMD micro VM.Standard.E2.1.Micro exists in the older regions
+        and not in the newer ones.
+      • ``list_image_shape_compatibility_entries`` — what the image supports,
+        chiefly an architecture gate. Oracle-Autonomous-Linux-10.1 listed 69
+        shapes on the same day, every one of them x86.
 
-      • ``list_shapes`` — what this AD offers at all. Shape *families* are not
-        deployed to every region: the Always-Free AMD micro
-        ``VM.Standard.E2.1.Micro`` exists in the older regions and is absent from
-        newer ones (us-chicago-1 offers no E2 shape whatsoever).
-      • ``list_image_shape_compatibility_entries`` — what the image supports.
-        Chiefly an architecture gate: the Ampere ``A1.Flex`` free shape is
-        aarch64, so it never pairs with an x86 platform image, and a current
-        Oracle Linux build drops the oldest x86 generations.
-
-    Neither list alone is enough, and the intersection is frequently much smaller
-    than either — an x86 Oracle Linux 10 image in us-chicago-1 has four usable
-    shapes out of 89 compatible ones, none of them free-tier.
+    Those two lists are routinely disjoint, and a disjoint pair is a *verdict*
+    ("nothing here boots this image"), not a gap in what we know.
     """
     import oci
     compute = oci.core.ComputeClient(_oci_config())
@@ -194,7 +220,58 @@ def _launchable_shapes_sync(
         availability_domain=availability_domain).data}
     compatible = {e.shape for e in oci.pagination.list_call_get_all_results(
         compute.list_image_shape_compatibility_entries, image_id=image_ocid).data}
-    return sorted(offered & compatible, key=_shape_sort_key)
+    return _ShapeScope(
+        usable=sorted(offered & compatible, key=_shape_sort_key),
+        offered=sorted(offered, key=_shape_sort_key),
+        compatible=sorted(compatible, key=_shape_sort_key),
+    )
+
+
+# Ampere (aarch64) shape families: VM.Standard.A1.Flex, BM.Standard.A1.160,
+# VM.Standard.A2.Flex. Anchored on the trailing dot/end so BM.GPU.A10.4 — Nvidia
+# on x86 — doesn't read as Arm. Used ONLY to word an error, never to gate a
+# launch: the gate is what OCI's own two lists say, and a name is a guess.
+_AMPERE_SHAPE_RE = re.compile(r"\.A[12](\.|$)")
+
+
+def _placement_refusal(scope: _ShapeScope, shape: str,
+                       availability_domain: str, region: str) -> str:
+    """The operator-facing sentence for a placement OCI will refuse.
+
+    Shared by the launch gate and the shape picker so the form and the API can't
+    explain the same rejection two different ways.
+    """
+    where = f"{region or _cfg('oci_region') or 'this region'} ({availability_domain})"
+
+    if not scope.usable:
+        # Both lists spoke and share nothing: every shape this tenancy is offered
+        # here is the wrong architecture for this image (or otherwise unsupported
+        # by it). Naming the offered shapes is the whole remedy — it is what tells
+        # the operator which way to move, image or region.
+        offered_hint = (", ".join(scope.offered[:8])
+                        + ("…" if len(scope.offered) > 8 else ""))
+        msg = (f"No shape offered in {where} can launch this image. The image supports "
+               f"{len(scope.compatible)} shapes, none of which this tenancy is offered "
+               f"here — {where} offers only: {offered_hint}.")
+        if all(_AMPERE_SHAPE_RE.search(s) for s in scope.offered):
+            msg += (" Every one of those is Ampere (aarch64), so the base image has to be"
+                    " an aarch64 build — the platform images carry it in the name"
+                    " (…-aarch64-…). Pick an aarch64 base image, or a region/AD that"
+                    " offers an x86 shape.")
+        return msg
+
+    hint = ", ".join(scope.usable[:8]) + ("…" if len(scope.usable) > 8 else "")
+    free = [s for s in scope.usable if oci_freetier.is_free_shape(s)]
+    return (
+        f"Shape {shape} cannot launch this image in {where} — either the shape "
+        f"isn't offered there or the image doesn't support it. OCI reports both "
+        f"as a bare 404 NotAuthorizedOrNotFound. Usable shapes for this image "
+        f"here: {hint}."
+        + ("" if free else
+           " None of them are Always-Free — in regions with no E2 shape the only"
+           " free compute is Ampere VM.Standard.A1.Flex, which needs an aarch64"
+           " image.")
+    )
 
 
 def _check_launch_placement_sync(
@@ -206,37 +283,34 @@ def _check_launch_placement_sync(
     LaunchInstance answers an absent shape, an incompatible image and a genuine
     policy denial with the *same* opaque ``404 NotAuthorizedOrNotFound`` — no
     field named, nothing to act on (see the troubleshooting note in
-    docs/image-management.md). Checking the placement first is what turns that
-    into a sentence naming the shape.
+    docs/image-management.md). An image the shape cannot boot can instead come
+    back as ``400 InvalidParameter`` naming both, a second into the build.
+    Checking the placement first is what turns either into a sentence naming the
+    shape *before* a job is queued.
 
     Fails **open** when the lookup itself errors: a listing call that can't
     reach OCI is not evidence the placement is wrong, and this must never be the
-    reason a build refuses to start.
+    reason a build refuses to start. It does NOT fail open on an empty
+    intersection between two lists that both answered — see ``_ShapeScope``.
     """
     try:
-        usable = _launchable_shapes_sync(
+        scope = _shape_scope_sync(
             compartment_id or _compartment(), availability_domain, image_ocid)
     except Exception as exc:  # noqa: BLE001 — advisory check, never a blocker
         logger.warning("OCI launch-placement precheck skipped: %s", exc)
         return
-    if not usable or shape in usable:
-        # An empty intersection means the lookup told us nothing useful (an image
-        # with no compatibility entries, say) — don't reject on that either.
+    if not scope.conclusive:
+        # One of the two lookups came back empty, which is OCI telling us nothing
+        # rather than telling us "no". Allow the launch and say so, so a build
+        # that then dies at LaunchInstance can be traced to an unenforced gate.
+        logger.info(
+            "OCI launch-placement precheck inconclusive for %s in %s "
+            "(%d shapes offered, %d compatible) — allowing the launch",
+            shape, availability_domain, len(scope.offered), len(scope.compatible))
         return
-
-    where = f"{region or _cfg('oci_region') or 'this region'} ({availability_domain})"
-    hint = ", ".join(usable[:8]) + ("…" if len(usable) > 8 else "")
-    free = [s for s in usable if oci_freetier.is_free_shape(s)]
-    raise OCIError(
-        f"Shape {shape} cannot launch this image in {where} — either the shape "
-        f"isn't offered there or the image doesn't support it. OCI reports both "
-        f"as a bare 404 NotAuthorizedOrNotFound. Usable shapes for this image "
-        f"here: {hint}."
-        + ("" if free else
-           " None of them are Always-Free — in regions with no E2 shape the only"
-           " free compute is Ampere VM.Standard.A1.Flex, which needs an aarch64"
-           " image.")
-    )
+    if shape in scope.usable:
+        return
+    raise OCIError(_placement_refusal(scope, shape, availability_domain, region))
 
 
 async def check_launch_placement(
@@ -249,38 +323,51 @@ async def check_launch_placement(
             shape=shape, compartment_id=compartment_id, region=region))
 
 
-def _launchable_shape_rows_sync(compartment_id: str, availability_domain: str = "",
-                                image_ocid: str = "") -> list[dict]:
-    """``_list_shapes_sync`` rows, narrowed to what ``image_ocid`` can boot here.
+def _shape_options_sync(compartment_id: str, availability_domain: str = "",
+                        image_ocid: str = "") -> tuple[list[dict], str]:
+    """``_list_shapes_sync`` rows narrowed to what ``image_ocid`` can boot here,
+    plus a note explaining the list when the narrowing leaves nothing.
 
     The picker's counterpart to ``_check_launch_placement_sync``: that one gates a
     submitted shape, this one keeps the unusable shapes out of the dropdown to
-    begin with. Both narrow through ``_launchable_shapes_sync``, deliberately —
-    a form that filters on a different rule than the gate enforces ends up either
-    hiding a shape the API would accept or offering one it rejects.
+    begin with. Both narrow through ``_shape_scope_sync`` and refuse on the same
+    condition, deliberately — a form that filters on a different rule than the
+    gate enforces ends up either hiding a shape the API would accept or offering
+    one it rejects.
 
     Returns rows (name + ocpus/memory/is_flexible/free_tier) rather than
-    ``_launchable_shapes_sync``'s bare names, because the form renders the
-    free-tier flag and switches its OCPU/memory inputs on ``is_flexible``.
+    ``_ShapeScope``'s bare names, because the form renders the free-tier flag and
+    switches its OCPU/memory inputs on ``is_flexible``.
 
-    Fails **open** on the same two conditions the gate does — a lookup error, and
-    an empty intersection (an image declaring no compatibility entries is
-    indistinguishable from one matching nothing) — so the picker never offers less
-    than the gate would accept, and an unreadable compatibility list degrades to
-    the plain AD list instead of an empty dropdown.
+    Fails **open** on a lookup error and on an inconclusive scope, so an
+    unreadable compatibility list degrades to the plain AD list instead of an
+    empty dropdown. It does NOT fail open when both lists answered and share
+    nothing: that empties the dropdown on purpose, and the note is what stops an
+    empty dropdown reading as a broken page.
     """
     shapes = _list_shapes_sync(compartment_id, availability_domain)
     if not shapes or not image_ocid or not availability_domain:
-        return shapes
+        return shapes, ""
     try:
-        usable = set(_launchable_shapes_sync(compartment_id, availability_domain, image_ocid))
+        scope = _shape_scope_sync(compartment_id, availability_domain, image_ocid)
     except Exception as exc:  # noqa: BLE001 — advisory narrowing, never a blocker
         logger.warning("OCI image/shape compatibility lookup failed for %s; offering "
                        "the unnarrowed AD list: %s", image_ocid, exc)
-        return shapes
-    if not usable:
-        return shapes
-    return [s for s in shapes if s["shape"] in usable]
+        return shapes, ""
+    if not scope.conclusive:
+        return shapes, ""
+    usable = set(scope.usable)
+    rows = [s for s in shapes if s["shape"] in usable]
+    # No shape to name: an empty `rows` means the intersection itself was empty, and
+    # that branch of _placement_refusal explains the placement, not a chosen shape.
+    return rows, ("" if rows else
+                  _placement_refusal(scope, "", availability_domain, ""))
+
+
+def _launchable_shape_rows_sync(compartment_id: str, availability_domain: str = "",
+                                image_ocid: str = "") -> list[dict]:
+    """``_shape_options_sync``'s rows, for callers with nothing to say about them."""
+    return _shape_options_sync(compartment_id, availability_domain, image_ocid)[0]
 
 
 def _list_subnets_sync(compartment_id: str, vcn_id: str = "") -> list[dict]:
@@ -319,8 +406,9 @@ def _get_network_options_sync(compartment_id: str, vcn_id: str,
     # there. Blank falls back to the first AD, which is also what a blank
     # availability_domain resolves to at launch time, so the two agree.
     scope_ad = availability_domain or (ads[0] if ads else "")
+    shapes_note = ""
     try:
-        shapes = _launchable_shape_rows_sync(compartment_id, scope_ad, image_ocid)
+        shapes, shapes_note = _shape_options_sync(compartment_id, scope_ad, image_ocid)
     except Exception as exc:
         logger.warning("OCI list_shapes failed: %s", exc)
         shapes = []
@@ -343,6 +431,11 @@ def _get_network_options_sync(compartment_id: str, vcn_id: str,
         # blank AD can only tell which one it actually got by being told.
         "availability_domain": scope_ad,
         "image_ocid":     image_ocid,
+        # Why `shapes` is empty, when it is empty *because* of the image scope.
+        # The form cannot work this out for itself — an empty list looks the same
+        # whether the AD offers nothing or the image can boot none of what it
+        # offers — and the two need opposite next steps from the operator.
+        "shapes_note":    shapes_note,
     }
 
 
