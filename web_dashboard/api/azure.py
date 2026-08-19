@@ -574,20 +574,42 @@ async def _fetch_vms(db: Session) -> list:
     return result
 
 
+
+async def _fetch_vms_fresh() -> list:
+    """Own session, so a stale-while-revalidate background refresh is safe.
+
+    ``get_or_refresh`` may run the fetcher as a detached task that OUTLIVES the request. A
+    fetcher closing over the ``Depends(get_db)`` session then runs against a Session the
+    request has already closed — and SQLAlchemy lets a closed Session be reused, so it
+    quietly checks out a FRESH pooled connection that nothing ever returns. On 5+5 per
+    process that is the ``QueuePool limit ... reached`` failure. The other interleaving is
+    worse: the task can start while the request is still in flight and use the same Session
+    concurrently, raising ``IllegalStateChangeError`` — possibly out of ``get_db``'s
+    ``finally``, i.e. a 500 on a response that was already computed.
+
+    Same pattern and same reason as the fetcher in ``api/inventory.py``.
+    """
+    from ..database import SessionLocal
+    s = SessionLocal()
+    try:
+        return await _fetch_vms(s)
+    finally:
+        s.close()
+
 @router.get("/dashboard-stats")
 async def azure_dashboard_stats(
-    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "read")),
 ):
     """One-call counts for the Azure dashboard tiles (VMs total+running, images
     total) — reuses the same cached data + RBAC as the list endpoints. A null
     section → the tile shows unavailable."""
+    # No `db`: the fetcher owns its session, so there is none here to capture by accident.
     out = {"instances": None, "images": None}
     try:
         raw, _ = await cache_service.get_or_refresh(
             cache_service.key_global("azure_vms"),
             cache_service.TTL["azure_vms"],
-            lambda: _fetch_vms(db))
+            _fetch_vms_fresh)
         accessible = _accessible_workgroups(current_user)
         out["instances"] = cloud_stats.summarize_instances(raw, accessible, "state")
         # Azure keys region as "location" on the VM rows.
@@ -611,7 +633,6 @@ async def azure_dashboard_stats(
 async def list_vms(
     bust: bool = False,
     workgroup: Optional[str] = None,
-    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "read")),
 ):
     """
@@ -621,6 +642,7 @@ async def list_vms(
     Non-admins see only VMs whose Job.workgroup (or workgroup tag) is in their
     workgroup list. `?workgroup=<name>` narrows further.
     """
+    # No `db`: the fetcher owns its session, so there is none here to capture by accident.
     accessible = _accessible_workgroups(current_user)
     if workgroup is not None:
         canonical = workgroup.lower()
@@ -633,7 +655,7 @@ async def list_vms(
     try:
         if bust:
             await cache_service.invalidate(cache_key)
-        raw, cached_at = await cache_service.get_or_refresh(cache_key, ttl, lambda: _fetch_vms(db))
+        raw, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch_vms_fresh)
         filtered = []
         for vm in raw:
             vm_wg = (vm.get("workgroup") or "").lower() or None

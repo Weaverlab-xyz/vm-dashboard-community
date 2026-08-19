@@ -288,10 +288,24 @@ def test_request_and_worker_paths_read_different_keys():
 # ── The services actually route through it ───────────────────────────────────
 
 _SERVICES = {
+    # The four hyperscalers, covered since the outage that produced this module.
     "gcp_service.py": ("gcp", "GCPError"),
     "oci_service.py": ("oci", "OCIError"),
     "aws_service.py": ("aws", "AWSError"),
     "azure_service.py": ("azure", "AzureError"),
+    # Everything else the dashboard home page fans out to. These were left on the shared
+    # default executor with NO deadline, which meant the property this module claims —
+    # "one provider's bad day cannot reach the others" — held for only 4 of 12 providers.
+    # A slow Proxmox host or an unreachable storage backend could still queue up every
+    # thread in the process and take unrelated routes down with it.
+    "proxmox_service.py": ("proxmox", "ProxmoxError"),
+    "nutanix_service.py": ("nutanix", "NutanixError"),
+    "vsphere_service.py": ("vsphere", "VSphereError"),
+    "hyperv_service.py": ("hyperv", "HyperVError"),
+    "xcpng_service.py": ("xcpng", "XcpNgError"),
+    "k8s_service.py": ("k8s", "K8sError"),
+    "storage_service.py": ("storage", "StorageError"),
+    "cloud_database_service.py": ("clouddb", "CloudDatabaseError"),
 }
 
 

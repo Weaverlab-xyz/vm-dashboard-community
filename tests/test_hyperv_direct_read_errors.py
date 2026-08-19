@@ -82,9 +82,51 @@ def _winrm_stub(result):
     return mod
 
 
+def _stub_cloud_executor():
+    """A stand-in for `services/cloud_executor`, which the service's `_to_thread` needs.
+
+    Blocking WinRM calls run on the hyperv pool now rather than the event loop's shared
+    default executor, so `_to_thread` does `from . import cloud_executor`. Under the plain
+    file load this module used to get, that raised "attempted relative import with no known
+    parent package" at CALL time — surfacing as a HyperVError with an import message in it,
+    since `_to_thread` translates every CloudCallError into one.
+
+    The real module needs config_service, so it is stubbed rather than loaded: what this
+    file tests is the message a failed read produces, not thread-pool admission. Running
+    the function inline is enough for that, and `tests/test_cloud_executor.py` owns the
+    pool's own behaviour.
+    """
+    mod = types.ModuleType("web_dashboard.services.cloud_executor")
+
+    class CloudCallError(Exception):
+        pass
+
+    async def run(_provider, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    mod.CloudCallError = CloudCallError
+    mod.run = run
+    sys.modules[mod.__name__] = mod
+    return mod
+
+
 def _service():
-    """Load `services/hyperv_service` from source, with `winrm` already stubbed."""
-    spec = importlib.util.spec_from_file_location("hyperv_service_under_test", _SERVICE)
+    """Load `services/hyperv_service` from source, with `winrm` already stubbed.
+
+    Loaded under its REAL dotted name, with stub parent packages, so the relative import in
+    `_to_thread` resolves. In the app this module is only ever imported as
+    `web_dashboard.services.hyperv_service`; the bare name this used to load under was the
+    one context in which its relative imports could not work.
+    """
+    for name in ("web_dashboard", "web_dashboard.services"):
+        if name not in sys.modules:
+            pkg = types.ModuleType(name)
+            pkg.__path__ = []          # mark it a package so submodule imports resolve
+            sys.modules[name] = pkg
+    _stub_cloud_executor()
+
+    spec = importlib.util.spec_from_file_location(
+        "web_dashboard.services.hyperv_service", _SERVICE)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)

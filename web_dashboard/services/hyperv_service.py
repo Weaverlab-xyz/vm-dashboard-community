@@ -5,10 +5,9 @@ Connects to a Windows host running Hyper-V and executes PowerShell Hyper-V
 cmdlets remotely.  Works with standalone Hyper-V hosts (Windows 10/11 Pro,
 Windows Server 2016–2025) and Failover Cluster nodes.
 
-All blocking WinRM calls run in asyncio.to_thread() so the FastAPI event loop
+All blocking WinRM calls run in _to_thread() so the FastAPI event loop
 is never blocked.
 """
-import asyncio
 import json
 import logging
 import re
@@ -23,6 +22,32 @@ _UUID_RE = re.compile(
 
 class HyperVError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking WinRM call on hyperv's OWN bounded thread pool.
+
+    These calls used to go to the event loop's default ThreadPoolExecutor — one unbounded
+    queue shared by every provider, about 8 threads in-container, with no deadline. That is
+    the shape that took the whole dashboard down for 30 minutes on 2026-08-12 when two
+    clouds went slow upstream: requests that needed nothing from hyperv queued behind
+    calls that never returned. See services/cloud_executor.py, which is explicit that a
+    bigger shared pool is not the fix, because a shared pool of any size is still a shared
+    failure domain.
+
+    Refusals become HyperVError so every existing ``except HyperVError`` — which is what turns a
+    failure into a 503 or an unavailable tile — keeps working unchanged. Anything WinRM
+    itself raises propagates untouched.
+
+    ``cloud_executor`` is imported INSIDE the function on purpose: this module is loaded by
+    file path under a non-dotted name in its own tests, and a top-level relative import
+    fails there with "attempted relative import with no known parent package".
+    """
+    from . import cloud_executor
+    try:
+        return await cloud_executor.run("hyperv", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise HyperVError(str(exc)) from exc
 
 
 # No _cfg here any more. This module used to read the singleton config keys directly,
@@ -257,7 +282,7 @@ def _power_op_sync(conn, vmid: str, name: str, op: str) -> dict:
 
 async def list_vms(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_vms_sync, conn)
+        return await _to_thread(_list_vms_sync, conn)
     except HyperVError:
         raise
     except Exception as e:
@@ -271,7 +296,7 @@ async def power_op(conn, vmid: str, name: str, op: str) -> dict:
             f"Invalid operation '{op}'. Must be one of: {', '.join(sorted(valid))}"
         )
     try:
-        return await asyncio.to_thread(_power_op_sync, conn, vmid, name, op)
+        return await _to_thread(_power_op_sync, conn, vmid, name, op)
     except HyperVError:
         raise
     except Exception as e:

@@ -304,6 +304,22 @@ async def _build_oci_instances(db, compartment: str) -> list:
     return instances
 
 
+async def _oci_instances_unfiltered(db, compartment: str) -> list:
+    """Full dashboard OCI instances, cache-aware (reads the oci_instances cache,
+    builds + caches on miss). Mirrors gcp.py::_gcp_instances_unfiltered.
+
+    Exists so the key and the unwrap live in ONE place. `_build_oci_instances` writes
+    `_cache_key("oci_instances", compartment)` while callers used to read
+    `_cache_key("oci_instances")`; those agree only because both resolve to
+    `_compartment()`. Taking `compartment` explicitly makes the read key byte-identical
+    to the write key instead of coincidentally equal.
+    """
+    cached = await cache_service.get(_cache_key("oci_instances", compartment))
+    if cached:
+        return (cached.get("data") or {}).get("instances") or []
+    return await _build_oci_instances(db, compartment)
+
+
 @router.get("/instances", response_model=OCIInstanceListResponse)
 async def list_instances(
     bust: bool = Query(False),
@@ -360,7 +376,12 @@ async def oci_dashboard_stats(
     if not _configured():
         return out
     try:
-        instances = await _build_oci_instances(db, _compartment())
+        # Cache-aware, like the other three clouds. This called _build_oci_instances
+        # UNCONDITIONALLY, so every dashboard load made a live OCI describe_instances
+        # plus a full Job scan while holding a pooled connection — alone among the four
+        # clouds, and alone even within this endpoint, whose images half below already
+        # read its cache.
+        instances = await _oci_instances_unfiltered(db, _compartment())
         out["instances"] = cloud_stats.summarize_instances(
             instances, _accessible_workgroups(current_user), "lifecycle_state")
     except oci_service.OCIError:

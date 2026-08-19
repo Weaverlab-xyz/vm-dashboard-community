@@ -4,10 +4,9 @@ Nutanix AHV service layer — Prism Central REST API v3.
 Works with both Prism Central (multi-cluster) and Prism Element (single-cluster).
 Authentication is HTTP Basic; no SDK required — httpx is sufficient.
 
-All blocking HTTP calls run in asyncio.to_thread() so the FastAPI event loop
+All blocking HTTP calls run in _to_thread() so the FastAPI event loop
 is never blocked.
 """
-import asyncio
 import logging
 import time
 
@@ -72,6 +71,32 @@ _CLOUD_IMAGES = [
 
 class NutanixError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking Prism Central call on nutanix's OWN bounded thread pool.
+
+    These calls used to go to the event loop's default ThreadPoolExecutor — one unbounded
+    queue shared by every provider, about 8 threads in-container, with no deadline. That is
+    the shape that took the whole dashboard down for 30 minutes on 2026-08-12 when two
+    clouds went slow upstream: requests that needed nothing from nutanix queued behind
+    calls that never returned. See services/cloud_executor.py, which is explicit that a
+    bigger shared pool is not the fix, because a shared pool of any size is still a shared
+    failure domain.
+
+    Refusals become NutanixError so every existing ``except NutanixError`` — which is what turns a
+    failure into a 503 or an unavailable tile — keeps working unchanged. Anything Prism Central
+    itself raises propagates untouched.
+
+    ``cloud_executor`` is imported INSIDE the function on purpose: this module is loaded by
+    file path under a non-dotted name in its own tests, and a top-level relative import
+    fails there with "attempted relative import with no known parent package".
+    """
+    from . import cloud_executor
+    try:
+        return await cloud_executor.run("nutanix", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise NutanixError(str(exc)) from exc
 
 
 # No _cfg here any more. This module used to read the singleton config keys directly,
@@ -450,7 +475,7 @@ def list_cloud_images() -> list[dict]:
 
 async def list_vms(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_vms_sync, conn)
+        return await _to_thread(_list_vms_sync, conn)
     except NutanixError:
         raise
     except Exception as e:
@@ -459,7 +484,7 @@ async def list_vms(conn) -> list[dict]:
 
 async def list_images(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_images_sync, conn)
+        return await _to_thread(_list_images_sync, conn)
     except NutanixError:
         raise
     except Exception as e:
@@ -468,7 +493,7 @@ async def list_images(conn) -> list[dict]:
 
 async def list_clusters(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_clusters_sync, conn)
+        return await _to_thread(_list_clusters_sync, conn)
     except NutanixError:
         raise
     except Exception as e:
@@ -477,7 +502,7 @@ async def list_clusters(conn) -> list[dict]:
 
 async def list_subnets(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_subnets_sync, conn)
+        return await _to_thread(_list_subnets_sync, conn)
     except NutanixError:
         raise
     except Exception as e:
@@ -486,7 +511,7 @@ async def list_subnets(conn) -> list[dict]:
 
 async def import_image(conn, name: str, source_uri: str) -> dict:
     try:
-        return await asyncio.to_thread(_import_image_sync, conn, name, source_uri)
+        return await _to_thread(_import_image_sync, conn, name, source_uri)
     except NutanixError:
         raise
     except Exception as e:
@@ -505,7 +530,7 @@ async def deploy_vm(
     disk_size_mib: int = 40960,
 ) -> dict:
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _deploy_vm_sync,
             conn, vm_name, image_uuid, cluster_uuid, subnet_uuid,
             vcpus, num_sockets, memory_mib, disk_size_mib,
@@ -518,7 +543,7 @@ async def deploy_vm(
 
 async def delete_image(conn, uuid: str) -> dict:
     try:
-        return await asyncio.to_thread(_delete_image_sync, conn, uuid)
+        return await _to_thread(_delete_image_sync, conn, uuid)
     except NutanixError:
         raise
     except Exception as e:
@@ -527,7 +552,7 @@ async def delete_image(conn, uuid: str) -> dict:
 
 async def delete_vm(conn, uuid: str, name: str = "") -> dict:
     try:
-        return await asyncio.to_thread(_delete_vm_sync, conn, uuid, name)
+        return await _to_thread(_delete_vm_sync, conn, uuid, name)
     except NutanixError:
         raise
     except Exception as e:
@@ -540,7 +565,7 @@ async def power_op(conn, uuid: str, name: str, op: str) -> dict:
             f"Invalid operation '{op}'. Must be one of: {', '.join(sorted(_TRANSITIONS))}"
         )
     try:
-        return await asyncio.to_thread(_power_op_sync, conn, uuid, name, op)
+        return await _to_thread(_power_op_sync, conn, uuid, name, op)
     except NutanixError:
         raise
     except Exception as e:

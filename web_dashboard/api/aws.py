@@ -297,20 +297,42 @@ async def _fetch_instances(db: Session) -> list:
     return result
 
 
+
+async def _fetch_instances_fresh() -> list:
+    """Own session, so a stale-while-revalidate background refresh is safe.
+
+    ``get_or_refresh`` may run the fetcher as a detached task that OUTLIVES the request. A
+    fetcher closing over the ``Depends(get_db)`` session then runs against a Session the
+    request has already closed — and SQLAlchemy lets a closed Session be reused, so it
+    quietly checks out a FRESH pooled connection that nothing ever returns. On 5+5 per
+    process that is the ``QueuePool limit ... reached`` failure. The other interleaving is
+    worse: the task can start while the request is still in flight and use the same Session
+    concurrently, raising ``IllegalStateChangeError`` — possibly out of ``get_db``'s
+    ``finally``, i.e. a 500 on a response that was already computed.
+
+    Same pattern and same reason as the fetcher in ``api/inventory.py``.
+    """
+    from ..database import SessionLocal
+    s = SessionLocal()
+    try:
+        return await _fetch_instances(s)
+    finally:
+        s.close()
+
 @router.get("/dashboard-stats")
 async def aws_dashboard_stats(
-    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "read")),
 ):
     """One-call counts for the AWS dashboard tiles (instances total+running, AMIs
     total) — reuses the same cached data + RBAC as the list endpoints, so it adds
     no cloud calls on a warm cache. A null section → the tile shows unavailable."""
+    # No `db`: the fetcher owns its session, so there is none here to capture by accident.
     out = {"instances": None, "images": None}
     try:
         raw, _ = await cache_service.get_or_refresh(
             instances_cache_key(),
             cache_service.TTL[CACHE_KEY_INSTANCES],
-            lambda: _fetch_instances(db))
+            _fetch_instances_fresh)
         accessible = _accessible_workgroups(current_user)
         out["instances"] = cloud_stats.summarize_instances(raw, accessible, "state")
         out["instances"]["by_region"] = cloud_stats.summarize_by_region(
@@ -332,7 +354,6 @@ async def aws_dashboard_stats(
 @router.get("/instances", response_model=EC2InstanceListResponse)
 async def list_instances(
     workgroup: Optional[str] = None,
-    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "read")),
 ):
     """
@@ -342,6 +363,7 @@ async def list_instances(
     Filtering: non-admins see only instances whose `Job.workgroup` is in their
     workgroup list. Admins see all. `?workgroup=<name>` narrows further.
     """
+    # No `db`: the fetcher owns its session, so there is none here to capture by accident.
     accessible = _accessible_workgroups(current_user)
     if workgroup is not None:
         canonical = workgroup.lower()
@@ -353,7 +375,7 @@ async def list_instances(
 
     try:
         raw, cached_at = await cache_service.get_or_refresh(
-            cache_key, ttl, lambda: _fetch_instances(db))
+            cache_key, ttl, _fetch_instances_fresh)
         filtered = []
         for inst in raw:
             inst_wg = inst.get("workgroup")

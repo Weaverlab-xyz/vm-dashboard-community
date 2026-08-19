@@ -4,11 +4,10 @@ VMware vSphere service layer — vSphere Web Services API via pyVmomi.
 Works with both standalone ESXi hosts and vCenter Server.  Connect to either
 and the same API is available — vCenter simply exposes a wider inventory.
 
-All blocking SDK calls run in asyncio.to_thread() so the FastAPI event loop
+All blocking SDK calls run in _to_thread() so the FastAPI event loop
 is never blocked.  Each public function opens a fresh session and always
 disconnects in a finally block to avoid session leaks.
 """
-import asyncio
 import logging
 import ssl
 import time
@@ -19,6 +18,32 @@ logger = logging.getLogger(__name__)
 
 class VSphereError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking pyVmomi call on vsphere's OWN bounded thread pool.
+
+    These calls used to go to the event loop's default ThreadPoolExecutor — one unbounded
+    queue shared by every provider, about 8 threads in-container, with no deadline. That is
+    the shape that took the whole dashboard down for 30 minutes on 2026-08-12 when two
+    clouds went slow upstream: requests that needed nothing from vsphere queued behind
+    calls that never returned. See services/cloud_executor.py, which is explicit that a
+    bigger shared pool is not the fix, because a shared pool of any size is still a shared
+    failure domain.
+
+    Refusals become VSphereError so every existing ``except VSphereError`` — which is what turns a
+    failure into a 503 or an unavailable tile — keeps working unchanged. Anything pyVmomi
+    itself raises propagates untouched.
+
+    ``cloud_executor`` is imported INSIDE the function on purpose: this module is loaded by
+    file path under a non-dotted name in its own tests, and a top-level relative import
+    fails there with "attempted relative import with no known parent package".
+    """
+    from . import cloud_executor
+    try:
+        return await cloud_executor.run("vsphere", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise VSphereError(str(exc)) from exc
 
 
 # No _cfg here any more. This module used to read the singleton config keys directly,
@@ -308,7 +333,7 @@ def _power_op_sync(conn, moref: str, op: str) -> dict:
 
 async def list_datacenters(conn) -> list[str]:
     try:
-        return await asyncio.to_thread(_list_datacenters_sync, conn)
+        return await _to_thread(_list_datacenters_sync, conn)
     except VSphereError:
         raise
     except Exception as e:
@@ -317,7 +342,7 @@ async def list_datacenters(conn) -> list[str]:
 
 async def list_hosts(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_hosts_sync, conn)
+        return await _to_thread(_list_hosts_sync, conn)
     except VSphereError:
         raise
     except Exception as e:
@@ -326,7 +351,7 @@ async def list_hosts(conn) -> list[dict]:
 
 async def list_vms(conn, datacenter: str = "") -> list[dict]:
     try:
-        return await asyncio.to_thread(_all_vms_sync, conn, datacenter)
+        return await _to_thread(_all_vms_sync, conn, datacenter)
     except VSphereError:
         raise
     except Exception as e:
@@ -335,7 +360,7 @@ async def list_vms(conn, datacenter: str = "") -> list[dict]:
 
 async def get_vm(conn, moref: str) -> dict:
     try:
-        return await asyncio.to_thread(_get_vm_sync, conn, moref)
+        return await _to_thread(_get_vm_sync, conn, moref)
     except VSphereError:
         raise
     except Exception as e:
@@ -351,7 +376,7 @@ async def power_op(conn, moref: str, op: str) -> dict:
     if op not in valid:
         raise VSphereError(f"Invalid operation '{op}'. Must be one of: {', '.join(sorted(valid))}")
     try:
-        return await asyncio.to_thread(_power_op_sync, conn, moref, op)
+        return await _to_thread(_power_op_sync, conn, moref, op)
     except VSphereError:
         raise
     except Exception as e:

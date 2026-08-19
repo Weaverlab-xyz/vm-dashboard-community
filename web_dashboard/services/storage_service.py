@@ -28,7 +28,6 @@ Public API:
     fetch_asset_in(backend, name)          — fetch from a specific backend (for migration)
     upload_asset_to(backend, name, data)   — write to a specific backend (for migration)
 """
-import asyncio
 import base64
 import logging
 from typing import Optional
@@ -76,6 +75,32 @@ def asset_type(name: str) -> str:
 
 class StorageError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking storage-backend call on storage's OWN bounded thread pool.
+
+    These calls used to go to the event loop's default ThreadPoolExecutor — one unbounded
+    queue shared by every provider, about 8 threads in-container, with no deadline. That is
+    the shape that took the whole dashboard down for 30 minutes on 2026-08-12 when two
+    clouds went slow upstream: requests that needed nothing from storage queued behind
+    calls that never returned. See services/cloud_executor.py, which is explicit that a
+    bigger shared pool is not the fix, because a shared pool of any size is still a shared
+    failure domain.
+
+    Refusals become StorageError so every existing ``except StorageError`` — which is what turns a
+    failure into a 503 or an unavailable tile — keeps working unchanged. Anything storage-backend
+    itself raises propagates untouched.
+
+    ``cloud_executor`` is imported INSIDE the function on purpose: this module is loaded by
+    file path under a non-dotted name in its own tests, and a top-level relative import
+    fails there with "attempted relative import with no known parent package".
+    """
+    from . import cloud_executor
+    try:
+        return await cloud_executor.run("storage", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise StorageError(str(exc)) from exc
 
 
 # Back-compat alias — older callers imported AnsibleStorageError from this
@@ -548,7 +573,7 @@ def _validate_backend(backend: str) -> None:
 async def list_assets() -> list[dict]:
     backend = _require_active()
     try:
-        return await asyncio.to_thread(_BACKEND_OPS[backend]["list"])
+        return await _to_thread(_BACKEND_OPS[backend]["list"])
     except StorageError:
         raise
     except Exception as e:
@@ -563,7 +588,7 @@ async def list_playbooks() -> list[str]:
 async def fetch_asset_b64(name: str) -> str:
     backend = _require_active()
     try:
-        data = await asyncio.to_thread(_BACKEND_OPS[backend]["fetch"], name)
+        data = await _to_thread(_BACKEND_OPS[backend]["fetch"], name)
         return base64.b64encode(data).decode()
     except StorageError:
         raise
@@ -583,7 +608,7 @@ async def upload_asset(name: str, data: bytes) -> None:
             f"Allowed extensions: {', '.join(sorted(_ASSET_EXTENSIONS))}"
         )
     try:
-        await asyncio.to_thread(_BACKEND_OPS[backend]["upload"], name, data)
+        await _to_thread(_BACKEND_OPS[backend]["upload"], name, data)
     except StorageError:
         raise
     except Exception as e:
@@ -593,7 +618,7 @@ async def upload_asset(name: str, data: bytes) -> None:
 async def delete_asset(name: str) -> None:
     backend = _require_active()
     try:
-        await asyncio.to_thread(_BACKEND_OPS[backend]["delete"], name)
+        await _to_thread(_BACKEND_OPS[backend]["delete"], name)
     except StorageError:
         raise
     except Exception as e:
@@ -605,7 +630,7 @@ async def delete_asset(name: str) -> None:
 async def list_assets_in(backend: str) -> list[dict]:
     _validate_backend(backend)
     try:
-        return await asyncio.to_thread(_BACKEND_OPS[backend]["list"])
+        return await _to_thread(_BACKEND_OPS[backend]["list"])
     except StorageError:
         raise
     except Exception as e:
@@ -615,7 +640,7 @@ async def list_assets_in(backend: str) -> list[dict]:
 async def fetch_asset_in(backend: str, name: str) -> bytes:
     _validate_backend(backend)
     try:
-        return await asyncio.to_thread(_BACKEND_OPS[backend]["fetch"], name)
+        return await _to_thread(_BACKEND_OPS[backend]["fetch"], name)
     except StorageError:
         raise
     except Exception as e:
@@ -630,7 +655,7 @@ async def upload_asset_to(backend: str, name: str, data: bytes) -> None:
             f"Allowed extensions: {', '.join(sorted(_ASSET_EXTENSIONS))}"
         )
     try:
-        await asyncio.to_thread(_BACKEND_OPS[backend]["upload"], name, data)
+        await _to_thread(_BACKEND_OPS[backend]["upload"], name, data)
     except StorageError:
         raise
     except Exception as e:
@@ -642,7 +667,7 @@ async def delete_asset_in(backend: str, name: str) -> None:
     targets the active backend)."""
     _validate_backend(backend)
     try:
-        await asyncio.to_thread(_BACKEND_OPS[backend]["delete"], name)
+        await _to_thread(_BACKEND_OPS[backend]["delete"], name)
     except StorageError:
         raise
     except Exception as e:
@@ -699,15 +724,15 @@ async def move_asset(name: str, from_backend: str, to_backend: str) -> None:
     # Copy first; only delete the source if the copy succeeded so a failure
     # mid-flight doesn't lose data.
     try:
-        data = await asyncio.to_thread(_BACKEND_OPS[from_backend]["fetch"], name)
+        data = await _to_thread(_BACKEND_OPS[from_backend]["fetch"], name)
     except Exception as e:
         raise StorageError(f"Failed to read '{name}' from {from_backend}: {e}") from e
     try:
-        await asyncio.to_thread(_BACKEND_OPS[to_backend]["upload"], name, data)
+        await _to_thread(_BACKEND_OPS[to_backend]["upload"], name, data)
     except Exception as e:
         raise StorageError(f"Failed to write '{name}' to {to_backend}: {e}") from e
     try:
-        await asyncio.to_thread(_BACKEND_OPS[from_backend]["delete"], name)
+        await _to_thread(_BACKEND_OPS[from_backend]["delete"], name)
     except Exception as e:
         # Copy succeeded but delete didn't — the asset is now duplicated. Surface
         # the warning rather than failing the whole operation so the user can
@@ -724,7 +749,7 @@ async def test_backend(backend: str) -> dict:
     Used by /api/storage/test for the page's "Test connection" button."""
     _validate_backend(backend)
     try:
-        items = await asyncio.to_thread(_BACKEND_OPS[backend]["list"])
+        items = await _to_thread(_BACKEND_OPS[backend]["list"])
         return {"ok": True, "count": len(items)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -829,12 +854,12 @@ async def has_terraform_state(backend: str) -> bool:
     """True if ``backend`` holds any live Terraform state. Used to guard a
     storage-backend swap so state isn't stranded."""
     if backend == "local":
-        return bool(await asyncio.to_thread(_local_state_jobs))
+        return bool(await _to_thread(_local_state_jobs))
     fn = _STATE_KEYS.get(backend)
     if not fn:
         return False
     try:
-        return bool(await asyncio.to_thread(fn))
+        return bool(await _to_thread(fn))
     except Exception as e:
         # If we can't tell, be conservative and report "yes" so the swap is
         # blocked rather than silently stranding state.
@@ -852,19 +877,19 @@ async def migrate_terraform_state(from_backend: str, to_backend: str) -> int:
 
     items = []  # (job_id, bytes)
     if from_backend == "local":
-        for job in await asyncio.to_thread(_local_state_jobs):
-            items.append((job, await asyncio.to_thread(_local_state_get, job)))
+        for job in await _to_thread(_local_state_jobs):
+            items.append((job, await _to_thread(_local_state_get, job)))
     else:
-        for key in await asyncio.to_thread(_STATE_KEYS[from_backend]):
+        for key in await _to_thread(_STATE_KEYS[from_backend]):
             job = _job_from_state_key(key)
             if job:
-                items.append((job, await asyncio.to_thread(_STATE_GET[from_backend], key)))
+                items.append((job, await _to_thread(_STATE_GET[from_backend], key)))
 
     for job, data in items:
         if to_backend == "local":
-            await asyncio.to_thread(_local_state_put, job, data)
+            await _to_thread(_local_state_put, job, data)
         else:
-            await asyncio.to_thread(_STATE_PUT[to_backend], _tf_state_object_key(to_backend, job), data)
+            await _to_thread(_STATE_PUT[to_backend], _tf_state_object_key(to_backend, job), data)
     return len(items)
 
 
@@ -1427,7 +1452,7 @@ async def upload_image_to(backend: str, key: str, fileobj) -> None:
             f"{', '.join(sorted(_IMAGE_EXTENSIONS))}."
         )
     try:
-        await asyncio.to_thread(_IMAGE_OPS[backend]["upload"], key, fileobj)
+        await _to_thread(_IMAGE_OPS[backend]["upload"], key, fileobj)
     except StorageError:
         raise
     except Exception as e:
@@ -1439,7 +1464,7 @@ async def download_image_to(backend: str, key: str, fileobj) -> None:
     fileobj. Multi-GB safe."""
     _validate_backend(backend)
     try:
-        await asyncio.to_thread(_IMAGE_OPS[backend]["download"], key, fileobj)
+        await _to_thread(_IMAGE_OPS[backend]["download"], key, fileobj)
     except StorageError:
         raise
     except Exception as e:
@@ -1452,7 +1477,7 @@ async def delete_image_in(backend: str, key: str) -> None:
     import."""
     _validate_backend(backend)
     try:
-        await asyncio.to_thread(_IMAGE_OPS[backend]["delete"], key)
+        await _to_thread(_IMAGE_OPS[backend]["delete"], key)
     except StorageError:
         raise
     except Exception as e:
@@ -1465,7 +1490,7 @@ async def head_image_in(backend: str, key: str) -> Optional[dict]:
     before relying on the dest blob."""
     _validate_backend(backend)
     try:
-        return await asyncio.to_thread(_IMAGE_OPS[backend]["head"], key)
+        return await _to_thread(_IMAGE_OPS[backend]["head"], key)
     except StorageError:
         raise
     except Exception as e:
@@ -1512,7 +1537,7 @@ async def presigned_url(
     if expiry_seconds <= 0:
         raise StorageError("presigned_url expiry_seconds must be > 0")
     try:
-        return await asyncio.to_thread(_IMAGE_OPS[backend]["presign"], key, expiry_seconds, method)
+        return await _to_thread(_IMAGE_OPS[backend]["presign"], key, expiry_seconds, method)
     except StorageError:
         raise
     except Exception as e:
@@ -1536,7 +1561,7 @@ async def copy(src_backend: str, src_key: str, dst_backend: str, dst_key: str) -
 
     if src_backend == dst_backend:
         try:
-            await asyncio.to_thread(_IMAGE_OPS[src_backend]["copy"], src_key, dst_key)
+            await _to_thread(_IMAGE_OPS[src_backend]["copy"], src_key, dst_key)
             return
         except StorageError:
             raise
@@ -1554,9 +1579,9 @@ async def copy(src_backend: str, src_key: str, dst_backend: str, dst_key: str) -
     os.close(fd)
     try:
         with open(tmp_path, "wb") as out:
-            await asyncio.to_thread(_IMAGE_OPS[src_backend]["download"], src_key, out)
+            await _to_thread(_IMAGE_OPS[src_backend]["download"], src_key, out)
         with open(tmp_path, "rb") as inp:
-            await asyncio.to_thread(_IMAGE_OPS[dst_backend]["upload"], dst_key, inp)
+            await _to_thread(_IMAGE_OPS[dst_backend]["upload"], dst_key, inp)
     finally:
         try:
             os.remove(tmp_path)
