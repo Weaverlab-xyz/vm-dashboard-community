@@ -775,6 +775,7 @@ function ociDashboard() {
     // Instead: keep networkOpts.shapes as the unscoped baseline and cache each
     // scope separately, keyed "<ad>|<image>".
     shapeScopes: {},         // key → array of shapes (an EMPTY array is a real answer)
+    shapeScopeNotes: {},     // key → the server's reason that array is empty
     shapeScopeLoading: {},   // key → true while that scope is in flight
     packerShapeNote: '',
     deployShapeNote: '',
@@ -921,6 +922,7 @@ function ociDashboard() {
         // Drop cached scopes — a manual refresh has to refetch them, not keep
         // serving lists built before it.
         this.shapeScopes = {};
+        this.shapeScopeNotes = {};
         // The unscoped response IS the "first AD, any image" scope; seed it so the
         // common case costs no second round-trip.
         if (r) this.shapeScopes[this._shapeScopeKey('', '')] = r.shapes || [];
@@ -959,6 +961,7 @@ function ociDashboard() {
         if (bust) p.push('bust=true');
         const r = await API.get('/api/oci/network-options' + (p.length ? '?' + p.join('&') : ''));
         this.shapeScopes[k] = r?.shapes || [];
+        this.shapeScopeNotes[k] = r?.shapes_note || '';
       } catch (e) {
         // Leave the scope unset so shapesFor() falls back to the baseline list.
         // A transient failure must not empty the picker.
@@ -996,14 +999,21 @@ function ociDashboard() {
              + ' — pick a shape from the narrowed list.';
     },
 
-    // Reachable only when the AD itself lists no shapes — a bad AD, or a failed
-    // ListShapes. The image narrowing cannot empty the list: it falls open to the
-    // full AD list whenever the intersection comes back empty, matching
-    // oci_service.check_launch_placement (see _launchable_shape_rows_sync).
-    _emptyScopeMessage(ad) {
+    // Two ways the dropdown ends up empty, and they need opposite next steps, so
+    // the server says which: `shapes_note` is set only when the IMAGE narrowed the
+    // list to nothing (every shape this AD offers is the wrong architecture for
+    // it — switch the base image, not the AD). Blank means the AD itself listed no
+    // shapes — a bad AD, or a failed ListShapes. Only the server can tell them
+    // apart: it holds both lists, the form holds neither.
+    _emptyScopeMessage(ad, note) {
+      if (note) return note;
       return `OCI lists no shapes ${ad ? 'in ' + ad : 'in this availability domain'}.`
              + ' Try another availability domain, or Refresh — a failed listing looks'
              + ' the same as an empty one.';
+    },
+
+    shapeScopeNote(ad, imageOcid) {
+      return this.shapeScopeNotes[this._shapeScopeKey(ad, imageOcid)] || '';
     },
 
     async loadInstances(bust = false) {
@@ -1083,7 +1093,8 @@ function ociDashboard() {
     packerShapeNotice() {
       const f = this.ociPackerForm;
       if (this.shapeScopeEmpty(f.availability_domain, f.base_image_ocid))
-        return this._emptyScopeMessage(f.availability_domain);
+        return this._emptyScopeMessage(
+          f.availability_domain, this.shapeScopeNote(f.availability_domain, f.base_image_ocid));
       return this.packerShapeNote;
     },
 
@@ -1271,7 +1282,8 @@ function ociDashboard() {
     deployShapeNotice() {
       const ad = this.deployForm.availability_domain;
       const img = this.selectedImage?.ocid || '';
-      if (this.shapeScopeEmpty(ad, img)) return this._emptyScopeMessage(ad);
+      if (this.shapeScopeEmpty(ad, img))
+        return this._emptyScopeMessage(ad, this.shapeScopeNote(ad, img));
       return this.deployShapeNote;
     },
 

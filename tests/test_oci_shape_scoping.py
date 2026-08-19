@@ -9,9 +9,12 @@ job-runner shape gate), so a bad pick surfaces as an opaque LaunchInstance failu
 minutes in — the picker is the only guard, which is why the scoping is pinned here.
 
 The second axis is image compatibility: an Ampere shape can be offered in the AD
-and still refuse an x86_64 image. That narrowing must fail OPEN — "compatibility
-unknown" is not "nothing launches here", or an unreadable compatibility list empties
-the picker for a perfectly launchable image.
+and still refuse an x86_64 image. That narrowing fails OPEN when a lookup is
+SILENT — "compatibility unknown" is not "nothing launches here", or an unreadable
+compatibility list empties the picker for a perfectly launchable image. It does not
+fail open when both lookups answer and share nothing: that is OCI saying no, and
+reading it as "unknown" is what put an Ampere shape under an x86 image in
+us-chicago-1 (see test_an_empty_intersection_from_two_answered_lists_empties_the_picker).
 
 The browser half (a @change on the AD select, and re-defaulting a shape the new
 scope dropped) is pinned in tests/template_helpers_check.js.
@@ -233,8 +236,12 @@ def test_launchable_shape_rows_skip_the_compat_call_without_an_image():
 # These mirror _check_launch_placement_sync's fail-open conditions on purpose (see
 # tests/test_packer_oci.py::test_the_precheck_fails_open_when_the_lookup_breaks).
 # The picker must never offer LESS than the gate accepts, or the form refuses a
-# shape the API would have taken — and in the empty-intersection case that means
-# every OCI deploy in the tenancy, with an empty dropdown and nothing to explain it.
+# shape the API would have taken.
+#
+# The line is *which lookup was silent*, not "the result was empty": a compat call
+# that raises, or an image publishing no entries at all, leaves us knowing nothing
+# and the AD list stands. Two lists that both answered and share nothing is a
+# verdict, and the test below the fold pins that it is now enforced on both sides.
 
 def test_unreadable_compatibility_leaves_the_ad_list_unnarrowed():
     """A tenancy whose policy blocks ListImageShapeCompatibilityEntries must still
@@ -254,21 +261,39 @@ def test_an_image_declaring_no_compatibility_entries_is_not_narrowed_to_nothing(
     assert len(rows) == 3, _shape_names(rows)
 
 
-def test_an_empty_intersection_falls_open_exactly_as_the_launch_gate_does():
+def test_an_empty_intersection_from_two_answered_lists_empties_the_picker():
     """AD-2 offers no Ampere shape and an Arm image boots on nothing else, so the
-    intersection is empty. ``check_launch_placement`` reads empty as "the lookup told
-    us nothing useful" and allows the launch; the picker has to agree, or the form
-    shows an empty dropdown for a shape the API would happily accept."""
+    intersection is empty — and that is an ANSWER, not a gap: nothing offered in
+    AD-2 can launch this image.
+
+    This used to fall open on both sides, and it cost a real build. In
+    us-chicago-1 `list_shapes` offered exactly three shapes, all Ampere (service
+    limits scope that list, not just hardware), while an x86 Autonomous Linux image
+    listed 69 compatible shapes — disjoint. The picker showed the unnarrowed AD
+    list with the free-tier Ampere shape ranked first, the gate allowed it, and
+    LaunchInstance answered 400 InvalidParameter 1.6s in.
+
+    The picker↔gate invariant is unchanged and is the reason both moved together:
+    everything offered clears the gate. Here that means offering nothing."""
     calls = _Calls()
     _install_fake_oci(calls, compat=_ARM_COMPAT)
-    rows = svc._launchable_shape_rows_sync(
+    rows, note = svc._shape_options_sync(
         "ocid1.compartment..a", "Uocm:PHX-AD-2", "ocid1.image..arm")
-    assert len(rows) == 2, _shape_names(rows)
+    assert rows == [], _shape_names(rows)
+    # An empty dropdown with no explanation reads as a broken page, and the wrong
+    # explanation sends the operator to another AD when they need another image.
+    assert note, "an empty narrowed list must carry the reason it is empty"
+    assert "VM.Standard.E2.1.Micro" in note, "the note must say what the AD does offer"
     # The gate reaches the same verdict on the same inputs — pinned together so the
     # two can't drift into disagreeing about one placement.
-    svc._check_launch_placement_sync(
-        availability_domain="Uocm:PHX-AD-2", image_ocid="ocid1.image..arm",
-        shape="VM.Standard.E2.1.Micro", compartment_id="ocid1.compartment..a")
+    try:
+        svc._check_launch_placement_sync(
+            availability_domain="Uocm:PHX-AD-2", image_ocid="ocid1.image..arm",
+            shape="VM.Standard.E2.1.Micro", compartment_id="ocid1.compartment..a")
+    except svc.OCIError:
+        pass
+    else:
+        raise AssertionError("the gate allowed a placement the picker refuses to offer")
 
 
 def test_the_picker_offers_only_shapes_the_launch_gate_accepts():

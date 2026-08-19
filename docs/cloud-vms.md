@@ -298,7 +298,8 @@ user + API keypair, and (best-effort) a KMS vault SSH-keypair secret.
 > lookup too** — the Packer build route and runner, plus `/api/oci/deploy` and
 > `/api/oci/bulk-deploy` — so an unlaunchable pairing is refused with HTTP 400
 > `shape_not_launchable`, naming the shape and listing what would work, instead of becoming
-> a bare `404 NotAuthorizedOrNotFound` a second into the job. That gate is what covers the
+> a bare `404 NotAuthorizedOrNotFound` — or a `400 InvalidParameter` naming shape and image —
+> a second into the job. That gate is what covers the
 > paths the picker doesn't: an API client bypassing the form, and the bulk modal, whose list
 > is not scoped at all (no AD picker; one shared shape across N images) — there **every**
 > selected image is checked against the shared shape before anything is created.
@@ -411,13 +412,22 @@ in [image-management.md](image-management.md).
   scope. The note under the picker names it. Choose from the narrowed list; the form won't
   submit until you do. The same happens on load in a region without
   `VM.Standard.E2.1.Micro`, whose Always-Free default the form drops rather than POST.
-- **OCI shape picker is empty** — OCI returned no shapes for that availability domain at all
-  (a failed `ListShapes` looks identical to an empty one). Try another AD, or **Refresh**. The
-  *image* narrowing can't cause this: when the image/AD intersection comes back empty, or the
-  tenancy's policy blocks `ListImageShapeCompatibilityEntries`, it falls open to the full AD
-  list — deliberately matching `check_launch_placement`, so the picker never offers less than
-  the API accepts. In that fallen-open state the advisory architecture warning and the
-  `shape_not_launchable` gate above are your only hints, so mind them.
+- **OCI shape picker is empty** — two different causes, and the note under the picker says
+  which, because they need opposite fixes:
+  - *"No shape offered in … can launch this image"* — the AD does offer shapes, and this
+    **base image** can boot none of them. Change the image, not the AD. The note lists what
+    the AD offers; if those are all `A1`/`A2` (Ampere), you need an `aarch64` image. This is
+    common in trial tenancies, where `ListShapes` is scoped by your **service limits** rather
+    than by what hardware exists — a tenancy with quota only for Ampere sees three shapes in
+    every AD of the region and cannot launch an x86 image anywhere in it.
+  - *"OCI lists no shapes in …"* — OCI returned nothing for that AD at all (a failed
+    `ListShapes` looks identical to an empty one). Try another AD, or **Refresh**.
+
+  The narrowing still falls open when a lookup is *silent* — the tenancy's policy blocks
+  `ListImageShapeCompatibilityEntries`, or the image publishes no entries — so the picker
+  never offers less than `check_launch_placement` accepts. In that fallen-open state the
+  advisory architecture warning and the `shape_not_launchable` gate above are your only
+  hints, so mind them.
 - **Deploy rejected (HTTP 409, `vm_name_collision`)** — the names this deploy would create
   are already taken by VMs the dashboard deployed or is deploying. Pick a different base
   name, or destroy the existing VMs first. The check is deliberately strict: Azure, GCP and

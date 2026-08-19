@@ -401,17 +401,26 @@ def _oci_service():
     return mod
 
 
-def _placement(usable, shape="VM.Standard.E2.1.Micro"):
-    """Run the precheck with a canned launchable-shape list. Returns the error
-    message, or None when the placement was accepted."""
+def _placement(usable, shape="VM.Standard.E2.1.Micro", offered=None, compatible=None):
+    """Run the precheck with a canned shape scope. Returns the error message, or
+    None when the placement was accepted.
+
+    ``usable`` is the intersection. ``offered`` and ``compatible`` default to it —
+    the ordinary case, where everything usable is both offered and compatible — so
+    the older tests read unchanged. Pass them to build the case that actually
+    matters: two lists that BOTH answered and share nothing.
+    """
     mod = _oci_service()
     if isinstance(usable, Exception):
         def fake(*a, **k):
             raise usable
     else:
         def fake(*a, **k):
-            return list(usable)
-    mod._launchable_shapes_sync = fake
+            return mod._ShapeScope(
+                usable=list(usable),
+                offered=list(usable if offered is None else offered),
+                compatible=list(usable if compatible is None else compatible))
+    mod._shape_scope_sync = fake
     mod._cfg = lambda key: "us-chicago-1" if key == "oci_region" else ""
     try:
         mod._check_launch_placement_sync(
@@ -441,9 +450,40 @@ def test_a_launchable_shape_is_accepted():
 
 def test_the_precheck_fails_open_when_the_lookup_breaks():
     """A listing call that can't reach OCI is not evidence the placement is
-    wrong, and must never be the reason a build refuses to start."""
+    wrong, and must never be the reason a build refuses to start.
+
+    An empty intersection built from two EMPTY lists is the same kind of silence —
+    an image that publishes no compatibility entries, a listing a policy trimmed
+    to nothing — and fails open too. What does not is the case below."""
     assert _placement(RuntimeError("connection reset")) is None
-    assert _placement([]) is None, "an empty intersection tells us nothing"
+    assert _placement([]) is None, "neither lookup answered — that is not a 'no'"
+
+
+# What AD-1 of us-chicago-1 really offered this tenancy on 2026-08-19: three
+# shapes, every one of them Ampere. `list_shapes` is scoped by service limits, not
+# just by what hardware exists, so a trial tenancy sees only what it has quota for.
+_CHICAGO_AMPERE = ["VM.Standard.A1.Flex", "VM.Standard.A2.Flex", "BM.Standard.A1.160"]
+# ...and what Oracle-Autonomous-Linux-10.1 said it supports: x86, all of it.
+_X86_COMPATIBLE = ["VM.Standard.E5.Flex", "VM.Standard3.Flex", "BM.Standard.E5.192"]
+
+
+def test_an_empty_intersection_from_two_answered_lists_is_a_refusal():
+    """The bug this file exists to stop recurring, and it cost a real build.
+
+    Both lookups answered — three shapes offered, 69 compatible — and they shared
+    nothing, because every shape the tenancy is offered in us-chicago-1 is Ampere
+    and the image was x86. The gate read the empty intersection as "the lookup told
+    us nothing", allowed VM.Standard.A1.Flex, and LaunchInstance rejected the pair
+    1.6s into the build with a 400 InvalidParameter. Empty-because-disjoint is a
+    verdict; only empty-because-silent is a gap."""
+    msg = _placement([], shape="VM.Standard.A1.Flex",
+                     offered=_CHICAGO_AMPERE, compatible=_X86_COMPATIBLE)
+    assert msg, "an Ampere shape was allowed to launch an x86 image"
+    assert "wYeM:US-CHICAGO-1-AD-1" in msg, "the error must name the placement"
+    # The remedy is a different IMAGE, not a different shape, so the message has to
+    # say what the AD offers — the operator cannot pick their way out of the list.
+    assert "VM.Standard.A1.Flex" in msg, "the error must list what the AD does offer"
+    assert "aarch64" in msg, "an Ampere-only AD must point at an aarch64 image"
 
 
 def test_the_no_free_shape_case_points_at_the_ampere_alternative():

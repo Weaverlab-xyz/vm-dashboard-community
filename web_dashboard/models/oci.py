@@ -51,9 +51,16 @@ class OCISubnetInfo(BaseModel):
 class OCINetworkOptions(BaseModel):
     availability_domains: List[str] = []
     # AD-scoped, and image-scoped when image_ocid was supplied — see
-    # oci_service._launchable_shapes_sync. Read it together with the two echo
+    # oci_service._shape_scope_sync. Read it together with the two echo
     # fields below; the same compartment yields different lists per scope.
+    # EMPTY IS A REAL ANSWER: a tenancy offered only Ampere shapes in this AD
+    # legitimately has none that can boot an x86 image. `shapes_note` says so.
     shapes: List[OCIShapeInfo] = []
+    # Set only when `shapes` came back empty *because* the image narrowed it to
+    # nothing — the same sentence the launch gate raises for that placement, so
+    # the form and the API never explain one rejection two ways. Blank otherwise,
+    # including when the AD simply lists no shapes at all.
+    shapes_note: str = ""
     subnets: List[OCISubnetInfo] = []
     region: str = ""
     compartment_ocid: str = ""
