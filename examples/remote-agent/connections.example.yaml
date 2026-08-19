@@ -237,6 +237,16 @@ connections:
   #   username: CORP\svc-dashboard
   #   password_file: /run/secrets/hyperv
   #   transport: ntlm
+  #   # Report each GUEST's IP addresses and OS as well as the VM list. Off by default
+  #   # because it costs a call per VM on every sync — and on by necessity if you want
+  #   # those guests to be Config-Management targets: without an address the dashboard
+  #   # has nothing to aim a playbook at, and it says so on the row rather than guessing.
+  #   #
+  #   # It reads from THIS file rather than a dashboard field for the same reason `host`
+  #   # does: how much this agent reads out of your guests is your decision. Needs guest
+  #   # tools (Integration Services / VMware Tools / qemu-guest-agent) in the guest, and
+  #   # supported on hyperv, vsphere and proxmox connections.
+  #   sync_guest_details: true
   #
   # - name: edge-esxi
   #   kind: esxi

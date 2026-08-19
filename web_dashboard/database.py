@@ -1287,6 +1287,20 @@ class CloudDatabase(Base):
     pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override
     entitle_integration_id = Column(String(64), nullable=True)  # Entitle DB integration registered on apply
 
+    # Which remote agent can reach this database, for a Config-Management run. NULL = the
+    # dashboard runs it itself, which is the behaviour before this column and the only one
+    # available to a provisioned cloud database.
+    #
+    # Only meaningful on a `registered` row with cloud='local'. Such a database sits on the
+    # corporate LAN, so the run used to require a sibling container on the DASHBOARD host —
+    # which a cloud-hosted dashboard (ECS / ACI / Container Apps) does not have and could
+    # not route from anyway. Naming an agent moves that one-shot container onto a host that
+    # does have a route. Unlike HypervisorConnection this row keeps `private_host`: the
+    # address is not a credential-aiming risk here, because the operator registered it and
+    # the agent re-checks it against its own policy.yaml before connecting.
+    agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
+                      index=True, nullable=True)
+
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
@@ -1587,6 +1601,12 @@ def init_db():
             "CREATE INDEX ix_jobs_expires_at ON jobs(expires_at)",
             "ALTER TABLE cloud_databases ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE cloud_databases ADD COLUMN expiry_warned_at TIMESTAMP",
+            # Which remote agent can reach a cloud='local' (on-prem) registered database
+            # for a Config-Management run. NULL on every existing row, which is the right
+            # answer — none of them had an agent, and the dashboard-local runner is still
+            # what they get. No FK in the raw DDL, matching every entry here.
+            "ALTER TABLE cloud_databases ADD COLUMN agent_id VARCHAR(36)",
+            "CREATE INDEX ix_cloud_databases_agent_id ON cloud_databases(agent_id)",
             "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",

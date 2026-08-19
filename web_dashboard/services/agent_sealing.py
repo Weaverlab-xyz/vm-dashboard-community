@@ -150,6 +150,43 @@ def seal_aad(*, agent_id: str, audience: str, epk: str, job_id: str, ref: str) -
     })
 
 
+def seal_host_key(host: str) -> str:
+    """One address, one binding, however it was typed.
+
+    Byte-identical to ``runners/agent/agent.py::seal_host_key``, and re-stated here rather
+    than shared for the same reason :func:`serialize` is — the agent is a standalone file
+    that cannot import from this package. A parity test pins the two.
+
+    Case and surrounding whitespace are obvious. The trailing dot is not: ``vc.lab.local.``
+    is the same name as ``vc.lab.local`` to DNS, and a refusal over it would be
+    indistinguishable from the relabelling this binding exists to catch.
+    """
+    return str(host or "").strip().rstrip(".").lower()
+
+
+def bundle_ref(*, run_kind: str, transport: str, host: str, port) -> str:
+    """The AAD ``ref`` for an ``agent_ansible`` run bundle, bound to its target.
+
+    :func:`seal_aad` explains why ``ref`` matters more than it looks: without it a
+    ciphertext released for one endpoint can be relabelled as the material for a host the
+    attacker controls. A run bundle carries an **SSH private key and a become password**,
+    which makes it the highest-value instance of that threat in this codebase — so the ref
+    names the endpoint rather than being a bare constant. Domain separation from
+    ``/secret`` would be satisfied by a constant; the target binding would not.
+
+    Both sides rebuild this from state they already trust: the dashboard from the job row,
+    the agent from the job envelope whose signature it has already checked. A dashboard that
+    returned a bundle sealed for a different host therefore cannot make the tag verify.
+
+    ``port`` goes through ``int`` so ``"22"`` and ``22`` cannot disagree across the wire.
+    """
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 0
+    return f"ansible:{run_kind}:{transport}:{seal_host_key(host)}:{port}"
+
+
 # ── Keys ──────────────────────────────────────────────────────────────────────
 
 def generate_reply_keypair() -> tuple[str, str]:

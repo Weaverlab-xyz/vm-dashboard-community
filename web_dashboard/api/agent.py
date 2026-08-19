@@ -7,6 +7,8 @@ Agent half — Ed25519-signed, no user identity involved:
   POST /api/agent/jobs/{id}/heartbeat       — progress + the cancel signal
   POST /api/agent/jobs/{id}/logs            — Live Output lines
   POST /api/agent/jobs/{id}/complete        — terminal status + result
+  POST /api/agent/jobs/{id}/secret          — a hypervisor credential, sealed
+  POST /api/agent/jobs/{id}/ansible-bundle  — a Config-Management run bundle, sealed
 
 Operator half — admin only:
 
@@ -32,6 +34,8 @@ pre-OIDC users, which is exactly wrong for a machine principal. Agents authorize
 ``agent_service.AGENT_JOB_TYPES`` and an ownership check on the job row; a static test
 asserts this file never calls ``require_permission`` in an agent route.
 """
+import base64
+import json
 import logging
 import re
 from typing import NamedTuple, Optional
@@ -42,7 +46,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, RemoteAgent, User, get_db
-from ..services import (agent_guard, agent_hypervisor_meta, agent_job_meta,
+from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_guard,
+                        agent_hypervisor_meta, agent_job_meta,
                         agent_ps_credential_service, agent_sealing, agent_service,
                         agent_signing, config_service, hypervisor_connection_service,
                         hypervisor_sync_service, job_service, public_url)
@@ -333,6 +338,11 @@ def _envelope_payload(job_type: str, meta: dict) -> dict:
     """
     if job_type == "agent_hypervisor":
         return agent_hypervisor_meta.hypervisor_kwargs(meta)
+    if job_type == "agent_ansible":
+        # The narrowest of the three: four scalars, and the playbook is not among them. The
+        # agent fetches the rest from /jobs/{id}/ansible-bundle, sealed — see
+        # agent_ansible_meta for why executable content may not be merely *signed*.
+        return agent_ansible_meta.envelope_payload(meta)
     return agent_job_meta.discover_kwargs(meta)
 
 
@@ -603,6 +613,117 @@ async def job_secret(job_id: str, body: SecretRequest, request: Request,
                                  "connection_ref": ref, "source": source})
     # Explicit, because nothing else in this app sets it. `no-store` and not `no-cache`:
     # the latter permits a proxy to store the body so long as it revalidates.
+    return JSONResponse(
+        content={"sealed": envelope},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+
+class BundleRequest(BaseModel):
+    """What the agent must say to be handed a run bundle.
+
+    Only the ephemeral reply key. There is deliberately nothing to *select* with: the run is
+    derived wholly from the job row, so a stolen agent identity cannot ask for a different
+    job's playbook or credentials. The body is covered by the request signature
+    (``canonical_request`` hashes it), so the key cannot be substituted in flight.
+    """
+    reply_key: str = ""
+
+
+@router.post("/jobs/{job_id}/ansible-bundle")
+async def job_ansible_bundle(job_id: str, body: BundleRequest, request: Request,
+                            agent: RemoteAgent = Depends(signed_agent),
+                            db: Session = Depends(get_db)):
+    """Hand this job's Config-Management run bundle to the agent, sealed.
+
+    The counterpart of :func:`job_secret`, and scoped down the same way — read that one
+    first; the reasoning is identical and only the payload differs. What differs and why:
+
+    * A bundle rather than one string, because splitting it into a route per credential
+      would cost one seal, one audit row and one **Password Safe checkout** each, for no
+      gain: ``job_id`` already prevents cross-job replay, and ``seal``'s plaintext is a JSON
+      object precisely so it can carry more than one field.
+    * The AAD ``ref`` is :func:`agent_sealing.bundle_ref`, which names the *endpoint* rather
+      than a connection. A bundle carries an SSH private key and a become password, so the
+      relabelling threat ``seal_aad`` describes is at its most valuable here — and because
+      the agent rebuilds the ref from the envelope it already signature-checked, a bundle
+      sealed for a different host cannot make the tag verify.
+    * It carries **no inventory and no ``ansible_*`` variable**. See
+      ``services/agent_ansible_bundle``: an inventory is a place to write
+      ``ansible_connection: local``, which would run the play inside the runner container
+      rather than against the target.
+
+    ``statuses=("running",)`` and ``Cache-Control: no-store`` are copied from
+    :func:`job_secret` deliberately: a cancelled job may still log and complete, but it has
+    no business being handed fresh credentials.
+    """
+    job = _owned(db, agent, job_id, statuses=("running",))
+    if job.job_type != "agent_ansible":
+        # Equality against the one type that has a run bundle, not a truthy test.
+        raise HTTPException(
+            status_code=409,
+            detail="This job type does not use a Config-Management run bundle.")
+
+    # Checked BEFORE the bundle is assembled, for the same reason job_secret checks it
+    # first: building it can open a real Password Safe request, so answering a call that
+    # could never be sealed would let a caller burn checkouts and rotations at will.
+    try:
+        agent_sealing.check_reply_key(body.reply_key)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+
+    meta = job.metadata_dict or {}
+    try:
+        bundle, scrub = await agent_ansible_bundle.build(db, job=job, agent=agent)
+    except agent_ansible_bundle.BundleError as exc:
+        # 409 with the detail passed through, matching job_secret: the agent puts this
+        # straight into the job's error_message, which is the only text a failed job
+        # renders — so the remedy has to survive the trip intact.
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    # Stamp the applied playbook's fingerprint onto the job row, for the config-drift
+    # signals. This is the only moment the dashboard holds those bytes — the agent will run
+    # them minutes from now — so recording it on completion instead would mean re-fetching
+    # the asset and hashing whatever it says *then*, which is a different playbook if
+    # somebody re-uploaded in between. A one-way hash, never the content.
+    try:
+        from ..services import config_drift
+        # The ASSET's bytes, which is what the dashboard-local runner hashes — so the two
+        # runners agree about whether a target is running the current playbook. For a
+        # `.yml` the asset IS the playbook; for a `.sh`/`.ps1`/`.rpm`/`.deb` the playbook is
+        # a generated wrapper and the asset is what the operator actually versioned.
+        content = (base64.b64decode(bundle["asset_b64"]) if bundle.get("asset_b64")
+                   else str(bundle.get("playbook") or "").encode())
+        job_service.update_metadata(
+            db, job.id, {"content_hash": config_drift.content_hash(content)})
+    except Exception:  # noqa: BLE001 — drift tracking must never fail a run
+        logger.warning("agent: could not stamp the content hash for job %s", job.id,
+                       exc_info=True)
+
+    ref = agent_sealing.bundle_ref(
+        run_kind=bundle["run_kind"], transport=bundle["transport"],
+        host=meta.get("target_host") or "", port=meta.get("target_port") or 0)
+    try:
+        envelope = agent_sealing.seal(
+            body.reply_key,
+            # A JSON *string*, not the dict: seal() does serialize({"secret": str(secret)}),
+            # so handing it a dict would seal a Python repr that json.loads then rejects on
+            # the far side — a silent corruption rather than a type error.
+            json.dumps({"bundle": bundle, "scrub": scrub}),
+            agent_id=agent.id, audience=_resolve_audience(request),
+            job_id=job.id, ref=ref)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+
+    # The asset name and target, never the credential fields. An audit row an operator can
+    # read alongside the job, and the one durable record that material was released.
+    agent_service.audit(db, agent, "agent.ansible_bundle", ip=_client_ip(request),
+                        details={"job_id": job.id, "run_kind": bundle["run_kind"],
+                                 "asset": meta.get("asset") or "",
+                                 "target": meta.get("target_host") or ""})
     return JSONResponse(
         content={"sealed": envelope},
         headers={"Cache-Control": "no-store", "Pragma": "no-cache"})

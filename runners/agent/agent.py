@@ -89,7 +89,20 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # sealed value cannot be produced by a build that would ignore it; and `_secret_for` now
 # REFUSES a connection with no credential instead of sending an empty password, which is
 # the failure an ungated old agent would otherwise produce.
-AGENT_VERSION = "2.2.0"
+# 2.3 added `agent_ansible`: Config Management executed on THIS host, in a one-shot sibling
+# container, against a VM or database the dashboard has no route to. Gated from the
+# dashboard (agent_service.supports_ansible) because an older agent has no such entry in
+# HANDLERS and would refuse the job by name — a refusal that lands in Live Output, where it
+# reads as a policy.yaml problem and sends the operator to edit the wrong file.
+# Two things about this release are load-bearing rather than incidental:
+#   * The signed job envelope carries FOUR SCALARS and no playbook. Executable content is
+#     never merely signed; it arrives sealed, from /jobs/{id}/ansible-bundle, bound by AAD
+#     to this agent, this job and this endpoint.
+#   * The agent renders the Ansible inventory ITSELF from those four scalars, and refuses
+#     any `ansible_*` extra var. A dashboard-supplied inventory could set
+#     `ansible_connection: local`, which would run the operator's playbook inside the runner
+#     container on this network instead of against the target it names.
+AGENT_VERSION = "2.3.0"
 
 log = logging.getLogger("agent")
 
@@ -466,6 +479,27 @@ def seal_host_key(host: str) -> str:
     indistinguishable from the relabelling this binding exists to catch.
     """
     return str(host or "").strip().rstrip(".").lower()
+
+
+def bundle_ref(*, run_kind: str, transport: str, host: str, port) -> str:
+    """The AAD ``ref`` for a Config-Management run bundle, bound to its target.
+
+    Byte-identical to ``web_dashboard/services/agent_sealing.py::bundle_ref``, mirrored here
+    because this file cannot import from that package; a parity test pins the two. If they
+    ever disagree the symptom is "the sealed bundle did not authenticate", which points an
+    operator at keys rather than at normalisation — so the mirror matters more than it looks.
+
+    Rebuilt from the job envelope this agent has ALREADY signature-checked, never from the
+    response that carried the ciphertext. That is the whole point: a dashboard which returned
+    a bundle sealed for some other host cannot make the tag verify here. A bundle carries an
+    SSH private key and a become password, so this is the most valuable instance in the
+    protocol of the relabelling attack the ``ref`` binding exists to stop.
+    """
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 0
+    return f"ansible:{run_kind}:{transport}:{seal_host_key(host)}:{port}"
 
 
 def local_seal_aad(*, host: str, purpose: str) -> bytes:
@@ -874,13 +908,40 @@ class Policy:
 
     def __init__(self, allow: list, deny: list, job_types: set, limits: dict,
                  digest: str, connection_verbs: dict = None, sibling: dict = None,
-                 loopback_connections: set = None):
+                 loopback_connections: set = None, ansible: dict = None,
+                 ansible_allow: list = None):
         self.allow = allow            # [(network, {ports} or None)]
         self.deny = deny              # [network]
         self.job_types = job_types
         self.limits = limits
         self.digest = digest
         self.connection_verbs = connection_verbs or {}   # {connection name: {verb}}
+        # Config Management, off unless the customer turns it on AND names an image.
+        #
+        # This has its own block and its own target list rather than riding `targets:` and
+        # `sibling:`, and the separation is the point: "may be TCP-probed for a management
+        # endpoint" and "may have an arbitrary playbook applied to it as root" are different
+        # grants, and an operator who widened the first to run a discovery sweep has not
+        # agreed to the second. Reusing one list would silently conflate them.
+        #
+        # Both images come from HERE and never from a job. A job says only which KIND of run
+        # it is (`vm` / `database`, a closed enum), and that selects between these two.
+        ansible = ansible or {}
+        self.ansible_enabled = bool(ansible.get("enabled"))
+        self.ansible_vm_image = str(ansible.get("vm_image") or "")
+        self.ansible_db_image = str(ansible.get("db_image") or "")
+        # Defaults to the sibling network so an operator who already configured one does not
+        # have to say it twice; `none` is refused before create because it makes every run
+        # fail with an unreachable host and no explanation.
+        self.ansible_network = str(ansible.get("network")
+                                   or (sibling or {}).get("network") or "bridge")
+        try:
+            self.ansible_max_runtime_minutes = int(ansible.get("max_runtime_minutes") or 30)
+        except (TypeError, ValueError):
+            self.ansible_max_runtime_minutes = 30
+        # Empty means "nothing may be configured", which is the correct fail-closed reading
+        # of an `ansible:` block with no targets — not "fall back to the discovery list".
+        self.ansible_allow = ansible_allow or []
         # The sibling runner is off unless the customer turns it on AND names an image.
         # The image comes from here and never from a job, so a compromised dashboard
         # cannot choose what gets run on the host.
@@ -919,6 +980,96 @@ class Policy:
                 f"(granted: {', '.join(sorted(granted)) or 'none'}). Add it to that "
                 f"connection's `verbs:` list and restart the agent.")
 
+    def ansible_image(self, run_kind: str) -> str:
+        """The sibling image for this kind of run, or raise :class:`PolicyRefusal`.
+
+        A closed dict rather than a lookup on the wire string, for the same reason
+        ``HANDLERS`` is: the job selects between two values the CUSTOMER wrote down, and can
+        never name an image of its own.
+        """
+        if not self.ansible_enabled:
+            raise PolicyRefusal(
+                "this agent's policy.yaml does not enable Config Management. Add an "
+                "`ansible:` block with `enabled: true`, the image(s) for the kinds of run "
+                "you want, and a `targets:` list — see "
+                "docs/remote-agents.md#agent-executed-ansible. Note this is a separate "
+                "grant from `targets:` and `sibling:` on purpose: it allows a playbook to "
+                "be applied to a host, not merely a port to be probed.")
+        images = {"vm": ("vm_image", self.ansible_vm_image),
+                  "database": ("db_image", self.ansible_db_image)}
+        if run_kind not in images:
+            raise PolicyRefusal(
+                f"{run_kind!r} is not a kind of Config-Management run this agent build "
+                f"knows (known: {', '.join(sorted(images))}).")
+        key, image = images[run_kind]
+        if not image:
+            raise PolicyRefusal(
+                f"policy.yaml enables Config Management but names no `ansible.{key}`, "
+                f"which is the image a {run_kind!r} run needs. Add it and pull it — the "
+                f"agent will not pull an image for you.")
+        return image
+
+    def check_ansible(self, ip: str, port: int) -> None:
+        """Raise :class:`PolicyRefusal` unless a playbook may be run against this endpoint.
+
+        Deliberately NOT :meth:`check`. The deny list is shared — loopback and
+        cloud-metadata are never reachable however the policy is written — but the allow
+        list is `ansible.targets`, which the customer writes separately from `targets`.
+        Falling back to `targets` when `ansible.targets` is empty would turn "I widened the
+        scan range" into "I authorised root on that subnet", which is the whole reason these
+        are two lists.
+        """
+        # Re-checked here rather than assumed from the caller having already asked for an
+        # image. Two gates that are each independently sufficient beat two that are only
+        # sufficient in the right order — the ordering is exactly what a later caller breaks.
+        if not self.ansible_enabled:
+            raise PolicyRefusal(
+                "this agent's policy.yaml does not enable Config Management "
+                "(`ansible: {enabled: true}`), so no endpoint may be configured.")
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            raise PolicyRefusal(f"{ip} is not an IP address")
+        for net in self.deny:
+            if addr in net:
+                raise PolicyRefusal(f"{ip} is in a denied range ({net})")
+        for net, ports in self.ansible_allow:
+            if addr in net and (ports is None or port in ports):
+                return
+        raise PolicyRefusal(
+            f"policy.yaml does not allow Config Management against {ip}:{port}. Add it "
+            f"under `ansible.targets:` — with the port ({port}) named — and restart the "
+            f"agent. The `targets:` list above it does NOT grant this: that one allows a "
+            f"port probe, this one allows a playbook to run as root on that host.")
+
+    @classmethod
+    def _parse_targets(cls, entries, where: str) -> list:
+        """``[(network, {ports} or None)]`` from a list of ``cidr``/``fqdn`` entries.
+
+        One parser for both ``targets:`` and ``ansible.targets:``. They are separate
+        *grants* and must never share a list, but they have the same shape — and two
+        parsers is how one of them would quietly stop pinning resolved addresses.
+        """
+        out = []
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                continue
+            ports = entry.get("ports")
+            ports = {int(p) for p in ports} if isinstance(ports, (list, tuple)) else None
+            if entry.get("cidr"):
+                try:
+                    out.append((ipaddress.ip_network(str(entry["cidr"]), strict=False), ports))
+                except ValueError as exc:
+                    raise AgentFatal(f"policy.yaml: bad cidr {entry['cidr']!r} "
+                                     f"under `{where}`: {exc}")
+            elif entry.get("fqdn"):
+                # Resolved once at load and pinned to the resulting addresses, so the
+                # allow-list is always expressed in IPs by the time it is consulted.
+                for addr in _resolve_all(str(entry["fqdn"])):
+                    out.append((ipaddress.ip_network(addr + "/32" if ":" not in addr
+                                                     else addr + "/128"), ports))
+        return out
+
     @classmethod
     def load(cls, path: str) -> "Policy":
         try:
@@ -933,23 +1084,7 @@ class Policy:
         if not isinstance(doc, dict):
             raise AgentFatal("policy.yaml must be a mapping at the top level.")
 
-        allow = []
-        for entry in doc.get("targets") or []:
-            if not isinstance(entry, dict):
-                continue
-            ports = entry.get("ports")
-            ports = {int(p) for p in ports} if isinstance(ports, (list, tuple)) else None
-            if entry.get("cidr"):
-                try:
-                    allow.append((ipaddress.ip_network(str(entry["cidr"]), strict=False), ports))
-                except ValueError as exc:
-                    raise AgentFatal(f"policy.yaml: bad cidr {entry['cidr']!r}: {exc}")
-            elif entry.get("fqdn"):
-                # Resolved once at load and pinned to the resulting addresses, so the
-                # allow-list is always expressed in IPs by the time it is consulted.
-                for addr in _resolve_all(str(entry["fqdn"])):
-                    allow.append((ipaddress.ip_network(addr + "/32" if ":" not in addr
-                                                       else addr + "/128"), ports))
+        allow = cls._parse_targets(doc.get("targets"), "targets")
         if not allow:
             raise AgentFatal(
                 "policy.yaml declares no targets, so the agent can reach nothing. Add a "
@@ -982,8 +1117,11 @@ class Policy:
                 verbs[name] = {str(v) for v in (entry.get("verbs") or [])}
                 if entry.get("allow_loopback"):
                     loopback.add(name)
+        ansible = doc.get("ansible") if isinstance(doc.get("ansible"), dict) else {}
+        ansible_allow = cls._parse_targets(ansible.get("targets"), "ansible.targets")
         return cls(allow, deny, job_types, limits,
-                   hashlib.sha256(raw).hexdigest(), verbs, sibling, loopback)
+                   hashlib.sha256(raw).hexdigest(), verbs, sibling, loopback,
+                   ansible, ansible_allow)
 
     def check(self, ip: str, port: int) -> None:
         """Raise :class:`PolicyRefusal` unless this exact address:port is allowed."""
@@ -1310,6 +1448,78 @@ class Dashboard:
             raise PolicyRefusal(f"connection {ref!r}: {exc}") from exc
         self.hold_secret(secret)
         return secret
+
+    def ansible_bundle(self, job_id: str, *, run_kind: str, transport: str,
+                       host: str, port) -> tuple:
+        """Fetch this job's Config-Management run bundle, sealed. Returns ``(bundle, scrub)``.
+
+        The same shape as :meth:`job_secret` — a fresh X25519 keypair per fetch, the public
+        half riding a body the Ed25519 signature already covers, the private half living only
+        as a local so there is no decryption key on this host for captured traffic.
+
+        The difference is what the AAD binds. :func:`bundle_ref` names the *endpoint*, and it
+        is rebuilt from the job envelope this agent already verified — so the dashboard cannot
+        hand back a bundle sealed for a different target, which for a payload carrying an SSH
+        private key is the attack worth closing.
+
+        Every credential in the bundle is registered for redaction here, before the caller has
+        a chance to emit anything. The dashboard also sends a ``scrub`` list, but it is treated
+        as an addition rather than the source of truth: a list is exactly the thing that goes
+        stale when a field is added, and the agent knows which of its own fields are secret.
+        """
+        ref = bundle_ref(run_kind=run_kind, transport=transport, host=host, port=port)
+        private_b64, public_b64 = generate_reply_keypair()
+        resp = self._request("POST", f"/api/agent/jobs/{job_id}/ansible-bundle",
+                             {"reply_key": public_b64})
+        if resp.status_code != 200:
+            detail = ""
+            try:
+                detail = str((resp.json() or {}).get("detail") or "")
+            except Exception:  # noqa: BLE001
+                detail = (resp.text or "")[:400]
+            # Says which files are NOT the problem, for the same reason job_secret does:
+            # every other refusal this agent produces points at policy.yaml, so without this
+            # the operator re-reads their own configuration first.
+            raise PolicyRefusal(
+                f"the dashboard refused to release this run's playbook and credentials "
+                f"({resp.status_code}): {detail} — this is a dashboard-side authorization or "
+                f"configuration refusal, not a policy.yaml problem.")
+        try:
+            envelope = (resp.json() or {}).get("sealed") or {}
+        except Exception as exc:  # noqa: BLE001
+            raise PolicyRefusal("the dashboard's run-bundle response was not JSON") from exc
+        try:
+            plain = open_sealed(
+                private_b64, envelope, agent_id=self.identity.agent_id,
+                audience=self.identity.audience, job_id=job_id, ref=ref)
+        except SealError as exc:
+            raise PolicyRefusal(f"run bundle: {exc}") from exc
+        try:
+            payload = json.loads(plain)
+            bundle = payload["bundle"]
+            scrub = payload.get("scrub") or []
+        except (ValueError, KeyError, TypeError) as exc:
+            raise PolicyRefusal(
+                "the dashboard's run bundle did not decode to the expected shape") from exc
+
+        for value in scrub:
+            self.hold_secret(str(value))
+        for key in ("login_password", "become_password", "ssh_private_key"):
+            if bundle.get(key):
+                self.hold_secret(str(bundle[key]))
+        # A PEM is multi-line and `redact` replaces within ONE line, so a whole-key hold
+        # never matches anything in the log. Hold each interior line as well, above the
+        # 4-char floor, or the key's body would pass through unredacted if a play echoed it.
+        for line in str(bundle.get("ssh_private_key") or "").splitlines():
+            if len(line.strip()) >= 8:
+                self.hold_secret(line.strip())
+        for value in (bundle.get("db") or {}).values():
+            if isinstance(value, str) and len(value) >= 4:
+                self.hold_secret(value)
+        for value in (bundle.get("env") or {}).values():
+            if isinstance(value, str) and len(value) >= 4:
+                self.hold_secret(value)
+        return bundle, scrub
 
 
 # ── Probes — never authenticate ───────────────────────────────────────────────
@@ -2234,14 +2444,49 @@ def _sync_vsphere(conn, payload, policy, emit, checkins=None):
     vms = _hv_request(conn, "GET", f"{base}/api/vcenter/vm",
                       headers={"vmware-api-session-id": token})
     rows = vms if isinstance(vms, list) else (vms.get("value") or [])
+    # Guest details are opt-in per connection: /api/vcenter/vm lists everything in one call,
+    # but the guest's ADDRESS needs a second call per VM, and a 500-VM vCenter should not pay
+    # that on every 30-minute sync unless those guests are Config-Management targets.
+    opts = conn.get("options") if isinstance(conn.get("options"), dict) else conn
+    want_guest = bool(opts.get("sync_guest_details"))
     out = []
     for vm in rows:
-        out.append({"vm_id": vm.get("vm"), "name": vm.get("name"),
-                    "power_state": vm.get("power_state"),
-                    "vcpus": vm.get("cpu_count"), "mem_mib": vm.get("memory_size_MiB"),
-                    "vm_type": "vm"})
+        row = {"vm_id": vm.get("vm"), "name": vm.get("name"),
+               "power_state": vm.get("power_state"),
+               "vcpus": vm.get("cpu_count"), "mem_mib": vm.get("memory_size_MiB"),
+               "vm_type": "vm"}
+        # Only for a running VM: the guest endpoints answer 503 on a powered-off one, and
+        # asking anyway would turn a normal inventory into one error per stopped VM.
+        if want_guest and str(vm.get("power_state") or "").upper() == "POWERED_ON":
+            ident = _vsphere_guest_identity(conn, base, token, vm.get("vm"))
+            if ident.get("ip"):
+                row["ip_addresses"] = [ident["ip"]]
+            if ident.get("family"):
+                row["guest_os"] = ident["family"][:64]
+        out.append(row)
     return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out),
             "enumerated": True}
+
+
+def _vsphere_guest_identity(conn, base: str, token: str, vm_id: str) -> dict:
+    """``{ip, family}`` for one running VM, or ``{}``.
+
+    Needs VMware Tools in the guest. Every failure is swallowed to ``{}`` deliberately: a
+    VM without Tools, one still booting, and one whose Tools are wedged all answer
+    differently, and none of them is a reason to fail the inventory of the whole vCenter —
+    a sync that fails is a sync that cannot prune, and a sync that returns nothing empties
+    the dashboard's cache. Absent keys leave the last known address in place.
+    """
+    try:
+        ident = _hv_request(conn, "GET", f"{base}/api/vcenter/vm/{vm_id}/guest/identity",
+                            headers={"vmware-api-session-id": token})
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(ident, dict):
+        return {}
+    ident = ident.get("value") if isinstance(ident.get("value"), dict) else ident
+    return {"ip": str(ident.get("ip_address") or "").strip(),
+            "family": str(ident.get("family") or "").strip()}
 
 
 def _sync_proxmox(conn, payload, policy, emit, checkins=None):
@@ -2263,15 +2508,64 @@ def _sync_proxmox(conn, payload, policy, emit, checkins=None):
     body = _hv_request(conn, "GET",
                        f"https://{host}:{port}/api2/json/cluster/resources?type=vm",
                        headers=header)
+    # Opt-in per connection, as on the other kinds: cluster/resources lists everything in one
+    # call, but a guest's address is one guest-agent call per VM.
+    opts = conn.get("options") if isinstance(conn.get("options"), dict) else conn
+    want_guest = bool(opts.get("sync_guest_details"))
     out = []
     for vm in body.get("data") or []:
-        out.append({"vm_id": str(vm.get("vmid")), "name": vm.get("name"),
-                    "power_state": vm.get("status"), "vcpus": vm.get("maxcpu"),
-                    "mem_mib": int((vm.get("maxmem") or 0) / (1024 * 1024)),
-                    "scope": vm.get("node"), "vm_type": vm.get("type")})
+        row = {"vm_id": str(vm.get("vmid")), "name": vm.get("name"),
+               "power_state": vm.get("status"), "vcpus": vm.get("maxcpu"),
+               "mem_mib": int((vm.get("maxmem") or 0) / (1024 * 1024)),
+               "scope": vm.get("node"), "vm_type": vm.get("type")}
+        # QEMU guests only, and only running ones: the guest agent is a qemu feature, so an
+        # LXC container has no such endpoint and a stopped VM's answers 500.
+        if (want_guest and vm.get("type") == "qemu"
+                and str(vm.get("status") or "") == "running"):
+            ips = _proxmox_guest_ips(conn, host, port, header,
+                                     vm.get("node"), vm.get("vmid"))
+            if ips:
+                row["ip_addresses"] = ips
+        out.append(row)
     emit(f"read {len(out)} guest(s) from Proxmox at {host}")
     return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out),
             "enumerated": True}
+
+
+def _proxmox_guest_ips(conn, host: str, port: int, header: dict, node, vmid) -> list:
+    """A running QEMU guest's non-loopback addresses, or ``[]``.
+
+    Needs `qemu-guest-agent` in the guest and `agent: 1` on the VM. Without either, Proxmox
+    answers 500 — swallowed to ``[]`` rather than raised, because that is the common case on
+    a real cluster and it is not a reason to fail the whole inventory. Loopback is filtered
+    because it is never how the agent would reach the guest, and an inventory whose first
+    address is 127.0.0.1 would be refused by policy for a confusing reason.
+    """
+    try:
+        body = _hv_request(
+            conn, "GET",
+            f"https://{host}:{port}/api2/json/nodes/{node}/qemu/{vmid}/agent/"
+            f"network-get-interfaces", headers=header)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    data = (body or {}).get("data") or {}
+    for iface in (data.get("result") if isinstance(data, dict) else data) or []:
+        if not isinstance(iface, dict):
+            continue
+        for addr in iface.get("ip-addresses") or []:
+            ip = str((addr or {}).get("ip-address") or "").strip()
+            if not ip:
+                continue
+            try:
+                parsed = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if parsed.is_loopback or parsed.is_link_local:
+                continue
+            if ip not in out:
+                out.append(ip)
+    return out[:16]          # matches the dashboard's own MAX_IPS cap
 
 
 def _sync_nutanix(conn, payload, policy, emit, checkins=None):
@@ -2820,14 +3114,47 @@ def _engine(method: str, path: str, body=None, timeout: float = 60.0,
         return resp.status, data.decode("utf-8", "replace")
 
 
+def _demux_frames(buf: bytearray) -> list:
+    """Every COMPLETE frame in ``buf`` as ``[(stream, payload)]``, consumed in place.
+
+    A partial frame — a header split across reads, or a payload that has not all arrived —
+    is deliberately LEFT in ``buf`` for the next call. That is the whole difference between
+    this and :func:`_demux`, and it is what makes the same walker usable on a follow stream:
+    a walker that discards the tail of every read would drop most of the output, and one
+    that mistook a partial payload for a header would desync every subsequent frame — the
+    exact corruption :func:`_engine`'s docstring records.
+
+    ``stream`` is Docker's first header byte: 1 stdout, 2 stderr. Returned rather than
+    discarded so a caller can keep the two apart; concatenating them splices a stderr
+    warning into the middle of a half-written stdout line.
+    """
+    frames = []
+    while True:
+        if len(buf) < 8:
+            return frames
+        size = int.from_bytes(buf[4:8], "big")
+        if len(buf) < 8 + size:
+            return frames          # payload still arriving — keep the header for next time
+        stream = buf[0] or 1
+        frames.append((stream, bytes(buf[8:8 + size])))
+        del buf[:8 + size]
+
+
 def _demux(raw: bytes) -> str:
-    """Strip Docker's 8-byte stream framing from a non-TTY log stream."""
-    out, i = [], 0
-    while i + 8 <= len(raw):
-        size = int.from_bytes(raw[i + 4:i + 8], "big")
-        out.append(raw[i + 8:i + 8 + size])
-        i += 8 + size
-    return b"".join(out).decode("utf-8", "replace") if out else raw.decode("utf-8", "replace")
+    """Strip Docker's 8-byte stream framing from a complete, in-hand log body.
+
+    A thin wrapper over :func:`_demux_frames` so there is one framing implementation. Used
+    for the non-follow read, where the whole body genuinely is in hand: the hypervisor
+    sibling's single JSON result, and the diagnostic tail after a failed start.
+
+    The fallback matters for that second case: a body with no complete frame at all is
+    almost always an unframed error string, so returning it as text beats returning "".
+    """
+    buf = bytearray(raw)
+    frames = _demux_frames(buf)
+    if not frames:
+        return raw.decode("utf-8", "replace")
+    return b"".join(payload for _stream, payload in frames).decode("utf-8", "replace")
 
 
 def sweep_orphans() -> int:
@@ -2942,6 +3269,371 @@ def _run_sibling(policy: "Policy", env: dict, emit, cancelled,
     return result
 
 
+# ── The Ansible sibling: streamed, cancellable, one-shot ──────────────────────
+#
+# A hypervisor operation is one API call whose whole result is a line of JSON. An Ansible
+# run is minutes of human-readable output an operator watches, so it needs a different
+# shape: follow the log stream, forward lines as they arrive, and be killable. That is why
+# this lives beside `_run_sibling` rather than inside it — the hypervisor path is correct as
+# it is, and bending it to do both would put a `follow` flag through code where the failure
+# mode is a corrupted stream.
+
+# Every value is a CONSTANT. `run_kind` selects the image (from policy) and nothing else, so
+# no HostConfig field is derived from anything the dashboard sends — the property
+# tests/test_agent_sibling_runner.py::test_no_hostconfig_field_comes_from_the_job asserts.
+#
+# Each number is here for a reason a real run found:
+#   Memory      256 MB SIGKILLs ansible-core before it prints anything — the controller alone
+#               is ~150-200 MB once requests/cryptography/pywinrm are imported, and every
+#               forked worker dirties copy-on-write pages immediately. MemorySwap equal to it
+#               makes the limit a limit rather than an invitation to thrash.
+#   PidsLimit   threads count against the pids cgroup, and a run is ansible + N forks + a
+#               persistent ansible-connection per host + ssh/sshpass.
+#   Tmpfs       the playbook and key fit in 16 MB; ansible's assembled AnsiballZ_* module
+#               payloads do not.
+#   LogConfig   NOT optional. `GET /logs` answers 501 when the container's logging driver is
+#               not file-based, and journald is the default on RHEL, Fedora, Rocky and Alma —
+#               so without this the whole feature is dead on those hosts, reported as "the
+#               runner produced no output". The rotation is free for a streaming reader.
+_ANSIBLE_MEMORY = 1024 * 1024 * 1024
+_ANSIBLE_HOSTCONFIG = {
+    "AutoRemove": False,        # the log stream and /wait both outlive the container
+    "Binds": [],               # files arrive through the archive API, not a mount
+    "Privileged": False,
+    "CapDrop": ["ALL"],
+    "ReadonlyRootfs": True,
+    "Tmpfs": {"/tmp": "rw,nosuid,nodev,size=128m,mode=1777"},
+    "PidsLimit": 512,
+    "Memory": _ANSIBLE_MEMORY,
+    "MemorySwap": _ANSIBLE_MEMORY,
+    "NanoCpus": 2_000_000_000,
+    "SecurityOpt": ["no-new-privileges:true"],
+    "LogConfig": {"Type": "json-file",
+                  "Config": {"max-size": "16m", "max-file": "2"}},
+}
+
+# Ansible writes outside /tmp by default — ~/.ansible/tmp for local temp, ~/.ansible/cp for
+# SSH ControlPersist sockets — and both runner images run as root with HOME=/root. On a
+# read-only root filesystem that is an immediate `[Errno 30] Read-only file system:
+# '/root/.ansible'`, before a single task runs. Relocating them is what lets
+# ReadonlyRootfs stay true, which is worth more than the convenience of turning it off.
+_ANSIBLE_ENV = {
+    "ANSIBLE_HOME": "/tmp/.ansible",
+    "ANSIBLE_LOCAL_TEMP": "/tmp/.ansible/tmp",
+    "ANSIBLE_SSH_CONTROL_PATH_DIR": "/tmp/.ansible/cp",
+    "ANSIBLE_REMOTE_TMP": "/tmp/.ansible/remote",
+    "ANSIBLE_RETRY_FILES_ENABLED": "0",
+    # The agent has no host-key store and each run is a fresh container, so there is nothing
+    # for a known_hosts check to be continuous with — it would refuse every first connection.
+    "ANSIBLE_HOST_KEY_CHECKING": "False",
+    "ANSIBLE_NOCOLOR": "1",
+    # stdout is a pipe, not a tty: without this Python buffers and the "live" output arrives
+    # in 4 KB blocks, which reads as a hung run.
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+}
+
+# Where the run's files are extracted. NOT under /tmp: the tmpfs above is mounted over /tmp
+# when the container starts, which would shadow anything placed there beforehand and delete
+# it with no diagnostic whatsoever. Must match agent_ansible_bundle.JOB_DIR on the dashboard.
+_JOB_DIR = "/opt/job"
+
+# One log line the agent will forward without a newline before giving up on finding one.
+# Matches Reporter.emit's own truncation so a line cannot be counted long here and short
+# there.
+_MAX_STREAM_LINE = 8192
+
+
+def _archive_put(container: str, files: dict) -> None:
+    """Write ``{path: bytes}`` into a created-but-not-started container as a tar.
+
+    This is how the playbook, the inventory and the SSH key get in. The alternative —
+    base64 in the environment, as the cloud runners use — cannot work here: ``execve``
+    caps a *single* environment string at ``MAX_ARG_STRLEN``, which is 128 KB on a
+    4 KB-page host and 2 MB on a 64 KB-page arm64 one. So an env-delivered playbook works
+    on the machine it was developed on and fails on a customer's with `argument list too
+    long`, surfacing as an unexplained container-start failure. There is no size limit here.
+
+    It is also strictly better for the credential: a value in ``Env`` is visible in
+    ``docker inspect`` for the life of the container, and these files are not.
+
+    Modes are set in the tar rather than by a shell step afterwards, so the private key is
+    never briefly world-readable. ``tarfile`` is stdlib, so the three-dependency rule holds.
+    """
+    import io
+    import tarfile
+
+    blob = io.BytesIO()
+    # No compression: this is a loopback socket, and gzip would only add CPU.
+    with tarfile.open(fileobj=blob, mode="w") as tar:
+        seen = set()
+        for path, content in files.items():
+            # Explicit parent directories. Docker's extractor does not create them, and a
+            # missing one fails the whole PUT rather than the single entry.
+            parts = path.strip("/").split("/")[:-1]
+            for i in range(len(parts)):
+                d = "/".join(parts[:i + 1])
+                if d in seen:
+                    continue
+                seen.add(d)
+                info = tarfile.TarInfo(d)
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o700
+                tar.addfile(info)
+            info = tarfile.TarInfo(path.strip("/"))
+            info.size = len(content)
+            info.mode = 0o600
+            tar.addfile(info, io.BytesIO(content))
+    payload = blob.getvalue()
+
+    conn = _UnixHTTP(DOCKER_SOCKET, timeout=120.0)
+    try:
+        conn.request("PUT", f"/containers/{container}/archive?path=%2F", body=payload,
+                     headers={"Content-Type": "application/x-tar",
+                              "Content-Length": str(len(payload))})
+        resp = conn.getresponse()
+        body = resp.read()
+    except OSError as exc:
+        raise PolicyRefusal(f"could not write the run's files into the container: {exc}")
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if resp.status not in (200, 204):
+        raise PolicyRefusal(
+            f"could not write the run's files into the container ({resp.status}): "
+            f"{body[:200].decode('utf-8', 'replace')}")
+
+
+def _stream_logs(container: str, on_line, deadline: float) -> None:
+    """Follow a container's log stream, calling ``on_line(text)`` per complete line.
+
+    Three things here are not obvious and all three were bugs waiting to happen.
+
+    ``read1`` and never ``read``: ``read(n)`` blocks until *n* bytes accumulate, so a
+    64 KB buffer would hold a play's output back for minutes at a time and the run would
+    look hung. ``read1`` does one recv and returns what is there.
+
+    ``IncompleteRead`` is a NORMAL end of stream, not an error. When a container is killed
+    the socket EOFs mid-chunk and ``http.client`` raises it; uncaught, a cancel would surface
+    as a traceback instead of "cancelled".
+
+    Nothing here polls for cancellation. The socket timeout is a generous *ceiling*, not a
+    clock — a timeout raised inside ``http.client``'s chunked state machine can leave it
+    between a chunk trailer and the next size line, with no defined way to resume, and one
+    desynced chunk desyncs every subsequent 8-byte frame header. Cancellation is a separate
+    thread that kills the container; the daemon closing the stream is what ends this loop.
+    """
+    conn = _UnixHTTP(DOCKER_SOCKET, timeout=max(30.0, deadline - time.monotonic() + 60.0))
+    try:
+        conn.request("GET", f"/containers/{container}/logs?stdout=1&stderr=1&follow=1")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            detail = resp.read()[:200].decode("utf-8", "replace")
+            if resp.status == 501:
+                raise PolicyRefusal(
+                    "this host's Docker logging driver is not file-based, so the run's "
+                    "output cannot be read back (the Engine answered 501). The agent asks "
+                    "for json-file per container, so this usually means the daemon forbids "
+                    "it — check `log-driver` in /etc/docker/daemon.json.")
+            raise PolicyRefusal(f"could not read the runner's output ({resp.status}): {detail}")
+
+        buf = bytearray()
+        held = {1: bytearray(), 2: bytearray()}
+        while True:
+            try:
+                chunk = resp.read1(65536)
+            except (http_client.IncompleteRead, OSError):
+                break              # killed, or the daemon went away: an ordinary EOF here
+            if not chunk:
+                break
+            buf += chunk
+            for stream, payload in _demux_frames(buf):
+                # stdout and stderr are kept apart deliberately: one shared buffer splices a
+                # stderr warning into the middle of a half-written stdout line.
+                pending = held[2 if stream == 2 else 1]
+                pending += payload
+                while True:
+                    nl = pending.find(b"\n")
+                    if nl >= 0:
+                        line, del_to = bytes(pending[:nl]), nl + 1
+                    elif len(pending) >= _MAX_STREAM_LINE:
+                        # No newline in sight. Flush what we have — and delete exactly what
+                        # was emitted, with no +1: the +1 is for a newline that is not there,
+                        # and it would silently eat one byte every 8 KB.
+                        line, del_to = bytes(pending[:_MAX_STREAM_LINE]), _MAX_STREAM_LINE
+                    else:
+                        break
+                    del pending[:del_to]
+                    on_line(line.decode("utf-8", "replace"))
+        # Whatever each stream ended on without a newline. Ansible's last line usually has
+        # one, but a crash mid-write does not, and that is the line worth having.
+        for pending in held.values():
+            if pending:
+                on_line(bytes(pending).decode("utf-8", "replace"))
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict,
+                         command: str, emit, cancelled) -> int:
+    """Run one playbook in a throwaway container, streaming its output. Returns the exit code.
+
+    Same guarantees as :func:`_run_sibling` — the image comes from policy, every HostConfig
+    field is a constant, nothing is bind-mounted — with three additions a long run needs:
+    output as it happens, a working Cancel, and a wall-clock ceiling.
+    """
+    if not policy.ansible_enabled:
+        raise PolicyRefusal(
+            "this agent's policy.yaml does not enable Config Management "
+            "(`ansible: {enabled: true}`).")
+    if policy.ansible_network == "none":
+        # Worth refusing rather than running: with no network every task fails as
+        # "unreachable", which reads as a firewall or credential problem on the target.
+        raise PolicyRefusal(
+            "policy.yaml sets `ansible.network: none`, so the runner has no network and "
+            "every task would fail as unreachable. Use `bridge`, or a network that can "
+            "reach the target.")
+
+    spec = {
+        "Image": image,
+        "Env": [f"{k}={v}" for k, v in {**_ANSIBLE_ENV, **env}.items()],
+        # A LIST, because the Engine API's Cmd is an array of strings — a bare string is not
+        # shell-parsed for you, it is taken as argv[0]. `caller` already prefixed `exec`, so
+        # the container's PID 1 becomes ansible-playbook itself: without that, `sh` is PID 1
+        # and does not forward SIGTERM to a child while waiting, so Cancel would do nothing
+        # until the SIGKILL ten seconds later — the same reason `docker stop` on `sh -c`
+        # always burns the full grace period.
+        "Cmd": ["/bin/sh", "-c", command],
+        # Cleared explicitly. `chrweav/ansible-winrm` is built on an upstream image that sets
+        # its own ENTRYPOINT, which would otherwise be prepended to the Cmd above and turn a
+        # valid command into an unrecognised argument.
+        "Entrypoint": [],
+        "WorkingDir": _JOB_DIR,
+        "Tty": False,              # the deframer's precondition, stated rather than assumed
+        "Labels": {SIBLING_LABEL: "1"},
+        "HostConfig": {**_ANSIBLE_HOSTCONFIG, "NetworkMode": policy.ansible_network},
+    }
+    status, body = _engine("POST", "/containers/create", spec)
+    if status == 404:
+        raise PolicyRefusal(
+            f"the Ansible runner image {image!r} is not present on this host. Pull it "
+            f"first: docker pull {image}")
+    if status not in (200, 201):
+        # The body is included deliberately — it carries the real reason, and discarding it
+        # is what turns a one-line diagnosis into an unsolvable report.
+        raise PolicyRefusal(f"could not create the Ansible runner ({status}): "
+                            f"{str(body)[:300]}")
+    container = body.get("Id")
+
+    timeout = max(60.0, policy.ansible_max_runtime_minutes * 60.0)
+    deadline = time.monotonic() + timeout
+    done = threading.Event()
+    killed = threading.Event()
+    expired = threading.Event()
+
+    def _watch():
+        """Kill the container on Cancel or on the deadline.
+
+        A separate thread because the reader must not poll: see :func:`_stream_logs`. Its own
+        short-timeout Engine calls, so a wedged daemon cannot make the watcher hang too.
+        """
+        while not done.wait(1.0):
+            over = time.monotonic() > deadline
+            if not (over or cancelled()):
+                continue
+            if over:
+                expired.set()
+            killed.set()
+            try:
+                _engine("POST", f"/containers/{container}/kill?signal=SIGTERM", timeout=20.0)
+            except Exception:  # noqa: BLE001
+                pass
+            if not done.wait(10.0):
+                try:
+                    _engine("POST", f"/containers/{container}/kill?signal=SIGKILL",
+                            timeout=20.0)
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
+    watcher = threading.Thread(target=_watch, name="ansible-watch", daemon=True)
+    try:
+        # The files go in BEFORE start: the tmpfs is mounted over /tmp at start, and the
+        # root filesystem is read-only once running.
+        _archive_put(container, files)
+
+        status, start_body = _engine("POST", f"/containers/{container}/start")
+        if status not in (204, 304):
+            raise PolicyRefusal(f"the Ansible runner would not start ({status}): "
+                                f"{str(start_body)[:300]}")
+        emit(f"running {image}")
+        watcher.start()
+        _stream_logs(container, emit, deadline)
+        done.set()
+
+        # /wait AFTER the stream, and it is /wait rather than an inspect on purpose. The
+        # container has already exited by the time the follow stream ends, so this returns
+        # at once — but if the daemon has not yet recorded the exit, /wait blocks until it
+        # can answer, whereas `GET /json` polled a millisecond early answers
+        # `Running: true, ExitCode: 0`. That is a FALSE SUCCESS, which for a config run
+        # means a failed playbook reported green.
+        status, waited = _engine("POST", f"/containers/{container}/wait", timeout=120.0)
+        code = int((waited or {}).get("StatusCode", -1)) if isinstance(waited, dict) else -1
+        wait_error = ((waited or {}).get("Error") or {}).get("Message") \
+            if isinstance(waited, dict) else ""
+
+        if expired.is_set():
+            raise PolicyRefusal(
+                f"the run exceeded this agent's ceiling of "
+                f"{policy.ansible_max_runtime_minutes} minutes and was stopped. Raise "
+                f"`ansible.max_runtime_minutes` in policy.yaml if the playbook is "
+                f"legitimately this slow.")
+        if killed.is_set():
+            # An operator cancel, and it RETURNS rather than raising. `execute` checks
+            # `reporter.cancelled` before it looks at the result and reports "Cancelled by
+            # the operator."; raising here would instead render as "Agent policy refused:
+            # cancelled", which reads like the policy stopped something the operator asked
+            # for. The exit code is 137 or 143 and is deliberately not reported as a failure.
+            emit("cancelled — the runner was stopped")
+            return -1
+        if code == 137 and _oom_killed(container):
+            raise PolicyRefusal(
+                f"the runner was killed for exceeding its "
+                f"{_ANSIBLE_MEMORY // (1024 * 1024)} MB memory limit. That is a fixed limit "
+                f"in this agent, not a setting — a playbook this heavy should do its work "
+                f"on the target rather than on the controller.")
+        if code < 0 and wait_error:
+            raise PolicyRefusal(f"the Ansible runner failed to run: {wait_error}")
+        return code
+    finally:
+        done.set()
+        try:
+            _engine("DELETE", f"/containers/{container}?force=1&v=1")
+        except Exception:  # noqa: BLE001
+            log.warning("could not remove Ansible runner container %s", container[:12])
+
+
+def _oom_killed(container: str) -> bool:
+    """Whether the kernel OOM-killed this container.
+
+    Only inspect reports it, and it is the difference between "exit 137" and a message that
+    names the memory limit — 137 alone is ambiguous between an OOM and the agent's own
+    cancel-kill. Best effort: a container already gone is simply not an OOM we can prove.
+    """
+    try:
+        status, body = _engine("GET", f"/containers/{container}/json", timeout=20.0)
+    except Exception:  # noqa: BLE001
+        return False
+    if status != 200 or not isinstance(body, dict):
+        return False
+    return bool((body.get("State") or {}).get("OOMKilled"))
+
+
 def _sibling_env(conn: dict, kind: str, verb: str, payload: dict, secret: str) -> dict:
     host, port = _conn_endpoint(conn, 5985 if kind == "hyperv" else 443)
     opts = conn.get("options") if isinstance(conn.get("options"), dict) else conn
@@ -2956,6 +3648,13 @@ def _sibling_env(conn: dict, kind: str, verb: str, payload: dict, secret: str) -
     if kind == "hyperv":
         env["HV_TRANSPORT"] = str(opts.get("transport") or "ntlm")
         env["HV_USE_SSL"] = "1" if opts.get("use_ssl") else "0"
+        # Report each guest's addresses and OS as well as the VM list. Off by default: it
+        # costs a KVP read per VM on the host, and it is only needed where those guests are
+        # Config-Management targets. It reads from YOUR connections.yaml rather than from a
+        # dashboard field for the same reason `host` does — how much this agent reads out of
+        # your guests is your decision, not the dashboard's.
+        if opts.get("sync_guest_details"):
+            env["HV_GUEST_DETAILS"] = "1"
     return env
 
 
@@ -3069,8 +3768,253 @@ def _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins):
     return impl(conn, payload, policy, emit, verb, checkins)
 
 
+# ── Config Management ─────────────────────────────────────────────────────────
+
+# A variable an operator may not set, because Ansible reads it as connection configuration
+# rather than data. THIS is the check that matters — the dashboard applies the same filter,
+# but a compromised dashboard is precisely the thing that would stop applying it.
+#
+# What it prevents, concretely: `ansible_connection: local` turns "configure that VM over
+# SSH" into "run this playbook inside the runner container", on this network, with the
+# runner image's kubectl and helm on PATH. `ansible_python_interpreter` and
+# `ansible_ssh_executable` are the same hole in different clothes. And `-e` outranks every
+# inventory variable in Ansible's precedence order, so a filter on the inventory alone would
+# be worth nothing.
+_RESERVED_VAR_PREFIX = "ansible_"
+
+# Ansible's own exit codes. Reported as text because "the run failed (exit 4)" sends an
+# operator to a search engine, and every one of these has a specific meaning worth stating.
+_ANSIBLE_EXIT = {
+    0: "",
+    1: "ansible-playbook itself failed — usually a malformed playbook or a bad argument",
+    2: "one or more hosts failed a task",
+    3: "one or more hosts were unreachable (older ansible reports this as 4)",
+    4: "the target was unreachable — check the address, the port and the credential",
+    99: "the run was aborted by a callback or a signal",
+    250: "an unexpected internal ansible error",
+}
+
+
+def _check_extra_vars(extra_vars: dict) -> None:
+    """Raise :class:`PolicyRefusal` if the dashboard tried to send a connection variable."""
+    bad = sorted(k for k in (extra_vars or {})
+                 if str(k).lower().startswith(_RESERVED_VAR_PREFIX))
+    if bad:
+        raise PolicyRefusal(
+            f"the dashboard sent {', '.join(bad)} as extra vars, and this agent refuses "
+            f"them: Ansible reads ansible_* variables as CONNECTION configuration, so one "
+            f"of them could redirect this playbook into the runner container instead of the "
+            f"target host. Remove them from the run and try again.")
+
+
+def _vm_inventory(*, ip: str, port: int, transport: str, login_user: str,
+                  winrm: dict) -> str:
+    """A one-host Ansible inventory, authored HERE rather than received.
+
+    Every value comes from the signed job envelope or from the typed credential fields —
+    never from a structure the dashboard composed. That is the difference between this and
+    accepting an inventory: there is no key here that the dashboard chose the *name* of.
+
+    ``ansible_host`` is the **resolved IP**, not the name the job used. ``check_ansible``
+    validated the resolved address to defeat DNS rebinding, but the connection happens later,
+    in another process, in another namespace — so pinning the address here is what makes that
+    check mean anything. It goes in the inventory rather than in ``HostConfig.ExtraHosts``,
+    which would be a job-derived HostConfig field and would break the property that none are.
+    """
+    hostvars = {"ansible_host": ip, "ansible_port": int(port)}
+    if transport == "winrm":
+        hostvars.update({
+            "ansible_connection": "winrm",
+            "ansible_winrm_scheme": str(winrm.get("scheme") or "http"),
+            "ansible_winrm_transport": str(winrm.get("transport") or "ntlm"),
+            "ansible_winrm_server_cert_validation":
+                str(winrm.get("cert_validation") or "ignore"),
+        })
+    else:
+        hostvars["ansible_connection"] = "ssh"
+    if login_user:
+        hostvars["ansible_user"] = login_user
+    # JSON, which is valid YAML, so ansible's yaml inventory plugin reads it. Written by
+    # json.dumps rather than assembled as text so no value can inject structure.
+    return json.dumps({"all": {"hosts": {"target": hostvars}}})
+
+
+def _ansible_argv(*, run_kind: str, transport: str, has_key: bool,
+                  has_vars: bool) -> list:
+    """The ``ansible-playbook`` argv, mirroring ``services/ansible_vm_cmd.build_vm_argv``.
+
+    Byte-identical to the dashboard's builder for the VM shape, and pinned by a test, for the
+    reason that module's docstring gives: the ORDER of the two ``--extra-vars`` is what makes
+    a resolved secret win a name conflict, and two copies would eventually disagree about it.
+
+    The database shape is the ``hosts: localhost`` play instead, matching
+    ``services/ansible_localhost_cmd.build_localhost_command``.
+    """
+    if run_kind == "database":
+        argv = ["ansible-playbook", "-i", "localhost,", "-c", "local",
+                f"{_JOB_DIR}/playbook.yml"]
+        if has_vars:
+            argv += ["--extra-vars", f"@{_JOB_DIR}/secret_vars.json"]
+        return argv
+    argv = [
+        "ansible-playbook",
+        "-i", f"{_JOB_DIR}/inventory.json",
+        f"{_JOB_DIR}/playbook.yml",
+        "--ssh-common-args",
+        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+    ]
+    if has_key:
+        argv += ["--private-key", f"{_JOB_DIR}/id_rsa"]
+    if has_vars:
+        argv += ["--extra-vars", f"@{_JOB_DIR}/secret_vars.json"]
+    return argv
+
+
+def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
+                dashboard) -> dict:
+    """Run one Config-Management job on this host, in a one-shot container.
+
+    The order of the first four steps is the security model, so it is worth reading as one
+    thing rather than four:
+
+    1. Read the FOUR scalars the envelope carries. There is nothing else in it — no playbook,
+       no filename, no variable name, no credential.
+    2. Resolve the address and check it against ``ansible.targets`` in the customer's
+       policy.yaml. This happens before anything is fetched, so a refused target costs the
+       dashboard nothing and tells it nothing.
+    3. Ask policy which image a run of this kind uses. The dashboard never names an image.
+    4. Only now fetch the sealed bundle, whose AAD binds it to the endpoint checked in (2).
+
+    Nothing is written to this host's filesystem: the files go straight into the container
+    through the archive API and die with it.
+    """
+    run_kind = str(payload.get("run_kind") or "")
+    transport = str(payload.get("transport") or "")
+    host = str(payload.get("target_host") or "")
+    try:
+        port = int(payload.get("target_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not host or not port:
+        raise PolicyRefusal("this job names no target address, so there is nothing to run "
+                            "against.")
+
+    # (3) before (2)'s fetch, and before the network: an agent whose policy has no image for
+    # this kind should say so rather than resolving a customer's DNS first.
+    image = policy.ansible_image(run_kind)
+
+    # (2) The resolved address is what gets checked AND what gets used, so the name cannot
+    # resolve to one thing here and another at connect time.
+    addresses = _resolve_all(host)
+    if not addresses:
+        raise PolicyRefusal(f"{host!r} does not resolve to any address from this agent.")
+    ip = addresses[0]
+    policy.check_ansible(ip, port)
+    emit(f"target {host} resolved to {ip}:{port} and is allowed by policy.yaml")
+
+    if MODE == "audit":
+        # Audit mode promises the agent "logs every job it would run, in full, and executes
+        # nothing". A playbook is the one job type where breaking that promise would be
+        # unrecoverable, so the return is here — before the bundle is even fetched, so no
+        # credential is released either.
+        emit(f"AUDIT MODE — would run {run_kind} Config Management against {ip}:{port} "
+             f"using {image}; nothing was fetched and nothing was executed")
+        return {"exit_code": 0, "audit": True}
+
+    # (4) The bundle, sealed and bound to this endpoint. Credentials are registered for
+    # redaction inside this call, before anything below can emit.
+    bundle, _scrub = dashboard.ansible_bundle(
+        job_id, run_kind=run_kind, transport=transport, host=host, port=port)
+
+    extra_vars = bundle.get("extra_vars") or {}
+    _check_extra_vars(extra_vars)
+
+    playbook = str(bundle.get("playbook") or "")
+    if not playbook.strip():
+        # Named here rather than left to ansible, which answers an empty playbook with
+        # "Unable to parse … did not contain a list of plays" — a message that reads as a
+        # broken playbook rather than as one that never arrived.
+        raise PolicyRefusal(
+            "the dashboard sent an empty playbook, so there is nothing to run. The asset it "
+            "named is empty or could not be read out of storage.")
+
+    files = {f"{_JOB_DIR.strip('/')}/playbook.yml": playbook.encode("utf-8")}
+
+    if bundle.get("asset_name") and bundle.get("asset_b64"):
+        files[f"{_JOB_DIR.strip('/')}/assets/{bundle['asset_name']}"] = \
+            base64.b64decode(bundle["asset_b64"])
+
+    has_key = False
+    if run_kind == "vm":
+        files[f"{_JOB_DIR.strip('/')}/inventory.json"] = _vm_inventory(
+            ip=ip, port=port, transport=transport,
+            login_user=str(bundle.get("login_user") or ""),
+            winrm=bundle.get("winrm") or {}).encode("utf-8")
+        if bundle.get("ssh_private_key"):
+            files[f"{_JOB_DIR.strip('/')}/id_rsa"] = \
+                str(bundle["ssh_private_key"]).encode("utf-8")
+            has_key = True
+
+    # Everything the play should see as DATA, in one file rather than on the command line so
+    # no value lands in `ps` on this host. The connection material the inventory does not
+    # carry — a WinRM/SSH password, a become password — goes here as the ansible_* names
+    # ANSIBLE expects; that is this agent naming them, not the dashboard, which is the whole
+    # reason `_check_extra_vars` runs against the dashboard's dict and not against this one.
+    play_vars = dict(extra_vars)
+    play_vars.update(bundle.get("db") or {})
+    if bundle.get("login_password"):
+        play_vars["ansible_password"] = bundle["login_password"]     # WinRM
+        play_vars["ansible_ssh_pass"] = bundle["login_password"]     # SSH
+    if bundle.get("become_password"):
+        play_vars["ansible_become_password"] = bundle["become_password"]
+    if play_vars:
+        files[f"{_JOB_DIR.strip('/')}/secret_vars.json"] = \
+            json.dumps(play_vars).encode("utf-8")
+
+    argv = _ansible_argv(run_kind=run_kind, transport=transport, has_key=has_key,
+                         has_vars=bool(play_vars))
+    # `exec` so ansible-playbook becomes PID 1 and SIGTERM reaches it. Without it `sh` is
+    # PID 1 and does not forward signals while waiting, so Cancel would do nothing until the
+    # SIGKILL ten seconds later.
+    command = "exec " + " ".join(_shell_quote(a) for a in argv)
+
+    emit(f"running {run_kind} Config Management against {ip}:{port}")
+    code = _run_ansible_sibling(
+        policy, image=image, files=files, env=bundle.get("env") or {},
+        command=command, emit=emit, cancelled=cancelled)
+
+    meaning = _ANSIBLE_EXIT.get(code, "")
+    if code == 0:
+        emit("ansible-playbook completed successfully")
+    elif code < 0:
+        # Cancelled. `execute` reads `reporter.cancelled` and reports it; returning quietly
+        # is what lets it, and a cancel must not be dressed up as a playbook failure.
+        return {"exit_code": code, "cancelled": True}
+    else:
+        # Raised, not returned: the job must land as FAILED. Returning a non-zero exit code
+        # in a result dict would complete the job green, which is the single worst outcome
+        # for a config-management run — an operator reads "completed" and believes the host
+        # was configured.
+        raise PolicyRefusal(
+            f"ansible-playbook exited {code}" + (f" — {meaning}" if meaning else ""))
+    return {"exit_code": code}
+
+
+def _shell_quote(value: str) -> str:
+    """``shlex.quote`` without importing shlex — POSIX single-quote escaping.
+
+    Written out because the argv it quotes is built from a credential-bearing bundle, and
+    the rule is three lines: wrap in single quotes, and end/reopen the quoting around any
+    single quote in the value.
+    """
+    if value and all(c.isalnum() or c in "@%+=:,./-_" for c in value):
+        return value
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
 HANDLERS = {"agent_discover": run_discovery,
-            "agent_hypervisor": run_hypervisor}
+            "agent_hypervisor": run_hypervisor,
+            "agent_ansible": run_ansible}
 
 
 # ── Job execution ─────────────────────────────────────────────────────────────

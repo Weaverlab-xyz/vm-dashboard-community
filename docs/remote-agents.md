@@ -1015,6 +1015,131 @@ shares a `batch_id`, so N job rows roll up as one run on `/jobs`.
 The cap that forces this is `MAX_RESULT_BYTES` (256 KB), and raising it is not an
 option — it is the only bound on an agent's write path into the database.
 
+## Agent-executed Config Management
+
+Discovery finds hosts and hypervisor brokering powers them on. This applies a **playbook**
+to them — to the *guests*, and to on-premises databases, over SSH or WinRM, from an
+Ansible process that runs inside your network.
+
+**Why this is the feature that makes on-prem hypervisor support worth having.** Most
+on-prem hypervisors have no usable Terraform provider, so the dashboard cannot build their
+VMs. All of those VMs speak Ansible. And a cloud-hosted dashboard cannot run Ansible against
+them at all by itself: the "Local Docker" runner is a sibling container on the *dashboard's*
+host, which has no Docker socket on ECS/ACI/Container Apps and no route to your LAN in any
+case. Moving that container onto the agent's host is the whole change.
+
+### What the dashboard sends, and what it does not
+
+This is the part worth reading closely, because a playbook is executable content and the
+[philosophy](#philosophy) above says the dashboard is not trusted.
+
+The signed job envelope carries **four scalars**: the kind of run, the transport, and the
+target address and port. That is all. No playbook, no filename, no variable name, no
+credential — `services/agent_ansible_meta.py` is a closed allowlist and a test asserts none
+of its fields can name a thing to fetch or run.
+
+Everything else arrives **sealed**, from `POST /api/agent/jobs/{id}/ansible-bundle`, encrypted
+to an X25519 key the agent generated for that one fetch — the same mechanism as
+[the credential the dashboard holds](#the-credential-the-dashboard-holds), and for the same
+reason: a signature proves the dashboard sent it, which is a weaker claim than the seal's
+"sent for *this* agent, *this* job and *this* endpoint". The AAD binds the endpoint, so a
+bundle released for one host cannot be relabelled as another's.
+
+**The agent writes the Ansible inventory itself.** This is not tidiness. An inventory is a
+place to write `ansible_connection: local`, which turns "configure that VM over SSH" into
+"execute this playbook *inside the runner container*" — on your network, with the runner
+image's `kubectl` and `helm` on `PATH`. `ansible_python_interpreter` and
+`ansible_ssh_executable` are the same hole in different clothes, and `-e` outranks every
+inventory variable in Ansible's precedence order, so filtering only the inventory would be
+worth nothing. So the bundle carries **typed** credential fields — one key per meaning — the
+agent renders the inventory from the four verified scalars, and **any `ansible_*` extra var
+is refused by name**. The address in that inventory is the **resolved IP**, pinned, because
+the policy check happens here and the connection happens seconds later in another container.
+
+### Four grants, all required
+
+| Grant | Who owns it | Where |
+|---|---|---|
+| this agent may run `agent_ansible` | the dashboard operator | Agents page |
+| `agent_ansible` in `job_types` | **you** | `policy.yaml` |
+| `ansible: {enabled, vm_image, db_image, targets}` + the Docker socket | **you** | `policy.yaml` + `docker-compose.sibling.yml` |
+| the run's credential | the dashboard operator | the run form's secret / managed-account picker |
+
+**`ansible.targets` is a separate list from `targets`, and that is the point.** The top-level
+list grants a *port probe*; this one grants *a playbook running as root*. An operator who
+widened a discovery sweep has not agreed to the second, so there is no fallback: an empty
+`ansible.targets` means nothing can be configured, however wide `targets` is. Name the ports —
+22 for Linux, 5985/5986 for Windows, the database port for a database.
+
+Both images come from `policy.yaml` and never from a job. A job names only the *kind*:
+
+```
+docker pull chrweav/ansible-winrm:latest     # VM targets — SSH and WinRM
+docker pull chrweav/ansible-cloud:latest     # database targets — the localhost play
+```
+
+The agent will not pull either for you, deliberately — a pull is a network fetch of
+executable content.
+
+### Before a VM appears as a target: it needs an address
+
+`Get-VM` and `/api/vcenter/vm` describe the *VM*, not the guest inside it, so a synced row
+has no address until something asks for one. Three things must all be true:
+
+1. the guest is **powered on**;
+2. guest tools are installed in it — Integration Services, VMware Tools, or
+   `qemu-guest-agent`;
+3. **`sync_guest_details: true`** on that connection in your `connections.yaml`.
+
+The third is off by default because reading each guest's addresses costs an extra call per
+VM on every sync, and an estate whose guests are not config targets should not pay it. Set
+it, **Sync Now**, and the guests become individually selectable. Until then the row is
+listed but disabled, with that reason on hover — which is the answer to "why is my VM not in
+the list".
+
+Supported on `hyperv`, `vsphere` and `proxmox`. Nutanix and XCP-ng report no guest address
+yet and say so on the row rather than appearing broken. **Hyper-V needs a re-pulled
+`chrweav/hypervisor-runner`** as well as the agent, because that is the image doing the
+asking.
+
+### On-premises databases
+
+Register the database with `cloud = local` and bind it to an agent. The run is the same
+`hosts: localhost` play the cloud databases use — `community.postgresql` / `mysql` /
+`general` reaching *out* to the endpoint — except the controller is a container on the
+agent's host instead of an in-cloud task. Its admin credential is checked out of Password
+Safe just-in-time by the dashboard and sealed into the bundle, so nothing durable sits on
+the agent.
+
+### What the run looks like
+
+A one-shot container, created per job and deleted after it: `--read-only`, `--cap-drop ALL`,
+`no-new-privileges`, no bind mounts, 1 GiB of memory and a 128 MB `/tmp`. Every field of that
+spec is a constant — a test asserts none of it comes from the job.
+
+The playbook, the inventory, the SSH key and the vars go in through the Docker **archive**
+API rather than the environment. That is a deliberate departure from the cloud runners'
+`PLAYBOOK_B64` contract, and the reason is unforgiving: `execve` caps a *single* environment
+string at 128 KB on a 4 KB-page host and 2 MB on a 64 KB-page arm64 one, so an env-delivered
+playbook works on the machine it was developed on and fails on a customer's with `argument
+list too long`. Files land mode 0600 and appear in no `docker inspect` output.
+
+Output **streams** into the existing Live Output pane, and the existing **Cancel** button
+works: a watcher sends SIGTERM to the container, then SIGKILL after ten seconds. There is
+also a wall-clock ceiling, `ansible.max_runtime_minutes` (default 30).
+
+Ansible's own exit codes are reported in words rather than as a number, because "exit 4"
+sends people to a search engine: 2 is "one or more hosts failed a task", 4 is "the target was
+unreachable". A non-zero exit **fails** the job — it is never reported as a completed run,
+which for config management would be the worst possible outcome.
+
+### Requires an agent image of 2.3.0 or newer
+
+The dashboard refuses to **queue** for an older one. An older agent has no `agent_ansible`
+entry in its closed `HANDLERS` dict, so it would refuse the job into Live Output — where the
+message reads as a `policy.yaml` problem and sends you to edit the wrong file. Refusing at
+enqueue puts the remedy where it is legible and leaves no job row behind.
+
 ## Best practices
 
 - **Run in audit mode first.** `AGENT_MODE=audit` logs every job it *would* run, in
@@ -1153,16 +1278,38 @@ an objection into a demonstration.
 | `vmrest has no 'restart' operation` | Working as intended — its API has no reset, reboot or snapshot. Use power_off then power_on. |
 | A sync never runs, and the connection shows an error | Read it — the enqueuer records why rather than queueing a job that would wait indefinitely. Usually the bound agent is offline or lacks the `agent_hypervisor` grant. |
 | Caddy never serves; logs show ACME retries | The hostname is internal and cannot satisfy an ACME challenge. Set `AGENT_TLS_INTERNAL=1` — see [above](#if-the-hostname-is-internal). |
+| `policy.yaml does not allow Config Management against x:22` | Working as intended, and the row above it in `targets:` does **not** grant this. Config Management has its own `ansible.targets:` list, because "may be port-probed" and "may have a playbook applied as root" are different decisions. Add the range there, with the port named. |
+| `this agent's policy.yaml does not enable Config Management` | No `ansible:` block, or `enabled` is not true. It is a separate grant from `sibling:` even though both need the Docker socket. |
+| `policy.yaml enables Config Management but names no ansible.vm_image` (or `db_image`) | A run of that kind has no image. Add the key and `docker pull` it — the agent will not pull for you. `vm_image` is `chrweav/ansible-winrm` (it has pywinrm, so it covers Linux and Windows); `db_image` is `chrweav/ansible-cloud` (it has the database collections). |
+| `the Ansible runner image … is not present on this host` | `docker pull` the image named in `ansible.vm_image` / `ansible.db_image`. |
+| A VM is listed in the target picker but **disabled**, hover says "no address" | Its sync reports no guest address. All three of: guest powered on, guest tools installed in it, and `sync_guest_details: true` on that connection in `connections.yaml`. Then **Sync Now**. On Hyper-V this also needs a re-pulled `chrweav/hypervisor-runner` — that image is what asks the guest. |
+| A VM does not appear in the picker at all | Either its connection is not agent-bound, or the row is untagged and you are not an admin — an untagged synced VM is admin-only until an admin assigns a workgroup, the same rule every hypervisor page keeps. |
+| The dashboard refuses to queue: *"needs at least 2.3"* | The bound agent predates agent-executed Config Management. Pull `chrweav/dashboard-agent:latest` and restart; the agent keeps its identity, so no re-enrolment. |
+| `Agent 'x' is not granted the Config-Management job type` | The dashboard operator's half of the permission. Agents page → that agent → grant `agent_ansible`. Your `policy.yaml` still has to grant it too. |
+| `the dashboard sent ansible_connection as extra vars, and this agent refuses them` | Working as intended, and it is the most important refusal here. `ansible_*` variables are connection configuration, not data — `ansible_connection: local` would run the playbook inside the runner container instead of against the target. Use the run form's own user / key / become fields. |
+| `this host's Docker logging driver is not file-based … (the Engine answered 501)` | The daemon forbids the per-container `json-file` driver the agent asks for. Check `log-driver` in `/etc/docker/daemon.json`. Without a readable log there is no way to stream the run's output, so this is fatal rather than cosmetic — and it is the default on RHEL, Fedora, Rocky and Alma, which is why the agent pins the driver per container. |
+| `the runner was killed for exceeding its 1024 MB memory limit` | A fixed limit in the agent, not a setting. A playbook that needs more than a gigabyte on the *controller* is doing work that belongs on the target. |
+| `the run exceeded this agent's ceiling of 30 minutes and was stopped` | Raise `ansible.max_runtime_minutes` in `policy.yaml` if the playbook is legitimately that slow; otherwise something is waiting on an answer that will never come. |
+| `policy.yaml sets ansible.network: none` | Refused before the container is created, because with no network every task fails as "unreachable" — which reads as a firewall or credential problem on the target. Use `bridge`, or a network that can reach it. |
+| `ansible-playbook exited 4 — the target was unreachable` | The address, the port or the credential. The address came from the agent's own sync, so start with the port: 22 needs sshd, 5985/5986 needs a WinRM listener (`winrm quickconfig`). |
+| `ansible-playbook exited 2 — one or more hosts failed a task` | The playbook ran and the play failed; read the output above the recap. Not a wiring problem. |
+| `This run's playbook and connection material total N KB, over the 256 KB limit` | Split the playbook, or move the bulk into a role the play fetches itself. The cap exists because the agent's own response ceiling is 1 MB and tripping it produces a far less useful message. |
+| A run against an on-prem **database** is refused for a missing endpoint | The registered row has no `private_host`. Re-register it with its address — an agent needs somewhere to connect. |
 
 ## Where this is heading
 
 Discovery was the first slice, chosen because no credential crosses the wire at all.
 Hypervisor brokering followed it and is described above. Next:
 
-- **Agent-executed Ansible** against private targets, spawning one-shot
-  `chrweav/ansible-cloud` siblings and reusing the existing
-  `PLAYBOOK_B64` / `CONN_VARS_B64` env contract byte for byte, plus a just-in-time
-  secret fetch gated on refs the job declared at enqueue time.
+- ~~**Agent-executed Ansible** against private targets~~ — shipped; see
+  [Agent-executed Config Management](#agent-executed-config-management). One detail of the
+  plan did not survive contact and is worth recording: it was to reuse the cloud runners'
+  `PLAYBOOK_B64` env contract byte for byte, and that is not safe. `execve` caps a single
+  environment string at 128 KB on a 4 KB-page host and 2 MB on a 64 KB-page arm64 one, so an
+  env-delivered playbook works on the machine it was written on and fails on a customer's.
+  The files go in through the Docker archive API instead, which also keeps them out of
+  `docker inspect`. The just-in-time secret fetch landed as planned, and grew to carry the
+  playbook as well — because executable content must be *sealed*, not merely signed.
 - ~~**Password Safe JIT checkout by the agent**~~ — shipped, and then superseded for the
   case it was aimed at. See [Where the credential comes from](#where-the-credential-comes-from)
   for the agent-side checkout, and
@@ -1171,6 +1318,13 @@ Hypervisor brokering followed it and is described above. Next:
 - **Nutanix power verbs and snapshots.** Both are full spec PUTs carrying a metadata
   version rather than simple actions, so getting one wrong writes to the VM instead of
   failing. Worth doing carefully rather than quickly.
+- **Nutanix and XCP-ng guest addresses.** Both sync VMs but report no guest IP, so their
+  guests cannot be Config-Management targets yet — the rows say so rather than failing. The
+  data is there (Prism's `nic_list`, XAPI's `VM_guest_metrics`); it is a producer change in
+  each sync, gated behind the same per-connection `sync_guest_details` flag.
+- **On-premises Kubernetes clusters as agent targets.** `cloud="local"` clusters have the
+  identical problem an on-prem database had, and the fix is the same shape — an `agent_id` on
+  the cluster row and the existing `run_kind` enum grown a third member.
 - **Retiring `POWERSHELL_EXECUTION_MODE=ssh`,** now that a co-located agent does the
   same job by polling outward instead of the dashboard holding an inbound SSH key to a
   Windows desktop.

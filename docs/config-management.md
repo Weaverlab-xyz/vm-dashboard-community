@@ -4,6 +4,15 @@ This document explains how the dashboard does config management — the
 philosophy that drives the design, the best practices the codebase
 encodes, and how the on-premises and cloud paths fit together.
 
+> **If your dashboard runs in a cloud** (ECS / ACI / Container Apps), the "Local
+> Docker" runner below cannot serve your on-premises targets: it is a sibling
+> container on the *dashboard's* host, which has neither a Docker socket nor a
+> route to your LAN. Those targets are reached by a
+> [remote agent](remote-agents.md#agent-executed-config-management) instead, which
+> runs the same one-shot container inside your network. Everything else in this
+> document — the asset types, the secret handling, the drift tracking — is
+> unchanged.
+
 The companion docs:
 
 - [Infrastructure as Code](infrastructure-as-code.md) — how the dashboard
@@ -75,6 +84,19 @@ Behind the scenes (see [`services/ansible_local_service.py`](../web_dashboard/se
   configured hypervisors appear, no empty groups.
 - The Local Docker runner (default) executes playbooks against this
   inventory directly from the dashboard host.
+
+Two limits of that path are worth knowing before you rely on it, and a
+[remote agent](remote-agents.md#agent-executed-config-management) is the answer
+to both:
+
+- **It targets the hypervisor *hosts*, not their guests.** `build_inventory()`
+  emits one Ansible host per *connection* — the vCenter, the Proxmox node — so
+  configuring the VMs running on them is a different thing entirely. Guests
+  synced by an agent are individually selectable once the sync reports an
+  address.
+- **Agent-bound connections are excluded from it deliberately.** They hold no
+  host and no credential on this side, so an inventory entry for one could never
+  connect. Their guests are reached by the agent instead.
 
 This is where contributors with on-prem labs help most — see
 [CONTRIBUTING.md → Where the community can help most](../CONTRIBUTING.md#where-the-community-can-help-most).
@@ -262,6 +284,7 @@ Where the Ansible process actually runs. Picked in
 | **AWS ECS Fargate** | A Fargate task launched per run in your VPC. | EC2 targets in private subnets without a path back to the dashboard host. |
 | **Azure ACI** | An Azure Container Instance per run, in your VNet. | Azure VMs in private subnets. |
 | **GCP Cloud Run Jobs** | A Cloud Run Job per run, in your project. | GCE instances. |
+| **Remote agent** | A one-shot container on the *agent's* host, inside your network. Not selectable here — it is chosen automatically when the target is only reachable that way. | On-prem hypervisor guests and on-prem databases, especially from a cloud-hosted dashboard. See [remote agents](remote-agents.md#agent-executed-config-management). |
 
 The cloud runners exist because connecting from a dashboard sitting on
 a corporate LAN to a deeply-private cloud subnet is often impossible

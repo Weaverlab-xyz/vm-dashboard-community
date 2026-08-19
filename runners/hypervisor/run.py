@@ -106,6 +106,54 @@ _PS_LIST = (
     "@{enumerated=$true; count=$vms.Count; vms=$vms}"
 )
 
+# The same enumeration plus each guest's addresses and OS name — what Config Management
+# needs, because a playbook has to reach the guest and `Get-VM` reports nothing about it.
+#
+# Kept as a SECOND script rather than folded into the one above, and that is deliberate on
+# two counts. It costs more on the host (a KVP read per VM), so it runs only for a
+# connection whose operator asked for it. And both fields depend on Integration Services
+# being present in the guest: a VM without them yields nothing here, while the plain
+# enumeration above still works — so the cheap path can never be made to fail by the
+# expensive one.
+#
+# Addresses come from the network adapters. `IPAddresses` is populated by the guest
+# integration components, so a powered-off VM and a VM without the services both report an
+# empty list; neither is an error and neither is guessed at.
+#
+# The OS name comes from the KVP exchange (`GuestIntrinsicExchangeItems`), which is the only
+# thing on a Hyper-V host that knows it. Each item is an XML fragment, so the name is pulled
+# by XPath rather than by string matching. Wrapped in try/catch because a host with WMI
+# hardened, or a VM mid-migration, must degrade to "no OS reported" rather than fail the
+# whole sync — which would empty the dashboard's cache for every VM on the host.
+_PS_LIST_GUEST = (
+    "$ErrorActionPreference = 'Stop'; "
+    "Import-Module Hyper-V; "
+    "$vms = @(Hyper-V\\Get-VM | ForEach-Object { "
+    "  $vm = $_; "
+    "  $ips = @(); "
+    "  try { $ips = @($vm | Hyper-V\\Get-VMNetworkAdapter | "
+    "        Select-Object -ExpandProperty IPAddresses | Where-Object { $_ }) } catch { } "
+    "  $os = ''; "
+    "  try { "
+    "    $kvp = Get-WmiObject -Namespace root\\virtualization\\v2 "
+    "           -Class Msvm_KvpExchangeComponent "
+    "           -Filter \"SystemName='$($vm.Id)'\"; "
+    "    foreach ($item in @($kvp.GuestIntrinsicExchangeItems)) { "
+    "      $x = [xml]$item; "
+    "      $n = $x.SelectSingleNode(\"/INSTANCE/PROPERTY[@NAME='Name']/VALUE\").'#text'; "
+    "      if ($n -eq 'OSName') { "
+    "        $os = $x.SelectSingleNode(\"/INSTANCE/PROPERTY[@NAME='Data']/VALUE\").'#text' } "
+    "    } "
+    "  } catch { } "
+    "  [pscustomobject]@{ Id=$vm.Id; Name=$vm.Name; State=$vm.State; "
+    "    ProcessorCount=$vm.ProcessorCount; "
+    "    MemoryMB=[int]($vm.MemoryAssigned/1MB); "
+    "    IPAddresses=$ips; OSName=$os } "
+    "}); "
+    "ConvertTo-Json -Compress -Depth 4 -InputObject "
+    "@{enumerated=$true; count=$vms.Count; vms=$vms}"
+)
+
 # A closed map, not a format string: the verb never reaches PowerShell as text.
 #
 # The switches are the whole meaning here, and the two on Stop-VM do NOT mean the same
@@ -158,7 +206,10 @@ def _hyperv(verb: str, host: str, port: int, user: str, secret: str,
     )
 
     if verb == "inventory_sync":
-        result = session.run_ps(_PS_LIST)
+        # Guest details are opt-in per connection: they cost a KVP read per VM, and only a
+        # connection whose VMs are Config-Management targets needs them.
+        want_guest = _env("HV_GUEST_DETAILS") == "1"
+        result = session.run_ps(_PS_LIST_GUEST if want_guest else _PS_LIST)
         if result.status_code != 0:
             _fail(f"Get-VM failed: {_text(result.std_err)[:400]}")
         raw = _text(result.std_out).strip()
@@ -180,14 +231,27 @@ def _hyperv(verb: str, host: str, port: int, user: str, secret: str,
         vms = []
         for vm in rows:
             state = vm.get("State")
-            vms.append({
+            row = {
                 "vm_id": str(vm.get("Id") or ""),
                 "name": vm.get("Name") or "",
                 "power_state": _STATE.get(state, str(state)),
                 "vcpus": vm.get("ProcessorCount"),
                 "mem_mib": vm.get("MemoryMB"),
                 "vm_type": "vm",
-            })
+            }
+            # Only ever ADD these keys, never a blank one. The dashboard's sanitiser drops
+            # absent keys and leaves the cached value alone, so an older agent — or a guest
+            # with no Integration Services — keeps whatever address was last known instead of
+            # having it overwritten with nothing.
+            ips = vm.get("IPAddresses")
+            if isinstance(ips, str):        # a single address is not wrapped in a list
+                ips = [ips]
+            ips = [str(i).strip() for i in (ips or []) if str(i).strip()]
+            if ips:
+                row["ip_addresses"] = ips
+            if vm.get("OSName"):
+                row["guest_os"] = str(vm["OSName"])[:64]
+            vms.append(row)
         # Hyper-V has no cursor: Get-VM returns the whole host in one call, and a host
         # with enough VMs to need paging is not a Hyper-V host.
         #

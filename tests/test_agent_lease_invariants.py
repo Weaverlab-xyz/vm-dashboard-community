@@ -200,8 +200,16 @@ def test_the_operator_half_is_admin_only():
     # naming this agent, and by deriving the connection from the job rather than the
     # request. See `job_secret`'s docstring. If a future route lands here without that
     # much, this list is the wrong place to silence it.
+    #
+    # `job_ansible_bundle` clears the same bar and then some, which is the only reason it is
+    # allowed to be here: it hands out MORE than a credential — a playbook, an SSH key and a
+    # become password — so it carries every gate `job_secret` does (signature, `owned_job`,
+    # `statuses=("running",)`, everything derived from the job row rather than the request,
+    # a reply key checked before any credential is obtained) plus an AAD bound to the target
+    # endpoint and a size cap. There is deliberately nothing in its request body to select
+    # with. If a third route wants in, it needs that list, not this one.
     agent_half = {"enroll_agent", "lease_job", "heartbeat", "push_logs", "complete",
-                  "job_secret"}
+                  "job_secret", "job_ansible_bundle"}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
