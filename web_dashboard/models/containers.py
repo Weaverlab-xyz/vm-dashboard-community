@@ -264,6 +264,28 @@ class PortainerDeployRequest(BaseModel):
     vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
 
 
+class PortainerEdgeRequest(BaseModel):
+    """Register an Edge-agent environment on the configured Portainer."""
+    name: str                                # environment name shown in Portainer
+    agent_image: Optional[str] = None        # blank -> portainer/agent:latest
+    checkin_interval: Optional[int] = None   # seconds; blank -> Portainer's default (5)
+
+
+class PortainerEdgeResponse(BaseModel):
+    """Everything needed to join the host, including the one-time Edge key.
+
+    The key is derived from the node's CURRENT url and is never stored — a node whose
+    external IP changes invalidates every key issued before the change.
+    """
+    endpoint_id: int
+    name: str
+    edge_id: str
+    edge_key: str                            # shown once; not persisted anywhere
+    server_url: str                          # the address the agent will dial
+    tunnel_port: int                         # 8000, already open in the node firewall
+    join_command: str                        # docker run ... to paste on the host
+
+
 class PortainerImportRequest(BaseModel):
     """A Portainer migration bundle, produced by
     ``python -m web_dashboard.scripts.portainer_migrate export``.

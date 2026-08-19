@@ -655,6 +655,102 @@ async def remove_team_member(user_id: int, team_id: int) -> bool:
     return True
 
 
+# ── Environments: Edge agent registration ────────────────────────────────────
+#
+# This is the ONE endpoint-creating call in this module, and it exists for a
+# specific reason. A managed Portainer node runs unprivileged with no Docker socket
+# and sits behind a fail-closed firewall on a public IP — it cannot reach a
+# workstation or a LAN Docker host, and no migration can make it. An Edge agent
+# inverts the direction: the agent runs ON the Docker host and dials OUT to the
+# node's tunnel port (8000, which the node's firewall already opens), so nothing
+# inbound to the operator's network is required.
+#
+# ⚠️  POST /api/endpoints is MULTIPART FORM, not JSON — Portainer's handler reads
+#     every field with RetrieveMultiPartFormValue, so a JSON body arrives as a
+#     missing-name validation error rather than anything that hints at the cause.
+#     That is why this call cannot go through _api(). Two further traps in the same
+#     handler: the tag field is spelled "TagIds" (not TagIDs, unlike the Go struct),
+#     and setting TLS at all is rejected outright for an Edge environment.
+
+#: Portainer's endpointCreationEnum. 4 is the only one this module creates.
+EDGE_AGENT_ENVIRONMENT = 4
+
+
+async def _api_form(method: str, path: str, fields: dict, *,
+                    ok: tuple = (200, 201), context: str = ""):
+    """One MULTIPART-FORM request against the configured Portainer.
+
+    Mirrors :func:`_api` but encodes ``fields`` as multipart form values. Every value
+    is stringified, because Portainer parses them out of the form itself and a
+    non-string would be dropped rather than coerced.
+    """
+    context = context or f"{method} {path}"
+    if _EXECUTION_MODE == "automation":
+        url, headers = await _portainer_url_and_headers()
+        # The runbook's long-reserved FormData channel — this is its first caller.
+        result = await _proxy_request(
+            method, f"{url}{path}", headers,
+            content_type="multipart/form-data",
+            form_data=json.dumps({k: str(v) for k, v in fields.items()}))
+        status = result.get("status_code", 0)
+        if status not in ok:
+            raise PortainerError(f"{context}: unexpected status {status}")
+        return result.get("body")
+
+    # httpx emits multipart when `files` is populated; a (None, value) tuple is a
+    # plain form FIELD rather than a file part, which is exactly what Portainer wants.
+    parts = {k: (None, str(v)) for k, v in fields.items()}
+    async with await _client() as client:
+        resp = await client.request(method, path, files=parts)
+        if resp.status_code not in ok and not resp.is_success:
+            _raise(resp, context)
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
+
+@_wrap_transport_errors
+async def create_edge_endpoint(name: str, server_url: str, *,
+                               group_id: int = 1,
+                               checkin_interval: int = 5) -> dict:
+    """Register an Edge-agent environment and return it, including its ``EdgeKey``.
+
+    ``server_url`` is the address the AGENT will dial — the node's own public URL. It
+    is baked into the Edge key (Portainer derives the key from this URL plus its
+    tunnel host and the new endpoint id), so a node whose external IP later changes
+    invalidates every key minted before the change. The caller must pass the node's
+    CURRENT url, not a cached one.
+
+    Portainer only fills ``EdgeID`` when its ``EnforceEdgeID`` setting is on; the
+    caller supplies its own agent id otherwise.
+    """
+    if not (name or "").strip():
+        raise PortainerError("an Edge environment needs a name")
+    if not (server_url or "").strip():
+        # Portainer rejects an empty URL for this creation type with "URL cannot be
+        # empty"; failing here says which URL it means.
+        raise PortainerError(
+            "an Edge environment needs the Portainer server URL the agent will dial "
+            "back to — deploy or configure the node first so its URL is known")
+    body = await _api_form(
+        "POST", "/api/endpoints",
+        {
+            "Name": name.strip(),
+            "EndpointCreationType": EDGE_AGENT_ENVIRONMENT,
+            "URL": server_url.strip(),
+            "GroupID": int(group_id),
+            "EdgeCheckinInterval": int(checkin_interval),
+            # Portainer defaults this to an empty list, but the handler parses it as
+            # JSON when present — so send valid JSON, not "".
+            "TagIds": "[]",
+        },
+        context=f"create_edge_endpoint({name})") or {}
+    logger.info("Portainer Edge environment '%s' created (id=%s)",
+                name, body.get("Id"))
+    return body
+
+
 # ── Registries ───────────────────────────────────────────────────────────────
 #
 # Read + create only, and deliberately no password parameter. A registry's

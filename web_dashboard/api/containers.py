@@ -14,6 +14,7 @@ Portainer CE container management endpoints.
   GET  /api/containers/gce-compose       — list GCE compose COS instances
   POST /api/containers/gce-compose/{name}/stop — delete a GCE compose instance
   POST /api/containers/portainer/import  — merge a migration bundle via job
+  POST /api/containers/portainer/edge-endpoint — register an Edge agent env
 """
 import base64
 import binascii
@@ -43,6 +44,8 @@ from ..models.containers import (
     GCEJumpointInfo,
     GCEJumpointListResponse,
     PortainerDeployRequest,
+    PortainerEdgeRequest,
+    PortainerEdgeResponse,
     PortainerEndpoint,
     PortainerEndpointList,
     PortainerImportRequest,
@@ -63,6 +66,7 @@ from ..services import (
     config_service,
     container_inventory_service,
     job_service,
+    portainer_edge_service,
     portainer_import_service,
     portainer_service,
     region_catalog,
@@ -1268,3 +1272,35 @@ async def import_portainer_bundle(
     return DeployContainerResponse(
         job_id=job.id, status="pending",
         message=f"Importing {summary['total']} object(s) into Portainer…")
+
+
+# ── Edge agent registration ──────────────────────────────────────────────────
+
+@router.post("/portainer/edge-endpoint", response_model=PortainerEdgeResponse)
+async def register_portainer_edge_endpoint(
+    req: PortainerEdgeRequest,
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Register an Edge-agent environment and return the command that joins it.
+
+    This is how a Docker host the dashboard cannot reach becomes a managed
+    environment: the agent runs ON that host and polls OUT to the node's tunnel port
+    (8000, already open in the node's firewall), so nothing inbound is needed.
+
+    Inline rather than a job — two HTTP calls against a node we already hold a token
+    for, with nothing to poll. The Edge key is shown ONCE, in this response: it is
+    derived from the node's current URL, so it is never cached and a node whose
+    external IP changes invalidates every key issued before the change.
+    """
+    try:
+        return PortainerEdgeResponse(
+            **await portainer_edge_service.register(
+                req.name, image=req.agent_image or "",
+                checkin_interval=req.checkin_interval
+                or portainer_edge_service.DEFAULT_CHECKIN_INTERVAL))
+    except PortainerNotConfigured as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "portainer_not_configured", "message": str(exc)})
+    except PortainerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
