@@ -164,6 +164,34 @@
         Lowercase letters, digits and hyphens — normalised to what all three clouds accept.
       </p>
 
+      <template x-if="requiredEnv().length">
+        <div class="mb-3 rounded border border-amber-300 bg-amber-50 px-3 py-2">
+          <p class="text-xs text-amber-900">
+            This adapter reads its target from its environment and does nothing without it.
+            Set <template x-for="(v, i) in requiredEnv()" :key="v"><span><code
+              class="font-mono" x-text="v.replace('|', ' or ')"></code><span
+              x-show="i < requiredEnv().length - 1">, </span></span></template>
+            below, or let the pairing job fill them in for you — provisioning a MySQL or
+            SQL Server database with <em>Register in Entitle</em> checked deploys and
+            configures one automatically.
+          </p>
+        </div>
+      </template>
+
+      <template x-if="requiredEnv().length">
+        <div class="mb-4">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Environment</label>
+          <textarea x-model="form.environmentText" rows="4"
+                    class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono"
+                    placeholder="FN_DB_ENGINE=mysql&#10;FN_DB_HOST=db.internal&#10;FN_DB_NAME=appdb"></textarea>
+          <p class="text-xs text-gray-400 mt-1">
+            One <code class="font-mono">KEY=VALUE</code> per line. <strong>Non-secret only</strong> —
+            these are stored and logged in cleartext, and a credential-shaped value is refused.
+            Pass a credential as a secret reference instead.
+          </p>
+        </div>
+      </template>
+
       <label class="block text-xs font-medium text-gray-600 mb-1">Network</label>
       <select x-model="form.network_mode" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm mb-1">
         <option value="public">Public — internet-reachable only</option>
@@ -189,14 +217,34 @@
     <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
       <h2 class="text-lg font-semibold mb-1">Test invoke</h2>
       <p class="text-xs text-gray-500 mb-4">
-        Sends this JSON with the shared secret attached — the fastest way to tell a broken
+        Sends this request with the shared secret attached — the fastest way to tell a broken
         function from a wrong curl.
       </p>
-      <textarea x-model="invokeBody" rows="6"
+      <div class="flex gap-2 mb-3">
+        <select x-model="invokeMethod" class="border border-gray-300 rounded px-2 py-1.5 text-sm">
+          <option value="POST">POST</option>
+          <option value="GET">GET</option>
+        </select>
+        <input x-model="invokePath" class="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm font-mono"
+               placeholder="/">
+      </div>
+      <template x-if="invokeRoutes().length">
+        <div class="mb-3 flex flex-wrap gap-1.5">
+          <template x-for="r in invokeRoutes()" :key="r.method + r.path">
+            <button @click="pickRoute(r)" type="button"
+                    class="text-xs font-mono border border-gray-300 rounded px-2 py-0.5 hover:bg-gray-50"
+                    :class="invokeMethod === r.method && invokePath === r.path ? 'bg-blue-50 border-blue-400 text-blue-700' : 'text-gray-600'"
+                    x-text="r.method + ' ' + r.path"></button>
+          </template>
+        </div>
+      </template>
+      <textarea x-model="invokeBody" rows="6" x-show="invokeMethod === 'POST'"
                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono mb-3"></textarea>
       <div x-show="invokeResult" x-cloak class="mb-3">
         <div class="text-xs font-medium text-gray-600 mb-1">
           Response <span x-text="'(HTTP ' + invokeResult.status + ')'"></span>
+          <span x-show="invokeResult.url" class="font-normal text-gray-400 font-mono"
+                x-text="' · ' + invokeMethod + ' ' + invokeResult.url"></span>
         </div>
         <pre class="bg-gray-900 text-gray-100 text-xs rounded p-3 overflow-x-auto max-h-72"
              x-text="JSON.stringify(invokeResult.body, null, 2)"></pre>
@@ -250,8 +298,9 @@ function functionsPage() {
     deployOpen: false, invokeOpen: false, credsOpen: false,
     toast: '', toastType: 'success',
     creds: null, invokeTarget: null, invokeResult: null,
-    invokeBody: '{\n  "probe": [{"host": "example.com", "port": 443}]\n}',
-    form: { workload: 'echo_diag', cloud: 'aws', region: '', name: '', network_mode: 'public' },
+    invokeBody: '{}', invokeMethod: 'POST', invokePath: '/',
+    form: { workload: 'echo_diag', cloud: 'aws', region: '', name: '', network_mode: 'public',
+            environmentText: '' },
 
     async init() {
       await Promise.all([this.load(), this.loadMeta()]);
@@ -329,6 +378,12 @@ function functionsPage() {
       if (!ids.includes(this.form.region)) this.form.region = ids[0] || '';
     },
 
+    // What the selected workload cannot run without, declared by the workload
+    // module itself (REQUIRED_ENV) and carried on the catalog.
+    requiredEnv() {
+      return ((this.workloads.find(w => w.name === this.form.workload) || {}).required_env) || [];
+    },
+
     // Re-seed on open: picking a workload can have narrowed availableClouds() since
     // the modal was last up, so a region from another cloud must not survive.
     openDeploy() { this.syncRegion(); this.deployOpen = true; },
@@ -336,7 +391,10 @@ function functionsPage() {
     async submitDeploy() {
       this.deploying = true;
       try {
-        await API.post('/api/functions', this.form);
+        const { environmentText, ...body } = this.form;
+        const environment = this.parseEnv(environmentText);
+        if (Object.keys(environment).length) body.environment = environment;
+        await API.post('/api/functions', body);
         this.deployOpen = false;
         this.notify('Deploying — follow progress in Jobs.');
         this.load();
@@ -344,16 +402,70 @@ function functionsPage() {
       finally { this.deploying = false; }
     },
 
-    openInvoke(fn) { this.invokeTarget = fn; this.invokeResult = null; this.invokeOpen = true; },
+    // KEY=VALUE per line. Splits on the FIRST '=' only, so a value containing one
+    // survives; a line with no '=' is a typo and is dropped rather than sent as a
+    // key with an empty value, which would read as "set, but blank".
+    parseEnv(text) {
+      const out = {};
+      for (const line of (text || '').split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const at = trimmed.indexOf('=');
+        if (at <= 0) continue;
+        out[trimmed.slice(0, at).trim()] = trimmed.slice(at + 1).trim();
+      }
+      return out;
+    },
+
+    // The routes an adapter serves, offered as one-click chips. They all live under
+    // a sub-path and two are GETs, so POST / — the only thing this modal used to be
+    // able to send — returns nothing but the 404 the workload correctly gives an
+    // unrouted path.
+    invokeRoutes() {
+      if (!this.invokeTarget || !this.isAdapter(this.invokeTarget)) return [];
+      return [
+        { method: 'POST', path: '/check_config' },
+        { method: 'GET',  path: '/get_assets' },
+        { method: 'GET',  path: '/get_actors' },
+        { method: 'GET',  path: '/get_all_permissions' },
+        { method: 'POST', path: '/create_actor' },
+        { method: 'POST', path: '/give_access' },
+        { method: 'POST', path: '/revoke_access' },
+        { method: 'POST', path: '/delete_actor' },
+      ];
+    },
+
+    pickRoute(r) { this.invokeMethod = r.method; this.invokePath = r.path; },
+
+    openInvoke(fn) {
+      this.invokeTarget = fn;
+      this.invokeResult = null;
+      // Default to something that works for THIS function. echo_diag answers on /
+      // and wants a probe; an adapter 404s there, and check_config is the route that
+      // reports whether it is configured at all — the right first question.
+      if (this.isAdapter(fn)) {
+        this.invokeMethod = 'POST';
+        this.invokePath = '/check_config';
+        this.invokeBody = '{}';
+      } else {
+        this.invokeMethod = 'POST';
+        this.invokePath = '/';
+        this.invokeBody = '{\n  "probe": [{"host": "example.com", "port": 443}]\n}';
+      }
+      this.invokeOpen = true;
+    },
 
     async runInvoke() {
       this.invoking = true;
       try {
         let payload = {};
-        try { payload = JSON.parse(this.invokeBody || '{}'); }
-        catch { throw new Error('the request body is not valid JSON'); }
+        if (this.invokeMethod === 'POST') {
+          try { payload = JSON.parse(this.invokeBody || '{}'); }
+          catch { throw new Error('the request body is not valid JSON'); }
+        }
         this.invokeResult = await API.post(
-          `/api/functions/${this.invokeTarget.id}/invoke`, { payload });
+          `/api/functions/${this.invokeTarget.id}/invoke`,
+          { payload, method: this.invokeMethod, path: this.invokePath || '/' });
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.invoking = false; }
     },

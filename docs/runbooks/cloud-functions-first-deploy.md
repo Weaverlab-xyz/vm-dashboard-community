@@ -67,9 +67,15 @@ roles/iam.serviceAccountUser     (on the runtime service account)
    curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$FN_URL" -d '{}'
    ```
    Expect `401`. Then with a wrong secret — expect a **byte-identical** 401.
-   A `500 {"error":"function not configured"}` means the secret never reached the
-   function's environment; that is the handler failing closed, which is correct
-   behaviour for a misconfiguration.
+   A `500 {"error":"function not configured"}` with **no** other field means the
+   secret never reached the function's environment; that is the handler failing
+   closed, which is correct behaviour for a misconfiguration.
+
+   The same body **with** a `problem` field is a different thing: the caller got past
+   auth and the *workload's* own settings are what is missing. `problem` names the
+   setting. (An adapter used to raise instead, which dispatch turned into
+   `500 {"error":"internal error"}` on every route — including `/check_config` —
+   so an unconfigured function had no way to say what was wrong.)
 5. **Destroy it** and confirm the row and the cloud resource both go.
 
 > `terraform destroy` removes the function but **leaves the Artifact Registry

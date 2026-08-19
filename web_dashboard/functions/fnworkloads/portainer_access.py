@@ -52,6 +52,16 @@ from fnruntime.contract import Context, Request, Response
 NAME = "portainer_access"
 DESCRIPTION = "Entitle Remote Adapter: just-in-time Portainer access via team membership."
 
+# Settings this workload cannot run without, in the form the dashboard's deploy
+# validation reads: ``"A|B"`` means either satisfies the requirement. Declared here,
+# beside the code that reads them, so the picker and the validator cannot drift from
+# what portainer_access actually needs.
+#
+# Without this a hand-deploy from the Cloud Functions page produced a function that
+# 500-ed on every request for the life of the install — the automated pairing path
+# always passes them, so nothing else caught it.
+REQUIRED_ENV = ("FN_PORTAINER_URL",)
+
 # Vendored beside this module at package time; in-repo it is the service module.
 try:
     import portainerrules as _rules  # noqa: E402
@@ -374,8 +384,27 @@ _ROUTES = {
 }
 
 
+def _unconfigured(exc: Exception, ctx: Context, *, reporting: bool) -> Response:
+    """What to answer when ``FN_PORTAINER_*`` cannot be resolved.
+
+    :func:`_config` used to run BEFORE routing, so its raise became dispatch's
+    opaque ``500 {"error": "internal error"}`` on every route — ``/check_config``
+    included, which is the one route that exists to name what is missing.
+
+    Safe to detail: dispatch verifies the shared secret before calling ``handle``.
+    """
+    problem = str(exc) or type(exc).__name__
+    if reporting:
+        # Same body shape as the success path, so a consumer needs no special case.
+        return Response(200, {"data": {
+            "valid": False, "url": "", "teams": [],
+            "dry_run": _dry_run(), "problems": [problem],
+        }})
+    return Response(500, {"error": "function not configured",
+                          "problem": problem, "request_id": ctx.request_id})
+
+
 def handle(req: Request, ctx: Context) -> Response:
-    config = _config()
     path = (req.path or "/").rstrip("/") or "/"
     handler = _ROUTES.get((req.method, path))
     if handler is None and path.startswith("/get_asset_permissions/") and req.method == "GET":
@@ -385,4 +414,10 @@ def handle(req: Request, ctx: Context) -> Response:
             "error": f"no route for {req.method} {path}",
             "routes": sorted(f"{method} {route}" for method, route in _ROUTES),
         })
+
+    # AFTER routing — see _unconfigured.
+    try:
+        config = _config()
+    except Exception as exc:
+        return _unconfigured(exc, ctx, reporting=handler is _check_config)
     return handler(req, ctx, config)

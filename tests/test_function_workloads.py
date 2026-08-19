@@ -170,6 +170,96 @@ def test_every_workload_exposes_the_contract():
         assert callable(getattr(module, "handle", None))
 
 
+# ── Every adapter answers when its settings are missing ──────────────────────
+#
+# The bug this pins, in the shape it shipped in: each adapter resolved its config at
+# the TOP of handle(), before routing. A function deployed without that config raised
+# on every path, dispatch turned the raise into ``500 {"error": "internal error"}``,
+# and /check_config — the one route whose job is to name what is missing — was the
+# loudest casualty. Held across all three adapters because all three had it.
+
+def _adapters():
+    """Imported here rather than at module scope: portainer_access and
+    azure_role_grant pull in their vendored rules modules, and a failure to do that
+    should fail THIS test rather than the whole file."""
+    from fnworkloads import azure_role_grant, db_grant, portainer_access
+    return (db_grant, portainer_access, azure_role_grant)
+
+
+def _unset_fn_settings():
+    """Drop every FN_* setting except the ones the runtime itself owns, so each
+    adapter sees exactly what a hand-deploy with no configuration gives it."""
+    keep = {"FN_WORKLOAD", "FN_CLOUD", "FN_REGION", "FN_NAME", "FN_SHARED_SECRET",
+            "FN_NETWORK_MODE", "FN_NETWORK", "FN_VPC_EGRESS", "FN_DEBUG",
+            "FN_LOG_BODY", "FN_EGRESS_PROBE", "FN_AUTH_HEADER", "FN_AUTH_PREFIX"}
+    removed = {k: v for k, v in os.environ.items()
+               if k.startswith("FN_") and k not in keep}
+    for key in removed:
+        del os.environ[key]
+    return removed
+
+
+def test_an_unconfigured_adapter_names_the_problem_instead_of_500ing_opaquely():
+    saved = _unset_fn_settings()
+    try:
+        for module in _adapters():
+            resp = module.handle(
+                Request(method="POST", path="/give_access", headers={}, query={},
+                        body=b"{}", source="aws_function_url"),
+                _ctx(module.NAME))
+            assert isinstance(resp, Response), (module.NAME, resp)
+            assert resp.status == 500, (module.NAME, resp.status)
+            assert resp.body["error"] == "function not configured", (module.NAME, resp.body)
+            # The whole point: a settings error the operator can act on, not
+            # dispatch's opaque generic body.
+            assert resp.body.get("problem"), (module.NAME, resp.body)
+            assert resp.body["problem"] != "internal error", (module.NAME, resp.body)
+    finally:
+        os.environ.update(saved)
+
+
+def test_an_unconfigured_adapter_still_answers_check_config():
+    saved = _unset_fn_settings()
+    try:
+        for module in _adapters():
+            resp = module.handle(
+                Request(method="POST", path="/check_config", headers={}, query={},
+                        body=b"{}", source="aws_function_url"),
+                _ctx(module.NAME))
+            assert resp.status == 200, (module.NAME, resp.status, resp.body)
+            data = resp.body["data"]
+            assert data["valid"] is False, (module.NAME, data)
+            assert data["problems"] and all(data["problems"]), (module.NAME, data)
+    finally:
+        os.environ.update(saved)
+
+
+def test_an_unconfigured_adapter_still_lists_its_routes_on_a_bad_path():
+    saved = _unset_fn_settings()
+    try:
+        for module in _adapters():
+            resp = module.handle(
+                Request(method="POST", path="/", headers={}, query={},
+                        body=b"{}", source="aws_function_url"),
+                _ctx(module.NAME))
+            assert resp.status == 404, (module.NAME, resp.status)
+            assert "POST /check_config" in resp.body["routes"], (module.NAME, resp.body)
+    finally:
+        os.environ.update(saved)
+
+
+def test_every_adapter_declares_what_it_cannot_run_without():
+    """REQUIRED_ENV is what stops the deploy form producing an inert function; an
+    adapter that reads settings but declares none is the gap reopening."""
+    for module in _adapters():
+        required = getattr(module, "REQUIRED_ENV", ())
+        assert required, f"{module.NAME} declares no REQUIRED_ENV"
+        for entry in required:
+            assert entry.startswith("FN_"), (module.NAME, entry)
+            # "A|B" means either satisfies it; every alternative must be a real name.
+            assert all(alt.strip() for alt in entry.split("|")), (module.NAME, entry)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0

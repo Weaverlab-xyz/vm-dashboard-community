@@ -358,6 +358,97 @@ def test_restricted_table_only_names_real_clouds():
         assert set(clouds) <= set(svc.VALID_CLOUDS), (workload, clouds)
 
 
+# ── Required settings: what stops the deploy form building an inert function ──
+#
+# The three adapters read their target out of the environment. Deployed without it
+# they are not degraded, they are inert — every request fails, for the life of the
+# function — and finding out costs a real cloud build. The picker reads the same
+# declaration this validates against, so the warning and the refusal cannot disagree.
+
+def test_the_catalog_carries_what_each_workload_requires():
+    catalog = {entry["name"]: entry for entry in svc.workload_catalog()}
+    for name, entry in catalog.items():
+        assert isinstance(entry["required_env"], list), (name, entry)
+        assert entry["required_env"] == list(svc.required_env(name)), name
+    # The adapters need configuration; the diagnostic workloads deliberately do not.
+    for name in ("db_grant", "portainer_access", "azure_role_grant"):
+        assert catalog[name]["required_env"], name
+    for name in ("echo_diag", "entitle_webhook_echo"):
+        assert catalog[name]["required_env"] == [], name
+
+
+def test_required_env_survives_a_workload_that_does_not_import():
+    """The catalog must never be the thing that breaks the page — same rule as the
+    description lookup, which already tolerates an unimportable module."""
+    assert svc.required_env("no_such_workload_here") == ()
+
+
+def test_a_missing_required_setting_is_refused_and_names_itself():
+    for missing, supplied in (
+        ("FN_DB_ENGINE", {"FN_DB_HOST": "db.internal", "FN_DB_NAME": "appdb"}),
+        ("FN_DB_HOST", {"FN_DB_ENGINE": "mysql", "FN_DB_NAME": "appdb"}),
+        ("FN_DB_NAME or FN_DB_NAMES",
+         {"FN_DB_ENGINE": "mysql", "FN_DB_HOST": "db.internal"}),
+    ):
+        try:
+            svc._check_required_env("db_grant", supplied)
+        except svc.CloudFunctionError as exc:
+            assert missing in str(exc), (missing, str(exc))
+        else:
+            raise AssertionError(f"accepted a deploy missing {missing}")
+
+
+def test_either_spelling_satisfies_an_alternation():
+    for name_key in ("FN_DB_NAME", "FN_DB_NAMES"):
+        svc._check_required_env("db_grant", {
+            "FN_DB_ENGINE": "mysql", "FN_DB_HOST": "db.internal", name_key: "appdb"})
+
+
+def test_a_blank_value_does_not_count_as_supplied():
+    """`FN_DB_HOST=""` reaches the function as an empty string and fails there
+    exactly as an absent one does, so it must fail here too."""
+    try:
+        svc._check_required_env("db_grant", {
+            "FN_DB_ENGINE": "mysql", "FN_DB_HOST": "  ", "FN_DB_NAME": "appdb"})
+    except svc.CloudFunctionError as exc:
+        assert "FN_DB_HOST" in str(exc), str(exc)
+    else:
+        raise AssertionError("accepted a blank required setting")
+
+
+def test_a_workload_with_no_requirements_is_never_refused():
+    svc._check_required_env("echo_diag", None)
+    svc._check_required_env("echo_diag", {})
+
+
+# ── Test invoke: reaching the route the operator actually meant ───────────────
+
+def test_the_invoke_path_is_appended_not_substituted():
+    """Azure's base URL already carries /api/<name>, and the adapters' routes are
+    relative to whatever the platform's root is — so this appends."""
+    base = "https://fn.example.com/api/my-fn"
+    assert svc._invoke_url(base, "/check_config") == f"{base}/check_config"
+    assert svc._invoke_url(base, "check_config") == f"{base}/check_config"
+    assert svc._invoke_url(base + "/", "/check_config") == f"{base}/check_config"
+    # An empty or root path is the old behaviour, byte for byte.
+    for path in ("", "/", None):
+        assert svc._invoke_url(base, path) == base, path
+
+
+def test_the_invoke_path_cannot_repoint_the_request():
+    """This value reaches an outbound request, so an absolute URL or a climb out of
+    the function's own path is refused rather than normalized."""
+    base = "https://fn.example.com/api/my-fn"
+    for path in ("https://evil.example.com/", "//evil.example.com/",
+                 "/../../other-fn/check_config", "/a/../../b"):
+        try:
+            svc._invoke_url(base, path)
+        except svc.CloudFunctionError:
+            pass
+        else:
+            raise AssertionError(f"accepted path {path!r}")
+
+
 def test_package_location_requires_the_bucket_to_be_configured():
     _reset()
     del CONF["function_package_s3_bucket"]
