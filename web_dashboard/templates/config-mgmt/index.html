@@ -198,6 +198,31 @@
                 </optgroup>
               </template>
 
+              <!-- On-prem VMs behind a remote agent. The playbook runs in a one-shot
+                   container ON THE AGENT HOST, which is the only way to reach these at all
+                   from a cloud-hosted dashboard. A row with a `reason` is shown disabled so
+                   "why is my VM missing" has an answer on the page rather than in a log. -->
+              <template x-if="agentVms.length > 0">
+                <optgroup label="On-Prem VMs (via agent)">
+                  <template x-for="v in agentVms" :key="`agent:${v.id}`">
+                    <option :value="`agent:${v.id}`" :disabled="!!v.reason"
+                            :title="v.reason || `${v.transport} to ${v.ip} via ${v.agent_name}`"
+                            x-text="`${v.name} — ${v.agent_name}${v.ip ? ' · '+v.ip : ''}${v.reason ? ' (no address yet)' : ''}`"></option>
+                  </template>
+                </optgroup>
+              </template>
+
+              <!-- On-prem databases behind a remote agent (localhost play on the agent host) -->
+              <template x-if="agentDatabases.length > 0">
+                <optgroup label="On-Prem Databases (via agent)">
+                  <template x-for="d in agentDatabases" :key="`agentdb:${d.id}`">
+                    <option :value="`agentdb:${d.id}`" :disabled="!!d.reason"
+                            :title="d.reason || `${d.host} via ${d.agent_name}`"
+                            x-text="`${d.engine} · ${d.host} — ${d.agent_name}`"></option>
+                  </template>
+                </optgroup>
+              </template>
+
               <!-- Ad-hoc on-prem host (bare IP / hostname) -->
               <optgroup label="Other">
                 <option value="__host__">On-prem host (IP / hostname)…</option>
@@ -628,6 +653,9 @@ function configMgmt() {
     managedLoading: false,
     managedError: '',
     managedSystems: [],
+    // /agent-targets — on-prem resources reachable only through a remote agent.
+    agentVms: [],
+    agentDatabases: [],
     managedAccountKey: '',
     managedBecomeKey: '',
     get hasCloudTargets() {
@@ -642,6 +670,16 @@ function configMgmt() {
       return this.k8sClusters.length > 0 || this.cloudDatabases.length > 0;
     },
 
+    // On-prem VMs and databases a remote agent can reach, from /agent-targets. These are
+    // the only targets available at all on a cloud-hosted dashboard, so leaving them out
+    // of the gate below would hide the picker on exactly the deployment that needs it.
+    // A row with a `reason` is listed but not selectable — usually a VM with no address
+    // yet — so it counts toward "has targets" only when something is actually runnable.
+    get hasAgentTargets() {
+      return this.agentVms.some(t => !t.reason)
+          || this.agentDatabases.some(t => !t.reason);
+    },
+
     // Whether the run panel has anything to offer. Single source of truth for the
     // empty state and the panel itself: the two conditions were spelled out
     // separately and both counted VMs only, so a deployment whose only resource was
@@ -652,7 +690,8 @@ function configMgmt() {
       return !!this.bulk
           || this.targets.length > 0
           || this.hasCloudTargets
-          || this.hasLocalhostTargets;
+          || this.hasLocalhostTargets
+          || this.hasAgentTargets;
     },
 
     // Detect cloud prefix on the selected target so the SSH-user field can
@@ -673,7 +712,22 @@ function configMgmt() {
       const t = this.form.target;
       if (t.startsWith('k8s:')) return 'k8s';
       if (t.startsWith('db:'))  return 'database';
+      if (t.startsWith('agentdb:')) return 'database';
       return 'vm';
+    },
+
+    // The selected agent target, or null. `agent:`/`agentdb:` options carry their whole
+    // routing in this row — agent id, connection, target id, transport — because the
+    // server re-derives every one of them before it creates a job (see
+    // api/config_mgmt._resolve_agent_target). The prefix is what tells the submit
+    // handler to send them at all.
+    get agentTarget() {
+      const t = this.form.target;
+      if (t.startsWith('agent:'))
+        return this.agentVms.find(v => 'agent:' + v.id === t) || null;
+      if (t.startsWith('agentdb:'))
+        return this.agentDatabases.find(d => 'agentdb:' + d.id === t) || null;
+      return null;
     },
 
     // Store-residency hint for variable/become secrets on the selected cloud
@@ -702,6 +756,12 @@ function configMgmt() {
       if (t.startsWith('aws:'))   return t.slice(4);
       if (t.startsWith('azure:')) return t.slice(6);
       if (t.startsWith('gcp:'))   return t.slice(4);
+      // An agent VM: the address the agent's own sync reported. Without this the option
+      // value ('agent:hv:<conn>:<vm>') would be keyed on as if it were a hostname and the
+      // Password Safe lookup would silently find no accounts — which reads as "this host
+      // is not onboarded" rather than as a bug here.
+      const at = this.agentTarget;
+      if (at) return at.ip || at.host || '';
       return '';
     },
 
@@ -864,6 +924,7 @@ function configMgmt() {
         this.loadAssets(),
         this.loadCloudTargets(),
         this.loadLocalhostTargets(),
+        this.loadAgentTargets(),
         this.loadJobs(),
         this.loadSecretOptions(),
       ]);
@@ -902,6 +963,18 @@ function configMgmt() {
       } catch (e) {
         this.k8sClusters = [];
         this.cloudDatabases = [];
+      }
+    },
+
+    async loadAgentTargets() {
+      try {
+        const data = await API.get('/api/config-mgmt/agent-targets') || {};
+        this.agentVms = data.vms || [];
+        this.agentDatabases = data.databases || [];
+      } catch (e) {
+        // A 404 is the ordinary case: remote agents are off. Empty lists, no error.
+        this.agentVms = [];
+        this.agentDatabases = [];
       }
     },
 
@@ -1024,6 +1097,55 @@ function configMgmt() {
           window.location.href = '/jobs?batch_id=' + encodeURIComponent(result.batch_id);
         } catch (e) {
           this.runError = e.message || 'Failed to queue bulk run.';
+        } finally {
+          this.running = false;
+        }
+        return;
+      }
+
+      // Agent-executed run: the target is on a network this dashboard has no route to,
+      // so the job is queued FOR the agent and the playbook runs in a one-shot container
+      // on the agent's host. Checked BEFORE the localhost branch below, because an on-prem
+      // database is targetKind 'database' and would otherwise be sent without its routing.
+      //
+      // Every routing field here is re-derived server-side against the dashboard's own rows
+      // before a job exists (api/config_mgmt._resolve_agent_target) — they are a proposal,
+      // not an instruction, which is why it is safe for them to come from the browser.
+      const at = this.agentTarget;
+      if (at) {
+        const isDb = this.form.target.startsWith('agentdb:');
+        const s = this.buildSecretPayload();
+        // A localhost play has no SSH connection to authenticate, so the connection-identity
+        // fields are omitted for a database rather than sent and ignored.
+        let managed_account = null, managed_become = null;
+        if (!isDb && this.canUseSecrets && this.managedEnabled) {
+          managed_account = this.resolveManaged(this.managedAccountKey);
+          managed_become = this.resolveManaged(this.managedBecomeKey);
+        }
+        this.running = true;
+        try {
+          const result = await API.post('/api/config-mgmt/run', {
+            asset: assetName,
+            asset_backend: assetBackend,
+            target_kind: isDb ? 'database' : 'vm',
+            target_id: at.target_id,
+            agent_id: at.agent_id,
+            connection_id: isDb ? '' : (at.connection_id || ''),
+            transport: isDb ? 'local' : (at.transport || ''),
+            target: isDb ? (at.host || '') : (at.ip || ''),
+            ansible_user: isDb ? '' : (this.form.ansible_user || '').trim(),
+            extra_vars,
+            secret_vars: s.secret_vars,
+            secret_become_source: isDb ? '' : s.secret_become_source,
+            secret_ssh_key_source: isDb ? '' : s.secret_ssh_key_source,
+            epml_token_var: this.canUseSecrets ? (this.epmlTokenVar || '').trim() : '',
+            managed_account,
+            managed_become,
+          });
+          toast(`Queued — job ${result.job_id.slice(0, 8)}…`, 'success');
+          window.location.href = '/jobs/' + result.job_id;
+        } catch (e) {
+          this.runError = e.message || 'Failed to queue run.';
         } finally {
           this.running = false;
         }

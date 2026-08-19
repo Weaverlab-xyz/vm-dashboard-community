@@ -56,7 +56,7 @@ ENROLL_TTL_MINUTES = 15
 # Job types a remote agent may execute. MUST stay disjoint from
 # jobs_worker.HANDLED_TYPES; the static test enforces it. These run on a network the
 # local worker cannot reach, so a type in both would be raced between two executors.
-AGENT_JOB_TYPES = ("agent_discover", "agent_hypervisor")
+AGENT_JOB_TYPES = ("agent_discover", "agent_hypervisor", "agent_ansible")
 
 # An agent is "online" if it polled within this many seconds. Three times the default
 # poll interval, so one dropped request does not flap the badge.
@@ -425,6 +425,47 @@ def allowed_job_types(agent: RemoteAgent) -> tuple:
 # could open a sealed credential. Below this, that key is an unknown key the agent ignores.
 MIN_DASHBOARD_SECRET_VERSION = (2, 1)
 
+# The agent build that first carried the `agent_ansible` handler and the streaming sibling
+# runner. Below this the job type is not in HANDLERS at all.
+MIN_ANSIBLE_VERSION = (2, 3)
+
+
+def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
+    """Whether this agent's self-reported version is at least ``minimum``.
+
+    One parser for every version gate, because two would drift on the "never reported one"
+    case — which must read as *too old*, not as *unknown so allow it*.
+    """
+    match = re.match(r"\s*(\d+)\.(\d+)", str(agent.agent_version or ""))
+    if not match:
+        # Never reported one, so it has never leased under a build that reports one.
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= minimum
+
+
+def supports_ansible(agent: RemoteAgent) -> bool:
+    """Whether this agent can execute a Config-Management run.
+
+    Read at ENQUEUE time for the same reason :func:`supports_dashboard_secret` is. The
+    failure mode here is louder than that one — an older agent has no ``agent_ansible``
+    entry in its closed ``HANDLERS`` dict, so it refuses the job by name rather than
+    running something wrong — but the refusal would land in a job's Live Output, where an
+    operator reads it as a policy problem and goes to edit ``policy.yaml``. Refusing at
+    enqueue is where the remedy is legible, and it leaves no job row behind.
+    """
+    return _version_at_least(agent, MIN_ANSIBLE_VERSION)
+
+
+def ansible_upgrade_hint(agent: RemoteAgent) -> str:
+    """The refusal an operator sees when the bound agent is too old to run Ansible."""
+    return (f"Agent '{agent.name}' reports version "
+            f"{agent.agent_version or 'unknown'} and Config Management needs at least "
+            f"{'.'.join(str(p) for p in MIN_ANSIBLE_VERSION)}. Pull "
+            f"chrweav/dashboard-agent:latest on that host and restart the container — "
+            f"re-enrolment is not needed, the agent keeps its identity. That host also "
+            f"needs an `ansible:` block in its policy.yaml and the sibling image pulled; "
+            f"see docs/remote-agents.md. Nothing was queued.")
+
 
 def supports_dashboard_secret(agent: RemoteAgent) -> bool:
     """Whether this agent can fetch a credential the dashboard holds for it.
@@ -443,11 +484,7 @@ def supports_dashboard_secret(agent: RemoteAgent) -> bool:
     column alongside `reported_job_types` would be the precise channel if this ever needs
     to gate something that matters.
     """
-    match = re.match(r"\s*(\d+)\.(\d+)", str(agent.agent_version or ""))
-    if not match:
-        # Never reported one, so it has never leased under a build that reports one.
-        return False
-    return (int(match.group(1)), int(match.group(2))) >= MIN_DASHBOARD_SECRET_VERSION
+    return _version_at_least(agent, MIN_DASHBOARD_SECRET_VERSION)
 
 
 def dashboard_secret_upgrade_hint(agent: RemoteAgent, conn_name: str) -> str:
@@ -600,10 +637,45 @@ def complete_job(db: Session, agent: RemoteAgent, job: Job, *, status: str,
                 f"Agent result exceeded {MAX_RESULT_BYTES // 1024} KB and was rejected.")
             return "failed"
         job_service.set_completed(db, job.id, payload)
+        _record_config_drift(db, job)
         return "completed"
 
     job_service.set_failed(db, job.id, (error or "The agent reported a failure.")[:2000])
     return "failed"
+
+
+def _record_config_drift(db: Session, job: Job) -> None:
+    """Record a successful agent Config-Management apply, for the drift signals.
+
+    The dashboard-local runner does this inline in ``ansible_local_run_service``, where the
+    playbook bytes are in hand. An agent run has no such moment — the bytes were sealed and
+    sent minutes ago — so the bundle route stamped the content hash onto the job row and this
+    reads it back.
+
+    Hooked on the SUCCESS path only, which is what makes hooking ``complete_job`` sufficient
+    here: ``reconcile_stale_jobs`` writes ``failed`` inline without passing through this
+    function, so a hook that had to fire on failure too would be skipped on every reap.
+
+    Best-effort, like the local path's: a drift-tracking hiccup must never turn a run that
+    genuinely succeeded into a failure.
+    """
+    if job.job_type != "agent_ansible":
+        return
+    meta = job.metadata_dict or {}
+    target = str(meta.get("target_host") or "")
+    asset = str(meta.get("asset") or "")
+    content_hash = str(meta.get("content_hash") or "")
+    if not (target and asset and content_hash):
+        return
+    try:
+        from . import config_drift
+        config_drift.record_apply(
+            db, target=target, playbook_ref=asset, content_hash=content_hash,
+            inputs_hash=config_drift.inputs_hash(meta.get("extra_vars") or {}),
+            job_id=job.id)
+    except Exception:  # noqa: BLE001
+        logger.warning("agent: config-drift record failed for job %s", job.id,
+                       exc_info=True)
 
 
 def audit(db: Session, agent: RemoteAgent, action: str, *, details: Optional[dict] = None,

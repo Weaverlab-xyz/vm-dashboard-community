@@ -1,4 +1,4 @@
-# OPT-IN overlay: lets the agent launch one-shot hypervisor runner containers.
+# OPT-IN overlay: lets the agent launch one-shot runner containers.
 #
 # Apply it ON TOP of docker-compose.yml, never instead of it:
 #   docker compose -f docker-compose.yml -f docker-compose.sibling.yml up -d
@@ -14,15 +14,26 @@
 # It is a separate file precisely so the promise in docker-compose.yml stays true:
 # without this overlay the agent has no socket, launches nothing, and cannot be made to.
 # Applying this is a deliberate act, and it is the third of three independent grants —
-# the dashboard must grant the `agent_hypervisor` job type, your policy.yaml must
-# enable the runner and name its image, and the socket must be here. Withhold any one
-# and nothing runs.
+# the dashboard must grant the job type (`agent_hypervisor` or `agent_ansible`), your
+# policy.yaml must enable that runner and name its image, and the socket must be here.
+# Withhold any one and nothing runs.
 #
-# WHAT IT BUYS: Hyper-V and **bare ESXi**, the two transports the agent cannot carry
+# WHAT IT BUYS, one: Hyper-V and **bare ESXi**, the two transports the agent cannot carry
 # itself — WinRM needs a real NTLM stack and a standalone ESXi host serves only the SOAP
 # API. vCenter, Proxmox, Nutanix Prism and XCP-ng need none of this; they work over the
-# agent's own three dependencies. If you do not run Hyper-V or standalone ESXi, do not
-# apply this file.
+# agent's own three dependencies.
+#
+# WHAT IT BUYS, two: **Config Management** — running an Ansible playbook against a VM or a
+# database on this network, which is the only way a cloud-hosted dashboard can configure an
+# on-premises guest at all. That is a larger grant than the hypervisor runner and it has its
+# own `ansible:` block in policy.yaml with its own target list, because "may be port-probed"
+# and "may have a playbook applied as root" are different decisions. Its images are separate
+# too, and you pull them yourself:
+#
+#   docker pull chrweav/ansible-winrm:latest     # VM targets (SSH and WinRM)
+#   docker pull chrweav/ansible-cloud:latest     # database targets (localhost play)
+#
+# If you run none of Hyper-V, standalone ESXi or Config Management, do not apply this file.
 #
 # WHAT THE AGENT DOES WITH IT: creates a container from the image named in *your*
 # policy.yaml, with no bind mounts, no capabilities, a read-only root filesystem,

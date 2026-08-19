@@ -644,6 +644,10 @@ class RegisterDatabaseRequest(BaseModel):
     # Password Safe system + account. The credential itself is checked out at run time
     # and never stored, so only ids and a name travel.
     managed_account: dict
+    # The remote agent that can reach this database, for a Config-Management run. Only
+    # valid with cloud='local' — an on-prem database is the one case the dashboard cannot
+    # reach itself, and from a cloud-hosted dashboard it is the ONLY way to configure one.
+    agent_id: str = ""
 
 
 @router.post("/register", status_code=201)
@@ -660,7 +664,7 @@ async def register_database(
             db, engine=req.engine, cloud=req.cloud, host=req.host, port=req.port,
             db_name=req.db_name, managed_account=req.managed_account or {},
             created_by=current_user.username, region=req.region,
-            instance_id=req.instance_id,
+            instance_id=req.instance_id, agent_id=req.agent_id,
         )
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

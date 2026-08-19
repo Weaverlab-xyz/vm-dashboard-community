@@ -31,7 +31,6 @@ import base64
 import json
 import logging
 import os
-import shlex
 import subprocess
 import tempfile
 
@@ -460,28 +459,20 @@ async def run_playbook(
                 pass  # Windows NTFS — the file is in the per-run tmpdir either way
 
         # ── build ansible-playbook args ───────────────────────────────────────
-        ansible_args: list[str] = [
-            "ansible-playbook",
-            "-i", inv_arg,
-            "/ansible/playbook.yml",
-            "--ssh-common-args",
-            "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
-        ]
-        if is_group:
-            ansible_args += ["--limit", target]
-        if has_key:
-            ansible_args += ["--private-key", "/ansible/id_rsa"]
-        if extra_vars:
-            ansible_args += ["--extra-vars", json.dumps(extra_vars)]
-        if has_secret_vars:
-            # @file keeps secret values off the process args and logs; it's read
-            # inside the container and deleted with the tmpdir when the run ends.
-            # Comes after the inline extra-vars so a secret var wins on conflict.
-            ansible_args += ["--extra-vars", "@/ansible/secret_vars.json"]
+        # Shared with the remote agent's one-shot sibling, which runs the same play shape
+        # from a different directory. The flag ORDER is the part that must not drift: the
+        # `@secret_vars.json` after the inline `--extra-vars` is what makes a resolved
+        # secret win a name conflict. See services/ansible_vm_cmd.
+        from . import ansible_vm_cmd
+        ansible_args = ansible_vm_cmd.build_vm_argv(
+            job_dir="/ansible", inventory=inv_arg,
+            limit=target if is_group else "",
+            private_key=has_key, extra_vars=extra_vars,
+            secret_vars_file=has_secret_vars)
 
         # Wrap in sh -c so we can chmod the key inside the container (needed on
         # Windows Docker Desktop where host-side chmod may not propagate).
-        ansible_cmd_str = " ".join(shlex.quote(a) for a in ansible_args)
+        ansible_cmd_str = ansible_vm_cmd.quote(ansible_args)
         if has_key:
             shell_cmd = f"chmod 600 /ansible/id_rsa 2>/dev/null; {ansible_cmd_str}"
         else:

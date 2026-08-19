@@ -1781,13 +1781,21 @@ _MANAGED_REF_PREFIX = "psmanaged:"
 
 def register_database(db: Session, *, engine: str, cloud: str, host: str,
                       port: int | None, db_name: str, managed_account: dict,
-                      created_by: str, region: str = "", instance_id: str = "") -> dict:
+                      created_by: str, region: str = "", instance_id: str = "",
+                      agent_id: str = "") -> dict:
     """Record a database that already exists, so it can be a Config Management target.
 
     The sibling of :func:`k8s_service.register_cluster`: no Terraform, no provisioning
     job, just an inventory row plus the reference needed to reach it. ``cloud='local'``
     is an on-prem database — the local runner reaches it directly, the same shape a
     kubeconfig-registered cluster already has.
+
+    ``agent_id`` names the remote agent that can reach it, and is what makes an on-prem
+    database usable from a **cloud-hosted** dashboard: without it the run needs a sibling
+    container on the dashboard's own host, which has neither a Docker socket on ECS/ACI/
+    Container Apps nor a route to the LAN. Only meaningful with ``cloud='local'`` — a
+    cloud database is reached by its own in-cloud runner — so it is refused elsewhere
+    rather than stored and silently ignored.
 
     ``managed_account`` is a Password Safe system/account pair. The credential itself is
     never stored: it is checked out at run time by
@@ -1813,7 +1821,19 @@ def register_database(db: Session, *, engine: str, cloud: str, host: str,
         raise CloudDatabaseError(
             f"a {engine} database at {host!r} is already registered")
 
+    agent_id = (agent_id or "").strip()
+    if agent_id and cloud != "local":
+        raise CloudDatabaseError(
+            f"a remote agent can only broker a cloud='local' database; this one is "
+            f"{cloud!r}, which is reached by its own in-cloud Ansible runner.")
+    if agent_id:
+        from ..database import RemoteAgent
+        if not db.query(RemoteAgent).filter(RemoteAgent.id == agent_id,
+                                            RemoteAgent.is_active.is_(True)).first():
+            raise CloudDatabaseError("that remote agent is not registered.")
+
     row = CloudDatabase(
+        agent_id=agent_id or None,
         engine=engine, cloud=cloud, source="registered",
         provider="registered", region=region or None, instance_id=instance_id or None,
         private_host=host, port=port or _DEFAULT_PORTS.get(engine),
@@ -1980,4 +2000,7 @@ def _serialize(r: CloudDatabase) -> dict:
         "entitle_viable": _entitle_viable(r.engine, r.provider, r.source),
         "created_by": r.created_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
+        # Which remote agent brokers Config-Management runs against this database, or None
+        # for one the dashboard reaches itself. An id, not a credential — safe to project.
+        "agent_id": getattr(r, "agent_id", None),
     }

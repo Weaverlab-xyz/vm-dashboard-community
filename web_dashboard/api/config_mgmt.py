@@ -19,6 +19,7 @@ Target types:
     On-premises group key  — "proxmox", "vsphere", "hyperv", "nutanix", "xcpng"
     Bare IP / hostname     — ad-hoc; cloud field determines SSH key source
 """
+import json
 import logging
 import uuid
 
@@ -189,6 +190,67 @@ async def get_cloud_targets(
     }
 
 
+# ── Agent-reachable targets (on-prem VMs + databases behind a remote agent) ─────
+
+@router.get("/agent-targets")
+async def get_agent_targets(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """On-prem VMs and databases a **remote agent** can configure.
+
+    The third target family, alongside ``/cloud-targets`` and ``/localhost-targets``, and the
+    only one for resources the dashboard has no route to at all. A cloud-hosted dashboard has
+    no other way to configure a hypervisor guest or an on-prem database: the runner it would
+    otherwise launch is a sibling container on its own host.
+
+    Built from ``inventory_service.collect`` + ``_target_spec`` rather than its own query, so
+    a row that appears here is one the run endpoint will accept — the two cannot disagree
+    about what is targetable, which is the failure mode a second implementation would have.
+    RBAC is the inventory page's own filter, so a synced VM nobody has tagged stays
+    admin-only.
+
+    ``reason`` is populated instead of the target fields when a row is *nearly* targetable —
+    almost always a VM with no address yet — because "why is my VM not in this list" is the
+    question this feature will actually generate.
+
+    Response shape::
+
+        {"vms": [{id, name, agent_id, agent_name, connection_id, target_id, ip,
+                  transport, cloud, reason}, …],
+         "databases": [{id, name, agent_id, agent_name, target_id, host, engine, reason}, …]}
+    """
+    from ..database import RemoteAgent
+    from ..services import inventory_service
+
+    agent_names = {a.id: a.name for a in db.query(RemoteAgent).all()}
+    accessible = inventory_service.accessible_workgroups(current_user)
+    out: dict = {"vms": [], "databases": []}
+    for item in inventory_service.collect(db):
+        if not item.get("agent_id"):
+            continue
+        if not inventory_service.visible_to(item, accessible, current_user.username):
+            continue
+        spec = inventory_service._target_spec(item)
+        row = {"id": item["id"], "name": item.get("name") or item["id"],
+               "agent_id": item["agent_id"],
+               "agent_name": agent_names.get(item["agent_id"], "(unknown agent)"),
+               "reason": spec if isinstance(spec, str) else ""}
+        if item.get("kind") == "database":
+            row.update({"engine": item.get("engine") or "",
+                        "host": item.get("private_host") or "",
+                        "target_id": item["id"].split(":", 1)[1]})
+            out["databases"].append(row)
+        else:
+            row.update({"cloud": item.get("cloud") or "",
+                        "connection_id": item.get("connection_id") or "",
+                        "target_id": item["id"].split(":")[-1],
+                        "ip": item.get("ip") or "",
+                        "transport": spec.get("transport") if isinstance(spec, dict) else ""})
+            out["vms"].append(row)
+    return out
+
+
 # ── Localhost targets (Kubernetes clusters + databases) ─────────────────────────
 
 @router.get("/localhost-targets")
@@ -240,7 +302,7 @@ class ManagedAccountRef(BaseModel):
       one managed system, so a pinned ref cannot be reused across a fleet: it would
       check out one machine's credential and connect to every host with it. A
       name-only ref is instead resolved against each job's OWN target host at run
-      time (see ``services.ansible_local_run_service._resolve_managed_ref``).
+      time (see ``services.ansible_credentials.resolve_managed_ref``).
 
     ``account_name`` is non-secret and becomes ``ansible_user``.
     """
@@ -299,6 +361,21 @@ class RunRequest(BaseModel):
     # separate account for the become/sudo password.
     managed_account: ManagedAccountRef | None = None
     managed_become: ManagedAccountRef | None = None
+    # ── Agent-executed runs ───────────────────────────────────────────────────
+    # Set when the target sits on a network the dashboard has no route to, so the run must
+    # be queued for a remote agent instead of a runner the dashboard launches. The inventory
+    # page fills these from `inventory_service._target_spec`; the run form does not offer
+    # them as free text.
+    #
+    # **Every one of these is RE-DERIVED server-side before a job is created** — see
+    # ``_resolve_agent_target``. They are a proposal the endpoint checks against its own
+    # rows, never an instruction. A client that could name an address and an agent could
+    # aim someone else's agent at a host of its choosing, which is the same reason the
+    # dashboard may never set an agent-bound connection's `host`.
+    agent_id: str = ""        # RemoteAgent.id that can reach this target
+    connection_id: str = ""   # the agent-bound hypervisor connection a VM was synced from
+    transport: str = ""       # "ssh" | "winrm" | "local"
+    port: int = 0             # the port on the target; 0 = derive from the transport
 
 
 def _cfg(key: str) -> str:
@@ -348,6 +425,172 @@ def _validate_cloud_secret_stores(runner: str, secret_vars: dict | None,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+
+
+def _resolve_agent_target(payload: "RunRequest", db) -> dict:
+    """Verify an agent-executed run against the dashboard's own rows, and return the job's
+    resolved target fields.
+
+    The request may *propose* an agent and an address; this decides whether that is true.
+    Everything returned is read from a row here, not copied from the body — so a caller who
+    rewrites ``target`` or ``agent_id`` gets a 400 rather than a job that points an agent
+    somewhere it was never told about. The agent's own ``policy.yaml`` is the second, and
+    final, gate on the same question.
+
+    Raises ``HTTPException(400/404)``; returns the overrides for
+    ``agent_ansible_meta.run_meta``.
+    """
+    from ..database import CloudDatabase, HypervisorConnection, HypervisorVMCache, RemoteAgent
+    from ..services import agent_ansible_meta, agent_service
+
+    agent = db.query(RemoteAgent).filter(RemoteAgent.id == payload.agent_id).first()
+    if not agent or not agent.is_active:
+        raise HTTPException(status_code=404, detail="That remote agent is not registered.")
+    if "agent_ansible" not in agent_service.allowed_job_types(agent):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Agent '{agent.name}' is not granted the Config-Management job type. "
+                    f"Grant it on the Agents page — this is the dashboard operator's half "
+                    f"of the permission; the agent's own policy.yaml is the other half."))
+    # Version gate at ENQUEUE, not at run: an older agent has no handler for this job type
+    # and would refuse it into Live Output, where the message reads as a policy problem.
+    if not agent_service.supports_ansible(agent):
+        raise HTTPException(status_code=400,
+                            detail=agent_service.ansible_upgrade_hint(agent))
+    if agent_service.status_of(agent) != "online":
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Agent '{agent.name}' is not online, so this run would sit queued "
+                    f"indefinitely. Nothing was queued."))
+
+    if payload.target_kind == "k8s":
+        # Out of scope for now, and refused by name rather than falling through to the VM
+        # branch — which would fail on a missing hypervisor connection and read as a wiring
+        # problem. An on-prem cluster has the identical shape to an on-prem database and
+        # wants the same treatment; it just is not wired yet.
+        raise HTTPException(
+            status_code=400,
+            detail=("Kubernetes clusters cannot yet be configured through a remote agent. "
+                    "An on-premises cluster still runs on the dashboard's own runner, which "
+                    "needs a route to the cluster's API server."))
+
+    if payload.target_kind == "database":
+        row = (db.query(CloudDatabase)
+               .filter(CloudDatabase.id == payload.target_id).first())
+        if not row:
+            raise HTTPException(status_code=404, detail="No such database.")
+        if (row.agent_id or "") != agent.id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"That database is not reachable through agent '{agent.name}'.")
+        if not row.private_host:
+            raise HTTPException(
+                status_code=400,
+                detail="That database has no endpoint recorded, so there is nothing for the "
+                       "agent to connect to.")
+        return {"run_kind": "database", "transport": "local",
+                "target_host": row.private_host, "target_port": row.port or 0,
+                "target_id": row.id, "connection_id": "",
+                "target_label": f"{row.engine}/{row.id[:8]}"}
+
+    # A VM: the connection must be bound to this agent, and the address must be one the
+    # agent itself reported for that VM. That second check is what stops an arbitrary
+    # address being substituted for a legitimately-synced one.
+    conn = (db.query(HypervisorConnection)
+            .filter(HypervisorConnection.id == payload.connection_id).first())
+    if not conn or not conn.is_active:
+        raise HTTPException(status_code=404, detail="No such hypervisor connection.")
+    if (conn.agent_id or "") != agent.id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"That connection is not brokered by agent '{agent.name}'.")
+    vm = (db.query(HypervisorVMCache)
+          .filter(HypervisorVMCache.connection_id == conn.id,
+                  HypervisorVMCache.vm_id == payload.target_id).first())
+    if not vm:
+        raise HTTPException(
+            status_code=404,
+            detail="That VM is not in this connection's synced inventory. Sync and retry.")
+    try:
+        ips = json.loads(vm.ip_addresses or "[]")
+    except ValueError:
+        ips = []
+    ips = [str(i) for i in ips if str(i).strip()]
+    if not ips:
+        raise HTTPException(
+            status_code=400,
+            detail=("This VM reports no address, so there is nothing to run against. An "
+                    "address needs the guest powered on, guest tools installed, and "
+                    "`sync_guest_details: true` on this connection in the agent's "
+                    "connections.yaml."))
+    # The body's address must be one the AGENT reported. Equal, not merely plausible.
+    host = payload.target if payload.target in ips else ips[0]
+    transport = (payload.transport
+                 if payload.transport in ("ssh", "winrm")
+                 else agent_ansible_meta.transport_for_guest_os(vm.guest_os))
+    return {"run_kind": "vm", "transport": transport, "target_host": host,
+            "target_port": payload.port or 0, "target_id": vm.vm_id,
+            "connection_id": conn.id,
+            "target_label": vm.name or vm.vm_id}
+
+
+async def _run_agent_ansible(payload: "RunRequest", db, current_user):
+    """Enqueue a Config-Management run for a remote agent to execute.
+
+    A distinct job type rather than an ``ansible_local`` row with a different runner, and
+    that is forced rather than chosen: ``agent_service.AGENT_JOB_TYPES`` must stay disjoint
+    from ``jobs_worker.HANDLED_TYPES`` or the local worker would race the agent for the same
+    row, and ``create_job(agent_id=…)`` forces ``status="queued"`` where the local worker
+    claims ``pending``.
+
+    Only refs reach the job row. The playbook and every credential are assembled and sealed
+    later, when the agent asks — see ``services/agent_ansible_bundle``.
+    """
+    from ..services import agent_ansible_bundle, agent_ansible_meta
+
+    if ansible_local_service.asset_type(payload.asset) not in (
+            "playbook", "script", "powershell", "rpm", "deb"):
+        raise HTTPException(status_code=400, detail=f"Unsupported asset {payload.asset!r}.")
+
+    # Refused here as well as on the agent so an operator who typed one gets a clean 400 now
+    # rather than a puzzling refusal in Live Output half a minute later.
+    offending = agent_ansible_bundle.reserved_vars(payload.extra_vars)
+    if offending:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{', '.join(offending)} cannot be set as extra vars: Ansible reads "
+                    f"ansible_* variables as connection configuration, so one of them could "
+                    f"redirect the play into the runner container instead of the target. "
+                    f"Use the run form's own user / key / become fields instead."))
+
+    if payload.secret_vars and not _can_use_secrets(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
+
+    overrides = _resolve_agent_target(payload, db)
+    asset_backend = payload.asset_backend or storage_service.active_backend()
+    # NOT gated on local-filesystem storage, unlike the in-cloud runners: the DASHBOARD reads
+    # the asset and puts the bytes in the sealed bundle, so a local/UNC backend works here
+    # even though a Fargate task could never reach it.
+    meta = agent_ansible_meta.run_meta(
+        payload,
+        description=f"Ansible (agent): {payload.asset} → {overrides['target_label']}",
+        asset_backend=asset_backend, **overrides)
+    problem = agent_ansible_meta.check(meta)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    job = job_service.create_job(
+        db, job_type="agent_ansible", created_by=current_user.username,
+        workgroup="ansible", metadata=meta, batch_id=payload.batch_id,
+        agent_id=payload.agent_id)
+    if payload.secret_vars:
+        job_service.log_audit(
+            db, current_user.username, "ansible_secret_use",
+            details={"vars": sorted(payload.secret_vars.keys()), "asset": payload.asset,
+                     "target": f"agent:{overrides['target_host']}"})
+    return {"job_id": job.id, "status": "queued"}
 
 
 async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
@@ -459,6 +702,12 @@ async def run_playbook(
     cluster / cloud database; the run is a localhost play on the in-cloud runner and
     the SSH-oriented fields are ignored (see _run_cloud_localhost).
     """
+    # Checked FIRST, and before the k8s/database split, because it is the reachability
+    # question rather than the target-family one: an on-prem database bound to an agent is
+    # target_kind="database" and still cannot use any runner the dashboard launches.
+    if payload.agent_id:
+        return await _run_agent_ansible(payload, db, current_user)
+
     if payload.target_kind in ("k8s", "database"):
         return await _run_cloud_localhost(payload, db, current_user)
 

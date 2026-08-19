@@ -37,11 +37,17 @@ def _page():
     return _read("web_dashboard", "templates", "config-mgmt", "index.html")
 
 
+def _optional_getter(src, name):
+    """Body of an Alpine `get <name>() { … }`, or "" when there is no such getter."""
+    m = re.search(r"\n(\s*)get %s\(\) \{\n(.*?)\n\1\},\n" % re.escape(name), src, re.S)
+    return m.group(2) if m else ""
+
+
 def _getter(src, name):
     """Body of an Alpine `get <name>() { … }`, up to the closing brace at its indent."""
-    m = re.search(r"\n(\s*)get %s\(\) \{\n(.*?)\n\1\},\n" % re.escape(name), src, re.S)
-    assert m, f"no `get {name}()` in the config-mgmt page"
-    return m.group(2)
+    body = _optional_getter(src, name)
+    assert body, f"no `get {name}()` in the config-mgmt page"
+    return body
 
 
 # ── one gate, not two ─────────────────────────────────────────────────────────
@@ -92,9 +98,23 @@ def test_every_picker_list_feeds_the_gate():
     lists = set(re.findall(r'x-if="(\w+(?:\.\w+)*)\.length > 0"', panel))
     assert lists, "found no optgroup source lists in the target picker"
 
+    # Follow the gate transitively rather than naming the helper getters, because a
+    # hardcoded list here is the same bug this test exists to catch: adding a target family
+    # would add a getter the list did not know about, and the guard would pass while the
+    # picker stayed hidden. Whatever `hasAnyTarget` reaches through `this.<name>` is walked.
     reachable = _getter(src, "hasAnyTarget")
-    for name in ("hasCloudTargets", "hasLocalhostTargets"):
-        reachable += _getter(src, name)
+    seen, queue = set(), re.findall(r"this\.(\w+)", reachable)
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        # Most names the walk reaches are plain state arrays, not getters — `_getter`
+        # asserts, so use the optional form and simply stop descending there.
+        body = _optional_getter(src, name)
+        if body:
+            reachable += body
+            queue += re.findall(r"this\.(\w+)", body)
     for lst in lists:
         root = lst.split(".")[0]
         assert root in reachable, (

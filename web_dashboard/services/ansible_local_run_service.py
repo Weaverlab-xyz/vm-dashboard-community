@@ -75,50 +75,27 @@ def _find_cloud_deploy_meta(db, cloud: str, ip: str) -> dict:
     return {}
 
 
-async def _resolve_managed_ref(db, ref: dict, target: str, cloud: str) -> dict:
-    """Fill in a name-only managed-account ref against ``target``'s own host.
+def _managed_name_hint(db, cloud: str, target: str,
+                       managed_account, managed_become) -> str:
+    """The extra name a Password Safe managed-system lookup should also try.
 
-    A bulk run picks an account by NAME, because ``system_id``/``account_id`` belong
-    to one managed system — reusing one pinned ref across a fleet would check out a
-    single machine's credential and connect everywhere with it. Each job therefore
-    resolves the name against the host it is actually configuring.
+    Cloud-native onboarding registers a managed system under the *deploy name* with a
+    placeholder IP, so looking it up by address alone misses it. Only this path can supply
+    that hint, because only this path has a deploy job to read it off — which is why
+    ``ansible_credentials.resolve_managed_ref`` takes it as an argument rather than going
+    looking. An on-prem VM behind an agent has no deploy job and passes ``""``.
 
-    Already-pinned refs (a single run from the picker) pass through untouched, so
-    this costs a Password Safe lookup only on the bulk path.
-
-    Runs the same chain as GET /managed-accounts: a deploy-name hint, then a
-    managed-system lookup by IP or name, then that system's accounts. Raises
-    ``LookupError`` when the host has no such account — the caller fails just this
-    job, leaving the rest of the batch alone.
+    Skipped entirely unless a ref actually needs resolving: a pinned ref from the single-run
+    picker never reaches the lookup, so computing the hint would be a wasted query on the
+    common path.
     """
-    if not ref or ref.get("account_id") is not None:
-        return ref
-    from ..services import btapi_service, managed_accounts as ma
+    def _needs_lookup(ref) -> bool:
+        return bool(ref) and (ref.get("account_id") if isinstance(ref, dict) else None) is None
 
-    wanted = (ref.get("account_name") or "").strip()
-    # Cloud-native onboarding registers the managed system under the deploy name with
-    # a placeholder IP, so an IP-only lookup misses it — same hint the run form passes.
+    if not (_needs_lookup(managed_account) or _needs_lookup(managed_become)):
+        return ""
     meta = _find_cloud_deploy_meta(db, cloud, target)
-    name_hint = meta.get("instance_name") or meta.get("vm_name") or ""
-    ip, sys_name = ma.lookup_args(target, name_hint)
-
-    systems = await btapi_service.list_ps_managed_systems_by_ip_or_name(ip, sys_name)
-    accounts_by_system = {}
-    for s in systems:
-        sid = s.get("ManagedSystemID") or s.get("SystemId") or s.get("SystemID")
-        if sid is None:
-            continue
-        accounts_by_system[int(sid)] = \
-            await btapi_service.list_ps_managed_accounts_with_fallback(int(sid))
-
-    found = ma.find_account_by_name(
-        ma.normalize_managed_systems(systems, accounts_by_system), wanted)
-    if not found:
-        raise LookupError(
-            f"Password Safe has no managed account named {wanted!r} for host "
-            f"{target!r}. Onboard it there, or run this host separately with an "
-            f"account picked from its own list.")
-    return found
+    return meta.get("instance_name") or meta.get("vm_name") or ""
 
 
 def _vm_build_key_secret(cloud: str, meta: dict) -> str:
@@ -275,116 +252,38 @@ async def _run_job(
             job_service.set_failed(db, job_id, f"Asset storage error: {e}")
             return
 
-        # Resolve requested Secrets-Management secrets ONCE, just-in-time — never
-        # stored on the job, never on the command line; values are scrubbed from
-        # output below. Named vars + become password apply to the local runner;
-        # the SSH-key secret applies to both (used as the connection key).
-        secret_extra_vars: dict = {}
-        secret_ssh_pem = None
-        secret_values: list = []
-        if secret_vars or secret_become_source or secret_ssh_key_source:
-            from ..services import ansible_secrets, config_service as cs
-
-            def _resolve_source(src: str) -> str:
-                src = (src or "").strip()
-                if not src:
-                    return ""
-                return cs.resolve_reference(src) if cs.is_reference(src) else cs.get(src)
-
-            secret_extra_vars = ansible_secrets.resolve_secret_vars(
-                secret_vars, get=cs.get, resolve_reference=cs.resolve_reference,
-                is_reference=cs.is_reference)
-            if secret_become_source:
-                _bp = _resolve_source(secret_become_source)
-                if _bp:
-                    secret_extra_vars["ansible_become_password"] = _bp
-            if secret_ssh_key_source:
-                secret_ssh_pem = _resolve_source(secret_ssh_key_source) or None
-            secret_values = [v for v in list(secret_extra_vars.values())
-                             + ([secret_ssh_pem] if secret_ssh_pem else []) if v]
-
-        # EPM-L installation token — minted here, at run time, and bound to the var
-        # the operator named. Registration tokens are short-lived (hours), so one
-        # fetched earlier and stored would already be dead; and the job metadata
-        # carries only the var NAME, so the token never reaches the database or the
-        # browser. Rides the same scrubbed channel as everything above.
-        if epml_token_var:
-            from ..services import epml_service
-            try:
-                _tok = await epml_service.get_installation_token()
-            except epml_service.EpmlError as e:
-                job_service.set_failed(db, job_id, f"EPM-L token request failed: {e}")
-                return
-            secret_extra_vars[epml_token_var] = _tok
-            secret_values.append(_tok)
-
-        # Managed-account checkout (BeyondTrust Password Safe) — check out the
-        # credential just-in-time. The account is the connection identity;
-        # managed_become is an optional separate account for the sudo/become
-        # password. Tracked separately so each runner can route it correctly:
-        #   • local / ACI → inline (merged into secret_extra_vars below)
-        #   • ECS / GCP   → the password vars become ephemeral store secrets, the
-        #                   SSH key rides SSH_KEY_B64, ansible_user is a plain var.
-        managed_cred_vars: dict = {}   # cred vars needing a secure channel on cloud
-        managed_plain_vars: dict = {}    # non-secret vars (ansible_user)
-        managed_request_ids: list = []   # PS request ids — checked in (rotate-on-release) after a cloud run
-        if managed_account or managed_become:
-            from ..services import btapi_service, managed_accounts as ma
-            # Long enough that the request is still open after the run for the
-            # rotate-on-check-in + check-in below (best-effort mitigation).
-            _req_dur = int(_cfg("ansible_managed_request_duration_min") or 60)
-            # A bulk run supplies the account by NAME; resolve it against THIS job's
-            # host before checking anything out, so every host uses its own
-            # credential. A pinned ref from the single-run picker passes through.
-            try:
-                managed_account = await _resolve_managed_ref(db, managed_account, target, cloud)
-                managed_become = await _resolve_managed_ref(db, managed_become, target, cloud)
-            except LookupError as e:
-                job_service.set_failed(db, job_id, str(e))
-                return
-            except btapi_service.BTAPIError as e:
-                job_service.set_failed(db, job_id, f"Password Safe lookup failed: {e}")
-                return
-            try:
-                if managed_account:
-                    req_id, cred = await btapi_service.get_ps_credential_with_request(
-                        managed_account["system_id"], managed_account["account_id"],
-                        duration_min=_req_dur,
-                        uses_ssh_key=managed_account.get("uses_ssh_key", False))
-                    managed_request_ids.append(req_id)
-                    # The account is the login identity → ansible_user. Strip any
-                    # cloud-plugin scope suffix (e.g. AWS Systems Manager's
-                    # ``adminuser;local``) so the SSH connection uses the real OS user.
-                    _login = ma.ssh_login_user(managed_account.get("account_name", ""))
-                    if _login:
-                        managed_plain_vars["ansible_user"] = _login
-                    # The credential is an SSH private key when the account is
-                    # DSS-managed (uses_ssh_key) OR the AWS Systems Manager Custom
-                    # Plugin — whose account "password" IS the minted private key,
-                    # WITHOUT the DSS flag set. Detect by content so the key is used
-                    # as the connection key (SSH_KEY_B64), not a password: password
-                    # routing would send it down the ECS ephemeral-store path and
-                    # Ubuntu rejects password SSH anyway. Normalize so OpenSSH
-                    # accepts it (trailing newline).
-                    if managed_account.get("uses_ssh_key") or "PRIVATE KEY" in (cred or ""):
-                        secret_ssh_pem = ansible_local_service._normalize_key(cred)  # connection key
-                    else:
-                        managed_cred_vars["ansible_ssh_pass"] = cred  # SSH password (sshpass)
-                        managed_cred_vars["ansible_password"] = cred  # WinRM targets
-                    secret_values.append(cred)
-                if managed_become:
-                    breq_id, bcred = await btapi_service.get_ps_credential_with_request(
-                        managed_become["system_id"], managed_become["account_id"],
-                        duration_min=_req_dur, uses_ssh_key=False)
-                    managed_request_ids.append(breq_id)
-                    managed_cred_vars["ansible_become_password"] = bcred
-                    secret_values.append(bcred)
-            except btapi_service.BTAPIError as e:
-                job_service.set_failed(db, job_id, f"Password Safe checkout failed: {e}")
-                return
-            # Local / ACI runners consume everything inline via secret_extra_vars.
-            secret_extra_vars.update(managed_cred_vars)
-            secret_extra_vars.update(managed_plain_vars)
+        # Resolve every credential ref into a value ONCE, just-in-time — named
+        # Secrets-Management vars, the become password, the SSH key, an EPM-L token and a
+        # Password Safe managed-account checkout. Shared with the agent-executed path
+        # (services/ansible_credentials), which needs the identical resolution to build its
+        # sealed bundle; two copies of this would use the wrong credential rather than fail.
+        #
+        # The cloud-native name hint stays HERE because only this path has a deploy job to
+        # read it off: cloud onboarding registers a managed system under the deploy name
+        # with a placeholder IP, so an IP-only lookup misses it.
+        from ..services import ansible_credentials
+        try:
+            _creds = await ansible_credentials.resolve(
+                db,
+                secret_vars=secret_vars,
+                secret_become_source=secret_become_source,
+                secret_ssh_key_source=secret_ssh_key_source,
+                epml_token_var=epml_token_var,
+                managed_account=managed_account,
+                managed_become=managed_become,
+                target=target, cloud=cloud,
+                name_hint=_managed_name_hint(db, cloud, target,
+                                            managed_account, managed_become),
+            )
+        except ansible_credentials.CredentialError as e:
+            job_service.set_failed(db, job_id, str(e))
+            return
+        secret_extra_vars = _creds.extra_vars
+        secret_ssh_pem = _creds.ssh_pem
+        managed_cred_vars = _creds.managed_cred_vars
+        managed_plain_vars = _creds.managed_plain_vars
+        managed_request_ids = _creds.request_ids
+        secret_values = _creds.scrub
 
         # Per-target-cloud runner backend: an AWS-target job uses
         # ansible_runner_aws, Azure → ansible_runner_azure, GCP → ansible_runner_gcp,

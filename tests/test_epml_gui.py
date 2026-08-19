@@ -154,14 +154,24 @@ def test_the_run_form_sends_the_token_variable_name():
 
 def test_the_token_is_minted_at_run_time_not_carried():
     """The var NAME travels; the token is fetched inside the run and appended to the
-    scrub set. A token resolved anywhere earlier would be expired by then anyway."""
-    src = _read("web_dashboard", "services", "ansible_local_run_service.py")
-    block = re.search(r"if epml_token_var:(.*?)\n        # Managed-account", src, re.S)
-    assert block, "no epml_token_var handling in the run service"
+    scrub set. A token resolved anywhere earlier would be expired by then anyway.
+
+    This lives in ``ansible_credentials`` rather than in one runner, so the guarantee now
+    covers the agent-executed path as well: an agent's sealed run bundle gets a token minted
+    at the moment it asks, through this same resolver, instead of a second copy of the logic
+    that could cache one.
+    """
+    src = _read("web_dashboard", "services", "ansible_credentials.py")
+    block = re.search(r"if epml_token_var:(.*?)\n    # Managed-account", src, re.S)
+    assert block, "no epml_token_var handling in the shared credential resolver"
     body = block.group(1)
     assert "get_installation_token" in body, "the token is not minted at run time"
-    assert "secret_values.append" in body, "the token is not added to the scrub set"
-    assert "secret_extra_vars[epml_token_var]" in body
+    assert "out.scrub.append" in body, "the token is not added to the scrub set"
+    assert "out.extra_vars[epml_token_var]" in body
+    # And the runner still asks for it, rather than having quietly dropped the field.
+    runner = _read("web_dashboard", "services", "ansible_local_run_service.py")
+    assert "epml_token_var=epml_token_var" in runner, (
+        "ansible_local_run_service no longer passes epml_token_var to the resolver")
 
 
 def test_storage_page_queues_the_sync_and_follows_the_job():

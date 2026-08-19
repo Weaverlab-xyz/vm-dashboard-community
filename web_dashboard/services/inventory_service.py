@@ -144,6 +144,16 @@ def _db_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": None,
         "detail_href": "/databases",
+        # Which agent can reach this database, for a Config-Management run. Only ever set on
+        # a cloud='local' registered row — an on-prem database the dashboard has a reference
+        # to but no route to. NULL keeps the pre-existing behaviour (the dashboard's own
+        # runner), which is the only option a provisioned cloud database has.
+        "agent_id": getattr(row, "agent_id", None),
+        # The endpoint an agent-executed localhost play reaches out to. Not shown in the UI;
+        # `_target_spec` needs it because an agent job carries the address, not a row id it
+        # could look up.
+        "private_host": getattr(row, "private_host", "") or "",
+        "port": getattr(row, "port", None),
     }
 
 
@@ -293,6 +303,20 @@ def _hv_item(conn, row, workgroup: Optional[str], ips: list) -> dict:
         "job_id": None,
         "ip": ips[0] if ips else "",
         "detail_href": _HV_PAGES.get(kind, "/connections"),
+        # Which agent, if any, can reach this VM — and which connection it was synced from.
+        # `_target_spec` needs both: a VM behind an agent-bound connection is on a network
+        # the dashboard has no route to, so a Config-Management run against it has to be
+        # queued FOR that agent rather than for the local runner. `agent_id` is None for a
+        # dashboard-direct connection, which is what keeps the existing behaviour.
+        # getattr, like _db_item's: these projections are exercised against plain
+        # stand-ins as well as ORM rows, and a row from a build before the column
+        # existed is the same shape.
+        "agent_id": getattr(conn, "agent_id", None),
+        "connection_id": conn.id,
+        # The guest's OS as the hypervisor reported it, used only to choose SSH or WinRM.
+        # Absent on a connection that does not sync guest details, and the run form's
+        # transport picker is what covers that.
+        "guest_os": getattr(row, "guest_os", "") or "",
     }
 
 
@@ -474,9 +498,17 @@ def _target_spec(item: dict):
         ip = item.get("ip") or ""
         if not ip:
             if item.get("source") == expiry_policy.SYNCED_HYPERVISOR_SOURCE:
-                # "its deploy job stored none" would be a lie: this row has no deploy
-                # job. Only a powered-on guest with tools installed reports an address,
-                # and only the Workstation and ESXi syncs ask for one at all.
+                # "its deploy job stored none" would be a lie: this row has no deploy job.
+                # Three separate things have to be true before a synced VM has an address,
+                # and the reason has to name whichever one is missing rather than send the
+                # operator to look at the other two.
+                if item.get("agent_id"):
+                    return (f"the {cloud or 'hypervisor'} inventory sync reports no address "
+                            f"for this VM. An address needs all three of: the guest powered "
+                            f"on, guest tools/Integration Services installed in it, and "
+                            f"`sync_guest_details: true` on this connection in the agent's "
+                            f"connections.yaml. Set that, Sync Now, and it becomes "
+                            f"selectable.")
                 tail = (f"Configure it through the {cloud} group target on the Config "
                         f"Management page."
                         if cloud in _GROUP_TARGET_KINDS else
@@ -488,6 +520,19 @@ def _target_spec(item: dict):
             return ("no recorded IP address — its deploy job stored none. Proxmox and "
                     "Nutanix VMs are configured through their hypervisor group target "
                     "on the Config Management page, not selected individually.")
+        # A VM behind an agent-bound connection is on a network the dashboard has no route
+        # to, so the run has to be queued FOR that agent — the local runner would resolve
+        # the address and then time out. This is the one case where an address alone is not
+        # enough to aim a run.
+        if item.get("agent_id"):
+            from . import agent_ansible_meta
+            return {"agent_id": item["agent_id"],
+                    "connection_id": item.get("connection_id") or "",
+                    "target_id": (item.get("id") or "").split(":")[-1],
+                    "target": ip,
+                    "transport": agent_ansible_meta.transport_for_guest_os(
+                        item.get("guest_os")),
+                    "cloud": ""}
         # `cloud` drives SSH-key retrieval and only means something for the three
         # clouds that store one; anything else runs as a plain ad-hoc IP target.
         return {"target": ip, "cloud": cloud if cloud in ("aws", "azure", "gcp") else ""}
@@ -506,6 +551,16 @@ def _target_spec(item: dict):
         if engine not in acr.ANSIBLE_DB_ENGINES:
             return (f"engine {engine!r} is not supported for Ansible runs "
                     f"(supported: {', '.join(acr.ANSIBLE_DB_ENGINES)}).")
+        # An on-prem database bound to an agent runs its localhost play ON THAT AGENT. The
+        # dashboard-local runner is the only other option for cloud='local', and it does not
+        # exist on a cloud-hosted dashboard — no Docker socket, and no route to the LAN.
+        if item.get("agent_id"):
+            if not item.get("private_host"):
+                return ("this database has no endpoint recorded, so an agent has nothing "
+                        "to connect to. Re-register it with its host.")
+            return {"target_kind": "database", "target_id": item["id"].split(":", 1)[1],
+                    "agent_id": item["agent_id"], "target": item["private_host"],
+                    "port": item.get("port") or 0, "transport": "local"}
         return {"target_kind": "database", "target_id": item["id"].split(":", 1)[1]}
 
     return f"{kind!r} resources have no Config-Management path."
