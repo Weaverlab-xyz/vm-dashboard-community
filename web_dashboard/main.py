@@ -916,6 +916,15 @@ try:
 except ImportError as exc:
     logger.warning("API router 'inventory' not loaded: %s", exc)
 
+try:
+    # The dashboard home page's one aggregate read. Always-on and NOT feature-gated: it
+    # answers for whichever tiles this install has, and a tile with nothing collected
+    # reports unavailable rather than 404ing the whole page.
+    from .api import dashboard as dashboard_api  # noqa: E402
+    app.include_router(dashboard_api.router)
+except ImportError as exc:
+    logger.warning("API router 'dashboard' not loaded: %s", exc)
+
 # Auto-delete timer (extend/pin + sweeper surface). Not feature-gated at the router:
 # GET /status has to answer "disabled" so the pages can hide the column, and the
 # mutations refuse on their own when the feature is off.

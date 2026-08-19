@@ -71,6 +71,17 @@ class TileSpec:
     # than collected-and-failed: an unconfigured cloud is not an error, and letting it earn
     # a cooldown would fill the operator's status page with noise.
     feature: str = ""
+    # Which api module's `_accessible_workgroups` governs this tile's rows, or "" for a tile
+    # with no per-row RBAC. It lives on the spec so the read endpoint needs no second table
+    # that could drift from this one.
+    #
+    # NOT unified on purpose. The four cloud modules key on `user.is_admin`; inventory,
+    # databases and k8s key on `user.is_effective_admin`, which is a SUPERSET (it also
+    # honours a session-permission row and a live Entitle JIT grant). A JIT-admin therefore
+    # sees everything on /inventory and only their own workgroups on /api/aws/instances.
+    # That inconsistency predates this table; reproducing it per tile is correct, and
+    # "fixing" it here would silently widen or narrow somebody's access.
+    rbac: str = ""
 
 
 # ── payload builders ─────────────────────────────────────────────────────────
@@ -244,19 +255,23 @@ async def _portainer_endpoints():
 # "unavailable" with nothing in any log — that failure mode has shipped here before.
 
 TILES = (
-    TileSpec("aws_instances",       "aws",       _aws_instances,       feature="aws"),
+    TileSpec("aws_instances",       "aws",       _aws_instances,       feature="aws",
+             rbac="aws"),
     TileSpec("aws_amis",            "aws",       _aws_amis,            feature="aws"),
     TileSpec("ecs_tasks",           "aws",       _ecs_tasks,           feature="aws"),
-    TileSpec("azure_vms",           "azure",     _azure_vms,           feature="azure"),
+    TileSpec("azure_vms",           "azure",     _azure_vms,           feature="azure",
+             rbac="azure"),
     TileSpec("azure_images",        "azure",     _azure_images,        feature="azure"),
     TileSpec("aci_containers",      "azure",     _aci_containers,      feature="azure"),
-    TileSpec("gcp_instances",       "gcp",       _gcp_instances,       feature="gcp"),
+    TileSpec("gcp_instances",       "gcp",       _gcp_instances,       feature="gcp",
+             rbac="gcp"),
     TileSpec("gcp_images",          "gcp",       _gcp_images,          feature="gcp"),
     TileSpec("gce_containers",      "gcp",       _gce_containers,      feature="gcp"),
     TileSpec("cloud_run_jobs",      "gcp",       _cloud_run_jobs,      feature="gcp"),
     TileSpec("portainer_node",      "gcp",       _portainer_node,      feature="gcp"),
     TileSpec("rancher_nodes",       "gcp",       _rancher_nodes,       feature="k8s_management"),
-    TileSpec("oci_instances",       "oci",       _oci_instances,       feature="oci"),
+    TileSpec("oci_instances",       "oci",       _oci_instances,       feature="oci",
+             rbac="oci"),
     TileSpec("oci_images",          "oci",       _oci_images,          feature="oci"),
     TileSpec("portainer_endpoints", "portainer", _portainer_endpoints,
              feature="portainer_configured"),
