@@ -33,8 +33,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import CloudFunction, Job
-from . import (cloud_function_package, config_service, job_service, terraform,
-               terraform_provider_env)
+from . import (cloud_function_package, config_service, job_service, region_catalog,
+               terraform, terraform_provider_env)
 from .region_config import resolve_region
 
 logger = logging.getLogger(__name__)
@@ -755,6 +755,17 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
     _check_target(workload, cloud)
     if not region:
         raise CloudFunctionError("region is required")
+    # Canonicalise + validate, as the cloud-database path does
+    # (api/cloud_databases._resolve_db_region). This one string is what the row, the
+    # Terraform vars ("region" on aws/gcp, "location" on azure) and
+    # region_config.resolve_region below all key off, so an Azure region on an AWS
+    # function — or "West US 2" where only "westus2" works — has to fail HERE rather
+    # than 90 seconds into an apply. A FORMAT check, deliberately not a membership
+    # test against the catalog: operators run regions we don't enumerate.
+    try:
+        region = region_catalog.resolve(cloud, region)
+    except ValueError as exc:
+        raise CloudFunctionError(str(exc)) from exc
     fn_name = normalize_name(name)
     if not _NAME_RE.match(fn_name):
         raise CloudFunctionError(
