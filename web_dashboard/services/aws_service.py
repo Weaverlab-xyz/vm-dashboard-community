@@ -61,10 +61,42 @@ def _aws_kwargs(region: str) -> dict:
         secret  = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 
     kwargs: dict = {"region_name": region}
+
+    # Dynamic tier first. `credentials()` returns None when this deployment is not on it,
+    # which is the normal case and costs a memo lookup. When it IS on it and no lease can
+    # be produced it raises rather than returning nothing — otherwise a deployment that
+    # had deliberately retired its static key would silently fall through to whatever is
+    # left in the environment, which is the outcome this whole feature exists to prevent.
+    try:
+        from . import workload_credential_lease as _leases
+        dynamic = _leases.credentials("aws")
+    except _lease_unavailable() as exc:
+        raise AWSError(
+            "AWS is configured to use BeyondTrust Workload Credentials, but no "
+            "credential could be issued: %s" % exc) from exc
+    if dynamic:
+        kwargs["aws_access_key_id"]     = dynamic["access_key_id"]
+        kwargs["aws_secret_access_key"] = dynamic["secret_access_key"]
+        # Assumed-role credentials are a triple. Without the session token every call
+        # fails InvalidClientTokenId, which reads like a wrong key rather than a missing
+        # field — this one line is what the dynamic path turns on.
+        kwargs["aws_session_token"]     = dynamic["session_token"]
+        return kwargs
+
     if key_id and secret:
         kwargs["aws_access_key_id"]     = key_id
         kwargs["aws_secret_access_key"] = secret
     return kwargs
+
+
+def _lease_unavailable():
+    """The LeaseUnavailable class, resolved lazily.
+
+    A function rather than a module-level import because the lease module imports this
+    one indirectly; a top-level import here would close the cycle.
+    """
+    from .workload_credential_lease import LeaseUnavailable
+    return LeaseUnavailable
 
 
 def eks_get_token(cluster_name: str, region: str) -> str:

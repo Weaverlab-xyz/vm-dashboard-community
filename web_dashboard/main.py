@@ -156,6 +156,25 @@ async def lifespan(app: FastAPI):
                             name="agent_credential_release_startup")
     )
 
+    # Mint any Workload Credentials lease this deployment needs before the first request
+    # arrives. A cold start would otherwise put an HTTP round trip on whichever request
+    # first touches a cloud, and the worker's periodic pass is up to a minute away. Costs
+    # one config lookup when no cloud is on the dynamic tier, which is the common case.
+    async def _warm_wlc_leases():
+        try:
+            from .services import workload_credential_lease as leases
+            for cloud in leases.CLOUDS:
+                if not leases.dynamic_enabled(cloud):
+                    continue
+                for purpose in leases.PURPOSES:
+                    await asyncio.to_thread(leases.refresh, cloud, purpose)
+        except Exception:
+            logger.warning("startup credential lease warm failed (non-fatal)",
+                           exc_info=True)
+    warmers.append(
+        asyncio.create_task(_warm_wlc_leases(), name="warm_wlc_leases")
+    )
+
     yield
 
     for task in warmers:

@@ -610,6 +610,34 @@ def _release_agent_credentials() -> None:
         db.close()
 
 
+def _refresh_wlc_leases() -> None:
+    """Renew any Workload Credentials lease that is close to expiry.
+
+    This is what makes the synchronous mint inside ``workload_credential_lease.credentials``
+    rare rather than routine: by the time a request needs a credential, this pass has
+    already replaced one that was running out. Without it every expiry boundary would put
+    an HTTP round trip on a request thread, and that thread pool is small enough that one
+    slow provider call has wedged the whole site before.
+
+    Never allowed to raise, for the same reason as :func:`_release_agent_credentials`: a
+    Workload Credentials outage must not stop the runner claiming work. A cloud that is
+    not on the dynamic tier costs one config lookup and returns immediately.
+    """
+    try:
+        from .services import workload_credential_lease as leases
+        for cloud in leases.CLOUDS:
+            for purpose in leases.PURPOSES:
+                try:
+                    if leases.refresh(cloud, purpose):
+                        logger.info("job runner: renewed the %s/%s credential lease",
+                                    cloud, purpose)
+                except Exception as exc:  # noqa: BLE001 — one cloud must not stop the others
+                    logger.warning("job runner: %s/%s lease refresh failed: %s",
+                                   cloud, purpose, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("job runner: credential lease refresh pass failed: %s", exc)
+
+
 def _limits() -> dict:
     """Per-tier in-flight caps, clamped to what this process's DB pool can serve.
 
@@ -731,6 +759,10 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL,
             # reaching the completion hook, so for a killed agent container this is the
             # only path that ever releases.
             await asyncio.to_thread(_release_agent_credentials)
+            # Piggybacks on the same tick. Cheap when nothing is due (one row read per
+            # cloud) and it is the difference between renewing a lease in the background
+            # and renewing it on a request thread.
+            await asyncio.to_thread(_refresh_wlc_leases)
 
         limits = _limits()
         _publish_if_changed(limits, len(running))

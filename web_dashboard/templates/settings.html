@@ -4315,6 +4315,54 @@
                 0 would pin a dead lease and 100 would bill an issuance on every check.
               </p>
             </div>
+            <div class="mt-5 border-t border-gray-100 pt-4">
+              <div class="flex items-center justify-between">
+                <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Active credential source</p>
+                <button @click="checkWlcSources()" :disabled="wlcSources.running"
+                        class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">
+                  <span x-text="wlcSources.running ? 'Checking…' : 'Check'"></span>
+                </button>
+              </div>
+              <p class="text-[11px] text-gray-400 mt-1">
+                What each cloud is <strong>actually</strong> using right now. Worth checking after
+                changing anything above — a broken lease and a cloud still on its static key look
+                the same from the outside otherwise.
+              </p>
+              <p x-show="wlcSources.error" x-cloak class="text-xs text-red-600 mt-2"
+                 x-text="wlcSources.error"></p>
+              <table x-show="wlcSources.clouds.length" x-cloak class="w-full text-xs mt-2">
+                <tbody>
+                  <template x-for="c in wlcSources.clouds" :key="c.cloud">
+                    <tr class="border-t border-gray-100">
+                      <td class="py-1.5 pr-2 font-mono uppercase text-gray-500" x-text="c.cloud"></td>
+                      <td class="py-1.5 pr-2">
+                        <span class="px-1.5 py-0.5 rounded text-[11px]"
+                              :class="c.source === 'dynamic' ? 'bg-green-100 text-green-800'
+                                      : (c.source === 'static' ? 'bg-gray-100 text-gray-700'
+                                                               : 'bg-amber-100 text-amber-800')"
+                              x-text="c.source === 'dynamic' ? 'dynamic (WC)' : c.source"></span>
+                      </td>
+                      <td class="py-1.5 text-gray-500">
+                        <template x-if="c.lease && c.lease.usable">
+                          <span>lease expires <span x-text="c.lease.expires_at"></span></span>
+                        </template>
+                        <template x-if="c.lease && !c.lease.usable">
+                          <span class="text-red-600"
+                                x-text="c.lease.last_error ? ('no usable lease — ' + c.lease.last_error)
+                                                           : 'no usable lease yet'"></span>
+                        </template>
+                        <template x-if="!c.lease && c.source === 'static'">
+                          <span class="text-gray-400">static key in the encrypted config</span>
+                        </template>
+                        <template x-if="!c.lease && c.source === 'unconfigured'">
+                          <span class="text-gray-400">no credential configured</span>
+                        </template>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </template>
@@ -4587,6 +4635,9 @@ function settingsPage() {
 
     // OIDC discovery probe result (Test connection in the SSO panel).
     oidcTest: { running: false, ok: null, error: '', doc: null },
+    // Which credential posture each cloud is actually on. Explicitly fetched rather
+    // than polled: it is a diagnostic an operator asks for after flipping a flag.
+    wlcSources: { running: false, error: '', clouds: [] },
 
     // ── Slide-over panel state ───────────────────────────────────────────
     panel: null,
@@ -5403,6 +5454,16 @@ function settingsPage() {
 
     // Probe the saved issuer's discovery document. Deliberately reads the stored
     // value rather than the form, so it tests what a login would actually use.
+    async checkWlcSources() {
+      this.wlcSources = { running: true, error: '', clouds: [] };
+      try {
+        const r = await API.get('/api/secrets/credential-sources');
+        this.wlcSources = { running: false, error: '', clouds: r.clouds || [] };
+      } catch (e) {
+        this.wlcSources = { running: false, error: e.message || String(e), clouds: [] };
+      }
+    },
+
     async testOidc() {
       this.oidcTest = { running: true, ok: null, error: '', doc: null };
       try {

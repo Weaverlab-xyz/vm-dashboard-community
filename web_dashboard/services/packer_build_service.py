@@ -198,8 +198,13 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         # Build env
         region = _cfg("aws_region") or "us-east-2"
         env = _base_env()
-        env["AWS_ACCESS_KEY_ID"] = _cfg("aws_access_key_id")
-        env["AWS_SECRET_ACCESS_KEY"] = _cfg("aws_secret_access_key")
+        from .workload_credential_lease import aws_subprocess_env as _wlc_aws_env
+        _dynamic = _wlc_aws_env()
+        if _dynamic:
+            env.update(_dynamic)
+        else:
+            env["AWS_ACCESS_KEY_ID"] = _cfg("aws_access_key_id")
+            env["AWS_SECRET_ACCESS_KEY"] = _cfg("aws_secret_access_key")
         env["AWS_DEFAULT_REGION"] = region
         env["PKR_VAR_region"] = region
 

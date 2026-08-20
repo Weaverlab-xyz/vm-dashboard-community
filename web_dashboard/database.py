@@ -1094,6 +1094,77 @@ class CloudCostCache(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class WorkloadCredentialLease(Base):
+    """One live Workload Credentials lease per (cloud, purpose).
+
+    Deliberately the same shape as :class:`CloudCostCache` — read that class and
+    ``services/cost_cache``'s module docstring first. Same three reasons for being in the
+    database rather than in a process-local dict, plus one this table has and that one
+    does not.
+
+    The app runs ``gunicorn -w 2`` and ``jobs_worker`` is a third process, so a
+    process-local dict would give each one **its own lease**. For a cost figure that is
+    wasteful; here it is billable. Workload Credentials charges per credential
+    *issuance*, so three processes each minting their own lease is three times the
+    invoice for the same credential, and every image rebuild would throw them all away
+    and re-mint. The row is what makes one issuance serve the whole deployment.
+
+    ``payload`` is written ONLY when a generate succeeded. A failure writes the error and
+    cooldown columns and leaves ``payload``/``expires_at`` untouched. Same asymmetry, same
+    reason: a 429 must never be able to replace a working credential. It matters more here
+    than for costs, because a blank credential does not degrade a tile — it makes the
+    dashboard indistinguishable from one that was never configured for the dynamic tier.
+
+    ``payload`` is **Fernet-encrypted** (``config_service.encrypt_value``), unlike
+    ``CloudCostCache.payload``. It holds a live cloud credential, so it gets the same
+    at-rest treatment as ``app_config``, and therefore the same rotation hazard: losing the
+    JWT root key makes stored leases unreadable. That is survivable in a way losing
+    ``app_config`` is not — the next refresh simply mints a new one.
+
+    ``expires_at`` is **not** a TTL opinion. It is the expiry the provider issued, and the
+    credential stops working at it whether or not anything here agrees. That is the
+    opposite of ``CloudCostCache``, where a stale payload is still servable.
+
+    The single-flight columns are ``claim_*`` rather than ``lease_*`` as in
+    ``CloudCostCache``. The word "lease" already means the provider-issued credential lease
+    throughout this feature, and having it also mean "this process's short claim on the
+    right to refresh" would be genuinely confusing in the one module that handles both.
+    """
+    __tablename__ = "workload_credential_lease"
+
+    # aws | azure. GCP is absent because Workload Credentials does not mint GCP
+    # credentials — a GCP deployment stays on the static tier by design, not by omission.
+    cloud = Column(String(16), primary_key=True)
+    # provision | readonly. Splitting by lifecycle rather than by operation is what lets
+    # the request path hold a read-only credential while write privilege exists only for
+    # the duration of a job. See docs/integrations/workload-credentials.md.
+    purpose = Column(String(32), primary_key=True)
+
+    # ── last-known-good (written ONLY on a successful generate) ──────────────
+    payload = Column(Text, nullable=True)              # Fernet-encrypted JSON of the credential
+    lease_id = Column(String(128), nullable=True)      # the provider's id; needed to revoke
+    issued_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
+
+    # ── failure (written ONLY on a failed attempt) ───────────────────────────
+    last_attempt_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    # While this is in the future nothing tries to mint for this (cloud, purpose). Guards
+    # against a misconfigured dynamic secret turning every page load into a billable
+    # failed attempt.
+    cooldown_until = Column(DateTime, nullable=True)
+
+    # ── single-flight ───────────────────────────────────────────────────────
+    # A liveness bound, not a mutex: a process that dies mid-generate releases its claim by
+    # expiry. The advisory lock only makes the claim's read-modify-write atomic and is
+    # never held across the network call.
+    claim_until = Column(DateTime, nullable=True)
+    claim_owner = Column(String(64), nullable=True)    # "host:pid" — diagnostics only
+
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class DashboardStatCache(Base):
     """One dashboard tile's last-known-good counts, plus the state that decides whether we
     are allowed to ask that provider again.

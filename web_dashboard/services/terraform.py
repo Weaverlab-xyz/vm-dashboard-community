@@ -75,10 +75,15 @@ def _backend_settings(deploy_dir: str):
             # — no DynamoDB table required.
             "use_lockfile": "true",
         }
-        env = {}
-        ak, sk = _cfg("aws_access_key_id"), _cfg("aws_secret_access_key")
-        if ak and sk:
-            env = {"AWS_ACCESS_KEY_ID": ak, "AWS_SECRET_ACCESS_KEY": sk}
+        # The state backend authenticates separately from the provider, so the dynamic
+        # tier has to be honoured here too. Wire only the provider and API calls succeed
+        # while `terraform init` fails — a confusing place to land.
+        from . import workload_credential_lease as _leases
+        env = _leases.aws_subprocess_env() or {}
+        if not env:
+            ak, sk = _cfg("aws_access_key_id"), _cfg("aws_secret_access_key")
+            if ak and sk:
+                env = {"AWS_ACCESS_KEY_ID": ak, "AWS_SECRET_ACCESS_KEY": sk}
         return ("s3", cfg, env)
 
     if backend == "azure_blob":
