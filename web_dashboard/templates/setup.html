@@ -92,10 +92,11 @@
       <div>
         <h2 class="text-lg font-semibold text-gray-900">AWS Credentials</h2>
         <p class="text-gray-500 text-sm mt-1">
-          Used to deploy EC2 instances. Create a dedicated IAM user with
-          <code class="bg-gray-100 px-1 rounded text-xs">AmazonEC2FullAccess</code> and
-          <code class="bg-gray-100 px-1 rounded text-xs">IAMReadOnlyAccess</code>,
-          then generate an access key.
+          Used to deploy EC2 instances. Create a dedicated IAM user with a
+          <em>customer-managed</em> policy &mdash; see Part A of
+          <code class="bg-gray-100 px-1 rounded text-xs">docs/ONBOARDING.md</code>,
+          as the AWS-managed policies do not grant enough (read-only S3 cannot
+          write Terraform state) &mdash; then generate an access key.
         </p>
       </div>
       <div class="space-y-4">

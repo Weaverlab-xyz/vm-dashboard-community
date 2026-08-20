@@ -209,9 +209,10 @@ IAM (sandbox-tagged, deleted by rollback):
 **Idempotency**: re-running `setup-aws.sh` looks up resources by tag and
 reuses anything already present. The IGW, route tables, subnet associations,
 SG rules, IAM policy attachments are all conditional inserts. The dashboard
-IAM user is reused on re-runs and the inline policy is re-applied each time
-so policy edits in the script land without rotating the access key. AWS
-allows at most 2 access keys per user, so the script never rotates blindly;
+IAM user is reused on re-runs and a new default version of the managed policy
+is created each time, so policy edits in the script land without rotating the
+access key. AWS allows at most 2 access keys per user, so the script never
+rotates blindly;
 if the cached secret is missing but a key still exists in AWS, it warns
 with recovery paths rather than minting a third key.
 
@@ -262,8 +263,17 @@ Key Vault dashboard-sandbox-kv-…
 
 Service principal dashboard-sandbox-sp
   Contributor on the resource group
-  Read on the Key Vault (so the dashboard can fetch the keypair at runtime)
+  Storage Blob Data Contributor on the storage account (Terraform state and the
+    azure_blob backend are DATA-plane writes; Contributor alone cannot do them)
+  User Access Administrator on the resource group (so the AKS module can create
+    its own role assignment — Contributor lacks roleAssignments/write)
+  Cost Management Reader on the SUBSCRIPTION (Cloud Costs; best-effort, warns
+    rather than aborting if you lack Owner/UAA at subscription scope)
+  Key Vault access policy: secrets get/list/set/delete (write is needed so
+    per-VM admin passwords can be vaulted and removed again on teardown)
   AcrPull on the container registry (so the ACI runners can pull the mirrors)
+  Dashboard Image Promoter custom role on the gallery RG (only when
+    AZURE_IMAGE_GALLERY_RG is set; override with AZURE_IMAGE_GALLERY_ROLE)
   Credentials cached at ~/.dashboard-sandbox/azure/sp.json (mode 600)
 
 Container registry dashboardsandboxacr…  (Basic SKU)

@@ -317,11 +317,17 @@ secret, OCI dashboard-user private key) are written with mode 600.
 ### AWS dashboard IAM user
 
 The AWS setup script also provisions an IAM user `dashboard-sandbox-app`
-with an inline policy covering every AWS API the dashboard calls (EC2 /
-ECS / Secrets Manager / S3 / CloudWatch Logs / vmimport-related
-ec2:ExportImage etc.). Operators no longer paste their own access key
-into the `/setup` wizard — the script's output block carries the
-sandbox-provisioned key id and secret directly.
+with a customer-managed policy `dashboard-app-policy` covering every AWS API
+the dashboard calls (EC2 / VPC / ECS / EKS / Lambda / RDS / Secrets Manager /
+S3 / CloudWatch Logs / Cost Explorer / SSM / vmimport-related
+ec2:ExportImage etc.). It is customer-managed rather than inline because
+inline user policies cap at 2048 bytes and this document is well over —
+managed policies get a 6144-byte quota plus versioning, so re-runs can
+publish a new default version without rotating the access key.
+
+Operators no longer paste their own access key into the `/setup` wizard — the
+script's output block carries the sandbox-provisioned key id and secret
+directly.
 
 The access-key secret is cached at `~/.dashboard-sandbox/aws/secret_access_key`
 (mode 0600). Re-runs of `setup-aws.sh` reuse the cached secret rather
