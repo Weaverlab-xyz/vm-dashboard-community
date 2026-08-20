@@ -1,0 +1,223 @@
+"""Structural guards for terraform/workload_credentials.
+
+There is no terraform binary in CI, so this reads the HCL as text. That is enough for what
+matters here: every detail pinned below is one that fails **silently** if it is wrong —
+a clamped TTL, an untagged session, a duplicated policy that drifts. None of them produce
+an error you would notice.
+
+Runs under pytest, or standalone:
+    python tests/test_wlc_terraform_module.py
+"""
+import os
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_MOD = os.path.join(_ROOT, "terraform", "workload_credentials")
+
+
+def _read(name):
+    with open(os.path.join(_MOD, name), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _all_hcl():
+    return "\n".join(_read(f) for f in sorted(os.listdir(_MOD)) if f.endswith(".tf"))
+
+
+def _uncommented(src):
+    """The HCL with comment tails removed, so prose cannot satisfy an assertion."""
+    return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+
+
+# ── Shape ────────────────────────────────────────────────────────────────────
+
+def test_the_module_follows_the_repo_layout():
+    # Same split as terraform/entitle_user_jit, which is the sibling "set up the
+    # BeyondTrust side" module.
+    for name in ("versions.tf", "variables.tf", "outputs.tf", "README.md",
+                 "aws.tf", "azure.tf", "main.tf"):
+        assert os.path.isfile(os.path.join(_MOD, name)), f"missing {name}"
+
+
+def test_terraform_111_is_required():
+    """The provider models a write-only attribute, which is a 1.11 feature.
+
+    On an older CLI it fails to load rather than degrading, so the constraint is not
+    cosmetic — and every other module here asks for 1.5, which makes this easy to
+    "tidy" downwards.
+    """
+    src = _uncommented(_read("versions.tf"))
+    assert 'required_version = ">= 1.11.0"' in src
+
+
+def test_the_provider_is_the_beyondtrust_one():
+    src = _uncommented(_read("versions.tf"))
+    assert 'source  = "beyondtrust/beyondtrust"' in src
+
+
+def test_the_api_version_is_not_pinned():
+    # Pinning it would freeze the module on one response shape; the provider's own default
+    # is the value to track.
+    assert "api_version" not in _uncommented(_read("versions.tf"))
+
+
+# ── The two details that fail silently ───────────────────────────────────────
+
+def test_both_trust_policies_allow_tag_session():
+    """`aws_tags` on a dynamic secret become STS session tags.
+
+    Without sts:TagSession the tagged assume is REFUSED rather than silently untagged, so
+    the failure is a mint that stops working — and the error does not mention tags.
+    """
+    src = _uncommented(_read("aws.tf"))
+    assert src.count("sts:TagSession") >= 2, (
+        "both the integration role's inline policy and the target role's trust policy "
+        "need sts:TagSession")
+
+
+def test_the_target_role_sets_max_session_duration():
+    """AWS defaults MaxSessionDuration to 3600 and CLAMPS a longer TTL request silently.
+
+    A lease shorter than configured then looks like a bug in the dashboard's refresh
+    logic rather than a role attribute, which is a long way to travel for one number.
+    """
+    src = _uncommented(_read("aws.tf"))
+    assert "max_session_duration = var.aws_max_session_duration" in src
+
+
+def test_the_max_session_duration_default_exceeds_the_ttl_default():
+    # Otherwise the shipped defaults clamp each other out of the box.
+    src = _read("variables.tf")
+    import re
+    def default_of(name):
+        block = src.split(f'variable "{name}"', 1)[1].split("\n}", 1)[0]
+        return int(re.search(r"default\s*=\s*(\d+)", block).group(1))
+    assert default_of("aws_max_session_duration") >= default_of("aws_ttl_seconds")
+
+
+def test_the_external_id_is_supplied_not_read_back():
+    """It is a REQUIRED input on the integration, not a computed attribute.
+
+    The vendor's own wiki example reads it as an attribute, which is out of date against
+    the shipping provider. Following the wiki produces a plan-time error.
+    """
+    src = _uncommented(_read("aws.tf"))
+    assert "external_id = random_uuid.aws_external_id" in src
+    assert 'resource "random_uuid" "aws_external_id"' in src
+
+
+def test_the_external_id_reaches_the_trust_condition():
+    # Half of the confused-deputy control. An integration whose external ID does not match
+    # the trust policy simply cannot assume, with no hint as to which half is wrong.
+    src = _uncommented(_read("aws.tf"))
+    assert "sts:ExternalId" in src
+
+
+# ── The everyday session policy ──────────────────────────────────────────────
+
+def test_the_everyday_secret_denies_the_escalation_paths():
+    """The entire point of the two-lease split.
+
+    If this deny list loses iam:PassRole or iam:CreateRole, the everyday lease silently
+    becomes as privileged as the provisioning one and the split stops buying anything —
+    with nothing observable to indicate it.
+    """
+    src = _uncommented(_read("aws.tf"))
+    everyday = src.split('"beyondtrust_workload_credentials_aws_dynamic_secret" "everyday"', 1)[1]
+    for action in ("iam:PassRole", "iam:CreateRole", "iam:AttachRolePolicy",
+                   "sts:AssumeRole"):
+        assert action in everyday, f"the everyday session policy no longer denies {action}"
+    assert '"Deny"' in everyday
+
+
+def test_both_secrets_share_one_role():
+    """Session policies intersect and never broaden, which is what makes one role enough.
+
+    Two roles would mean two trust policies and two permission sets to keep aligned.
+    """
+    src = _uncommented(_read("aws.tf"))
+    assert src.count("role_arn        = aws_iam_role.target[0].arn") == 2
+
+
+def test_the_everyday_secret_is_optional():
+    # Off means one lease for everything, which is the dashboard's default behaviour.
+    src = _uncommented(_read("aws.tf"))
+    assert "var.create_everyday_secret" in src
+
+
+# ── No duplicated permission definitions ─────────────────────────────────────
+
+def test_the_module_does_not_copy_the_dashboard_iam_policy():
+    """setup-aws.sh owns `dashboard-app-policy`; this module attaches it.
+
+    A second copy here would drift from that one the first time either changed, which is
+    the failure this repo hits most often — four non-identical secret lists, warmer vs
+    reader divergence, the .sh/.ps1 twins. One policy, one owner.
+    """
+    hcl = _uncommented(_all_hcl())
+    for pasted in ("ec2:RunInstances", "ec2:TerminateInstances", "secretsmanager:GetSecretValue",
+                   "ce:GetCostAndUsage", "ecs:RegisterTaskDefinition"):
+        assert pasted not in hcl, (
+            f"{pasted} appears in the module — the dashboard policy has been copied in "
+            f"rather than attached, and it will drift from setup-aws.sh")
+    assert "aws_iam_role_policy_attachment" in _uncommented(_read("aws.tf"))
+
+
+def test_the_module_creates_no_azure_role_assignments():
+    # Same reasoning: setup-azure.sh owns the Azure grant set.
+    src = _uncommented(_read("azure.tf"))
+    assert "azurerm_role_assignment" not in src
+
+
+def test_the_module_does_not_create_the_azure_integration_app():
+    """Its client secret is the root of the Azure path and would land in state.
+
+    The target app's secret does not, because the BeyondTrust resource declares
+    client_secret write-only.
+    """
+    src = _uncommented(_read("azure.tf"))
+    assert "azuread_application_password" not in src
+    assert 'resource "azuread_application"' not in src
+
+
+# ── The outputs have to match real settings ──────────────────────────────────
+
+def test_the_output_settings_names_are_real_config_fields():
+    """The outputs tell an operator what to paste into the panel.
+
+    A key that does not exist in config.py sends them looking for a field that is not
+    there — and `get_bool` falls back to getattr(settings, ...), so a misspelt flag reads
+    as permanently False rather than erroring.
+    """
+    outputs = _uncommented(_read("outputs.tf"))
+    with open(os.path.join(_ROOT, "web_dashboard", "config.py"), encoding="utf-8") as fh:
+        config = fh.read()
+    for key in ("wlc_aws_enabled", "wlc_aws_folder", "wlc_aws_secret_name",
+                "wlc_aws_readonly_secret_name", "wlc_azure_enabled",
+                "wlc_azure_folder", "wlc_azure_secret_name"):
+        assert key in outputs, f"outputs.tf does not surface {key}"
+        assert f"{key}:" in config, f"{key} is not a config.py field"
+
+
+def test_the_secret_names_match_what_the_readme_and_outputs_agree_on():
+    # An operator copies the name from the output into the panel; a mismatch with what the
+    # module actually created is a 404 at mint time.
+    aws = _uncommented(_read("aws.tf"))
+    outputs = _uncommented(_read("outputs.tf"))
+    for name in ("dashboard-provision", "dashboard-everyday"):
+        assert f'name             = "{name}"' in aws, f"{name} is not created"
+        assert f'"{name}"' in outputs, f"{name} is not surfaced in the outputs"
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    failures = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"ok   {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f"FAIL {fn.__name__}: {e}")
+    print(f"\n{len(fns) - failures}/{len(fns)} passed")
+    sys.exit(1 if failures else 0)

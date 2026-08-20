@@ -170,6 +170,30 @@ presenting a stored one.
 
 ---
 
+## Provisioning the BeyondTrust side
+
+[`terraform/workload_credentials/`](../../terraform/workload_credentials/) creates the
+integration, the dynamic secrets, and the AWS IAM trust chain in one apply, and outputs
+the exact values to paste into the settings panel:
+
+```bash
+export BEYONDTRUST_ACCESS_TOKEN='<PAT minted with the target site selected>'
+export BEYONDTRUST_SITE_ID='<site GUID>'
+terraform -chdir=terraform/workload_credentials init
+terraform -chdir=terraform/workload_credentials apply
+```
+
+Worth using rather than the console, because four of the details fail in ways that do not
+name the field: the external ID (a required input, not a value the service hands back),
+`sts:TagSession` on both trust policies, `MaxSessionDuration` on the target role, and — on
+Azure — an app **Object** ID that is easy to confuse with a client ID.
+
+The module deliberately does **not** contain a copy of the dashboard's IAM policy or the
+Azure role assignments. `setup-aws.sh` and `setup-azure.sh` own those; a second definition
+would drift from them. See the module's README.
+
+---
+
 ## Setup
 
 1. Settings → **Preview features** → enable **Workload Credentials
