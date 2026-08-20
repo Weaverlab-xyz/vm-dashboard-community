@@ -4265,16 +4265,28 @@
               </div>
             </div>
             <div class="mt-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">AWS — read-only dynamic secret <span class="text-gray-400 font-normal">(optional)</span></label>
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS — everyday dynamic secret <span class="text-gray-400 font-normal">(optional)</span></label>
               <input type="text" x-model="panelCfg.wlc_aws_readonly_secret_name"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                     placeholder="dashboard-readonly">
+                     placeholder="dashboard-everyday">
               <p class="text-[11px] text-gray-400 mt-1">
-                Set this to split the credential by lifecycle: inventory and cost pages use the
-                read-only lease, and the provisioning lease is acquired only while a job runs. It
-                can point at the <strong>same role</strong> with a narrower session policy — that is
-                what removes standing write privilege between jobs. Leave blank to use the
-                provisioning secret for everything.
+                Set this to split the credential by lifecycle. Everything outside a job uses this
+                lease; the provisioning lease is minted only while a job runs and is never
+                pre-warmed, so <strong><code>iam:PassRole</code> and <code>iam:CreateRole</code>
+                are absent from the stored credential between jobs</strong> — which is the point
+                of the split.
+              </p>
+              <p class="text-[11px] text-amber-700 mt-1">
+                <strong>Not literally read-only</strong>, despite the setting name. The dashboard
+                writes on the request path too — editing a secret, uploading to storage,
+                re-tagging a VM, starting a container task. Its session policy needs those, and
+                only needs to <em>exclude</em> IAM. A strictly read-only policy here breaks the
+                Secrets and Storage pages.
+              </p>
+              <p class="text-[11px] text-gray-400 mt-1">
+                It can point at the <strong>same role</strong> as the provisioning secret with a
+                narrower session policy. Leave blank to use one lease for everything, which is
+                the default and changes nothing.
               </p>
             </div>
 

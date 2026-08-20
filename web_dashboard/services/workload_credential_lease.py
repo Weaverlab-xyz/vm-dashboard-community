@@ -41,12 +41,14 @@ released by the claim's own commit — it is never held across the provider call
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -88,6 +90,36 @@ _WAIT_POLL_SECONDS = 0.25
 
 _memo: dict = {}
 _memo_lock = threading.Lock()
+
+# Which purpose the current task needs. Empty means "decide from configuration".
+#
+# A context variable rather than a parameter because `aws_service._aws_kwargs` receives
+# only a region — it is called from ~50 sites and has no idea whether the caller is about
+# to describe an instance or terminate one. Threading an operation label through all of
+# them is the refactor this design exists to avoid; the job boundary is a seam the code
+# already understands.
+#
+# contextvars are snapshotted per Task at create_task time, so this must be entered
+# INSIDE the job's own task — see jobs_worker._run_job, which enters `correlation` there
+# for exactly the same reason. asyncio.to_thread copies the context, so the synchronous
+# credential lookups a job makes off the event loop inherit it.
+_purpose_ctx = contextvars.ContextVar("wlc_purpose", default="")
+
+
+@contextmanager
+def provisioning():
+    """Mark the current task as needing write privilege.
+
+    Everything outside such a block gets the everyday lease, which carries no IAM. That
+    is the point of the split: `iam:PassRole` and `iam:CreateRole` exist only while a job
+    is actually running, so a credential lifted from the lease row at an arbitrary moment
+    cannot escalate.
+    """
+    token = _purpose_ctx.set(PURPOSE_PROVISION)
+    try:
+        yield
+    finally:
+        _purpose_ctx.reset(token)
 
 
 class LeaseUnavailable(Exception):
@@ -145,6 +177,80 @@ def secret_name_for(cloud: str, purpose: str) -> str:
         return (_cfg(f"wlc_{cloud}_readonly_secret_name")
                 or _cfg(f"wlc_{cloud}_secret_name"))
     return _cfg(f"wlc_{cloud}_secret_name")
+
+
+def has_distinct_readonly(cloud: str) -> bool:
+    """Whether `cloud` has a read-only dynamic secret of its own."""
+    return bool(_cfg(f"wlc_{cloud}_readonly_secret_name"))
+
+
+def purposes_for(cloud: str) -> tuple:
+    """The purposes that warrant a lease of their own for `cloud`.
+
+    ``readonly`` appears only when its own dynamic secret is configured. Without one, a
+    caller asking for it is served the provisioning lease instead — one lease, one
+    issuance.
+
+    This is not a micro-optimisation. Minting a second lease from the *same* dynamic
+    secret under a different purpose label bills twice for one credential, and nothing
+    reads the copy. Iterating a static list of purposes here is exactly that bug, and it
+    is invisible: two rows appear, both refresh forever, and the only symptom is the
+    invoice.
+    """
+    if not dynamic_enabled(cloud) or not _cfg(f"wlc_{cloud}_secret_name"):
+        return ()
+    if has_distinct_readonly(cloud):
+        return (PURPOSE_PROVISION, PURPOSE_READONLY)
+    return (PURPOSE_PROVISION,)
+
+
+def default_purpose(cloud: str) -> str:
+    """The purpose to use when a caller did not name one.
+
+    ``provision`` inside a job (set by :func:`provisioning`), the everyday lease
+    otherwise. Before a second dynamic secret exists there is only one lease, so
+    everything resolves to ``provision`` and behaviour is exactly as it was — an operator
+    opts into the split by creating that secret, not by upgrading.
+    """
+    explicit = _purpose_ctx.get()
+    if explicit:
+        return explicit
+    return PURPOSE_READONLY if has_distinct_readonly(cloud) else PURPOSE_PROVISION
+
+
+def warm_purposes_for(cloud: str) -> tuple:
+    """The purposes the startup warmer and the periodic pass may pre-mint.
+
+    Deliberately NOT :func:`purposes_for`. Pre-minting ``provision`` would leave a
+    credential carrying `iam:PassRole` and `iam:CreateRole` in the row at all times,
+    which is the exact thing the split removes — warming it would defeat the feature
+    while looking like an optimisation.
+
+    So once a second secret exists, only the everyday lease is warmed; ``provision`` is
+    minted when a job starts and then allowed to expire. A job pays one HTTP round trip
+    at its start, which against a multi-minute deploy is nothing.
+
+    Note what this does NOT do: it does not revoke ``provision`` when the job ends. AWS
+    refuses early revocation, so the credential lives to its TTL regardless; dropping the
+    row early would only hide it from us, at the cost of a fresh billable issuance per
+    job rather than per TTL window. Eager release is available as further hardening if
+    the row at rest matters more than the issuance count.
+    """
+    configured = purposes_for(cloud)
+    if PURPOSE_READONLY in configured:
+        return (PURPOSE_READONLY,)
+    return configured
+
+
+def _effective_purpose(cloud: str, purpose: str) -> str:
+    """Collapse ``readonly`` onto ``provision`` when there is no distinct secret for it.
+
+    Applied before any row lookup, so the collapsed pair share one row rather than
+    silently duplicating one.
+    """
+    if purpose == PURPOSE_READONLY and not has_distinct_readonly(cloud):
+        return PURPOSE_PROVISION
+    return purpose
 
 
 def folder_for(cloud: str) -> str:
@@ -374,7 +480,7 @@ def invalidate(cloud: str = "", purpose: str = "") -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def credentials(cloud: str, purpose: str = PURPOSE_PROVISION) -> Optional[dict]:
+def credentials(cloud: str, purpose: str = "") -> Optional[dict]:
     """The credential values for `cloud`, or None when it is not on the dynamic tier.
 
     None means "use the static credential" and is the normal answer for most deployments.
@@ -388,6 +494,7 @@ def credentials(cloud: str, purpose: str = PURPOSE_PROVISION) -> Optional[dict]:
     if not dynamic_enabled(cloud):
         return None
 
+    purpose = _effective_purpose(cloud, purpose or default_purpose(cloud))
     now = _utcnow()
     hit = _memo_get(cloud, purpose, now)
     if hit is not None:
@@ -411,6 +518,7 @@ def refresh(cloud: str, purpose: str = PURPOSE_PROVISION, *, force: bool = False
     """
     if not dynamic_enabled(cloud):
         return False
+    purpose = _effective_purpose(cloud, purpose)
     name = secret_name_for(cloud, purpose)
     if not name:
         return False
@@ -510,7 +618,7 @@ def _unavailable_reason(cloud: str, purpose: str, snap) -> str:
     return f"no usable {cloud} credential for {purpose} and none could be minted"
 
 
-def aws_subprocess_env(purpose: str = PURPOSE_PROVISION):
+def aws_subprocess_env(purpose: str = ""):
     """``AWS_*`` env vars for a subprocess, or None when AWS is not on the dynamic tier.
 
     One helper for terraform (both the provider and the S3 state backend) and Packer,

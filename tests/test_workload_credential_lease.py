@@ -332,6 +332,185 @@ def test_the_model_exists_with_the_documented_key():
     assert "claim_until" in src and "claim_owner" in src
 
 
+# ── Purpose collapsing (the duplicate-issuance bug) ──────────────────────────
+#
+# Iterating a static PURPOSES list minted a second lease from the SAME dynamic secret
+# under a different label. Two rows, both refreshing forever, nothing reading the copy,
+# and the only symptom is the invoice. These tests exist so that cannot come back.
+
+def test_no_purposes_when_the_cloud_is_not_on_the_dynamic_tier():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
+    assert lease.purposes_for("aws") == ()
+
+
+def test_no_purposes_when_no_dynamic_secret_is_named():
+    _stub_cfg(flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.purposes_for("aws") == ()
+
+
+def test_only_provision_when_there_is_no_distinct_readonly_secret():
+    # The bug: this used to return both, and the readonly one resolved to the SAME
+    # dynamic secret name — a second billable issuance for one credential.
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.purposes_for("aws") == (lease.PURPOSE_PROVISION,)
+
+
+def test_both_purposes_once_a_readonly_secret_is_configured():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision",
+                      "wlc_aws_readonly_secret_name": "dashboard-readonly"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.purposes_for("aws") == (lease.PURPOSE_PROVISION, lease.PURPOSE_READONLY)
+
+
+def test_readonly_collapses_onto_provision_without_its_own_secret():
+    # So both labels share ONE row rather than duplicating it.
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
+    assert lease._effective_purpose("aws", lease.PURPOSE_READONLY) == lease.PURPOSE_PROVISION
+
+
+def test_readonly_stays_itself_once_it_has_its_own_secret():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision",
+                      "wlc_aws_readonly_secret_name": "dashboard-readonly"})
+    assert lease._effective_purpose("aws", lease.PURPOSE_READONLY) == lease.PURPOSE_READONLY
+
+
+def test_provision_never_collapses():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
+    assert lease._effective_purpose("aws", lease.PURPOSE_PROVISION) == lease.PURPOSE_PROVISION
+
+
+def test_the_refresh_loops_iterate_configured_purposes_not_the_constant():
+    """The guard on the actual bug.
+
+    Both the startup warmer and the worker pass looped over the PURPOSES constant, which
+    is what produced the duplicate lease. They must ask which purposes are configured.
+    """
+    for parts in (("web_dashboard", "main.py"),
+                  ("web_dashboard", "jobs_worker.py")):
+        src = _read(*parts)
+        assert "purposes_for(cloud)" in src, f"{parts[-1]} does not use purposes_for"
+        assert "in leases.PURPOSES" not in src, (
+            f"{parts[-1]} still iterates the PURPOSES constant, which mints a duplicate "
+            f"lease when no distinct readonly secret is configured")
+
+
+# ── The job boundary (Phase 2b) ──────────────────────────────────────────────
+#
+# `_aws_kwargs` receives only a region, so the purpose cannot be a parameter. A context
+# variable entered at the job boundary is the seam; these tests pin the semantics that
+# make it safe, above all that nothing changes until a second dynamic secret exists.
+
+def test_without_a_second_secret_everything_resolves_to_provision():
+    """The no-op guarantee.
+
+    An operator opts into the split by creating a second dynamic secret, never by
+    upgrading. Until then there is one lease and it serves everything.
+    """
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.default_purpose("aws") == lease.PURPOSE_PROVISION
+    with lease.provisioning():
+        assert lease.default_purpose("aws") == lease.PURPOSE_PROVISION
+
+
+def test_with_a_second_secret_the_request_path_gets_the_everyday_lease():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision",
+                      "wlc_aws_readonly_secret_name": "dashboard-everyday"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.default_purpose("aws") == lease.PURPOSE_READONLY
+
+
+def test_inside_a_job_the_purpose_is_provision():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision",
+                      "wlc_aws_readonly_secret_name": "dashboard-everyday"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    with lease.provisioning():
+        assert lease.default_purpose("aws") == lease.PURPOSE_PROVISION
+
+
+def test_the_provisioning_marker_is_unset_on_the_way_out():
+    # A leaked token would give every later request write privilege — the exact opposite
+    # of the feature.
+    _stub_cfg(values={"wlc_aws_secret_name": "p", "wlc_aws_readonly_secret_name": "e"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    with lease.provisioning():
+        pass
+    assert lease.default_purpose("aws") == lease.PURPOSE_READONLY
+
+
+def test_the_marker_is_unset_even_when_the_job_raises():
+    _stub_cfg(values={"wlc_aws_secret_name": "p", "wlc_aws_readonly_secret_name": "e"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    try:
+        with lease.provisioning():
+            raise RuntimeError("job blew up")
+    except RuntimeError:
+        pass
+    assert lease.default_purpose("aws") == lease.PURPOSE_READONLY
+
+
+def test_nesting_restores_the_outer_value():
+    _stub_cfg(values={"wlc_aws_secret_name": "p", "wlc_aws_readonly_secret_name": "e"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    with lease.provisioning():
+        with lease.provisioning():
+            assert lease.default_purpose("aws") == lease.PURPOSE_PROVISION
+        assert lease.default_purpose("aws") == lease.PURPOSE_PROVISION
+    assert lease.default_purpose("aws") == lease.PURPOSE_READONLY
+
+
+# ── What the warmer may pre-mint ─────────────────────────────────────────────
+
+def test_the_warmer_never_pre_mints_provision_once_the_split_is_on():
+    """The whole security payoff.
+
+    Pre-minting `provision` would leave a credential carrying iam:PassRole and
+    iam:CreateRole sitting in the row at all times — defeating the split while looking
+    like a harmless optimisation.
+    """
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision",
+                      "wlc_aws_readonly_secret_name": "dashboard-everyday"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.warm_purposes_for("aws") == (lease.PURPOSE_READONLY,)
+
+
+def test_the_warmer_still_warms_the_single_lease_when_there_is_no_split():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.warm_purposes_for("aws") == (lease.PURPOSE_PROVISION,)
+
+
+def test_nothing_is_warmed_for_a_cloud_not_on_the_dynamic_tier():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
+    assert lease.warm_purposes_for("aws") == ()
+
+
+def test_the_warmer_and_the_worker_use_warm_purposes_not_all_purposes():
+    """The guard on the payoff.
+
+    Swapping this back to purposes_for would silently restore a standing
+    write-privileged credential, with no error and no visible symptom.
+    """
+    for parts in (("web_dashboard", "main.py"), ("web_dashboard", "jobs_worker.py")):
+        src = _read(*parts)
+        assert "warm_purposes_for(cloud)" in src, f"{parts[-1]} pre-mints too much"
+        assert "leases.purposes_for(cloud)" not in src
+
+
+def test_the_job_runner_enters_the_provisioning_scope():
+    # And inside _run_job, not the supervisor: contextvars snapshot per Task, so entering
+    # it in the loop body would tag whichever job happened to be starting.
+    src = _read("web_dashboard", "jobs_worker.py")
+    body = src.split("async def _run_job", 1)[1].split("\nasync def ", 1)[0]
+    assert "with _wlc_provisioning():" in body
+    # Scoped to the dispatch, not the whole task: the heartbeat is created before it and
+    # must not inherit write privilege. Also keeps `with correlation(job_id):` a single
+    # statement, which test_worker_tiers pins literally.
+    assert "with correlation(job_id):" in body
+    assert "with correlation(job_id), _wlc_provisioning():" not in body
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
