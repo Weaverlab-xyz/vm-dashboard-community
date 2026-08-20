@@ -77,7 +77,14 @@ presenting a stored one.
    holds after signing in to Pathfinder.
 3. **A personal access token** — Pathfinder → **Manage Profile → Personal
    Access Tokens → Create Token**. Copy it immediately; it is not retrievable
-   later. A PAT is scoped to a **single site**.
+   later.
+
+   > **Switch to the target site *before* creating the token.** A PAT is scoped
+   > to whichever site was selected when you minted it, and there is currently no
+   > way to widen it (multi-site PATs are still in flight). It is easy to mint one
+   > while the Pathfinder admin tenant is selected rather than the site you
+   > actually want — and the resulting failure does not look like a scoping
+   > problem. See [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -101,6 +108,63 @@ so an existing secret can be migrated to WC from the Secrets page.
 > the dashboard reaches WC in the first place, so storing it there would make
 > the backend unreadable without itself. The migration UI refuses this
 > explicitly.
+
+---
+
+## Verifying from the command line
+
+Worth doing before configuring the dashboard: it isolates a credential problem
+from a dashboard problem, and static operations are unmetered so it costs
+nothing.
+
+```bash
+read -rsp 'WLC PAT: ' WLC_PAT; echo; export WLC_PAT
+export WLC_SITE_ID='<your-site-guid>'
+```
+
+`GET /session` validates the token, the site and the API version in one call,
+without creating anything:
+
+```bash
+curl -sS -o /dev/null -w 'session: %{http_code}\n' "https://api.beyondtrust.io/site/$WLC_SITE_ID/secrets/session" -H "Authorization: Bearer $WLC_PAT" -H "bt-secrets-api-version: 2026-04-28"
+```
+
+`200` means you are good to configure the dashboard. To also prove write access:
+
+```bash
+curl -sS -X POST "https://api.beyondtrust.io/site/$WLC_SITE_ID/secrets/static/wlc-probe?folder=dashboard" -H "Authorization: Bearer $WLC_PAT" -H "bt-secrets-api-version: 2026-04-28" -H 'Content-Type: application/json' -d '{"secret":{"username":"u","password":"p"}}'
+```
+
+`201` and an echoed `{"metadata": {...}, "secret": {...}}` is success. Clean up
+with `DELETE` on the same path.
+
+## Troubleshooting
+
+**`401` with `{"error":"Access denied for this site"}`**
+
+The token authenticated but is not authorized for the site in the URL. In order
+of likelihood:
+
+1. **The PAT is scoped to a different site than the one you are calling.** This
+   is by far the most common cause, and the wording is misleading — it reads like
+   the site is missing the application. Minting a token while the *Pathfinder
+   admin tenant* is selected, rather than the site itself, produces exactly this.
+   Re-mint with the target site selected.
+2. **The site does not have Workload Credentials provisioned.** Confirm by
+   switching to it in Pathfinder and looking for the application tile. If there
+   is no tile, raise the IT Help ticket in [Prerequisites](#prerequisites).
+3. **Your account has no Workload Credentials role on that site.** Authentication
+   and authorization are separate here; a valid token with no role assignment
+   fails consistently rather than intermittently.
+
+Note what this error is *not*: an invalid or expired token reports
+`Invalid access token` / plain `401 Unauthorized` instead, so the wording does
+distinguish the two cases once you know to look.
+
+**A TLS or certificate error rather than an HTTP status** — that is your own
+egress path, not the API. Behind a TLS-inspecting corporate proxy you need the
+corporate root CA in the trust store of whatever is making the call (including
+the dashboard container — see the `--corp-ca` overlay).
 
 ---
 
