@@ -93,14 +93,20 @@ def _backend_settings(deploy_dir: str):
             "key": key,
             "use_azuread_auth": "true",
         }
-        env = {}
-        for ck, ak in (("azure_client_id", "ARM_CLIENT_ID"),
-                       ("azure_client_secret", "ARM_CLIENT_SECRET"),
-                       ("azure_tenant_id", "ARM_TENANT_ID"),
-                       ("azure_subscription_id", "ARM_SUBSCRIPTION_ID")):
-            v = _cfg(ck)
-            if v:
-                env[ak] = v
+        # Same split-failure risk as the S3 backend above: the state backend
+        # authenticates separately from the provider, and `use_azuread_auth` means it
+        # authenticates at all. Wire only the provider and `terraform init` fails while
+        # API calls succeed.
+        from . import workload_credential_lease as _leases
+        env = _leases.azure_subprocess_env() or {}
+        if not env:
+            for ck, ak in (("azure_client_id", "ARM_CLIENT_ID"),
+                           ("azure_client_secret", "ARM_CLIENT_SECRET"),
+                           ("azure_tenant_id", "ARM_TENANT_ID"),
+                           ("azure_subscription_id", "ARM_SUBSCRIPTION_ID")):
+                v = _cfg(ck)
+                if v:
+                    env[ak] = v
         return ("azurerm", cfg, env)
 
     if backend == "gcs":

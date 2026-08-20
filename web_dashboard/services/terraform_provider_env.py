@@ -51,6 +51,10 @@ def gcp_env() -> Optional[dict]:
 def azure_env() -> Optional[dict]:
     """Azure provider creds via the ARM_* env vars; ``None`` when unset →
     terraform falls back to the container env / az CLI auth."""
+    from . import workload_credential_lease as leases
+    dynamic = leases.azure_subprocess_env()
+    if dynamic:
+        return dynamic
     env: dict = {}
     for cfg_key, arm_key in (
         ("azure_client_id", "ARM_CLIENT_ID"),

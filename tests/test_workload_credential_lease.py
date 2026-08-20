@@ -511,6 +511,130 @@ def test_the_job_runner_enters_the_provisioning_scope():
     assert "with correlation(job_id), _wlc_provisioning():" not in body
 
 
+# ── Azure (Phase 3) ──────────────────────────────────────────────────────────
+#
+# The asymmetry that makes Azure different from AWS: Workload Credentials mints a
+# password onto an app registration and has no idea which SUBSCRIPTION the dashboard
+# targets, so the lease is incomplete on its own. Miss that and you build a client that
+# authenticates fine and then acts on nothing.
+
+def _stub_azure_lease(values, subscription=""):
+    """Point `credentials` at a fixed Azure lease and config at a subscription."""
+    original = lease.credentials
+    lease.credentials = lambda cloud, purpose="": values if cloud == "azure" else None
+    lease._cfg = lambda key, default="": (subscription if key == "azure_subscription_id"
+                                          else default)
+    return original
+
+
+AZURE_LEASE = {"client_id": "cid", "client_secret": "csec", "tenant_id": "tid",
+               "key_id": "kid"}
+
+
+def test_the_azure_quad_takes_its_subscription_from_config():
+    original = _stub_azure_lease(AZURE_LEASE, subscription="sub-123")
+    try:
+        quad = lease.azure_credentials()
+    finally:
+        lease.credentials = original
+    assert quad == {"client_id": "cid", "client_secret": "csec",
+                    "tenant_id": "tid", "subscription_id": "sub-123"}
+
+
+def test_a_missing_subscription_raises_rather_than_returning_three_quarters():
+    """A credential with no subscription authenticates and then acts on nothing.
+
+    Returning the triple and letting the SDK fail later would surface as a confusing
+    permissions or not-found error a long way from the cause.
+    """
+    original = _stub_azure_lease(AZURE_LEASE, subscription="")
+    try:
+        lease.azure_credentials()
+    except lease.LeaseUnavailable as exc:
+        assert "azure_subscription_id" in str(exc)
+    else:
+        raise AssertionError("expected LeaseUnavailable")
+    finally:
+        lease.credentials = original
+
+
+def test_the_azure_quad_is_none_when_azure_is_not_on_the_dynamic_tier():
+    original = lease.credentials
+    lease.credentials = lambda cloud, purpose="": None
+    try:
+        assert lease.azure_credentials() is None
+        assert lease.azure_subprocess_env() is None
+    finally:
+        lease.credentials = original
+
+
+def test_the_azure_subprocess_env_carries_all_four_arm_variables():
+    # Three copies of this mapping existed before it was shared; each was a chance to
+    # omit one, and an absent ARM_SUBSCRIPTION_ID fails inside terraform, not here.
+    original = _stub_azure_lease(AZURE_LEASE, subscription="sub-123")
+    try:
+        env = lease.azure_subprocess_env()
+    finally:
+        lease.credentials = original
+    assert env == {"ARM_CLIENT_ID": "cid", "ARM_CLIENT_SECRET": "csec",
+                   "ARM_TENANT_ID": "tid", "ARM_SUBSCRIPTION_ID": "sub-123"}
+
+
+# ── The Azure credential sites ───────────────────────────────────────────────
+
+def test_all_four_azure_credential_sites_consult_the_lease():
+    """The drift guard, matching the AWS one.
+
+    `aks_get_token` is the one that bites: it deliberately bypasses `_ensure_creds`
+    because the sync k8s-runner path cannot await, so wiring only `_ensure_creds` leaves
+    the runner silently using a static credential the operator may have retired.
+    """
+    checks = [
+        (("web_dashboard", "services", "azure_service.py"), "workload_credential_lease"),
+        (("web_dashboard", "services", "terraform_provider_env.py"), "azure_subprocess_env"),
+        (("web_dashboard", "services", "terraform.py"), "azure_subprocess_env"),
+        (("web_dashboard", "services", "packer_build_service.py"), "azure_credentials"),
+    ]
+    for parts, needle in checks:
+        assert needle in _read(*parts), f"{parts[-1]} does not consult the lease for Azure"
+
+
+def test_aks_get_token_resolves_the_dynamic_tier_itself():
+    src = _read("web_dashboard", "services", "azure_service.py")
+    body = src.split("def aks_get_token", 1)[1].split("\ndef ", 1)[0]
+    assert "_resolve_azure_credentials_sync()" in body
+
+
+def test_the_azure_credential_cache_is_keyed_on_the_material():
+    """It used to rebuild only on explicit invalidation, with no expiry at all.
+
+    Survivable while every source was long-lived; wrong for a credential that expires in
+    1-24 hours, since the process would pin a dead secret until restart — and
+    invalidate_credentials is process-local, so a sibling worker would keep its own dead
+    copy regardless.
+    """
+    src = _read("web_dashboard", "services", "azure_service.py")
+    assert "_cred_key" in src
+    body = src.split("async def _ensure_creds", 1)[1].split("\ndef ", 1)[0]
+    assert "_cred_key != key" in body
+    # And it must not go back to the populated-only check.
+    assert "if _cred_cache is None:" not in body
+
+
+def test_the_azure_resolver_runs_on_azures_own_pool():
+    """Off the event loop, but NOT on the shared default executor.
+
+    The dynamic rung is a memo hit in the common case and mints over HTTP on a cold
+    start, so it cannot run inline. It also cannot run on `asyncio.to_thread`: that pool
+    is eight slots for the whole application, and saturating it is the 30-minute outage
+    the per-cloud pools were introduced to prevent. test_cloud_executor pins this too.
+    """
+    src = _read("web_dashboard", "services", "azure_service.py")
+    body = src.split("async def _ensure_creds", 1)[1].split("\ndef ", 1)[0]
+    assert "await _to_thread(" in body
+    assert "asyncio.to_thread" not in body
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

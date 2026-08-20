@@ -283,10 +283,15 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         build_dir.mkdir(parents=True, exist_ok=True)
 
         # Azure credentials
-        client_id = _cfg("azure_client_id")
-        client_secret = _cfg("azure_client_secret")
-        tenant_id = _cfg("azure_tenant_id")
-        subscription_id = _cfg("azure_subscription_id")
+        # The dynamic tier first. Packer gets the credential wired into the template
+        # rather than the environment (see the PKR_VAR_* block below), so a lease has to
+        # be resolved here explicitly — there is no ambient path it could fall back to.
+        from .workload_credential_lease import azure_credentials as _wlc_azure
+        _quad = _wlc_azure() or {}
+        client_id = _quad.get("client_id") or _cfg("azure_client_id")
+        client_secret = _quad.get("client_secret") or _cfg("azure_client_secret")
+        tenant_id = _quad.get("tenant_id") or _cfg("azure_tenant_id")
+        subscription_id = _quad.get("subscription_id") or _cfg("azure_subscription_id")
         resource_group = _cfg("azure_resource_group") or "dashboard-rg"
         location = _cfg("azure_location") or "centralus"
 

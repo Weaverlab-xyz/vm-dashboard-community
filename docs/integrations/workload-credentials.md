@@ -24,7 +24,7 @@ cares about:
 | Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented, verified live** |
 | Dynamic AWS credentials for the dashboard's own cloud calls | **Implemented** — not yet exercised against a live dynamic secret |
 | Splitting AWS into an everyday and a provisioning lease | **Implemented** — opt-in, not yet exercised live |
-| Dynamic Azure credentials | Planned |
+| Dynamic Azure credentials | **Implemented** — not yet exercised against a live dynamic secret |
 | In-cluster workload identity (a pod federating its ServiceAccount token) | Planned |
 
 The static-secret backend was deliberately first: it exercises the site, token
@@ -84,6 +84,29 @@ One thing it deliberately does not do: it does not revoke the provisioning lease
 job ends. AWS refuses early revocation, so that credential lives to its TTL regardless;
 dropping the row early would only hide it from the dashboard, at the cost of a fresh
 billable issuance per job rather than per TTL window.
+
+### How Azure differs
+
+Same lease machinery, three differences worth knowing before you enable it:
+
+- **The lease does not carry a subscription.** Workload Credentials mints a password
+  onto an app registration; it has no idea which subscription the dashboard targets, so
+  `azure_subscription_id` still comes from configuration. A lease without it is refused
+  rather than used, because a credential that authenticates and then acts on nothing
+  fails a long way from the cause.
+- **Azure leases *are* revocable**, unlike AWS. Each renewal releases the previous one,
+  which matters here in a way it does not for AWS: every mint adds a
+  `passwordCredential` to the target app registration, and app registrations cap them.
+  Skip the release and you eventually cannot mint at all.
+- **TTL is 1–24 hours** (AWS is 15 minutes to 12 hours, further capped by the role's
+  `MaxSessionDuration`).
+
+The in-process credential cache is keyed on the credential **material**, so a re-minted
+or rotated secret is picked up on the next call. It previously rebuilt only when the
+setup wizard explicitly invalidated it, which was survivable while every source was
+long-lived and wrong for one that expires — the process would have pinned a dead secret
+until restart, and that invalidation is process-local so a sibling worker would have kept
+its own dead copy anyway.
 
 If AWS is on the dynamic tier and no lease can be issued, cloud calls **fail**
 rather than falling back to a static key. That is deliberate: an operator who has

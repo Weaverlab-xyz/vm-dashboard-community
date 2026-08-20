@@ -97,20 +97,54 @@ def _require_azure():
 
 _cred_cache: Optional["ClientSecretCredential"] = None
 _sub_id_cache: Optional[str] = None
+# The material the cached credential was built from. Comparing it is what lets the cache
+# expire — see _ensure_creds.
+_cred_key: Optional[tuple] = None
+
+
+def _resolve_azure_credentials_sync() -> tuple:
+    """(client_id, client_secret, tenant_id, subscription_id, source), or the dynamic tier.
+
+    Split out of :func:`_ensure_creds` and synchronous so the Workload Credentials rung —
+    which may block on an HTTP mint — can be pushed off the event loop by the caller.
+    Returns ``(None, ..., None)`` when Azure is not on the dynamic tier, and the caller
+    falls through to the static ladder.
+    """
+    from . import workload_credential_lease as leases
+    quad = leases.azure_credentials()
+    if not quad:
+        return (None, None, None, None, "")
+    return (quad["client_id"], quad["client_secret"], quad["tenant_id"],
+            quad["subscription_id"], "Workload Credentials")
 
 
 async def _ensure_creds() -> tuple:
     """Return (ClientSecretCredential, subscription_id).
 
-    Priority: config_service (DB / wizard) → env vars (settings) → BeyondTrust.
-    Result is cached in-process; call invalidate_credentials() after a wizard update.
-    """
-    global _cred_cache, _sub_id_cache
-    _require_azure()
-    if _cred_cache is None:
-        from ..config import settings
-        from . import config_service
+    Priority: Workload Credentials lease → config_service (DB / wizard) → env vars →
+    BeyondTrust Password Safe.
 
+    **The cache is keyed on the credential material, not merely on being populated.**
+    It used to rebuild only when explicitly invalidated, which was survivable while every
+    source was long-lived but is wrong for a minted credential that expires in 1–24 hours:
+    the process would pin a dead secret until restart, and `invalidate_credentials()` is
+    process-local so a sibling gunicorn worker would keep its own dead copy regardless.
+    Comparing the material means a rotated or re-minted credential is picked up on the
+    next call, and it fixes wizard rotation for free.
+    """
+    global _cred_cache, _sub_id_cache, _cred_key
+    _require_azure()
+
+    # Off the event loop, on AZURE's pool rather than the shared default executor: the
+    # dynamic rung is a memo hit in the common case, but a cold start mints over HTTP, and
+    # saturating the shared 8-slot pool is the outage test_cloud_executor exists to
+    # prevent.
+    from ..config import settings
+    from . import config_service
+    client_id, client_secret, tenant_id, sub_id, source = await _to_thread(
+        _resolve_azure_credentials_sync)
+
+    if not client_id:
         # Config_service (DB) takes precedence; fall back to env vars via settings.
         client_id     = config_service.get("azure_client_id")     or settings.azure_client_id
         client_secret = config_service.get("azure_client_secret") or settings.azure_client_secret
@@ -140,21 +174,30 @@ async def _ensure_creds() -> tuple:
                 "AZURE_SUBSCRIPTION_ID in your .env file."
             )
 
+    key = (client_id, client_secret, tenant_id, sub_id)
+    if _cred_cache is None or _cred_key != key:
         _cred_cache = ClientSecretCredential(
             tenant_id=tenant_id,
             client_id=client_id,
             client_secret=client_secret,
         )
         _sub_id_cache = sub_id
+        _cred_key = key
         logger.info("Azure credentials loaded from %s.", source)
     return _cred_cache, _sub_id_cache
 
 
 def invalidate_credentials() -> None:
-    """Force re-fetch of Azure credentials on next call (use after credential rotation)."""
-    global _cred_cache, _sub_id_cache
+    """Force re-fetch of Azure credentials on next call (use after credential rotation).
+
+    Still called from the setup wizard. Largely redundant now that _ensure_creds compares
+    the material — and it always was process-local, so it never reached a sibling worker.
+    Kept because clearing on an explicit save is cheap and makes the intent obvious.
+    """
+    global _cred_cache, _sub_id_cache, _cred_key
     _cred_cache = None
     _sub_id_cache = None
+    _cred_key = None
     logger.info("Azure credential cache cleared.")
 
 
@@ -180,9 +223,15 @@ def aks_get_token(server_id: str = AKS_AAD_SERVER_APP_ID) -> str:
     _require_azure()
     from ..config import settings
     from . import config_service
-    client_id     = config_service.get("azure_client_id")     or settings.azure_client_id
-    client_secret = config_service.get("azure_client_secret") or settings.azure_client_secret
-    tenant_id     = config_service.get("azure_tenant_id")     or settings.azure_tenant_id
+    # The dynamic tier first. Already synchronous here, so no thread hop is needed — and
+    # missing this rung is how the k8s runner path would silently keep using a static
+    # credential the operator had retired, since this function deliberately does not go
+    # through _ensure_creds.
+    client_id, client_secret, tenant_id, _sub, _src = _resolve_azure_credentials_sync()
+    if not client_id:
+        client_id     = config_service.get("azure_client_id")     or settings.azure_client_id
+        client_secret = config_service.get("azure_client_secret") or settings.azure_client_secret
+        tenant_id     = config_service.get("azure_tenant_id")     or settings.azure_tenant_id
     if client_id and client_secret and tenant_id:
         cred = ClientSecretCredential(
             tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
