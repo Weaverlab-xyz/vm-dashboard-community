@@ -539,6 +539,81 @@ def test_the_live_metadata_response_is_flat():
     assert fn(observed) == "2026-08-20T15:16:10.140955Z"
 
 
+# ── List entries, as observed live ───────────────────────────────────────────
+#
+# A live entry carries ONLY `path` — no `name`, no `folder` — with timestamps nested
+# under `metadata`. Deriving the folder from config instead of from the path is correct
+# only by coincidence for a top-level secret, and wrong for anything in a sub-folder,
+# which listing returns because it is recursive.
+
+LIVE_LIST_ENTRY = {"metadata": {"createdAt": "2026-08-20T15:16:10.140955Z",
+                                "id": "cc407dd9-3314-4571-9f53-279d952019ac",
+                                "tags": {}, "version": 1},
+                   "path": "dashboard/wlc-probe",
+                   "type": "static"}
+
+
+def _backend_mod():
+    """secrets_backend_service, loaded by file path (stdlib-only top-level imports)."""
+    import importlib.util
+    path = os.path.join(_ROOT, "web_dashboard", "services", "secrets_backend_service.py")
+    spec = importlib.util.spec_from_file_location("secrets_backend_service_list", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_live_list_entry_yields_name_folder_and_ref_from_the_path():
+    """The exact body a live GET /static?recursive=true returned.
+
+    `path` is the reference; everything else is derived from it, because the entry has no
+    name and no folder of its own.
+    """
+    mod = _backend_mod()
+    folder, name = mod._wlc_split(LIVE_LIST_ENTRY["path"])
+    assert folder == "dashboard"
+    assert name == "wlc-probe"
+    assert mod._wlc_timestamp(LIVE_LIST_ENTRY) == "2026-08-20T15:16:10.140955Z"
+
+
+def test_a_subfolder_path_keeps_its_full_folder():
+    """The case that made deriving the folder from config wrong.
+
+    Listing is recursive, so a secret two levels down comes back too. Taking the folder
+    from config would report it as `dashboard/x`, and every later read of it would 404.
+    """
+    mod = _backend_mod()
+    folder, name = mod._wlc_split("dashboard/sub/deeper/x")
+    assert folder == "dashboard/sub/deeper"
+    assert name == "x"
+
+
+def test_a_root_level_path_has_no_folder():
+    mod = _backend_mod()
+    folder, name = mod._wlc_split("just-a-name")
+    assert folder == ""
+    assert name == "just-a-name"
+
+
+def test_list_wlc_reads_path_and_never_name_or_folder():
+    # The guard. The live entry has no `name` and no `folder` key at all, so an
+    # implementation relying on either returns nothing (or a wrong ref) and the page
+    # looks empty rather than erroring.
+    src = _read("web_dashboard", "services", "secrets_backend_service.py")
+    body = src.split("def list_wlc", 1)[1].split("\ndef ", 1)[0]
+    assert 'entry.get("path")' in body
+    assert 'entry.get("name")' not in body
+    assert 'entry.get("folder")' not in body
+
+
+def test_list_wlc_skips_entries_that_are_not_static():
+    # A dynamic secret handed to a reader that decodes it as a stored value would be a
+    # billable mint at best and a confusing failure at worst.
+    src = _read("web_dashboard", "services", "secrets_backend_service.py")
+    body = src.split("def list_wlc", 1)[1].split("\ndef ", 1)[0]
+    assert '"static"' in body
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

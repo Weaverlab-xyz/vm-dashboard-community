@@ -700,22 +700,38 @@ def describe_wlc(ref: str, vault_id: str | None = None):
 
 
 def list_wlc() -> list:
+    """List secrets under the configured folder.
+
+    A live list entry carries **only** ``path`` — there is no ``name`` and no ``folder``
+    field, and its timestamps are nested under ``metadata``::
+
+        {"metadata": {"createdAt": ..., "id": ..., "version": 1},
+         "path": "dashboard/wlc-probe", "type": "static"}
+
+    So ``path`` is the reference, and the folder is split back out of it rather than taken
+    from config. That distinction only shows up with sub-folders: listing is recursive, so
+    a secret at ``dashboard/sub/x`` would otherwise be reported as ``dashboard/x`` and
+    every subsequent read of it would 404.
+    """
     from . import workload_credentials_service as wlc
-    folder = _wlc_cfg()
     out: list = []
-    for entry in wlc.list_static(folder=folder):
+    for entry in wlc.list_static(folder=_wlc_cfg()):
         if not isinstance(entry, dict):
             continue
-        name = entry.get("name") or entry.get("path", "").rstrip("/").rpartition("/")[2]
-        if not name:
+        # The route is /static, but skip anything that says otherwise rather than handing
+        # a dynamic secret to a reader that would try to decode it as a stored value.
+        if entry.get("type") not in (None, "", "static"):
             continue
-        entry_folder = entry.get("folder") or folder
+        path = (entry.get("path") or "").strip("/")
+        if not path:
+            continue
+        folder, name = _wlc_split(path)
         out.append({
             "name":        name,
-            "folder":      entry_folder,
+            "folder":      folder,
             "description": entry.get("description", ""),
             "updated_at":  _wlc_timestamp(entry) or "",
-            "ref":         f"{entry_folder}/{name}".strip("/"),
+            "ref":         path,
         })
     return out
 
