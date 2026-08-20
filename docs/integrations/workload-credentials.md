@@ -1,0 +1,241 @@
+# BeyondTrust Workload Credentials
+
+> **Preview — the product is pre-GA.** Workload Credentials reaches general
+> availability on **2026-10-14** (engineering code freeze 2026-09-14) and has
+> already shipped one breaking API change. It is gated behind a **preview flag**
+> (Settings → Preview features) and is off by default. Nothing about your
+> existing credentials changes until you turn it on.
+
+Workload Credentials (WC; codename *SMoP*, "Secrets Manager on Platform") is
+BeyondTrust's cloud-native secrets product. It does two things the dashboard
+cares about:
+
+- **Static secrets** — a versioned key/value store with folders, usable as a
+  secrets backend alongside AWS Secrets Manager, Azure Key Vault, GCP Secret
+  Manager and BeyondTrust Secrets Safe. Free and unmetered.
+- **Dynamic secrets** — mints **short-lived** AWS and Azure credentials on
+  demand, so the dashboard stops holding a standing cloud secret at all.
+
+---
+
+## What is implemented today
+
+| Capability | Status |
+|---|---|
+| Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented** |
+| Dynamic AWS credentials for the dashboard's own cloud calls | Planned — see [the design](../design/cloud-identity-jit.md) and the roadmap below |
+| Dynamic Azure credentials | Planned |
+| In-cluster workload identity (a pod federating its ServiceAccount token) | Planned |
+
+The static-secret backend is deliberately first: it exercises the site, token
+and API version end to end **without incurring a metered credential issuance**,
+so a misconfiguration surfaces before anything bills.
+
+---
+
+## This is a choice, not a migration
+
+The dashboard has three credential postures, and they coexist. Each cloud
+selects its own:
+
+| Posture | What holds the cloud credential | Requires |
+|---|---|---|
+| **Static** (default) | encrypted `app_config`, or an external vault reference | nothing — no BeyondTrust licence |
+| **Static + Entitle machine gate** | the same key, privilege elevated per operation | an Entitle tenant + agent |
+| **Dynamic (WC)** | nothing standing — minted per lease | a Pathfinder site with WC enabled |
+
+Turning WC on is what *unlocks* retiring **your** static credentials. It never
+retires them for anyone else, and never as a side effect of an upgrade. See
+[Secrets management](../secrets-management.md) for the wider tiered model.
+
+**GCP is absent on purpose.** WC mints AWS and Azure credentials only, so a GCP
+deployment stays on the static tier. A mixed install — say AWS dynamic, Azure
+dynamic, GCP static — is the normal case, not a gap.
+
+### Be clear about what this buys
+
+The dashboard still needs one long-lived credential — the WC **personal access
+token** — to call the API. So the honest claim is not "no static secrets":
+
+> Three standing cloud credentials carrying `ec2:*` / `Contributor` /
+> `Compute Admin` collapse into **one platform PAT**, and the cloud credentials
+> themselves become short-lived, per-lease, and auditable.
+
+The in-cluster path is the one that can reach genuinely zero standing
+credentials, because a pod federates its own ServiceAccount token rather than
+presenting a stored one.
+
+---
+
+## Prerequisites
+
+1. **A US-region Pathfinder site with Workload Credentials enabled.** The
+   feature can only be added to US-region sites. If your site does not have it,
+   raise an IT Help ticket asking for the Workload Credentials application to be
+   added, quoting your **Org ID** and **Site ID**.
+2. **Your Site ID** — the `tenant_id` claim in the access token your browser
+   holds after signing in to Pathfinder.
+3. **A personal access token** — Pathfinder → **Manage Profile → Personal
+   Access Tokens → Create Token**. Copy it immediately; it is not retrievable
+   later. A PAT is scoped to a **single site**.
+
+---
+
+## Setup
+
+1. Settings → **Preview features** → enable **Workload Credentials
+   (BeyondTrust)**.
+2. Click **Configure** on that row and fill in the API base URL, Site ID and
+   PAT. Leave **API version** at its default unless BeyondTrust tells you
+   otherwise — it is sent as the mandatory `bt-secrets-api-version` header, and
+   a wrong value fails in a way that reads like an authentication error.
+3. Go to **Secrets** (`/secrets`), select **BeyondTrust Workload Credentials
+   (preview)** as the backend and click **Test connection**. This calls
+   `GET /session`, which validates the token without creating anything.
+4. Create a secret through Browse & Edit to confirm write access.
+
+The `wlc://` reference prefix then works anywhere the other vault prefixes do,
+so an existing secret can be migrated to WC from the Secrets page.
+
+> The PAT itself **cannot** be migrated into Workload Credentials — it is how
+> the dashboard reaches WC in the first place, so storing it there would make
+> the backend unreadable without itself. The migration UI refuses this
+> explicitly.
+
+---
+
+## Permissions
+
+The dashboard needs a broad set of cloud permissions because it provisions VMs,
+databases, clusters, functions, images and container runners. When you move a
+cloud to the dynamic tier, the credential WC mints must carry the same set the
+static credential carries today.
+
+The canonical, always-current lists are the sandbox bootstrap scripts —
+`scripts/sandbox/Linux/setup-aws.sh` (the `dashboard-app-policy` IAM policy) and
+`scripts/sandbox/Linux/setup-azure.sh` (the service-principal grants), plus their
+PowerShell twins. Treat those as the source of truth; the summaries below explain
+the parts that are easy to get wrong.
+
+### AWS — the role Workload Credentials assumes
+
+Three roles chain together:
+
+```
+BeyondTrust bridge role
+   └─ assumes → your integration role   (trust + sts:ExternalId condition)
+        └─ assumes → your target role   (carries the dashboard's permissions)
+```
+
+The integration role's trust policy names the BeyondTrust bridge principal and
+requires the **external ID** that WC generates when you create the integration.
+The target role trusts the integration role.
+
+Two details that fail silently:
+
+- **The target role's trust policy needs `sts:TagSession` as well as
+  `sts:AssumeRole`.** The dynamic secret's `aws_tags` become STS **session
+  tags**, which is what gives you CloudTrail attribution per issuing secret.
+  Without `sts:TagSession`, tagged issuance fails.
+- **`MaxSessionDuration` caps the TTL and defaults to one hour.** The dynamic
+  secret can ask for up to 12 hours, but STS will not exceed the role's own
+  limit — and it does not warn, it just clamps. Set it explicitly.
+
+Permission notes beyond the canonical policy:
+
+| Area | Note |
+|---|---|
+| `iam:PassRole` | Needed for instance profiles, ECS task/execution roles, EKS cluster and node roles, Lambda execution roles and the VM import/export role. Scope it to those name patterns with an `iam:PassedToService` condition rather than a broad suffix wildcard. |
+| `iam:CreateRole` / `iam:AttachRolePolicy` | Terraform creates EKS, Lambda and SSM roles. Constrain with an `iam:PermissionsBoundary` condition and an `iam:PolicyARN` allow-list, or the credential can grant itself administrator. |
+| `secretsmanager:ListSecrets` | Cannot be resource-scoped, so the credential can **enumerate every secret name** in the account even though it reads values only under the configured prefix. |
+| `ce:GetCostAndUsage` | Cost Explorer is account-global and effectively `us-east-1`. Any `aws:RequestedRegion` condition must allow it or the Cost page breaks. |
+| `AWSServiceRoleForRDS` | Must be pre-created with privileged credentials. It is a **setup step**, not a permission the role can grant itself — otherwise the first database provision fails. |
+
+### Azure — the app registration credentials are minted onto
+
+WC adds a temporary password to a **pre-existing app registration**, so there are
+two distinct Azure AD objects:
+
+1. **The integration app** — WC authenticates as this. Its client secret is what
+   you give the WC integration.
+2. **The target app** — credentials are minted onto this. It is identified by its
+   **Object ID, not its Application (client) ID**. This is the most common
+   mistake in Azure setup.
+
+Grant the integration app permission to manage passwords on the target app.
+Prefer **ownership**, which needs no tenant-wide Graph permission at all:
+
+```bash
+az ad app owner add --id "<target-app-object-id>" --owner-object-id "<integration-sp-object-id>"
+```
+
+This is CLI-only — the Portal's owners picker accepts users, not service
+principals. The broader alternative is the `Application.ReadWrite.All` Graph
+application role, which needs admin consent and a few minutes to propagate.
+
+The **target app's own** Azure RBAC is what the dashboard runs with:
+
+| Grant | Scope | Why |
+|---|---|---|
+| `Contributor` — or `Virtual Machine Contributor` + `Network Contributor` + `Storage Account Contributor` | resource group | VM, VNet, NIC and public-IP lifecycle |
+| **`Storage Blob Data Contributor`** | storage account | **Data plane. `Contributor` does not grant it**, and the Terraform `azurerm` state backend authenticates with Entra, so state operations fail without it. |
+| **`Key Vault Secrets Officer`** (RBAC vaults) or the access policy `get list set delete` (policy-based vaults) | the vault | `Contributor` does not grant secret data-plane access either. Which one you need depends on the vault's authorization mode. |
+| `AcrPull` | the registry | container runners pulling images |
+| `Cost Management Reader` | **subscription** | the Cost Management query is subscription-rooted; without it the Cost page reports Azure as unavailable |
+| `User Access Administrator` | resource group | **only** for AKS and Cloud Functions, which create role assignments during provisioning. Omit it entirely otherwise. |
+
+> **One undocumented subscription-scope requirement.** The pre-deploy quota check
+> reads VM SKU and usage data at **subscription** scope and raises on failure, and
+> it runs before every VM deploy. A resource-group-scoped-only principal will fail
+> *every* VM deploy. Grant subscription `Reader`, or expect that.
+
+**A limitation worth knowing:** WC mints onto a pre-existing app registration, and
+each distinct permission set needs its own registration. The dashboard needs a
+broad union, so on Azure you get one app carrying that union — per-operation least
+privilege is not available on this path the way it is on AWS, where a dynamic
+secret can narrow a shared role with an inline session policy.
+
+---
+
+## Costs and lease behaviour
+
+**Dynamic credential issuances are metered.** Static secrets are not.
+
+That single fact drives how the dashboard uses the API: it holds **one lease per
+cloud and purpose** in the database, shared across every worker process, and
+regenerates only when the lease is close to expiry. It never calls `generate`
+per request. If you are sizing this, count credential *issuances*, not API
+calls.
+
+Practical consequences:
+
+- **Prefer a TTL of an hour or more** on the dynamic secret. AWS credentials
+  cannot be revoked early anyway, so a short TTL buys no security and multiplies
+  the issuance count — a 15-minute TTL is roughly 70,000 issuances a year for one
+  cloud.
+- **There is no renew endpoint.** At expiry the dashboard generates a fresh
+  lease; leases are not extended.
+- **AWS leases cannot be revoked** (`400 lease_not_revocable`); Azure leases can,
+  and the dashboard releases the previous Azure lease on refresh so passwords do
+  not accumulate on the target app registration.
+
+---
+
+## Reference
+
+| | |
+|---|---|
+| API base | `https://api.beyondtrust.io/site/<site-id>/secrets` |
+| Auth | `Authorization: Bearer <PAT>` |
+| Required header | `bt-secrets-api-version: 2026-04-28` |
+| Terraform provider | `beyondtrust/beyondtrust` (registry), Terraform ≥ 1.11 |
+| Provider env vars | `BEYONDTRUST_ACCESS_TOKEN`, `BEYONDTRUST_SITE_ID` |
+
+The Terraform provider manages folders, static secrets, AWS and Azure
+integrations, AWS and Azure dynamic secrets, and workload-identity (OIDC issuer
+trust) registrations — so the whole configuration side can be provisioned as
+code rather than clicked through the console.
+
+Related: [Secrets management](../secrets-management.md) ·
+[Machine-identity JIT design](../design/cloud-identity-jit.md) ·
+[Password Safe](password-safe.md) · [Entitle](entitle.md)

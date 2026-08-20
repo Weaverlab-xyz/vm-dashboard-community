@@ -73,6 +73,9 @@ _BOOTSTRAP_BLOCKLIST: dict[str, frozenset[str]] = {
     "azure_kv":        frozenset({"azure_client_secret"}),
     "gcp_sm":          frozenset({"gcp_service_account_json"}),
     "bt_secrets_safe": frozenset({"pscli_client_secret"}),
+    # The PAT is how the dashboard reaches WC at all; migrating it into WC
+    # would make the backend unreadable without itself.
+    "wlc":             frozenset({"wlc_pat"}),
 }
 
 
@@ -88,6 +91,7 @@ class BackendConfigPayload(BaseModel):
     secrets_bt_host: str = ""
     secrets_bt_folder: str = "Dashboard"
     secrets_bt_owner: str = ""
+    secrets_wlc_folder: str = "dashboard"
     secret_max_age_days: int = 0   # flag secrets older than this; 0 = disabled
 
 
@@ -101,7 +105,8 @@ class MigratePayload(BaseModel):
 @router.get("/backends")
 async def list_backends(request: Request):
     _require_admin(request)
-    return [
+    from ..services import config_service as cs
+    backends = [
         {
             "id":          "database",
             "label":       "Database (Fernet-encrypted)",
@@ -128,6 +133,16 @@ async def list_backends(request: Request):
             "description": "Secrets are stored in BeyondTrust Password Safe using your configured ps-cli credentials.",
         },
     ]
+    # Pre-GA, so it is listed only once the preview flag is on — see
+    # setup._PREVIEW_FLAGS["workload_credentials_enabled"].
+    if cs.get_bool("workload_credentials_enabled", False):
+        backends.append({
+            "id":          "wlc",
+            "label":       "BeyondTrust Workload Credentials (preview)",
+            "description": "Static KV secrets are stored in BeyondTrust Workload Credentials "
+                           "using your configured site and personal access token.",
+        })
+    return backends
 
 
 @router.get("/config")
@@ -144,6 +159,7 @@ async def get_backend_config(request: Request):
         "secrets_bt_host":     cs.get("secrets_bt_host", ""),
         "secrets_bt_folder":   cs.get("secrets_bt_folder", "Dashboard"),
         "secrets_bt_owner":    cs.get("secrets_bt_owner", ""),
+        "secrets_wlc_folder":  cs.get("secrets_wlc_folder", "dashboard"),
         "secret_max_age_days": int(cs.get("secret_max_age_days") or 0),
     }
 
@@ -164,6 +180,7 @@ async def update_backend_config(payload: BackendConfigPayload, request: Request)
         "secrets_bt_host":      payload.secrets_bt_host,
         "secrets_bt_folder":    payload.secrets_bt_folder,
         "secrets_bt_owner":     payload.secrets_bt_owner,
+        "secrets_wlc_folder":   payload.secrets_wlc_folder,
         "secret_max_age_days":  str(max(0, payload.secret_max_age_days)),
     })
     logger.info("Secrets backend config updated: backend=%s", payload.backend)

@@ -294,6 +294,7 @@ def _upsert_admin(username: str, password: str) -> None:
 
 _WIZARD_SECRET_FIELDS = frozenset({
     "aws_secret_access_key",
+    "wlc_pat",
     "azure_client_secret",
     "azure_oauth_client_secret",
     "gcp_service_account_json",
@@ -1364,6 +1365,42 @@ class NotificationsFeatureConfig(BaseModel):
     notify_retention_days: int = 30
 
 
+class WorkloadCredentialsFeatureConfig(BaseModel):
+    """Config-only panel (no `enabled`) for the Workload Credentials PREVIEW feature.
+
+    The preview toggle owns `workload_credentials_enabled`; this panel holds the
+    site, PAT and per-cloud dynamic-secret wiring. See _CONFIG_ONLY_FEATURES.
+
+    Workload Credentials is **not GA** (GA 2026-10-14, code freeze 2026-09-14) and
+    has already shipped one breaking change, which is why it sits behind a preview
+    flag rather than the normal integration toggles: an operator has to opt in
+    knowingly, and the static-credential tier stays fully supported alongside it.
+
+    GCP is absent on purpose — WC mints AWS and Azure credentials only, so a GCP
+    deployment stays on the static tier. A mixed install is the normal case.
+    """
+    wlc_api_base_url: str = "https://api.beyondtrust.io"
+    wlc_site_id: str = ""
+    wlc_pat: str = ""
+    # Mandatory `bt-secrets-api-version` header value. A wrong version fails in a
+    # way that reads like an auth error, so it is explicit, not inferred.
+    wlc_api_version: str = "2026-04-28"
+    wlc_api_path_version: str = ""
+    # Per-cloud opt-in, mirroring cloud_identity_{cloud}_enabled: the master flag
+    # being on must not silently reroute a cloud's credentials before its dynamic
+    # secret has been proven to work.
+    wlc_aws_enabled: bool = False
+    wlc_aws_folder: str = ""
+    wlc_aws_secret_name: str = ""
+    wlc_aws_readonly_secret_name: str = ""
+    wlc_azure_enabled: bool = False
+    wlc_azure_folder: str = ""
+    wlc_azure_secret_name: str = ""
+    wlc_refresh_margin_pct: int = 50
+    # Folder for the `wlc://` static-secret backend on the Secrets page.
+    secrets_wlc_folder: str = "dashboard"
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     # Keyed "remote_agents" so _feature_to_cfg_key derives the EXISTING flag name
@@ -1395,6 +1432,7 @@ _FEATURE_MODELS = {
     "multi_region":   MultiRegionFeatureConfig,
     "oidc":           OidcFeatureConfig,
     "cloud_functions": CloudFunctionsFeatureConfig,
+    "workload_credentials": WorkloadCredentialsFeatureConfig,
     "worker":         WorkerFeatureConfig,
 }
 
@@ -1404,7 +1442,8 @@ _FEATURE_MODELS = {
 #
 # "worker" is here because the job worker has no off position at all: it is the process
 # that runs every queued job, so an enable toggle could only ever mislead.
-_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker", "cloud_functions"}
+_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker", "cloud_functions",
+                         "workload_credentials"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
@@ -1421,6 +1460,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "ansible_aci_acr_password",
     "rancher_bootstrap_password", "rancher_admin_password", "rancher_api_token",
     "oidc_client_secret",
+    "wlc_pat",
 })
 
 
@@ -1661,6 +1701,14 @@ _PREVIEW_FLAGS = {
         "Cloud Functions",
         "Deploy dashboard-authored handlers as AWS Lambda / Azure Function Apps / "
         "GCP Cloud Run functions, optionally attached to a VPC/VNet."),
+    # Preview because the product itself is pre-GA (GA 2026-10-14) and has already
+    # shipped a breaking API change. Off means the dashboard uses today's static
+    # cloud credentials, unchanged.
+    "workload_credentials_enabled": (
+        "Workload Credentials (BeyondTrust)",
+        "Pre-GA. Mint short-lived AWS and Azure credentials on demand instead of "
+        "storing static keys, and use Workload Credentials as a secrets backend. "
+        "Requires a US-region Pathfinder site with the feature enabled."),
 }
 
 # Preview flags that ALSO have a config panel — maps the flag key to the
@@ -1669,6 +1717,7 @@ _PREVIEW_FLAGS = {
 _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
     "cloud_functions_enabled": "cloud_functions",
+    "workload_credentials_enabled": "workload_credentials",
 }
 
 

@@ -1388,6 +1388,41 @@ class Settings(BaseSettings):
     entitle_machine_identity_email: str = ""
     entitle_machine_poll_interval_ms: int = 400     # 250–500ms recommended by design
 
+    # BeyondTrust Workload Credentials (WC; codename SMoP) — the third credential
+    # posture. WC mints short-lived AWS/Azure credentials on demand, so the
+    # standing cloud secret stops existing rather than being time-boxed.
+    #
+    # Every default below preserves today's behaviour: the master flag is off, so
+    # a community install with no BeyondTrust products is untouched and keeps
+    # using the static keys in app_config. Turning this on is what UNLOCKS
+    # retiring an install's own static credentials — it never retires them for
+    # anyone else. See docs/integrations/workload-credentials.md.
+    workload_credentials_enabled: bool = False
+    wlc_api_base_url: str = "https://api.beyondtrust.io"
+    wlc_site_id: str = ""                           # site (tenant) GUID — the `tenant_id` claim in your access JWT
+    wlc_pat: str = ""                               # Personal Access Token; SECRET — registered in secret_hygiene.SECRET_REGISTRY
+    # Mandatory `bt-secrets-api-version` header. Date-based; matches the shipping
+    # Terraform provider's DefaultAPIVersion. A wrong value fails in a way that
+    # reads like an auth error, so it is explicit rather than inferred.
+    wlc_api_version: str = "2026-04-28"
+    wlc_api_path_version: str = ""                  # optional path segment (e.g. "v1"); empty = no version in the path
+    # Per-cloud opt-in, mirroring cloud_identity_{cloud}_enabled. GCP is absent
+    # deliberately — WC covers AWS and Azure only, so GCP stays on the static tier.
+    wlc_aws_enabled: bool = False
+    wlc_aws_folder: str = ""                        # dynamic-secret folder path
+    wlc_aws_secret_name: str = ""                   # the provisioning dynamic secret
+    wlc_aws_readonly_secret_name: str = ""          # optional read-only dynamic secret (see the job-boundary split)
+    wlc_azure_enabled: bool = False
+    wlc_azure_folder: str = ""
+    wlc_azure_secret_name: str = ""
+    # Regenerate once less than this % of a lease's TTL remains. Clamped to
+    # 1..99 by the caller: 0 would mean "never refresh" and 100 would bill an
+    # issuance on every check.
+    wlc_refresh_margin_pct: int = 50
+    # Folder used by the `wlc://` static-secret backend (Secrets page CRUD),
+    # matching secrets_aws_prefix / secrets_gcp_prefix.
+    secrets_wlc_folder: str = "dashboard"
+
     # Entitle user-JIT (Phase 4 UI affordances) — surfaces a "Request access"
     # nav link + 403-page deep links pointing at the matching Entitle resource.
     entitle_user_jit_enabled: bool = False

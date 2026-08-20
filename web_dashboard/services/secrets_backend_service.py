@@ -610,6 +610,103 @@ def read_bt_secrets_safe(ref: str, vault_id: str | None = None) -> str:
     return ""
 
 
+# ── BeyondTrust Workload Credentials (static secrets) ─────────────────────────
+#
+# Only the *static* half of Workload Credentials lives here — plain versioned
+# secrets, which are free and unmetered. Dynamic secrets are a different thing
+# entirely: they mint a short-lived cloud credential, they are billed per
+# issuance, and they carry a lease that has to be reused rather than re-fetched.
+# Routing those through this backend would bill a credential issuance every time
+# config_service resolved a reference, so they deliberately do NOT appear here.
+
+def _wlc_cfg() -> str:
+    """The folder new secrets are written under, mirroring secrets_aws_prefix."""
+    return _cs().get("secrets_wlc_folder") or "dashboard"
+
+
+def _wlc_split(ref: str) -> tuple:
+    """Split a stored reference into (folder, name).
+
+    A reference is the secret's full path, so the last segment is the name and
+    everything before it is the folder. A bare name means the root folder — not
+    the configured default, because the reference records where the secret
+    actually IS, and re-deriving the folder from live config would break every
+    stored reference the day an operator edits that setting.
+    """
+    ref = (ref or "").strip().strip("/")
+    if "/" not in ref:
+        return "", ref
+    folder, _, name = ref.rpartition("/")
+    return folder, name
+
+
+def test_wlc() -> dict:
+    from . import workload_credentials_service as wlc
+    return wlc.test_connection()
+
+
+def write_wlc(key: str, value: str) -> str:
+    from . import workload_credentials_service as wlc
+    folder = _wlc_cfg()
+    wlc.write_static(key, value, folder=folder)
+    ref = f"{folder}/{key}".strip("/")
+    logger.info("WC: wrote secret %s", ref)
+    return ref
+
+
+def read_wlc(ref: str, vault_id: str | None = None) -> str:
+    _ = vault_id  # WC is addressed by site, which is global config — no per-vault split
+    from . import workload_credentials_service as wlc
+    folder, name = _wlc_split(ref)
+    return wlc.read_static(name, folder=folder)
+
+
+def describe_wlc(ref: str, vault_id: str | None = None):
+    """Last-changed time, so staleness alerting reads WC's own clock rather than
+    when the reference happened to be pasted in here.
+
+    Uses the dedicated metadata route, which returns timestamps WITHOUT reading
+    the value — staleness reporting has no business decrypting a secret.
+    """
+    _ = vault_id
+    from . import workload_credentials_service as wlc
+    folder, name = _wlc_split(ref)
+    meta = wlc.static_metadata(name, folder=folder)
+    for field in ("updatedAt", "updated_at", "modifiedAt", "lastModified",
+                  "createdAt", "created_at"):
+        if meta.get(field):
+            return _naive_utc(meta[field])
+    return None
+
+
+def list_wlc() -> list:
+    from . import workload_credentials_service as wlc
+    folder = _wlc_cfg()
+    out: list = []
+    for entry in wlc.list_static(folder=folder):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name") or entry.get("path", "").rstrip("/").rpartition("/")[2]
+        if not name:
+            continue
+        entry_folder = entry.get("folder") or folder
+        out.append({
+            "name":        name,
+            "folder":      entry_folder,
+            "description": entry.get("description", ""),
+            "updated_at":  entry.get("updatedAt") or entry.get("updated_at") or "",
+            "ref":         f"{entry_folder}/{name}".strip("/"),
+        })
+    return out
+
+
+def delete_wlc(ref: str) -> None:
+    from . import workload_credentials_service as wlc
+    folder, name = _wlc_split(ref)
+    wlc.delete_static(name, folder=folder)
+    logger.info("WC: deleted secret %s", ref)
+
+
 # ── Dispatch table ────────────────────────────────────────────────────────────
 
 _TEST_FN = {
@@ -617,6 +714,7 @@ _TEST_FN = {
     "azure_kv":        test_azure_kv,
     "gcp_sm":          test_gcp_sm,
     "bt_secrets_safe": test_bt_secrets_safe,
+    "wlc":             test_wlc,
 }
 
 _WRITE_FN = {
@@ -624,6 +722,7 @@ _WRITE_FN = {
     "azure_kv":        write_azure_kv,
     "gcp_sm":          write_gcp_sm,
     "bt_secrets_safe": write_bt_secrets_safe,
+    "wlc":             write_wlc,
 }
 
 _READ_FN = {
@@ -631,6 +730,7 @@ _READ_FN = {
     "azure_kv":        read_azure_kv,
     "gcp_sm":          read_gcp_sm,
     "bt_secrets_safe": read_bt_secrets_safe,
+    "wlc":             read_wlc,
 }
 
 
@@ -744,6 +844,7 @@ _DESCRIBE_FN = {
     "azure_kv":        describe_azure_kv,
     "gcp_sm":          describe_gcp_sm,
     "bt_secrets_safe": describe_bt_secrets_safe,
+    "wlc":             describe_wlc,
 }
 
 
@@ -1117,6 +1218,7 @@ _LIST_FN = {
     "azure_kv":        list_azure_kv,
     "gcp_sm":          list_gcp_sm,
     "bt_secrets_safe": list_bt_secrets_safe,
+    "wlc":             list_wlc,
     "database":        list_database,
 }
 
@@ -1125,6 +1227,7 @@ _DELETE_FN = {
     "azure_kv":        delete_azure_kv,
     "gcp_sm":          delete_gcp_sm,
     "bt_secrets_safe": delete_bt_secrets_safe,
+    "wlc":             delete_wlc,
     "database":        delete_database,
 }
 
