@@ -166,7 +166,7 @@ async def lifespan(app: FastAPI):
             for cloud in leases.CLOUDS:
                 if not leases.dynamic_enabled(cloud):
                     continue
-                for purpose in leases.purposes_for(cloud):
+                for purpose in leases.warm_purposes_for(cloud):
                     await asyncio.to_thread(leases.refresh, cloud, purpose)
         except Exception:
             logger.warning("startup credential lease warm failed (non-fatal)",

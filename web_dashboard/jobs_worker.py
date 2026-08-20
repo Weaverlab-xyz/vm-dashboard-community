@@ -538,6 +538,25 @@ def _fail_backstop(job_id: str, exc: BaseException) -> None:
         db.close()
 
 
+@contextlib.contextmanager
+def _wlc_provisioning():
+    """``workload_credential_lease.provisioning``, resolved lazily and fail-open.
+
+    Lazy because the runner must not import the credential feature at module scope, and
+    fail-open because a job failing to *start* over a credential feature that may not
+    even be configured would be a far worse bug than the one the split prevents. When
+    the lease module is unavailable this is a plain no-op and the job runs exactly as it
+    did before.
+    """
+    try:
+        from .services.workload_credential_lease import provisioning
+    except Exception:  # noqa: BLE001
+        yield
+        return
+    with provisioning():
+        yield
+
+
 async def _run_job(job_id: str, job_type: str, meta: dict) -> None:
     """One claimed job, start to finish, in its own task.
 
@@ -551,7 +570,11 @@ async def _run_job(job_id: str, job_type: str, meta: dict) -> None:
     Nothing may propagate out of here: one job's crash can take down neither the loop nor
     a sibling.
     """
-    with correlation(job_id):
+    # Entered alongside `correlation`, and here rather than in the supervisor for the
+    # identical contextvars reason spelled out above: a job needs write privilege for its
+    # whole run, and nothing outside a job should have it. It is a no-op until a second
+    # dynamic secret is configured, so this changes nothing until an operator opts in.
+    with correlation(job_id), _wlc_provisioning():
         # Keep this job's heartbeat fresh for its whole run so a sibling worker's
         # startup reconcile can't false-fail it (see _heartbeat).
         hb = asyncio.create_task(_heartbeat(job_id), name=f"hb:{job_id}")
@@ -626,7 +649,7 @@ def _refresh_wlc_leases() -> None:
     try:
         from .services import workload_credential_lease as leases
         for cloud in leases.CLOUDS:
-            for purpose in leases.purposes_for(cloud):
+            for purpose in leases.warm_purposes_for(cloud):
                 try:
                     if leases.refresh(cloud, purpose):
                         logger.info("job runner: renewed the %s/%s credential lease",

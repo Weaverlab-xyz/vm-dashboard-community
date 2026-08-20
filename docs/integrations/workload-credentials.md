@@ -23,7 +23,7 @@ cares about:
 |---|---|
 | Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented, verified live** |
 | Dynamic AWS credentials for the dashboard's own cloud calls | **Implemented** — not yet exercised against a live dynamic secret |
-| Splitting AWS into a read-only and a provisioning lease | Planned |
+| Splitting AWS into an everyday and a provisioning lease | **Implemented** — opt-in, not yet exercised live |
 | Dynamic Azure credentials | Planned |
 | In-cluster workload identity (a pod federating its ServiceAccount token) | Planned |
 
@@ -52,6 +52,38 @@ entirely by the fact that issuances are billed.
 - **The previous lease is released on renewal.** AWS refuses early revocation and
   that is expected; the call is made anyway so the Azure path (which does accept
   it) needs no separate handling.
+
+### The optional two-lease split
+
+Set an **everyday** dynamic secret (`wlc_aws_readonly_secret_name`) and the dashboard
+uses two leases instead of one:
+
+- **Everyday** — everything outside a job. Warmed at startup and renewed in the
+  background.
+- **Provisioning** — minted when a job starts, **never pre-warmed**, allowed to expire.
+
+The payoff is that `iam:PassRole` and `iam:CreateRole` are absent from the stored
+credential between jobs, so a credential lifted from the lease row at an arbitrary
+moment cannot escalate. Leaving the setting blank keeps one lease for everything, which
+is the default and changes nothing.
+
+> **The everyday policy is not literally read-only**, despite the setting name — which
+> shipped before this was understood, and is now inaccurate rather than wrong enough to
+> justify a config migration. The dashboard writes on the request path as well as inside
+> jobs: editing a secret (`secretsmanager:*`), uploading to storage (`s3:PutObject`),
+> re-tagging a VM (`ec2:CreateTags`), starting or stopping a container task
+> (`ecs:RunTask` / `StopTask`). Roughly fourteen such sites. The everyday policy needs
+> those and only needs to **exclude IAM**. A strictly read-only policy breaks the Secrets
+> and Storage pages.
+
+Both secrets can point at the **same role** and differ only by inline session policy —
+session policies intersect, never broaden — so the split costs a few lines of HCL rather
+than a second role and trust policy.
+
+One thing it deliberately does not do: it does not revoke the provisioning lease when the
+job ends. AWS refuses early revocation, so that credential lives to its TTL regardless;
+dropping the row early would only hide it from the dashboard, at the cost of a fresh
+billable issuance per job rather than per TTL window.
 
 If AWS is on the dynamic tier and no lease can be issued, cloud calls **fail**
 rather than falling back to a static key. That is deliberate: an operator who has
