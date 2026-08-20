@@ -570,16 +570,22 @@ async def _run_job(job_id: str, job_type: str, meta: dict) -> None:
     Nothing may propagate out of here: one job's crash can take down neither the loop nor
     a sibling.
     """
-    # Entered alongside `correlation`, and here rather than in the supervisor for the
-    # identical contextvars reason spelled out above: a job needs write privilege for its
-    # whole run, and nothing outside a job should have it. It is a no-op until a second
-    # dynamic secret is configured, so this changes nothing until an operator opts in.
-    with correlation(job_id), _wlc_provisioning():
+    with correlation(job_id):
         # Keep this job's heartbeat fresh for its whole run so a sibling worker's
         # startup reconcile can't false-fail it (see _heartbeat).
         hb = asyncio.create_task(_heartbeat(job_id), name=f"hb:{job_id}")
         try:
-            await _dispatch(job_id, job_type, meta)
+            # Write privilege, for the dispatch only. Inside the task rather than in the
+            # supervisor for the same contextvars reason as `correlation` above, and
+            # around the dispatch rather than the whole block for two more: the heartbeat
+            # task is created above and snapshots the context as it stands then, so it
+            # never inherits write privilege; and `with correlation(job_id):` stays a
+            # single statement, which test_worker_tiers pins literally.
+            #
+            # A no-op until a second dynamic secret is configured, so this changes
+            # nothing until an operator opts into the split.
+            with _wlc_provisioning():
+                await _dispatch(job_id, job_type, meta)
         except asyncio.CancelledError:
             # Shutdown drain. Deliberately NOT marked failed here: _drain backdates the
             # heartbeat so the next process's startup reconcile owns the row, and only

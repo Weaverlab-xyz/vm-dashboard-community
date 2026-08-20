@@ -503,8 +503,12 @@ def test_the_job_runner_enters_the_provisioning_scope():
     # it in the loop body would tag whichever job happened to be starting.
     src = _read("web_dashboard", "jobs_worker.py")
     body = src.split("async def _run_job", 1)[1].split("\nasync def ", 1)[0]
-    assert "_wlc_provisioning()" in body
-    assert "with correlation(job_id), _wlc_provisioning():" in body
+    assert "with _wlc_provisioning():" in body
+    # Scoped to the dispatch, not the whole task: the heartbeat is created before it and
+    # must not inherit write privilege. Also keeps `with correlation(job_id):` a single
+    # statement, which test_worker_tiers pins literally.
+    assert "with correlation(job_id):" in body
+    assert "with correlation(job_id), _wlc_provisioning():" not in body
 
 
 if __name__ == "__main__":
