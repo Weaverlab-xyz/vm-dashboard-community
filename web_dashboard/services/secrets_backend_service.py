@@ -661,6 +661,30 @@ def read_wlc(ref: str, vault_id: str | None = None) -> str:
     return wlc.read_static(name, folder=folder)
 
 
+_WLC_TIME_FIELDS = ("updatedAt", "updated_at", "modifiedAt", "lastModified",
+                    "createdAt", "created_at")
+
+
+def _wlc_timestamp(obj):
+    """The first recognisable timestamp in `obj`, checking a nested ``metadata`` too.
+
+    Verified live, the create response puts timestamps one level down:
+    ``{"metadata": {"createdAt": ...}, "secret": {...}}``. Whether the metadata and list
+    routes use that same envelope is not confirmed, so read both levels. Getting this
+    wrong is quiet rather than loud — no timestamp means staleness silently reports when
+    the reference was pasted in here instead of the vault's own last-changed date, which
+    is precisely what the external-vault path exists to avoid.
+    """
+    if not isinstance(obj, dict):
+        return None
+    inner = obj.get("metadata")
+    for level in (obj, inner if isinstance(inner, dict) else {}):
+        for field in _WLC_TIME_FIELDS:
+            if level.get(field):
+                return level[field]
+    return None
+
+
 def describe_wlc(ref: str, vault_id: str | None = None):
     """Last-changed time, so staleness alerting reads WC's own clock rather than
     when the reference happened to be pasted in here.
@@ -671,31 +695,43 @@ def describe_wlc(ref: str, vault_id: str | None = None):
     _ = vault_id
     from . import workload_credentials_service as wlc
     folder, name = _wlc_split(ref)
-    meta = wlc.static_metadata(name, folder=folder)
-    for field in ("updatedAt", "updated_at", "modifiedAt", "lastModified",
-                  "createdAt", "created_at"):
-        if meta.get(field):
-            return _naive_utc(meta[field])
-    return None
+    found = _wlc_timestamp(wlc.static_metadata(name, folder=folder))
+    return _naive_utc(found) if found else None
 
 
 def list_wlc() -> list:
+    """List secrets under the configured folder.
+
+    A live list entry carries **only** ``path`` — there is no ``name`` and no ``folder``
+    field, and its timestamps are nested under ``metadata``::
+
+        {"metadata": {"createdAt": ..., "id": ..., "version": 1},
+         "path": "dashboard/wlc-probe", "type": "static"}
+
+    So ``path`` is the reference, and the folder is split back out of it rather than taken
+    from config. That distinction only shows up with sub-folders: listing is recursive, so
+    a secret at ``dashboard/sub/x`` would otherwise be reported as ``dashboard/x`` and
+    every subsequent read of it would 404.
+    """
     from . import workload_credentials_service as wlc
-    folder = _wlc_cfg()
     out: list = []
-    for entry in wlc.list_static(folder=folder):
+    for entry in wlc.list_static(folder=_wlc_cfg()):
         if not isinstance(entry, dict):
             continue
-        name = entry.get("name") or entry.get("path", "").rstrip("/").rpartition("/")[2]
-        if not name:
+        # The route is /static, but skip anything that says otherwise rather than handing
+        # a dynamic secret to a reader that would try to decode it as a stored value.
+        if entry.get("type") not in (None, "", "static"):
             continue
-        entry_folder = entry.get("folder") or folder
+        path = (entry.get("path") or "").strip("/")
+        if not path:
+            continue
+        folder, name = _wlc_split(path)
         out.append({
             "name":        name,
-            "folder":      entry_folder,
+            "folder":      folder,
             "description": entry.get("description", ""),
-            "updated_at":  entry.get("updatedAt") or entry.get("updated_at") or "",
-            "ref":         f"{entry_folder}/{name}".strip("/"),
+            "updated_at":  _wlc_timestamp(entry) or "",
+            "ref":         path,
         })
     return out
 

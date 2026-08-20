@@ -14,7 +14,6 @@ in either the `secret` object or the response root.
 Runs under pytest, or standalone:  python tests/test_workload_credentials.py
 """
 import importlib.util
-import io
 import os
 import sys
 from datetime import datetime
@@ -415,6 +414,204 @@ def test_the_panel_warns_that_the_feature_is_pre_ga():
     # The operator has to be able to see this without reading the docs.
     html = _panel_html()
     assert "Pre-GA" in html or "pre-GA" in html
+
+
+# ── Timestamp envelope tolerance ─────────────────────────────────────────────
+#
+# The live create response nests everything but the value under "metadata". Whether the
+# metadata and list routes do the same is unconfirmed, and getting it wrong is SILENT:
+# no timestamp means staleness reports when the reference was pasted in here rather than
+# the vault's own last-changed date.
+
+def _timestamp_fn():
+    """`_wlc_timestamp` from secrets_backend_service, loaded by file path.
+
+    The module's only top-level imports are stdlib, and every relative import sits inside
+    a function, so it loads without the package chain.
+    """
+    import importlib.util
+    path = os.path.join(_ROOT, "web_dashboard", "services", "secrets_backend_service.py")
+    spec = importlib.util.spec_from_file_location("secrets_backend_service", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._wlc_timestamp
+
+
+def test_a_flat_timestamp_is_found():
+    assert _timestamp_fn()({"updatedAt": "2026-08-20T15:00:00Z"}) == "2026-08-20T15:00:00Z"
+
+
+def test_a_timestamp_nested_under_metadata_is_found():
+    # The shape actually observed from a live create.
+    fn = _timestamp_fn()
+    observed = {"metadata": {"createdAt": "2026-08-20T15:16:10Z", "id": "x", "version": 1},
+                "secret": {"username": "u"}}
+    assert fn(observed) == "2026-08-20T15:16:10Z"
+
+
+def test_an_update_time_wins_over_a_create_time():
+    fn = _timestamp_fn()
+    assert fn({"updatedAt": "2026-08-20T16:00:00Z",
+               "createdAt": "2026-08-01T10:00:00Z"}) == "2026-08-20T16:00:00Z"
+
+
+def test_no_timestamp_anywhere_is_none():
+    fn = _timestamp_fn()
+    assert fn({"id": "x", "version": 2}) is None
+    assert fn({"metadata": {"id": "x"}}) is None
+
+
+def test_a_non_dict_is_none_rather_than_an_error():
+    fn = _timestamp_fn()
+    assert fn(None) is None
+    assert fn("2026-08-20") is None
+    assert fn([]) is None
+
+
+def test_a_non_dict_metadata_member_does_not_break_the_scan():
+    # Defensive: a provider that returns metadata: null must not take out the top level.
+    fn = _timestamp_fn()
+    assert fn({"metadata": None, "updatedAt": "2026-08-20T15:00:00Z"}) == "2026-08-20T15:00:00Z"
+
+
+# ── Collection envelope ──────────────────────────────────────────────────────
+#
+# Verified live: collections come back as {"data": [...]}. The earlier guess
+# (secrets/static/items) matched none of them, so list_static returned [] on every call
+# and the Secrets page showed nothing — a silent empty rather than an error.
+
+def test_a_collection_keyed_under_data_is_found():
+    # The confirmed live shape.
+    assert wlc._collection({"data": [{"name": "a"}]}) == [{"name": "a"}]
+
+
+def test_a_bare_list_is_returned_unchanged():
+    assert wlc._collection([{"name": "a"}]) == [{"name": "a"}]
+
+
+def test_an_empty_collection_is_an_empty_list():
+    assert wlc._collection({"data": []}) == []
+
+
+def test_legacy_collection_keys_are_still_tolerated():
+    # Kept as fallbacks: the API is pre-GA and has already renamed things once, and a
+    # wrong guess here fails silently rather than loudly.
+    for key in ("secrets", "static", "items", "folders"):
+        assert wlc._collection({key: [{"name": "a"}]}) == [{"name": "a"}]
+
+
+def test_an_unrecognised_envelope_is_an_empty_list_not_an_error():
+    assert wlc._collection({"unexpected": {"nested": 1}}) == []
+    assert wlc._collection(None) == []
+    assert wlc._collection("text") == []
+
+
+def test_data_wins_over_the_legacy_keys():
+    assert wlc._collection({"data": [1], "secrets": [2]}) == [1]
+
+
+# ── The read envelope, as observed live ──────────────────────────────────────
+
+def test_the_live_read_response_yields_just_the_secret_map():
+    """The exact body a live GET /static/{name} returned.
+
+    The value sits under `secret` alongside a sibling `metadata` block; anything that
+    returned the whole envelope would hand the Secrets page a document containing
+    version and id fields the operator never wrote.
+    """
+    observed = {"metadata": {"createdAt": "2026-08-20T15:16:10.140955Z",
+                             "id": "cc407dd9-3314-4571-9f53-279d952019ac",
+                             "tags": {}, "version": 1},
+                "secret": {"password": "p", "username": "u"}}
+    assert wlc.static_value_from(observed) == '{"password": "p", "username": "u"}'
+
+
+def test_the_live_metadata_response_is_flat():
+    """A live GET /static/{name}/metadata returned timestamps at the TOP level.
+
+    Recorded because the create and read responses nest theirs under `metadata`, so the
+    inconsistency is the surprising part and the reason the timestamp scan reads both.
+    """
+    observed = {"createdAt": "2026-08-20T15:16:10.140955Z",
+                "id": "cc407dd9-3314-4571-9f53-279d952019ac",
+                "tags": {}, "version": 1}
+    fn = _timestamp_fn()
+    assert fn(observed) == "2026-08-20T15:16:10.140955Z"
+
+
+# ── List entries, as observed live ───────────────────────────────────────────
+#
+# A live entry carries ONLY `path` — no `name`, no `folder` — with timestamps nested
+# under `metadata`. Deriving the folder from config instead of from the path is correct
+# only by coincidence for a top-level secret, and wrong for anything in a sub-folder,
+# which listing returns because it is recursive.
+
+LIVE_LIST_ENTRY = {"metadata": {"createdAt": "2026-08-20T15:16:10.140955Z",
+                                "id": "cc407dd9-3314-4571-9f53-279d952019ac",
+                                "tags": {}, "version": 1},
+                   "path": "dashboard/wlc-probe",
+                   "type": "static"}
+
+
+def _backend_mod():
+    """secrets_backend_service, loaded by file path (stdlib-only top-level imports)."""
+    import importlib.util
+    path = os.path.join(_ROOT, "web_dashboard", "services", "secrets_backend_service.py")
+    spec = importlib.util.spec_from_file_location("secrets_backend_service_list", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_live_list_entry_yields_name_folder_and_ref_from_the_path():
+    """The exact body a live GET /static?recursive=true returned.
+
+    `path` is the reference; everything else is derived from it, because the entry has no
+    name and no folder of its own.
+    """
+    mod = _backend_mod()
+    folder, name = mod._wlc_split(LIVE_LIST_ENTRY["path"])
+    assert folder == "dashboard"
+    assert name == "wlc-probe"
+    assert mod._wlc_timestamp(LIVE_LIST_ENTRY) == "2026-08-20T15:16:10.140955Z"
+
+
+def test_a_subfolder_path_keeps_its_full_folder():
+    """The case that made deriving the folder from config wrong.
+
+    Listing is recursive, so a secret two levels down comes back too. Taking the folder
+    from config would report it as `dashboard/x`, and every later read of it would 404.
+    """
+    mod = _backend_mod()
+    folder, name = mod._wlc_split("dashboard/sub/deeper/x")
+    assert folder == "dashboard/sub/deeper"
+    assert name == "x"
+
+
+def test_a_root_level_path_has_no_folder():
+    mod = _backend_mod()
+    folder, name = mod._wlc_split("just-a-name")
+    assert folder == ""
+    assert name == "just-a-name"
+
+
+def test_list_wlc_reads_path_and_never_name_or_folder():
+    # The guard. The live entry has no `name` and no `folder` key at all, so an
+    # implementation relying on either returns nothing (or a wrong ref) and the page
+    # looks empty rather than erroring.
+    src = _read("web_dashboard", "services", "secrets_backend_service.py")
+    body = src.split("def list_wlc", 1)[1].split("\ndef ", 1)[0]
+    assert 'entry.get("path")' in body
+    assert 'entry.get("name")' not in body
+    assert 'entry.get("folder")' not in body
+
+
+def test_list_wlc_skips_entries_that_are_not_static():
+    # A dynamic secret handed to a reader that decodes it as a stored value would be a
+    # billable mint at best and a confusing failure at worst.
+    src = _read("web_dashboard", "services", "secrets_backend_service.py")
+    body = src.split("def list_wlc", 1)[1].split("\ndef ", 1)[0]
+    assert '"static"' in body
 
 
 if __name__ == "__main__":
