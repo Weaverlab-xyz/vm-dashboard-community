@@ -450,8 +450,14 @@ def generate(name: str, folder: str = "") -> dict:
     """
     payload = _request("POST", "/dynamic/" + name + "/generate", folder=folder)
     result = parse_generated(payload)
-    logger.info("WC: generated lease %s from dynamic secret %s (expires %s)",
-                result["lease_id"] or "(none)", name, result["expires_at"])
+    # Log the request, never the result. Reading any field back out of `result`
+    # puts a credential-bearing object on a wide-audience sink one edit away from
+    # leaking, and a lease id is a correlation handle to a LIVE credential. The
+    # lease id belongs in the lease row and in Workload Credentials' own audit
+    # log; what an operator needs here is the issuance count, which the folder
+    # and name give them.
+    logger.info("WC: generated a credential from dynamic secret %s/%s",
+                folder or "(root)", name)
     return result
 
 
@@ -474,6 +480,8 @@ def revoke_lease(lease_id: str) -> None:
         _request("DELETE", "/leases/id/" + lease_id)
     except WorkloadCredentialsError as exc:
         if "not_revocable" in str(exc):
-            logger.debug("WC: lease %s is not revocable (expected for AWS)", lease_id)
+            # Same reasoning as generate(): a lease id identifies a live
+            # credential, so it stays out of the application log.
+            logger.debug("WC: lease is not revocable (expected for AWS)")
             return
         raise
