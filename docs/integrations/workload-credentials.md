@@ -1,10 +1,9 @@
 # BeyondTrust Workload Credentials
 
 > **Preview — the product is pre-GA.** Workload Credentials reaches general
-> availability on **2026-10-14** (engineering code freeze 2026-09-14) and has
-> already shipped one breaking API change. It is gated behind a **preview flag**
-> (Settings → Preview features) and is off by default. Nothing about your
-> existing credentials changes until you turn it on.
+> availability in late 2026. It is gated behind a **preview flag**
+> (Settings → Preview features) and is off by default. 
+> 
 
 Workload Credentials (WC; codename *SMoP*, "Secrets Manager on Platform") is
 BeyondTrust's cloud-native secrets product. It does two things the dashboard
