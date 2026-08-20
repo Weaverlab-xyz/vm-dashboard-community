@@ -1524,6 +1524,17 @@ def _write_feature(feature: str, payload_dict: dict) -> None:
         except Exception:
             pass
 
+    if feature == "workload_credentials":
+        # The per-cloud flags and the secret names both live on this panel, so a save can
+        # reroute a cloud's credentials. The memo is process-local and short-lived, but
+        # clearing it here means the operator sees the effect of their own change
+        # immediately rather than up to the TTL later.
+        try:
+            from ..services import workload_credential_lease
+            workload_credential_lease.invalidate()
+        except Exception:
+            pass
+
     if feature == "oidc":
         # Discovery + JWKS are cached for an hour; without this an operator who
         # fixes a typo'd issuer would keep hitting the old one until it expired.

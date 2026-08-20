@@ -22,8 +22,12 @@ def _cfg(key: str) -> str:
 
 
 def aws_env() -> Optional[dict]:
-    """AWS provider creds (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY); ``None``
-    when unset → terraform uses the container env / instance profile."""
+    """AWS provider creds (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY [/ _SESSION_TOKEN]);
+    ``None`` when unset → terraform uses the container env / instance profile."""
+    from . import workload_credential_lease as leases
+    dynamic = leases.aws_subprocess_env()
+    if dynamic:
+        return dynamic
     key_id = _cfg("aws_access_key_id")
     secret = _cfg("aws_secret_access_key")
     if key_id and secret:
