@@ -145,6 +145,33 @@ async def list_backends(request: Request):
     return backends
 
 
+@router.get("/credential-sources")
+async def get_credential_sources(request: Request):
+    """Which credential posture each cloud is actually running on, and lease health.
+
+    Exists because "did the flip take effect?" is otherwise unanswerable from the UI. A
+    cloud whose lease is broken and a cloud legitimately still on the static tier behave
+    identically from the outside — the same shape as the dead-endpoint tile that hid for
+    an entire install's lifetime because "unavailable" was the catch-all for both.
+
+    Never returns a credential, only its provenance and expiry. GCP is included and always
+    reports `static` or `unconfigured`: Workload Credentials does not mint GCP
+    credentials, and showing the cloud rather than omitting it is what makes that a
+    documented boundary instead of a gap the operator has to infer.
+    """
+    _require_admin(request)
+    from ..services import workload_credential_lease as leases
+    out = []
+    for cloud in ("aws", "azure", "gcp"):
+        source = leases.source_for(cloud)
+        entry = {"cloud": cloud, "source": source, "lease": None}
+        if source == "dynamic":
+            # Only the provisioning purpose for now; the readonly split is Phase 2b.
+            entry["lease"] = leases.status(cloud, leases.PURPOSE_PROVISION)
+        out.append(entry)
+    return {"clouds": out}
+
+
 @router.get("/config")
 async def get_backend_config(request: Request):
     _require_admin(request)
