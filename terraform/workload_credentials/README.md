@@ -35,8 +35,16 @@ state. Create it once by hand; pass its details in. (The BeyondTrust resource tr
 
 ## Prerequisites
 
-- **Terraform ≥ 1.11.** The BeyondTrust provider uses a write-only attribute, which is a
-  1.11 feature — on an older CLI the provider fails to load rather than degrading.
+- **Terraform ≥ 1.11**, run from your own machine. The BeyondTrust provider uses a
+  write-only attribute, which is a 1.11 feature; on an older CLI it fails to load rather
+  than degrading.
+
+  Note this is **newer than the dashboard image's own terraform**, which is pinned to
+  1.10.5 (`Dockerfile`, `ARG TERRAFORM_VERSION`). So you cannot run this module from
+  inside the container, even though terraform is already there — the obvious shortcut
+  fails on the version gate. Nothing else is affected: the dashboard never invokes this
+  module, only the deploy modules under `terraform/ec2_instance`, `terraform/k8s_cluster`
+  and so on, none of which need 1.11.
 - A **US-region Pathfinder site** with Workload Credentials enabled.
 - AWS credentials able to create IAM roles and read the managed policy.
 - `dashboard-app-policy` present, or an explicit `aws_dashboard_policy_arn`.
