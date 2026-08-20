@@ -147,6 +147,42 @@ def secret_name_for(cloud: str, purpose: str) -> str:
     return _cfg(f"wlc_{cloud}_secret_name")
 
 
+def has_distinct_readonly(cloud: str) -> bool:
+    """Whether `cloud` has a read-only dynamic secret of its own."""
+    return bool(_cfg(f"wlc_{cloud}_readonly_secret_name"))
+
+
+def purposes_for(cloud: str) -> tuple:
+    """The purposes that warrant a lease of their own for `cloud`.
+
+    ``readonly`` appears only when its own dynamic secret is configured. Without one, a
+    caller asking for it is served the provisioning lease instead — one lease, one
+    issuance.
+
+    This is not a micro-optimisation. Minting a second lease from the *same* dynamic
+    secret under a different purpose label bills twice for one credential, and nothing
+    reads the copy. Iterating a static list of purposes here is exactly that bug, and it
+    is invisible: two rows appear, both refresh forever, and the only symptom is the
+    invoice.
+    """
+    if not dynamic_enabled(cloud) or not _cfg(f"wlc_{cloud}_secret_name"):
+        return ()
+    if has_distinct_readonly(cloud):
+        return (PURPOSE_PROVISION, PURPOSE_READONLY)
+    return (PURPOSE_PROVISION,)
+
+
+def _effective_purpose(cloud: str, purpose: str) -> str:
+    """Collapse ``readonly`` onto ``provision`` when there is no distinct secret for it.
+
+    Applied before any row lookup, so the collapsed pair share one row rather than
+    silently duplicating one.
+    """
+    if purpose == PURPOSE_READONLY and not has_distinct_readonly(cloud):
+        return PURPOSE_PROVISION
+    return purpose
+
+
 def folder_for(cloud: str) -> str:
     return _cfg(f"wlc_{cloud}_folder")
 
@@ -388,6 +424,7 @@ def credentials(cloud: str, purpose: str = PURPOSE_PROVISION) -> Optional[dict]:
     if not dynamic_enabled(cloud):
         return None
 
+    purpose = _effective_purpose(cloud, purpose)
     now = _utcnow()
     hit = _memo_get(cloud, purpose, now)
     if hit is not None:
@@ -411,6 +448,7 @@ def refresh(cloud: str, purpose: str = PURPOSE_PROVISION, *, force: bool = False
     """
     if not dynamic_enabled(cloud):
         return False
+    purpose = _effective_purpose(cloud, purpose)
     name = secret_name_for(cloud, purpose)
     if not name:
         return False

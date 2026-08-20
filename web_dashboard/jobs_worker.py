@@ -626,7 +626,7 @@ def _refresh_wlc_leases() -> None:
     try:
         from .services import workload_credential_lease as leases
         for cloud in leases.CLOUDS:
-            for purpose in leases.PURPOSES:
+            for purpose in leases.purposes_for(cloud):
                 try:
                     if leases.refresh(cloud, purpose):
                         logger.info("job runner: renewed the %s/%s credential lease",

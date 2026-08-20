@@ -332,6 +332,69 @@ def test_the_model_exists_with_the_documented_key():
     assert "claim_until" in src and "claim_owner" in src
 
 
+# ── Purpose collapsing (the duplicate-issuance bug) ──────────────────────────
+#
+# Iterating a static PURPOSES list minted a second lease from the SAME dynamic secret
+# under a different label. Two rows, both refreshing forever, nothing reading the copy,
+# and the only symptom is the invoice. These tests exist so that cannot come back.
+
+def test_no_purposes_when_the_cloud_is_not_on_the_dynamic_tier():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
+    assert lease.purposes_for("aws") == ()
+
+
+def test_no_purposes_when_no_dynamic_secret_is_named():
+    _stub_cfg(flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.purposes_for("aws") == ()
+
+
+def test_only_provision_when_there_is_no_distinct_readonly_secret():
+    # The bug: this used to return both, and the readonly one resolved to the SAME
+    # dynamic secret name — a second billable issuance for one credential.
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.purposes_for("aws") == (lease.PURPOSE_PROVISION,)
+
+
+def test_both_purposes_once_a_readonly_secret_is_configured():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision",
+                      "wlc_aws_readonly_secret_name": "dashboard-readonly"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    assert lease.purposes_for("aws") == (lease.PURPOSE_PROVISION, lease.PURPOSE_READONLY)
+
+
+def test_readonly_collapses_onto_provision_without_its_own_secret():
+    # So both labels share ONE row rather than duplicating it.
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
+    assert lease._effective_purpose("aws", lease.PURPOSE_READONLY) == lease.PURPOSE_PROVISION
+
+
+def test_readonly_stays_itself_once_it_has_its_own_secret():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision",
+                      "wlc_aws_readonly_secret_name": "dashboard-readonly"})
+    assert lease._effective_purpose("aws", lease.PURPOSE_READONLY) == lease.PURPOSE_READONLY
+
+
+def test_provision_never_collapses():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
+    assert lease._effective_purpose("aws", lease.PURPOSE_PROVISION) == lease.PURPOSE_PROVISION
+
+
+def test_the_refresh_loops_iterate_configured_purposes_not_the_constant():
+    """The guard on the actual bug.
+
+    Both the startup warmer and the worker pass looped over the PURPOSES constant, which
+    is what produced the duplicate lease. They must ask which purposes are configured.
+    """
+    for parts in (("web_dashboard", "main.py"),
+                  ("web_dashboard", "jobs_worker.py")):
+        src = _read(*parts)
+        assert "purposes_for(cloud)" in src, f"{parts[-1]} does not use purposes_for"
+        assert "in leases.PURPOSES" not in src, (
+            f"{parts[-1]} still iterates the PURPOSES constant, which mints a duplicate "
+            f"lease when no distinct readonly secret is configured")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
