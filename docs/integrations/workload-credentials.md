@@ -22,14 +22,42 @@ cares about:
 
 | Capability | Status |
 |---|---|
-| Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented** |
-| Dynamic AWS credentials for the dashboard's own cloud calls | Planned — see [the design](../design/cloud-identity-jit.md) and the roadmap below |
+| Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented, verified live** |
+| Dynamic AWS credentials for the dashboard's own cloud calls | **Implemented** — not yet exercised against a live dynamic secret |
+| Splitting AWS into a read-only and a provisioning lease | Planned |
 | Dynamic Azure credentials | Planned |
 | In-cluster workload identity (a pod federating its ServiceAccount token) | Planned |
 
-The static-secret backend is deliberately first: it exercises the site, token
+The static-secret backend was deliberately first: it exercises the site, token
 and API version end to end **without incurring a metered credential issuance**,
 so a misconfiguration surfaces before anything bills.
+
+## How the AWS lease behaves
+
+Worth understanding before you enable it, because the behaviour is shaped almost
+entirely by the fact that issuances are billed.
+
+- **One lease serves the whole deployment.** It is stored in the database, not
+  per-process, so the two web workers and the job worker share it. A per-process
+  cache would mint three credentials for one purpose and bill for three.
+- **It is renewed in the background**, at startup and on the job worker's
+  existing 60-second tick, once less than `wlc_refresh_margin_pct` of its
+  lifetime remains. A request only ever mints synchronously on a genuinely cold
+  start.
+- **A failure never clears the working credential.** A failed mint records the
+  error and backs off; the last good lease keeps serving until it actually
+  expires.
+- **A failing configuration backs off** rather than retrying per request — a
+  wrong dynamic-secret name would otherwise turn every page load into another
+  billable attempt.
+- **The previous lease is released on renewal.** AWS refuses early revocation and
+  that is expected; the call is made anyway so the Azure path (which does accept
+  it) needs no separate handling.
+
+If AWS is on the dynamic tier and no lease can be issued, cloud calls **fail**
+rather than falling back to a static key. That is deliberate: an operator who has
+retired their static key should not silently get some other credential from the
+environment.
 
 ---
 
