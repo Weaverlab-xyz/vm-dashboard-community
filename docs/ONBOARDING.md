@@ -153,19 +153,84 @@ and C are the manual alternative.
 The dashboard deploys EC2 instances into **your** AWS account using an IAM
 user dedicated to the dashboard.
 
-### 1. Create the IAM user
+### 1. Create the IAM user and attach a policy
+
+The dashboard needs a **customer-managed** policy. The AWS-managed policies an
+earlier version of this guide recommended do not work — see
+[Why not the AWS-managed policies](#why-not-the-aws-managed-policies) below.
+
+**Recommended — lift the canonical policy.** `dashboard-app-policy` in
+[`scripts/sandbox/Linux/setup-aws.sh`](../scripts/sandbox/Linux/setup-aws.sh)
+(the `DASHBOARD_POLICY_DOC` heredoc) covers every AWS call the dashboard makes,
+across every feature. That script is the source of truth — restating every
+statement here would only go stale.
 
 ```powershell
 aws iam create-user --user-name dashboard-dev
-aws iam attach-user-policy --user-name dashboard-dev --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess
-aws iam attach-user-policy --user-name dashboard-dev --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-aws iam attach-user-policy --user-name dashboard-dev --policy-arn arn:aws:iam::aws:policy/IAMReadOnlyAccess
+
+# Copy the DASHBOARD_POLICY_DOC JSON out of setup-aws.sh into
+# dashboard-app-policy.json, substituting your account id and your storage
+# bucket prefix for the ${...} placeholders, then:
+aws iam create-policy `
+  --policy-name dashboard-app-policy `
+  --policy-document file://dashboard-app-policy.json
+
+aws iam attach-user-policy --user-name dashboard-dev `
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/dashboard-app-policy
 ```
 
-> **Why these policies:** `AmazonEC2FullAccess` for launching/terminating
-> instances and creating AMIs; `AmazonS3ReadOnlyAccess` for reading OVA
-> upload buckets when you import images; `IAMReadOnlyAccess` for looking
-> up instance profiles during deploy.
+> **It has to be a managed policy, not an inline one.** Inline user policies are
+> capped at 2048 bytes and this document is ~5.2 KB (the managed-policy quota is
+> 6144). Managed policies are also versioned, so
+> `aws iam create-policy-version --set-as-default` propagates later edits
+> without rotating the access key.
+
+**Minimal — core VM deploys only.** If you only want the Cloud VMs page, these
+are the permissions that path actually needs:
+
+| Purpose | Actions |
+|---------|---------|
+| Instance lifecycle | `ec2:Describe*`, `ec2:RunInstances`, `ec2:StartInstances`, `ec2:StopInstances`, `ec2:TerminateInstances`, `ec2:RebootInstances`, `ec2:ModifyInstanceAttribute`, `ec2:CreateTags`, `ec2:DeleteTags`, `ec2:GetPasswordData` |
+| Security groups and key pairs | `ec2:CreateSecurityGroup`, `ec2:DeleteSecurityGroup`, `ec2:AuthorizeSecurityGroupIngress`/`Egress`, `ec2:RevokeSecurityGroupIngress`/`Egress`, `ec2:CreateKeyPair`, `ec2:DeleteKeyPair`, `ec2:ImportKeyPair` |
+| **Terraform remote state** | `s3:ListBucket`, `s3:GetBucketLocation`, `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListBucketMultipartUploads`, `s3:ListMultipartUploadParts` — on the bucket **and** on `<bucket>/*` |
+| Instance profiles | `iam:PassRole`, scoped to the roles you let the dashboard pass |
+| Credential test | `sts:GetCallerIdentity` |
+
+Everything past that is per-feature. Each row below names the `Sid` in
+`setup-aws.sh` so you can lift just that statement:
+
+| Feature | Extra permissions | `Sid` in `setup-aws.sh` |
+|---------|-------------------|-------------------------|
+| Cross-cloud image promote (VHD export / import) | `ec2:ImportImage`, `ec2:ExportImage`, `ec2:DescribeImportImageTasks`, `ec2:DescribeExportImageTasks`, `ec2:CancelImportTask`, `ec2:CancelExportTask` — plus a `vmimport` role with its own trust policy | `DashboardVMImportExport` |
+| Gateways and remote runners (ECS) | ECS cluster / task-definition / task actions, `ssm:GetParameter` and `ssm:GetParameters` on the ECS-optimized-AMI parameter path, `iam:CreateServiceLinkedRole` for `ecs.amazonaws.com`, and `iam:PassRole` on `ecsTaskExecutionRole` / `ecsInstanceRole` | `DashboardECS`, `DashboardECSOptimizedAMI`, `DashboardServiceLinkedRole`, `DashboardPassRoles` |
+| Kubernetes clusters (EKS) | `eks:*`, role CRUD scoped to `role/k8s-*` and `role/*-role`, `iam:CreateServiceLinkedRole` for the `eks*` service principals, `iam:GetRole` | `DashboardEKS`, `DashboardRoles`, `DashboardEKSServiceLinkedRole`, `DashboardEKSGetRole` |
+| Cloud databases (RDS) | DB instance and DB subnet group CRUD, `rds:DescribeDBEngineVersions`, `rds:DescribeOrderableDBInstanceOptions`, tag actions | `DashboardRDS` |
+| Cloud Functions (Lambda) | `lambda:*`, plus Secrets Manager on `secret:*-fn-secret-*` | `DashboardLambda`, `DashboardSecretsManager` |
+| Cloud Costs | `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`, `ce:GetTags` | `DashboardCostExplorer` |
+| External secrets backend | Secrets Manager CRUD on `secret:dashboard/*` — see [secrets-management.md](secrets-management.md#iam-permissions-required-per-backend) | `DashboardSecretsManager` |
+| Password Safe VM onboarding | `ssm:SendCommand`, `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` | `DashboardSSMRunCommand` |
+| Job log streaming | `logs:*` | `DashboardLogs` |
+
+#### Why not the AWS-managed policies
+
+Earlier revisions of this guide told you to attach `AmazonEC2FullAccess`,
+`AmazonS3ReadOnlyAccess` and `IAMReadOnlyAccess`. That combination is both
+broader than necessary and too narrow to work:
+
+- **`AmazonEC2FullAccess`** grants more EC2 than the dashboard uses, and nothing
+  at all for ECS, EKS, Lambda, RDS, Secrets Manager or Cost Explorer — every one
+  of which this same guide sets up later (Appendix L, Appendix M, and the
+  external-vault step in Part D).
+- **`AmazonS3ReadOnlyAccess` breaks deploys outright.** Terraform state lives in
+  your active storage backend, so an apply must *write* `s3:PutObject` /
+  `s3:DeleteObject` for both the `.tfstate` object and its `.tflock` companion
+  (the dashboard uses S3-native state locking). Read-only fails every apply and
+  destroy. Worse, with no storage backend configured at all, state falls back to
+  the container's local disk, where losing that directory **orphans live cloud
+  resources** — see [infrastructure-as-code.md](infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+- **`IAMReadOnlyAccess` cannot `iam:PassRole`**, which is the action attaching an
+  instance profile actually requires. The old "looking up instance profiles"
+  rationale named the wrong mechanism.
 
 ### 2. Create the access key
 
@@ -186,7 +251,7 @@ picks: `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1`.
 ## Part B — Azure setup
 
 The dashboard deploys Azure VMs into **your** Azure subscription using a
-service principal (SP) with the Contributor role.
+service principal (SP) scoped to a single resource group.
 
 ### 1. Log in and pick a subscription
 
@@ -197,27 +262,88 @@ az account show --query id -o tsv
 
 Copy the subscription id.
 
-### 2. Create the service principal
+### 2. Create the resource group and pick a region
+
+```powershell
+az group create --name dashboard-rg --location eastus
+```
+
+The `AZURE_RESOURCE_GROUP` value in `.env` becomes the default RG for deployed
+VMs, and `AZURE_LOCATION` its region (e.g. `centralus`, `eastus`,
+`westeurope`). Create it now rather than letting the first deploy create it —
+the SP in the next step is scoped to this resource group, so it has to exist
+first.
+
+### 3. Create the service principal
 
 ```powershell
 az ad sp create-for-rbac `
   --name "dashboard-dev" `
   --role Contributor `
-  --scopes /subscriptions/<your-subscription-id>
+  --scopes /subscriptions/<your-subscription-id>/resourceGroups/dashboard-rg
 ```
 
 The output includes `appId`, `password`, and `tenant` — you need all three
 (plus the subscription id) for `.env`.
 
+> **Scope it to the resource group, not the subscription.** The sandbox scripts
+> scope `Contributor` to a single RG, and so should you; a subscription-wide
+> grant hands the dashboard every resource you own. Widen it only if you
+> deliberately want deploys landing outside `dashboard-rg`.
+
 > **Security note:** the client secret (`password`) rotates. Azure will
 > warn you when it nears expiry; create a new one and update `.env`.
 
-### 3. Pick a resource group and region
+### 4. Grant the additional roles
 
-The `AZURE_RESOURCE_GROUP` value in `.env` becomes the default RG for
-deployed VMs. It will be created on first deploy if it doesn't already
-exist. Set `AZURE_LOCATION` to your preferred Azure region (e.g.
-`centralus`, `eastus`, `westeurope`).
+`Contributor` on the RG is **not sufficient on its own.** It is a control-plane
+role, so it cannot write blob data — and Terraform state is blob data. Add the
+grants for the features you intend to use:
+
+| Feature | Grant | Scope |
+|---------|-------|-------|
+| **Terraform state + storage backend** | `Storage Blob Data Contributor` | the storage account |
+| Secrets backend (Key Vault) | secret permissions `get list set delete` | the vault |
+| Kubernetes clusters (AKS) | `User Access Administrator` | the resource group |
+| Cloud Costs | `Cost Management Reader` | the **subscription** |
+| Container registry pulls | `AcrPull` | the registry |
+| Image promote into a Compute Gallery | a custom role with the gallery/image actions, or `Contributor` | the gallery's RG |
+
+```powershell
+# Terraform state and the azure_blob storage backend — data plane, required
+az role assignment create `
+  --assignee <appId> `
+  --role "Storage Blob Data Contributor" `
+  --scope /subscriptions/<sub-id>/resourceGroups/dashboard-rg/providers/Microsoft.Storage/storageAccounts/<account>
+
+# Key Vault secrets backend — write is required so per-VM admin passwords can
+# be vaulted and removed again on teardown
+az keyvault set-policy --name <vault> `
+  --object-id <sp-object-id> `
+  --secret-permissions get list set delete
+
+# AKS only: the cluster module creates its own role assignment, which
+# Contributor cannot do (it lacks Microsoft.Authorization/roleAssignments/write)
+az role assignment create `
+  --assignee <appId> `
+  --role "User Access Administrator" `
+  --scope /subscriptions/<sub-id>/resourceGroups/dashboard-rg
+
+# Cloud Costs only: cost data is queried at subscription scope
+az role assignment create `
+  --assignee <appId> `
+  --role "Cost Management Reader" `
+  --scope /subscriptions/<sub-id>
+```
+
+> **Key Vault: access policy or RBAC.** The command above uses a vault access
+> policy, which is what the sandbox scripts do. If your vault uses the RBAC
+> permission model instead, the equivalent is the **Key Vault Secrets Officer**
+> role — see [secrets-management.md](secrets-management.md#iam-permissions-required-per-backend).
+
+For the authoritative list, see the role assignments in
+[`scripts/sandbox/Linux/setup-azure.sh`](../scripts/sandbox/Linux/setup-azure.sh);
+that script is the source of truth.
 
 ---
 
@@ -238,9 +364,19 @@ gcloud config set project <YOUR_PROJECT_ID>
 
 ### 2. Enable required APIs
 
+For core VM deploys:
+
 ```bash
-gcloud services enable compute.googleapis.com secretmanager.googleapis.com
+gcloud services enable compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com
 ```
+
+Optional features each need their own API. Rather than list a set that goes
+stale, enable the same ones the sandbox script does — see the two
+`gcloud services enable` calls in
+[`scripts/sandbox/Linux/setup-gcp.sh`](../scripts/sandbox/Linux/setup-gcp.sh),
+which cover Cloud Run, Cloud Build, GKE (plus Fleet/Connect Gateway),
+BigQuery, Cloud Functions, Artifact Registry, Service Networking and Cloud SQL
+Admin.
 
 ### 3. Create a service account and download a key
 
@@ -249,14 +385,20 @@ gcloud services enable compute.googleapis.com secretmanager.googleapis.com
 gcloud iam service-accounts create dashboard-sa \
   --display-name "VM Dashboard SA"
 
-# Grant Compute Admin and Secret Manager accessor
-gcloud projects add-iam-policy-binding <PROJECT_ID> \
-  --member "serviceAccount:dashboard-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
-  --role "roles/compute.admin"
+# Core roles: instances, impersonation for attached SAs, and secrets
+for ROLE in roles/compute.admin \
+            roles/iam.serviceAccountUser \
+            roles/secretmanager.secretAccessor; do
+  gcloud projects add-iam-policy-binding <PROJECT_ID> \
+    --member "serviceAccount:dashboard-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
+    --role "$ROLE"
+done
 
-gcloud projects add-iam-policy-binding <PROJECT_ID> \
+# Terraform state lives in a bucket, so the SA needs to WRITE objects there.
+# Deliberately bucket-scoped, not project-wide.
+gcloud storage buckets add-iam-policy-binding gs://<YOUR_STATE_BUCKET> \
   --member "serviceAccount:dashboard-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
-  --role "roles/secretmanager.secretAccessor"
+  --role "roles/storage.objectAdmin"
 
 # Download the JSON key
 gcloud iam service-accounts keys create sa-key.json \
@@ -264,6 +406,40 @@ gcloud iam service-accounts keys create sa-key.json \
 ```
 
 Keep `sa-key.json` safe. You'll paste its entire contents into the wizard.
+
+> **`roles/compute.admin` alone is not enough.** It grants nothing on Cloud
+> Storage, and Terraform keeps its state in your active storage backend — so
+> without the `storage.objectAdmin` binding above, every apply and destroy
+> fails. And with no storage backend configured at all, state falls back to the
+> container's local disk, where losing that directory **orphans live cloud
+> resources**. See
+> [infrastructure-as-code.md](infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+
+Optional features need more roles on top:
+
+| Feature | Extra roles |
+|---------|-------------|
+| Kubernetes clusters (GKE) | `roles/container.admin`, `roles/gkehub.admin`, `roles/resourcemanager.projectIamAdmin`, `roles/iam.roleAdmin`, `roles/serviceusage.serviceUsageAdmin` — see [kubernetes.md](kubernetes.md) for why `container.admin` alone is insufficient |
+| Cloud databases (Cloud SQL) | `roles/cloudsql.admin`, `roles/servicenetworking.networksAdmin` |
+| Cloud Functions / Cloud Run | `roles/run.admin`, `roles/run.developer`, `roles/run.invoker`, `roles/cloudfunctions.developer`, `roles/cloudbuild.builds.builder`, `roles/artifactregistry.writer`, `roles/secretmanager.admin` |
+| Image export (VHD) | `roles/cloudbuild.builds.editor`, plus the roles the Cloud Build service identities need — see [image-management.md](image-management.md) |
+| Cloud Costs | `roles/bigquery.jobUser`, `roles/bigquery.dataViewer` (see below) |
+| External secrets backend (writing secrets) | `roles/secretmanager.secretVersionAdder`, or `roles/secretmanager.admin` on the project &mdash; see [secrets-management.md](secrets-management.md#iam-permissions-required-per-backend) |
+| Job log viewing | `roles/logging.viewer` |
+
+The full set the sandbox grants is the `for role in ...` loop in
+[`setup-gcp.sh`](../scripts/sandbox/Linux/setup-gcp.sh), which carries a
+why-comment per role. That script is the source of truth — listing every role
+here would only go stale.
+
+> **Cloud Costs on GCP is a BigQuery query, not a cost API.** You must first
+> create a **Cloud Billing export to BigQuery** in the Billing console — no
+> setup script can create it for you. Then set the export table on the Cloud
+> Costs settings page (`<project>.<dataset>.gcp_billing_export_v1_XXXX`) and
+> grant the service account `roles/bigquery.jobUser` +
+> `roles/bigquery.dataViewer`. **If the export dataset lives in a different
+> project**, grant `dataViewer` on that dataset in that project too — a
+> project-level binding here will not reach it.
 
 ### 4. (Optional) Store an SSH key pair in Secret Manager
 
