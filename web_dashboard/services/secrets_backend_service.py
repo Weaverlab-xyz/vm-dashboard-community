@@ -661,6 +661,30 @@ def read_wlc(ref: str, vault_id: str | None = None) -> str:
     return wlc.read_static(name, folder=folder)
 
 
+_WLC_TIME_FIELDS = ("updatedAt", "updated_at", "modifiedAt", "lastModified",
+                    "createdAt", "created_at")
+
+
+def _wlc_timestamp(obj):
+    """The first recognisable timestamp in `obj`, checking a nested ``metadata`` too.
+
+    Verified live, the create response puts timestamps one level down:
+    ``{"metadata": {"createdAt": ...}, "secret": {...}}``. Whether the metadata and list
+    routes use that same envelope is not confirmed, so read both levels. Getting this
+    wrong is quiet rather than loud — no timestamp means staleness silently reports when
+    the reference was pasted in here instead of the vault's own last-changed date, which
+    is precisely what the external-vault path exists to avoid.
+    """
+    if not isinstance(obj, dict):
+        return None
+    inner = obj.get("metadata")
+    for level in (obj, inner if isinstance(inner, dict) else {}):
+        for field in _WLC_TIME_FIELDS:
+            if level.get(field):
+                return level[field]
+    return None
+
+
 def describe_wlc(ref: str, vault_id: str | None = None):
     """Last-changed time, so staleness alerting reads WC's own clock rather than
     when the reference happened to be pasted in here.
@@ -671,12 +695,8 @@ def describe_wlc(ref: str, vault_id: str | None = None):
     _ = vault_id
     from . import workload_credentials_service as wlc
     folder, name = _wlc_split(ref)
-    meta = wlc.static_metadata(name, folder=folder)
-    for field in ("updatedAt", "updated_at", "modifiedAt", "lastModified",
-                  "createdAt", "created_at"):
-        if meta.get(field):
-            return _naive_utc(meta[field])
-    return None
+    found = _wlc_timestamp(wlc.static_metadata(name, folder=folder))
+    return _naive_utc(found) if found else None
 
 
 def list_wlc() -> list:
@@ -694,7 +714,7 @@ def list_wlc() -> list:
             "name":        name,
             "folder":      entry_folder,
             "description": entry.get("description", ""),
-            "updated_at":  entry.get("updatedAt") or entry.get("updated_at") or "",
+            "updated_at":  _wlc_timestamp(entry) or "",
             "ref":         f"{entry_folder}/{name}".strip("/"),
         })
     return out

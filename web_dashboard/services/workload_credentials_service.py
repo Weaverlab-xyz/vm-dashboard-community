@@ -389,22 +389,32 @@ def test_connection() -> dict:
             "message": f"Connected to Workload Credentials at {base} (site {_cfg('wlc_site_id')})."}
 
 
-def list_folders() -> list:
-    data = _request("GET", "/folders")
-    if isinstance(data, list):
-        return data
-    return (data or {}).get("folders") or []
+# Confirmed against a live site: collections come back as {"data": [...]}. The other
+# keys are kept as fallbacks rather than removed — this API is pre-GA and has already
+# shipped one breaking change, so tolerating a rename costs nothing and a wrong guess
+# here returns an empty list rather than an error, which is silent.
+_COLLECTION_KEYS = ("data", "secrets", "static", "items", "folders")
 
 
-def list_static(folder: str = "") -> list:
-    data = _request("GET", "/static", folder=folder)
-    if isinstance(data, list):
-        return data
-    for key in ("secrets", "static", "items"):
-        val = (data or {}).get(key)
+def _collection(payload) -> list:
+    """The list inside a collection response, whatever it is keyed under."""
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in _COLLECTION_KEYS:
+        val = payload.get(key)
         if isinstance(val, list):
             return val
     return []
+
+
+def list_folders() -> list:
+    return _collection(_request("GET", "/folders"))
+
+
+def list_static(folder: str = "") -> list:
+    return _collection(_request("GET", "/static", folder=folder))
 
 
 def read_static(name: str, folder: str = "") -> str:
