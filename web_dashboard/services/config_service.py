@@ -72,6 +72,7 @@ _EXT_PREFIXES: dict[str, str] = {
     "azure_kv://": "azure_kv",
     "gcp_sm://":   "gcp_sm",
     "bt_safe://":  "bt_secrets_safe",
+    "wlc://":      "wlc",
 }
 
 
@@ -472,6 +473,7 @@ _SECRET_KEYS = frozenset({
     "azure_client_secret",
     "azure_oauth_client_secret",
     "gcp_service_account_json",
+    "wlc_pat",
 })
 
 

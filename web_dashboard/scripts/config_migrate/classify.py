@@ -241,6 +241,7 @@ HTTP_MASKED_KEYS = frozenset({
     "azure_client_secret",
     "azure_oauth_client_secret",
     "gcp_service_account_json",
+    "wlc_pat",
 })
 
 #: The sentinel ``get_all_public`` substitutes. Matched by prefix rather than

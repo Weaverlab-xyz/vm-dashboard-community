@@ -17,11 +17,18 @@ advance at your own pace.
 | **1 — Encrypted database** | Application DB (AES-256) | Anyone with DB access + JWT key | Getting started; local dev |
 | **2 — External vault (migrated)** | AWS SM / Azure KV / GCP SM / BT Secrets Safe | Vault IAM policy | Shared or long-lived deployments |
 | **3 — Vault-backed cloud credentials** | External vault; fetched at runtime by BeyondTrust | Password Safe audit log | Regulated environments; zero-standing-access |
+| **4 — Dynamic cloud credentials** | Nowhere — minted per lease by BeyondTrust Workload Credentials | Workload Credentials audit log | Removing the standing cloud credential entirely |
 
-You do not have to reach Tier 3. Tier 1 is secure enough for a single-user
-local deployment. Tier 2 is the right target for any shared or persistent
-environment. Tier 3 adds checkout audit trails and is worth the added
-complexity when compliance or separation-of-duties is a requirement.
+You do not have to climb this ladder. Tier 1 is secure enough for a
+single-user local deployment. Tier 2 is the right target for any shared or
+persistent environment. Tier 3 adds checkout audit trails and is worth the added
+complexity when compliance or separation-of-duties is a requirement. Tier 4 goes
+further and removes the standing cloud credential altogether.
+
+Each tier is selected **per cloud**, so a mixed deployment is normal rather than
+a half-finished migration — AWS on Tier 4 alongside GCP on Tier 1 is a supported
+configuration, not a gap. Nothing here changes on upgrade: a deployment stays on
+whichever tier it is on until an operator moves it.
 
 ---
 
@@ -85,7 +92,8 @@ by calling the vault API, caches the result for 5 minutes, and discards it.
 | **AWS Secrets Manager** | `aws_sm://` | IAM credentials already configured in the dashboard |
 | **Azure Key Vault** | `azure_kv://` | Service principal already configured in the dashboard |
 | **GCP Secret Manager** | `gcp_sm://` | Service account already configured in the dashboard |
-| **BeyondTrust Secrets Safe** | `bt_secrets_safe://` | ps-cli credentials already configured in the dashboard |
+| **BeyondTrust Secrets Safe** | `bt_safe://` | ps-cli credentials already configured in the dashboard |
+| **BeyondTrust Workload Credentials** | `wlc://` | Site ID + personal access token (preview — see below) |
 
 Each backend reuses the cloud provider credentials you have already entered —
 no additional IAM setup is needed beyond granting the existing SP / SA / IAM
@@ -282,6 +290,25 @@ for setup instructions.
 | Rotation | Manual vault update | Rotate in Password Safe; dashboard gets new value immediately |
 | SSH key | Stored as vault secret | Managed Account checkout (key never written to disk) |
 | Requires BeyondTrust licence | No | Yes (Secrets Safe) |
+
+### Tier 4 — dynamic cloud credentials (Workload Credentials)
+
+Tier 3 still keeps a credential somewhere and fetches it when needed. **Tier 4
+has nothing to fetch**: BeyondTrust Workload Credentials mints a short-lived AWS
+or Azure credential on demand, and it expires on its own.
+
+This is a **preview** feature and is off by default — the product is pre-GA. It
+is enabled under Settings → Preview features, per cloud, and turning it on is
+also what unlocks retiring that deployment's own static keys. Workload
+Credentials additionally works as a Tier 2 backend for ordinary static secrets
+(`wlc://`), which is the cheapest way to verify the connection before anything
+dynamic is switched on.
+
+One caveat stated plainly: the dashboard still holds a Workload Credentials
+personal access token, so this collapses three standing cloud credentials into
+one platform token rather than eliminating secrets outright.
+
+See [integrations/workload-credentials.md](integrations/workload-credentials.md).
 
 ### Hypervisor credentials for a remote agent
 

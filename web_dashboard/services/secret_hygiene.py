@@ -37,6 +37,7 @@ SECRET_REGISTRY: list = [
     ("pscli_client_secret",       "BeyondTrust ps-cli Client Secret"),
     ("bt_client_secret",          "BeyondTrust Privileged Remote Access Client Secret"),
     ("epml_pat",                  "BeyondTrust EPM-L Personal Access Token"),
+    ("wlc_pat",                   "BeyondTrust Workload Credentials PAT"),
     ("entitle_api_token",         "Entitle API Token"),
     ("entitle_api_key",           "Entitle Terraform Provider API Key"),
     ("proxmox_token_secret",      "Proxmox API Token Secret"),
@@ -54,6 +55,7 @@ BACKEND_PREFIXES: dict = {
     "azure_kv":        "azure_kv://",
     "gcp_sm":          "gcp_sm://",
     "bt_secrets_safe": "bt_safe://",
+    "wlc":             "wlc://",
 }
 
 
