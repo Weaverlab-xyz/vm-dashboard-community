@@ -636,6 +636,49 @@ def aws_subprocess_env(purpose: str = ""):
     }
 
 
+def azure_credentials(purpose: str = ""):
+    """The Azure service-principal quad, or None when Azure is not on the dynamic tier.
+
+    Workload Credentials mints a password onto an app registration. It has no idea which
+    **subscription** the dashboard targets, so unlike the AWS lease — which is
+    self-contained — this one is incomplete on its own and the subscription still comes
+    from configuration. Miss that and you get a client that authenticates successfully
+    and then acts on nothing, which is a confusing way to fail.
+    """
+    values = credentials("azure", purpose)
+    if not values:
+        return None
+    subscription_id = _cfg("azure_subscription_id")
+    if not subscription_id:
+        raise LeaseUnavailable(
+            "Azure is set to use Workload Credentials, but azure_subscription_id is not "
+            "configured — a minted credential has no subscription to act on")
+    return {
+        "client_id":       values["client_id"],
+        "client_secret":   values["client_secret"],
+        "tenant_id":       values["tenant_id"],
+        "subscription_id": subscription_id,
+    }
+
+
+def azure_subprocess_env(purpose: str = ""):
+    """``ARM_*`` env vars for a subprocess, or None when Azure is not on the dynamic tier.
+
+    One helper for the terraform provider, the azurerm state backend and Packer, for the
+    same reason as :func:`aws_subprocess_env`: three hand-written copies of the mapping
+    are three chances to omit one of the four variables.
+    """
+    quad = azure_credentials(purpose)
+    if not quad:
+        return None
+    return {
+        "ARM_CLIENT_ID":       quad["client_id"],
+        "ARM_CLIENT_SECRET":   quad["client_secret"],
+        "ARM_TENANT_ID":       quad["tenant_id"],
+        "ARM_SUBSCRIPTION_ID": quad["subscription_id"],
+    }
+
+
 def status(cloud: str, purpose: str = PURPOSE_PROVISION) -> dict:
     """Non-secret lease state for the UI and health surfaces. Never returns the payload."""
     from ..database import SessionLocal
