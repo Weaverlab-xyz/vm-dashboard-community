@@ -14,6 +14,11 @@ Pinned here:
     main.py's comment block happened
   * the five hypervisor tiles KEEP their fetchers. They are a live host call unless the
     connection is agent-backed, and the aggregate makes no live calls by construction
+  * the one section that still fans out does NOT blank the tiles the aggregate answers.
+    `workstation_vms` sits in that section for layout while being server-answered, so
+    `_fetchTile` has no branch for it — and its fallthrough used to be `{value: -1}`,
+    which the fan-out then wrote over the snapshot's real count. The tile read
+    "- unavailable" on every load while /vms behind it listed the VMs
   * Refresh triggers the collector; it does not re-fetch the live endpoints. Reverting to a
     per-tile fan-out from the one button an operator presses when the page already looks
     wrong is the cost-cache incident in miniature
@@ -141,6 +146,76 @@ def test_the_hypervisor_tiles_keep_their_fetchers():
             "tile would read 'unavailable' forever. These are a live WinRM/pyVmomi/XAPI "
             "call unless the connection is agent-backed, which is why they are not in the "
             "snapshot")
+
+
+def _hypervisor_section_keys():
+    """The tile keys in the one section that still fans out.
+
+    A section literal runs from its own `id:` to the next one's, so a tile matched inside
+    that slice belongs to it.
+    """
+    ids = [(m.group(1), m.start()) for m in re.finditer(r"id: '([a-z]+)',", DASHBOARD)]
+    assert ids, "the tileSections catalog moved or changed shape"
+    src = None
+    for i, (sid, start) in enumerate(ids):
+        if sid != "hypervisors":
+            continue
+        end = ids[i + 1][1] if i + 1 < len(ids) else len(DASHBOARD)
+        src = DASHBOARD[start:end]
+    assert src, "there is no 'hypervisors' section — refreshSection has nothing to fan out"
+    return re.findall(r"\{\s*key:\s*'([a-z_]+)'", src)
+
+
+def test_every_tile_in_the_fanned_out_section_has_exactly_one_source():
+    """Fetcher or aggregate, never neither and never both.
+
+    Neither is a tile that can only read "unavailable"; both is the warmer/reader drift
+    two sources for one number always becomes.
+    """
+    keys = _hypervisor_section_keys()
+    assert "workstation_vms" in keys, (
+        "the Workstation tile left the hypervisors section — this file's premise moved")
+    for key in keys:
+        assert (key in CLIENT_FETCHED) != (key in SERVER_ANSWERED), (
+            f"the {key!r} tile is in the fanned-out section with "
+            f"{'two sources' if key in CLIENT_FETCHED else 'no source'}: "
+            f"CLIENT_FETCHED={key in CLIENT_FETCHED}, SERVER_ANSWERED={key in SERVER_ANSWERED}")
+
+
+def test_the_section_fanout_does_not_blank_the_tiles_the_aggregate_answers():
+    """The Workstation regression, at the two places that caused it.
+
+    `workstation_vms` is in the fanned-out section AND server-answered — legitimately: it
+    is a hypervisor kind, tile order matches the nav, and an agent-bound Workstation
+    connection is a plain DB read rather than the live WinRM/pyVmomi/XAPI call the other
+    five are. So `_fetchTile` has no branch for it, its fallthrough answered
+    `{value: -1}` for every key it does not handle, and `refreshSection` wrote that over
+    the number the snapshot had just delivered. Result: "- unavailable" on the tile and a
+    full list of VMs on the page one click behind it, on every load and every Refresh.
+    """
+    server_answered_here = [k for k in _hypervisor_section_keys() if k in SERVER_ANSWERED]
+    assert server_answered_here, (
+        "no server-answered tile is left in the fanned-out section — if that is deliberate, "
+        "delete this test rather than leaving it passing vacuously")
+
+    dispatch = _code_only(_js("_fetchTile"))
+    assert not re.search(r"return\s*\{\s*value:\s*-1\s*\}", dispatch), (
+        "_fetchTile answers {value: -1} for a key it has no branch for. That is the shape a "
+        "dead cloud API produces, so refreshSection cannot tell 'this tile is unavailable' "
+        f"from 'this tile is not mine' — and {server_answered_here} are not its to answer. "
+        "Return null for an unhandled key")
+    assert re.search(r"return\s+null\s*;", dispatch), (
+        "_fetchTile has no null fallthrough, so a key it does not handle falls off the end "
+        "as undefined — which refreshSection would store as the tile's whole stat object")
+
+    body = _code_only(_js("refreshSection"))
+    assert re.search(r"===\s*null", body), (
+        "refreshSection writes every result unconditionally, so a tile _fetchTile does not "
+        f"handle gets overwritten anyway. {server_answered_here} come from "
+        "/api/dashboard/stats and must survive this fan-out")
+    assert "loadSnapshot" in body, (
+        "refreshSection never consults the aggregate, so pressing this section's Refresh "
+        f"cannot refresh {server_answered_here} at all")
 
 
 def test_refresh_triggers_the_collector_rather_than_a_live_fanout():
