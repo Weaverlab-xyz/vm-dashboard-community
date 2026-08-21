@@ -131,6 +131,16 @@ def _database_name(tf_variables: dict, engine: str,
     Every source is a *recorded* value. There is deliberately no engine default: RDS
     SQL Server creates no user database, and ``master`` is the system catalog, so
     substituting it would scope grants at the whole instance instead of refusing.
+
+    Deliberately **not** ``cloud_database_service.connection_db_name``, which is the
+    other half of the same question and answers ``master`` for every provisioned SQL
+    Server. That one is the admin-session catalog (where an admin connects, and where
+    server-level principals live); this one is the grant scope. They diverge on Azure
+    and GCP, whose modules really do create a user catalog, and unifying them would
+    rescope every SQL Server grant there from the user's database to the system
+    catalog: db_datareader/db_datawriter are DATABASE-level fixed roles. The ``master``
+    half is not lost — for the azure_sql contained-database model, cloud_db_sql_service
+    derives the master connection it needs to CREATE LOGIN itself (_SPLIT_LOGIN_FLAVORS).
     """
     for key in ("db_name", "database_name", "initial_catalog"):
         value = (tf_variables or {}).get(key)

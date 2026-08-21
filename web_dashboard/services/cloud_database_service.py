@@ -211,9 +211,13 @@ def _oracle_db_name(db_id: str) -> str:
     return ("adb" + re.sub(r"[^a-z0-9]", "", db_id.lower()))[:14]
 
 
-def connection_db_name(row) -> str:
+def connection_db_name(row, tf_variables: Optional[dict] = None) -> str:
     """The database an admin session actually opens against this row — what the
-    Databases page and the Connection modal show.
+    Databases page and the Connection modal show, and what every admin-session
+    consumer connects to: the PRA protocol tunnel (:func:`_broker_tunnel`), the
+    native Entitle connector (:func:`_entitle_register_core`), the Secrets Safe
+    admin document, the managed-user creation and the Ansible connection vars.
+    Not display-only — changing it changes what those sessions open.
 
     Deliberately distinct from the *catalog* stored in ``row.db_name``: for SQL Server
     you always connect to the ``master`` system database. RDS creates no user database
@@ -223,6 +227,11 @@ def connection_db_name(row) -> str:
     the Entitle adapter, whose ``FN_DB_NAME`` must name a real catalog or nothing.
 
     Pure: no ``Session``, no job lookup, because :func:`_serialize` calls it per row.
+    ``tf_variables`` is an optional *fallback* source for the callers that already hold
+    the provisioning job's var set. It only fills a blank ``row.db_name``, so passing it
+    can never change an answer the row already gives — it keeps a row the backfill has
+    not reached yet (provisioned before the column existed, on an instance that has not
+    restarted since) resolvable, which is where these callers used to read from.
     """
     engine = row.engine or ""
     registered = (getattr(row, "source", None) or "provisioned") == "registered"
@@ -235,7 +244,7 @@ def connection_db_name(row) -> str:
     # row the backfill could not reach. Never invent one for a registered Oracle row.
     if engine == "oracle" and not row.db_name and not registered:
         return _oracle_db_name(row.id)
-    return row.db_name or ""
+    return row.db_name or (tf_variables or {}).get("db_name", "") or ""
 
 
 def _aws_db_security_groups(regional: dict, opts: dict) -> list[str]:
@@ -755,7 +764,10 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
             jumpoint_name=row.jumpoint_name or _cfg("bt_jumpoint_name"),
             client_secret=client_secret,
             username=admin_username,
-            database=("master" if engine == "sqlserver" else tf_variables.get("db_name", "")),
+            # The admin session catalog, resolved from the row by the same function
+            # the Databases page and the Connection dialog use — NOT the Entitle
+            # grant scope (cloud_db_adapter_service._database_name).
+            database=connection_db_name(row, tf_variables),
             tag="clouddb",
             # Vault account for credential injection at tunnel launch; rides in
             # the same workspace/state so decommission destroys it too. The
@@ -880,7 +892,13 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
         port=reg_port,
         username=admin_username,
         password=admin_password,
-        database=("master" if engine == "sqlserver" else tfv.get("db_name", "")),
+        # The connector logs in as the admin and mints server-level principals, so
+        # this is the admin-session catalog, not the grant scope. Unreachable for
+        # sqlserver today: _entitle_ineligible_reason above rejects every managed
+        # flavor (_ENTITLE_VIABLE_SQLSERVER_PROVIDERS is empty), so the sqlserver
+        # branch only starts running when RDS Custom / SQL MI are added — both real
+        # instances where master is right and `USE` works.
+        database=connection_db_name(row, tfv),
         version=version,
         private=True,   # dashboard-built DBs are private (publicly_accessible=false)
         tag="clouddb",
@@ -1057,7 +1075,12 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
             "engine": row.engine,
             "host": row.private_host,
             "port": row.port,
-            "database": tf_variables.get("db_name", ""),
+            # This document records the ADMIN credential, so it must carry the
+            # catalog that credential actually connects to — the same one the tunnel
+            # targets. The raw tf db_name was wrong for ("sqlserver", "aws"), whose
+            # var set omits db_name: it stored an empty database on an otherwise
+            # usable credential record.
+            "database": connection_db_name(row, tf_variables),
             "username": admin_username,
             "password": admin_password,
         })
@@ -1121,7 +1144,10 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
                       or tf_variables.get("administrator_login") or "dbadmin")
     admin_password = (config_service.get(f"clouddb/{row.id}/admin")
                       or tf_variables.get("master_password") or "")
-    db_name = "master" if engine == "sqlserver" else tf_variables.get("db_name", "")
+    # Admin-session catalog. For sqlserver this is doubly required: the statement
+    # is CREATE LOGIN (server-level), and cloud_db_sql_service._mssql_command
+    # hardcodes `-d master` anyway, so any other value here would be discarded.
+    db_name = connection_db_name(row, tf_variables)
     managed_user = _managed_user_name(row.id)
     managed_pw = sql.generate_password()
     image = _cfg(f"clouddb_db_client_image_{engine}") or sql.default_client_image(engine)
@@ -1196,7 +1222,10 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
                       or tf_variables.get("master_username") or "dbadmin")
     admin_password = (config_service.get(f"clouddb/{row.id}/admin")
                       or tf_variables.get("administrator_password") or "")
-    db_name = "master" if engine == "sqlserver" else tf_variables.get("db_name", "")
+    # Admin-session catalog. For sqlserver this is doubly required: the statement
+    # is CREATE LOGIN (server-level), and cloud_db_sql_service._mssql_command
+    # hardcodes `-d master` anyway, so any other value here would be discarded.
+    db_name = connection_db_name(row, tf_variables)
     managed_user = _managed_user_name(row.id)
     managed_pw = sql.generate_password()
     image = _cfg(f"clouddb_db_client_image_{engine}") or sql.default_client_image(engine)
@@ -2018,7 +2047,9 @@ async def _registered_connection_vars(row) -> dict:
             f"Password Safe returned an empty credential for database {row.id}")
 
     engine = row.engine
-    db_name = row.db_name or ("master" if engine == "sqlserver" else "")
+    # connection_db_name already encodes the registered asymmetry: the operator's
+    # own entry wins and master is only the fallback.
+    db_name = connection_db_name(row)
     from . import managed_accounts as ma
     return {
         "db_engine": engine,
@@ -2044,8 +2075,10 @@ async def ansible_connection_vars(db: Session, db_id: str) -> dict:
                    Oracle (``ADMIN``) overrides, else ``dbadmin``.
       - password — the encrypted config store (``clouddb/{id}/admin``); tf_variables
                    never carry it (scrubbed).
-      - db_name  — ``master`` for SQL Server (you connect to ``master``; RDS omits a
-                   db_name), the ADB name for Oracle, else the provisioned db_name.
+      - db_name  — :func:`connection_db_name`: ``master`` for SQL Server (you connect
+                   to ``master``; RDS omits a db_name), the ADB name for Oracle, else
+                   the recorded catalog. **Not** the Entitle grant scope — see
+                   ``cloud_db_adapter_service._database_name``.
 
     The returned keys are engine-independent so one sample playbook maps them onto any
     module's args (``login_host: "{{ db_login_host }}"`` …). Raises
@@ -2077,12 +2110,9 @@ async def ansible_connection_vars(db: Session, db_id: str) -> dict:
             f"no admin credential available for db_id={row.id} "
             f"(provisioning job pruned?) — cannot build Ansible connection vars")
 
-    if engine == "sqlserver":
-        db_name = "master"
-    elif engine == "oracle":
-        db_name = _oracle_db_name(row.id)
-    else:
-        db_name = tfv.get("db_name", "")
+    # The play connects as the admin, so this is the admin-session catalog — the same
+    # one the tunnel targets. connection_db_name already carries the Oracle fallback.
+    db_name = connection_db_name(row, tfv)
 
     return {
         "db_engine": engine,
