@@ -1392,16 +1392,35 @@ async def run_provision_apply(
     if not row:
         logger.warning("clouddb apply: row %s vanished", db_id)
         return
-    # The job's persisted tf_variables OMIT the master password — a secret is never
-    # written to jobs.extra_data. Re-inject it from the secrets backend into the key
-    # the engine module (and the downstream PRA tunnel + credential staging, which
-    # read it back out of tf_variables) expect.
-    _pw = config_service.get(f"clouddb/{db_id}/admin") or ""
-    if _pw:
-        _pw_key = {"azure": "administrator_password", "oci": "admin_password"}.get(row.cloud, "master_password")
-        tf_variables[_pw_key] = _pw
     job_service.set_running(db, job_id)
     try:
+        # The job's persisted tf_variables OMIT the master password — a secret is never
+        # written to jobs.extra_data. Re-inject it from the secrets backend into the key
+        # the engine module (and the downstream PRA tunnel + credential staging, which
+        # read it back out of tf_variables) expect.
+        #
+        # get_fresh, not get: provision() wrote this key from the APP process moments
+        # ago, and the runner claims the job within one POLL_INTERVAL (2s) — well inside
+        # config_service's 5s cache TTL, which the supervisor pass keeps permanently
+        # warm by re-reading worker_policy every poll. A cached read therefore returns
+        # "" for a row that is certainly in app_config, most of the time.
+        #
+        # And an empty read must fail HERE. Skipping the injection (what this used to
+        # do) handed terraform a var set with no master_password, so the apply died on
+        # "No value for required variable" pointing at the module's variable block —
+        # a missing-secret bug wearing a Terraform bug's clothes, and one that looked
+        # like it belonged to whichever engine/region happened to draw the short straw.
+        _pw_key = {"azure": "administrator_password", "oci": "admin_password"}.get(row.cloud, "master_password")
+        _pw = config_service.get_fresh(f"clouddb/{db_id}/admin")
+        if not _pw:
+            raise CloudDatabaseError(
+                f"the admin credential for this database is unreadable: "
+                f"config://clouddb/{db_id}/admin holds no value, so Terraform would run "
+                f"with no {_pw_key}. It is minted once at provision and cannot be "
+                f"re-derived — delete this database and provision a new one."
+            )
+        tf_variables[_pw_key] = _pw
+
         # Kick the shared Gateway host EARLY (only when PRA is configured) so its
         # ~2-min boot overlaps the 5-10-min RDS apply instead of stacking after it.
         if _pra_configured():

@@ -257,6 +257,45 @@ def get(key: str, default: str = "", workgroup: str | None = None) -> str:
     return _resolve_external(raw, workgroup=workgroup)
 
 
+def get_fresh(key: str, default: str = "", workgroup: str | None = None) -> str:
+    """Like :func:`get`, but reads this one key straight from the DB.
+
+    For a value ANOTHER process wrote seconds ago. get() answers from a snapshot up
+    to _CACHE_TTL_SECONDS old, so a row that is definitely in app_config reads back
+    as "" for up to five seconds — and the shape that hits is exactly the one that
+    matters: the app mints a per-resource secret (``clouddb/<id>/admin``,
+    ``cloudfn/<id>/bearer``), commits it, and creates a Job; the job runner claims
+    that Job within POLL_INTERVAL (2s) and reads the secret back. The runner's
+    snapshot is ALWAYS under 5s old — its supervisor pass re-reads ``worker_policy``
+    through this cache every poll — so the read lands inside the stale window most
+    of the time and the secret silently comes back empty.
+
+    One indexed single-row SELECT, so it is only worth it where the value is both
+    fresh and required. Everything read repeatedly (feature flags, cloud creds)
+    should stay on get() and its cache.
+    """
+    from ..database import SessionLocal, AppConfig
+    db = SessionLocal()
+    try:
+        rows = db.query(AppConfig).filter(AppConfig.key == key).all()
+        scoped = {getattr(r, "workgroup", None): r.value for r in rows}
+    finally:
+        db.close()
+
+    # Same lookup priority as get(): the workgroup row, then the global row.
+    found_wg = workgroup if (workgroup is not None and workgroup in scoped) else None
+    if found_wg is None and None not in scoped:
+        return _resolve_external(default, workgroup=workgroup)
+    stored = scoped[found_wg]
+    value = _decrypt(stored) if stored else ""
+    # Repair the cache under the scope the row actually came from, so a later get()
+    # in the same dispatch (the tunnel broker, the Password Safe staging) doesn't go
+    # back to reading the stale snapshot this call just worked around.
+    with _cache_lock:
+        _cache[(key, found_wg)] = value
+    return _resolve_external(value, workgroup=workgroup)
+
+
 def get_raw(key: str, default: str = "", workgroup: str | None = None) -> str:
     """Return the **stored** value for key *without* resolving external references.
 

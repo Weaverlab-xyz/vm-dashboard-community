@@ -1131,7 +1131,13 @@ async def _reinject_secrets(row: CloudFunction, tf_variables: dict) -> dict:
     (stripped) var set fails before it deletes anything.
     """
     variables = dict(tf_variables or {})
-    secret = config_service.get(f"cloudfn/{row.id}/bearer") or ""
+    # get_fresh, not get: on a first deploy this key was written by the APP process
+    # moments ago and the runner claims the job within one 2s poll — inside the config
+    # cache's 5s TTL, so a cached read returns "" for a row that is certainly there.
+    # `shared_secret` is a required variable in the aws_lambda and gcp_cloudrun modules,
+    # so an empty read fails the apply on "No value for required variable". Same defect
+    # cloud_database_service.run_provision_apply had with the DB admin password.
+    secret = config_service.get_fresh(f"cloudfn/{row.id}/bearer")
     if row.cloud == "azure":
         # Rebuild the Key Vault reference rather than the value. Also covers a
         # function deployed before the vault path existed: it has no persisted
