@@ -264,6 +264,31 @@ def test_the_object_id_guard_says_which_id_it_wants():
     src = _read("variables.tf")
     assert "NOT its appId" in src
 
+
+def test_the_folder_can_be_adopted_rather_than_created():
+    """A live apply failed here.
+
+    `folder already exists: dashboard (code: folder_already_exists)` — hit by anyone who
+    used Workload Credentials as a static-secret backend first, or who re-ran after a
+    partial apply. The provider has no folder data source (only the two integrations have
+    one), so an existing folder cannot be adopted declaratively; create_folder is the
+    lever.
+    """
+    main = _uncommented(_read("main.tf"))
+    assert "var.create_folder" in main, "the folder resource is unconditional"
+    variables = _uncommented(_read("variables.tf"))
+    assert 'variable "create_folder"' in variables
+
+
+def test_the_folder_path_falls_back_to_the_plain_name():
+    """What makes create_folder = false usable.
+
+    With the resource absent, one() is null and the coalesce supplies var.folder. Without
+    that fallback, skipping creation would file the secrets under an empty folder.
+    """
+    main = _uncommented(_read("main.tf"))
+    assert "coalesce(one(beyondtrust_workload_credentials_folder.this[*].path), var.folder)" in main
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
