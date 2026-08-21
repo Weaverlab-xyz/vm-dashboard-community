@@ -81,6 +81,20 @@ value in the dashboard's secrets backend, and records `entitle_agent_token_ref`
 resource "entitle_agent_token" "agent" { name = var.agent_name }   # .token is sensitive
 ```
 
+**The mint is not repeatable, so it is recoverable instead.** Entitle refuses a second
+token of the same name (`400 Resource already exists`) and offers no data source to read
+an existing one back, so re-running a mint can never be idempotent: `terraform import`
+would yield state with a null `token`, which is useless because the chart needs the value.
+What *is* idempotent is recovery — Terraform records sensitive outputs and attributes in
+state as **plaintext**, and `entitle_agent_token_tf_state` is stashed **unscrubbed** for
+exactly this reason (contrast `ps_resource_service._scrub_state`, which redacts a `token`
+before stashing because that path destroys by id and never needs the value). So when
+`entitle_agent_token_ref` resolves empty, `ensure_agent_token` first recovers the value
+(and the name) from that state and restores the ref, minting only if there is nothing to
+recover — or if a *different* name was requested, which is how an operator deliberately
+forces a fresh token. An unrecoverable conflict is a dead end by construction and fails with the
+remedies spelled out in the message — see the [troubleshooting entry](../integrations/entitle.md#troubleshooting).
+
 `setup_entitle_agent` then, using the **same primitives** the ESO/management installs
 already use:
 

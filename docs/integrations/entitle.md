@@ -221,6 +221,23 @@ capability *and* the per-build "Register in Entitle" checkbox are on, then check
 log: `docker compose logs app | grep -i entitle`. Registration is non-fatal — the VM/DB
 still provisions; the job message records why registration was skipped or failed.
 
+**"an Entitle Agent token named X already exists in the tenant"** (the raw provider
+form is `Failed to create the Agent Token, status code: 400 … Resource already exists`) —
+the token mint failed, so the `k8s_entitle_agent` job died **before touching the cluster**;
+nothing was installed and Live Output stays empty. It means the tenant already holds a
+token of that name while this dashboard holds no copy of its value. The value is returned
+only at creation and cannot be read back, and `ensure_agent_token` already tries to recover
+it from `entitle_agent_token_tf_state` before minting — so reaching this error means there
+is no stored state either (config migration treats all three keys as runtime handles and
+drops them: see `config_migrate/classify.py` `_RUNTIME_HANDLES`). Fix by one of: delete
+that token in Entitle and retry — which breaks any agent still using it; set
+`ENTITLE_AGENT_TOKEN_NAME` to an unused name so a fresh token is minted; or set
+`ENTITLE_AGENT_TOKEN_REF` to the existing token value. Both keys are **env/`.env` only** —
+`entitle_agent_token_name` is read-only in the Settings panel and `entitle_agent_token_ref`
+is not in it at all. To check whether an agent is in fact installed, the Kubernetes page's
+per-cluster flag is just `entitle_agent_cluster_id == cluster.id`; confirm against reality
+with `helm list -n entitle`.
+
 **"private target requires entitle_agent_token_name"** — the resource is private and no
 Entitle agent is configured. Either provision the agent (Kubernetes) and set
 `entitle_agent_token_name`, or register only public resources.

@@ -739,6 +739,43 @@ def _resolve_token_ref(ref: str) -> str:
     return config_service.get(ref) or ref
 
 
+def _agent_token_from_state(tf_state_json: str) -> tuple:
+    """Recover ``(token, name)`` from a previous mint's stored ``terraform.tfstate``.
+
+    Entitle returns the token value only at creation, but Terraform records sensitive
+    outputs and attributes in state as PLAINTEXT — which is why the Password Safe path
+    scrubs a ``token`` attribute before stashing state (``ps_resource_service._scrub_state``)
+    and why :func:`ensure_agent_token` deliberately does not. Keeping it intact is what
+    makes the mint recoverable: the ref can resolve empty while this state survives (an
+    external secrets-backend ref whose secret was deleted, a cleared ``entitle/agent-token``
+    row, a partially restored config store), and a second mint under the same name is a hard
+    ``400 Resource already exists`` from Entitle. Returns ``("", "")`` when there is nothing
+    to recover — every failure here is non-fatal, the caller just falls through to minting."""
+    if not tf_state_json:
+        return "", ""
+    try:
+        state = json.loads(tf_state_json)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("entitle_agent_token_tf_state is not valid JSON — cannot recover the token")
+        return "", ""
+    if not isinstance(state, dict):
+        return "", ""
+    token, name = "", ""
+    out = (state.get("outputs") or {}).get("token")
+    if isinstance(out, dict) and out.get("value"):
+        token = str(out["value"])
+    # The name lives only on the resource; the token is here too when the state was
+    # captured without the output block.
+    for res in state.get("resources") or []:
+        if res.get("type") != "entitle_agent_token":
+            continue
+        for inst in res.get("instances") or []:
+            attrs = inst.get("attributes") or {}
+            token = token or str(attrs.get("token") or "")
+            name = name or str(attrs.get("name") or "")
+    return token, name
+
+
 async def mint_agent_token(name: str) -> dict:
     """Mint a fresh Entitle Agent token via the provider. Returns ``{token, tf_state_json}``.
 
@@ -748,7 +785,24 @@ async def mint_agent_token(name: str) -> dict:
     if not _api_key():
         raise EntitleRegistrationError(
             "entitle_api_key (or entitle_api_token) is not configured — cannot mint an agent token")
-    res = await asyncio.to_thread(_apply_hcl_sync, _agent_token_hcl(name), {})
+    try:
+        res = await asyncio.to_thread(_apply_hcl_sync, _agent_token_hcl(name), {})
+    except EntitleRegistrationError as exc:
+        # Entitle rejects a duplicate agent-token NAME. We always apply into an empty
+        # workdir, so this means the tenant already holds that name while we hold no
+        # copy of its value — unrecoverable here (create-only secret, no data source),
+        # so spell out the remedies: the job page renders error_message and nothing else.
+        if "already exists" not in str(exc).lower():
+            raise
+        raise EntitleRegistrationError(
+            f"an Entitle Agent token named '{name}' already exists in the tenant, but this "
+            "dashboard holds no copy of its value. Entitle returns the value only at "
+            "creation, so it cannot be read back and re-minting the same name is refused. "
+            "Fix by one of: delete that token in Entitle and retry (this breaks any agent "
+            "still using it); set ENTITLE_AGENT_TOKEN_NAME to an unused name; or set "
+            "ENTITLE_AGENT_TOKEN_REF to the existing token value. Neither key is editable "
+            "in the Settings panel — both are env/.env only."
+        ) from exc
     token = (res.get("outputs") or {}).get("token")
     if not token:
         raise EntitleRegistrationError("agent-token mint returned no 'token' output")
@@ -758,16 +812,41 @@ async def mint_agent_token(name: str) -> dict:
 async def ensure_agent_token(name: str = "") -> str:
     """Return the Entitle agent token value, minting + persisting one if none exists.
 
-    If ``entitle_agent_token_ref`` already resolves to a value, return it. Otherwise mint
-    a token, stash the value in the encrypted config store, and record the ref
-    (``entitle_agent_token_ref`` → ``config://entitle/agent-token``), the name
+    If ``entitle_agent_token_ref`` already resolves to a value, return it. If it does not
+    but a previous mint's ``entitle_agent_token_tf_state`` is still stored for the SAME
+    name, recover the value from that state (:func:`_agent_token_from_state`) and restore
+    the ref — re-minting an existing name is refused by Entitle, so recovery is the only
+    idempotent path. A *different* requested name skips recovery: that is how an operator
+    forces a fresh token.
+
+    Otherwise mint a token, stash the value in the encrypted config store, and record the
+    ref (``entitle_agent_token_ref`` → ``config://entitle/agent-token``), the name
     (``entitle_agent_token_name``, reused for private-target registration), and the mint's
     ``terraform.tfstate`` (``entitle_agent_token_tf_state``) for later destroy/rotation."""
     from . import config_service
     existing = _resolve_token_ref(_cfg("entitle_agent_token_ref"))
     if existing:
         return existing
+    # The ref resolved empty. Before minting — which Entitle refuses outright if a token
+    # of this name already exists — try to recover the value from the previous mint's
+    # state, and restore the ref/name the mint would have written.
     token_name = name or _cfg("entitle_agent_token_name") or "vm-dashboard-agent"
+    recovered, recovered_name = _agent_token_from_state(_cfg("entitle_agent_token_tf_state"))
+    if recovered and recovered_name and recovered_name != token_name:
+        # Asking for a different name is how an operator forces a FRESH token (the
+        # documented way out of an unrecoverable name conflict). Stale state must not
+        # silently win that argument.
+        logger.info("stored agent-token state is for '%s' but '%s' was requested — minting instead",
+                    recovered_name, token_name)
+        recovered = ""
+    if recovered:
+        config_service.set(_AGENT_TOKEN_CONFIG_KEY, recovered)
+        config_service.set("entitle_agent_token_ref", f"config://{_AGENT_TOKEN_CONFIG_KEY}")
+        if recovered_name and not _cfg("entitle_agent_token_name"):
+            config_service.set("entitle_agent_token_name", recovered_name)
+        logger.info("Entitle agent token recovered from stored terraform state (name=%s) — no mint",
+                    recovered_name or "unknown")
+        return recovered
     minted = await mint_agent_token(token_name)
     config_service.set(_AGENT_TOKEN_CONFIG_KEY, minted["token"])
     config_service.set("entitle_agent_token_ref", f"config://{_AGENT_TOKEN_CONFIG_KEY}")
