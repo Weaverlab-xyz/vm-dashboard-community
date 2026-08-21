@@ -1256,6 +1256,71 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
             "admin_username": admin_username, "client_image": image, "port": port}
 
 
+_FA_MODE_REFERENCE = "reference"
+
+
+def _ps_fa_mode() -> str:
+    """Where the DB plugin's functional account comes from: ``"reference"`` (the
+    operator created it and named it in config -- VM/k8s parity) or ``"create"``
+    (mint one per database from the configured credential material -- legacy default).
+    An explicit choice, never inferred from a blank field."""
+    return (_cfg("clouddb_ps_functional_account_mode") or "create").strip().lower()
+
+
+async def _resolve_db_functional_account(*, config_key: str, platform_id: int,
+                                         platform_tokens: tuple, label: str,
+                                         create: dict) -> tuple:
+    """Resolve the functional account to onboard against ->
+    ``(functional_account_id, platform_id, owned)``.
+
+    ``reference`` mode RESOLVES an account the operator created in BeyondInsight,
+    exactly as ``ps_vm_hook.register`` and ``ps_k8s_token_service`` do -- the account is
+    never created and never deleted, and the managed system takes ITS platform, because
+    the functional account is the thing that binds the plugin. ``owned`` comes back
+    False, and the caller must not stash an id the decommission path would then delete.
+
+    ``create`` mode mints one per database from ``create`` (the credential material off
+    the settings panel) and ``owned`` is True.
+
+    ``platform_id`` is therefore only consulted in ``create`` mode; callers pass 0 in
+    ``reference`` mode rather than resolving a platform name they will not use.
+
+    A misconfigured name raises. The caller's onboarding block is best-effort, so the
+    raise only warns and leaves the job green -- hence the ``logger.error``, which is
+    the one durable, greppable trace of an operator error that produced no artifacts.
+    """
+    from . import ps_api_service, ps_vm_hook
+    if _ps_fa_mode() != _FA_MODE_REFERENCE:
+        fa_id = await ps_api_service.create_functional_account_on_platform(
+            platform_id=platform_id, **create)
+        return int(fa_id), int(platform_id), True
+
+    name = _cfg(config_key)
+    if not name:
+        logger.error("clouddb: functional-account mode is %r but %s is blank -- no %s "
+                     "functional account to onboard against",
+                     _FA_MODE_REFERENCE, config_key, label)
+        raise CloudDatabaseError(
+            f"clouddb_ps_functional_account_mode is {_FA_MODE_REFERENCE!r} but no "
+            f"{label} functional account is configured -- set {config_key} to the name "
+            f"of the account you created in Password Safe, or switch the mode back to "
+            f"'create' to have the dashboard mint one per database")
+    fa = await ps_api_service.get_functional_account(name)
+    pname = fa.get("platform_name") or ""
+    if not ps_vm_hook._platform_name_ok(pname, *platform_tokens):
+        logger.error("clouddb: %s functional account %r is on platform %r, not a %r "
+                     "platform (%s)", label, name, pname, " ".join(platform_tokens), config_key)
+        raise CloudDatabaseError(
+            f"functional account {name!r} is on platform {pname!r}, not a "
+            f"{' '.join(platform_tokens)!r} platform -- the managed system would land on "
+            f"the wrong platform. Point {config_key} at the functional account you "
+            f"created on your {label} plugin platform.")
+    logger.info("clouddb: using operator-created %s functional account %r "
+                "(id=%s platform=%r) -- not created here, not deleted on decommission",
+                label, name, fa["id"], pname)
+    return int(fa["id"]), int(fa["platform_id"]), False
+
+
 async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id: str,
                                       engine: str, tf_variables: dict, ctx: dict) -> None:
     """Onboard the DB into Password Safe: a managed system + managed account on the
@@ -1280,23 +1345,30 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     }
 
     # ── DB managed system (cloud-specific custom plugin) ──
+    fa_mode = _ps_fa_mode()
     if row.cloud == "azure":
-        # "{engine} Azure Run Command Plugin": the functional account bundles the
-        # Azure control-plane SP with a privileged DB login (the minted admin), which
-        # rotates the dedicated managed user. Address is eight ;-separated fields.
-        db_platform_id = await ps_api_service.get_platform_id(
-            _cfg(f"clouddb_ps_platform_azure_{engine}"))
-        auth_mode = (_cfg("clouddb_ps_azure_auth_mode") or "SP").upper()
-        admin_password = config_service.get(f"clouddb/{row.id}/admin") or ""
-        fa_username = f"{auth_mode}:{ctx['admin_username']}"
-        if auth_mode == "MSI":
-            fa_password = f"-:-:{admin_password}"
-        else:
-            client_id = _cfg("clouddb_ps_azure_sp_client_id") or _cfg("azure_client_id")
-            client_secret = (_cfg("clouddb_ps_azure_sp_client_secret")
-                             or _cfg("azure_client_secret"))
-            fa_password = f"{client_id}:{client_secret}:{admin_password}"
+        # "{engine} Azure Run Command Plugin". In "create" mode the functional account
+        # bundles the Azure control-plane SP with a privileged DB login (the minted
+        # admin), which rotates the dedicated managed user; in "reference" mode the
+        # operator's own account carries whatever the plugin needs, so none of that
+        # credential material is read here. Address is eight ;-separated fields.
+        db_platform_id = 0 if fa_mode == _FA_MODE_REFERENCE else (
+            await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_azure_{engine}")))
         fa_label, db_method = "azure", "dbazure"
+        fa_key = f"clouddb_ps_functional_account_azure_{engine}"
+        fa_tokens = ("azure", "run command")
+        fa_username = fa_password = ""
+        if fa_mode != _FA_MODE_REFERENCE:
+            auth_mode = (_cfg("clouddb_ps_azure_auth_mode") or "SP").upper()
+            admin_password = config_service.get(f"clouddb/{row.id}/admin") or ""
+            fa_username = f"{auth_mode}:{ctx['admin_username']}"
+            if auth_mode == "MSI":
+                fa_password = f"-:-:{admin_password}"
+            else:
+                client_id = _cfg("clouddb_ps_azure_sp_client_id") or _cfg("azure_client_id")
+                client_secret = (_cfg("clouddb_ps_azure_sp_client_secret")
+                                 or _cfg("azure_client_secret"))
+                fa_password = f"{client_id}:{client_secret}:{admin_password}"
         ssl_flag = "sslTRUE" if config_service.get_bool("clouddb_ps_azure_ssl", True) else "sslFALSE"
         # Address: vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;ssl
         dns_name = ";".join([
@@ -1304,31 +1376,45 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             _cfg("azure_tenant_id"), row.private_host, ctx["db_name"] or "",
             _cfg("clouddb_ps_azure_cert_path"), ssl_flag])
     else:
-        # "{engine} SSM Custom Plugin": functional account = the AWS IAM user (SSM
-        # transport); the managed account self-rotates. Address is six ;-separated fields.
-        db_platform_id = await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_{engine}"))
-        iam_user = _cfg("clouddb_ps_ssm_iam_username")
-        akid = _cfg("clouddb_ps_ssm_access_key_id")
-        secret = _cfg("clouddb_ps_ssm_secret_access_key")
-        if iam_user and akid and secret:
-            fa_username, fa_password = iam_user, f"{akid}:{secret}"   # IAM-user mode
-        else:
-            fa_username, fa_password = "EC2", secrets.token_urlsafe(16)  # EC2 mode: role-based; PS still stores a value
+        # "{engine} SSM Custom Plugin": in "create" mode the functional account is the
+        # AWS IAM user (SSM transport) and the managed account self-rotates; in
+        # "reference" mode the operator's own account carries the IAM credential, so the
+        # keys below are not read. Address is six ;-separated fields.
+        db_platform_id = 0 if fa_mode == _FA_MODE_REFERENCE else (
+            await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_{engine}")))
         fa_label, db_method = "ssm", "dbssm"
+        fa_key = f"clouddb_ps_functional_account_{engine}"
+        fa_tokens = ("ssm",)
+        fa_username = fa_password = ""
+        if fa_mode != _FA_MODE_REFERENCE:
+            iam_user = _cfg("clouddb_ps_ssm_iam_username")
+            akid = _cfg("clouddb_ps_ssm_access_key_id")
+            secret = _cfg("clouddb_ps_ssm_secret_access_key")
+            if iam_user and akid and secret:
+                fa_username, fa_password = iam_user, f"{akid}:{secret}"   # IAM-user mode
+            else:
+                fa_username, fa_password = "EC2", secrets.token_urlsafe(16)  # EC2 mode: role-based; PS still stores a value
         # DNS name: {instance};{region};{db endpoint};{db name};{public key path};{suffix}
         dns_name = ";".join([
             ctx["jump_host_id"], ctx["region"], row.private_host, ctx["db_name"] or "",
             _cfg("clouddb_ps_ssm_public_key_path"), _cfg("clouddb_ps_ssm_account_suffix") or "local"])
-    db_fa_id = await ps_api_service.create_functional_account_on_platform(
-        platform_id=db_platform_id, account_name=fa_username,
-        display_name=f"{name}-{fa_label}-fa", password=fa_password,
-        description=f"Cloud-DB functional account for dashboard database {name} (db_id={row.id})")
-    stash["ps_db_functional_account_id"] = db_fa_id
+    db_fa_id, db_platform_id, db_fa_owned = await _resolve_db_functional_account(
+        config_key=fa_key, platform_id=db_platform_id, platform_tokens=fa_tokens,
+        label=fa_label, create={
+            "account_name": fa_username, "display_name": f"{name}-{fa_label}-fa",
+            "password": fa_password,
+            "description": f"Cloud-DB functional account for dashboard database {name} (db_id={row.id})"})
+    # Only an account WE minted may be deleted at decommission. The teardown loop is
+    # driven purely by the PRESENCE of "ps_db_functional_account_id", so a referenced
+    # (operator-owned) account goes under a key that loop never reads.
+    stash["ps_db_functional_account_id" if db_fa_owned
+          else "ps_db_functional_account_ref"] = db_fa_id
     reg = await ps_resource_service.register_managed_system(
         name=f"{name}-db", host_name=row.private_host, ip_address="127.0.0.1",
         port=ctx["port"], functional_account_id=db_fa_id, platform_id=db_platform_id,
         workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
-        method=db_method, dns_name=dns_name)
+        method=db_method, dns_name=dns_name,
+        use_own_credentials=config_service.get_bool("clouddb_ps_self_rotation", False))
     stash["ps_db_registration_tf_state"] = reg.get("tf_state_json")
     stash["ps_db_system_id"] = reg.get("managed_system_id")
     stash["ps_db_account_id"] = reg.get("managed_account_id")
@@ -1339,17 +1425,23 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     job = db.query(Job).filter(Job.id == job_id).first()
     vault_account_name = (job.metadata_dict or {}).get("vault_account_name") if job else None
     if vault_account_name and _cfg("bt_api_host"):
-        pv_platform_id = await ps_api_service.get_platform_id(_cfg("clouddb_ps_pravault_platform"))
+        pv_platform_id = 0 if fa_mode == _FA_MODE_REFERENCE else (
+            await ps_api_service.get_platform_id(_cfg("clouddb_ps_pravault_platform")))
         pra_url = _cfg("bt_api_host")
         if not pra_url.lower().startswith("http"):
             pra_url = f"https://{pra_url}"
-        pv_fa_id = await ps_api_service.create_functional_account_on_platform(
-            platform_id=pv_platform_id,
-            account_name=(_cfg("pra_config_api_client_id") or _cfg("bt_client_id")),
-            display_name=f"{name}-pravault-fa",
-            password=(_cfg("pra_config_api_client_secret") or _cfg("bt_client_secret")),
-            description=f"PRA Config API functional account for dashboard database {name} (db_id={row.id})")
-        stash["ps_pravault_functional_account_id"] = pv_fa_id
+        pv_account = pv_secret = ""
+        if fa_mode != _FA_MODE_REFERENCE:
+            pv_account = _cfg("pra_config_api_client_id") or _cfg("bt_client_id")
+            pv_secret = _cfg("pra_config_api_client_secret") or _cfg("bt_client_secret")
+        pv_fa_id, pv_platform_id, pv_fa_owned = await _resolve_db_functional_account(
+            config_key="clouddb_ps_pravault_functional_account",
+            platform_id=pv_platform_id, platform_tokens=("pra vault",), label="PRA Vault",
+            create={"account_name": pv_account, "display_name": f"{name}-pravault-fa",
+                    "password": pv_secret,
+                    "description": f"PRA Config API functional account for dashboard database {name} (db_id={row.id})"})
+        stash["ps_pravault_functional_account_id" if pv_fa_owned
+              else "ps_pravault_functional_account_ref"] = pv_fa_id
         reg2 = await ps_resource_service.register_managed_system(
             name=f"{name}-pravault", host_name=pra_url, ip_address="127.0.0.1", port=443,
             functional_account_id=pv_fa_id, platform_id=pv_platform_id,
@@ -1557,6 +1649,11 @@ async def run_provision_apply(
             except Exception as exc:
                 logger.warning("clouddb: PS managed-system onboarding failed db_id=%s "
                                "(non-fatal): %s", db_id, exc)
+                # Non-fatal, and this branch has no legacy-staging fallback — so without
+                # a log line the job goes green with no Password Safe artifacts and no
+                # explanation anywhere the operator looks.
+                job_service.append_job_log(
+                    db, job_id, f"Password Safe onboarding skipped (non-fatal): {exc}")
         else:
             # Legacy: stage the admin credential (functional account + Secrets Safe doc)
             # — independent of PRA (gated only on pscli_* config). Non-fatal.
@@ -1727,6 +1824,9 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
                 except Exception as exc:
                     errors.append(f"{label}: {exc}")
                     logger.warning("clouddb %s removal for %s failed: %s", label, db_id, exc)
+        # Only accounts the dashboard MINTED are deleted. In "reference" mode the id was
+        # stashed as ps_*_functional_account_ref instead — a key nothing here reads — so
+        # an operator-created functional account survives every decommission.
         for key, label in (("ps_pravault_functional_account_id", "PRA Vault functional account"),
                            ("ps_db_functional_account_id", "DB functional account")):
             fa = meta.get(key)

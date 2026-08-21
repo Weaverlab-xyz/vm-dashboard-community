@@ -483,10 +483,32 @@ Both paths create a **dedicated managed DB user** as the rotation target (not th
 admin), point the PRA tunnel's injected credential at it, onboard the DB as a Password
 Safe **managed system + managed account**, and onboard the PRA Vault account on the
 **`PRA Vault Username Password`** plugin so rotations propagate into the tunnel credential.
-Every step is **non-fatal**: any failure logs a warning and falls back to the legacy
-admin-credential staging, leaving the database up. Decommissioning deregisters both
-managed systems and deletes both functional accounts before the instance is destroyed
-(the managed DB user goes with it).
+Every step is **non-fatal** and leaves the database up. A failure in the *managed-user
+creation* falls back to legacy admin-credential staging; a failure in *managed-system
+onboarding* has no fallback — it appends `Password Safe onboarding skipped (non-fatal): …`
+to the job log and moves on, so read the log rather than the job status.
+
+### Where the functional account comes from
+
+`clouddb_ps_functional_account_mode` picks one of two contracts:
+
+| Mode | Functional account | Panel holds |
+|---|---|---|
+| **`reference`** | **Operator-created.** Resolved by name, never created, **never deleted on decommission** — the same contract as `passwordsafe_vm_functional_account_*` (VM) and `k8s_ps_functional_account_*` (k8s). The managed system inherits **its** platform, so the `clouddb_ps_platform_*` names become advisory. | the account name |
+| `create` (default) | **Dashboard-created**, one per database, deleted on decommission. | the credential material packed into it |
+
+`reference` keeps the static cloud credential — the IAM access key, the Azure client
+secret — out of the dashboard's config store entirely. It needs **one account per engine
+per cloud**, because a functional account belongs to a platform. A blank name in
+`reference` mode is an error, not a fall-through to `create`.
+
+It also needs `clouddb_ps_self_rotation` on: the account it names is unprivileged on the
+database, so only the plugin's self-rotate action can change a credential. Its DB login must
+still exist on each managed server for *Verify Functional Account* to pass — the dashboard
+creates only the managed user.
+
+Decommissioning deregisters both managed systems and, in `create` mode only, deletes both
+functional accounts before the instance is destroyed (the managed DB user goes with it).
 
 > **Password sync note (both clouds).** The dashboard registers both managed systems, but
 > making Password Safe *propagate* a DB rotation into the PRA Vault managed account may
@@ -530,12 +552,16 @@ rotation (no elevated DB privilege needed).
 | Key | Default | Notes |
 |---|---|---|
 | `clouddb_ps_onboarding_enabled` | `false` | Master toggle (AWS **and** Azure) |
-| `clouddb_ps_platform_postgres` / `_mysql` / `_sqlserver` | `psql/mysql/mssql SSM Custom Plugin` | Custom-plugin platform names |
+| `clouddb_ps_functional_account_mode` | `create` | `create` or `reference` — see above |
+| `clouddb_ps_self_rotation` | `false` | Emits `use_own_credentials` on the managed account, so the DB plugin's self-rotate action runs. **Required with `reference` mode** — the via-functional-account action needs a privileged DB login a provisioned server does not have |
+| `clouddb_ps_platform_postgres` / `_mysql` / `_sqlserver` | `psql/mysql/mssql SSM Custom Plugin` | Custom-plugin platform names; advisory in `reference` mode |
+| `clouddb_ps_functional_account_postgres` / `_mysql` / `_sqlserver` | — | `reference` mode: the operator-created account on each SSM platform |
 | `clouddb_ps_pravault_platform` | `PRA Vault Username Password` | PRA Vault plugin platform |
+| `clouddb_ps_pravault_functional_account` | — | `reference` mode: the operator-created account on the PRA Vault platform |
 | `clouddb_ps_workgroup` | — | Workgroup; blank → `passwordsafe_workgroup` |
 | `clouddb_db_client_image_postgres` / `_mysql` / `_sqlserver` | `postgres:16` / `mysql:8.4` / `mcr.microsoft.com/mssql-tools18` | DB-client images on the jump host |
-| `clouddb_ps_ssm_iam_username` | — | IAM user (functional account); blank → EC2 role mode |
-| `clouddb_ps_ssm_access_key_id` / `_secret_access_key` | — | IAM-mode credentials |
+| `clouddb_ps_ssm_iam_username` | — | `create` mode only: IAM user (functional account); blank → EC2 role mode |
+| `clouddb_ps_ssm_access_key_id` / `_secret_access_key` | — | `create` mode only: IAM-mode credentials |
 | `clouddb_ps_ssm_account_suffix` | `local` | DNS-name suffix; an AssumeRole ARN for cross-account mode |
 | `clouddb_ps_ssm_public_key_path` | — | Public-key path on the PS node/broker |
 | `pra_config_api_client_id` / `_secret` | — | PRA Config-API account; blank → reuse `bt_client_id` / `bt_client_secret` |
@@ -548,9 +574,18 @@ dashboard first prepares that VM over Run Command (installs the DB clients and d
 plugin's `private.pem` / `passphrase.txt` to `/root/psplugin`), then creates the managed
 user. The DB is registered on the **`{engine} Azure Run Command Plugin`** platform with the
 eight-field address `vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;sslTRUE|sslFALSE`.
-Unlike AWS, the **functional account is a privileged DB login** (the minted admin) bundled
-with the Azure control-plane service principal: username `SP:<admin>` (or `MSI:<admin>`),
-password `clientId:clientSecret:adminPassword` (or `-:-:adminPassword` for MSI). Set
+In `create` mode, and unlike AWS, the **functional account is a privileged DB login** (the
+minted admin) bundled with the Azure control-plane service principal: username `SP:<admin>`
+(or `MSI:<admin>`), password `clientId:clientSecret:adminPassword` (or `-:-:adminPassword`
+for MSI). Because that embeds a **per-database** password, a single pre-created Azure account
+(`reference` mode) is only viable with the plugin's **self-rotate** change action, where the
+managed account rotates itself and the functional account supplies only the Azure
+control-plane token. That action is selected by `use_own_credentials` on the managed account
+— turn on `clouddb_ps_self_rotation`. All three plugins resolve the Azure control-plane
+credential in three tiers — the functional account's own service principal (`SP:` names), else
+a broker-level one under `AppSettings:Azure{Postgres,MySql,Mssql}:ControlPlane`, else
+`DefaultAzureCredential` — so `SP:` functional accounts need nothing broker-side even on an
+off-Azure Resource Broker. Set
 `passwordsafe_azure_db_registration_method=off` to keep the toggle on for AWS but skip Azure.
 
 **Prerequisites (manual):**
@@ -576,11 +611,12 @@ AWS keys above):
 | Key | Default | Notes |
 |---|---|---|
 | `passwordsafe_azure_db_registration_method` | `runcommand` | `runcommand` or `off` (skip Azure, keep AWS) |
-| `clouddb_ps_platform_azure_postgres` / `_mysql` / `_sqlserver` | `PostgreSQL/MySQL/MSSQL Azure Run Command Plugin` | Custom-plugin platform names |
-| `clouddb_ps_azure_auth_mode` | `SP` | `SP` (service principal) or `MSI` — functional-account username prefix |
+| `clouddb_ps_platform_azure_postgres` / `_mysql` / `_sqlserver` | `PostgreSQL/MySQL/MSSQL Azure Run Command Plugin` | Custom-plugin platform names; advisory in `reference` mode |
+| `clouddb_ps_functional_account_azure_postgres` / `_mysql` / `_sqlserver` | — | `reference` mode: the operator-created account on each Run Command platform |
+| `clouddb_ps_azure_auth_mode` | `SP` | `create` mode only: `SP` (service principal) or `MSI` — functional-account username prefix |
 | `clouddb_ps_azure_cert_path` | `C:\BeyondTrust\certs\public_cert.cer` | Public-cert path on the Resource Broker (address field 7) |
 | `clouddb_ps_azure_ssl` | `true` | `sslTRUE` / `sslFALSE` (address field 8) |
-| `clouddb_ps_azure_sp_client_id` / `_client_secret` | — | Azure SP for the functional account; blank → reuse `azure_client_id` / `_secret` |
+| `clouddb_ps_azure_sp_client_id` / `_client_secret` | — | `create` mode only: Azure SP for the functional account; blank → reuse `azure_client_id` / `_secret` |
 | `clouddb_ps_azure_plugin_private_key` / `_passphrase` | — | Plugin RSA key material dropped on the jump VM (encrypted at rest) |
 
 ---

@@ -421,6 +421,49 @@ class Settings(BaseSettings):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Where the DB plugin's functional account comes from. Two modes, and they are
+    # opposites — the mode is an explicit choice, never inferred from a blank field,
+    # because this feature already has enough silent fallbacks:
+    #   "create"    (default, legacy) — the dashboard mints ONE functional account PER
+    #               DATABASE at provision time, packing the credential material below
+    #               (AWS: the IAM user + key; Azure: the SP + the minted DB admin) into
+    #               it, and DELETES it on decommission.
+    #   "reference" — the operator creates the functional accounts in BeyondInsight and
+    #               names them here. The dashboard resolves each one over the API, the
+    #               managed system inherits ITS platform, and the account is never
+    #               created and never deleted. This is how the VM
+    #               (passwordsafe_vm_functional_account_*) and k8s
+    #               (k8s_ps_functional_account_*) paths have always worked, and it keeps
+    #               the static cloud credential out of the dashboard's config store
+    #               entirely. A blank or unresolvable name is an ERROR in this mode, not
+    #               a fall-through to "create".
+    # One account per ENGINE per cloud: a functional account belongs to a platform, and
+    # each engine is its own plugin platform — so there is no generic fallback key.
+    clouddb_ps_functional_account_mode: str = "create"   # create | reference
+    clouddb_ps_functional_account_postgres: str = ""     # on "psql SSM Custom Plugin"
+    clouddb_ps_functional_account_mysql: str = ""        # on "mysql SSM Custom Plugin"
+    clouddb_ps_functional_account_sqlserver: str = ""    # on "mssql SSM Custom Plugin"
+    clouddb_ps_pravault_functional_account: str = ""     # on "PRA Vault Username Password"
+    # "Change Password Using Own Credentials" on the DB managed account. The DB custom
+    # plugins ship two change actions and Password Safe picks between them from this flag:
+    #   on  — the managed account rotates ITSELF (no privilege needed on the target), which
+    #         is what an operator-created, unprivileged functional account requires;
+    #   off — Password Safe calls the via-functional-account action, which needs a
+    #         privileged DB login (CREATEROLE / CREATE USER / ALTER ANY LOGIN). That is
+    #         only true when the functional account IS the DB admin, i.e. "create" mode.
+    # Off by default so existing installs are unchanged. Self-rotation also requires
+    # Password Safe to hold the account's correct current password — it does, because the
+    # dashboard seeds it at onboarding. All three Azure plugins resolve the Azure
+    # control-plane credential in three tiers: (1) the functional account's own service
+    # principal, used whenever the FA name carries the SP: prefix; (2) a BROKER-level SP
+    # under AppSettings:Azure{Postgres,MySql,Mssql}:ControlPlane, used for MSI: mode;
+    # (3) DefaultAzureCredential (an ambient managed identity). So an off-Azure broker
+    # needs nothing extra as long as the FAs are SP: — tiers 2/3 are broker-side config
+    # the dashboard cannot set. Note the functional account is REQUIRED for every action,
+    # self-rotation included, and all three password segments are validated before the
+    # credential is built: its DB password segment must be non-empty and valid even when
+    # a self-rotate change never uses it.
+    clouddb_ps_self_rotation: bool = False
     # Import from Password Safe (/databases → "Import from Password Safe"). Reads only —
     # nothing in Password Safe is created or changed. Password Safe already runs a
     # discovery scanner with managed credentials, so it knows a database's platform,
@@ -498,6 +541,13 @@ class Settings(BaseSettings):
     clouddb_ps_platform_azure_postgres: str = "PostgreSQL Azure Run Command Plugin"
     clouddb_ps_platform_azure_mysql: str = "MySQL Azure Run Command Plugin"
     clouddb_ps_platform_azure_sqlserver: str = "MSSQL Azure Run Command Plugin"
+    # Azure counterparts of clouddb_ps_functional_account_* — read only when
+    # clouddb_ps_functional_account_mode is "reference" (see that key for both modes).
+    clouddb_ps_functional_account_azure_postgres: str = ""   # on "PostgreSQL Azure Run Command Plugin"
+    clouddb_ps_functional_account_azure_mysql: str = ""      # on "MySQL Azure Run Command Plugin"
+    clouddb_ps_functional_account_azure_sqlserver: str = ""  # on "MSSQL Azure Run Command Plugin"
+    # Only read in "create" mode — in "reference" mode the operator puts whatever the
+    # plugin needs into the functional account itself, so these stay blank.
     clouddb_ps_azure_auth_mode: str = "SP"          # SP (service principal) | MSI (managed identity)
     clouddb_ps_azure_cert_path: str = r"C:\BeyondTrust\certs\public_cert.cer"  # address field 7: public cert path on the Resource Broker
     clouddb_ps_azure_ssl: bool = True               # address field 8: sslTRUE (Azure flex servers require TLS) | sslFALSE

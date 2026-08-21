@@ -87,6 +87,23 @@ _PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "pra
 # Methods whose managed account is password-managed (no SSH DSS key auto-management).
 _PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "pravault", "k8ssa"})
 
+# Password Safe's managed-system address column is 255 chars. The cloud-DB plugin addresses
+# pack 6-8 fields into it, and the Azure one is close to the ceiling with realistic values
+# (two GUIDs, a flexible-server FQDN, a broker cert path). Over the limit the API rejects or
+# truncates the address, and a truncated address fails inside the plugin later as an
+# unparseable field rather than as a length problem — so check it here, where the number can
+# be named.
+_MAX_MANAGED_SYSTEM_ADDRESS = 255
+
+
+def _check_address_length(dns_name: str, method: str) -> None:
+    if len(dns_name) > _MAX_MANAGED_SYSTEM_ADDRESS:
+        raise PSResourceError(
+            f"{method} managed-system address is {len(dns_name)} characters, over Password "
+            f"Safe's {_MAX_MANAGED_SYSTEM_ADDRESS}-character limit. Shorten the longest "
+            f"field — usually the Resource Broker cert path or the resource group — since a "
+            f"truncated address fails later inside the plugin as an unparseable field.")
+
 # The public REST create/update-managed-account path the Terraform provider uses caps
 # ``Password`` at 128 characters (400 "Password cannot exceed 128 characters."). This is a
 # limit of THAT path only — a plugin's rotation write-back
@@ -281,7 +298,8 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
                                  managed_account_name: str, ssh_key_enforcement_mode: int,
                                  application_host_id: int = 0, method: str = "ssh",
                                  dns_name: str = "", emit_private_key: bool = True,
-                                 dss_auto_management: bool = True) -> str:
+                                 dss_auto_management: bool = True,
+                                 use_own_credentials: bool = False) -> str:
     """HCL onboarding a VM as a managed system + its account. Two shapes via ``method``:
 
     * ``ssh`` (default) — traditional managed system keyed by host_name/ip on an SSH
@@ -341,6 +359,16 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
         _line("auto_management_flag", "true"),
         _line("api_enabled", "true"),
     ]
+    if use_own_credentials:
+        # "Change Password Using Own Credentials". The DB custom plugins expose two change
+        # actions and Password Safe picks between them from THIS flag: with it the account
+        # rotates itself (Postgres ALTER USER on self / MySQL ALTER USER CURRENT_USER() /
+        # SQL Server ALTER LOGIN … OLD_PASSWORD), which needs no privilege on the target;
+        # without it Password Safe calls the via-functional-account action, which needs a
+        # privileged DB login (CREATEROLE / CREATE USER / ALTER ANY LOGIN) that a
+        # dashboard-provisioned server does not have. Omitted rather than emitted false so
+        # existing managed accounts keep whatever they were onboarded with.
+        acct_lines.append(_line("use_own_credentials", "true"))
 
     sys_block = "\n".join(sys_lines)
     acct_block = "\n".join(acct_lines)
@@ -462,7 +490,8 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
                                    ssh_key_enforcement_mode: int = 2,
                                    application_host_id: int = 0, method: str = "ssh",
                                    dns_name: str = "", account_suffix: str = "",
-                                   initial_password: str = "") -> dict:
+                                   initial_password: str = "",
+                                   use_own_credentials: bool = False) -> dict:
     """Onboard a VM as a Password Safe managed system + managed account.
     Returns ``{managed_system_id, managed_account_id, tf_state_json,
     initial_password_seeded}``.
@@ -580,6 +609,7 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             raise PSResourceError(
                 "DB SSM onboarding requires a dns_name of the form "
                 "'{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};local'")
+        _check_address_length(dns_name, "dbssm")
         hcl = _generate_managed_system_hcl(
             name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
             functional_account_id=functional_account_id, platform_id=platform_id,
@@ -588,7 +618,7 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="dbssm", dns_name=dns_name, emit_private_key=False,
-            dss_auto_management=False)
+            dss_auto_management=False, use_own_credentials=use_own_credentials)
     elif method == "dbazure":
         # Cloud-DB via the "{engine} Azure Run Command Plugin": Password Safe reaches
         # the private Azure DB by running the DB client on a jump VM over Azure VM Run
@@ -600,6 +630,7 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
                 "DB Azure Run Command onboarding requires a dns_name of the form "
                 "'vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;"
                 "sslTRUE|sslFALSE'")
+        _check_address_length(dns_name, "dbazure")
         hcl = _generate_managed_system_hcl(
             name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
             functional_account_id=functional_account_id, platform_id=platform_id,
@@ -608,7 +639,7 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="dbazure", dns_name=dns_name, emit_private_key=False,
-            dss_auto_management=False)
+            dss_auto_management=False, use_own_credentials=use_own_credentials)
     elif method == "pravault":
         # "PRA Vault Username Password" plugin: Password Safe PATCHes the rotated
         # password into a PRA Vault username_password account via the PRA Config API.
