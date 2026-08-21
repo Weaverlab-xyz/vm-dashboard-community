@@ -34,6 +34,22 @@ variable "folder" {
   default     = "dashboard"
 }
 
+variable "create_folder" {
+  description = <<-EOT
+    Create the folder, rather than expecting it to exist already.
+
+    Set to false when the folder is already there — which is the case if Workload
+    Credentials was used as a static-secret backend first, or if an earlier apply got
+    part-way. The API rejects a duplicate with `folder_already_exists` and the provider
+    has no folder data source, so there is no way to adopt one; this is the lever.
+
+    With this false, the dynamic secrets are filed under var.folder by name instead of
+    under the path the create call returned. Identical for a root-level folder.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   description = "Tags applied to the created cloud resources."
   type        = map(string)
