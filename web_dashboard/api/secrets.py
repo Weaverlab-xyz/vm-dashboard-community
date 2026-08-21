@@ -154,6 +154,17 @@ async def get_credential_sources(request: Request):
     identically from the outside — the same shape as the dead-endpoint tile that hid for
     an entire install's lifetime because "unavailable" was the catch-all for both.
 
+    Reports **every** purpose the cloud holds a lease for, not just ``provision``. That
+    single-purpose read was itself an instance of the bug above: once a read-only dynamic
+    secret is configured, ``provision`` is no longer the lease serving traffic — it is
+    minted per job and left to expire — so reporting it alone rendered a reassuring "no
+    usable lease yet" while the everyday lease was failing every sweep with a 401. The
+    panel whose whole job is answering "is this working?" could not see the only row that
+    knew.
+
+    ``on_demand`` is what keeps the extra row from becoming a new false alarm: a purpose
+    nothing pre-mints legitimately has no lease between jobs.
+
     Never returns a credential, only its provenance and expiry. GCP is included and always
     reports `static` or `unconfigured`: Workload Credentials does not mint GCP
     credentials, and showing the cloud rather than omitting it is what makes that a
@@ -164,10 +175,22 @@ async def get_credential_sources(request: Request):
     out = []
     for cloud in ("aws", "azure", "gcp"):
         source = leases.source_for(cloud)
-        entry = {"cloud": cloud, "source": source, "lease": None}
+        entry = {"cloud": cloud, "source": source, "leases": [], "problem": ""}
         if source == "dynamic":
-            # Only the provisioning purpose for now; the readonly split is Phase 2b.
-            entry["lease"] = leases.status(cloud, leases.PURPOSE_PROVISION)
+            configured = leases.purposes_for(cloud)
+            if not configured:
+                # On the dynamic tier with nothing to mint from. `credentials()` raises on
+                # this, so every call to the cloud is already failing — name the missing
+                # key rather than showing a blank row and letting it read as healthy.
+                entry["problem"] = ("on the dynamic tier but no dynamic secret is named "
+                                    f"(wlc_{cloud}_secret_name)")
+            on_demand = set(configured) - set(leases.warm_purposes_for(cloud))
+            serving = leases.default_purpose(cloud)
+            for purpose in configured:
+                lease = leases.status(cloud, purpose)
+                lease["on_demand"] = purpose in on_demand
+                lease["serving_requests"] = purpose == serving
+                entry["leases"].append(lease)
         out.append(entry)
     return {"clouds": out}
 
