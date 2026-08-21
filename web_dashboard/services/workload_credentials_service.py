@@ -27,6 +27,16 @@ The path grammar mirrors the provider's ``BuildPath``::
     /site/{site-id}/secrets[/{path-version}]{endpoint}
 
 with an optional ``?folder=`` query for anything addressed by folder + name.
+
+**Confirmed against a live site, 2026-08-21.** This was the one part that could not be
+settled from the provider, which manages configuration and never calls ``generate``; the
+vendor wiki documented two incompatible shapes. A real issuance from
+``POST /dynamic/{name}/generate?folder={folder}`` returned the credential nested under a
+``secret`` object in camelCase, with ``accessKeyId`` / ``secretAccessKey`` /
+``sessionToken`` / ``leaseId`` / ``expiration`` plus ``credentialType`` and ``type``. The
+requested TTL of 3600 came back intact, so AWS's one-hour role-chaining limit does not
+bite at that value even though this is a three-hop chain. See
+``tests/test_workload_credentials.py`` for the recorded payload.
 """
 from __future__ import annotations
 
