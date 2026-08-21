@@ -61,11 +61,19 @@ resource "beyondtrust_workload_credentials_azure_dynamic_secret" "dashboard" {
 # Note what is deliberately absent: any Azure RBAC role assignment.
 #
 # The target app needs Contributor (or the tighter trio), Storage Blob Data Contributor,
-# Key Vault access and possibly subscription-scoped Reader and Cost Management Reader —
-# but the dashboard's existing service principal already has all of that, granted by
-# scripts/sandbox/Linux/setup-azure.sh. Point that setup at the target app and the grants
-# come with it. Duplicating them here would be a second, drifting definition of the same
-# permission set, which is the trap this module avoids on the AWS side too.
+# Key Vault access and possibly subscription-scoped Reader and Cost Management Reader.
+# Enumerating that here would be a second, drifting definition of the set
+# scripts/sandbox/Linux/setup-azure.sh already applies — the trap this module avoids on
+# the AWS side too.
 #
-# See docs/integrations/workload-credentials.md for the grant list, including the
+# But the grants do NOT arrive on their own. setup-azure.sh creates and grants its OWN
+# service principal, so a separate target app registration starts with nothing. An
+# earlier version of this comment said otherwise and was wrong.
+#
+# scripts/wlc/setup-azure-apps.sh handles it by COPYING every role assignment from a
+# reference service principal — the one the dashboard authenticates with today — onto
+# the target. Parity by construction, and no list to maintain in either place. Run it
+# before this module.
+#
+# See docs/integrations/workload-credentials.md for what those grants are, including the
 # subscription-scoped quota read that fails EVERY VM deploy when it is missing.

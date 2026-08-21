@@ -29,7 +29,7 @@ output "aws_external_id" {
     The external ID tying the integration to your trust policy. Sensitive: it is half of
     the confused-deputy control, so it is not printed by default.
   EOT
-  value       = coalesce(one(random_uuid.aws_external_id[*].result), "")
+  value       = coalesce(one(beyondtrust_workload_credentials_aws_integration.this[*].external_id), "")
   sensitive   = true
 }
 
@@ -51,7 +51,7 @@ output "aws_dashboard_policy_arn" {
 
 output "next_steps" {
   description = "What to do after a successful apply."
-  value = <<-EOT
+  value       = <<-EOT
     1. Settings → Preview features → enable "Workload Credentials (BeyondTrust)".
     2. Configure → paste the Site ID and a PAT minted WITH THIS SITE SELECTED, then the
        folder and secret names from the `dashboard_settings` output.
