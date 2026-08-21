@@ -333,7 +333,7 @@ def test_the_reference_prefix_is_registered_on_both_sides():
 
 
 def test_the_feature_is_gated_behind_a_preview_flag():
-    # Workload Credentials is pre-GA and has already shipped one breaking API
+    # Workload Credentials is not yet generally available and its API may still
     # change, so it must not sit among the normal integration toggles.
     src = _read("web_dashboard", "api", "setup.py")
     flags = src.split("_PREVIEW_FLAGS = {", 1)[1].split("\n}", 1)[0]
@@ -410,10 +410,17 @@ def test_the_panel_does_not_bind_the_preview_flag_itself():
     assert "panelCfg.workload_credentials_enabled" not in _panel_html()
 
 
-def test_the_panel_warns_that_the_feature_is_pre_ga():
-    # The operator has to be able to see this without reading the docs.
+def test_the_panel_carries_a_preview_warning():
+    """The operator has to see this without reading the docs.
+
+    Deliberately checks for the status word only, not a date. This repository is public
+    and a release schedule is BeyondTrust's to announce, so no operator-facing text here
+    carries one.
+    """
     html = _panel_html()
-    assert "Pre-GA" in html or "pre-GA" in html
+    assert "Preview" in html or "preview" in html
+    for leak in ("2026-10-14", "2026-09-14", "code freeze", "general availability on"):
+        assert leak not in html, f"the panel should not state {leak!r}"
 
 
 # ── Timestamp envelope tolerance ─────────────────────────────────────────────
@@ -494,8 +501,8 @@ def test_an_empty_collection_is_an_empty_list():
 
 
 def test_legacy_collection_keys_are_still_tolerated():
-    # Kept as fallbacks: the API is pre-GA and has already renamed things once, and a
-    # wrong guess here fails silently rather than loudly.
+    # Kept as fallbacks: the API is still pre-release and may rename things, and a wrong
+    # guess here fails silently rather than loudly.
     for key in ("secrets", "static", "items", "folders"):
         assert wlc._collection({key: [{"name": "a"}]}) == [{"name": "a"}]
 

@@ -1371,10 +1371,10 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     The preview toggle owns `workload_credentials_enabled`; this panel holds the
     site, PAT and per-cloud dynamic-secret wiring. See _CONFIG_ONLY_FEATURES.
 
-    Workload Credentials is **not GA** (GA 2026-10-14, code freeze 2026-09-14) and
-    has already shipped one breaking change, which is why it sits behind a preview
-    flag rather than the normal integration toggles: an operator has to opt in
-    knowingly, and the static-credential tier stays fully supported alongside it.
+    Workload Credentials is not yet generally available and its API may still change,
+    which is why it sits behind a preview flag rather than the normal integration
+    toggles: an operator has to opt in knowingly, and the static-credential tier stays
+    fully supported alongside it.
 
     GCP is absent on purpose — WC mints AWS and Azure credentials only, so a GCP
     deployment stays on the static tier. A mixed install is the normal case.
@@ -1712,12 +1712,13 @@ _PREVIEW_FLAGS = {
         "Cloud Functions",
         "Deploy dashboard-authored handlers as AWS Lambda / Azure Function Apps / "
         "GCP Cloud Run functions, optionally attached to a VPC/VNet."),
-    # Preview because the product itself is pre-GA (GA 2026-10-14) and has already
-    # shipped a breaking API change. Off means the dashboard uses today's static
-    # cloud credentials, unchanged.
+    # Preview because the product is not yet generally available and its API may still
+    # change. Deliberately no release dates here or in any operator-facing text: this
+    # repository is public, and a schedule is BeyondTrust's to announce. Off means the
+    # dashboard uses today's static cloud credentials, unchanged.
     "workload_credentials_enabled": (
         "Workload Credentials (BeyondTrust)",
-        "Pre-GA. Mint short-lived AWS and Azure credentials on demand instead of "
+        "Preview. Mint short-lived AWS and Azure credentials on demand instead of "
         "storing static keys, and use Workload Credentials as a secrets backend. "
         "Requires a US-region Pathfinder site with the feature enabled."),
 }

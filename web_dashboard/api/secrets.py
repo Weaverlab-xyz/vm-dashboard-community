@@ -133,7 +133,7 @@ async def list_backends(request: Request):
             "description": "Secrets are stored in BeyondTrust Password Safe using your configured ps-cli credentials.",
         },
     ]
-    # Pre-GA, so it is listed only once the preview flag is on — see
+    # Preview-only, so it is listed once the flag is on — see
     # setup._PREVIEW_FLAGS["workload_credentials_enabled"].
     if cs.get_bool("workload_credentials_enabled", False):
         backends.append({

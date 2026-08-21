@@ -297,8 +297,9 @@ Tier 3 still keeps a credential somewhere and fetches it when needed. **Tier 4
 has nothing to fetch**: BeyondTrust Workload Credentials mints a short-lived AWS
 or Azure credential on demand, and it expires on its own.
 
-This is a **preview** feature and is off by default — the product is pre-GA. It
-is enabled under Settings → Preview features, per cloud, and turning it on is
+This is a **preview** feature and is off by default — the product is not yet
+generally available. It is enabled under Settings → Preview features, per cloud,
+and turning it on is
 also what unlocks retiring that deployment's own static keys. Workload
 Credentials additionally works as a Tier 2 backend for ordinary static secrets
 (`wlc://`), which is the cheapest way to verify the connection before anything
