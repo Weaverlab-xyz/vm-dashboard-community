@@ -167,13 +167,15 @@
       <template x-if="requiredEnv().length">
         <div class="mb-3 rounded border border-amber-300 bg-amber-50 px-3 py-2">
           <p class="text-xs text-amber-900">
-            This adapter reads its target from its environment and does nothing without it.
-            Set <template x-for="(v, i) in requiredEnv()" :key="v"><span><code
+            This adapter reads its target from its environment and does nothing without
+            it, so <template x-for="(v, i) in requiredEnv()" :key="v"><span><code
               class="font-mono" x-text="v.replace('|', ' or ')"></code><span
               x-show="i < requiredEnv().length - 1">, </span></span></template>
-            below, or let the pairing job fill them in for you — provisioning a MySQL or
-            SQL Server database with <em>Register in Entitle</em> checked deploys and
-            configures one automatically.
+            are <strong>required here</strong> — a deploy that omits them is refused rather
+            than left for a later job to finish.
+            To skip this form entirely, provision a MySQL or SQL Server database with
+            <em>Register in Entitle</em> checked: that pairing deploys and configures its
+            own adapter beside the database.
           </p>
         </div>
       </template>
@@ -184,6 +186,9 @@
           <textarea x-model="form.environmentText" rows="4"
                     class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono"
                     placeholder="FN_DB_ENGINE=mysql&#10;FN_DB_HOST=db.internal&#10;FN_DB_NAME=appdb"></textarea>
+          <p x-show="missingEnv().length" x-cloak class="text-xs text-red-600 mt-1">
+            Still needed: <span x-text="missingEnv().map(v => v.replace('|', ' or ')).join(', ')"></span>
+          </p>
           <p class="text-xs text-gray-400 mt-1">
             One <code class="font-mono">KEY=VALUE</code> per line. <strong>Non-secret only</strong> —
             these are stored and logged in cleartext, and a credential-shaped value is refused.
@@ -205,7 +210,8 @@
 
       <div class="flex justify-end gap-2">
         <button @click="deployOpen = false" class="px-3 py-1.5 text-sm text-gray-600">Cancel</button>
-        <button @click="submitDeploy()" :disabled="deploying || !!cloudBlocked() || !form.region"
+        <button @click="submitDeploy()"
+                :disabled="deploying || !!cloudBlocked() || !form.region || missingEnv().length"
                 class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm px-3 py-1.5 rounded-lg"
                 x-text="deploying ? 'Deploying…' : 'Deploy'"></button>
       </div>
@@ -382,6 +388,18 @@ function functionsPage() {
     // module itself (REQUIRED_ENV) and carried on the catalog.
     requiredEnv() {
       return ((this.workloads.find(w => w.name === this.form.workload) || {}).required_env) || [];
+    },
+
+    // Which of those are still unset, mirroring cloud_function_service._check_required_env:
+    // a blank value counts as absent, and 'A|B' is satisfied by either. Checked here
+    // because that guard REFUSES the deploy — it is a precondition like cloudBlocked()
+    // and an empty region, not something a later job fills in, and it was the only one
+    // you had to post a deploy to discover.
+    missingEnv() {
+      const env = this.parseEnv(this.form.environmentText);
+      const present = Object.keys(env).filter(k => String(env[k] || '').trim());
+      return this.requiredEnv().filter(
+        req => !req.split('|').some(alt => present.includes(alt)));
     },
 
     // Re-seed on open: picking a workload can have narrowed availableClouds() since
