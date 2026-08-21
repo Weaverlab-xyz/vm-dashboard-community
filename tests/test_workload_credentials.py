@@ -112,6 +112,50 @@ def test_aws_camel_case_response_is_parsed():
     assert out["expires_at"] == datetime(2026, 8, 20, 18, 0, 0)
 
 
+def test_the_shape_the_live_api_actually_returned():
+    """Recorded from a real `generate` against a provisioned site, 2026-08-21.
+
+    Until this call was made the response shape was a guess: the vendor wiki documented
+    two incompatible ones and the Terraform provider never calls generate, so nothing
+    could settle it. The observed answer is nested-under-`secret`, camelCase — which the
+    test above had right.
+
+    Kept as a separate case anyway, because the live payload carried two fields we had
+    never seen (`credentialType`, `type`) and their handling is the part worth pinning.
+    """
+    out = wlc.parse_generated({"secret": {
+        "accessKeyId": "ASIAEXAMPLE",
+        "secretAccessKey": "sekrit",
+        "sessionToken": "token",
+        "leaseId": "545a16b2-b973-427c-97a6-ca6cea34b3b7",
+        "expiration": "2026-08-21T17:43:49Z",
+        "credentialType": "assumed_role",
+        "type": "aws",
+    }})
+    assert out["lease_id"] == "545a16b2-b973-427c-97a6-ca6cea34b3b7"
+    assert out["expires_at"] == datetime(2026, 8, 21, 17, 43, 49)
+
+    # The point of the test: `values` is spread into boto3 client kwargs, so an unknown
+    # field arriving there is a TypeError on every AWS call. Exact equality, not a
+    # subset — the whole risk is EXTRA keys, which a subset check would not catch.
+    assert out["values"] == {"access_key_id": "ASIAEXAMPLE",
+                             "secret_access_key": "sekrit",
+                             "session_token": "token"}
+
+
+def test_the_session_token_is_present_in_the_observed_shape():
+    """The field the whole dynamic tier depends on.
+
+    Four call sites had to be changed to carry it. Had the live response omitted it,
+    every one of them would have been pointless — so it is worth an assertion of its own
+    rather than being folded into a dict comparison.
+    """
+    out = wlc.parse_generated({"secret": {
+        "accessKeyId": "A", "secretAccessKey": "B", "sessionToken": "C",
+        "leaseId": "l", "expiration": "2026-08-21T17:43:49Z"}})
+    assert out["values"]["session_token"] == "C"
+
+
 def test_aws_pascal_case_response_is_parsed_too():
     # BeyondTrust's own GitHub Action accepts both, so we must as well.
     out = wlc.parse_generated({"secret": {
