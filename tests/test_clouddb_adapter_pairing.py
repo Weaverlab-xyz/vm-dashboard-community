@@ -204,6 +204,39 @@ def test_a_missing_database_name_is_refused_not_guessed():
         raise AssertionError("invented a database name")
 
 
+def test_the_provisioning_variables_still_win_over_the_row():
+    """Ordering, not preference: it makes the row a pure fallback, so adding it cannot
+    rescope a pairing that already resolves."""
+    row = _Row(db_name="from-the-row")
+    assert pairing._database_name({"db_name": "from-the-job"}, "mysql", row) == "from-the-job"
+
+
+def test_the_row_carries_the_name_when_the_provisioning_job_is_gone():
+    """The whole point of stamping cloud_databases.db_name at provision time: a pruned
+    job used to take FN_DB_NAME with it and the pairing could not be made at all."""
+    assert pairing._database_name({}, "mysql", _Row(db_name="appdb")) == "appdb"
+
+
+def test_a_missing_database_name_is_still_refused_when_a_row_is_supplied():
+    """RDS SQL Server creates no user database, so its row is legitimately blank.
+    Substituting `master` there would scope grants at the whole instance instead of
+    refusing — the fallback must be a RECORDED value, never an engine default."""
+    for row in (_Row(engine="sqlserver", db_name=None),
+                _Row(engine="sqlserver", db_name="")):
+        try:
+            pairing._database_name({}, "sqlserver", row)
+        except pairing.AdapterPairingError as exc:
+            assert "database name" in str(exc)
+        else:
+            raise AssertionError("invented a database name")
+
+
+def test_the_pairing_passes_the_row_to_the_resolver():
+    """A fallback nothing reaches is not a fallback."""
+    source = open(pairing.__file__, encoding="utf-8").read()
+    assert "_database_name(tf_variables, row.engine, row)" in source
+
+
 # ── Wiring ───────────────────────────────────────────────────────────────────
 
 def test_the_provision_path_routes_by_adapter_required():

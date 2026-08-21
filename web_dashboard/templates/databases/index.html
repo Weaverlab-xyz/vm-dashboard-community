@@ -84,6 +84,7 @@
         <thead>
           <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
             <th class="px-4 py-3">Engine</th>
+            <th class="px-4 py-3">Database</th>
             <th class="px-4 py-3">Location</th>
             <th class="px-4 py-3">Region</th>
             <th class="px-4 py-3">Status</th>
@@ -98,6 +99,22 @@
               <td class="px-4 py-3">
                 <div class="font-medium text-gray-900" x-text="d.engine"></div>
                 <div class="text-xs text-gray-400" x-text="d.provider"></div>
+              </td>
+              <!-- The catalog when one exists, else the database you connect to. Both come
+                   resolved from the server (db_name / connect_db_name) — no engine rules
+                   here, so this cell can never drift from what the tunnel and the Entitle
+                   adapter use. They differ only for SQL Server on Azure/GCP, where the
+                   module creates a real catalog but admin sessions still go via master. -->
+              <td class="px-4 py-3 text-xs font-mono">
+                <div class="text-gray-700" x-show="d.db_name || d.connect_db_name"
+                     x-text="d.db_name || d.connect_db_name"></div>
+                <div class="text-gray-400" x-show="d.db_name && d.connect_db_name && d.connect_db_name !== d.db_name"
+                     x-cloak x-text="'via ' + d.connect_db_name"></div>
+                <span x-show="!d.db_name && !d.connect_db_name" class="text-gray-300"
+                      :title="d.source === 'registered'
+                        ? 'No database name was recorded when this one was registered.'
+                        : 'This row predates the name being stored on it, and its provisioning job is gone.'"
+                      x-text="d.source === 'registered' ? '(not set)' : '(unknown)'"></span>
               </td>
               <td class="px-4 py-3">
                 <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" x-text="locationLabel(d.cloud)"></span>
@@ -681,6 +698,7 @@
         <div class="font-mono text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 space-y-1">
           <div>engine: <span x-text="conn?.engine"></span></div>
           <div>private host: <span x-text="(conn?.private_host || '—') + (conn?.port ? ':' + conn.port : '')"></span></div>
+          <div>database: <span x-text="conn?.connect_db_name || '(not set)'"></span></div>
           <div>PRA jump id: <span x-text="conn?.jump_item_id || '(no tunnel — PRA not configured)'"></span></div>
           <div>status: <span x-text="conn?.status"></span></div>
         </div>

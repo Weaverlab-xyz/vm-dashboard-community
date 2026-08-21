@@ -1345,8 +1345,18 @@ class CloudDatabase(Base):
     instance_id = Column(String(255), nullable=True)       # cloud resource id (filled on apply)
     private_host = Column(String(255), nullable=True)      # private endpoint host (no public endpoint)
     port = Column(Integer, nullable=True)
-    # Only a registered row needs this: a provisioned one reads its database name from
-    # the provisioning job's tf_variables, which a registered row does not have.
+    # The database catalog on this instance. Written on BOTH paths: a registered row
+    # records the operator's entry, and a provisioned one mirrors the `db_name` handed
+    # to Terraform (cloud_database_service.provision), so neither the Databases page
+    # nor the Entitle cloud-function adapter depends on the provisioning job surviving.
+    # Pre-existing provisioned rows are filled by backfill_provisioned_db_names.
+    #
+    # NULL means no user database exists to name: RDS SQL Server rejects db_name at
+    # creation, and a registered row may legitimately leave it blank. The SQL Server
+    # -> `master` substitution is applied at READ time by
+    # cloud_database_service.connection_db_name and never stored — on Azure/GCP a real
+    # catalog exists alongside master, and the adapter's FN_DB_NAME must name that
+    # catalog or nothing at all.
     db_name = Column(String(128), nullable=True)
     status = Column(String(32), nullable=False, default="provisioning", index=True)
 
@@ -1781,6 +1791,22 @@ def init_db():
                 print(f"Audit chain: backfilled {n} pre-existing entr{'y' if n == 1 else 'ies'}.")
         except Exception as e:  # never block startup on backfill
             print(f"Audit chain backfill skipped: {e}")
+
+    # One-time: copy each provisioned cloud database's catalog out of its provisioning
+    # job onto the row itself. Here rather than in the migration block above for the
+    # reason spelled out at the hypervisor seed: this is data, not DDL, and it must stay
+    # OUTSIDE the advisory-locked transaction. Convergent, so it takes no lock of its own.
+    with SessionLocal() as _dbname_db:
+        try:
+            # Inside the try, unlike the audit chain above: cloud_database_service pulls
+            # in terraform + region_config, and a heavy import that fails must not be
+            # the thing that stops the app booting either.
+            from .services import cloud_database_service as _clouddb
+            n = _clouddb.backfill_provisioned_db_names(_dbname_db)
+            if n:
+                print(f"Cloud databases: backfilled {n} database name(s).")
+        except Exception as e:  # never block startup on backfill
+            print(f"Cloud database name backfill skipped: {e}")
 
     print("Database initialized successfully!")
 

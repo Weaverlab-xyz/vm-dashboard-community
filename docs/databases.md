@@ -97,6 +97,25 @@ made optional on the server side (`rds.force_ssl=0` / `require_secure_transport=
 Cloud SQL `ssl_mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED`). SQL Server and Oracle keep TLS on
 because their tunnels terminate/forward TLS themselves.
 
+### The database name
+
+The **Name** you give a database on the Provision form is slugified into the catalog
+Terraform creates (`My App DB` → `my_app_db`; Oracle instead gets a deterministic
+`adb…` name, capped at ADB's 14 characters). That catalog is recorded on the row, so
+the **Database** column on the Databases page and the `database:` line in the
+**Connection** dialog show it without depending on the provisioning job still existing —
+which also gives the [Entitle cloud-function adapter](integrations/cloud-functions.md)
+something to scope its grants to (`FN_DB_NAME`).
+
+Two engines read differently:
+
+- **SQL Server** — you connect to the `master` system database. On RDS that is *all*
+  there is (the module omits `db_name`; see [AWS](#aws-rds) below), so the column shows
+  `master`. On Azure/GCP a real catalog is created as well, and the page shows both —
+  the catalog, with `via master` beneath it.
+- **Registered** databases show whatever was recorded at registration, `(not set)` if
+  nothing was. SQL Server falls back to `master`.
+
 ---
 
 ## Importing from Password Safe

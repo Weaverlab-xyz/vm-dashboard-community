@@ -170,9 +170,10 @@ class _FakeQuery:
 class _FakeDB:
     def __init__(self, row=None):
         self._row = row
+        self.added = []
 
-    def add(self, *a, **k):
-        pass
+    def add(self, row, *a, **k):
+        self.added.append(row)
 
     def commit(self):
         pass
@@ -189,8 +190,9 @@ class _FakeDB:
 def test_provision_embeds_secret_stripped_tf_variables_in_job_metadata():
     _CAPTURED.clear()
     CONF.clear()
+    fake_db = _FakeDB()
     result = svc.provision(
-        _FakeDB(), engine="postgres", cloud="aws", region="r1",
+        fake_db, engine="postgres", cloud="aws", region="r1",
         name="appdb", created_by="admin")
 
     # The job the runner will claim must already carry tf_variables (the bug was
@@ -215,6 +217,11 @@ def test_provision_embeds_secret_stripped_tf_variables_in_job_metadata():
     assert meta["db_id"] == result["db_id"]
     assert meta["engine"] == "postgres"
     assert meta["cloud"] == "aws"
+
+    # The catalog is stamped on the ROW too, so neither the Databases page nor the
+    # Entitle adapter depends on this job surviving. Exactly the -var, no engine
+    # substitution — see cloud_database_service.connection_db_name.
+    assert fake_db.added[0].db_name == persisted["db_name"]
 
 
 def _provisioned_gcp_mysql():
