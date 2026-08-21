@@ -259,8 +259,10 @@ def _check_required_env(workload: str, environment: Optional[dict]) -> None:
                if not any(alt in present for alt in req.split("|"))]
     if not missing:
         return
-    hint = ("Provisioning a MySQL or SQL Server database with 'Register in Entitle' "
-            "checked deploys and configures one of these for you."
+    hint = ("To have this done for you, provision a MySQL or SQL Server database with "
+            "'Register in Entitle' checked — that pairing deploys and configures its own "
+            "adapter. It cannot finish one started by hand: it names its function after "
+            "the database."
             if workload == "db_grant" else
             "Deploy echo_diag instead if you only want to test the endpoint.")
     raise CloudFunctionError(
