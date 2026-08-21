@@ -378,6 +378,67 @@ def test_dbazure_register_rejects_dns_name_without_eight_parts():
             pass
 
 
+def test_an_over_long_managed_system_address_is_refused_up_front():
+    # Password Safe's address column is 255 chars and the eight-field Azure address gets
+    # close with two GUIDs, a flexible-server FQDN and a broker cert path. Over the limit
+    # the address is rejected or truncated, and a truncated one fails later inside the
+    # plugin as an unparseable field — so it must fail here, naming the number.
+    import asyncio
+    long_rg = "rg-" + "x" * 200
+    azure = ";".join(["jump-vm", long_rg, "11111111-2222-3333-4444-555555555555",
+                      "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "db.mysql.database.azure.com",
+                      "appdb", r"C:\certs\public_cert.cer", "sslTRUE"])
+    assert len(azure) > ps._MAX_MANAGED_SYSTEM_ADDRESS
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="pg", host_name="pg", functional_account_id=1, platform_id=30,
+            workgroup_id="wg", method="dbazure", dns_name=azure))
+        raise AssertionError("expected PSResourceError for an over-long address")
+    except ps.PSResourceError as exc:
+        assert "255" in str(exc) and str(len(azure)) in str(exc)
+
+
+def test_a_realistic_azure_address_still_fits():
+    # Guard against the check being so tight it rejects the real thing: this is the shape
+    # the dashboard actually builds for a provisioned Azure flexible server.
+    addr = ";".join(["clouddb-jumpoint", "rg-clouddb-eastus2",
+                     "11111111-2222-3333-4444-555555555555",
+                     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                     "clouddb-abcdef01.postgres.database.azure.com", "appdb",
+                     r"C:\BeyondTrust\certs\public_cert.cer", "sslTRUE"])
+    assert len(addr) <= ps._MAX_MANAGED_SYSTEM_ADDRESS, len(addr)
+    ps._check_address_length(addr, "dbazure")   # must not raise
+
+
+def test_self_rotation_emits_use_own_credentials_for_the_db_plugins():
+    # "Change Password Using Own Credentials" is what makes Password Safe call the DB
+    # plugin's self-rotate action (ALTER USER on self / CURRENT_USER() / OLD_PASSWORD)
+    # instead of the via-functional-account one, which needs CREATEROLE / CREATE USER /
+    # ALTER ANY LOGIN on the target server. A provisioned server has no such login, so
+    # without this flag every rotation fails long after a green provisioning job.
+    for base in (_DBSSM, _DBAZURE):
+        hcl = ps._generate_managed_system_hcl(**dict(base, use_own_credentials=True))
+        assert ps._line("use_own_credentials", "true") in hcl
+
+
+def test_use_own_credentials_is_omitted_not_false_by_default():
+    # Omitted rather than emitted false, so re-running against an account an operator
+    # already flipped in BeyondInsight does not silently turn self-rotation back off.
+    for base in (_DBSSM, _DBAZURE):
+        assert "use_own_credentials" not in ps._generate_managed_system_hcl(**base)
+
+
+def test_the_vm_and_k8s_paths_never_self_rotate():
+    # Their credential is minted BY the plugin (SSH key / SA token), not rotated by the
+    # account itself, so register_managed_system must not thread the flag into them.
+    import inspect
+    src = inspect.getsource(ps.register_managed_system)
+    for method in ('method="ssm"', 'method="azurevm"', 'method="gcpvm"',
+                   'method="k8ssa"', 'method="pravault"'):
+        i = src.index(method)
+        assert "use_own_credentials" not in src[i:i + 200], method
+
+
 def test_dbazure_is_a_recognised_password_managed_plugin_method():
     assert "dbazure" in ps._PLUGIN_METHODS
     assert "dbazure" in ps._PASSWORD_MANAGED_METHODS

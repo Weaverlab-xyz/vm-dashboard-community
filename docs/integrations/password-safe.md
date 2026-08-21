@@ -182,6 +182,14 @@ Integrations → Password Safe → Resource registration (VMs)** (`passwordsafe_
 The functional account + workgroup must already exist in Password Safe; the dashboard
 resolves them over the public API and creates the managed system/account with Terraform.
 
+> **Functional-account ownership across the three integrations.** VM onboarding and
+> [k8s ServiceAccount token rotation](#kubernetes-serviceaccount-token-rotation) always
+> reference an operator-created account. **Cloud-database** onboarding does too, but only
+> when `clouddb_ps_functional_account_mode` is `reference`; its default, `create`, mints one
+> per database and deletes it on decommission. See
+> [Databases → Layer 2](../databases.md#layer-2--password-safe-aws--azure). Easy to conflate,
+> so check the mode before hunting for a missing account.
+
 > This section is the authoritative reference for **VM** onboarding methods. For the full
 > cloud-VM deploy story (provisioning, PRA Shell Jump, Entitle) see [Cloud VMs](../cloud-vms.md).
 

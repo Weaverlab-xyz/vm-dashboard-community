@@ -680,6 +680,18 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Functional account source — "create" mints one per database (legacy), "reference"
+    # resolves an operator-created account by name and never creates or deletes it
+    # (VM/k8s parity). See config.py for the full semantics. One account per engine per
+    # cloud, because a functional account belongs to a platform.
+    clouddb_ps_functional_account_mode: str = "create"   # "create" | "reference"
+    clouddb_ps_functional_account_postgres: str = ""
+    clouddb_ps_functional_account_mysql: str = ""
+    clouddb_ps_functional_account_sqlserver: str = ""
+    clouddb_ps_pravault_functional_account: str = ""
+    # "Change Password Using Own Credentials" on the DB managed account — see config.py.
+    # Required with an unprivileged operator-created functional account.
+    clouddb_ps_self_rotation: bool = False
     # Import from Password Safe — see config.py for what each one does.
     # clouddb_ps_import_max_systems MUST stay annotated `int`: _read_feature's
     # int-coercion branch only fires on an int annotation, and an unset int otherwise
@@ -702,6 +714,9 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_platform_azure_postgres: str = "PostgreSQL Azure Run Command Plugin"
     clouddb_ps_platform_azure_mysql: str = "MySQL Azure Run Command Plugin"
     clouddb_ps_platform_azure_sqlserver: str = "MSSQL Azure Run Command Plugin"
+    clouddb_ps_functional_account_azure_postgres: str = ""
+    clouddb_ps_functional_account_azure_mysql: str = ""
+    clouddb_ps_functional_account_azure_sqlserver: str = ""
     clouddb_ps_azure_auth_mode: str = "SP"          # "SP" (service principal) | "MSI" (managed identity)
     clouddb_ps_azure_cert_path: str = r"C:\BeyondTrust\certs\public_cert.cer"  # public cert path on the Resource Broker
     clouddb_ps_azure_ssl: bool = True               # sslTRUE (Azure flex servers require TLS) | sslFALSE

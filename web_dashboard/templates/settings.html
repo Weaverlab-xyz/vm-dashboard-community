@@ -1305,6 +1305,46 @@
               Enable Password Safe onboarding for provisioned AWS &amp; Azure databases
             </label>
             <div x-show="panelCfg.clouddb_ps_onboarding_enabled" class="space-y-3">
+              <!-- x-init default is load-bearing: an unset string config key reads back
+                   as "" from /api/setup/feature, not as the model default. -->
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Functional account source</label>
+                  <select x-model="panelCfg.clouddb_ps_functional_account_mode"
+                          x-init="panelCfg.clouddb_ps_functional_account_mode = panelCfg.clouddb_ps_functional_account_mode || 'create'"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="create">Create one per database (legacy)</option>
+                    <option value="reference">Reference an existing account</option>
+                  </select>
+                </div>
+              </div>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.clouddb_ps_self_rotation"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                Rotate with the account&#39;s own credentials (self-rotation)
+              </label>
+              <p class="text-xs text-gray-400">
+                Sets <code class="bg-gray-100 px-1 rounded">Change Password Using Own Credentials</code> on the managed
+                account, so the DB plugin rotates it in place instead of calling the via-functional-account action —
+                which needs a privileged DB login (<code class="bg-gray-100 px-1 rounded">CREATEROLE</code> /
+                <code class="bg-gray-100 px-1 rounded">CREATE USER</code> /
+                <code class="bg-gray-100 px-1 rounded">ALTER ANY LOGIN</code>) that a provisioned server does not have.
+                <strong>Required</strong> with an operator-created functional account — that account is unprivileged on
+                the database, so only the self-rotate action can change a credential. Keep the functional account names in
+                <code class="bg-gray-100 px-1 rounded">SP:</code> form and the Azure credential comes from the account
+                itself, so an off-Azure Resource Broker needs no extra setup. Their DB password segment must still be
+                valid: it is unused by a self-rotate change but <em>Verify Functional Account</em> logs in with it.
+              </p>
+              <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
+                The dashboard resolves the functional accounts you name below and never creates or deletes them — the same
+                contract as the VM and Kubernetes onboarding. Each managed system inherits its account&#39;s platform, so the
+                Platform fields become advisory, and the cloud credential stays in Password Safe instead of this config store.
+                One account per engine per cloud, because a functional account belongs to a platform.
+              </p>
+              <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode !== 'reference'">
+                The dashboard creates a functional account per database from the credential material below, and deletes it on
+                decommission. Switch to <em>Reference an existing account</em> to point at accounts you created yourself.
+              </p>
               <div class="grid grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
@@ -1325,6 +1365,26 @@
                          placeholder="mssql SSM Custom Plugin">
                 </div>
               </div>
+              <div class="grid grid-cols-3 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Functional Account</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_functional_account_postgres"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="name or id">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">MySQL Functional Account</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_functional_account_mysql"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="name or id">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server Functional Account</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_functional_account_sqlserver"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="name or id">
+                </div>
+              </div>
               <div class="grid grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Platform</label>
@@ -1339,23 +1399,32 @@
                          placeholder="Default Workgroup">
                 </div>
               </div>
-              <p class="text-xs text-gray-400">Functional account = the AWS IAM user for SSM SendCommand. Leave the IAM fields blank to use the EC2 instance-role mode (Password Safe node/broker on an EC2 with the SSM role).</p>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-2 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Functional Account</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_pravault_functional_account"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="pra-config-api">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode !== 'reference'">Functional account = the AWS IAM user for SSM SendCommand. Leave the IAM fields blank to use the EC2 instance-role mode (Password Safe node/broker on an EC2 with the SSM role).</p>
+              <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">Not used in this mode — the functional account you name above carries it.</p>
+              <div class="grid grid-cols-3 gap-3" :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">IAM Username</label>
-                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_iam_username"
+                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_iam_username" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="(blank = EC2 role mode)">
                 </div>
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">IAM Access Key ID</label>
-                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_access_key_id"
+                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_access_key_id" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="AKIA…">
                 </div>
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">IAM Secret Access Key</label>
-                  <input type="password" x-model="panelCfg.clouddb_ps_ssm_secret_access_key"
+                  <input type="password" x-model="panelCfg.clouddb_ps_ssm_secret_access_key" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="••••••••">
                 </div>
@@ -1445,10 +1514,30 @@
                            placeholder="MSSQL Azure Run Command Plugin">
                   </div>
                 </div>
-                <div class="grid grid-cols-3 gap-3">
+                <div class="grid grid-cols-3 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
                   <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Functional Account</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_functional_account_azure_postgres"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="name or id">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">MySQL Functional Account</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_functional_account_azure_mysql"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="name or id">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server Functional Account</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_functional_account_azure_sqlserver"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="name or id">
+                  </div>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
+                  <div :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Auth Mode</label>
-                    <select x-model="panelCfg.clouddb_ps_azure_auth_mode"
+                    <select x-model="panelCfg.clouddb_ps_azure_auth_mode" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                       <option value="SP">SP (service principal)</option>
                       <option value="MSI">MSI (managed identity)</option>
@@ -1468,17 +1557,18 @@
                     </label>
                   </div>
                 </div>
-                <p class="text-xs text-gray-400">Azure service principal for the functional account — leave blank to reuse the dashboard's Azure credentials. It needs Virtual Machine Contributor on the jump-VM resource group.</p>
-                <div class="grid grid-cols-2 gap-3">
+                <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode !== 'reference'">Azure service principal for the functional account — leave blank to reuse the dashboard&#39;s Azure credentials. It needs Virtual Machine Contributor on the jump-VM resource group.</p>
+                <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">Not used in this mode — the functional account you name above carries it.</p>
+                <div class="grid grid-cols-2 gap-3" :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">SP Client ID</label>
-                    <input type="text" x-model="panelCfg.clouddb_ps_azure_sp_client_id"
+                    <input type="text" x-model="panelCfg.clouddb_ps_azure_sp_client_id" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                            placeholder="(blank = reuse azure_client_id)">
                   </div>
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">SP Client Secret</label>
-                    <input type="password" x-model="panelCfg.clouddb_ps_azure_sp_client_secret"
+                    <input type="password" x-model="panelCfg.clouddb_ps_azure_sp_client_secret" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                            placeholder="••••••••">
                   </div>
