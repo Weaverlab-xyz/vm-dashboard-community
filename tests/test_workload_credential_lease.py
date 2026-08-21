@@ -635,6 +635,127 @@ def test_the_azure_resolver_runs_on_azures_own_pool():
     assert "asyncio.to_thread" not in body
 
 
+def test_the_azure_resolver_fails_closed_like_the_aws_one():
+    """LeaseUnavailable must become an AzureError.
+
+    Unwrapped it is not an AzureError, so it escapes every route's `except AzureError` as
+    a bare 500 — which means no 503, and the Azure page raises its credential banner only
+    on a 503. The one sentence explaining the failure ended up in the container log and
+    nowhere else. aws_service has wrapped this since the dynamic tier landed.
+    """
+    src = _read("web_dashboard", "services", "azure_service.py")
+    body = src.split("def _resolve_azure_credentials_sync", 1)[1].split("\ndef ", 1)[0]
+    assert "LeaseUnavailable" in body
+    assert "raise AzureError" in body
+
+
+# ── Backoff is not overridable (the runaway-retry bug) ───────────────────────
+#
+# `force` meant "mint even though the lease still works". It also skipped the cooldown,
+# and `refresh` had no cooldown check of its own, so a broken lease was re-attempted on
+# every sweep forever. An auth failure is not billed, so the visible symptom was only log
+# noise — but the failure this backoff was written for, a generate that succeeds at the
+# provider and then cannot be parsed here, is charged for on every attempt.
+
+def test_a_row_in_cooldown_is_in_backoff():
+    assert lease._in_backoff(_snap(cooldown_until=NOW + timedelta(minutes=5)), NOW) is True
+
+
+def test_a_row_whose_cooldown_has_passed_is_not_in_backoff():
+    assert lease._in_backoff(_snap(cooldown_until=NOW - timedelta(seconds=1)), NOW) is False
+
+
+def test_a_row_that_never_failed_is_not_in_backoff():
+    assert lease._in_backoff(_snap(), NOW) is False
+
+
+def test_a_missing_row_is_not_in_backoff():
+    # No row means nothing has failed yet, so there is nothing to wait for.
+    assert lease._in_backoff(None, NOW) is False
+
+
+def test_force_does_not_override_the_backoff():
+    """The claim path must consult the backoff unconditionally.
+
+    `force` exists to get past the "still usable" short-circuit for a renewal. Letting it
+    also mean "ignore the backoff" is what took the periodic refresher outside the
+    backoff, since that is the one caller that passes it.
+    """
+    src = _read("web_dashboard", "services", "workload_credential_lease.py")
+    body = src.split("def _claim(", 1)[1].split("\ndef ", 1)[0]
+    assert "_in_backoff(snap, now)" in body
+    assert "cooldown_until" not in body, (
+        "_claim compares cooldown_until inline again — use _in_backoff, so the check "
+        "cannot pick up a `not force` clause that refresh() does not have")
+
+
+def test_the_refresher_checks_the_backoff_before_minting():
+    # Reaching _claim would refuse the mint anyway, but only by raising LeaseUnavailable,
+    # which the caller logs at WARNING — once per sweep, indefinitely.
+    src = _read("web_dashboard", "services", "workload_credential_lease.py")
+    body = src.split("def refresh(", 1)[1].split("\ndef ", 1)[0]
+    assert "_in_backoff(snap, now)" in body
+
+
+def test_a_config_change_clears_the_backoff():
+    """Otherwise fixing the cause is invisible for up to _COOLDOWN_MAX_SECONDS.
+
+    Nothing overrides the cooldown any more, so the panel save has to lift it explicitly —
+    and the PAT saved on that panel is the single likeliest thing to have been failing.
+    """
+    assert hasattr(lease, "clear_backoff")
+    src = _read("web_dashboard", "services", "workload_credential_lease.py")
+    body = src.split("def clear_backoff(", 1)[1].split("\ndef ", 1)[0]
+    assert "cooldown_until = None" in body
+    # Same asymmetry as _record_failure, from the other side: clearing failure state is
+    # not a reason to discard a credential that works.
+    assert "row.payload" not in body
+    setup = _read("web_dashboard", "api", "setup.py")
+    assert "clear_backoff()" in setup, (
+        "the workload_credentials panel save does not lift the retry backoff")
+
+
+# ── The health surface reports every lease (the invisible-failure bug) ───────
+
+def test_credential_sources_reports_every_configured_purpose():
+    """It read only `provision`, which is not the lease serving traffic.
+
+    Once a readonly secret exists, `provision` is minted per job and left to expire, so a
+    missing one is healthy — and the everyday lease, the one failing every sweep with a
+    401, was not reported at all. The panel that exists to answer "is this working?" was
+    the last place able to answer it.
+    """
+    src = _read("web_dashboard", "api", "secrets.py")
+    body = src.split("async def get_credential_sources", 1)[1].split("\n@router", 1)[0]
+    assert "purposes_for(cloud)" in body
+    assert "PURPOSE_PROVISION" not in body, (
+        "credential-sources is back to reporting one hard-coded purpose")
+    # A purpose nothing pre-mints has no lease between jobs; without this the second row
+    # becomes a permanent false alarm, which is the same bug wearing the other hat.
+    assert "warm_purposes_for(cloud)" in body
+
+
+def test_the_credential_panel_renders_each_lease():
+    src = _read("web_dashboard", "templates", "settings.html")
+    assert "c.leases" in src, "the panel does not iterate the per-purpose collection"
+    assert "c.lease.last_error" not in src, "the panel still reads the single-lease shape"
+
+
+def test_the_cloud_pages_do_not_offer_a_static_remedy_on_the_dynamic_tier():
+    """`aws configure` / a .env key cannot fix a cloud whose credentials are minted.
+
+    Both banners gave exactly one remedy regardless of tier. The Azure one also dropped
+    the server's message on the floor, so the reason was not shown at all.
+    """
+    for parts in (("web_dashboard", "templates", "aws", "index.html"),
+                  ("web_dashboard", "templates", "azure", "index.html")):
+        src = _read(*parts)
+        assert "includes('Workload Credentials')" in src, (
+            f"{parts[-2]}/{parts[-1]} still shows one remedy for every credential failure")
+    azure = _read("web_dashboard", "templates", "azure", "index.html")
+    assert 'x-text="credError"' in azure, "the Azure banner discards the server's reason"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

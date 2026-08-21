@@ -4445,18 +4445,36 @@
                               x-text="c.source === 'dynamic' ? 'dynamic (WC)' : c.source"></span>
                       </td>
                       <td class="py-1.5 text-gray-500">
-                        <template x-if="c.lease && c.lease.usable">
-                          <span>lease expires <span x-text="c.lease.expires_at"></span></span>
+                        <template x-if="c.problem">
+                          <span class="text-amber-700" x-text="c.problem"></span>
                         </template>
-                        <template x-if="c.lease && !c.lease.usable">
-                          <span class="text-red-600"
-                                x-text="c.lease.last_error ? ('no usable lease — ' + c.lease.last_error)
-                                                           : 'no usable lease yet'"></span>
+                        <!-- One line per purpose. Reporting only `provision` is what let a
+                             failing everyday lease read as "no usable lease yet" here
+                             while every AWS call on the site was 401ing. -->
+                        <template x-for="l in (c.leases || [])" :key="l.purpose">
+                          <div class="flex items-baseline gap-1.5">
+                            <span class="font-mono text-[10px]"
+                                  :class="l.serving_requests ? 'text-gray-600 font-semibold'
+                                                             : 'text-gray-400'"
+                                  x-text="l.purpose"></span>
+                            <template x-if="l.usable">
+                              <span>expires <span x-text="l.expires_at"></span></span>
+                            </template>
+                            <template x-if="!l.usable && l.last_error">
+                              <span class="text-red-600" x-text="l.last_error"></span>
+                            </template>
+                            <template x-if="!l.usable && !l.last_error && l.on_demand">
+                              <span class="text-gray-400">minted when a job runs</span>
+                            </template>
+                            <template x-if="!l.usable && !l.last_error && !l.on_demand">
+                              <span class="text-red-600">no lease yet</span>
+                            </template>
+                          </div>
                         </template>
-                        <template x-if="!c.lease && c.source === 'static'">
+                        <template x-if="!(c.leases || []).length && !c.problem && c.source === 'static'">
                           <span class="text-gray-400">static key in the encrypted config</span>
                         </template>
-                        <template x-if="!c.lease && c.source === 'unconfigured'">
+                        <template x-if="!(c.leases || []).length && !c.problem && c.source === 'unconfigured'">
                           <span class="text-gray-400">no credential configured</span>
                         </template>
                       </td>
@@ -4464,6 +4482,13 @@
                   </template>
                 </tbody>
               </table>
+              <p x-show="wlcSources.clouds.some(c => (c.leases || []).length > 1)" x-cloak
+                 class="text-[11px] text-gray-400 mt-2">
+                <code>readonly</code> is the lease every page and API call uses.
+                <code>provision</code> carries write privilege and is minted only while a
+                job is running, so no lease between jobs is normal — that is the point of
+                the split.
+              </p>
             </div>
           </div>
         </div>

@@ -24,12 +24,31 @@
     </div>
   </div>
 
-  <!-- AWS credential error banner -->
+  <!-- AWS credential error banner.
+       The remedy has to branch. On the Workload Credentials tier there is no static key
+       and no AWS CLI anywhere in the picture, so "run aws configure" points at the one
+       place the answer cannot be — and the heading was wrong too: the credentials ARE
+       configured, they could not be issued. The sentinel is the message aws_service
+       raises when it cannot obtain a lease (services/aws_service.py). -->
   <div x-show="credentialError" x-cloak
        class="mb-6 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
-    <p class="font-semibold mb-1">AWS credentials not configured</p>
+    <p class="font-semibold mb-1"
+       x-text="credentialError.includes('Workload Credentials')
+               ? 'AWS credential could not be issued'
+               : 'AWS credentials not configured'"></p>
     <p x-text="credentialError"></p>
-    <p class="mt-1">Make sure AWS CLI is configured: <code class="bg-amber-100 px-1 rounded">aws configure</code></p>
+    <template x-if="credentialError.includes('Workload Credentials')">
+      <p class="mt-1">
+        AWS takes its credentials from BeyondTrust Workload Credentials, so there is no
+        static key to fix here. Check the personal access token and the dynamic-secret
+        names under <a href="/settings" class="underline font-medium">Settings →
+        Preview features → Workload Credentials</a>, then use <strong>Check</strong> on
+        that panel to see the state of each lease.
+      </p>
+    </template>
+    <template x-if="!credentialError.includes('Workload Credentials')">
+      <p class="mt-1">Make sure AWS CLI is configured: <code class="bg-amber-100 px-1 rounded">aws configure</code></p>
+    </template>
   </div>
 
   <!-- Tab navigation -->

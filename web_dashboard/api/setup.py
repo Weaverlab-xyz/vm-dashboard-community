@@ -1544,9 +1544,19 @@ def _write_feature(feature: str, payload_dict: dict) -> None:
         # reroute a cloud's credentials. The memo is process-local and short-lived, but
         # clearing it here means the operator sees the effect of their own change
         # immediately rather than up to the TTL later.
+        #
+        # The backoff has to go too, and for a stronger reason: a failing lease is in
+        # cooldown for up to 15 minutes, nothing overrides that, and the PAT saved on this
+        # very panel is the most likely thing to have been failing. Without this, fixing
+        # the credential and watching the dashboard stay broken is the expected
+        # experience.
         try:
             from ..services import workload_credential_lease
             workload_credential_lease.invalidate()
+            cleared = workload_credential_lease.clear_backoff()
+            if cleared:
+                logger.info("Workload Credentials: cleared the retry backoff on %d "
+                            "lease row(s) after a configuration change.", cleared)
         except Exception:
             pass
 
