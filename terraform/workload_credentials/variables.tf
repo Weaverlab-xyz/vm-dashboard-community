@@ -133,6 +133,15 @@ variable "aws_ttl_seconds" {
     condition     = var.aws_ttl_seconds >= 900 && var.aws_ttl_seconds <= 43200
     error_message = "assumed_role credentials allow 900-43200 seconds (15 minutes to 12 hours)."
   }
+
+  # Caught here because STS does not complain: asking for longer than the role's own
+  # MaxSessionDuration hands back a SHORTER credential with no error anywhere. The
+  # dashboard would then refresh far more often than configured, and every refresh is a
+  # metered issuance.
+  validation {
+    condition     = var.aws_ttl_seconds <= var.aws_max_session_duration
+    error_message = "aws_ttl_seconds cannot exceed aws_max_session_duration - STS would silently clamp it and issue a shorter credential."
+  }
 }
 
 variable "create_everyday_secret" {
@@ -165,6 +174,11 @@ variable "azure_tenant_id" {
   description = "Entra tenant (directory) GUID."
   type        = string
   default     = ""
+
+  validation {
+    condition     = !var.enable_azure || var.azure_tenant_id != ""
+    error_message = "azure_tenant_id is required when enable_azure is true."
+  }
 }
 
 variable "azure_integration_client_id" {
@@ -175,6 +189,11 @@ variable "azure_integration_client_id" {
   EOT
   type        = string
   default     = ""
+
+  validation {
+    condition     = !var.enable_azure || var.azure_integration_client_id != ""
+    error_message = "azure_integration_client_id is required when enable_azure is true."
+  }
 }
 
 variable "azure_integration_client_secret" {
@@ -205,6 +224,11 @@ variable "azure_integration_sp_object_id" {
   EOT
   type        = string
   default     = ""
+
+  validation {
+    condition     = !var.enable_azure || var.azure_integration_sp_object_id != ""
+    error_message = "azure_integration_sp_object_id is required when enable_azure is true (unless azure_manage_target_ownership is false). Get it with: az ad sp show --id <integration-client-id> --query id."
+  }
 }
 
 variable "azure_target_application_object_id" {
@@ -217,6 +241,11 @@ variable "azure_target_application_object_id" {
   EOT
   type        = string
   default     = ""
+
+  validation {
+    condition     = !var.enable_azure || var.azure_target_application_object_id != ""
+    error_message = "azure_target_application_object_id is required when enable_azure is true. It is the target app's Object ID (az ad app show --id <app> --query id), NOT its appId."
+  }
 }
 
 variable "azure_manage_target_ownership" {

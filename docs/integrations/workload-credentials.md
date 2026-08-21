@@ -332,6 +332,21 @@ two distinct Azure AD objects:
    **Object ID, not its Application (client) ID**. This is the most common
    mistake in Azure setup.
 
+`scripts/wlc/setup-azure-apps.sh` does all of this — both registrations, the
+ownership, and the target app's Azure RBAC. Run it before the Terraform module:
+
+```bash
+scripts/wlc/setup-azure-apps.sh --reference-sp <the azure_client_id you use today>
+```
+
+It copies the role assignments from that reference principal rather than applying a
+hardcoded list, so the target app ends up with exactly what your working service
+principal has. That matters more than it sounds: the grants do **not** arrive on their
+own — `setup-azure.sh` creates and grants its *own* principal, so a fresh app
+registration starts with nothing and every call 403s.
+
+The manual equivalent, if you would rather not run a script:
+
 Grant the integration app permission to manage passwords on the target app.
 Prefer **ownership**, which needs no tenant-wide Graph permission at all:
 
