@@ -211,6 +211,33 @@ def _oracle_db_name(db_id: str) -> str:
     return ("adb" + re.sub(r"[^a-z0-9]", "", db_id.lower()))[:14]
 
 
+def connection_db_name(row) -> str:
+    """The database an admin session actually opens against this row — what the
+    Databases page and the Connection modal show.
+
+    Deliberately distinct from the *catalog* stored in ``row.db_name``: for SQL Server
+    you always connect to the ``master`` system database. RDS creates no user database
+    at all (the module omits ``db_name``), and the Azure/GCP admin paths target
+    ``master`` on purpose even though their modules do create a catalog alongside it —
+    so the substitution is applied on read and never stored. Storing it would poison
+    the Entitle adapter, whose ``FN_DB_NAME`` must name a real catalog or nothing.
+
+    Pure: no ``Session``, no job lookup, because :func:`_serialize` calls it per row.
+    """
+    engine = row.engine or ""
+    registered = (getattr(row, "source", None) or "provisioned") == "registered"
+    if engine == "sqlserver":
+        # A registered row is somebody else's server, so the operator's entry wins and
+        # master is only the fallback — the same asymmetry _registered_connection_vars
+        # already has. A provisioned one is always reached through master.
+        return (row.db_name or "master") if registered else "master"
+    # Oracle's ADB name is derived from the row id, so it stays resolvable even for a
+    # row the backfill could not reach. Never invent one for a registered Oracle row.
+    if engine == "oracle" and not row.db_name and not registered:
+        return _oracle_db_name(row.id)
+    return row.db_name or ""
+
+
 def _aws_db_security_groups(regional: dict, opts: dict) -> list[str]:
     """Security groups to attach to an RDS instance. ``regional`` is that region's
     already-resolved config set (``resolve_region("aws", region)``).
@@ -555,6 +582,14 @@ def provision(
     )
     job_meta["tf_variables"] = {k: v for k, v in tf_variables.items()
                                 if k not in _SECRET_TF_KEYS}
+    # Record the catalog on the row as well, so nothing depends on this job surviving:
+    # the Databases page shows it and the Entitle cloud-function adapter scopes its
+    # grants to it. Exactly the -var, with no engine substitution — that is what makes
+    # the column definitionally equal to what Terraform was handed. RDS SQL Server
+    # leaves it NULL because its module creates no user database (see the branch in
+    # _build_tf_variables); `master` is applied on read by connection_db_name instead.
+    row.db_name = tf_variables.get("db_name") or None
+    db.commit()
     job = job_service.create_job(
         db, job_type="clouddb_provision", created_by=created_by,
         metadata=job_meta,
@@ -1778,6 +1813,55 @@ def list_databases(db: Session) -> list[dict]:
     return [_serialize(r) for r in rows]
 
 
+def backfill_provisioned_db_names(db: Session) -> int:
+    """One-time: copy each provisioned row's catalog out of its provisioning job into
+    ``cloud_databases.db_name``. Returns the number of rows written.
+
+    Rows created before :func:`provision` started stamping the column carry their name
+    only in ``jobs.extra_data["tf_variables"]``, so the Databases page has nothing to
+    show and the Entitle adapter has nothing to fall back on. Idempotent and
+    convergent — it only ever writes a NULL column, and two processes computing the
+    same value for the same row is a benign last-write-wins, so it needs no advisory
+    lock of its own (the one thing that could reintroduce the init_db deadlock class).
+
+    A registered row is skipped: a blank name there is the operator's own choice, and
+    inventing one would change what a Config-Management run connects to. A row whose
+    job is gone stays NULL rather than getting a guessed value.
+    """
+    rows = db.query(CloudDatabase).filter(CloudDatabase.db_name.is_(None)).all()
+    rows = [r for r in rows if (r.source or "provisioned") != "registered"]
+    if not rows:
+        return 0
+
+    # One indexed pass over the jobs rather than _provision_job_for per row (that scans
+    # every clouddb_provision job on each call). Ascending, so the last write into the
+    # map is the newest job — the same row _provision_job_for would have picked.
+    meta_by_db: dict[str, dict] = {}
+    for job in (db.query(Job)
+                  .filter(Job.job_type == "clouddb_provision")
+                  .order_by(Job.created_at.asc()).all()):
+        meta = job.metadata_dict or {}
+        db_id = meta.get("db_id")
+        if db_id:
+            meta_by_db[db_id] = meta
+
+    written = 0
+    for row in rows:
+        tfv = (meta_by_db.get(row.id) or {}).get("tf_variables") or {}
+        # The same three keys the adapter reads: the SQL Server modules name it
+        # differently, and Azure SQL's is the database resource, not an initial catalog.
+        name = next((str(tfv[k]) for k in ("db_name", "database_name", "initial_catalog")
+                     if tfv.get(k)), "")
+        if name:
+            row.db_name = name
+            written += 1
+    if written:
+        db.commit()
+    logger.info("clouddb db_name backfill: %s of %s candidate row(s) resolved",
+                written, len(rows))
+    return written
+
+
 def connection_info(db: Session, db_id: str) -> dict:
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
@@ -1792,6 +1876,8 @@ def connection_info(db: Session, db_id: str) -> dict:
         "source": row.source or "provisioned",
         "status": row.status, "private_host": row.private_host, "port": row.port,
         "jump_item_id": row.jump_item_id,
+        # The database to name in a connection string / after sqlcmd's -d.
+        "db_name": row.db_name, "connect_db_name": connection_db_name(row),
     }
 
 
@@ -2015,6 +2101,11 @@ def _serialize(r: CloudDatabase) -> dict:
         "port": r.port, "status": r.status, "jump_item_id": r.jump_item_id,
         # Drives the delete verb (deregister vs decommission) and the UI badge.
         "source": r.source or "provisioned", "db_name": r.db_name,
+        # db_name is the raw catalog (NULL where no user database exists);
+        # connect_db_name is what you actually open a session against. Both are
+        # projected because the page shows the pair when they differ — see
+        # connection_db_name for why the substitution is never stored.
+        "connect_db_name": connection_db_name(r),
         "entitle_integration_id": r.entitle_integration_id,
         "entitle_viable": _entitle_viable(r.engine, r.provider, r.source),
         "created_by": r.created_by,

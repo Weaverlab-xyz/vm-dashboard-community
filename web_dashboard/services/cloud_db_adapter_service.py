@@ -118,17 +118,26 @@ def build_environment(row: CloudDatabase, *, admin_username: str,
     return environment
 
 
-def _database_name(tf_variables: dict, engine: str) -> str:
+def _database_name(tf_variables: dict, engine: str,
+                   row: Optional[CloudDatabase] = None) -> str:
     """The database grants are scoped to.
 
-    It lives in the provisioning job's tf_variables — the CloudDatabase row does not
-    carry one. SQL Server's modules name it differently, and Azure SQL's is the
+    The provisioning job's tf_variables stay the first source, so every pairing that
+    resolves today resolves to exactly the same catalog. ``cloud_databases.db_name``
+    is the fallback for when that job is gone — it now holds the same value, stamped at
+    provision time. SQL Server's modules name it differently, and Azure SQL's is the
     database resource rather than an initial-catalog setting.
+
+    Every source is a *recorded* value. There is deliberately no engine default: RDS
+    SQL Server creates no user database, and ``master`` is the system catalog, so
+    substituting it would scope grants at the whole instance instead of refusing.
     """
     for key in ("db_name", "database_name", "initial_catalog"):
         value = (tf_variables or {}).get(key)
         if value:
             return str(value)
+    if row is not None and row.db_name:
+        return str(row.db_name)
     raise AdapterPairingError(
         f"cannot determine the database name for this {engine} instance from its "
         "provisioning job — the adapter would have nothing to scope grants to")
@@ -203,7 +212,7 @@ async def run_pairing(db: Session, *, db_id: str, job_id: str,
     job_service.set_running(db, job_id)
     try:
         admin_username, admin_password, tf_variables = _admin_credentials(db, row)
-        database = _database_name(tf_variables, row.engine)
+        database = _database_name(tf_variables, row.engine, row)
 
         job_service.update_progress(db, job_id, 15, "Staging the admin credential…")
         secret_environment = _stage_admin_secret(row, admin_password)
