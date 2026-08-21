@@ -108,6 +108,9 @@ variable "aws_max_session_duration" {
     a longer request — no error, just a shorter credential than asked for. Set it above
     the TTL you want. 4 hours by default because issuances are metered and a longer
     lease means fewer of them.
+
+    Note this may be moot: see the role-chaining cap described on aws_ttl_seconds. A
+    generous ceiling here is harmless either way.
   EOT
   type        = number
   default     = 14400
@@ -122,9 +125,21 @@ variable "aws_ttl_seconds" {
   description = <<-EOT
     TTL requested for a minted AWS credential.
 
-    Prefer an hour or more. AWS credentials cannot be revoked early, so a short TTL buys
-    no security and multiplies the metered issuance count — at 15 minutes that is roughly
+    Prefer an hour. AWS credentials cannot be revoked early, so a short TTL buys no
+    security and multiplies the metered issuance count — at 15 minutes that is roughly
     70,000 issuances a year for one cloud.
+
+    UNVERIFIED, AND THE REASON THE DEFAULT IS EXACTLY AN HOUR: this is a role CHAIN
+    (BeyondTrust assumes the bridge, the bridge assumes the integration role, that
+    assumes the target role), and AWS limits a role-chained session to a maximum of one
+    hour regardless of any role's MaxSessionDuration. If that applies here, a value above
+    3600 either errors at generate time or comes back clamped, and aws_max_session_duration
+    above 3600 buys nothing.
+
+    It is not validated because the cap depends on how BeyondTrust performs the final
+    hop, which cannot be determined from this side — only a live `generate` settles it.
+    Raise this above 3600 only after checking the `expiration` on a real lease against
+    what was asked for.
   EOT
   type        = number
   default     = 3600

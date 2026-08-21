@@ -86,6 +86,19 @@ terraform -chdir=terraform/workload_credentials apply \
 `azure_integration_client_secret` is best passed as `TF_VAR_azure_integration_client_secret`
 so it stays out of shell history.
 
+## Before you raise the TTL
+
+The default `aws_ttl_seconds` is exactly 3600, and that is deliberate. This is a role
+**chain** — three `AssumeRole` hops — and AWS limits a role-chained session to one hour
+regardless of what any role's `MaxSessionDuration` says. Whether that applies depends on
+how BeyondTrust performs the final hop, which cannot be determined from this side, so the
+module does not validate it.
+
+Check a real lease's `expiration` against what was requested before trusting a larger
+value. The failure mode is the one this module keeps running into: not an error, just a
+shorter credential than you asked for, and a refresh rate — and metered issuance count —
+several times what you configured.
+
 ## The AWS trust chain
 
 ```
