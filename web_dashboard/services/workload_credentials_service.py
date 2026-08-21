@@ -390,9 +390,9 @@ def test_connection() -> dict:
 
 
 # Confirmed against a live site: collections come back as {"data": [...]}. The other
-# keys are kept as fallbacks rather than removed — this API is pre-GA and has already
-# shipped one breaking change, so tolerating a rename costs nothing and a wrong guess
-# here returns an empty list rather than an error, which is silent.
+# keys are kept as fallbacks rather than removed — this API is still pre-release and may
+# rename things, so tolerating that costs nothing, whereas a wrong guess here returns an
+# empty list rather than an error, which is silent.
 _COLLECTION_KEYS = ("data", "secrets", "static", "items", "folders")
 
 
