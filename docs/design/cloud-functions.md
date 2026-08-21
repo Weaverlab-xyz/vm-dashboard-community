@@ -274,6 +274,31 @@ user *before* the login — the login cannot be dropped while a principal maps t
 Entitle retries, and a revoke that errors leaves standing access behind, which is
 the one outcome this feature exists to prevent.
 
+### `FN_DB_NAME` is the grant scope, not the admin catalog
+
+"Which database?" has **two** answers for a SQL Server row, and they are not
+interchangeable. Both are correct; the disagreement is deliberate.
+
+| Concept | Resolver | sqlserver answer |
+|---|---|---|
+| **Admin session** — where an admin connects, and where SQL Server's *server-level* principals live | `cloud_database_service.connection_db_name` | **always `master`**, every cloud |
+| **Grant scope** — the catalog whose *data* a JIT account gets rights on | `cloud_db_adapter_service._database_name` → `FN_DB_NAME` | the **real user catalog** |
+
+The admin-session answer is `master` because AWS RDS for SQL Server rejects `db_name`
+at creation (so that Terraform var set omits it and `master` is the only catalog that
+exists), because `CREATE LOGIN` is a server-level statement, and because `USE` /
+a reconnect gets you anywhere else afterwards. It is not a display-only helper: the
+PRA protocol tunnel, the Ansible connection vars, the managed-user creation, the Secrets
+Safe admin document and the native Entitle connector all open the catalog it returns.
+
+`FN_DB_NAME` must **not** follow it. `db_datareader` / `db_datawriter` are
+*database-level* fixed roles, so scoping them to `master` would hand the JIT account
+rights over the system catalog and none over the application data. The two answers
+diverge precisely on **Azure and GCP**, whose modules do create a user catalog
+(`azurerm_mssql_database`, `google_sql_database`); on AWS there is no user catalog, so
+pairing refuses rather than falling back to `master`. `tests/test_clouddb_db_name_concepts.py`
+pins the split in both directions.
+
 ### Dry run is the default
 
 With `FN_DB_DRY_RUN` unset the workload returns the exact statements it would run
