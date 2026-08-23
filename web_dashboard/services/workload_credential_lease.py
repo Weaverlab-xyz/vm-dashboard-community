@@ -19,7 +19,10 @@ processes minting independently is three times the invoice for one credential, a
 image rebuild would discard them and re-mint.
 
 **A failing configuration is left alone.** ``cooldown_until`` stops a bad dynamic-secret
-name turning every page load into another billable failed attempt.
+name turning every page load into another billable failed attempt. It binds the periodic
+refresher too, which is the path that actually runs unattended — nothing overrides the
+backoff, and an operator who fixes the cause lifts it explicitly via
+:func:`clear_backoff` from the settings save.
 
 Two divergences from ``cost_cache``:
 
@@ -349,6 +352,19 @@ def _cooldown_seconds(failures: int) -> int:
     return min(_COOLDOWN_MAX_SECONDS, _FAIL_BASE_SECONDS * max(1, 2 ** (failures - 1)))
 
 
+def _in_backoff(snap, now: datetime) -> bool:
+    """Whether a row is inside its failure backoff.
+
+    A named helper rather than the same comparison written twice, because two call sites
+    have to agree on it: :func:`_claim`, which refuses the claim, and :func:`refresh`,
+    which must not even reach the claim. They disagreed once — ``force`` skipped the check
+    in the first and there was no check in the second — and the effect was that the
+    periodic refresher sat outside the backoff completely, re-attempting a failing mint on
+    every sweep for as long as the lease stayed broken.
+    """
+    return bool(snap and snap["cooldown_until"] and now < snap["cooldown_until"])
+
+
 def _try_lock(db, cloud: str) -> bool:
     """Try the per-cloud claim lock. Never blocks.
 
@@ -381,7 +397,18 @@ def _claim(cloud: str, purpose: str, *, force: bool) -> tuple:
 
         if _usable(snap, now) and not force:
             return False, snap
-        if snap["cooldown_until"] and now < snap["cooldown_until"] and not force:
+        # Backoff is deliberately NOT part of what `force` overrides. `force` means
+        # "replace this lease even though it still works" — the renewal case, which needs
+        # to get past the check above and nothing else. Letting it skip the cooldown too
+        # put the periodic refresher outside the backoff entirely: once a lease went
+        # unusable, every sweep attempted another generate, forever, at the sweep interval
+        # rather than at 60s, 120s, 240s ... _COOLDOWN_MAX_SECONDS. Harmless for an auth
+        # failure, which is never billed. Not harmless for the failure this cooldown was
+        # written for: a generate that succeeds at the provider and then fails locally
+        # (an unparseable response, a rotated root key) is charged for on every attempt.
+        # Nothing overrides it — `clear_backoff` exists for the one case that should,
+        # which is an operator changing the configuration.
+        if _in_backoff(snap, now):
             return False, snap
         if snap["claim_until"] and now < snap["claim_until"]:
             # Someone else is minting and has not expired yet.
@@ -478,6 +505,44 @@ def invalidate(cloud: str = "", purpose: str = "") -> None:
             _memo.pop(key, None)
 
 
+def clear_backoff(cloud: str = "", purpose: str = "") -> int:
+    """Drop the failure backoff on matching rows so the next pass retries immediately.
+
+    The durable counterpart to :func:`invalidate`, and it exists because the backoff is
+    otherwise absolute — nothing overrides ``cooldown_until``, by design (see
+    :func:`_claim`). Without this, an operator who fixes the very thing that was failing —
+    a revoked PAT, a mistyped secret name — would keep watching the broken state for up to
+    ``_COOLDOWN_MAX_SECONDS`` afterwards, with nothing on screen to explain the wait.
+    Called from the settings save, which is the one moment "the configuration changed" is
+    known rather than guessed.
+
+    Never touches ``payload``: the same asymmetry as :func:`_record_failure`, from the
+    other side. A working credential must survive a config save, and clearing failure
+    state is not a reason to discard one.
+
+    Returns the number of rows cleared, for the log line.
+    """
+    from ..database import SessionLocal, WorkloadCredentialLease
+    db = SessionLocal()
+    try:
+        q = db.query(WorkloadCredentialLease).filter(
+            WorkloadCredentialLease.cooldown_until.isnot(None))
+        if cloud:
+            q = q.filter(WorkloadCredentialLease.cloud == cloud)
+        if purpose:
+            q = q.filter(WorkloadCredentialLease.purpose == purpose)
+        rows = q.all()
+        now = _utcnow()
+        for row in rows:
+            row.cooldown_until = None
+            row.consecutive_failures = 0
+            row.updated_at = now
+        db.commit()
+        return len(rows)
+    finally:
+        db.close()
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def credentials(cloud: str, purpose: str = "") -> Optional[dict]:
@@ -515,6 +580,10 @@ def refresh(cloud: str, purpose: str = PURPOSE_PROVISION, *, force: bool = False
 
     Driven from the startup warmer and the worker's periodic sweep, which is what keeps the
     synchronous mint inside :func:`credentials` rare.
+
+    ``force`` skips the "is it due yet?" test, not the backoff. A cloud in cooldown is
+    left alone by every caller here — see :func:`_claim`. An operator who has just fixed
+    the configuration gets an immediate retry from :func:`clear_backoff`, not from a flag.
     """
     if not dynamic_enabled(cloud):
         return False
@@ -530,6 +599,15 @@ def refresh(cloud: str, purpose: str = PURPOSE_PROVISION, *, force: bool = False
         snap = _snap(_row(db, cloud, purpose))
     finally:
         db.close()
+
+    # In backoff: do nothing, and say nothing. _claim refuses anyway, but reaching it
+    # means falling out through LeaseUnavailable and logging a warning — which is how a
+    # single broken credential produced one identical WARNING per sweep, indefinitely,
+    # on both the app and the worker.
+    if _in_backoff(snap, now):
+        logger.debug("WC lease %s/%s is in backoff until %s; not attempting a mint",
+                     cloud, purpose, snap["cooldown_until"])
+        return False
 
     if not force and snap and _usable(snap, now):
         from . import workload_credentials_service as wlc

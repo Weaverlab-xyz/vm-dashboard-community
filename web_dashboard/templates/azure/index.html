@@ -32,14 +32,34 @@
     </div>
   </div>
 
-  <!-- Credential error banner -->
+  <!-- Credential error banner.
+       Shows the server's own reason rather than one fixed remedy. The .env advice is
+       right for a deployment with no credentials at all and wrong for every other way
+       this fails — most sharply on the Workload Credentials tier, where there is no .env
+       key in the picture and the actual cause (a rejected token, a mistyped dynamic
+       secret) was being discarded along with the message. -->
   <div x-show="credError" class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
     <svg class="h-5 w-5 text-red-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
     </svg>
     <div>
-      <p class="text-sm font-medium text-red-700">Azure credentials not configured</p>
-      <p class="text-xs text-red-600 mt-1">Set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID in your .env file.</p>
+      <p class="text-sm font-medium text-red-700"
+         x-text="String(credError).includes('Workload Credentials')
+                 ? 'Azure credential could not be issued'
+                 : 'Azure credentials not configured'"></p>
+      <p class="text-xs text-red-600 mt-1" x-text="credError"></p>
+      <template x-if="String(credError).includes('Workload Credentials')">
+        <p class="text-xs text-red-600 mt-1">
+          Azure takes its credentials from BeyondTrust Workload Credentials, so there is no
+          static key or <code>.env</code> value to fix here. Check the personal access token
+          and the dynamic-secret names under
+          <a href="/settings" class="underline font-medium">Settings → Preview features →
+          Workload Credentials</a>.
+        </p>
+      </template>
+      <template x-if="!String(credError).includes('Workload Credentials')">
+        <p class="text-xs text-red-600 mt-1">Complete the setup wizard, or set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID in your .env file.</p>
+      </template>
     </div>
   </div>
 
@@ -1063,7 +1083,7 @@ function azureDashboard() {
     ...deployNameState(),
     // State
     loading: false,
-    credError: false,
+    credError: '',   // the server's reason, '' when there is none
     activeTab: 'marketplace',
     location: '{{ default_location }}',
 
@@ -1253,7 +1273,7 @@ function azureDashboard() {
         // configured azure_location) when nothing is selected yet.
         if (!this.location) this.location = data.location || (data.locations && data.locations[0]) || '';
       } catch (e) {
-        if (e.status === 503) this.credError = true;
+        if (e.status === 503) this.credError = e.message || 'Azure credentials are unavailable.';
       }
     },
 
@@ -1298,7 +1318,7 @@ function azureDashboard() {
         const data = await API.get('/api/azure/marketplace-images' + params);
         this.marketplaceImages = data.images || [];
       } catch (e) {
-        if (e.status === 503) this.credError = true;
+        if (e.status === 503) this.credError = e.message || 'Azure credentials are unavailable.';
         toast('Failed to load marketplace images', 'error');
       } finally {
         this.marketplaceLoading = false;
@@ -1319,7 +1339,7 @@ function azureDashboard() {
         this.privateImages = data.images || [];
         this.privateImagesWarnings = data.warnings || [];
       } catch (e) {
-        if (e.status === 503) this.credError = true;
+        if (e.status === 503) this.credError = e.message || 'Azure credentials are unavailable.';
         toast('Failed to load private images', 'error');
       } finally {
         this.imagesLoading = false;
@@ -1341,7 +1361,7 @@ function azureDashboard() {
         const data = await API.get(`/api/azure/vms${bust ? '?bust=true' : ''}`);
         this.vms = data.vms || [];
       } catch (e) {
-        if (e.status === 503) this.credError = true;
+        if (e.status === 503) this.credError = e.message || 'Azure credentials are unavailable.';
       } finally {
         this.vmsLoading = false;
       }

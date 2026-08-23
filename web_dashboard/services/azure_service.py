@@ -111,7 +111,18 @@ def _resolve_azure_credentials_sync() -> tuple:
     falls through to the static ladder.
     """
     from . import workload_credential_lease as leases
-    quad = leases.azure_credentials()
+    try:
+        quad = leases.azure_credentials()
+    except leases.LeaseUnavailable as exc:
+        # Mirrors aws_service._aws_kwargs, which has wrapped this since the dynamic tier
+        # landed. Unwrapped, LeaseUnavailable is not an AzureError, so it escapes every
+        # route's `except AzureError` as a bare 500 — no 503, and therefore no credential
+        # banner on the Azure page at all. A deployment that had deliberately retired its
+        # static key would look generically broken, with the one sentence explaining why
+        # visible only in the container log.
+        raise AzureError(
+            "Azure is configured to use BeyondTrust Workload Credentials, but no "
+            "credential could be issued: %s" % exc) from exc
     if not quad:
         return (None, None, None, None, "")
     return (quad["client_id"], quad["client_secret"], quad["tenant_id"],

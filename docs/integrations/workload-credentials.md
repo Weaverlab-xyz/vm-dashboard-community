@@ -246,6 +246,26 @@ with `DELETE` on the same path.
 
 ## Troubleshooting
 
+**`401 Personal access token not found`**
+
+A third 401 wording, distinct from the two below, and the most literal: the token
+presented is not in the PAT store at all. It is not a scoping or authorization
+problem, so nothing about the site, the folder or the dynamic-secret names will
+fix it. Either the PAT was revoked or has aged out, or what reached the header is
+not the PAT — a truncated paste is the usual culprit.
+
+Confirm with the unmetered `GET /session` call
+[above](#verifying-from-the-command-line) before changing anything: the same 401
+there proves the token, independent of everything the dashboard adds. Then re-mint
+under **Manage Profile → Personal Access Tokens** with the target site selected
+and paste it into the panel — the field renders as `••••••••` when a value already
+exists, so it has to be overwritten. Bullets are what preserve the stored value;
+clearing the field wipes it.
+
+Observed live on 2026-08-21 against a correctly provisioned site, on every
+`generate` for `dashboard/dashboard-everyday`, once a minute — with the folder,
+the secret names and the API version all correct.
+
 **`401` with `{"error":"Access denied for this site"}`**
 
 The token authenticated but is not authorized for the site in the URL. In order
@@ -264,8 +284,10 @@ of likelihood:
    fails consistently rather than intermittently.
 
 Note what this error is *not*: an invalid or expired token reports
-`Invalid access token` / plain `401 Unauthorized` instead, so the wording does
-distinguish the two cases once you know to look.
+`Invalid access token` / plain `401 Unauthorized`, and a token that does not exist
+reports `Personal access token not found` (above). Three distinct 401s, and the
+wording is the only thing that separates them — so read it rather than assuming
+any 401 means the site.
 
 **A TLS or certificate error rather than an HTTP status** — that is your own
 egress path, not the API. Behind a TLS-inspecting corporate proxy you need the
