@@ -492,6 +492,160 @@ def test_the_names_this_adapter_mints_pass_its_own_guard():
     assert resp.status == 200, resp.body
 
 
+# ── Entitle's Ephemeral Accounts mode: create_actor IS the grant ─────────────
+#
+# Entitle offers two REST connection modes and they are not the same lifecycle. In
+# Ephemeral Accounts mode it calls create_actor and delete_actor ONLY — give_access
+# and revoke_access are never invoked, and its connection schema rejects those keys
+# outright. An adapter that minted a role-less account and waited for give_access
+# therefore returned success, handed the requester a working credential with no
+# privileges on anything, and dropped it on expiry. Nothing in Entitle, the job log
+# or the adapter's own response said so, which is why it gets this much coverage.
+
+
+def _ephemeral(role=None, asset=None, email="alice@example.com", **extra):
+    """A create_actor body in the shape Ephemeral mode actually sends."""
+    payload = {"asset": {"identifier": asset or _asset_id()},
+               "provisioning_data": {"email": email, "first_name": "A",
+                                     "last_name": "Lice"}}
+    if role is not None:
+        payload["role_code"] = role
+    payload.update(extra)
+    return payload
+
+
+def test_ephemeral_create_actor_grants_because_give_access_never_comes():
+    """The whole point. Without the GRANT the requester gets a login that can read
+    nothing, and every layer above reports success."""
+    _env()
+    sql = _statements(_call("POST", "/create_actor", _ephemeral(role="read")).body)
+    assert "CREATE USER" in sql, sql
+    assert "GRANT SELECT" in sql, sql
+
+
+def test_ephemeral_create_actor_reads_provisioning_data_not_actor():
+    """Ephemeral mode sends ``provisioning_data``; reading only ``actor`` answered
+    400 to every real grant while every offline test passed."""
+    _env()
+    resp = _call("POST", "/create_actor", _ephemeral())
+    assert resp.status == 200, resp.body
+    assert "jit_alice_example_com" in resp.body["data"]["identifier"]
+
+
+def test_ephemeral_without_a_role_field_takes_the_least_privileged_one():
+    """The role's field name is not reliably documented for this mode, so a role
+    that cannot be found must degrade to read — never to readwrite."""
+    _env()
+    body = _call("POST", "/create_actor", _ephemeral()).body
+    assert body["data"]["role_code"] == "read"
+    sql = _statements(body)
+    assert "GRANT SELECT ON" in sql and "INSERT" not in sql, sql
+
+
+def test_ephemeral_honours_the_role_it_is_given():
+    _env()
+    body = _call("POST", "/create_actor", _ephemeral(role="readwrite")).body
+    assert body["data"]["role_code"] == "readwrite"
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" in _statements(body)
+
+
+def test_ephemeral_reads_a_role_the_asset_carries():
+    _env()
+    payload = _ephemeral()
+    payload["asset"]["role_code"] = "readwrite"
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" in _statements(
+        _call("POST", "/create_actor", payload).body)
+
+
+def test_ephemeral_refuses_an_unknown_role_rather_than_downgrading_it():
+    _env()
+    resp = _call("POST", "/create_actor", _ephemeral(role="db_owner"))
+    assert resp.status == 400, resp.body
+
+
+def test_ephemeral_refuses_an_asset_it_does_not_serve():
+    _env()
+    resp = _call("POST", "/create_actor",
+                 _ephemeral(asset="mysql:other.host:otherdb"))
+    assert resp.status == 404, resp.body
+
+
+def test_ephemeral_create_actor_cannot_be_redirected_by_the_asset():
+    """Same property as give_access: Entitle echoes the whole asset object, and only
+    its identifier is read. Now that create_actor grants, it needs the guarantee."""
+    _env()
+    payload = _ephemeral()
+    payload["asset"].update({"host": "evil.example.com", "database": "otherdb"})
+    sql = _statements(_call("POST", "/create_actor", payload).body)
+    assert "evil.example.com" not in sql and "otherdb" not in sql, sql
+    assert "`appdb`" in sql, sql
+
+
+def test_ephemeral_scopes_the_account_to_the_database_being_granted():
+    """Standing mode has to create the principal everywhere because create_actor
+    carries no asset. With one in hand there is no reason to, and putting it
+    elsewhere would be access nobody asked for."""
+    _multi()
+    body = _call("POST", "/create_actor",
+                 _ephemeral(asset=_asset_id("reporting"))).body
+    assert [p["database"] for p in body["data"]["plan"]] == ["reporting"]
+    sql = _statements(body)
+    assert "`reporting`" in sql
+    for other in ("appdb", "billing"):
+        assert f"`{other}`" not in sql, sql
+
+
+def test_an_asset_in_the_request_is_what_selects_the_mode():
+    """A single-database adapter must NOT take the ephemeral branch for a Standing
+    request just because the target is unambiguous — that would grant a role before
+    give_access asked for one."""
+    _env()
+    sql = _statements(_call("POST", "/create_actor",
+                            {"actor": {"email": "alice@example.com"}}).body)
+    assert "CREATE USER" in sql
+    assert "GRANT" not in sql, sql
+
+
+def test_ephemeral_dry_run_still_returns_no_credential():
+    _env()
+    body = _call("POST", "/create_actor", _ephemeral()).body
+    assert "username" not in body["data"], body
+    assert "password" not in json.dumps(body).lower(), body
+
+
+def test_ephemeral_survives_the_azure_sql_split():
+    """create_actor now composes create + grant, and on Azure SQL that is still a
+    login in master and a contained user plus role in the database."""
+    _env(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql")
+    body = _call("POST", "/create_actor", _ephemeral(role="read")).body
+    assert [p["database"] for p in body["data"]["plan"]] == ["master", "appdb"]
+    sql = _statements(body)
+    assert "CREATE LOGIN" in sql and "CREATE USER" in sql
+    assert "ALTER ROLE db_datareader ADD MEMBER" in sql, sql
+    assert "USE " not in sql, sql
+
+
+def test_ephemeral_delete_actor_ignores_the_asset_and_drops_everywhere():
+    """Ephemeral mode sends an asset on delete_actor too. Honouring it would leave a
+    SQL Server user behind in every other served database — an orphaned principal a
+    later login of the same name re-adopts."""
+    _multi(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql")
+    body = _call("POST", "/delete_actor", {
+        "actor_identifier": "jit_a_1",
+        "asset": {"identifier": _asset_id("reporting")}}).body
+    databases = [p["database"] for p in body["data"]["plan"]]
+    assert databases == ["appdb", "reporting", "billing", "master"], databases
+
+
+def test_ephemeral_still_refuses_an_account_it_did_not_mint():
+    """create_actor mints its own name so it cannot be steered, but delete_actor is
+    still handed one by the caller."""
+    _env()
+    resp = _call("POST", "/delete_actor", {
+        "actor_identifier": "dbadmin", "asset": {"identifier": _asset_id()}})
+    assert resp.status == 403, resp.body
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
