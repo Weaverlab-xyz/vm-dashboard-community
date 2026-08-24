@@ -12,6 +12,9 @@ account):
   Rotation, gcpvm = GCP VM SSH Rotation) emit the plugin address in dns_name, a
   placeholder ip, no SSH-only fields, and no pushed private key (Password Safe mints
   the key);
+- the three cloud-DB shapes (dbssm, dbazure, dbgcp), whose accounts are password-
+  managed instead; dbgcp additionally has an options-bearing address grammar and its
+  own tighter 249-character limit;
 - _scrub_state redacts password + private_key so neither lands in stashed state.
 
 Imports ps_resource_service with a stubbed web_dashboard.config (no app deps).
@@ -442,6 +445,110 @@ def test_the_vm_and_k8s_paths_never_self_rotate():
 def test_dbazure_is_a_recognised_password_managed_plugin_method():
     assert "dbazure" in ps._PLUGIN_METHODS
     assert "dbazure" in ps._PASSWORD_MANAGED_METHODS
+
+
+# -- GCP cloud-DB onboarding shape (dbgcp = "GCP Cloud SQL {engine}") -- five
+# positional address fields plus key=value options, real port, password-managed. The
+# plugin reaches the private instance over the Cloud SQL Data API, so unlike its two
+# siblings the address carries no host, no cert path and no key material at all. --
+
+_DBGCP_DNS = "data-api;acme-data-prod:us-central1:clouddb-ab12cd34;appdb;-;-;iam=true"
+_DBGCP = dict(name="clouddb-pg", host_name="10.102.0.3",
+              ip_address="127.0.0.1", port=5432, functional_account_id=42, platform_id=31,
+              entity_type_id=1, workgroup_id="55", managed_account_name="psafe_ab12cd34ef56",
+              ssh_key_enforcement_mode=2, method="dbgcp", dns_name=_DBGCP_DNS,
+              emit_private_key=False, dss_auto_management=False)
+
+
+def test_dbgcp_system_block_uses_channel_address_placeholder_ip_and_no_ssh():
+    hcl = ps._generate_managed_system_hcl(**_DBGCP)
+    assert ps._line("dns_name", json.dumps(_DBGCP_DNS)) in hcl
+    assert _DBGCP_DNS.split(";")[0] == "data-api"
+    assert ps._line("ip_address", '"127.0.0.1"') in hcl
+    assert ps._line("platform_id", 31) in hcl
+    assert ps._line("port", 5432) in hcl
+    assert "remote_client_type" not in hcl
+    assert "ssh_key_enforcement_mode" not in hcl
+
+
+def test_dbgcp_account_is_password_managed_no_key_no_dss():
+    hcl = ps._generate_managed_system_hcl(**_DBGCP)
+    assert ps._line("account_name", '"psafe_ab12cd34ef56"') in hcl
+    assert "private_key" not in hcl
+    assert ps._line("password", "var.ps_account_password") in hcl
+    assert ps._line("dss_auto_management_flag", "false") in hcl
+    assert 'variable "ps_account_private_key"' not in hcl
+
+
+def test_dbgcp_is_a_recognised_password_managed_plugin_method():
+    assert "dbgcp" in ps._PLUGIN_METHODS
+    assert "dbgcp" in ps._PASSWORD_MANAGED_METHODS
+
+
+def test_dbgcp_register_rejects_a_malformed_address():
+    # The grammar is positional-fields-plus-options, not a fixed semicolon count like
+    # dbssm/dbazure, so each rule gets its own case.
+    import asyncio
+    bad = (
+        "",                                                     # blank
+        "data-api;p:r:i;db;-",                                  # only four fields
+        "magic;p:r:i;db;-;-",                                   # unknown channel
+        "data-api;not-a-connection-name;db;-;-",                # field 2 not project:region:instance
+        "admin-api;p:r:i;postgres;-;-",                         # db name on a channel that opens none
+        "data-api;p:r:i;-;-;-",                                 # data-api needs a db name
+        "data-api;p:r:i;db;-;sslTRUE",                          # SSL flag on a control-plane channel
+        "data-api;p:r:i;db;https://x;-",                        # audience on a control-plane channel
+        "cloud-run;p:r:i;db;https://x/path;sslTRUE",            # audience with a path
+        "data-api;p:r:i;db;-;-;bogus=1",                        # unrecognised option
+        "data-api;p:r:i;db;-;-;ver=1",                          # cloud-run-only option
+    )
+    for addr in bad:
+        try:
+            asyncio.run(ps.register_managed_system(
+                name="pg", host_name="pg", functional_account_id=1, platform_id=31,
+                workgroup_id="wg", method="dbgcp", dns_name=addr))
+            raise AssertionError("expected PSResourceError for dns_name=%r" % addr)
+        except ps.PSResourceError:
+            pass
+
+
+def test_dbgcp_accepts_the_shapes_the_dashboard_actually_builds():
+    for addr in ("data-api;acme:us-central1:clouddb-ab12cd34;appdb;-;-;iam=true",
+                 # MySQL carries the host qualifier the plugin refuses to assume.
+                 "data-api;acme:us-central1:clouddb-ab12cd34;appdb;-;-;iam=true;host=%"):
+        ps._validate_dbgcp_dns_name(addr)          # must not raise
+
+
+def test_dbgcp_uses_the_plugins_tighter_249_limit_not_password_safes_255():
+    # Password Safe truncates at 255 but the plugin refuses at 249, and a truncated
+    # address does not error -- it silently becomes a different, wrong address. Building
+    # to the looser limit would emit addresses the plugin rejects at every rotation.
+    assert ps._DBGCP_MAX_ADDRESS == 249 < ps._MAX_MANAGED_SYSTEM_ADDRESS
+    over = "data-api;acme:us-central1:" + ("i" * 216) + ";appdb;-;-"
+    assert 249 < len(over) <= 255, len(over)
+    ps._check_address_length(over, "dbgcp")        # the shared 255 check would let it through
+    try:
+        ps._validate_dbgcp_dns_name(over)
+        raise AssertionError("expected the 249-character limit to reject %d chars" % len(over))
+    except ps.PSResourceError as exc:
+        assert "249" in str(exc), exc
+
+
+def test_dbgcp_never_self_rotates_even_when_the_flag_is_on():
+    # Self-rotation is a CLOUD-RUN action; the data-api channel refuses it at pre-flight
+    # before any network call. clouddb_ps_self_rotation is one global flag that AWS/Azure
+    # "reference" mode REQUIRES, so the GCP branch has to drop it rather than inherit it
+    # -- otherwise turning it on for AWS silently breaks every GCP rotation.
+    # Read the source rather than import it: cloud_database_service pulls in the app.
+    path = os.path.join(_ROOT, "web_dashboard", "services", "cloud_database_service.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    i = src.index('if db_method == "dbgcp" and self_rotate:')
+    window = src[i:i + 500]
+    assert "self_rotate = False" in window, window
+    # and the register call must pass the narrowed local, not the raw config read
+    j = src.index("use_own_credentials=self_rotate")
+    assert j > i, "the guard must run before register_managed_system is called"
 
 
 if __name__ == "__main__":

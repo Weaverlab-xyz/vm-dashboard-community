@@ -268,6 +268,18 @@ def _aws_db_security_groups(regional: dict, opts: dict) -> list[str]:
     return [configured] if configured else []
 
 
+def _gcp_iam_auth_wanted() -> bool:
+    """Whether a NEW Cloud SQL instance should come up with
+    ``cloudsql.iam_authentication`` on — i.e. whether GCP Password Safe onboarding is
+    configured at all. Reads the same two switches as :func:`_ps_db_onboarding_enabled`
+    minus the per-row parts, because tf variables are built before there is a row to
+    inspect. Harmless when onboarding is later turned off; the flag only ever *permits*
+    IAM authentication, it does not require it."""
+    return (config_service.get_bool("clouddb_ps_onboarding_enabled", False)
+            and (config_service.get("passwordsafe_gcp_db_registration_method")
+                 or "off").lower() != "off")
+
+
 def _build_tf_variables(
     *, engine: str, cloud: str, region: str, db_id: str, db_name: str,
     master_username: str, master_password: str, opts: dict,
@@ -370,6 +382,7 @@ def _build_tf_variables(
             "disk_size": opts.get("disk_size", 20),
             "private_network": opts.get("private_network") or resolve_region("gcp", region)["db_network"],
             "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+            "iam_authentication": _gcp_iam_auth_wanted(),
         }
 
     if (engine, cloud) == ("mysql", "gcp"):
@@ -388,6 +401,7 @@ def _build_tf_variables(
             "disk_size": opts.get("disk_size", 20),
             "private_network": opts.get("private_network") or resolve_region("gcp", region)["db_network"],
             "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+            "iam_authentication": _gcp_iam_auth_wanted(),
         }
 
     if (engine, cloud) == ("sqlserver", "gcp"):
@@ -1113,14 +1127,14 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
             db.commit()
 
 
-# ── Optional Password Safe DB onboarding (AWS-only, opt-in) ───────────────────
+# ── Optional Password Safe DB onboarding (AWS / Azure / GCP, opt-in) ──────────
 
 def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
     """Gate for the full Password Safe DB onboarding: the Password Safe OAuth
     client configured, the operator opt-in flag set, and a supported cloud —
-    AWS (SSM plugin) or Azure (Run Command plugins, unless the Azure method is set
-    to "off"). When off, the DB still provisions and the legacy admin-credential
-    staging runs instead."""
+    AWS (SSM plugin), Azure (Run Command plugins, unless the Azure method is set to
+    "off") or GCP (Cloud SQL plugins on the data-api channel, off by default). When
+    off, the DB still provisions and the legacy admin-credential staging runs instead."""
     if not (_pscli_configured()
             and config_service.get_bool("clouddb_ps_onboarding_enabled", False)):
         return False
@@ -1129,6 +1143,16 @@ def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
     if row.cloud == "azure":
         return (config_service.get("passwordsafe_azure_db_registration_method")
                 or "runcommand").lower() != "off"
+    if row.cloud == "gcp":
+        # SQL Server is excluded on purpose: Cloud SQL for SQL Server has no IAM
+        # database authentication, so the data-api channel would need the functional
+        # account's password mirrored into Secret Manager (the plugin's ``fasecret=``
+        # option) and re-synced on every rotation — a second authority for a credential
+        # Password Safe exists to own. That engine wants the cloud-run channel.
+        if row.engine not in ("postgres", "mysql"):
+            return False
+        return (config_service.get("passwordsafe_gcp_db_registration_method")
+                or "off").lower() != "off"
     return False
 
 
@@ -1362,6 +1386,144 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
             "admin_username": admin_username, "client_image": image, "port": port}
 
 
+def _observed_iam_db_user(users: list, sa_email: str) -> str:
+    """Pick, from a ``users.list`` response, the in-database name Cloud SQL actually
+    stored for IAM service account ``sa_email``.
+
+    Read rather than derive. The documented transform is "drop
+    ``.gserviceaccount.com``" on PostgreSQL and "local part, lowercased, truncated to
+    32" on MySQL, but there is in-house precedent for GCP surfacing an unexpected
+    principal name: on GKE the Kubernetes username for a key-based service account
+    turned out to be the numeric ``uniqueId`` rather than the email, which silently
+    nullified a role binding. A functional account naming a principal the database
+    does not have fails Verify with an unhelpful message, so trust the catalog.
+
+    Ranked: exact email, then equal local parts, then a stored name that is a prefix
+    of the local part (MySQL's 32-character cap)."""
+    want = (sa_email or "").strip().lower()
+    local = want.split("@")[0]
+    exact = same_local = truncated = ""
+    for u in users or []:
+        if str(u.get("type") or "").upper() != "CLOUD_IAM_SERVICE_ACCOUNT":
+            continue
+        name = str(u.get("name") or "").strip()
+        if not name:
+            continue
+        low = name.lower()
+        if low == want:
+            exact = name
+        elif low.split("@")[0] == local:
+            same_local = same_local or name
+        elif local and local.startswith(low.split("@")[0]):
+            truncated = truncated or name
+    return exact or same_local or truncated
+
+
+def _fa_grant_statement(engine: str, *, fa_db_user: str, managed_user: str,
+                        managed_host: str) -> str:
+    """The GRANT the functional account needs to rotate ``managed_user``.
+
+    PostgreSQL 16 — which is the module default, not an edge case — dropped the rule
+    that ``CREATEROLE`` alone lets a role administer another, so this is per-role
+    ``ADMIN OPTION``. That is also the safer grant: a compromised functional account
+    can reset only the accounts Password Safe manages."""
+    if engine == "postgres":
+        return f'GRANT "{managed_user}" TO "{fa_db_user}" WITH ADMIN OPTION;'
+    if engine == "mysql":
+        # No per-user equivalent of ADMIN OPTION here. Do NOT grant UPDATE on mysql.* —
+        # Cloud SQL restricts DML on mysql.user.
+        return f"GRANT CREATE USER ON *.* TO '{fa_db_user}'@'%';"
+    return ""
+
+
+async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id: str,
+                                      engine: str, tf_variables: dict) -> dict:
+    """GCP counterpart of :func:`_create_db_managed_user`, and much the simplest of the
+    three: **there is no jump host.**
+
+    AWS runs the DB client on the ECS gateway over SSM and Azure runs it on the shared
+    jump VM over Run Command, because neither has line-of-sight to a private database
+    any other way. GCP does: ``users.insert`` on the Cloud SQL Admin API creates the
+    dedicated managed user with no database connection at all, so a private-IP instance
+    needs no relay, no peering and no client image. This also means the whole jump-host
+    apparatus the other two carry — client images, the RSA key pair, the key-drop
+    commands — has no counterpart here.
+
+    Returns the onboarding context. Raises on failure so the caller falls back to admin
+    staging."""
+    from . import gcp_service
+    from . import cloud_db_sql_service as sql
+    project = (tf_variables.get("project") or _cfg("gcp_project")
+               or _cfg("gcp_project_id"))
+    instance = row.instance_id
+    if not project or not instance:
+        raise CloudDatabaseError(
+            f"GCP Cloud SQL onboarding needs both a project ({project!r}) and an "
+            f"instance name ({instance!r}) — the instance connection name is built from "
+            f"them plus the region")
+    region = row.region or _cfg("gcp_region")
+    db_name = connection_db_name(row, tf_variables)
+    admin_username = tf_variables.get("master_username") or "dbadmin"
+    port = row.port or sql.default_port(engine)
+
+    # 1. Per-instance prerequisites. The Cloud SQL Data API is OFF BY DEFAULT on every
+    #    instance — this is the one remaining imperative onboarding action, and the
+    #    successor to the other clouds' per-jump-host provisioning.
+    await gcp_service.ensure_cloudsql_rotation_prereqs(project, instance, iam_auth=True)
+
+    # 2. The dedicated managed user (the rotation target — never the master admin).
+    #    A MySQL account is identified by user@host, and cloud_db_sql_service's own
+    #    MySQL path creates '<user>'@'%', so match it here and carry the host forward:
+    #    the plugin refuses to assume one.
+    managed_user = _managed_user_name(row.id)
+    managed_pw = sql.generate_password()
+    managed_host = "%" if engine == "mysql" else ""
+    await gcp_service.create_cloudsql_user(project, instance, managed_user,
+                                           password=managed_pw, host=managed_host)
+
+    # 3. The rotation identity as an IAM database user, so the functional account needs
+    #    no stored database password at all — under IAM auth its credential is a
+    #    short-lived OAuth token minted per connection. Then read back the name the
+    #    database actually stored (see _observed_iam_db_user).
+    rotator = _cfg("clouddb_ps_gcp_rotator_service_account")
+    fa_db_user = ""
+    if rotator:
+        await gcp_service.create_cloudsql_user(project, instance, rotator,
+                                               iam_service_account=True)
+        try:
+            fa_db_user = _observed_iam_db_user(
+                await gcp_service.list_cloudsql_users(project, instance), rotator)
+        except Exception as exc:
+            logger.warning("clouddb: could not read back the IAM database user for %s "
+                           "on %s: %s", rotator, instance, exc)
+        if not fa_db_user:
+            fa_db_user = rotator.split(".gserviceaccount.com")[0]
+            logger.warning("clouddb: IAM database user for %s not found in users.list on "
+                           "%s — falling back to the derived name %r, which Verify will "
+                           "reject if the database stored something else",
+                           rotator, instance, fa_db_user)
+
+    # 4. The functional account still needs rights over the managed principal. That is
+    #    SQL, and executeSql authenticates as the CALLER, so the dashboard cannot issue
+    #    it without itself being a privileged database principal. Report the exact
+    #    statement on the job instead of failing: this mirrors AWS and Azure, which also
+    #    require an out-of-band grant, and the job log is where the operator looks.
+    grant = _fa_grant_statement(engine, fa_db_user=fa_db_user, managed_user=managed_user,
+                                managed_host=managed_host)
+    if grant and fa_db_user:
+        job_service.append_job_log(
+            db, job_id,
+            f"Password Safe rotation needs one grant on this database, which the "
+            f"dashboard cannot issue itself — run it as an admin: {grant}")
+
+    logger.info("clouddb: managed DB user %r created via Cloud SQL users.insert on %s "
+                "db_id=%s (no jump host)", managed_user, instance, row.id)
+    return {"managed_user": managed_user, "managed_pw": managed_pw,
+            "managed_user_host": managed_host, "project": project, "instance": instance,
+            "fa_db_user": fa_db_user, "region": region, "db_name": db_name,
+            "admin_username": admin_username, "client_image": "", "port": port}
+
+
 _FA_MODE_REFERENCE = "reference"
 
 
@@ -1446,8 +1608,10 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
                                       engine: str, tf_variables: dict, ctx: dict) -> None:
     """Onboard the DB into Password Safe: a managed system + managed account on the
     cloud-specific DB plugin platform — AWS "{engine} SSM Custom Plugin" (functional
-    account = the AWS IAM user for SSM) or Azure "{engine} Azure Run Command Plugin"
-    (functional account = the Azure SP + the privileged DB admin login) — and, when a
+    account = the AWS IAM user for SSM), Azure "{engine} Azure Run Command Plugin"
+    (functional account = the Azure SP + the privileged DB admin login) or GCP
+    "GCP Cloud SQL {engine}" (functional account = a GCP identity and, under IAM
+    database authentication, no database password at all) — and, when a
     PRA Vault account exists for this DB, a managed system + managed account on the
     "PRA Vault Username Password" platform so Password Safe propagates rotations into
     the vaulted credential the tunnel injects. Ids + teardown state are stashed on the
@@ -1461,13 +1625,48 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         "ps_db_jump_host_id": ctx.get("jump_host_id") or ctx.get("jump_vm_name"),
         "ps_db_region": ctx["region"],
         "ps_db_admin_username": ctx["admin_username"],
-        "ps_db_client_image": ctx["client_image"],
+        "ps_db_client_image": ctx.get("client_image", ""),
         "ps_db_name": ctx["db_name"],
     }
 
     # ── DB managed system (cloud-specific custom plugin) ──
     fa_mode = _ps_fa_mode()
-    if row.cloud == "azure":
+    if row.cloud == "gcp":
+        # "GCP Cloud SQL {engine}" on the data-api channel. No jump host, no broker
+        # cert, no RSA key pair: the plugin reaches the private-IP instance through the
+        # Cloud SQL Data API. Under IAM database authentication the functional account
+        # has NO database password — the composite's third segment is "-" — so unlike
+        # Azure nothing per-database is packed into it, which is why one operator-owned
+        # account per engine ("reference" mode) is the natural fit here.
+        db_platform_id = 0 if fa_mode == _FA_MODE_REFERENCE else (
+            await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_gcp_{engine}")))
+        fa_label, db_method = "gcp", "dbgcp"
+        fa_key = f"clouddb_ps_functional_account_gcp_{engine}"
+        fa_tokens = ("gcp", "cloud sql")
+        fa_username = fa_password = ""
+        if fa_mode != _FA_MODE_REFERENCE:
+            auth_mode = (_cfg("clouddb_ps_gcp_auth_mode") or "ADC").upper()
+            # The database user is the IAM principal name the DATABASE stored, read back
+            # from the catalog rather than derived — see _observed_iam_db_user.
+            fa_username = f"{auth_mode}:{ctx.get('fa_db_user') or ''}"
+            impersonate = (_cfg("clouddb_ps_gcp_impersonate_target")
+                           if auth_mode == "IMP" else "")
+            # Segment 1 is the base64 service-account key, and only SA: mode has one —
+            # a ~2.4 KB key base64s to ~3.2 KB, over Password Safe's 1000-character
+            # credential limit, which is why ADC:/IMP: are the supported modes. Segment
+            # 2 is the impersonation target; segment 3 the database password, which does
+            # not exist under IAM auth.
+            fa_password = f"-:{impersonate or '-'}:-"
+        # Address: channel;project:region:instance;dbName;audience;ssl[;key=value]
+        conn_name = f"{ctx['project']}:{row.region}:{row.instance_id}"
+        addr = ["data-api", conn_name, ctx["db_name"] or "", "-", "-", "iam=true"]
+        if engine == "mysql":
+            # The plugin deliberately REFUSES to default a MySQL host qualifier, because
+            # app@% and app@10.0.0.5 are different accounts and rotating the wrong row
+            # rotates the wrong account silently. We created '<user>'@'%', so say so.
+            addr.append(f"host={ctx.get('managed_user_host') or '%'}")
+        dns_name = ";".join(addr)
+    elif row.cloud == "azure":
         # "{engine} Azure Run Command Plugin". In "create" mode the functional account
         # bundles the Azure control-plane SP with a privileged DB login (the minted
         # admin), which rotates the dedicated managed user; in "reference" mode the
@@ -1530,12 +1729,23 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     # (operator-owned) account goes under a key that loop never reads.
     stash["ps_db_functional_account_id" if db_fa_owned
           else "ps_db_functional_account_ref"] = db_fa_id
+    # Self-rotation ("change password using own credentials") is a CLOUD-RUN action;
+    # the data-api channel refuses it at pre-flight, before any network call. But
+    # clouddb_ps_self_rotation is one global flag that AWS/Azure "reference" mode
+    # REQUIRES, so GCP has to drop it rather than inherit it. GCP does not need it: the
+    # functional account is granted rights over the managed principal instead.
+    self_rotate = config_service.get_bool("clouddb_ps_self_rotation", False)
+    if db_method == "dbgcp" and self_rotate:
+        logger.info("clouddb: not emitting use_own_credentials for db_id=%s — self-"
+                    "rotation is a cloud-run action the data-api channel refuses at "
+                    "pre-flight; the functional account rotates the managed user", row.id)
+        self_rotate = False
     reg = await ps_resource_service.register_managed_system(
         name=f"{name}-db", host_name=row.private_host, ip_address="127.0.0.1",
         port=ctx["port"], functional_account_id=db_fa_id, platform_id=db_platform_id,
         workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
         method=db_method, dns_name=dns_name,
-        use_own_credentials=config_service.get_bool("clouddb_ps_self_rotation", False))
+        use_own_credentials=self_rotate)
     stash["ps_db_registration_tf_state"] = reg.get("tf_state_json")
     stash["ps_db_system_id"] = reg.get("managed_system_id")
     stash["ps_db_account_id"] = reg.get("managed_account_id")
@@ -1885,9 +2095,12 @@ async def run_provision_apply(
         row.status = "available"
         db.commit()
 
-        # Optional Password Safe DB onboarding (AWS + Azure, opt-in). Create the
-        # dedicated managed user FIRST so the tunnel/vault injects it, then let PS
-        # own its rotation. Any failure falls back to the legacy admin staging.
+        # Optional Password Safe DB onboarding (AWS / Azure / GCP, opt-in). Create
+        # the dedicated managed user FIRST so the tunnel/vault injects it, then let PS
+        # own its rotation. Any failure falls back to the legacy admin staging. The
+        # three clouds reach the private DB differently: AWS runs the client on the ECS
+        # gateway over SSM, Azure on the jump VM over Run Command, and GCP not at all —
+        # it uses the Cloud SQL Admin API, which needs no network path.
         #
         # Two gates, and they answer different questions: _ps_db_onboarding_enabled is
         # "is this deployment set up for it", _ps_onboarding_opted is "did the operator
@@ -1902,6 +2115,9 @@ async def run_provision_apply(
             try:
                 if row.cloud == "azure":
                     onboard_ctx = await _create_db_managed_user_azure(
+                        db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+                elif row.cloud == "gcp":
+                    onboard_ctx = await _create_db_managed_user_gcp(
                         db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
                 else:
                     onboard_ctx = await _create_db_managed_user(

@@ -39,7 +39,7 @@ differs by cloud/engine:
 |---|---|---|---|---|
 | **AWS** | postgres / mysql / sqlserver (RDS) | ✅ tunnel | ✅ `dbssm` | ✅ register + JIT |
 | **Azure** | postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) | ✅ tunnel | ✅ `dbazure` | ✅ register + JIT |
-| **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) | ✅ tunnel | ❌ | ✅ postgres / mysql (via forwarder) |
+| **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) | ✅ tunnel | ⚠️ `dbgcp` — postgres / mysql, inert until the plugin's data-api channel ships | ✅ postgres / mysql (via forwarder) |
 | **OCI** | ⚠️ **oracle only** (Autonomous DB) — read the caveats² | ✅ tunnel¹ | ❌ | ❌ |
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
@@ -467,12 +467,13 @@ OCI has no per-region config sets.
 
 ---
 
-## Layer 2 — Password Safe (AWS + Azure)
+## Layer 2 — Password Safe (AWS + Azure + GCP)
 
-*Optional.* When enabled (`clouddb_ps_onboarding_enabled`), provisioning an **AWS** or
-**Azure** database additionally hands rotation of a database credential to Password Safe
-and keeps the PRA-vaulted credential in sync. **GCP and OCI are not supported** — those
-databases provision and get a tunnel, but no Password Safe onboarding.
+*Optional.* When enabled (`clouddb_ps_onboarding_enabled`), provisioning an **AWS**,
+**Azure** or **GCP** database additionally hands rotation of a database credential to
+Password Safe and keeps the PRA-vaulted credential in sync. **OCI is not supported** —
+those databases provision and get a tunnel, but no Password Safe onboarding. GCP covers
+**PostgreSQL and MySQL only**, and ships off — see that section for both reasons.
 
 ### Two ways in: at provision, or afterwards
 
@@ -505,9 +506,9 @@ use **Import from Password Safe** instead.
 > is the field-by-field operator runbook: prerequisites, exactly what to put in each
 > settings-panel field, the test procedure, and how to read a failure.
 
-Both paths create a **dedicated managed DB user** as the rotation target (not the master
-admin), point the PRA tunnel's injected credential at it, onboard the DB as a Password
-Safe **managed system + managed account**, and onboard the PRA Vault account on the
+All three paths create a **dedicated managed DB user** as the rotation target (not the
+master admin), point the PRA tunnel's injected credential at it, onboard the DB as a
+Password Safe **managed system + managed account**, and onboard the PRA Vault account on the
 **`PRA Vault Username Password`** plugin so rotations propagate into the tunnel credential.
 Every step is **non-fatal** and leaves the database up. A failure in the *managed-user
 creation* falls back to legacy admin-credential staging; a failure in *managed-system
@@ -646,6 +647,92 @@ AWS keys above):
 | `clouddb_ps_azure_ssl` | `true` | `sslTRUE` / `sslFALSE` (address field 8) |
 | `clouddb_ps_azure_sp_client_id` / `_client_secret` | — | `create` mode only: Azure SP for the functional account; blank → reuse `azure_client_id` / `_secret` |
 | `clouddb_ps_azure_plugin_private_key` / `_passphrase` | — | Plugin RSA key material dropped on the jump VM (encrypted at rest) |
+
+### GCP — `dbgcp` (Cloud SQL Data API)
+
+> **Not functional yet.** The three `.PSPLUGIN` packages install, and their address and
+> functional-account parsing, capability pre-flight and action surface are real — but the
+> channel transports are still stubs. A rotation or verify returns *"the 'data-api'
+> channel is not implemented in this build"* rather than succeeding. Everything below is
+> wired and testable up to that boundary; `passwordsafe_gcp_db_registration_method` ships
+> **`off`** for exactly this reason. Turning it on early is still useful: reaching that
+> message proves the address parsed, the functional account parsed, the platform bound
+> and the pre-flight passed.
+
+Unlike the other two clouds there is **no jump host**. The **`GCP Cloud SQL {engine}`**
+plugins reach a private-IP instance through Google's own control plane — the Cloud SQL
+**Data API** (`instances.executeSql`) — so there is no DB client to install, no RSA key
+pair, no public certificate on any Resource Broker, and no relay VM. The dashboard does
+its own onboarding work the same way: the dedicated managed user is created with
+`users.insert` on the Cloud SQL Admin API, which opens no database connection at all.
+
+The DB is registered on the **`GCP Cloud SQL {engine}`** platform with the five-field
+address `channel;project:region:instance;dbName;audience;ssl[;key=value]`, in practice
+`data-api;{project}:{region}:{instance};{dbName};-;-;iam=true` (MySQL appends `;host=%`).
+Field 2 is the instance **connection name**, not a hostname. Both control-plane fields
+are `-`: the Cloud SQL APIs are always TLS and never open a database connection, and the
+plugin rejects a value there rather than letting anyone believe they disabled it.
+
+Under **IAM database authentication** the functional account has **no database password
+at all** — its credential is a short-lived OAuth token minted per connection, and the
+composite's third segment is `-`. So the functional account is `ADC:<dbUser>` (or
+`IMP:`/`SA:`) with password `-:-:-`. Because nothing per-database is packed into it,
+**`reference` mode is the recommended configuration here**, and — unlike Azure —
+it does *not* need `clouddb_ps_self_rotation`. That flag is ignored for GCP on purpose:
+self-rotation is a `cloud-run`-channel action that `data-api` refuses at pre-flight, so
+leaving the global flag on for AWS/Azure cannot break GCP.
+
+**PostgreSQL and MySQL only.** Cloud SQL for SQL Server does not support IAM database
+authentication for database operations, so `data-api` would need the functional account's
+password mirrored into Secret Manager and re-synced on every rotation — a second
+authority for a credential Password Safe exists to own. That engine wants the plugin's
+`cloud-run` channel, which does not exist yet.
+
+**Prerequisites (manual):**
+
+- Upload the two **`GCP Cloud SQL PostgreSQL`** / **`GCP Cloud SQL MySQL`** plugins and
+  **`PRA Vault Username Password`**. No key pair and no broker certificate — there is
+  none in this design.
+- Create the **rotator service account** and name it in the panel. **Keep the name
+  short**: MySQL truncates an IAM database username at the `@` and caps it at **32
+  characters**, so `bt-rotator` is safe and `bt-passwordsafe-cloudsql-rotator-prod` is not.
+- Grant it a least-privilege role. If you use only `data-api`,
+  **`roles/cloudsql.instanceUser`** is sufficient — it carries
+  `cloudsql.instances.executesql` and `cloudsql.instances.login` and, critically, **not**
+  `cloudsql.users.update`. Prefer an IAM **condition** on `resource.name` to scope it to
+  specific instances.
+- Give the **Resource Brokers** a GCP identity. On a Compute Engine broker, attach the
+  service account (`ADC:`, nothing stored anywhere). Off GCP, place a key file at
+  `GOOGLE_APPLICATION_CREDENTIALS` on each broker, or use `IMP:` and grant the broker's
+  identity `roles/iam.serviceAccountTokenCreator` on the rotator. `SA:` is **not** a
+  fallback: a base64 key is ~3.2 KB, over Password Safe's 1000-character credential limit.
+- Grant the functional account rights over each managed principal. The dashboard prints
+  the exact statement on the provisioning job, because `executeSql` authenticates as the
+  caller and the dashboard cannot issue it. On **PostgreSQL 16** — the module default —
+  `GRANT "<managed>" TO "<fa>" WITH ADMIN OPTION` per role; `CREATEROLE` alone is no
+  longer sufficient. On MySQL, `GRANT CREATE USER ON *.* TO '<fa>'@'%'`.
+- Create a **PRA Configuration-API account** as in the AWS section.
+
+The dashboard enables the two per-instance prerequisites itself at onboarding
+(`ensure_cloudsql_rotation_prereqs`): the **Cloud SQL Data API**, which is *off by
+default per instance*, and the `cloudsql.iam_authentication` database flag. New instances
+also get the flag declaratively from the Terraform module. It then registers the rotator
+as an IAM database user and **reads back the name the database actually stored** rather
+than deriving it — there is in-house precedent for GCP surfacing an unexpected principal
+name, and a functional account naming a principal the database does not have fails Verify
+with an unhelpful message.
+
+**Config keys** (the PRA-Vault plugin and workgroup are shared with the AWS keys above;
+there are no client-image or key-material keys here):
+
+| Key | Default | Notes |
+|---|---|---|
+| `passwordsafe_gcp_db_registration_method` | `off` | `dataapi` or `off`. Ships `off` until the plugin's data-api channel is implemented |
+| `clouddb_ps_platform_gcp_postgres` / `_mysql` | `GCP Cloud SQL PostgreSQL` / `GCP Cloud SQL MySQL` | Custom-plugin platform names; advisory in `reference` mode |
+| `clouddb_ps_functional_account_gcp_postgres` / `_mysql` | — | `reference` mode: the operator-created account on each Cloud SQL platform |
+| `clouddb_ps_gcp_auth_mode` | `ADC` | `ADC` / `IMP` / `SA` — the functional-account username prefix |
+| `clouddb_ps_gcp_impersonate_target` | — | `IMP` mode: the service account to impersonate |
+| `clouddb_ps_gcp_rotator_service_account` | — | The rotation identity, registered as an IAM database user per instance. Keep it ≤32 characters for MySQL |
 
 ---
 

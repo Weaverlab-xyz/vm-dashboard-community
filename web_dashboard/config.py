@@ -404,7 +404,7 @@ class Settings(BaseSettings):
     bt_jumpoint_name: str = ""    # name of the pre-existing Jumpoint in PRA (required for Terraform path)
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
-    # ── Optional cloud-DATABASE Password Safe onboarding (AWS-only) ───────────
+    # ── Optional cloud-DATABASE Password Safe onboarding (AWS) ────────────────
     # When enabled, provisioning an AWS DB additionally: creates a dedicated managed DB
     # user (via the DB client run on the shared Jumpoint host over SSM), onboards the DB
     # as a Password Safe managed system + managed account on the "{engine} SSM Custom
@@ -570,6 +570,50 @@ class Settings(BaseSettings):
     # cert lives on the Resource Broker at clouddb_ps_azure_cert_path.
     clouddb_ps_azure_plugin_private_key: str = ""   # PEM, encrypted at rest
     clouddb_ps_azure_plugin_passphrase: str = ""    # encrypted at rest
+
+    # ── GCP cloud-DATABASE Password Safe onboarding (Cloud SQL plugins) ──────
+    # The GCP counterpart of the two paths above, and the one that needs no jump
+    # host at all: the "GCP Cloud SQL {engine}" plugins reach a PRIVATE-IP instance
+    # through Google's control plane (the Cloud SQL Data API, instances.executeSql)
+    # rather than by running a DB client somewhere with line of sight. So there is
+    # no cert path, no RSA key pair and no client image here — and under IAM
+    # database authentication no functional-account DB password either: the
+    # credential is a short-lived OAuth token minted per connection, and the
+    # composite's third segment is "-".
+    #
+    # POSTGRES AND MYSQL ONLY. Cloud SQL for SQL Server has no IAM database auth, so
+    # data-api would need the FA password mirrored into Secret Manager and re-synced
+    # on every rotation; that engine wants the plugin's cloud-run channel instead.
+    #
+    # Ships "off": the plugin packages install and parse, but their channel
+    # transports are stubs until the data-api channel ships, so a rotation reports
+    # "not implemented in this build" rather than succeeding. Flip to "dataapi" once
+    # that lands. The three plugins are a one-time MANUAL upload (see docs); the
+    # platform names below are how the dashboard finds them.
+    passwordsafe_gcp_db_registration_method: str = "off"  # dataapi | off
+    clouddb_ps_platform_gcp_postgres: str = "GCP Cloud SQL PostgreSQL"
+    clouddb_ps_platform_gcp_mysql: str = "GCP Cloud SQL MySQL"
+    # GCP counterparts of clouddb_ps_functional_account_* — read only when
+    # clouddb_ps_functional_account_mode is "reference", which is the RECOMMENDED mode
+    # here: unlike Azure, the GCP composite carries nothing per-database, so one
+    # operator-owned account per engine covers every Cloud SQL instance.
+    clouddb_ps_functional_account_gcp_postgres: str = ""  # on "GCP Cloud SQL PostgreSQL"
+    clouddb_ps_functional_account_gcp_mysql: str = ""     # on "GCP Cloud SQL MySQL"
+    # The functional account's GCP identity mode — the username prefix. ADC uses the
+    # Resource Broker's own credentials (an attached service account on a Compute
+    # Engine broker, GOOGLE_APPLICATION_CREDENTIALS on an on-premises one) and stores
+    # no key anywhere. IMP starts from ADC and impersonates the rotator service account
+    # via roles/iam.serviceAccountTokenCreator. SA embeds a base64 key, which at ~3.2 KB
+    # is over Password Safe's 1000-character credential limit — so it cannot survive a
+    # functional-account write-back and is not a supported production mode.
+    clouddb_ps_gcp_auth_mode: str = "ADC"          # ADC | IMP | SA
+    clouddb_ps_gcp_impersonate_target: str = ""    # IMP mode: service account to impersonate
+    # The operator-created rotation identity. The dashboard registers this as an IAM
+    # database user on each instance it onboards and reads back the name the database
+    # actually stored. KEEP IT SHORT: MySQL truncates an IAM database username at the
+    # "@" and caps it at 32 characters, so "bt-rotator" is safe and
+    # "bt-passwordsafe-cloudsql-rotator-prod" is not.
+    clouddb_ps_gcp_rotator_service_account: str = ""  # e.g. bt-rotator@<project>.iam.gserviceaccount.com
 
     # EPM for Linux (EPM-L) — Pathfinder public API gateway.
     # The gateway base is api.beyondtrust.io (NOT app.beyondtrust.io — that host

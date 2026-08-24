@@ -46,7 +46,9 @@ PANELS = {"password_safe": "PasswordSafeFeatureConfig",
 FLAGS = ("password_safe_enabled", "pra_enabled", "epml_enabled")
 
 # The 96 non-`enabled` keys the single BeyondTrustFeatureConfig declared, frozen here so
-# the split is provably lossless. A key that vanishes from all three models is a field an
+# the split is provably lossless, PLUS keys deliberately added since (the eight
+# `*_gcp_*` cloud-DB onboarding keys, which wire the GCP Cloud SQL plugins as the third
+# Layer-2 cloud alongside AWS SSM and Azure Run Command). A key that vanishes from all three models is a field an
 # operator can no longer set; one that appears on two breaks the union-check equivalence
 # test_setup_feature_roundtrip documents in its own docstring.
 LEGACY_KEYS = frozenset("""
@@ -79,6 +81,10 @@ clouddb_ps_functional_account_azure_sqlserver
 clouddb_ps_azure_auth_mode clouddb_ps_azure_cert_path clouddb_ps_azure_ssl
 clouddb_ps_azure_sp_client_id clouddb_ps_azure_sp_client_secret
 clouddb_ps_azure_plugin_private_key clouddb_ps_azure_plugin_passphrase
+passwordsafe_gcp_db_registration_method clouddb_ps_platform_gcp_postgres
+clouddb_ps_platform_gcp_mysql clouddb_ps_functional_account_gcp_postgres
+clouddb_ps_functional_account_gcp_mysql clouddb_ps_gcp_auth_mode
+clouddb_ps_gcp_impersonate_target clouddb_ps_gcp_rotator_service_account
 azure_bt_jump_group_name azure_jumpoint_name azure_vm_jumpoint_mode
 gcp_bt_jump_group_name gcp_jumpoint_name gcp_vm_jumpoint_mode
 epml_site_id epml_pat

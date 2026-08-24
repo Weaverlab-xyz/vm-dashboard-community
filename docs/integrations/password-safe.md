@@ -187,7 +187,7 @@ resolves them over the public API and creates the managed system/account with Te
 > reference an operator-created account. **Cloud-database** onboarding does too, but only
 > when `clouddb_ps_functional_account_mode` is `reference`; its default, `create`, mints one
 > per database and deletes it on decommission. See
-> [Databases → Layer 2](../databases.md#layer-2--password-safe-aws--azure). Easy to conflate,
+> [Databases → Layer 2](../databases.md#layer-2--password-safe-aws--azure--gcp). Easy to conflate,
 > so check the mode before hunting for a missing account.
 
 > This section is the authoritative reference for **VM** onboarding methods. For the full
@@ -549,11 +549,14 @@ choices is what it is: [k8s-sa-token-rotation](../design/k8s-sa-token-rotation.m
 ## Databases
 
 The dashboard also provisions **managed cloud databases** (AWS / Azure / GCP / OCI), reaches
-them through a PRA protocol tunnel, and can optionally **onboard AWS and Azure databases into
-Password Safe** for credential rotation (via the `{engine} SSM Custom Plugin` /
-`{engine} Azure Run Command Plugin` and the shared `PRA Vault Username Password` plugin). That
-whole feature — base provisioning, per-cloud prerequisites, and the Password Safe onboarding —
-is documented separately in **[Databases](../databases.md)**. The tunnel half needs
+them through a PRA protocol tunnel, and can optionally **onboard AWS, Azure and GCP databases
+into Password Safe** for credential rotation (via the `{engine} SSM Custom Plugin`,
+`{engine} Azure Run Command Plugin` or `GCP Cloud SQL {engine}` plugin, and the shared
+`PRA Vault Username Password` plugin). GCP covers PostgreSQL and MySQL only, reaches the
+instance over Google's control plane rather than a jump host, and ships off until the
+plugin's data-api channel is implemented. That whole feature — base provisioning, per-cloud
+prerequisites, and the Password Safe onboarding — is documented separately in
+**[Databases](../databases.md)**. The tunnel half needs
 [Privileged Remote Access](privileged-remote-access.md).
 
 Onboarding is asked for **per database**, in one of two places: the **Onboard into Password
