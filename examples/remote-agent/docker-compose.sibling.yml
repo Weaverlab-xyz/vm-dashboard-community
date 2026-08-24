@@ -72,15 +72,43 @@ services:
     # does not require loosening the agent's own hardening, and it should not be
     # loosened: the socket is the capability, the container flags are not.
 
-# Then, in YOUR policy.yaml:
+# Then, in YOUR policy.yaml. One block per feature, and they are INDEPENDENT: mounting the
+# socket implies neither, and `ansible:` does not need `sibling:` — the Config Management
+# path checks only `ansible.enabled`. Enable what you actually run.
+#
+# ── Hyper-V and bare ESXi brokering ───────────────────────────────────────────
 #
 #   sibling:
 #     enabled: true
 #     image: chrweav/hypervisor-runner:latest
 #     network: bridge          # the network the runner joins; not host
 #
-# And pull the image once on this host — the agent will not pull it for you, because a
-# pull is a network fetch of executable content and that is a decision for you, not for
-# a job:
+# ── Config Management ─────────────────────────────────────────────────────────
+# Two edits, not one: the job type has to be in the top-level `job_types:` as well.
+# `ansible.targets` is its OWN list and never falls back to the top-level `targets:` —
+# leave it empty and nothing may be configured, however wide that one is. Name the ports:
+# 22 for Linux over SSH, 5985/5986 for Windows over WinRM, the database port for a
+# database (5432 postgres, 3306 mysql, 1433 sqlserver).
 #
-#   docker pull chrweav/hypervisor-runner:latest
+#   job_types:
+#     - agent_ansible
+#
+#   ansible:
+#     enabled: true
+#     vm_image: chrweav/ansible-winrm:latest     # VM targets — SSH and WinRM
+#     db_image: chrweav/ansible-cloud:latest     # database targets — the localhost play
+#     targets:
+#       - cidr: 10.20.10.0/24
+#         ports: [22, 5985, 5986]
+#
+# Name only the image for the kind of run you do; a run of a kind with no image is refused
+# by name. See policy.example.yaml for the full annotated block.
+#
+# ── And pull them ─────────────────────────────────────────────────────────────
+#
+# Once each, on this host — the agent will not pull them for you, because a pull is a
+# network fetch of executable content and that is a decision for you, not for a job:
+#
+#   docker pull chrweav/hypervisor-runner:latest    # only for `sibling:`
+#   docker pull chrweav/ansible-winrm:latest        # only for `ansible.vm_image`
+#   docker pull chrweav/ansible-cloud:latest        # only for `ansible.db_image`

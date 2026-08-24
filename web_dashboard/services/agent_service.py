@@ -457,14 +457,26 @@ def supports_ansible(agent: RemoteAgent) -> bool:
 
 
 def ansible_upgrade_hint(agent: RemoteAgent) -> str:
-    """The refusal an operator sees when the bound agent is too old to run Ansible."""
+    """The refusal an operator sees when the bound agent is too old to run Ansible.
+
+    Names the Ansible runner images outright rather than saying "the sibling image". On an
+    agent host that phrase reads as ``chrweav/hypervisor-runner`` — the other thing here the
+    docs call a sibling, and the one an operator setting up brokering has already pulled —
+    so the advice was followed to no effect. The two features share the Docker socket and
+    nothing else; the Ansible path never looks at ``sibling.enabled``.
+
+    Spells out the policy.yaml half for the same reason :func:`dashboard_secret_upgrade_hint`
+    does: this fires before a job row exists, so there is no Live Output to read next.
+    """
     return (f"Agent '{agent.name}' reports version "
             f"{agent.agent_version or 'unknown'} and Config Management needs at least "
             f"{'.'.join(str(p) for p in MIN_ANSIBLE_VERSION)}. Pull "
             f"chrweav/dashboard-agent:latest on that host and restart the container — "
             f"re-enrolment is not needed, the agent keeps its identity. That host also "
-            f"needs an `ansible:` block in its policy.yaml and the sibling image pulled; "
-            f"see docs/remote-agents.md. Nothing was queued.")
+            f"needs `agent_ansible` in its policy.yaml `job_types`, an `ansible:` block "
+            f"with its own `targets:` list, and the runner image for the kind of run "
+            f"pulled — chrweav/ansible-winrm for VMs, chrweav/ansible-cloud for databases, "
+            f"not the hypervisor sibling; see docs/remote-agents.md. Nothing was queued.")
 
 
 def supports_dashboard_secret(agent: RemoteAgent) -> bool:
