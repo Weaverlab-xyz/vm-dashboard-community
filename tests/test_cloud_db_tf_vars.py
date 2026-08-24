@@ -47,6 +47,9 @@ def _install_stubs():
     cfg = types.ModuleType("web_dashboard.services.config_service")
     cfg.get = lambda key: CONF.get(key, "")
     cfg.set = lambda key, val: CONF.__setitem__(key, val)
+    # The GCP branches read this too, to decide whether a new Cloud SQL instance comes
+    # up with cloudsql.iam_authentication on (_gcp_iam_auth_wanted).
+    cfg.get_bool = lambda key, default=False: bool(CONF.get(key, default))
     sys.modules["web_dashboard.services.config_service"] = cfg
 
     # cloud_database_service imports these at module load but the builder never
@@ -151,6 +154,44 @@ def test_postgres_gcp_uses_tier_and_project():
         assert tf["private_network"] == "net-x"
         assert tf["labels"] == {"managed-by": "vm-dashboard", "clouddb-id": "abcdef0123456789"}
         assert "instance_class" not in tf  # instance_class is an RDS var
+    finally:
+        CONF.clear()
+
+
+def test_gcp_iam_authentication_is_off_until_ps_onboarding_is_configured():
+    # The flag only ever PERMITS IAM database auth, but it is still a change to the
+    # instance, so a deployment that never onboards to Password Safe should not get it.
+    CONF.clear()
+    CONF["gcp_project"] = "proj-x"
+    try:
+        for engine in ("postgres", "mysql"):
+            assert _build(engine, "gcp")["iam_authentication"] is False, engine
+    finally:
+        CONF.clear()
+
+
+def test_gcp_iam_authentication_follows_both_switches():
+    # Both are required: the master toggle AND the per-cloud method, matching
+    # _ps_db_onboarding_enabled. The master toggle alone is shared with AWS/Azure.
+    CONF.clear()
+    CONF.update({"gcp_project": "proj-x", "clouddb_ps_onboarding_enabled": True})
+    try:
+        assert _build("postgres", "gcp")["iam_authentication"] is False, "method still off"
+        CONF["passwordsafe_gcp_db_registration_method"] = "dataapi"
+        for engine in ("postgres", "mysql"):
+            assert _build(engine, "gcp")["iam_authentication"] is True, engine
+    finally:
+        CONF.clear()
+
+
+def test_gcp_sqlserver_never_gets_the_iam_authentication_var():
+    # Cloud SQL for SQL Server has no IAM database auth at all, and its module does not
+    # declare the variable — passing it would fail the apply outright.
+    CONF.clear()
+    CONF.update({"gcp_project": "proj-x", "clouddb_ps_onboarding_enabled": True,
+                 "passwordsafe_gcp_db_registration_method": "dataapi"})
+    try:
+        assert "iam_authentication" not in _build("sqlserver", "gcp")
     finally:
         CONF.clear()
 

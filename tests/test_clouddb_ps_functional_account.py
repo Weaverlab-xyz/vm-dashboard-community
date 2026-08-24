@@ -60,13 +60,30 @@ class _FakeJobRow:
 
 FAKE_FA = {"id": 77, "platform_id": 909,
            "platform_name": "psql SSM Custom Plugin", "account_name": "clouddb-ssm-postgres"}
+# The GCP siblings, on the Cloud SQL plugin platforms. "clouddb-gcp-wrong" sits on a
+# platform whose name carries neither token, so it exercises the mismatch guard.
+FAKE_FA_GCP = {"id": 88, "platform_id": 808,
+               "platform_name": "GCP Cloud SQL PostgreSQL",
+               "account_name": "clouddb-gcp-postgres"}
+FAKE_FA_GCP_MYSQL = dict(FAKE_FA_GCP, id=89, platform_id=807,
+                         platform_name="GCP Cloud SQL MySQL",
+                         account_name="clouddb-gcp-mysql")
+FAKE_FA_WRONG = dict(FAKE_FA_GCP, id=90, platform_name="Azure Active Directory",
+                     account_name="clouddb-gcp-wrong")
+_FAKE_ACCOUNTS = {
+    "clouddb-ssm-postgres": FAKE_FA,
+    "pra-config-api": FAKE_FA,
+    "clouddb-gcp-postgres": FAKE_FA_GCP,
+    "clouddb-gcp-mysql": FAKE_FA_GCP_MYSQL,
+    "clouddb-gcp-wrong": FAKE_FA_WRONG,
+}
 
 
 async def _fake_get_functional_account(name):
     CALLS.append(("get_functional_account", name))
-    if name not in ("clouddb-ssm-postgres", "pra-config-api"):
+    if name not in _FAKE_ACCOUNTS:
         raise AssertionError(f"unexpected functional account lookup {name!r}")
-    return dict(FAKE_FA)
+    return dict(_FAKE_ACCOUNTS[name])
 
 
 async def _fake_create_fa_on_platform(*, platform_id, account_name, display_name,
@@ -84,8 +101,13 @@ async def _fake_get_workgroup_id(name):
     return 5
 
 
+LAST_REGISTER = {}
+
+
 async def _fake_register_managed_system(**kw):
     CALLS.append(("register", kw["functional_account_id"], kw["platform_id"]))
+    LAST_REGISTER.clear()
+    LAST_REGISTER.update(kw)
     return {"tf_state_json": "{}", "managed_system_id": 1, "managed_account_id": 2}
 
 
@@ -165,6 +187,7 @@ def _run(coro):
 def _reset(**conf):
     CONF.clear()
     CALLS.clear()
+    LAST_REGISTER.clear()
     CONF.update(conf)
 
 
@@ -308,6 +331,163 @@ def test_the_managed_system_is_registered_against_the_referenced_account():
     _onboard(clouddb_ps_functional_account_mode="reference",
              clouddb_ps_functional_account_postgres="clouddb-ssm-postgres")
     assert ("register", 77, 909) in CALLS, "the system must inherit the account's platform"
+
+
+
+# -- the GCP branch (dbgcp = "GCP Cloud SQL {engine}", data-api channel) -------
+#
+# The third Layer-2 cloud, and the one shaped differently from the other two: the plugin
+# reaches a private-IP instance over Google's control plane, so the address carries no
+# host, no cert path and no key material, and under IAM database authentication the
+# functional-account composite carries no database password either.
+
+def _onboard_gcp(engine="postgres", **conf):
+    _reset(**conf)
+    job_row = _FakeJobRow()
+    row = _CloudDatabase(id="abcdef0123456789abcd", cloud="gcp",
+                         private_host="10.102.0.3", engine=engine,
+                         region="us-central1", instance_id="clouddb-abcdef01")
+    ctx = {"managed_user": "psafe_abcdef012345", "region": "us-central1",
+           "admin_username": "dbadmin", "client_image": "", "db_name": "appdb",
+           "port": 5432 if engine == "postgres" else 3306,
+           "project": "acme-data-prod", "instance": "clouddb-abcdef01",
+           "fa_db_user": "bt-rotator@acme-data-prod.iam",
+           "managed_user_host": "%" if engine == "mysql" else ""}
+    _run(svc._onboard_ps_managed_systems(
+        _FakeDB(job_row), row=row, job_id="job-1", engine=engine,
+        tf_variables={"identifier": "clouddb-abcdef01"}, ctx=ctx))
+    return job_row.metadata_dict
+
+
+def test_gcp_address_is_the_data_api_five_field_form():
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL")
+    addr = LAST_REGISTER["dns_name"]
+    fields = addr.split(";")
+    assert fields[0] == "data-api", addr
+    # Field 2 is the instance CONNECTION NAME, not a hostname -- project:region:instance,
+    # composed from columns the row already has rather than a new terraform output.
+    assert fields[1] == "acme-data-prod:us-central1:clouddb-abcdef01", addr
+    assert fields[2] == "appdb", addr
+    # Both control-plane channels reject an audience or an SSL flag: they are always TLS
+    # and never open a database connection.
+    assert fields[3] == "-" and fields[4] == "-", addr
+    assert "iam=true" in fields[5:], addr
+    assert LAST_REGISTER["method"] == "dbgcp"
+
+
+def test_gcp_mysql_address_carries_the_host_qualifier():
+    # The plugin deliberately REFUSES to default a MySQL host, because app@% and
+    # app@10.0.0.5 are different accounts and rotating the wrong row is silent. The
+    # dashboard created '<user>'@'%', so the address has to say so.
+    _onboard_gcp(engine="mysql", clouddb_ps_platform_gcp_mysql="GCP Cloud SQL MySQL")
+    assert "host=%" in LAST_REGISTER["dns_name"].split(";"), LAST_REGISTER["dns_name"]
+
+
+def test_gcp_postgres_address_has_no_host_option():
+    # host= applies to MySQL only; the plugin rejects an option it does not recognise
+    # for the engine rather than ignoring it.
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL")
+    assert "host=" not in LAST_REGISTER["dns_name"], LAST_REGISTER["dns_name"]
+
+
+def _real_dbgcp_validator():
+    """The REAL _validate_dbgcp_dns_name, lifted out of ps_resource_service by source.
+
+    That module is stubbed in this file (the whole point is to drive the onboarding with
+    no Terraform), so a normal import returns the fake. But the one thing worth proving
+    end to end here is that the address this service BUILDS is an address that validator
+    ACCEPTS — the two halves live in different modules and nothing else pins them
+    together. Exec'ing just the grammar block keeps that check honest without unstubbing.
+    """
+    import re as _re
+    src_path = os.path.join(_ROOT, "web_dashboard", "services", "ps_resource_service.py")
+    with open(src_path, encoding="utf-8") as fh:
+        src = fh.read()
+    block = src[src.index("_DBGCP_MAX_ADDRESS = 249"):src.index("def _ssm_account_name")]
+
+    class _Err(Exception):
+        pass
+
+    ns = {"re": _re, "PSResourceError": _Err}
+    exec(block, ns)  # noqa: S102 - test-local, reads our own source
+    return ns["_validate_dbgcp_dns_name"], _Err
+
+
+def test_the_address_the_service_builds_is_one_the_plugin_grammar_accepts():
+    validate, Err = _real_dbgcp_validator()
+    for engine in ("postgres", "mysql"):
+        _onboard_gcp(engine=engine,
+                     **{f"clouddb_ps_platform_gcp_{engine}": "GCP Cloud SQL X"})
+        addr = LAST_REGISTER["dns_name"]
+        try:
+            validate(addr)
+        except Err as exc:
+            raise AssertionError(f"{engine}: the service built {addr!r}, which the "
+                                 f"plugin grammar rejects: {exc}")
+
+
+def test_gcp_address_survives_the_plugins_249_character_limit():
+    # ps_resource_service is stubbed here, so the limit is spelled out rather than read
+    # from it; test_ps_resource.py pins the constant itself. 249 not 255, because a
+    # truncated address does not error -- it becomes a different, wrong address.
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL")
+    addr = LAST_REGISTER["dns_name"]
+    assert len(addr) <= 249, (len(addr), addr)
+
+
+def test_gcp_create_mode_composite_carries_no_database_password():
+    # Under IAM database auth there is nothing to store, rotate or leak: segment 3 is
+    # "-". This is the whole reason "reference" mode is the natural GCP configuration --
+    # unlike Azure, the composite holds nothing per-database.
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL")
+    created = [c for c in CALLS if c[0] == "create"]
+    assert created, CALLS
+    _, _, account_name, password = created[0]
+    assert account_name == "ADC:bt-rotator@acme-data-prod.iam", account_name
+    assert password == "-:-:-", password
+
+
+def test_gcp_imp_mode_puts_the_target_in_the_second_segment():
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                 clouddb_ps_gcp_auth_mode="IMP",
+                 clouddb_ps_gcp_impersonate_target="bt-rotator@acme.iam.gserviceaccount.com")
+    _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
+    assert account_name.startswith("IMP:"), account_name
+    assert password == "-:bt-rotator@acme.iam.gserviceaccount.com:-", password
+
+
+def test_gcp_reference_mode_inherits_the_accounts_platform():
+    meta = _onboard_gcp(clouddb_ps_functional_account_mode="reference",
+                        clouddb_ps_functional_account_gcp_postgres="clouddb-gcp-postgres")
+    assert ("register", 88, 808) in CALLS, CALLS
+    assert meta["ps_db_functional_account_ref"] == 88
+    assert "ps_db_functional_account_id" not in meta
+
+
+def test_gcp_reference_mode_rejects_an_account_on_the_wrong_platform():
+    # The token check is ("gcp", "cloud sql"); a Password Safe account on some other
+    # platform would register a managed system the plugin never sees.
+    try:
+        _onboard_gcp(clouddb_ps_functional_account_mode="reference",
+                     clouddb_ps_functional_account_gcp_postgres="clouddb-gcp-wrong")
+        raise AssertionError("expected a wrong-platform functional account to be refused")
+    except svc.CloudDatabaseError:
+        pass
+
+
+def test_gcp_never_self_rotates_even_when_the_global_flag_is_on():
+    # Self-rotation is a CLOUD-RUN action the data-api channel refuses at pre-flight,
+    # but clouddb_ps_self_rotation is one global flag that AWS/Azure "reference" mode
+    # REQUIRES -- so turning it on for those clouds must not reach GCP.
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                 clouddb_ps_self_rotation=True)
+    assert LAST_REGISTER["use_own_credentials"] is False, LAST_REGISTER
+
+
+def test_the_other_clouds_still_self_rotate_when_the_flag_is_on():
+    # The guard above must be scoped to dbgcp, not applied to every DB plugin.
+    _onboard(clouddb_ps_self_rotation=True)
+    assert LAST_REGISTER["use_own_credentials"] is True, LAST_REGISTER
 
 
 # ── staging the plugin key material on the jump host ─────────────────────────

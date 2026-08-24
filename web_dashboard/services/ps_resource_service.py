@@ -82,10 +82,13 @@ _REDACTED = "**REDACTED-BY-DASHBOARD**"
 # emits dss_auto_management_flag = false.
 # ``k8ssa`` (the "Kubernetes Service Account Token" plugin) is password-managed too —
 # there the "password" IS the ServiceAccount bearer token.
-_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "pravault",
-                             "k8ssa"})
+# ``dbgcp`` (cloud-DB via the "GCP Cloud SQL {engine}" plugins) is password-managed as
+# well; unlike its two DB siblings it reaches the instance over Google's control plane
+# rather than a jump host, so there is no key material anywhere in its address.
+_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "dbgcp",
+                             "pravault", "k8ssa"})
 # Methods whose managed account is password-managed (no SSH DSS key auto-management).
-_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "pravault", "k8ssa"})
+_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "dbgcp", "pravault", "k8ssa"})
 
 # Password Safe's managed-system address column is 255 chars. The cloud-DB plugin addresses
 # pack 6-8 fields into it, and the Azure one is close to the ceiling with realistic values
@@ -234,6 +237,134 @@ def _validate_k8ssa_dns_name(dns_name: str) -> None:
             raise PSResourceError(
                 f"default namespace {value!r} is not a valid Kubernetes name — lowercase "
                 f"letters, digits and hyphens, starting and ending alphanumeric")
+
+
+# ── GCP Cloud SQL address grammar ─────────────────────────────────────────────
+#
+# Transcribed from the plugin's Factories/AddressFormat.cs + ParameterFactory.cs, for
+# the same reason the k8ssa grammar above is: the plugin treats an unrecognised option
+# as an ERROR rather than ignoring it, and an option silently dropped inside a sealed
+# package is undiagnosable from the operator's side. Five positional fields, then
+# optional key=value options:
+#
+#   channel;project:region:instance;dbName|-;audience|-;sslTRUE|sslFALSE|-[;option=value]
+#
+# Field 2 is the Cloud SQL *instance connection name*, not a hostname — project, region
+# and instance are derived from it rather than entered separately.
+#
+# Password Safe truncates the address field at 255; the plugin refuses at 249, and a
+# truncated address does not error — it silently becomes a DIFFERENT, WRONG address. So
+# this is the tighter of the two limits on purpose (_MAX_MANAGED_SYSTEM_ADDRESS is 255).
+_DBGCP_MAX_ADDRESS = 249
+_DBGCP_POSITIONAL = 5
+_DBGCP_FORMAT = ("channel;project:region:instance;dbName|-;audience|-;"
+                 "sslTRUE|sslFALSE|-[;option=value]")
+_DBGCP_CHANNELS = frozenset({"admin-api", "data-api", "cloud-run"})
+# Both control-plane channels talk to a Google API over TLS and never open a database
+# connection, so a database name, an audience or an SSL flag on one is a configuration
+# error rather than a no-op — the plugin rejects rather than letting anyone believe they
+# turned TLS off.
+_DBGCP_CONTROL_PLANE = frozenset({"admin-api", "data-api"})
+_DBGCP_OPTION_KEYS = frozenset({"host", "fasecret", "iam", "ver", "verifier"})
+# Options the plugin accepts only on one channel; anywhere else it raises.
+_DBGCP_OPTION_CHANNEL = {"fasecret": "data-api", "ver": "cloud-run"}
+_DBGCP_SSL_FLAGS = frozenset({"ssltrue", "sslfalse"})
+# project:region:instance — three non-empty segments, and no ';' smuggled through.
+_DBGCP_CONNECTION_NAME = re.compile(r"^[^:;]+:[^:;]+:[^:;]+$")
+
+
+def _validate_dbgcp_dns_name(dns_name: str) -> None:
+    """Raise PSResourceError unless ``dns_name`` is an address the plugin will parse.
+
+    Mirrors the plugin's own pre-flight: length cap, known channel, a well-formed
+    instance connection name, then the per-channel rule for each remaining positional
+    field, then every trailing field as a recognised ``key=value`` option. Blank
+    trailing fields are skipped, as the plugin skips them, so a trailing ';' is fine."""
+    addr = (dns_name or "").strip()
+    if not addr:
+        raise PSResourceError(
+            f"GCP Cloud SQL onboarding requires a dns_name of the form '{_DBGCP_FORMAT}'")
+    if len(addr) > _DBGCP_MAX_ADDRESS:
+        raise PSResourceError(
+            f"managed system address is {len(addr)} characters, "
+            f"{len(addr) - _DBGCP_MAX_ADDRESS} over the {_DBGCP_MAX_ADDRESS} character "
+            f"limit the plugin enforces (Password Safe truncates the field at 255, and a "
+            f"truncated address silently becomes a different, wrong address). The instance "
+            f"connection name and the audience are the two long fields.")
+
+    fields = [f.strip() for f in addr.split(";")]
+    channel = fields[0].lower()
+    if channel not in _DBGCP_CHANNELS:
+        raise PSResourceError(
+            f"managed system address channel {fields[0]!r} is not recognised — use one of "
+            f"{', '.join(sorted(_DBGCP_CHANNELS))}")
+    if len(fields) < _DBGCP_POSITIONAL:
+        raise PSResourceError(
+            f"managed system address {addr!r} has {len(fields)} field(s), expected at least "
+            f"{_DBGCP_POSITIONAL} — '{_DBGCP_FORMAT}'")
+
+    if not _DBGCP_CONNECTION_NAME.match(fields[1]):
+        raise PSResourceError(
+            f"instance connection name {fields[1]!r} is not of the form "
+            f"'project:region:instance' — get it with "
+            f"\"gcloud sql instances describe <instance> --format='value(connectionName)'\"")
+
+    database, audience, ssl_flag = fields[2], fields[3], fields[4]
+    if channel == "admin-api":
+        if database != "-":
+            raise PSResourceError(
+                f"the 'admin-api' channel opens no database connection, so field 3 must be "
+                f"'-', not {database!r}")
+    elif not database or database == "-":
+        raise PSResourceError(
+            f"the {channel!r} channel requires a database name in field 3")
+
+    if channel == "cloud-run":
+        if not audience or audience == "-":
+            raise PSResourceError(
+                "the 'cloud-run' channel requires the Cloud Run custom audience in field 4")
+        low = audience.lower()
+        if low.startswith("http://") or low.startswith("https://"):
+            rest = audience.split("://", 1)[1]
+            if any(c in rest for c in "/?#"):
+                raise PSResourceError(
+                    f"Cloud Run audience {audience!r} must be a bare origin — a path, query "
+                    f"or fragment is rejected, because the audience doubles as the request "
+                    f"target and is used verbatim as the token audience")
+        if ssl_flag.lower() not in _DBGCP_SSL_FLAGS:
+            raise PSResourceError(
+                f"field 5 must be 'sslTRUE' or 'sslFALSE' on the 'cloud-run' channel, "
+                f"not {ssl_flag!r}")
+    else:
+        if audience != "-":
+            raise PSResourceError(
+                f"field 4 (audience) applies only to the 'cloud-run' channel, so it must be "
+                f"'-' on {channel!r}, not {audience!r}")
+        if ssl_flag != "-":
+            raise PSResourceError(
+                f"the Cloud SQL Admin and Data APIs are always TLS, so field 5 must be '-' "
+                f"on {channel!r}, not {ssl_flag!r} — the plugin rejects a value here rather "
+                f"than letting anyone believe they disabled it")
+
+    for field in fields[_DBGCP_POSITIONAL:]:
+        if not field:
+            continue
+        key, sep, value = field.partition("=")
+        key = key.strip().lower()
+        if not sep or not key or key not in _DBGCP_OPTION_KEYS:
+            raise PSResourceError(
+                f"{field!r} in managed system address {addr!r} is not a recognised option — "
+                f"options are key=value with one of: "
+                f"{', '.join(sorted(_DBGCP_OPTION_KEYS))}. The plugin treats an unknown "
+                f"option as an error, not as something to ignore.")
+        required = _DBGCP_OPTION_CHANNEL.get(key)
+        if required and required != channel:
+            raise PSResourceError(
+                f"the {key!r} option applies only to the {required!r} channel, but {addr!r} "
+                f"is a {channel!r} address")
+        if not value.strip():
+            raise PSResourceError(
+                f"the {key!r} option in managed system address {addr!r} has no value")
 
 
 def _ssm_account_name(name: str, suffix: str) -> str:
@@ -639,6 +770,23 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="dbazure", dns_name=dns_name, emit_private_key=False,
+            dss_auto_management=False, use_own_credentials=use_own_credentials)
+    elif method == "dbgcp":
+        # Cloud-DB via the "GCP Cloud SQL {engine}" plugins. Unlike its two DB siblings
+        # there is no jump host: the plugin reaches a private-IP instance through the
+        # Cloud SQL Data API, so the address carries no host, no cert path and no key
+        # material — five positional fields plus optional key=value options. ip is a
+        # placeholder, the real DB port applies, and the account is PASSWORD-managed
+        # (a dedicated managed user the functional account's IAM identity rotates).
+        _validate_dbgcp_dns_name(dns_name)
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="dbgcp", dns_name=dns_name, emit_private_key=False,
             dss_auto_management=False, use_own_credentials=use_own_credentials)
     elif method == "pravault":
         # "PRA Vault Username Password" plugin: Password Safe PATCHes the rotated

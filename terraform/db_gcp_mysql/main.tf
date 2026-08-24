@@ -88,6 +88,20 @@ variable "private_network" {
   description = "VPC the instance gets its private IP on — a bare network name (e.g. my-vpc) or a full self-link/path. Private services access must already be configured on it (the sandbox does this)."
 }
 
+variable "iam_authentication" {
+  # Turns on `cloudsql.iam_authentication`, which lets an IAM principal authenticate to
+  # the database with a short-lived OAuth token instead of a stored password. The
+  # Password Safe "GCP Cloud SQL {engine}" plugins need it on the data-api channel: with
+  # it, the functional account has NO database password to store, rotate or leak.
+  #
+  # Declarative here so a NEW instance comes up ready. Instances provisioned before this
+  # variable existed -- and registered ones the dashboard never applied -- are patched at
+  # onboarding time by gcp_service.ensure_cloudsql_rotation_prereqs instead, which also
+  # enables the Data API (that one has no terraform surface).
+  type    = bool
+  default = false
+}
+
 variable "ssl_mode" {
   type    = string
   default = "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
@@ -147,6 +161,14 @@ resource "google_sql_database_instance" "this" {
 
     backup_configuration {
       enabled = false
+    }
+
+    dynamic "database_flags" {
+      for_each = var.iam_authentication ? [1] : []
+      content {
+        name  = "cloudsql.iam_authentication"
+        value = "on"
+      }
     }
   }
 }

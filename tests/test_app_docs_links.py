@@ -22,7 +22,7 @@ outside, from the feature being undocumented.
 
 The fragment half matters just as much and is easier to get wrong, because the
 in-app slug is not the heading. ``## Layer 2 — Password Safe (AWS + Azure)``
-renders as ``#layer-2--password-safe-aws--azure``; a plausible hand-written guess
+renders as ``#layer-2--password-safe-aws--azure--gcp``; a plausible hand-written guess
 like ``#password-safe-onboarding`` resolves to nothing and silently drops the
 reader at the top of a 700-line page.
 

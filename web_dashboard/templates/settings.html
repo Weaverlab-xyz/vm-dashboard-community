@@ -1297,7 +1297,7 @@
               on AWS, the <code class="bg-gray-100 px-1 rounded">{engine} Azure Run Command Plugin</code> on Azure),
               and onboards the PRA Vault credential (via the <code class="bg-gray-100 px-1 rounded">PRA Vault Username Password</code> plugin)
               so Password Safe propagates rotations into the tunnel-injected credential. GCP and OCI are not supported.
-              The custom plugins + the RSA key prep are one-time manual setup — see the <a href="/docs/databases#layer-2--password-safe-aws--azure" class="underline" target="_blank">database onboarding guide</a>.
+              The custom plugins + the RSA key prep are one-time manual setup — see the <a href="/docs/databases#layer-2--password-safe-aws--azure--gcp" class="underline" target="_blank">database onboarding guide</a>.
             </p>
             <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
               <input type="checkbox" x-model="panelCfg.clouddb_ps_onboarding_enabled"
@@ -1611,6 +1611,110 @@
                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                            placeholder="••••••••">
                   </div>
+                </div>
+              </div>
+              <!-- GCP (Cloud SQL plugins) -->
+              <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">GCP (Cloud SQL plugins)</p>
+                <p class="text-xs text-gray-400">
+                  For GCP databases the DB is onboarded onto the <code class="bg-gray-100 px-1 rounded">GCP Cloud SQL {engine}</code> plugin,
+                  which reaches a private-IP instance through Google&#39;s own control plane (the Cloud SQL Data API) &mdash; so unlike AWS and Azure
+                  there is <strong>no jump host, no broker certificate and no RSA key pair</strong>. Under IAM database authentication the functional
+                  account has no database password at all. <strong>PostgreSQL and MySQL only</strong>: Cloud SQL for SQL Server has no IAM database
+                  auth, so it needs the plugin&#39;s cloud-run channel instead.
+                </p>
+                <p class="text-xs text-amber-600">
+                  The plugin packages install and parse addresses today, but their channel transports are not implemented yet &mdash; a rotation
+                  reports &ldquo;not implemented in this build&rdquo; rather than succeeding. Leave this off until the data-api channel ships.
+                </p>
+                <!-- x-init default is load-bearing: an unset string config key reads back
+                     as "" from /api/setup/feature, not as the model default. -->
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">GCP onboarding method</label>
+                  <select x-model="panelCfg.passwordsafe_gcp_db_registration_method"
+                          x-init="panelCfg.passwordsafe_gcp_db_registration_method = panelCfg.passwordsafe_gcp_db_registration_method || 'off'"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="off">Off &mdash; skip GCP (default)</option>
+                    <option value="dataapi">Cloud SQL Data API plugins</option>
+                  </select>
+                  <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_gcp_db_registration_method || 'off') === 'off'">
+                    GCP databases skip Password Safe onboarding and fall back to the legacy admin-credential staging;
+                    the AWS and Azure paths above are unaffected.
+                  </p>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_gcp_postgres"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="GCP Cloud SQL PostgreSQL">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">MySQL Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_gcp_mysql"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="GCP Cloud SQL MySQL">
+                  </div>
+                </div>
+                <div x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'" class="space-y-3">
+                  <p class="text-xs text-gray-400">
+                    Operator-created functional accounts, one per engine. This is the <strong>recommended</strong> mode on GCP: unlike Azure the
+                    composite carries nothing per-database, so a single account covers every Cloud SQL instance on that platform.
+                  </p>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Functional Account</label>
+                      <input type="text" x-model="panelCfg.clouddb_ps_functional_account_gcp_postgres"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             placeholder="clouddb-gcp-postgres">
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">MySQL Functional Account</label>
+                      <input type="text" x-model="panelCfg.clouddb_ps_functional_account_gcp_mysql"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             placeholder="clouddb-gcp-mysql">
+                    </div>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">GCP Identity Mode</label>
+                    <select x-model="panelCfg.clouddb_ps_gcp_auth_mode"
+                            x-init="panelCfg.clouddb_ps_gcp_auth_mode = panelCfg.clouddb_ps_gcp_auth_mode || 'ADC'"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="ADC">ADC &mdash; the broker&#39;s own credentials</option>
+                      <option value="IMP">IMP &mdash; impersonate a service account</option>
+                      <option value="SA">SA &mdash; embedded key (over the 1000-char limit)</option>
+                    </select>
+                    <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.clouddb_ps_gcp_auth_mode || 'ADC') === 'ADC'">
+                      An attached service account on a Compute Engine Resource Broker, or <code class="bg-gray-100 px-1 rounded">GOOGLE_APPLICATION_CREDENTIALS</code>
+                      on an on-premises one. No key material is stored in Password Safe or here.
+                    </p>
+                    <p class="text-xs text-amber-600 mt-1" x-show="(panelCfg.clouddb_ps_gcp_auth_mode || 'ADC') === 'SA'">
+                      A base64 service-account key is roughly 3.2&nbsp;KB, over Password Safe&#39;s 1000-character credential limit &mdash; so the
+                      composite cannot survive a functional-account write-back. Prefer ADC or IMP.
+                    </p>
+                  </div>
+                  <div x-show="(panelCfg.clouddb_ps_gcp_auth_mode || 'ADC') === 'IMP'">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Impersonation Target</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_gcp_impersonate_target"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="bt-rotator@my-project.iam.gserviceaccount.com">
+                    <p class="text-xs text-gray-400 mt-1">
+                      The broker&#39;s identity needs <code class="bg-gray-100 px-1 rounded">roles/iam.serviceAccountTokenCreator</code> on this account.
+                    </p>
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Rotator Service Account</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_gcp_rotator_service_account"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="bt-rotator@my-project.iam.gserviceaccount.com">
+                  <p class="text-xs text-gray-400 mt-1">
+                    Operator-created. The dashboard registers it as an IAM database user on each instance it onboards and reads back the name the
+                    database actually stored. <strong>Keep the name short</strong> &mdash; MySQL truncates an IAM database username at the
+                    <code class="bg-gray-100 px-1 rounded">@</code> and caps it at 32 characters.
+                  </p>
                 </div>
               </div>
             </div>

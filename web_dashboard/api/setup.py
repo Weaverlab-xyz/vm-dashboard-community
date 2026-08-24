@@ -672,7 +672,8 @@ class PasswordSafeFeatureConfig(BaseModel):
     # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
     passwordsafe_gcp_registration_method: str = "gcpvm"   # "gcpvm" (GCP VM SSH Rotation plugin) | "ssh"
     passwordsafe_gcp_change_password_on_register: bool = True  # mint first key on onboard (adminuser has none baked in)
-    # Optional cloud-DATABASE Password Safe onboarding (AWS-only) — see config.py.
+    # Optional cloud-DATABASE Password Safe onboarding (AWS) — see config.py.
+    # The Azure and GCP counterparts follow further down.
     # The two custom plugins + jump-host RSA prep are one-time MANUAL setup.
     clouddb_ps_onboarding_enabled: bool = False
     clouddb_ps_platform_postgres: str = "psql SSM Custom Plugin"
@@ -729,6 +730,18 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_azure_sp_client_secret: str = ""     # encrypted at rest; blank → reuse azure_client_secret
     clouddb_ps_azure_plugin_private_key: str = ""   # PEM, encrypted at rest; dropped on the jump VM
     clouddb_ps_azure_plugin_passphrase: str = ""    # encrypted at rest
+    # GCP cloud-DATABASE Password Safe onboarding (Cloud SQL plugins) — see config.py.
+    # No jump host, no cert, no key material: the plugins reach a private-IP instance
+    # over the Cloud SQL Data API. Postgres + MySQL only; ships "off" until the
+    # plugin's data-api channel is implemented.
+    passwordsafe_gcp_db_registration_method: str = "off"  # "dataapi" (Cloud SQL Data API) | "off"
+    clouddb_ps_platform_gcp_postgres: str = "GCP Cloud SQL PostgreSQL"
+    clouddb_ps_platform_gcp_mysql: str = "GCP Cloud SQL MySQL"
+    clouddb_ps_functional_account_gcp_postgres: str = ""
+    clouddb_ps_functional_account_gcp_mysql: str = ""
+    clouddb_ps_gcp_auth_mode: str = "ADC"           # "ADC" | "IMP" | "SA" (SA busts the 1000-char limit)
+    clouddb_ps_gcp_impersonate_target: str = ""     # IMP mode: service account to impersonate
+    clouddb_ps_gcp_rotator_service_account: str = ""  # keep short: MySQL caps IAM db usernames at 32
     # k8s ServiceAccount token rotation (Password Safe) — see config.py for the key
     # semantics. Every numeric key below MUST stay annotated `int`: _read_feature's
     # int-coercion branch only fires on an int annotation, and an unset int otherwise

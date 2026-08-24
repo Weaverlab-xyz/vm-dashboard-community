@@ -276,9 +276,9 @@ def test_the_checkbox_does_not_also_switch_off_the_legacy_credential_staging():
 
 # ── eligibility has one owner ─────────────────────────────────────────────────
 
-def test_a_provisioned_aws_or_azure_database_is_onboardable():
+def test_a_provisioned_aws_azure_or_gcp_database_is_onboardable():
     _reset()
-    for cloud in ("aws", "azure"):
+    for cloud in ("aws", "azure", "gcp"):
         assert svc._ps_ineligible_reason(_row(cloud=cloud)) is None
 
 
@@ -289,19 +289,34 @@ def test_a_registered_database_is_refused_and_told_why():
 
 
 def test_a_cloud_with_no_plugin_transport_is_refused():
-    """GCP and OCI have no SSM/Run Command equivalent into a private managed database,
-    so there is nothing to onboard them WITH — a fact about the cloud, not a switch."""
+    """OCI has no SSM/Run Command/Data API equivalent into a private managed database,
+    so there is nothing to onboard it WITH — a fact about the cloud, not a switch.
+    (GCP used to be in this list; it now reaches Cloud SQL over Google's control plane.)"""
     _reset()
-    for cloud in ("gcp", "oci", "local"):
+    for cloud in ("oci", "local"):
         reason = svc._ps_ineligible_reason(_row(cloud=cloud))
         assert reason, f"{cloud} has no plugin transport and must be refused"
         assert cloud.upper() in reason
 
 
+def test_gcp_sql_server_is_refused_as_a_structural_fact():
+    """Cloud SQL for SQL Server has no IAM database authentication, so the data-api
+    channel would need the functional account's password mirrored into Secret Manager.
+    A property of the platform, so it belongs with the structural blockers rather than
+    silently doing nothing at apply time."""
+    _reset()
+    reason = svc._ps_ineligible_reason(_row(cloud="gcp", engine="sqlserver"))
+    assert reason and "IAM database authentication" in reason
+    for engine in ("postgres", "mysql"):
+        assert svc._ps_ineligible_reason(_row(cloud="gcp", engine=engine)) is None
+
+
 def test_the_row_the_page_reads_carries_the_same_verdict():
     _reset()
     assert svc._serialize(_row())["ps_viable"] is True
-    assert svc._serialize(_row(cloud="gcp"))["ps_viable"] is False
+    assert svc._serialize(_row(cloud="oci", engine="oracle"))["ps_viable"] is False
+    assert svc._serialize(_row(cloud="gcp"))["ps_viable"] is True
+    assert svc._serialize(_row(cloud="gcp", engine="sqlserver"))["ps_viable"] is False
     assert svc._serialize(_row())["ps_onboarded"] is False
     assert svc._serialize(_row(ps_managed_system_id="1"))["ps_onboarded"] is True
 

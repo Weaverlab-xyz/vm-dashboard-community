@@ -4592,3 +4592,273 @@ async def wait_sql_instance_runnable(project: str, name: str, clouddb_id: str) -
     """Async wrapper for :func:`_wait_sql_instance_runnable_sync`."""
     return await _to_thread(
         _wait_sql_instance_runnable_sync, project, name, clouddb_id)
+
+# ── Cloud SQL rotation prerequisites + control-plane SQL ──────────────────────
+#
+# The GCP Cloud SQL Password Safe plugins reach a PRIVATE-IP instance through Google's
+# control plane rather than a jump host, so onboarding one needs no network path at all
+# — which is why the dashboard does its own onboarding work the same way. Everything
+# below rides the _authed_session() + _SQLADMIN_BASE pair already used above; note that
+# ``sql/v1beta4`` serves the Admin API (instances.patch, users.*) AND the Data API
+# (instances.executeSql), so one base covers both.
+
+# The Data API is off by default PER INSTANCE. gcloud spells this ``--data-api-access``;
+# the REST spelling is kept here as a constant so a Google rename is a one-line fix
+# rather than a hunt, and _ensure_cloudsql_rotation_prereqs_sync reports the equivalent
+# gcloud command when the field is rejected.
+_SQL_DATA_API_FIELD = "dataApiAccess"
+_SQL_DATA_API_ON = "ALLOW_DATA_API"
+_SQL_IAM_AUTH_FLAG = "cloudsql.iam_authentication"
+
+
+def _sql_wait_operation(session, project: str, op_name: str, *, timeout_s: int,
+                        what: str) -> None:
+    """Poll a Cloud SQL long-running Operation to DONE and raise on its error
+    collection. An operation that has not finished by ``timeout_s`` raises too --
+    unlike the orphan sweep, every caller here needs the change to have actually
+    landed before the next step runs."""
+    if not op_name:
+        return
+    op_url = f"{_SQLADMIN_BASE}/projects/{project}/operations/{op_name}"
+    deadline = time.monotonic() + timeout_s
+    while True:
+        r = session.get(op_url)
+        r.raise_for_status()
+        body = r.json()
+        if body.get("status") == "DONE":
+            errs = (body.get("error") or {}).get("errors")
+            if errs:
+                raise GCPError(f"{what} operation error: {errs}")
+            return
+        if time.monotonic() >= deadline:
+            raise GCPError(f"{what} did not finish within {timeout_s}s "
+                           f"(operation {op_name} still {body.get('status')})")
+        time.sleep(5)
+
+
+def _ensure_cloudsql_rotation_prereqs_sync(
+    project: str, instance: str, *, iam_auth: bool = True, timeout_s: int = 600,
+) -> dict:
+    """Idempotently enable, on Cloud SQL instance ``instance``, the two things the
+    Password Safe ``data-api`` plugins need: the **Cloud SQL Data API** (off by default
+    per instance) and, for PostgreSQL/MySQL, the ``cloudsql.iam_authentication``
+    database flag.
+
+    Reads first and patches only what is missing, so a re-provision or a repeated
+    registration is a no-op rather than a restart. Returns
+    ``{"data_api": bool, "iam_auth": bool, "patched": bool}`` describing the state
+    afterwards. Synchronous; callers wrap in ``_to_thread``.
+
+    **databaseFlags is a REPLACE list, not a merge** -- patching it with only our flag
+    would silently drop every other flag on the instance, so the existing list is read
+    and merged. (Same trap as ``routers.patch`` replacing a Cloud NAT's nats list.)"""
+    s = _authed_session()
+    inst_url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{instance}"
+    r = s.get(inst_url)
+    if r.status_code == 404:
+        raise GCPError(f"Cloud SQL instance {instance!r} not found in project {project!r}")
+    r.raise_for_status()
+    settings_body = (r.json() or {}).get("settings") or {}
+
+    want_data_api = str(settings_body.get(_SQL_DATA_API_FIELD) or "") != _SQL_DATA_API_ON
+    flags = list(settings_body.get("databaseFlags") or [])
+    have_iam = any(str(f.get("name")) == _SQL_IAM_AUTH_FLAG
+                   and str(f.get("value")).lower() == "on" for f in flags)
+    want_iam = bool(iam_auth) and not have_iam
+
+    if not want_data_api and not want_iam:
+        return {"data_api": True, "iam_auth": bool(iam_auth), "patched": False}
+
+    patch: dict = {"settings": {}}
+    if want_data_api:
+        patch["settings"][_SQL_DATA_API_FIELD] = _SQL_DATA_API_ON
+    if want_iam:
+        merged = [f for f in flags if str(f.get("name")) != _SQL_IAM_AUTH_FLAG]
+        merged.append({"name": _SQL_IAM_AUTH_FLAG, "value": "on"})
+        patch["settings"]["databaseFlags"] = merged
+
+    pr = s.patch(inst_url, json=patch)
+    if not pr.ok:
+        detail = (pr.text or "")[:400]
+        if want_data_api and _SQL_DATA_API_FIELD.lower() in detail.lower():
+            raise GCPError(
+                f"enabling the Cloud SQL Data API on {instance} was rejected "
+                f"(HTTP {pr.status_code}): {detail}. If the REST field has been renamed, "
+                f"run it by hand: gcloud sql instances patch {instance} "
+                f"--project={project} --data-api-access={_SQL_DATA_API_ON}")
+        raise GCPError(f"patch {instance} failed: HTTP {pr.status_code} {detail}")
+    _sql_wait_operation(s, project, (pr.json() or {}).get("name"),
+                        timeout_s=timeout_s, what=f"patch {instance}")
+    logger.info("gcp sql prereqs: %s data_api_patched=%s iam_auth_patched=%s (project=%s)",
+                instance, want_data_api, want_iam, project)
+    return {"data_api": True, "iam_auth": bool(iam_auth), "patched": True}
+
+
+async def ensure_cloudsql_rotation_prereqs(project: str, instance: str,
+                                           *, iam_auth: bool = True) -> dict:
+    """Async wrapper for :func:`_ensure_cloudsql_rotation_prereqs_sync`."""
+    return await _to_thread(_ensure_cloudsql_rotation_prereqs_sync, project, instance,
+                            iam_auth=iam_auth)
+
+
+def _create_cloudsql_user_sync(
+    project: str, instance: str, name: str, *, password: str = "",
+    iam_service_account: bool = False, host: str = "", timeout_s: int = 300,
+) -> None:
+    """Create a Cloud SQL user via ``users.insert`` -- **no database connection**, so
+    this works against a private-IP instance from anywhere with control-plane access.
+    This is what replaces the AWS SSM / Azure Run Command jump-host hop for GCP.
+
+    ``iam_service_account=True`` registers an IAM principal (no password); otherwise a
+    built-in user with ``password``. An existing user of the same name is treated as
+    success, so a retried job is a no-op. Synchronous; callers wrap in ``_to_thread``."""
+    s = _authed_session()
+    url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{instance}/users"
+    body: dict = {"name": name}
+    if host:
+        body["host"] = host
+    if iam_service_account:
+        body["type"] = "CLOUD_IAM_SERVICE_ACCOUNT"
+    else:
+        body["password"] = password
+    r = s.post(url, json=body)
+    if r.status_code == 409 or (not r.ok and "already exists" in (r.text or "").lower()):
+        logger.info("gcp sql user %s already exists on %s -- leaving it", name, instance)
+        return
+    if not r.ok:
+        raise GCPError(f"create user {name!r} on {instance} failed: "
+                       f"HTTP {r.status_code} {(r.text or '')[:300]}")
+    _sql_wait_operation(s, project, (r.json() or {}).get("name"),
+                        timeout_s=timeout_s, what=f"create user {name!r} on {instance}")
+
+
+async def create_cloudsql_user(project: str, instance: str, name: str, *,
+                               password: str = "", iam_service_account: bool = False,
+                               host: str = "") -> None:
+    """Async wrapper for :func:`_create_cloudsql_user_sync`."""
+    return await _to_thread(_create_cloudsql_user_sync, project, instance, name,
+                            password=password, iam_service_account=iam_service_account,
+                            host=host)
+
+
+def _delete_cloudsql_user_sync(project: str, instance: str, name: str, *,
+                               host: str = "", timeout_s: int = 300) -> bool:
+    """Delete a Cloud SQL user via ``users.delete``. Returns False when the user (or the
+    instance) is already gone, so decommission is idempotent. Synchronous."""
+    s = _authed_session()
+    url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{instance}/users"
+    params = {"name": name}
+    if host:
+        params["host"] = host
+    r = s.delete(url, params=params)
+    if r.status_code == 404:
+        return False
+    if not r.ok:
+        raise GCPError(f"delete user {name!r} on {instance} failed: "
+                       f"HTTP {r.status_code} {(r.text or '')[:300]}")
+    _sql_wait_operation(s, project, (r.json() or {}).get("name"),
+                        timeout_s=timeout_s, what=f"delete user {name!r} on {instance}")
+    return True
+
+
+async def delete_cloudsql_user(project: str, instance: str, name: str,
+                               *, host: str = "") -> bool:
+    """Async wrapper for :func:`_delete_cloudsql_user_sync`."""
+    return await _to_thread(_delete_cloudsql_user_sync, project, instance, name, host=host)
+
+
+def _list_cloudsql_users_sync(project: str, instance: str) -> list:
+    """``users.list`` -- the registry as the Admin API sees it. Note this MISSES
+    principals created inside the database with ``CREATE ROLE``; it is used here only
+    to read back what an IAM ``users.insert`` actually stored."""
+    s = _authed_session()
+    url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{instance}/users"
+    r = s.get(url)
+    if r.status_code == 404:
+        return []
+    r.raise_for_status()
+    return list((r.json() or {}).get("items") or [])
+
+
+async def list_cloudsql_users(project: str, instance: str) -> list:
+    """Async wrapper for :func:`_list_cloudsql_users_sync`."""
+    return await _to_thread(_list_cloudsql_users_sync, project, instance)
+
+
+def _execute_cloudsql_sql_sync(
+    project: str, instance: str, database: str, statement: str,
+    *, auto_iam_authn: bool = True, user: str = "", password_secret_version: str = "",
+) -> list:
+    """Run ``statement`` against ``database`` on ``instance`` through the Cloud SQL
+    **Data API** (``instances.executeSql``) and return the result rows.
+
+    No database connection is opened from here -- Google's control plane executes the
+    SQL -- so this reaches a private-IP instance with no jump host, no relay and no VPC
+    path. It authenticates as the *caller*: ``auto_iam_authn`` uses the dashboard's own
+    service account as an IAM database user, otherwise a built-in ``user`` whose
+    password comes from Secret Manager.
+
+    ``executeSql`` returns **HTTP 200 even when the SQL failed** -- the failure is
+    reported in a ``status`` object alongside an empty ``results`` envelope. Code that
+    checked only the HTTP status would report every failed statement as a success, which
+    on a rotation path leaves Password Safe holding a password the database never
+    accepted. This therefore requires POSITIVE confirmation: an absent-or-OK ``status``
+    *and* a well-formed ``results`` envelope. Never the mere absence of an error.
+
+    Synchronous; callers wrap in ``_to_thread``."""
+    s = _authed_session()
+    url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{instance}/executeSql"
+    body: dict = {
+        "sqlStatement": statement,
+        "database": database,
+        "partialResultMode": "FAIL_PARTIAL_RESULT",
+    }
+    if auto_iam_authn:
+        body["autoIamAuthn"] = True
+    else:
+        body["user"] = user
+        if password_secret_version:
+            body["passwordSecretVersion"] = password_secret_version
+
+    r = s.post(url, json=body)
+    if not r.ok:
+        detail = (r.text or "")[:400]
+        low = detail.lower()
+        if "executesql" in low and ("disabled" in low or "not enabled" in low):
+            raise GCPError(
+                f"the Cloud SQL Data API is disabled on instance {instance}. Enable it: "
+                f"gcloud sql instances patch {instance} --project={project} "
+                f"--data-api-access={_SQL_DATA_API_ON}")
+        if r.status_code == 403:
+            raise GCPError(
+                f"executeSql on {instance} was denied (HTTP 403): {detail}. The caller "
+                f"needs cloudsql.instances.executesql and cloudsql.instances.login -- "
+                f"roles/cloudsql.instanceUser is the smallest predefined role with both.")
+        raise GCPError(f"executeSql on {instance} failed: HTTP {r.status_code} {detail}")
+
+    payload = r.json() or {}
+    # Positive confirmation, in this order: an explicit non-OK status is the failure the
+    # HTTP code did not report, and a missing results envelope means we cannot prove the
+    # statement ran at all.
+    status = payload.get("status")
+    if isinstance(status, dict) and status:
+        code = status.get("code")
+        if code not in (None, 0) or status.get("message") or status.get("errors"):
+            raise GCPError(
+                f"executeSql on {instance} returned HTTP 200 but the statement failed: "
+                f"{str(status)[:400]}")
+    if "results" not in payload:
+        raise GCPError(
+            f"executeSql on {instance} returned HTTP 200 with no results envelope, so the "
+            f"statement cannot be confirmed to have run: {str(payload)[:300]}")
+    return list(payload.get("results") or [])
+
+
+async def execute_cloudsql_sql(project: str, instance: str, database: str, statement: str,
+                               *, auto_iam_authn: bool = True, user: str = "",
+                               password_secret_version: str = "") -> list:
+    """Async wrapper for :func:`_execute_cloudsql_sql_sync`."""
+    return await _to_thread(_execute_cloudsql_sql_sync, project, instance, database,
+                            statement, auto_iam_authn=auto_iam_authn, user=user,
+                            password_secret_version=password_secret_version)
+
