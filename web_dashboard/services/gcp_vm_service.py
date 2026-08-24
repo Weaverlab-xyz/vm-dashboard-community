@@ -540,6 +540,32 @@ async def _run_destroy(
                 result["bt_error"] = err
                 job_service.update_progress(db, job_id, 35, err)
 
+        # OT demo cell wiring rides the VM's lifecycle: the Web Jump and protocol
+        # tunnel were written onto this deploy's metadata the moment they existed
+        # (services/ot_service._wire_cell), so this one destroy path — reached by
+        # the Destroy button AND the expiry reaper — cleans whatever subset exists.
+        # Best-effort like the Shell Jump above: a PRA-side failure must not stop
+        # the instance delete.
+        if deploy_meta.get("ot_web_jump_tf_state"):
+            job_service.update_progress(db, job_id, 38, "Removing the OT HMI Web Jump…")
+            try:
+                from ..services import terraform_pra_service
+                await terraform_pra_service.remove_web_jump(deploy_meta["ot_web_jump_tf_state"])
+                result["ot_web_jump_removed"] = deploy_meta.get("ot_web_jump_id") or True
+            except Exception as e:  # noqa: BLE001
+                logger.error("OT web jump removal failed for %s: %s", instance_name, e)
+                result["ot_error"] = f"Web Jump removal failed: {e}"
+        if deploy_meta.get("ot_tunnel_tf_state"):
+            job_service.update_progress(db, job_id, 42, "Removing the OT protocol tunnel…")
+            try:
+                from ..services import terraform_pra_service
+                await terraform_pra_service.remove_api_tunnel(deploy_meta["ot_tunnel_tf_state"])
+                result["ot_tunnel_removed"] = deploy_meta.get("ot_tunnel_jump_id") or True
+            except Exception as e:  # noqa: BLE001
+                logger.error("OT tunnel removal failed for %s: %s", instance_name, e)
+                result["ot_error"] = (result.get("ot_error", "") +
+                                      f" tunnel removal failed: {e}").strip()
+
         # Remove the Entitle SSH integration if this deploy registered one.
         if deploy_meta.get("entitle_registration_tf_state"):
             from ..services import entitle_vm_hook

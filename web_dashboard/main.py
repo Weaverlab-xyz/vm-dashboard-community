@@ -908,6 +908,14 @@ app.include_router(gateways_api.router,
                    dependencies=[_feature_gate("pra_enabled")])
 
 try:
+    # OT demo endpoints (protocol tunnels + the OT demo cell). Every route exists to
+    # provision PRA jump items, so the whole router follows the PRA flag.
+    from .api import ot as ot_api  # noqa: E402
+    app.include_router(ot_api.router, dependencies=[_feature_gate("pra_enabled")])
+except ImportError as exc:
+    logger.warning("API router 'ot' not loaded: %s", exc)
+
+try:
     # Virtual desktop management (Azure pools + PRA brokering). Gated on vdesktops_enabled.
     from .api import desktops  # noqa: E402
     app.include_router(desktops.router, dependencies=[_feature_gate("vdesktops_enabled")])

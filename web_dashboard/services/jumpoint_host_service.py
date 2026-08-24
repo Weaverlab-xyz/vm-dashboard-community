@@ -794,6 +794,20 @@ def _active_web_jump_count(cloud: str) -> int:
     return total
 
 
+def _active_ot_tunnel_count() -> int:
+    """Standalone OT protocol tunnels (api/ot) brokered by the shared GCP gateway.
+
+    Cell-attached OT wiring needs no term here — a cell's gce_deploy row already
+    holds its reference via ``_active_gce_count``. Standalone tunnels have no job
+    row, only config keys, so without this a cloud-database decommission could reap
+    the gateway from under a tunnel an operator is mid-session on (the same class
+    of bug ``_active_web_jump_count`` exists to prevent). Exceptions propagate on
+    purpose: the caller's whole pass is best-effort, and an error must mean
+    "don't reap", never "count is zero"."""
+    from . import ot_service
+    return ot_service.active_standalone_tunnel_count()
+
+
 async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
     """Terminate the shared Gateway host for ``cloud`` iff nothing is left using
     it. Dispatches per cloud. Best-effort; logs and returns on error."""
@@ -988,7 +1002,7 @@ async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
         # term for exactly this reason.
         active = (_active_db_count(db, "gcp") + _active_k8s_count(db, "gcp")
                   + _active_vdesktop_count(db, "gcp") + _active_gce_count(db)
-                  + _active_web_jump_count("gcp"))
+                  + _active_web_jump_count("gcp") + _active_ot_tunnel_count())
         if active > 0:
             logger.info("gateway-host(gcp): keeping gateway (%d active resource(s))", active)
             return

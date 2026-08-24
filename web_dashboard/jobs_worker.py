@@ -71,6 +71,7 @@ HANDLED_TYPES = (
     "oci_deploy", "oci_bulk_deploy", "oci_destroy",
     "azure_deploy", "azure_bulk_deploy", "azure_destroy", "azure_create_image",
     "gce_deploy", "gce_bulk_deploy", "gce_capture_image", "gce_destroy",
+    "ot_cell_deploy",
     "gateway_deploy", "gateway_teardown",
     # Auto-delete timer sweep. The app's loop only ENQUEUES one of these; _claim_one's
     # rowcount lock below is what makes a pass single-flight across two gunicorn workers
@@ -134,6 +135,9 @@ MEDIUM_TYPES = (
     "azure_deploy", "azure_bulk_deploy", "azure_destroy",
     "gce_deploy", "gce_bulk_deploy", "gce_destroy",
     "oci_deploy", "oci_bulk_deploy", "oci_destroy",
+    # Drives one queued gce_deploy child (cloud SDK + the same short PRA terraforms
+    # a gce_deploy runs), then two more short terraforms for the Web Jump + tunnel.
+    "ot_cell_deploy",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     # Polls a CLOUD runner, but its cloud="local" branch shells out to `docker run` and
     # reads the container's output line by line. MEDIUM is the tier that admits a local
@@ -482,6 +486,12 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # instead of a paired bt-jumpoint-<vm> per instance.
             from .services import gcp_vm_service
             await gcp_vm_service.run(job_id, job_type, meta)
+        elif job_type == "ot_cell_deploy":
+            # OT demo cell: drives its queued gce_deploy child through
+            # gcp_vm_service.run, then wires the PRA Web Jump + protocol tunnel.
+            # The service owns the parent's terminal status.
+            from .services import ot_service
+            await ot_service.run_cell_deploy(job_id, meta)
         elif job_type in ("gateway_deploy", "gateway_teardown"):
             # An operator-requested BeyondTrust Gateway host. Unlike the auto-ensured
             # one, nothing reference-counts it — it lives until someone removes it.
