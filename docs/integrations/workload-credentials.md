@@ -254,13 +254,22 @@ problem, so nothing about the site, the folder or the dynamic-secret names will
 fix it. Either the PAT was revoked or has aged out, or what reached the header is
 not the PAT — a truncated paste is the usual culprit.
 
-Confirm with the unmetered `GET /session` call
-[above](#verifying-from-the-command-line) before changing anything: the same 401
-there proves the token, independent of everything the dashboard adds. Then re-mint
-under **Manage Profile → Personal Access Tokens** with the target site selected
-and paste it into the panel — the field renders as `••••••••` when a value already
-exists, so it has to be overwritten. Bullets are what preserve the stored value;
-clearing the field wipes it.
+Confirm before changing anything, with either of these — they make the same
+unmetered `GET /session` call:
+
+- **Test connection**, on the Workload Credentials panel next to the API version.
+  It uses the *saved* values, so save first. This is the fastest answer, and the
+  only panel control that actually asks BeyondTrust — **Active credential source**
+  further down replays the last recorded lease error out of the database, so it
+  will keep showing a stale failure after the cause is fixed.
+- The `curl` [above](#verifying-from-the-command-line), which proves the token
+  independently of everything the dashboard adds.
+
+Then re-mint under **Manage Profile → Personal Access Tokens** with the target
+site selected and paste it into the panel. The token box is **always empty** when
+the panel opens, whether or not one is stored — leave it blank to keep the stored
+token, type to replace it, clear it to remove it. The placeholder is the only
+thing that differs (`•••••••• stored — leave blank to keep`).
 
 Observed live on 2026-08-21 against a correctly provisioned site, on every
 `generate` for `dashboard/dashboard-everyday`, once a minute — with the folder,

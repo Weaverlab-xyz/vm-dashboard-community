@@ -1508,10 +1508,25 @@ def _feature_to_cfg_key(feature: str) -> str:
 
 
 def _read_feature(feature: str, model_cls) -> dict:
-    """Build a response dict for a feature by reading config_service."""
+    """Build a response dict for a feature by reading config_service.
+
+    Secrets come back as an empty string — never the stored value, and never a mask
+    either. A field pre-filled with ``••••••••`` renders identically to an empty one
+    in a ``type=password`` box, so an operator who clicks in and pastes produces
+    ``••••••••<secret>``; :func:`_write_feature` then drops it as a placeholder and the
+    save returns 200 having changed nothing. That is indistinguishable from success and
+    it cost a real debugging session on the Workload Credentials PAT.
+
+    ``_secret_fields`` and ``_secrets_set`` replace what the mask used to convey: which
+    fields are secret, and which already hold a value. The panel uses them to render a
+    "stored — leave blank to keep" placeholder and to omit untouched secrets from the
+    save, matching the notification-endpoint editor's ``has_secret`` contract.
+    """
     from ..services import config_service
     enabled_key = _feature_to_cfg_key(feature)
     data = {} if feature in _CONFIG_ONLY_FEATURES else {"enabled": config_service.get_bool(enabled_key)}
+    secret_fields: list = []
+    secrets_set: list = []
     for field, info in model_cls.model_fields.items():
         if field == "enabled":
             continue
@@ -1531,13 +1546,32 @@ def _read_feature(feature: str, model_cls) -> dict:
                 data[field] = info.default
             continue
         val = config_service.get(field)
-        # Redact secrets for display
-        data[field] = "••••••••" if (field in _SECRET_FEATURE_KEYS and val) else val
+        if field in _SECRET_FEATURE_KEYS:
+            secret_fields.append(field)
+            if val:
+                secrets_set.append(field)
+            data[field] = ""
+            continue
+        data[field] = val
+    data["_secret_fields"] = secret_fields
+    data["_secrets_set"] = secrets_set
     return data
 
 
-def _write_feature(feature: str, payload_dict: dict) -> None:
-    """Persist a feature's config to config_service."""
+def _write_feature(feature: str, payload_dict: dict, touched: set | None = None) -> None:
+    """Persist a feature's config to config_service.
+
+    ``touched`` is the set of secret fields the operator actually typed into, sent by
+    the panel as ``_secrets_touched``. Secrets now arrive blank when untouched (see
+    :func:`_read_feature`), so a blank box on its own is ambiguous — it could mean
+    "unchanged" or "erase this". The touch list is what separates them: a secret is
+    written only when it appears there, which keeps "clear the box to remove the value"
+    working without letting an untouched panel wipe a credential.
+
+    When ``touched`` is ``None`` the caller is not touch-aware — an older cached panel,
+    or the import path — and blank secrets are skipped outright. That errs towards
+    keeping a working credential, which is the only safe direction to err in here.
+    """
     from ..services import config_service
     pairs: dict = {}
     if feature in _CONFIG_ONLY_FEATURES:
@@ -1547,7 +1581,16 @@ def _write_feature(feature: str, payload_dict: dict) -> None:
         enabled = payload_dict.pop("enabled", False)
         pairs[enabled_key] = "1" if enabled else "0"
     for key, value in payload_dict.items():
-        # Skip placeholder values (user left secret field as bullets)
+        if key in _SECRET_FEATURE_KEYS:
+            if touched is not None:
+                if key not in touched:
+                    continue
+            elif not (value or "").strip():
+                continue
+        # Legacy sentinel: a cached panel still round-tripping the old bullet mask.
+        # _read_feature no longer emits one, but a browser holding the previous page
+        # will, and storing it would leave a key that looks configured and fails at
+        # cloud-call time.
         if isinstance(value, str) and value.startswith("••"):
             continue
         if isinstance(value, bool):
@@ -1611,12 +1654,22 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
     model_cls = _FEATURE_MODELS.get(feature_name)
     if model_cls is None:
         raise HTTPException(status_code=404, detail=f"Unknown feature: {feature_name}")
+    # `_secrets_touched` is panel metadata, not a config field — pull it out before the
+    # model sees it. Its absence means "not touch-aware", which _write_feature treats as
+    # "never write a blank secret" rather than assuming nothing was edited.
+    raw = dict(payload)
+    touched = raw.pop("_secrets_touched", None)
+    if touched is not None:
+        if not isinstance(touched, list) or not all(isinstance(t, str) for t in touched):
+            raise HTTPException(status_code=400,
+                                detail="_secrets_touched must be a list of field names")
+        touched = set(touched)
     # Validate through the model for type safety, but only persist keys that were
     # explicitly sent — this prevents a toggle-only call ({enabled: true}) from
     # blanking out credential fields that weren't included in the payload.
-    validated = model_cls(**payload).model_dump()
-    filtered = {k: v for k, v in validated.items() if k in payload}
-    _write_feature(feature_name, filtered)
+    validated = model_cls(**raw).model_dump()
+    filtered = {k: v for k, v in validated.items() if k in raw}
+    _write_feature(feature_name, filtered, touched=touched)
     logger.info("Feature '%s' configuration updated.", feature_name)
     return {"ok": True}
 
