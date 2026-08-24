@@ -17,7 +17,22 @@
 # Apple-silicon dev hosts alike:
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -t chrweav/ansible-winrm:latest --push runners/ansible-winrm
-FROM willhallonline/ansible:latest
+# Pinned by DIGEST, not :latest. Upstream moved :latest to a non-root default user
+# (User=ansible) between v26.8.10 and v26.9.0, which broke the collection install below
+# with "Permission denied: /usr/share/ansible" -- a release build failing with nothing
+# changed in this repo. The digest is an OCI image index covering linux/amd64 +
+# linux/arm64, so both buildx legs resolve. Bumping it is a deliberate act: re-pull
+# willhallonline/ansible:latest, confirm the build still passes, and update both the
+# digest and the date below.
+#   willhallonline/ansible:latest as of 2026-08-24
+FROM willhallonline/ansible:latest@sha256:fa4f22d33cd150c76d48900a29f9d03bf1eb5cfbe77cef9c7905dbc5b0635587
+
+# The upstream image now defaults to the unprivileged `ansible` user. Both RUN layers
+# below write to system paths, and every runner that consumes this image ran as root for
+# its whole life before that upstream change -- so root is restored here deliberately,
+# to fix the build without also changing the runtime user out from under the
+# config-management runs. Hardening the runtime user is a separate, testable change.
+USER root
 
 # pywinrm + requests-ntlm cover the NTLM transport the sample Windows plays default
 # to (ansible_winrm_transport: ntlm). Add pywinrm[credssp] if you use CredSSP.
