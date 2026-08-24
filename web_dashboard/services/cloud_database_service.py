@@ -2253,6 +2253,18 @@ async def _teardown_ps_onboarding(db: Session, *, row: Optional[CloudDatabase],
     Returns the error strings; empty means everything recorded was removed."""
     meta = (prov_job.metadata_dict or {}) if prov_job else {}
     if not _has_ps_onboarding(meta):
+        # Say so, rather than returning in silence. A teardown that skips because nothing
+        # was recorded is indistinguishable, in the job log, from one that had nothing to
+        # do -- which is how an orphaned managed system goes unnoticed: the destroy log
+        # shows only Terraform and the job still goes green. Observed live 2026-08-24.
+        logger.info("clouddb: no Password Safe onboarding recorded on provision job %s "
+                    "for db_id=%s - skipping PS teardown",
+                    getattr(prov_job, "id", None), row.id if row is not None else "?")
+        job_service.append_job_log(
+            db, progress_job_id,
+            "No Password Safe onboarding was recorded for this database, so there is "
+            "nothing to remove. If it WAS onboarded, its managed system is orphaned and "
+            "needs removing by hand.")
         return []
     db_id = row.id if row is not None else "?"
     errors: list[str] = []

@@ -565,6 +565,77 @@ def test_azure_prep_still_installs_clients_and_aws_prep_does_not():
     assert "apt-get" not in aws
 
 
+# ── the teardown record must survive a later failure ─────────────────────────
+#
+# Observed live 2026-08-24: an AWS database was onboarded (managed system 168 and managed
+# account 203 both present in Password Safe), then decommissioned, and the destroy log
+# showed ONLY Terraform -- no Password Safe step at all -- leaving both orphaned.
+#
+# Teardown is gated on ids in the PROVISIONING job's metadata, and those used to be
+# written once at the very end of onboarding. So anything failing after the managed
+# system was registered lost the only pointer to it, and the teardown then skipped it in
+# silence. _stash_on_job now commits after each external resource is created; this pins
+# that, because the fix is invisible on a happy path and easy to undo by moving a line.
+
+def test_the_managed_system_id_is_committed_before_the_pra_vault_half():
+    _reset(bt_api_host="pra.example.com")
+    job_row = _FakeJobRow()
+    job_row.metadata_dict = {"vault_account_name": "va-1"}   # makes the PRA Vault block run
+    row = _CloudDatabase(id="abcdef0123456789abcd", cloud="aws",
+                         private_host="db.internal", engine="postgres")
+    ctx = {"managed_user": "psafe_abcdef012345", "jump_host_id": "i-123", "region": "us-east-1",
+           "admin_username": "dbadmin", "client_image": "postgres:16", "db_name": "appdb",
+           "port": 5432}
+
+    calls = {"n": 0}
+
+    async def _second_registration_fails(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"tf_state_json": "{}", "managed_system_id": 168, "managed_account_id": 203}
+        raise RuntimeError("PRA Vault registration failed")
+
+    psr = sys.modules["web_dashboard.services.ps_resource_service"]
+    real = psr.register_managed_system
+    psr.register_managed_system = _second_registration_fails
+    try:
+        _run(svc._onboard_ps_managed_systems(
+            _FakeDB(job_row), row=row, job_id="job-1", engine="postgres",
+            tf_variables={"identifier": "clouddb-abcdef01"}, ctx=ctx))
+    except Exception:
+        pass          # onboarding is best-effort by design; not what this asserts
+    finally:
+        psr.register_managed_system = real
+
+    assert calls["n"] == 2, "the PRA Vault registration should have been attempted"
+    # Without the incremental commit this is None: the managed system exists in Password
+    # Safe with nothing pointing at it, and decommission skips it without a word.
+    assert job_row.metadata_dict.get("ps_db_registration_tf_state") is not None, (
+        "the managed system was created but its teardown record was lost - "
+        "decommission would silently orphan it")
+    assert job_row.metadata_dict.get("ps_db_system_id") == 168
+
+
+def test_a_teardown_with_nothing_recorded_says_so():
+    # The other half of the same failure: silence here reads exactly like "there was
+    # nothing to remove", so an orphan leaves no trace in the job the operator reads.
+    logged = []
+    js = sys.modules["web_dashboard.services.job_service"]
+    prev = getattr(js, "append_job_log", None)
+    js.append_job_log = lambda db, job_id, line: logged.append(line)
+    prev_up = getattr(js, "update_progress", None)
+    js.update_progress = lambda *a, **k: None
+    try:
+        errs = _run(svc._teardown_ps_onboarding(
+            _FakeDB(_FakeJobRow()), row=None, prov_job=None, progress_job_id="job-9"))
+    finally:
+        if prev is not None: js.append_job_log = prev
+        if prev_up is not None: js.update_progress = prev_up
+    assert errs == []
+    assert logged, "a teardown that removed nothing must leave a line in the job log"
+    assert "orphan" in logged[0].lower()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
