@@ -581,24 +581,36 @@ class Settings(BaseSettings):
     # credential is a short-lived OAuth token minted per connection, and the
     # composite's third segment is "-".
     #
-    # POSTGRES AND MYSQL ONLY. Cloud SQL for SQL Server has no IAM database auth, so
-    # data-api would need the FA password mirrored into Secret Manager and re-synced
-    # on every rotation; that engine wants the plugin's cloud-run channel instead.
+    # TWO CHANNELS, chosen per engine. postgres/mysql ride "data-api" (no
+    # infrastructure at all). SQL Server rides "cloud-run", because Cloud SQL for SQL
+    # Server has no IAM database authentication and data-api would need the FA
+    # password mirrored into Secret Manager — a second authority for the credential.
+    # cloud-run needs a small Cloud Run service the OPERATOR deploys (the plugin repo
+    # ships a ps-dbops-sqlserver Terraform module); the dashboard only needs its
+    # stable custom audience, below.
     #
-    # Ships "off": the plugin packages install and parse, but their channel
-    # transports are stubs until the data-api channel ships, so a rotation reports
-    # "not implemented in this build" rather than succeeding. Flip to "dataapi" once
-    # that lands. The three plugins are a one-time MANUAL upload (see docs); the
-    # platform names below are how the dashboard finds them.
+    # Ships "off". Channel readiness is uneven: cloud-run is built (SQL Server only,
+    # not yet exercised against a live instance) while data-api is still a stub that
+    # reports "not implemented in this build". The three plugins are a one-time
+    # MANUAL upload (see docs); the platform names below are how the dashboard finds
+    # them.
     passwordsafe_gcp_db_registration_method: str = "off"  # dataapi | off
     clouddb_ps_platform_gcp_postgres: str = "GCP Cloud SQL PostgreSQL"
     clouddb_ps_platform_gcp_mysql: str = "GCP Cloud SQL MySQL"
+    clouddb_ps_platform_gcp_sqlserver: str = "GCP Cloud SQL SQL Server"
+    # "auto" takes the plugin's own recommended channel per engine (data-api for
+    # postgres/mysql, cloud-run for sqlserver); an explicit value overrides it for
+    # every engine. admin-api is deliberately not offered — it needs
+    # cloudsql.users.update, which among predefined roles lives only in the very broad
+    # roles/cloudsql.admin, and it cannot see principals created inside the database.
+    clouddb_ps_gcp_channel: str = "auto"  # auto | data-api | cloud-run
     # GCP counterparts of clouddb_ps_functional_account_* — read only when
     # clouddb_ps_functional_account_mode is "reference", which is the RECOMMENDED mode
     # here: unlike Azure, the GCP composite carries nothing per-database, so one
     # operator-owned account per engine covers every Cloud SQL instance.
-    clouddb_ps_functional_account_gcp_postgres: str = ""  # on "GCP Cloud SQL PostgreSQL"
-    clouddb_ps_functional_account_gcp_mysql: str = ""     # on "GCP Cloud SQL MySQL"
+    clouddb_ps_functional_account_gcp_postgres: str = ""   # on "GCP Cloud SQL PostgreSQL"
+    clouddb_ps_functional_account_gcp_mysql: str = ""      # on "GCP Cloud SQL MySQL"
+    clouddb_ps_functional_account_gcp_sqlserver: str = ""  # on "GCP Cloud SQL SQL Server"
     # The functional account's GCP identity mode — the username prefix. ADC uses the
     # Resource Broker's own credentials (an attached service account on a Compute
     # Engine broker, GOOGLE_APPLICATION_CREDENTIALS on an on-premises one) and stores
@@ -614,6 +626,14 @@ class Settings(BaseSettings):
     # "@" and caps it at 32 characters, so "bt-rotator" is safe and
     # "bt-passwordsafe-cloudsql-rotator-prod" is not.
     clouddb_ps_gcp_rotator_service_account: str = ""  # e.g. bt-rotator@<project>.iam.gserviceaccount.com
+    # The cloud-run channel's Cloud Run service. The AUDIENCE is address field 4 and is
+    # used verbatim as both the request target and the OIDC token audience — the
+    # generated *.run.app hostname changes if the service is recreated and every
+    # revision gets its own URL, so a stable custom audience is what lets a managed-system
+    # address survive a redeploy. Blank turns the cloud-run channel off (there would be
+    # no address to build), which is why SQL Server stays dark until it is set.
+    clouddb_ps_gcp_dbops_audience: str = ""   # e.g. https://bt-dbops.example.internal
+    clouddb_ps_gcp_dbops_ssl: bool = True     # address field 5: sslTRUE | sslFALSE
 
     # EPM for Linux (EPM-L) — Pathfinder public API gateway.
     # The gateway base is api.beyondtrust.io (NOT app.beyondtrust.io — that host

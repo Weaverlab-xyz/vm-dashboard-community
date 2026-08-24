@@ -1617,15 +1617,17 @@
               <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
                 <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">GCP (Cloud SQL plugins)</p>
                 <p class="text-xs text-gray-400">
-                  For GCP databases the DB is onboarded onto the <code class="bg-gray-100 px-1 rounded">GCP Cloud SQL {engine}</code> plugin,
-                  which reaches a private-IP instance through Google&#39;s own control plane (the Cloud SQL Data API) &mdash; so unlike AWS and Azure
-                  there is <strong>no jump host, no broker certificate and no RSA key pair</strong>. Under IAM database authentication the functional
-                  account has no database password at all. <strong>PostgreSQL and MySQL only</strong>: Cloud SQL for SQL Server has no IAM database
-                  auth, so it needs the plugin&#39;s cloud-run channel instead.
+                  For GCP databases the DB is onboarded onto the <code class="bg-gray-100 px-1 rounded">GCP Cloud SQL {engine}</code> plugin.
+                  <strong>PostgreSQL and MySQL</strong> use the <strong>Data API</strong> channel, which reaches a private-IP instance through
+                  Google&#39;s own control plane &mdash; so unlike AWS and Azure there is <strong>no jump host, no broker certificate and no RSA key
+                  pair</strong>, and under IAM database authentication the functional account has no database password at all.
+                  <strong>SQL Server</strong> uses the <strong>Cloud Run</strong> channel, because Cloud SQL for SQL Server has no IAM database
+                  authentication; that channel needs a small Cloud Run service you deploy yourself, and the dashboard only needs its audience below.
                 </p>
                 <p class="text-xs text-amber-600">
-                  The plugin packages install and parse addresses today, but their channel transports are not implemented yet &mdash; a rotation
-                  reports &ldquo;not implemented in this build&rdquo; rather than succeeding. Leave this off until the data-api channel ships.
+                  Channel readiness is uneven. <strong>Cloud Run is built</strong> (SQL Server only) but has not yet been exercised against a live
+                  Cloud SQL instance. <strong>The Data API channel is still a stub</strong> &mdash; a PostgreSQL or MySQL rotation reports
+                  &ldquo;not implemented in this build&rdquo; rather than succeeding.
                 </p>
                 <!-- x-init default is load-bearing: an unset string config key reads back
                      as "" from /api/setup/feature, not as the model default. -->
@@ -1642,7 +1644,21 @@
                     the AWS and Azure paths above are unaffected.
                   </p>
                 </div>
-                <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Channel</label>
+                  <select x-model="panelCfg.clouddb_ps_gcp_channel"
+                          x-init="panelCfg.clouddb_ps_gcp_channel = panelCfg.clouddb_ps_gcp_channel || 'auto'"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="auto">Automatic &mdash; Data API for PostgreSQL/MySQL, Cloud Run for SQL Server</option>
+                    <option value="data-api">Data API for every engine</option>
+                    <option value="cloud-run">Cloud Run for every engine</option>
+                  </select>
+                  <p class="text-xs text-gray-400 mt-1">
+                    Automatic follows the plugin&#39;s own recommendation per engine. Cloud Run is also the only channel that can
+                    <em>verify</em> a managed account&#39;s password or let one rotate itself.
+                  </p>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
                     <input type="text" x-model="panelCfg.clouddb_ps_platform_gcp_postgres"
@@ -1655,13 +1671,19 @@
                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                            placeholder="GCP Cloud SQL MySQL">
                   </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_gcp_sqlserver"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="GCP Cloud SQL SQL Server">
+                  </div>
                 </div>
                 <div x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'" class="space-y-3">
                   <p class="text-xs text-gray-400">
                     Operator-created functional accounts, one per engine. This is the <strong>recommended</strong> mode on GCP: unlike Azure the
                     composite carries nothing per-database, so a single account covers every Cloud SQL instance on that platform.
                   </p>
-                  <div class="grid grid-cols-2 gap-3">
+                  <div class="grid grid-cols-3 gap-3">
                     <div>
                       <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Functional Account</label>
                       <input type="text" x-model="panelCfg.clouddb_ps_functional_account_gcp_postgres"
@@ -1673,6 +1695,12 @@
                       <input type="text" x-model="panelCfg.clouddb_ps_functional_account_gcp_mysql"
                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                              placeholder="clouddb-gcp-mysql">
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server Functional Account</label>
+                      <input type="text" x-model="panelCfg.clouddb_ps_functional_account_gcp_sqlserver"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             placeholder="clouddb-gcp-mssql">
                     </div>
                   </div>
                 </div>
@@ -1711,10 +1739,35 @@
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="bt-rotator@my-project.iam.gserviceaccount.com">
                   <p class="text-xs text-gray-400 mt-1">
-                    Operator-created. The dashboard registers it as an IAM database user on each instance it onboards and reads back the name the
-                    database actually stored. <strong>Keep the name short</strong> &mdash; MySQL truncates an IAM database username at the
-                    <code class="bg-gray-100 px-1 rounded">@</code> and caps it at 32 characters.
+                    Operator-created, and used by the <strong>Data API</strong> channel only. The dashboard registers it as an IAM database user on
+                    each instance it onboards and reads back the name the database actually stored. <strong>Keep the name short</strong> &mdash;
+                    MySQL truncates an IAM database username at the <code class="bg-gray-100 px-1 rounded">@</code> and caps it at 32 characters.
                   </p>
+                </div>
+                <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
+                  <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">Cloud Run channel (SQL Server)</p>
+                  <p class="text-xs text-gray-400">
+                    The Cloud Run service holds the database drivers and connects over direct VPC egress. <strong>You deploy it</strong> &mdash; the
+                    plugin repository ships a <code class="bg-gray-100 px-1 rounded">ps-dbops-sqlserver</code> Terraform module, and the dashboard
+                    cannot build its container image. Grant each Resource Broker&#39;s identity
+                    <code class="bg-gray-100 px-1 rounded">roles/run.invoker</code> on it, named service accounts only.
+                  </p>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Cloud Run Audience</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_gcp_dbops_audience"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="https://bt-dbops.example.internal">
+                    <p class="text-xs text-gray-400 mt-1">
+                      The service&#39;s stable <strong>custom audience</strong>, not a revision URL &mdash; it is sent verbatim as both the request
+                      target and the token audience, so the string configured on the service is the string that goes here. A path, query or fragment
+                      is rejected. <strong>Blank leaves SQL Server onboarding off</strong>, because there would be no address to build.
+                    </p>
+                  </div>
+                  <label class="flex items-center gap-2">
+                    <input type="checkbox" x-model="panelCfg.clouddb_ps_gcp_dbops_ssl"
+                           class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                    <span class="text-sm text-gray-700">Require TLS from the Cloud Run service to the database</span>
+                  </label>
                 </div>
               </div>
             </div>

@@ -534,17 +534,21 @@ def test_dbgcp_uses_the_plugins_tighter_249_limit_not_password_safes_255():
         assert "249" in str(exc), exc
 
 
-def test_dbgcp_never_self_rotates_even_when_the_flag_is_on():
-    # Self-rotation is a CLOUD-RUN action; the data-api channel refuses it at pre-flight
-    # before any network call. clouddb_ps_self_rotation is one global flag that AWS/Azure
-    # "reference" mode REQUIRES, so the GCP branch has to drop it rather than inherit it
-    # -- otherwise turning it on for AWS silently breaks every GCP rotation.
+def test_dbgcp_self_rotation_is_narrowed_to_the_cloud_run_channel():
+    # Self-rotation needs to log in AS the managed account, which only cloud-run can do;
+    # the control-plane channels authenticate as the caller and refuse it at pre-flight.
+    # clouddb_ps_self_rotation is one global flag that AWS/Azure "reference" mode
+    # REQUIRES, so the GCP branch honours it PER CHANNEL rather than inheriting it
+    # wholesale -- otherwise turning it on for AWS silently breaks every GCP data-api
+    # rotation, and dropping it unconditionally would deny SQL Server the one change
+    # action that needs no privilege over the target.
     # Read the source rather than import it: cloud_database_service pulls in the app.
     path = os.path.join(_ROOT, "web_dashboard", "services", "cloud_database_service.py")
     with open(path, encoding="utf-8") as fh:
         src = fh.read()
-    i = src.index('if db_method == "dbgcp" and self_rotate:')
-    window = src[i:i + 500]
+    i = src.index('if db_method == "dbgcp" and self_rotate and (')
+    window = src[i:i + 700]
+    assert '!= "cloud-run"' in window, window
     assert "self_rotate = False" in window, window
     # and the register call must pass the narrowed local, not the raw config read
     j = src.index("use_own_credentials=self_rotate")

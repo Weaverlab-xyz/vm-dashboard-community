@@ -75,6 +75,9 @@ _FAKE_ACCOUNTS = {
     "pra-config-api": FAKE_FA,
     "clouddb-gcp-postgres": FAKE_FA_GCP,
     "clouddb-gcp-mysql": FAKE_FA_GCP_MYSQL,
+    "clouddb-gcp-mssql": dict(FAKE_FA_GCP, id=91, platform_id=806,
+                              platform_name="GCP Cloud SQL SQL Server",
+                              account_name="clouddb-gcp-mssql"),
     "clouddb-gcp-wrong": FAKE_FA_WRONG,
 }
 
@@ -341,21 +344,33 @@ def test_the_managed_system_is_registered_against_the_referenced_account():
 # host, no cert path and no key material, and under IAM database authentication the
 # functional-account composite carries no database password either.
 
-def _onboard_gcp(engine="postgres", **conf):
+_GCP_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433}
+
+
+def _onboard_gcp(engine="postgres", channel=None, **conf):
     _reset(**conf)
     job_row = _FakeJobRow()
     row = _CloudDatabase(id="abcdef0123456789abcd", cloud="gcp",
                          private_host="10.102.0.3", engine=engine,
                          region="us-central1", instance_id="clouddb-abcdef01")
+    channel = channel or ("cloud-run" if engine == "sqlserver" else "data-api")
     ctx = {"managed_user": "psafe_abcdef012345", "region": "us-central1",
-           "admin_username": "dbadmin", "client_image": "", "db_name": "appdb",
-           "port": 5432 if engine == "postgres" else 3306,
+           "admin_username": "sqlserver" if engine == "sqlserver" else "dbadmin",
+           "client_image": "", "db_name": "master" if engine == "sqlserver" else "appdb",
+           "port": _GCP_PORTS[engine],
            "project": "acme-data-prod", "instance": "clouddb-abcdef01",
-           "fa_db_user": "bt-rotator@acme-data-prod.iam",
+           "channel": channel,
+           "fa_db_user": ("sqlserver" if channel == "cloud-run"
+                          else "bt-rotator@acme-data-prod.iam"),
            "managed_user_host": "%" if engine == "mysql" else ""}
+    # run_provision_apply re-injects the admin password into tf_variables before it
+    # reaches here, which is where the cloud-run functional account's database password
+    # comes from in create mode. (On the post-hoc path tf_variables is the SECRET-STRIPPED
+    # copy off the job, and the same value is read from the secrets backend instead.)
     _run(svc._onboard_ps_managed_systems(
         _FakeDB(job_row), row=row, job_id="job-1", engine=engine,
-        tf_variables={"identifier": "clouddb-abcdef01"}, ctx=ctx))
+        tf_variables={"identifier": "clouddb-abcdef01",
+                      "master_password": "s3cr3t-admin-pw"}, ctx=ctx))
     return job_row.metadata_dict
 
 
@@ -488,6 +503,139 @@ def test_the_other_clouds_still_self_rotate_when_the_flag_is_on():
     # The guard above must be scoped to dbgcp, not applied to every DB plugin.
     _onboard(clouddb_ps_self_rotation=True)
     assert LAST_REGISTER["use_own_credentials"] is True, LAST_REGISTER
+
+
+
+# -- the cloud-run channel (SQL Server) ---------------------------------------
+#
+# The only channel that can verify a managed account's password or let one rotate
+# itself, and the only one Cloud SQL for SQL Server can use at all -- it has no IAM
+# database authentication, so there is no passwordless option.
+
+def test_sqlserver_takes_the_cloud_run_channel_and_carries_the_audience():
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
+    fields = LAST_REGISTER["dns_name"].split(";")
+    assert fields[0] == "cloud-run", fields
+    assert fields[1] == "acme-data-prod:us-central1:clouddb-abcdef01", fields
+    # SQL Server's admin session catalog is master, not the user database.
+    assert fields[2] == "master", fields
+    # Field 4 is the STABLE CUSTOM AUDIENCE, used verbatim as both the request target
+    # and the token audience -- a *.run.app hostname changes when the service is
+    # recreated and every revision gets its own URL.
+    assert fields[3] == "https://bt-dbops.acme.internal", fields
+    assert fields[4] == "sslTRUE", fields
+    assert LAST_REGISTER["port"] == 1433
+
+
+def test_the_ssl_flag_is_a_real_toggle_on_cloud_run():
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                 clouddb_ps_gcp_dbops_ssl=False)
+    assert LAST_REGISTER["dns_name"].split(";")[4] == "sslFALSE"
+
+
+def test_cloud_run_create_mode_carries_a_real_database_password():
+    # No IAM database auth exists for SQL Server, so segment 3 cannot be "-" the way it
+    # is on data-api. In create mode it is this database's own admin credential -- which
+    # makes the composite PER-DATABASE, exactly the property that makes reference mode
+    # the better answer here, as it is on Azure.
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
+    _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
+    assert account_name == "ADC:sqlserver", account_name
+    segments = password.split(":", 2)
+    assert segments[0] == "-" and segments[1] == "-", password
+    assert segments[2] == "s3cr3t-admin-pw", password
+
+
+def test_cloud_run_honours_self_rotation_where_data_api_refuses_it():
+    # The same global flag, opposite answers, because the channels differ in what they
+    # can do -- not because GCP is special. cloud-run logs in AS the managed account
+    # (ALTER LOGIN ... OLD_PASSWORD), which needs no privilege over the target at all.
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                 clouddb_ps_self_rotation=True)
+    assert LAST_REGISTER["use_own_credentials"] is True
+
+    _onboard_gcp(engine="postgres",
+                 clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                 clouddb_ps_self_rotation=True)
+    assert LAST_REGISTER["use_own_credentials"] is False
+
+
+def test_the_channel_override_moves_postgres_onto_cloud_run():
+    _onboard_gcp(engine="postgres", channel="cloud-run",
+                 clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                 clouddb_ps_gcp_channel="cloud-run",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
+    fields = LAST_REGISTER["dns_name"].split(";")
+    assert fields[0] == "cloud-run", fields
+    assert fields[3] == "https://bt-dbops.acme.internal", fields
+    # iam=true is a data-api option and must not ride along.
+    assert not any(f.startswith("iam=") for f in fields), fields
+
+
+def test_every_cloud_run_address_the_service_builds_parses():
+    validate, Err = _real_dbgcp_validator()
+    for engine in ("postgres", "mysql", "sqlserver"):
+        _onboard_gcp(engine=engine, channel="cloud-run",
+                     clouddb_ps_gcp_channel="cloud-run",
+                     clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                     **{f"clouddb_ps_platform_gcp_{engine}": "GCP Cloud SQL X"})
+        addr = LAST_REGISTER["dns_name"]
+        try:
+            validate(addr)
+        except Err as exc:
+            raise AssertionError(f"{engine}: the service built {addr!r}, which the "
+                                 f"plugin grammar rejects: {exc}")
+
+
+def test_sqlserver_reference_mode_inherits_the_cloud_sql_platform():
+    meta = _onboard_gcp(engine="sqlserver",
+                        clouddb_ps_functional_account_mode="reference",
+                        clouddb_ps_functional_account_gcp_sqlserver="clouddb-gcp-mssql",
+                        clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
+    assert ("register", 91, 806) in CALLS, CALLS
+    assert meta["ps_db_functional_account_ref"] == 91
+
+
+
+def _gate(engine, **conf):
+    _reset(pscli_api_url="https://ps.example/BeyondTrust/api/public/v3",
+           pscli_client_id="cid", pscli_client_secret="sec",
+           clouddb_ps_onboarding_enabled=True,
+           passwordsafe_gcp_db_registration_method="dataapi", **conf)
+    return svc._ps_db_onboarding_enabled(
+        _CloudDatabase(id="d", cloud="gcp", engine=engine))
+
+
+def test_sql_server_stays_off_until_the_cloud_run_audience_is_configured():
+    # Not a structural refusal any more, but there is no address to build without the
+    # audience -- field 4 IS the audience, and it is what the OIDC token is minted for.
+    # Off is the honest answer; half-configured would fail at the first rotation.
+    assert _gate("sqlserver") is False
+    assert _gate("sqlserver",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal") is True
+
+
+def test_postgres_needs_no_audience_because_data_api_needs_no_service():
+    assert _gate("postgres") is True
+    assert _gate("mysql") is True
+
+
+def test_forcing_every_engine_onto_cloud_run_makes_the_audience_universal():
+    assert _gate("postgres", clouddb_ps_gcp_channel="cloud-run") is False
+    assert _gate("postgres", clouddb_ps_gcp_channel="cloud-run",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal") is True
+
+
+def test_an_unknown_engine_is_still_refused():
+    assert _gate("oracle") is False
 
 
 # ── staging the plugin key material on the jump host ─────────────────────────

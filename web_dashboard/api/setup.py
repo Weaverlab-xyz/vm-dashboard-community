@@ -737,11 +737,16 @@ class PasswordSafeFeatureConfig(BaseModel):
     passwordsafe_gcp_db_registration_method: str = "off"  # "dataapi" (Cloud SQL Data API) | "off"
     clouddb_ps_platform_gcp_postgres: str = "GCP Cloud SQL PostgreSQL"
     clouddb_ps_platform_gcp_mysql: str = "GCP Cloud SQL MySQL"
+    clouddb_ps_platform_gcp_sqlserver: str = "GCP Cloud SQL SQL Server"
+    clouddb_ps_gcp_channel: str = "auto"            # "auto" | "data-api" | "cloud-run"
     clouddb_ps_functional_account_gcp_postgres: str = ""
     clouddb_ps_functional_account_gcp_mysql: str = ""
+    clouddb_ps_functional_account_gcp_sqlserver: str = ""
     clouddb_ps_gcp_auth_mode: str = "ADC"           # "ADC" | "IMP" | "SA" (SA busts the 1000-char limit)
     clouddb_ps_gcp_impersonate_target: str = ""     # IMP mode: service account to impersonate
     clouddb_ps_gcp_rotator_service_account: str = ""  # keep short: MySQL caps IAM db usernames at 32
+    clouddb_ps_gcp_dbops_audience: str = ""   # cloud-run: the service's stable custom audience
+    clouddb_ps_gcp_dbops_ssl: bool = True     # cloud-run: address field 5
     # k8s ServiceAccount token rotation (Password Safe) — see config.py for the key
     # semantics. Every numeric key below MUST stay annotated `int`: _read_feature's
     # int-coercion branch only fires on an int annotation, and an unset int otherwise

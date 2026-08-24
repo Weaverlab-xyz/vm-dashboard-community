@@ -1144,15 +1144,18 @@ def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
         return (config_service.get("passwordsafe_azure_db_registration_method")
                 or "runcommand").lower() != "off"
     if row.cloud == "gcp":
-        # SQL Server is excluded on purpose: Cloud SQL for SQL Server has no IAM
-        # database authentication, so the data-api channel would need the functional
-        # account's password mirrored into Secret Manager (the plugin's ``fasecret=``
-        # option) and re-synced on every rotation — a second authority for a credential
-        # Password Safe exists to own. That engine wants the cloud-run channel.
-        if row.engine not in ("postgres", "mysql"):
+        if (config_service.get("passwordsafe_gcp_db_registration_method")
+                or "off").lower() == "off":
             return False
-        return (config_service.get("passwordsafe_gcp_db_registration_method")
-                or "off").lower() != "off"
+        if row.engine not in _GCP_CHANNEL_DEFAULTS:
+            return False
+        # The cloud-run channel talks to a Cloud Run service the OPERATOR deploys (the
+        # plugin repo ships a ps-dbops-sqlserver Terraform module for it), and the
+        # managed-system address carries that service's stable custom audience. Without
+        # the audience there is no address to build, so this is off rather than broken.
+        if _gcp_channel(row.engine) == "cloud-run" and not _cfg("clouddb_ps_gcp_dbops_audience"):
+            return False
+        return True
     return False
 
 
@@ -1165,12 +1168,36 @@ def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
 # onboard it WITH — not a switch that is off.
 _PS_ONBOARDING_CLOUDS = ("aws", "azure", "gcp")
 
-# Engines each cloud's plugin set can actually manage. Cloud SQL for SQL Server supports
-# IAM database authentication for instance and backup operations only, never for database
-# operations — so the data-api channel would need the functional account's password
-# mirrored into Secret Manager and re-synced on every rotation. That is a property of the
-# platform, not a switch, which is why it lives with the structural blockers.
-_PS_ONBOARDING_ENGINES = {"gcp": ("postgres", "mysql")}
+# Engines each cloud's plugin set can actually manage, as a STRUCTURAL fact. GCP used to
+# restrict this to postgres+mysql because Cloud SQL for SQL Server has no IAM database
+# authentication and the data-api channel would have needed the functional account's
+# password mirrored into Secret Manager. The cloud-run channel removes that: the
+# credential travels in the request body and Password Safe stays the sole authority. So
+# SQL Server is now a CONFIGURATION question — is the Cloud Run service deployed and its
+# audience known? — which _ps_db_onboarding_enabled answers, not this function.
+_PS_ONBOARDING_ENGINES: dict = {}
+
+# Which plugin channel drives each GCP engine. These are the plugin's own recommended
+# defaults: postgres/mysql on data-api (zero infrastructure, and under IAM database auth
+# zero stored secrets), sqlserver on cloud-run (no IAM database auth exists for it, so
+# data-api would need Secret Manager as a second authority for the credential). An
+# operator can override with clouddb_ps_gcp_channel.
+_GCP_CHANNEL_DEFAULTS = {"postgres": "data-api", "mysql": "data-api",
+                         "sqlserver": "cloud-run"}
+_GCP_CHANNELS = ("data-api", "cloud-run")
+
+
+def _gcp_channel(engine: str) -> str:
+    """The plugin channel to drive for ``engine`` on GCP.
+
+    ``clouddb_ps_gcp_channel`` is ``auto`` (per-engine default above) or an explicit
+    channel. admin-api is deliberately not offered: it needs ``cloudsql.users.update``,
+    which among predefined roles lives only in the very broad ``roles/cloudsql.admin``,
+    and it cannot see principals created inside the database."""
+    choice = (_cfg("clouddb_ps_gcp_channel") or "auto").strip().lower()
+    if choice in _GCP_CHANNELS:
+        return choice
+    return _GCP_CHANNEL_DEFAULTS.get(engine, "data-api")
 
 
 def _ps_ineligible_reason(row: CloudDatabase) -> Optional[str]:
@@ -1449,6 +1476,12 @@ def _fa_grant_statement(engine: str, *, fa_db_user: str, managed_user: str,
         # No per-user equivalent of ADMIN OPTION here. Do NOT grant UPDATE on mysql.* —
         # Cloud SQL restricts DML on mysql.user.
         return f"GRANT CREATE USER ON *.* TO '{fa_db_user}'@'%';"
+    if engine == "sqlserver":
+        # ALTER ANY LOGIN is exactly enough and is what CustomerDbRootRole carries;
+        # sysadmin is unavailable on Cloud SQL. Only needed when the functional account
+        # drives the change — under self-rotation the login alters itself with
+        # OLD_PASSWORD and needs no permission at all.
+        return f"ALTER SERVER ROLE CustomerDbRootRole ADD MEMBER [{fa_db_user}];"
     return ""
 
 
@@ -1481,11 +1514,16 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     db_name = connection_db_name(row, tf_variables)
     admin_username = tf_variables.get("master_username") or "dbadmin"
     port = row.port or sql.default_port(engine)
+    channel = _gcp_channel(engine)
 
-    # 1. Per-instance prerequisites. The Cloud SQL Data API is OFF BY DEFAULT on every
-    #    instance — this is the one remaining imperative onboarding action, and the
-    #    successor to the other clouds' per-jump-host provisioning.
-    await gcp_service.ensure_cloudsql_rotation_prereqs(project, instance, iam_auth=True)
+    # 1. Per-instance prerequisites, but ONLY for the control-plane channel. cloud-run
+    #    opens a real database connection from a service inside the VPC, so it needs
+    #    neither the Data API nor IAM database authentication — and Cloud SQL for SQL
+    #    Server has no IAM database auth to enable in the first place. Patching an
+    #    instance for a channel that will not use it is a change we have no reason to
+    #    make.
+    if channel == "data-api":
+        await gcp_service.ensure_cloudsql_rotation_prereqs(project, instance, iam_auth=True)
 
     # 2. The dedicated managed user (the rotation target — never the master admin).
     #    A MySQL account is identified by user@host, and cloud_db_sql_service's own
@@ -1497,13 +1535,23 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     await gcp_service.create_cloudsql_user(project, instance, managed_user,
                                            password=managed_pw, host=managed_host)
 
-    # 3. The rotation identity as an IAM database user, so the functional account needs
-    #    no stored database password at all — under IAM auth its credential is a
-    #    short-lived OAuth token minted per connection. Then read back the name the
+    # 3. Who the functional account authenticates to the DATABASE as.
+    #
+    #    On data-api that is an IAM database user, so the functional account needs no
+    #    stored database password at all — its credential is a short-lived OAuth token
+    #    minted per connection. Register the rotator, then read back the name the
     #    database actually stored (see _observed_iam_db_user).
+    #
+    #    On cloud-run there is no IAM database auth (SQL Server has none), so the
+    #    functional account is a real database login with a real password. In "create"
+    #    mode that is the built-in admin this database was provisioned with — which does
+    #    mean the composite carries a PER-DATABASE password, exactly the property that
+    #    makes "reference" mode the better answer here, as it is on Azure.
     rotator = _cfg("clouddb_ps_gcp_rotator_service_account")
     fa_db_user = ""
-    if rotator:
+    if channel == "cloud-run":
+        fa_db_user = admin_username
+    elif rotator:
         await gcp_service.create_cloudsql_user(project, instance, rotator,
                                                iam_service_account=True)
         try:
@@ -1524,8 +1572,13 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     #    it without itself being a privileged database principal. Report the exact
     #    statement on the job instead of failing: this mirrors AWS and Azure, which also
     #    require an out-of-band grant, and the job log is where the operator looks.
-    grant = _fa_grant_statement(engine, fa_db_user=fa_db_user, managed_user=managed_user,
-                                managed_host=managed_host)
+    #    Self-rotation needs none of it: the managed account authenticates as itself and
+    #    alters itself, which is the strongest argument for turning it on.
+    self_rotating = (channel == "cloud-run"
+                     and config_service.get_bool("clouddb_ps_self_rotation", False))
+    grant = "" if self_rotating else _fa_grant_statement(
+        engine, fa_db_user=fa_db_user, managed_user=managed_user,
+        managed_host=managed_host)
     if grant and fa_db_user:
         job_service.append_job_log(
             db, job_id,
@@ -1533,11 +1586,13 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
             f"dashboard cannot issue itself — run it as an admin: {grant}")
 
     logger.info("clouddb: managed DB user %r created via Cloud SQL users.insert on %s "
-                "db_id=%s (no jump host)", managed_user, instance, row.id)
+                "db_id=%s channel=%s (no jump host)",
+                managed_user, instance, row.id, channel)
     return {"managed_user": managed_user, "managed_pw": managed_pw,
             "managed_user_host": managed_host, "project": project, "instance": instance,
             "fa_db_user": fa_db_user, "region": region, "db_name": db_name,
-            "admin_username": admin_username, "client_image": "", "port": port}
+            "admin_username": admin_username, "client_image": "", "port": port,
+            "channel": channel}
 
 
 _FA_MODE_REFERENCE = "reference"
@@ -1659,23 +1714,44 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         fa_label, db_method = "gcp", "dbgcp"
         fa_key = f"clouddb_ps_functional_account_gcp_{engine}"
         fa_tokens = ("gcp", "cloud sql")
+        channel = ctx.get("channel") or _gcp_channel(engine)
         fa_username = fa_password = ""
         if fa_mode != _FA_MODE_REFERENCE:
             auth_mode = (_cfg("clouddb_ps_gcp_auth_mode") or "ADC").upper()
-            # The database user is the IAM principal name the DATABASE stored, read back
-            # from the catalog rather than derived — see _observed_iam_db_user.
+            # On data-api the database user is the IAM principal name the DATABASE
+            # stored, read back from the catalog rather than derived (see
+            # _observed_iam_db_user); on cloud-run it is a real login, because SQL Server
+            # has no IAM database authentication.
             fa_username = f"{auth_mode}:{ctx.get('fa_db_user') or ''}"
             impersonate = (_cfg("clouddb_ps_gcp_impersonate_target")
                            if auth_mode == "IMP" else "")
             # Segment 1 is the base64 service-account key, and only SA: mode has one —
             # a ~2.4 KB key base64s to ~3.2 KB, over Password Safe's 1000-character
             # credential limit, which is why ADC:/IMP: are the supported modes. Segment
-            # 2 is the impersonation target; segment 3 the database password, which does
-            # not exist under IAM auth.
-            fa_password = f"-:{impersonate or '-'}:-"
+            # 2 is the impersonation target. Segment 3 is the database password: absent
+            # under IAM auth, but REQUIRED on cloud-run, where in "create" mode it is
+            # this database's own admin credential.
+            fa_db_password = "-"
+            if channel == "cloud-run":
+                fa_db_password = (config_service.get(f"clouddb/{row.id}/admin")
+                                  or tf_variables.get("master_password") or "-")
+            fa_password = f"-:{impersonate or '-'}:{fa_db_password}"
         # Address: channel;project:region:instance;dbName;audience;ssl[;key=value]
         conn_name = f"{ctx['project']}:{row.region}:{row.instance_id}"
-        addr = ["data-api", conn_name, ctx["db_name"] or "", "-", "-", "iam=true"]
+        if channel == "cloud-run":
+            # Field 4 is the Cloud Run service's stable CUSTOM AUDIENCE, used verbatim as
+            # both the request target and the token audience — the generated *.run.app
+            # hostname changes if the service is recreated, and each revision gets its
+            # own URL, so the audience is what lets this address survive a redeploy.
+            ssl_flag = ("sslTRUE" if config_service.get_bool("clouddb_ps_gcp_dbops_ssl", True)
+                        else "sslFALSE")
+            addr = [channel, conn_name, ctx["db_name"] or "",
+                    _cfg("clouddb_ps_gcp_dbops_audience"), ssl_flag]
+        else:
+            # Both control-plane fields are "-": the Cloud SQL APIs are always TLS and
+            # never open a database connection, and the plugin rejects a value in either
+            # rather than letting anyone believe they disabled something.
+            addr = [channel, conn_name, ctx["db_name"] or "", "-", "-", "iam=true"]
         if engine == "mysql":
             # The plugin deliberately REFUSES to default a MySQL host qualifier, because
             # app@% and app@10.0.0.5 are different accounts and rotating the wrong row
@@ -1745,16 +1821,21 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     # (operator-owned) account goes under a key that loop never reads.
     stash["ps_db_functional_account_id" if db_fa_owned
           else "ps_db_functional_account_ref"] = db_fa_id
-    # Self-rotation ("change password using own credentials") is a CLOUD-RUN action;
-    # the data-api channel refuses it at pre-flight, before any network call. But
-    # clouddb_ps_self_rotation is one global flag that AWS/Azure "reference" mode
-    # REQUIRES, so GCP has to drop it rather than inherit it. GCP does not need it: the
-    # functional account is granted rights over the managed principal instead.
+    # Self-rotation ("change password using own credentials") is a CLOUD-RUN action:
+    # it needs to log in AS the managed account, which only that channel can do. The
+    # control-plane channels authenticate as the caller and refuse it at pre-flight,
+    # before any network call. clouddb_ps_self_rotation is one global flag that AWS/Azure
+    # "reference" mode REQUIRES, so on GCP it has to be honoured per channel rather than
+    # inherited wholesale — otherwise turning it on for AWS breaks every GCP data-api
+    # rotation. On data-api the functional account is granted rights over the managed
+    # principal instead.
     self_rotate = config_service.get_bool("clouddb_ps_self_rotation", False)
-    if db_method == "dbgcp" and self_rotate:
+    if db_method == "dbgcp" and self_rotate and (
+            (ctx.get("channel") or _gcp_channel(engine)) != "cloud-run"):
         logger.info("clouddb: not emitting use_own_credentials for db_id=%s — self-"
-                    "rotation is a cloud-run action the data-api channel refuses at "
-                    "pre-flight; the functional account rotates the managed user", row.id)
+                    "rotation needs the cloud-run channel and this managed system is on "
+                    "%s, which refuses it at pre-flight; the functional account rotates "
+                    "the managed user instead", row.id, _gcp_channel(engine))
         self_rotate = False
     reg = await ps_resource_service.register_managed_system(
         name=f"{name}-db", host_name=row.private_host, ip_address="127.0.0.1",

@@ -552,9 +552,10 @@ The dashboard also provisions **managed cloud databases** (AWS / Azure / GCP / O
 them through a PRA protocol tunnel, and can optionally **onboard AWS, Azure and GCP databases
 into Password Safe** for credential rotation (via the `{engine} SSM Custom Plugin`,
 `{engine} Azure Run Command Plugin` or `GCP Cloud SQL {engine}` plugin, and the shared
-`PRA Vault Username Password` plugin). GCP covers PostgreSQL and MySQL only, reaches the
-instance over Google's control plane rather than a jump host, and ships off until the
-plugin's data-api channel is implemented. That whole feature — base provisioning, per-cloud
+`PRA Vault Username Password` plugin). GCP needs no jump host on either of its channels:
+PostgreSQL and MySQL go over Google's control plane (the Cloud SQL Data API), and SQL
+Server through a small Cloud Run service you deploy. It ships off — the Cloud Run channel
+is built but not yet live-tested, and the Data API channel is still a plugin-side stub. That whole feature — base provisioning, per-cloud
 prerequisites, and the Password Safe onboarding — is documented separately in
 **[Databases](../databases.md)**. The tunnel half needs
 [Privileged Remote Access](privileged-remote-access.md).
