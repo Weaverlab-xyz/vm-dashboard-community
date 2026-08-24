@@ -2,7 +2,7 @@
 
 Operator runbook for standing up **database credential rotation** through the custom
 Password Safe plugins: the three **`{engine} Azure Run Command Plugin`**s, the three
-**`{engine} SSM Custom Plugin`**s and the two **`GCP Cloud SQL {engine}`** plugins.
+**`{engine} SSM Custom Plugin`**s and the three **`GCP Cloud SQL {engine}`** plugins.
 Covers what must exist before the settings panel is useful, exactly what to put in each
 field, and how to prove the plugin ran.
 
@@ -12,12 +12,13 @@ Panel: **Settings → Integrations → Password Safe → Configure → Database 
 **Scope:** AWS, Azure and GCP. OCI databases provision and get a tunnel, but have no
 Password Safe onboarding path at all.
 
-> **GCP is wired but not yet functional.** The Cloud SQL plugin packages install and
-> parse, but their channel transports are stubs — a rotation returns *"the 'data-api'
-> channel is not implemented in this build"*. `passwordsafe_gcp_db_registration_method`
-> therefore ships **`off`**. §1.7 and §4 below cover it anyway, because everything up to
-> the transport boundary is real and worth proving now. GCP also covers **PostgreSQL and
-> MySQL only**.
+> **GCP readiness is uneven, per channel.** SQL Server rides the **Cloud Run** channel,
+> which is built and unit-tested but has not yet been exercised against a live Cloud SQL
+> instance. PostgreSQL and MySQL ride the **Data API** channel, which is still a
+> plugin-side stub — a rotation returns *"the 'data-api' channel is not implemented in
+> this build"*. `passwordsafe_gcp_db_registration_method` therefore ships **`off`**.
+> §1.7 and §4 cover both, because everything up to the transport boundary is real on the
+> Data API path and the whole path should work on Cloud Run.
 
 ---
 
@@ -147,15 +148,16 @@ the `.PSPLUGIN` for each engine you intend to test, plus the shared PRA Vault pl
 | AWS mssql SSM | `mssql SSM Custom Plugin` |
 | GCP Cloud SQL PostgreSQL | `GCP Cloud SQL PostgreSQL` |
 | GCP Cloud SQL MySQL | `GCP Cloud SQL MySQL` |
+| GCP Cloud SQL SQL Server | `GCP Cloud SQL SQL Server` |
 | PRA Vault (shared) | `PRA Vault Username Password` |
 
 The platform name is looked up by name at registration time. A mismatch fails the lookup
 with the name quoted in the job error, so it is self-diagnosing — but it fails *after* the
 database is already built.
 
-The GCP set has no SQL Server entry: Cloud SQL for SQL Server does not support IAM database
-authentication for database operations, so that engine needs the plugin's `cloud-run`
-channel rather than `data-api`.
+The GCP SQL Server plugin is the one that needs infrastructure: Cloud SQL for SQL Server
+does not support IAM database authentication for database operations, so it runs on the
+plugin's `cloud-run` channel rather than `data-api`. See §1.7.
 
 ### 1.2 Azure — the RSA key pair
 
@@ -247,9 +249,13 @@ node/broker; it is **address field 5**.
 
 ### 1.7 GCP — the rotator service account and the broker identity
 
-There is **no key pair and no jump-host prep here** — the Cloud SQL plugins reach a
-private-IP instance over Google's control plane, so none of §1.2's or §1.5's apparatus
-has a counterpart. Two things to create instead.
+There is **no key pair and no jump-host prep here** — none of §1.2's or §1.5's apparatus
+has a counterpart on either GCP channel. What you create depends on the engine:
+
+| Engine | Channel | What you have to stand up |
+|---|---|---|
+| PostgreSQL, MySQL | `data-api` | A rotator service account. No infrastructure at all |
+| SQL Server | `cloud-run` | A Cloud Run service, plus `roles/run.invoker` for each broker |
 
 **The rotation identity.** One service account per project, shared by every database:
 
@@ -287,19 +293,67 @@ authenticates to GCP:
 | `IMP:` | Broker already has some GCP identity | `roles/iam.serviceAccountTokenCreator` on the rotator, granted to that identity |
 | `SA:` | **Not supported in practice** | A base64 key is ~3.2 KB, over Password Safe's 1000-character credential limit, so the composite cannot survive a write-back |
 
+**The Cloud Run service (SQL Server).** The dashboard **cannot deploy this** — it is a
+.NET container the plugin repository builds, and the dashboard has no path to build or
+publish that image. Use the plugin repo's `ps-dbops-sqlserver` Terraform module, or by
+hand:
+
+```
+gcloud run deploy bt-dbops --project=<project> --region=<region> \
+    --no-allow-unauthenticated \
+    --network=<vpc> --subnet=<subnet> --vpc-egress=private-ranges-only \
+    --service-account=bt-dbops@<project>.iam.gserviceaccount.com \
+    --min-instances=1 --concurrency=8 --max-instances=5 --timeout=120 \
+    --add-custom-audiences=https://bt-dbops.<your-domain>
+```
+
+Three of those are load-bearing:
+
+- **`--add-custom-audiences`** is not optional. The generated `*.run.app` hostname changes
+  if the service is recreated and each revision gets its own URL; the stable audience is
+  what lets the managed-system address survive a redeploy, and it is what goes in
+  `clouddb_ps_gcp_dbops_audience`.
+- **`--min-instances=1`** is a correctness decision, not a cost one. Direct VPC egress
+  documents connection-establishment delays of a minute or more on startup, and a rotation
+  that times out **may already have applied** — the worst outcome this system can produce.
+- **`--concurrency=8`**, well below the default, because each request holds a database
+  connection and Cloud SQL's connection limit is reached long before Cloud Run notices.
+
+Then grant each broker identity `roles/run.invoker` — **named service accounts only**,
+never `allUsers` or `allAuthenticatedUsers`. If your brokers are outside GCP they cannot
+reach `ingress=internal`, so the service starts with public ingress plus IAM: a
+credential-changing API with a globally resolvable endpoint, protected by IAM rather than
+network position. Compensate with an org policy
+(`constraints/iam.allowedPolicyMemberDomains`) that makes an `allUsers` binding
+impossible. Private Service Connect is the follow-on hardening step, and the custom
+audience makes that flip invisible to Password Safe.
+
+The Cloud Run service account is strikingly small — it needs **none** of
+`roles/cloudsql.client`, `roles/cloudsql.instanceUser` or `roles/cloudsql.admin`, because
+it uses neither IAM database authentication nor a Cloud SQL connector.
+
 **The database grant.** The functional account needs rights over each managed principal,
-and the dashboard cannot issue it: `executeSql` authenticates as the *caller*. The exact
-statement is printed on the provisioning job — run it as an admin:
+and the dashboard cannot issue it. The exact statement is printed on the provisioning job
+— run it as an admin:
 
 - **PostgreSQL 16** (the module default): `GRANT "<managed>" TO "<fa>" WITH ADMIN OPTION;`
   per role. `CREATEROLE` alone is no longer sufficient, and this is the most likely
   source of "worked in dev, 403 in production".
 - **MySQL:** `GRANT CREATE USER ON *.* TO '<fa>'@'%';`. Do **not** grant `UPDATE ON
   mysql.*` — Cloud SQL restricts DML on `mysql.user`.
+- **SQL Server:** `ALTER SERVER ROLE CustomerDbRootRole ADD MEMBER [<fa>];`, which carries
+  `ALTER ANY LOGIN`. `sysadmin` is unavailable on Cloud SQL and `ALTER ANY LOGIN` is
+  exactly enough.
 
-Everything else is automatic. The dashboard enables the **Cloud SQL Data API** (off by
-default *per instance*) and the `cloudsql.iam_authentication` flag at onboarding, and new
-instances get the flag from the Terraform module.
+**Or skip the grant entirely on SQL Server** by turning on self-rotation: the managed
+login alters itself with `OLD_PASSWORD` and the functional account needs no privilege over
+it at all. That is the recommended setting on `cloud-run`, and the dashboard emits
+`use_own_credentials` only for that channel.
+
+Everything else is automatic on the Data API path: the dashboard enables the **Cloud SQL
+Data API** (off by default *per instance*) and the `cloudsql.iam_authentication` flag at
+onboarding, and new instances get the flag from the Terraform module. On `cloud-run` none
+of that runs — the service connects with a database login, so there is nothing to patch.
 
 ---
 
@@ -380,25 +434,35 @@ plugins)** block at the bottom of Database Onboarding.
 
 | Field | Value |
 |---|---|
-| GCP onboarding method | `Cloud SQL Data API plugins` — leave on **Off** until the plugin's data-api channel ships |
-| PostgreSQL / MySQL Platform | The platform names exactly as uploaded: `GCP Cloud SQL PostgreSQL` / `GCP Cloud SQL MySQL` |
-| PostgreSQL / MySQL Functional Account | `reference` mode only — the operator-created account on each platform |
+| GCP onboarding method | `Cloud SQL Data API plugins` to enable GCP at all; **Off** disables it while leaving AWS and Azure on |
+| Channel | `Automatic` — Data API for PostgreSQL/MySQL, Cloud Run for SQL Server. Override only to force one channel for every engine |
+| PostgreSQL / MySQL / SQL Server Platform | The platform names exactly as uploaded |
+| … Functional Account | `reference` mode only — the operator-created account on each platform |
 | GCP Identity Mode | `ADC` unless the broker needs impersonation; then `IMP` plus the target below |
 | Impersonation Target | `IMP` mode only — the rotator's full email |
-| Rotator Service Account | The full email from §1.7. ≤32 characters before the `@` for MySQL |
+| Rotator Service Account | **Data API only.** The full email from §1.7, ≤32 characters before the `@` for MySQL |
+| Cloud Run Audience | **Cloud Run only, and required for it.** The stable custom audience from §1.7. Blank leaves SQL Server off |
+| Require TLS … to the database | Address field 5. On by default |
 
-There is no SSL toggle, no certificate path, no client image and no key material in this
-block — none of them exist in this design.
+There is no certificate path, no client image and no key material in this block — none of
+them exist in this design.
 
 **`reference` is the recommended mode here.** Unlike Azure, whose functional-account
 composite embeds a *per-database* admin password, the GCP composite under IAM
 authentication is `-:-:-` — it holds nothing per-database, so one operator-created
 account per engine covers every Cloud SQL instance on that platform.
 
-It also does **not** need `clouddb_ps_self_rotation`, which §0 says `reference` mode
-requires. That requirement is an AWS/Azure one: self-rotation is a `cloud-run`-channel
-action and `data-api` refuses it at pre-flight. The dashboard therefore drops the flag
-for GCP even when it is on, so leaving it enabled for the other two clouds is safe.
+**`clouddb_ps_self_rotation` is honoured per channel here.** §0 says `reference` mode
+requires it, and on `cloud-run` that holds — it is also the *preferred* setting, because
+the managed login alters itself with `OLD_PASSWORD` and the functional account needs no
+privilege over it. On `data-api` the plugin refuses self-rotation at pre-flight, so the
+dashboard drops the flag for those managed systems and grants the functional account
+rights over the managed principal instead. Leaving the flag on for AWS/Azure is therefore
+safe for both GCP channels.
+
+**SQL Server is the one GCP engine whose `create`-mode composite is per-database**, since
+it carries the minted admin password — the same property Azure has, and the same reason
+to prefer `reference` mode with self-rotation.
 
 ---
 

@@ -299,16 +299,16 @@ def test_a_cloud_with_no_plugin_transport_is_refused():
         assert cloud.upper() in reason
 
 
-def test_gcp_sql_server_is_refused_as_a_structural_fact():
-    """Cloud SQL for SQL Server has no IAM database authentication, so the data-api
-    channel would need the functional account's password mirrored into Secret Manager.
-    A property of the platform, so it belongs with the structural blockers rather than
-    silently doing nothing at apply time."""
+def test_gcp_sql_server_is_eligible_now_that_cloud_run_exists():
+    """It used to be a structural refusal: Cloud SQL for SQL Server has no IAM database
+    authentication, so data-api would have needed the functional account's password
+    mirrored into Secret Manager. The cloud-run channel removes that — the credential
+    travels in the request body — so the question moved from "can this ever work" to
+    "is the Cloud Run service deployed", which is configuration, not a fact about the
+    row. _ps_ineligible_reason is documented as structural blockers only."""
     _reset()
-    reason = svc._ps_ineligible_reason(_row(cloud="gcp", engine="sqlserver"))
-    assert reason and "IAM database authentication" in reason
-    for engine in ("postgres", "mysql"):
-        assert svc._ps_ineligible_reason(_row(cloud="gcp", engine=engine)) is None
+    for engine in ("postgres", "mysql", "sqlserver"):
+        assert svc._ps_ineligible_reason(_row(cloud="gcp", engine=engine)) is None, engine
 
 
 def test_the_row_the_page_reads_carries_the_same_verdict():
@@ -316,7 +316,7 @@ def test_the_row_the_page_reads_carries_the_same_verdict():
     assert svc._serialize(_row())["ps_viable"] is True
     assert svc._serialize(_row(cloud="oci", engine="oracle"))["ps_viable"] is False
     assert svc._serialize(_row(cloud="gcp"))["ps_viable"] is True
-    assert svc._serialize(_row(cloud="gcp", engine="sqlserver"))["ps_viable"] is False
+    assert svc._serialize(_row(cloud="gcp", engine="sqlserver"))["ps_viable"] is True
     assert svc._serialize(_row())["ps_onboarded"] is False
     assert svc._serialize(_row(ps_managed_system_id="1"))["ps_onboarded"] is True
 
