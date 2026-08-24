@@ -5,15 +5,18 @@
 The Rancher integration gives the dashboard a **central Kubernetes management
 plane**. Instead of standing up a whole Kubernetes cluster just to host
 [Rancher](https://www.rancher.com/), the dashboard runs the Rancher server as a
-**single privileged container on a Google Compute Engine (GCE) VM using
-Container-Optimized OS (COS)** — the same lightweight container-on-a-VM pattern
-the dashboard already uses for the BeyondTrust Gateway. The node gets a
-**public, source-restricted IP**, and every Kubernetes cluster you manage is
-*imported* into it.
+**single privileged container on one VM** — the same lightweight
+container-on-a-VM pattern it already uses for the BeyondTrust Gateway. The node
+gets a **public, source-restricted IP**, and every Kubernetes cluster you manage
+is *imported* into it.
+
+**The node runs on AWS, Azure or GCP** — you pick which when you deploy it. That
+choice is about where the management plane *lives*; the clusters it manages can be
+anywhere, on any cloud or on-prem (see [below](#does-this-work-for-private-clusters-in-another-cloud)).
 
 You deploy, view, and tear down the node from a **Kubernetes (Rancher)** tab on
-the **Containers** page — the same place you manage Portainer and cloud
-containers.
+the **Containers** page — the same place you manage Portainer, the Gateways and
+cloud containers.
 
 > **Single-container Rancher is intended for lab / demo / small-scale use**, the
 > same as Rancher's own single-node Docker install. It is not a highly-available
@@ -25,13 +28,14 @@ containers.
 ## How it works
 
 ```
-Operator ──(source-restricted 443, or optional PRA Web Jump)──▶ GCE COS Rancher node (public IP)
+Operator ──(source-restricted 443, or optional PRA Web Jump)──▶ Rancher node (public IP)
 Dashboard app ──(direct HTTPS v3 API, httpx)──────────────────▶ same node
 Downstream cluster (any cloud / on-prem, PRIVATE) ──(cattle-cluster-agent egress 443)──▶ same node
 ```
 
-- **The node** is one `rancher/rancher` container on a COS VM, launched via the
-  GCE container-declaration (konlet) metadata — no Helm, no cluster to build.
+- **The node** is one `rancher/rancher` container on one VM — no Helm, no cluster
+  to build. How the container gets started is the only thing that differs per
+  cloud; see [the node, per cloud](#the-node-per-cloud).
 - **The dashboard** talks to the Rancher v3 API directly over HTTPS with an API
   token minted at first boot.
 - **Downstream clusters** are *imported*: Rancher hands back a registration
@@ -40,11 +44,31 @@ Downstream cluster (any cloud / on-prem, PRIVATE) ──(cattle-cluster-agent eg
   or on-prem can be managed** as long as they have egress to the node — no
   inbound firewall opening, no VPC peering.
 
-### Does this work for private clusters that aren't in GCP?
+### The node, per cloud
 
-**Yes.** The imported agent initiates the connection *to* the Rancher node, so
-the downstream cluster only needs outbound reachability to the node's public
-`server-url`. EKS, AKS, GKE, and on-prem clusters all work the same way.
+The container is the same everywhere: one privileged `rancher/rancher` on ports
+80/443, restarted with the host, holding its state in `/var/lib/rancher`. What
+differs is the machinery around it.
+
+| | AWS | Azure | GCP |
+|---|---|---|---|
+| Host | EC2, ECS-optimized AL2023 AMI (Docker preinstalled) | Ubuntu 22.04 VM | Container-Optimized OS VM |
+| Container started by | `docker run` from EC2 user-data | `docker run` from cloud-init | `gce-container-declaration` (konlet) |
+| Default size | `t3.medium` | `Standard_B2s` | `e2-medium` |
+| Ingress gate | a dedicated security group | a dedicated NSG on the NIC | a firewall rule targeting a network tag |
+| Fail-closed means | every ingress rule revoked | the allow rule deleted | the firewall rule deleted |
+| Public IP | ephemeral | **static** — survives a recreate | ephemeral |
+| Needs an instance identity? | no | no | no |
+
+The node is given **no instance profile, managed identity or service account**: it
+talks to Rancher and to the clusters that dial it, never to the cloud's own API.
+
+### Does this work for private clusters in another cloud?
+
+**Yes** — and it does not matter which cloud the node itself is on. The imported
+agent initiates the connection *to* the Rancher node, so the downstream cluster
+only needs outbound reachability to the node's public `server-url`. EKS, AKS, GKE
+and on-prem clusters all work the same way.
 
 ---
 
@@ -53,8 +77,9 @@ the downstream cluster only needs outbound reachability to the node's public
 | Requirement | Notes |
 |---|---|
 | **Kubernetes management enabled** | Toggle **Kubernetes** on under **Settings → Integrations** (`k8s_management_enabled`). This surfaces the Containers → Kubernetes (Rancher) tab. |
-| **GCP configured** | A GCP project + service-account JSON on **Settings → GCP** (or the setup wizard). The node always runs in GCP, regardless of where the imported clusters live. |
-| **Service-account IAM** | The dashboard SA needs `compute.instances.create`, `compute.firewalls.{get,create,update,delete}`, and instance delete. `scripts/sandbox/Linux/setup-gcp.sh` grants `roles/compute.admin`, which covers these. |
+| **At least one cloud configured** | AWS, Azure or GCP credentials on **Settings** (or the setup wizard). You pick which one hosts the node on the deploy form; the imported clusters can live anywhere regardless. |
+| **Permissions for that cloud** | **GCP** — `compute.instances.create`, `compute.firewalls.{get,create,update,delete}` and instance delete; `setup-gcp.sh` grants `roles/compute.admin`, which covers these. **AWS** — EC2 run/terminate plus security-group create/authorize/revoke/delete; `setup-aws.sh`'s `dashboard-app-policy` already grants all of it. **Azure** — `Contributor` on the resource group, which `setup-azure.sh` grants. |
+| **A region with a configured subnet** | The node needs a public subnet with egress, and a subnet is regional on every cloud — so only regions that have one are offered. This is the same per-region config the Gateways use. |
 | **A bootstrap password** | Set a Rancher bootstrap (first-run admin) password — see Setup. |
 | **Allowed source CIDRs** | The firewall **fails closed**, but dashboard-provisioned clusters' egress IPs (and, when the Web Jump is on, the dashboard-managed Gateway's egress IP) are **added automatically** — see [Automatic firewall whitelisting](#automatic-firewall-whitelisting). You only add extra operator IPs and pre-existing operator Gateways here. |
 | **A ≥ 4 GB machine type** | Rancher OOMs on shared-core types; the default `e2-medium` (4 GB) is the minimum. |
@@ -70,32 +95,42 @@ tab appears on the **Containers** page.
 
 ### Step 2 — Configure the node
 
-Open **Settings → Kubernetes** and fill in the **Rancher management node (GCE
-COS)** section:
+Open **Settings → Kubernetes** and fill in the **Rancher management node**
+section. The first group applies whichever cloud the node runs on:
 
 | Field | Notes |
 |---|---|
 | **Bootstrap password** | First-run admin password. The API token is minted from it and stored encrypted; you never re-enter it. |
-| **Allowed source CIDRs** | *Optional / additive.* Comma-separated CIDRs for the GCE firewall (tcp 80/443). Dashboard-provisioned clusters and the dashboard-managed Web-Jump Gateway are added automatically ([details](#automatic-firewall-whitelisting)); use this only for extra operator IPs and pre-existing operator Gateways. If nothing is set here **and** nothing is auto-discovered, the firewall stays closed unless *Allow open* is ticked. The panel shows the effective allow-list read-only. |
-| **Machine type** | Default `e2-medium` (4 GB). Bump to `e2-standard-2` if you'll import several clusters. |
-| **Zone** | Blank → the configured GCP zone. |
-| **Container image** | Default `rancher/rancher:latest`. Pin a version for reproducibility. |
-| **Boot disk (GB)** | Default 30. Holds `/var/lib/rancher`. |
-| **Allow open** | Opt-in to open `0.0.0.0/0` when no CIDRs are set — **not recommended** for a public privileged container. |
+| **Allowed source CIDRs** | *Optional / additive.* Comma-separated CIDRs for the node's ingress rule (tcp 80/443). Dashboard-provisioned clusters and the dashboard-managed Web-Jump Gateway are added automatically ([details](#automatic-firewall-whitelisting)); use this only for extra operator IPs and pre-existing operator Gateways. If nothing is set here **and** nothing is auto-discovered, the node stays closed unless *Allow open* is ticked. The panel shows the effective allow-list read-only. |
+| **Readiness timeout (s)** | Default 360. How long the deploy waits for Rancher to serve after boot; raise it for a cold image pull or a slow disk. |
 | **Verify TLS certificate** | Leave off for the node's self-signed cert; turn on only if you've put a real cert on it. |
 | **PRA Web Jump to the Rancher UI** | Opt-in zero-trust access — see [PRA Web Jump](#pra-web-jump-optional). |
+
+Below that, a **Settings for cloud** picker switches between one field group per
+cloud — container image, machine size, VM name, disk size, and that cloud's
+*Allow open* opt-in. Each cloud keeps its own, so trying the node somewhere else
+doesn't mean re-entering everything.
+
+> **That picker is a view control, not a setting.** Where the node actually runs
+> is chosen on the deploy form and recorded from where it landed — so there is one
+> source of truth for it, and it is the node itself.
+
+Sizes must clear Rancher's ~4 GB floor: `e2-medium` on GCP, `t3.medium` on AWS,
+`Standard_B2s` on Azure. Smaller types OOM, and the GCP path refuses the obvious
+ones outright.
 
 Settings apply immediately — no restart.
 
 ### Step 3 — Deploy the node
 
-On **Containers → Kubernetes (Rancher)**, optionally choose a **Region / Zone**
-([placement](#placement-multi-region)) and fill the **PRA access** fieldset (see
-below), then click **Deploy Rancher node**. This enqueues a background job (follow
-it at `/jobs/{job_id}`) that:
+On **Containers → Kubernetes (Rancher)**, choose the **Cloud** and optionally a
+**Region** (and a **Zone**, on GCP only) — see [placement](#placement-cloud-and-region)
+— fill the **PRA access** fieldset (see below), then click **Deploy Rancher node**.
+This enqueues a background job (follow it at `/jobs/{job_id}`) that:
 
-1. Creates/updates the source-restricted firewall rule (`<node>-allow-mgmt`, tcp 80/443).
-2. Launches the COS VM with the privileged Rancher container and an external IP.
+1. Creates/updates the source-restricted ingress rule (`<node>-allow-mgmt`, tcp 80/443)
+   — a firewall rule on GCP, a security group on AWS, an NSG rule on Azure.
+2. Launches the VM with the privileged Rancher container and a public IP.
 3. Pins the node's public IP as Rancher's `server-url`.
 4. Waits for Rancher to come up, then bootstraps it and mints the API token.
 5. **Completes Rancher's first-run wizard** (see below) so the UI is ready to log into.
@@ -124,27 +159,29 @@ Like the database and cloud-VM deploys, the deploy form offers **PRA pickers**
 
 The picks are persisted to config, so they're reused by later console opens.
 
-#### Placement (multi-region)
+#### Placement (cloud and region)
 
-The deploy form also offers a **Region** (and optional **Zone**) picker so the
-single Rancher node can run in a region other than the GCP default:
+The deploy form offers a **Cloud**, a **Region** and — on GCP only — a **Zone**:
 
-- **Region** — the dropdown lists only regions that have a configured subnet (the
-  default region plus any region seeded into `gcp_region_configs` via **Settings →
-  Multi-region** / a per-region sandbox run). The node's subnet is regional, so a
-  region with no subnet can't host it. Blank keeps the node's **current** region
-  (or the configured default).
-- **Zone** — optional, within the chosen region. Blank uses the region's **first
-  available** zone (which correctly skips regions with no `-a` zone, e.g. `us-east1`
-  starts at `-b`). If that zone is out of capacity
-  (`ZONE_RESOURCE_POOL_EXHAUSTED`), the deploy **automatically retries a sibling
-  zone in the same region** rather than failing.
+- **Cloud** — `aws`, `azure` or `gcp`. Defaults to wherever the node currently is.
+- **Region** — the dropdown lists only regions of the chosen cloud that have a
+  configured subnet (the default region plus any region added via **Settings →
+  Multi-region** or a per-region sandbox run). The node needs a public subnet and a
+  subnet is regional everywhere, so a region without one can't host it. Blank keeps
+  the node's **current** region.
+- **Zone** — GCP only, and optional. Blank uses the region's **first available**
+  zone (which correctly skips regions with no `-a` zone, e.g. `us-east1` starts at
+  `-b`). If that zone is out of capacity (`ZONE_RESOURCE_POOL_EXHAUSTED`), the
+  deploy **automatically retries a sibling zone in the same region**. The field is
+  hidden on the other clouds because an EC2 subnet already pins its availability
+  zone and Azure has no zone in this shape.
 
-Rancher stays a **single** management plane: redeploying to a **different** region
-**relocates** the node — the old-region VM is deleted first so no duplicate
-`rancher-server` is stranded (the node is ephemeral, so state re-bootstraps and
-imported clusters re-import). The chosen zone is persisted to `gcp_rancher_zone`, so
-teardown and later bare redeploys stay in that region.
+Rancher stays a **single** management plane: redeploying to a different region **or
+a different cloud relocates** the node — the old VM is deleted first so no duplicate
+`rancher-server` is stranded. The node is ephemeral, so state re-bootstraps and
+imported clusters must re-import. Where it landed is recorded
+(`rancher_node_cloud` plus that cloud's zone key), so teardown and later bare
+redeploys stay put instead of drifting back to a default.
 
 ### Automatic first-run
 
@@ -221,11 +258,11 @@ and-egg problem. The dashboard now manages the allow-list for you:
   so a single detected `/32` isn't reliable there — set the pool's CIDR (e.g.
   `104.28.182.0/24`) in `rancher_dashboard_egress_cidr`; detection keeps a stored
   CIDR that already contains the detected IP instead of clobbering it.
-- **API runner (VPC connector)** — when `rancher_api_transport=runner` (see
-  [Corp TLS inspection](#corp-tls-inspection-api-transport)), the Cloud Run
-  runner's VPC-connector range (`rancher_runner_source_cidr`) is auto-added so the
-  runner's internal-IP traffic is admitted (GCE ingress rules apply to internal
-  traffic too). Private RFC1918 range — no public exposure.
+- **API runner** — when `rancher_api_transport=runner` (see
+  [Corp TLS inspection](#corp-tls-inspection-api-transport)), the runner's own source
+  range (`rancher_runner_source_cidr`) is auto-added so its internal traffic is
+  admitted — ingress rules apply to internal traffic on all three clouds. Private
+  RFC1918 range, so no public exposure.
 - **Provisioned clusters** — each dashboard-provisioned cluster (EKS/AKS/GKE) is
   given a **stable, reserved egress IP** (an Elastic IP on AWS, a reserved Cloud
   NAT IP on GCP, a static NAT-gateway IP on Azure). The provision job captures it
@@ -238,8 +275,9 @@ and-egg problem. The dashboard now manages the allow-list for you:
   source the firewall must allow, and since all of a cloud's gateway hosts join one PRA
   Gateway *cluster*, PRA may broker a given session through any node in it: allowing
   only the shared host's IP left a session brokered by another node blocked.
-  `rancher_ui_jumpoint_cloud` (default `gcp`, same cloud as the node) picks which
-  cloud's gateways broker the UI. A provisioned Web Jump also holds a reference on the
+  `rancher_ui_jumpoint_cloud` (default `gcp`) picks which cloud's gateways broker the
+  UI. It is independent of where the node runs — a Gateway in any cloud can reach a
+  public node in any other — but keeping them on the same cloud is the simplest setup. A provisioned Web Jump also holds a reference on the
   shared gateway, so the idle teardown can't reclaim its broker.
 - **Manual CIDRs** — `rancher_allowed_source_cidrs` is still honoured and **added
   on top**, for extra operator/human IPs and for **pre-existing operator Gateways**
@@ -248,10 +286,22 @@ and-egg problem. The dashboard now manages the allow-list for you:
 
 The effective set is recomputed and re-applied idempotently on every relevant
 event: node deploy, cluster provision, cluster import, cluster decommission, Web Jump
-enable, and every **gateway deploy or teardown**. It stays **fail-closed** — if there are no manual CIDRs, no
-provisioned clusters, and no captured Gateway IP, the firewall is not opened
-(unless *Allow open* is ticked). The **Settings → Kubernetes** panel shows the
-computed allow-list read-only.
+enable, and every **gateway deploy or teardown**. It stays **fail-closed** — if there
+are no manual CIDRs, no provisioned clusters, and no captured Gateway IP, the node is
+not opened (unless *Allow open* is ticked). The **Settings → Kubernetes** panel shows
+the computed allow-list read-only.
+
+**What "closed" means, per cloud.** The merged set is identical everywhere; only the
+mechanism differs, because the three clouds do not offer the same primitive:
+
+| Cloud | Open | Closed |
+|---|---|---|
+| GCP | a firewall rule targeting the node's network tag | the rule is **deleted** |
+| AWS | a dedicated security group on the node's ENI | **every ingress permission is revoked** — a security group in use by a running instance cannot be deleted |
+| Azure | one allow rule in a dedicated NSG on the node's NIC | the **rule** is deleted; the NSG stays (it is attached to a live NIC, and a Standard public IP denies all inbound without a rule anyway) |
+
+In every case the node ends up unreachable, which is what the deploy checks before it
+bothers polling for readiness.
 
 All three dashboard-managed gateway hosts expose a knowable egress IP: GCP and AWS
 via the host's public IP, and Azure via a **Standard, secure-by-default public IP**
@@ -285,11 +335,21 @@ Two ways out:
    ephemeral, and you may not control corp policy.
 2. **`rancher_api_transport = runner`** — the dashboard executes every Rancher
    API call (readiness, bootstrap, server-url pin, cluster import/delete) as
-   `curl` inside a **one-shot GCP Cloud Run job**, which egresses from GCP with
+   `curl` inside a **one-shot in-cloud job**, which egresses from the cloud with
    no inspecting proxy in the path — the same corp-CA-dodging pattern as the
    Ansible/k8s cloud runners. The job targets the node's **internal IP**
-   (`rancher_internal_url`, captured at deploy), so it needs VPC reach —
-   **either** of:
+   (`rancher_internal_url`, captured at deploy), so it needs network reach to it.
+
+   **The runner runs in the node's own cloud** — it is not configured separately.
+   That is forced by what it is for: reaching a private address inside the node's
+   own network. A GCP node gets a Cloud Run job, an AWS node an ECS Fargate task in
+   the node's VPC, an Azure node an ACI container group on a VNet-delegated subnet.
+   Each reuses the k8s runner's existing configuration for that cloud, so a runner
+   install needs nothing new. Set `rancher_runner_source_cidr` to the runner's
+   source range and it is auto-merged into the node's allow-list while the transport
+   is `runner`.
+
+   On **GCP** specifically, VPC reach needs **either** of:
    - **Direct VPC egress (recommended)** — `gcp_run_network` +
      `gcp_run_subnetwork`: the job's NIC lands straight in the subnet. No
      standing infrastructure or cost, and immune to the Serverless-VPC-Access
@@ -301,9 +361,15 @@ Two ways out:
      the connector's `/28`.
 
    Plus the k8s runner's base GCP knobs: `gcp_project_id` and `gcp_region` (or
-   `gcp_ansible_cloud_run_region`). `rancher_runner_source_cidr` is auto-merged
-   into the firewall allow-list while the transport is `runner`. The runner
-   fails fast with the exact keys when neither VPC option is configured.
+   `gcp_ansible_cloud_run_region`). The runner fails fast naming the exact keys when
+   neither VPC option is configured.
+
+   On **AWS** the task is pinned to the node's region and that region's runner
+   subnet (`ansible_ecs_subnet_id`), because a task in another VPC has no route to
+   the node's private IP — and the failure is a dropped SYN, not an error. On
+   **Azure** the container group needs a VNet-**delegated** subnet in the node's VNet
+   (`ansible_aci_subnet_id`, falling back to `azure_aci_subnet_id`); without one it
+   runs with a public address and cannot route to the node at all.
 
    Request payloads (API token, bootstrap password) travel to the job as a curl
    config over stdin — never in the container's argv. Note each API call costs a
@@ -359,17 +425,24 @@ manually (the dashboard can't discover an IP for a host it didn't provision).
 
 ## Ephemeral node
 
-The node is deliberately **disposable**: it uses an **ephemeral external IP** and
-an **auto-delete boot disk**.
+The node is deliberately **disposable**: its boot disk is deleted with the VM, so
+`/var/lib/rancher` does not survive a recreate.
 
 - While the VM is alive, redeploying reuses it (state is preserved).
-- **Stopping/recreating the node changes its IP and wipes `/var/lib/rancher`.**
-  Rancher must re-bootstrap, and every imported cluster must be re-imported
-  (their agents were dialing the old IP).
+- **Recreating the node wipes `/var/lib/rancher`.** Rancher must re-bootstrap, and
+  every imported cluster must be re-imported.
 
-This trade-off keeps the node cheap and simple for lab/demo use. If you need the
-node to survive restarts, that's a future enhancement (reserve a static IP +
-mount a persistent disk).
+Whether the *address* survives depends on the cloud, and that changes how much
+re-importing you face:
+
+| Cloud | Public IP across a recreate | Consequence |
+|---|---|---|
+| GCP | ephemeral — **changes** | the agents were dialing the old IP, so every cluster re-imports |
+| AWS | auto-assigned — **changes** | same |
+| Azure | Standard SKU, and a Standard IP must be Static — **kept** | the `server-url` still resolves, so re-import is only needed because the state is gone, not because the address moved |
+
+This trade-off keeps the node cheap and simple for lab/demo use. On GCP and AWS you
+could reserve a static address to close the gap; on Azure you already have one.
 
 ---
 
@@ -379,7 +452,9 @@ On the Rancher tab, click **Stop** on the node. This enqueues a teardown job tha
 
 1. Refuses (unless forced) if clusters are still imported — it warns you they'll
    be orphaned. The tab's confirm dialog forces past this.
-2. Deletes the VM and its firewall rule.
+2. Deletes the VM and its ingress rule — plus, on AWS, reclaims the node's security
+   group once the terminating instance releases it, and on Azure the NIC, public IP
+   and NSG the VM owned.
 3. Deregisters the node from Entitle and removes the PRA Web Jump (if either was
    configured).
 4. Clears the node's runtime config so a fresh deploy re-bootstraps cleanly.
@@ -400,20 +475,14 @@ apply immediately.
 | `rancher_bootstrap_password` | — | First-run bootstrap password (secret; transient — Rancher requires the admin password to differ). ≥12 chars |
 | `rancher_admin_password` | `""` | Admin UI password for auto first-run (secret); blank = auto-generate a distinct one, surfaced in the panel + job result |
 | `rancher_auto_first_run` | `true` | Auto-complete Rancher's first-run wizard on a fresh deploy (password + EULA + telemetry) |
+| `rancher_node_cloud` | `gcp` | `aws` \| `azure` \| `gcp` — which cloud hosts the node. Picked on the deploy form and rewritten to where it actually landed, so teardown and bare redeploys stay put. Defaults to `gcp` because every node deployed before this key existed is a GCE VM |
 | `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); the dashboard's own egress, provisioned clusters + the Web-Jump Gateway are auto-added. Empty + nothing auto-discovered = closed |
 | `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Behind a corp proxy pool set the pool's CIDR — a stored CIDR containing the detected IP is kept, not clobbered. Bare IP → `/32` |
 | `rancher_ready_timeout_s` | `360` | Seconds the deploy waits for Rancher to serve after boot; raise for slow disks / large images |
-| `rancher_api_transport` | `direct` | `direct` \| `runner` — run the Rancher API calls as curl in a GCP Cloud Run job when this network's TLS inspection blocks the node's self-signed cert ([details](#corp-tls-inspection-api-transport)) |
+| `rancher_api_transport` | `direct` | `direct` \| `runner` — run the Rancher API calls as curl in a one-shot job **in the node's own cloud** when this network's TLS inspection blocks the node's self-signed cert ([details](#corp-tls-inspection-api-transport)) |
 | `rancher_internal_url` | (runtime) | `https://<node internal IP>` captured at deploy — what the runner transport dials |
-| `rancher_runner_source_cidr` | `""` | The runner's source range — the direct-egress subnet's CIDR (or the connector's `/28`); auto-added to the firewall while the transport is `runner` |
+| `rancher_runner_source_cidr` | `""` | The runner's source range (the direct-egress subnet's CIDR, the connector's `/28`, the ECS runner subnet, or the ACI delegated subnet); auto-added to the node's ingress while the transport is `runner` |
 | `gcp_run_network` / `gcp_run_subnetwork` | `""` | Direct VPC egress for Cloud Run runner jobs (preferred over `gcp_ansible_vpc_connector`; no standing infra) |
-| `gcp_rancher_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs set (discouraged) |
-| `gcp_rancher_image` | `rancher/rancher:latest` | Rancher container image |
-| `gcp_rancher_machine_type` | `e2-medium` | VM size (≥ 4 GB enforced) |
-| `gcp_rancher_zone` | `""` | Zone the node runs in. Set/overwritten on deploy to the **actual** launched zone (so teardown + bare redeploys stay in that region). Blank → the deploy-form region's first available zone, else the GCP default zone. Pick a region/zone per-deploy on the Rancher tab |
-| `gcp_rancher_name` | `rancher-server` | VM + firewall base name |
-| `gcp_rancher_boot_disk_gb` | `30` | Boot disk size |
-| `gcp_rancher_network_tag` | `rancher` | Network tag = firewall target |
 | `rancher_verify_tls` | `false` | Verify the node's cert on API calls |
 | `rancher_server_url` | (runtime) | Set to `https://<node IP>` by the deploy job |
 | `rancher_api_token` | (runtime) | Minted at bootstrap (secret) |
@@ -425,6 +494,25 @@ apply immediately.
 | `rancher_ui_vault_account_id` | (runtime) | PRA Vault account id created for the admin credential; cleared on teardown |
 | `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud) |
 
+### Per-cloud node keys
+
+One group per cloud, all optional — the defaults are usable. Only the group for the
+cloud the node runs on has any effect, which is why each cloud can keep its own.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `gcp_rancher_image` / `aws_rancher_image` / `azure_rancher_image` | `rancher/rancher:latest` | Rancher container image. Pin a version for reproducibility |
+| `gcp_rancher_machine_type` | `e2-medium` | GCE size (≥ 4 GB enforced — the launcher refuses the obvious too-small types) |
+| `aws_rancher_instance_type` | `t3.medium` | EC2 size. `t3.small` (2 GB) OOMs |
+| `azure_rancher_vm_size` | `Standard_B2s` | Azure size. `Standard_B1s` (1 GB) OOMs |
+| `gcp_rancher_name` / `aws_rancher_name` / `azure_rancher_name` | `rancher-server` | VM (or instance) name, and the base name of its ingress rule (`<name>-allow-mgmt`) |
+| `gcp_rancher_boot_disk_gb` / `aws_rancher_boot_disk_gb` / `azure_rancher_boot_disk_gb` | `30` | Boot / root / OS disk size. Holds `/var/lib/rancher` and is deleted with the VM |
+| `gcp_rancher_allow_open` / `aws_rancher_allow_open` / `azure_rancher_allow_open` | `false` | Open `0.0.0.0/0` on that cloud when no CIDRs are set (discouraged) |
+| `gcp_rancher_network_tag` | `rancher` | GCE network tag = the firewall rule's target. No analogue on AWS/Azure, where a dedicated security group / NSG *is* the scope |
+| `gcp_rancher_zone` | `""` | Zone the node runs in. Overwritten on deploy with the **actual** launched zone. Blank → the region's first available zone. Pick a region/zone per-deploy on the Rancher tab |
+| `aws_rancher_zone` | (runtime) | **Recorded, not chosen** — the availability zone the node landed in. The subnet pins it, so there is nothing to pick |
+| `azure_rancher_zone` | (runtime) | **Recorded, not chosen** — the location the node landed in, so a bare redeploy stays there |
+
 ---
 
 ## Troubleshooting
@@ -432,16 +520,27 @@ apply immediately.
 **Kubernetes (Rancher) tab is missing** — enable **Kubernetes** under **Settings
 → Integrations**. The flag applies immediately.
 
-**"Rancher node isn't configured" card** — set a GCP project and a Rancher
-bootstrap password under **Settings → Kubernetes**.
+**"Rancher node isn't configured" card** — the node's cloud has no credentials, or
+no Rancher bootstrap password is set. Add both under **Settings**.
 
-**Deploy job fails with a `403` / permission error** — the GCP service account is
-missing `compute.instances.create` or `compute.firewalls.*`. Re-run
-`setup-gcp.sh` or grant `roles/compute.admin`.
+**Deploy fails: "cannot be placed in \<region\>: … is not set for that region"** —
+the chosen region has no configured subnet (and, on AWS, no VPC). That is deliberate:
+falling back would put the node in the *default* region's network while the form, the
+job and the row all said otherwise. Run that cloud's sandbox setup for the region, or
+add a per-region config under **Settings → Multi-region**.
 
-**Node is RUNNING but the URL won't load** — the firewall is closed. Set
-`rancher_allowed_source_cidrs` to include your IP (the node fails closed by
-design) and redeploy to patch the rule.
+**Deploy job fails with a permission error** — the node's cloud is missing a
+permission. **GCP**: `compute.instances.create` or `compute.firewalls.*` — re-run
+`setup-gcp.sh` or grant `roles/compute.admin`. **AWS**: EC2 run/terminate or
+security-group authorize/revoke — re-run `setup-aws.sh` to refresh
+`dashboard-app-policy`. **Azure**: `Contributor` on the resource group — re-run
+`setup-azure.sh`.
+
+**Node is RUNNING but the URL won't load** — the node is closed. Set
+`rancher_allowed_source_cidrs` to include your IP (it fails closed by design) and
+redeploy to patch the rule. Check what is actually allowed with
+`GET /api/containers/rancher/firewall`, or the read-only allow-list on
+**Settings → Kubernetes**.
 
 **Deploy job fails waiting for Rancher** — two common causes, and the error names
 both. (1) **The node is up but the dashboard's egress IP isn't in the firewall** —
@@ -469,8 +568,22 @@ pool (e.g. Cloudflare WARP) egresses from multiple IPs while the firewall pins o
 `/32`. Set the pool's CIDR in `rancher_dashboard_egress_cidr` (e.g.
 `104.28.182.0/24`); detection keeps a containing CIDR intact.
 
-**Machine type rejected** — types under 4 GB (`e2-micro`, `e2-small`, …) are
-refused; use `e2-medium` or larger.
+**Machine type rejected** — GCE types under 4 GB (`e2-micro`, `e2-small`, …) are
+refused outright; use `e2-medium` or larger. On AWS and Azure the API accepts a small
+size and Rancher then OOMs instead, which looks like a readiness timeout — use at
+least `t3.medium` or `Standard_B2s`.
+
+**Azure: the node is RUNNING but nothing answers** — an Azure VM with a Standard
+public IP and no NSG rule denies *every* inbound packet, so this looks identical to a
+closed allow-list. Confirm the node's NSG (`<node>-allow-mgmt`) exists and carries an
+`allow-mgmt` inbound rule; a deploy whose ingress step failed leaves the VM up and
+unreachable.
+
+**AWS: the VPC won't delete after a teardown** — the node's security group is
+unreferenced but still present, and an orphaned group blocks a VPC delete with an
+opaque `DependencyViolation`. Teardown reclaims it once the instance releases its
+ENI, and the sandbox rollback sweeps any `*-allow-mgmt` group it finds; delete it by
+hand if both were interrupted.
 
 **Imported cluster stays "Pending" in Rancher** — the `cattle-cluster-agent`
 can't reach the node. Confirm the downstream cluster has egress to the node's

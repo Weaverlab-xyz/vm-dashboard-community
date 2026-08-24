@@ -10,6 +10,17 @@ dashboard runs across AWS, Azure, and GCP.
 | **Azure ACI** | a **container group**, one container per compose service | ✅ |
 | **GCP GCE** | a **Container-Optimized OS** VM running all services as a multi-container [konlet](https://cloud.google.com/container-optimized-os/docs) spec (Cloud Run Jobs are single-container, so a COS instance is used instead) | ✅ |
 
+The dashboard also runs three **managed single-container nodes** — the BeyondTrust
+Gateway, the Portainer server and the Rancher management plane. Those are not compose
+deploys and are not listed above, but they are the same idea (one container, one VM)
+and they all run on **AWS, Azure or GCP**, chosen per deploy:
+
+| Node | Doc | What it hosts |
+|---|---|---|
+| **Gateway** | [Gateway hosts](integrations/gateways.md) | the PRA broker every tunnel and jump goes through |
+| **Portainer server** | [Portainer](integrations/portainer.md) | Portainer CE, managing remote Docker hosts via Edge agents |
+| **Rancher node** | [Rancher](integrations/rancher.md) | the Kubernetes management plane every cluster is imported into |
+
 > **The PAM layer stack does not apply here.** Unlike [Cloud VMs](cloud-vms.md),
 > [Databases](databases.md), and [Kubernetes](kubernetes.md), a compose
 > deployment is an **ephemeral workload**, not a persistent access target — there is no PRA

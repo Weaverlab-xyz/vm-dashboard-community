@@ -11,9 +11,10 @@ hosts; each appears as its own environment/endpoint.)
 
 There are two ways to get one:
 
-- **Deploy a managed server** — the dashboard stands up Portainer CE for you on a
-  GCE Container-Optimized-OS VM, bootstraps it, and wires up the connection. This is
-  the same managed-service shape as the [Rancher node](rancher.md).
+- **Deploy a managed server** — the dashboard stands up Portainer CE for you on a VM
+  in **AWS, Azure or GCP** (you pick which), bootstraps it, and wires up the
+  connection. This is the same managed-service shape as the
+  [Rancher node](rancher.md).
 - **Connect your own** — point the dashboard at a Portainer server you already run,
   using a Personal Access Token.
 
@@ -42,77 +43,104 @@ topology is required beyond the dashboard being able to reach the Portainer URL.
 
 ### What gets created
 
-A single `portainer/portainer-ce` container on a **Container-Optimized-OS GCE VM**
-with a public, source-restricted IP (the konlet mechanism, same as the Rancher node):
+A single `portainer/portainer-ce` container on one VM with a public,
+source-restricted IP — the same shape as the [Rancher node](rancher.md):
 
 | Aspect | Detail |
 |---|---|
-| VM label | `purpose=portainer` (how the dashboard finds it) |
+| VM tag / label | `purpose=portainer` (how the dashboard finds it again) |
 | Ports | **9443** HTTPS UI/API, **8000** Edge agent tunnel |
 | Privileges | **Unprivileged**, no Docker socket — the server administers *remote* Docker hosts over the API, so it needs neither |
-| State | `/data` on the VM's boot disk, or on a persistent disk — see [Durable state](#durable-state) |
+| State | `/data` on the VM's own disk, or on a separate volume — see [Durable state](#durable-state) |
 | TLS | self-signed certificate on 9443 |
 
-> **By default the node is ephemeral.** The boot disk auto-deletes, so tearing the node
-> down — or recreating it — wipes `/data`: users, environments and settings are all
-> lost, and the external IP changes. Turn on [durable state](#durable-state) to keep
-> them.
+### The node, per cloud
+
+The container is identical everywhere. What differs is the machinery around it.
+
+| | AWS | Azure | GCP |
+|---|---|---|---|
+| Host | EC2, ECS-optimized AL2023 AMI (Docker preinstalled) | Ubuntu 22.04 VM | Container-Optimized OS VM |
+| Container started by | `docker run` from EC2 user-data | `docker run` from cloud-init | `gce-container-declaration` (konlet) |
+| Default size | `t3.small` | `Standard_B1s` | `e2-small` |
+| Ingress gate | a dedicated security group | a dedicated NSG on the NIC | a firewall rule targeting a network tag |
+| Durable `/data` | a gp3 EBS volume (`DeleteOnTermination=false`) | a managed disk (`delete_option=Detach`) | a persistent disk (`auto_delete=false`) |
+| Public IP | ephemeral | **static** — survives a recreate | ephemeral |
+
+> **By default the node is ephemeral.** Its disk is deleted with the VM, so tearing
+> the node down — or recreating it — wipes `/data`: users, environments and settings
+> are all lost. On GCP and AWS the external IP changes too, which additionally
+> invalidates every Edge key; **on Azure the address is static and survives**. Turn on
+> [durable state](#durable-state) to keep the data either way.
 
 ### Durable state
 
 Tick **Keep Portainer's data on a persistent disk** in **Settings → Containers**
-(`portainer_data_disk_enabled`) and `/data` moves to a separate disk named
-`<node-name>-data`, attached with `auto_delete=false`. A teardown then keeps the
-users, environments and settings, and the next deploy reattaches them.
+(`portainer_data_disk_enabled`) and `/data` moves to a separate volume named
+`<node-name>-data`, created so it outlives the VM. A teardown then keeps the users,
+environments and settings, and the next deploy reattaches them.
 
-The mount is a konlet `gcePersistentDisk` volume rather than a cloud-init mount unit,
-because konlet formats the disk (`mkfs.ext4` on a blank one, `fsck` on a used one),
-mounts it, and only *then* starts the container. There is no window in which Portainer
-could come up against an unmounted directory and write its database to the boot disk
-instead.
+**The container must not start before that volume is mounted.** If it does, Portainer
+writes its database to the VM's own disk and loses it on the next recreate — silently,
+with nothing in any log to say so. Each cloud reaches that guarantee differently:
 
-Four things follow from this, and they are the whole reason it is opt-in:
+| Cloud | How the ordering is guaranteed |
+|---|---|
+| GCP | a konlet `gcePersistentDisk` volume: konlet formats a blank disk (`mkfs.ext4`), `fsck`s a used one, mounts it, and only *then* starts the container |
+| Azure | the disk is attached at VM **create** time and its device path is deterministic, so cloud-init mounts it before the `docker run` |
+| AWS | an existing EBS volume **cannot** be attached by `run_instances`, so the attach lands after boot — user-data therefore **waits** for the device (up to 5 minutes, resolved via `/dev/disk/by-id` because Nitro renames it), mounts it, and refuses to start the container at all if it never arrives |
 
-- **The disk pins the node's zone.** A persistent disk is zonal and cannot attach
-  outside its own zone, so an existing disk overrides the region/zone pick and the
-  same-region capacity fallback is disabled. Deploying into a *different region* is
-  refused outright rather than silently landing back in the old one — move it with a
-  disk snapshot, or tear down with the disk deleted and rebuild.
-- **The external IP still changes.** Only `/data` is durable; the node takes a fresh
-  ephemeral IP on every recreate, so `portainer_url` is rewritten each deploy. This
-  matters for Edge agents — see [the warning below](#connect-a-docker-host-edge-agent).
-- **The admin password must be the one the disk already knows.** Portainer ignores
+On every cloud the format step is conditional on the volume having no filesystem, so a
+redeploy can never reformat the disk holding your only copy of the node's state.
+
+Four things follow from durable state, and they are the whole reason it is opt-in:
+
+- **The volume pins the node's zone.** A persistent disk, an EBS volume and a managed
+  disk are all zonal and cannot attach outside their own zone, so an existing one
+  overrides the region/zone pick and the same-region capacity fallback is disabled.
+  Deploying into a *different region* is refused outright rather than silently landing
+  back in the old one — move it with a snapshot, or tear down with the volume deleted
+  and rebuild.
+- **On GCP and AWS the external IP still changes.** Only `/data` is durable; the node
+  takes a fresh address on every recreate, so `portainer_url` is rewritten each
+  deploy. That matters for Edge agents — see
+  [the warning below](#connect-a-docker-host-edge-agent). **On Azure it does not**: the
+  Standard public IP is static, so joined agents keep checking in.
+- **The admin password must be the one the volume already knows.** Portainer ignores
   `--admin-password` once its database holds an admin, so a deploy onto an existing
-  disk keeps the *old* credential. Teardown therefore preserves
-  `portainer_admin_password` and `portainer_pat` whenever the disk is preserved. If the
-  disk exists but no password is stored, the deploy **fails up front** rather than
-  launching a node nobody can sign into.
-- **The disk keeps billing** until something deletes it. Teardown asks separately; see
-  [Teardown](#teardown).
+  volume keeps the *old* credential. Teardown therefore preserves
+  `portainer_admin_password` and `portainer_pat` whenever the volume is preserved. If
+  the volume exists but no password is stored, the deploy **fails up front** rather
+  than launching a node nobody can sign into.
+- **The volume keeps billing** until something deletes it. Teardown asks separately;
+  see [Teardown](#teardown).
 
 ### Prerequisites
 
 | Requirement | Notes |
 |---|---|
-| A configured GCP project | The node is a GCE VM; set it under **Settings → GCP** |
-| A region with a configured subnet | The node's subnet is regional — only configured regions are offered |
+| One configured cloud | AWS, Azure or GCP credentials under **Settings**. You pick which hosts the node on the deploy form |
+| Permissions for it | **GCP** `roles/compute.admin` (from `setup-gcp.sh`); **AWS** EC2 + security-group + EBS volume actions (all in `setup-aws.sh`'s `dashboard-app-policy`); **Azure** `Contributor` on the resource group (from `setup-azure.sh`) |
+| A region with a configured subnet | The node needs a public subnet, and a subnet is regional on every cloud — only configured regions are offered |
 | Allowed source CIDRs | Who may reach 9443/8000. Fail-closed: see [Firewall](#firewall) |
 
 ### Deploy
 
 1. Open **Containers → Portainer**. The **Managed Portainer server** panel is at
    the top.
-2. Optionally pick a **Region** and **Zone**. Blank region keeps the node's current
-   region (or the configured default); blank zone auto-picks the region's first
-   available zone, falling back to a sibling zone if that one is capacity-exhausted.
+2. Pick a **Cloud**, and optionally a **Region** (and a **Zone**, on GCP only). Blank
+   region keeps the node's current region; blank zone auto-picks the region's first
+   available one, falling back to a sibling if that is capacity-exhausted. The Zone
+   field is hidden on AWS and Azure because an EC2 subnet already pins its
+   availability zone and Azure has no zone in this shape.
 3. Click **Deploy Portainer server**. You land on the job page.
 
 The job runs on the durable worker (VM boot plus bootstrap outlasts a web timeout):
 
 | Step | What happens |
 |---|---|
-| Configuring firewall | Auto-detects the dashboard's public egress IP, merges it with your CIDRs, applies the rule. **Fails fast** if the merged set is empty |
-| Launching COS VM | Creates (or reuses/starts) the VM; relocates it if you picked a different region |
+| Configuring firewall | Auto-detects the dashboard's public egress IP, merges it with your CIDRs, applies the ingress rule. **Fails fast** if the merged set is empty |
+| Launching the node VM | Creates (or reuses/starts) the VM; relocates it if you picked a different region **or cloud** |
 | Waiting for Portainer | Polls `GET /api/system/status` until it serves |
 | Signing in as the admin user | The VM was launched with `--admin-password`, so the admin already exists |
 | Minting an API token | Logs in and creates a personal access token |
@@ -130,11 +158,17 @@ bcrypt hash (`--admin-password`), so Portainer initializes its admin at startup.
 is deliberate: Portainer only accepts `POST /api/users/admin/init` for a short window
 after the container starts, and once that window closes it answers *every* request with
 `administrator initialization timeout` — a node with no admin that nobody can log into
-until the container restarts. Initializing at boot means there is no window to lose. A
-node that is already in that state can't be repaired by redeploying (the launcher reuses
-a running VM, and the container declaration is only read at boot) — **delete the node
-and deploy again**; the job now says so instead of reporting a misleading
-"already had an admin user".
+until the container restarts. Initializing at boot means there is no window to lose.
+
+This holds on every cloud, and so does the way out of it: a node already in that state
+can't be repaired by redeploying, because the launcher reuses a running VM and the
+thing that carries `--admin-password` (the container declaration on GCP, user-data on
+AWS, cloud-init on Azure) is only read at boot. **Delete the node and deploy again**;
+the job says so instead of reporting a misleading "already had an admin user".
+
+> The hash travels in instance metadata / user-data, which is readable from inside the
+> VM. It is a bcrypt hash rather than the password, and it is the same exposure the GCE
+> path has always had — but it is why the node is given no other secret.
 
 ### PRA Web Jump (optional)
 
@@ -172,28 +206,46 @@ the fieldset stays hidden otherwise.
 ### Teardown
 
 **Stop** on the node row removes the PRA Web Jump (when one exists), deletes the VM
-and its firewall rule, then clears `portainer_url` and the node's other runtime config.
+and its ingress rule, then clears `portainer_url` and the node's other runtime config.
+On AWS it also reclaims the node's security group once the terminating instance
+releases it; on Azure it removes the NIC, the public IP and the NSG the VM owned.
 
-- **Without a data disk** all Portainer state goes with the VM, and the admin password
-  and API token are cleared too.
-- **With a data disk** the disk is *kept* by default and the credential keys are
+- **Without a data volume** all Portainer state goes with the VM, and the admin
+  password and API token are cleared too.
+- **With a data volume** the volume is *kept* by default and the credential keys are
   preserved with it, so the next deploy comes back with the same users, environments
-  and settings. A second confirmation offers to delete the disk as well — that is the
+  and settings. A second confirmation offers to delete the volume as well — that is the
   one part of a teardown that cannot be undone.
+
+> **The volume can outlive the sandbox.** Because it is meant to survive a teardown, it
+> can end up the only thing left in a region. The sandbox rollback scripts therefore
+> **refuse** to run while a managed node or an orphaned node volume is present, rather
+> than cascading over your only copy of the node's state.
 
 ### Firewall
 
-The node's ingress rule opens **tcp 9443 and 8000** to a merged source set:
+The node's ingress opens **tcp 9443 and 8000** to a merged source set:
 
 - `portainer_allowed_source_cidrs` — your manual CSV.
 - The dashboard's own public egress CIDR — auto-detected and saved on every deploy,
   because the worker bootstraps and polls the node over its public IP. If you egress
   from a proxy *pool*, set `portainer_dashboard_egress_cidr` to the pool's range by
   hand; detection will not clobber a broader range that already contains the detected IP.
+- A `/32` per dashboard-deployed Gateway, when the
+  [PRA Web Jump](#pra-web-jump-optional) is on.
 
-It is **fail-closed**: an empty merged set opens nothing, and deletes any existing
-rule. Set `gcp_portainer_allow_open` to open `0.0.0.0/0` when no CIDRs are set — a
-deliberate opt-in. **Settings → Containers** shows the live merged allow-list.
+It is **fail-closed** on every cloud — an empty merged set leaves the node unreachable
+— but the mechanism differs, because the three clouds do not offer the same primitive:
+
+| Cloud | Open | Closed |
+|---|---|---|
+| GCP | a firewall rule targeting the node's network tag | the rule is **deleted** |
+| AWS | a dedicated security group on the node's ENI | **every ingress permission is revoked** — a security group in use by a running instance cannot be deleted |
+| Azure | one allow rule in a dedicated NSG on the node's NIC | the **rule** is deleted; the NSG stays (it is attached to a live NIC, and a Standard public IP denies all inbound without a rule anyway) |
+
+Set that cloud's `*_portainer_allow_open` to open `0.0.0.0/0` when no CIDRs are set — a
+deliberate opt-in, per cloud. **Settings → Containers** shows the live merged
+allow-list.
 
 ---
 
@@ -217,11 +269,13 @@ certificate. Without it the agent's first poll fails certificate verification an
 environment simply never appears — with no error in a place you would think to look.
 
 > **The Edge key is shown once and is tied to the node's URL.** Portainer derives the
-> key from the node URL, its tunnel host and the new environment's id. The managed node
-> takes an **ephemeral external IP**, so recreating it changes the URL and every agent
-> joined beforehand stops being able to check in — which shows up as environments quietly
-> going offline, not as an error. The Containers page warns when the stored URL no longer
-> matches the running node; re-run **Generate join command** and re-join each host.
+> key from the node URL, its tunnel host and the new environment's id — so whether a key
+> survives a recreate depends on whether the address does. On **GCP and AWS** the node
+> takes an ephemeral address, so recreating it changes the URL and every agent joined
+> beforehand stops being able to check in — which shows up as environments quietly going
+> offline, not as an error. On **Azure** the Standard public IP is static, so joined
+> agents keep working. The Containers page warns when the stored URL no longer matches
+> the running node; when it does, re-run **Generate join command** and re-join each host.
 
 ---
 
@@ -368,15 +422,8 @@ on the run form is irrelevant — nothing is installed on it.
 | `portainer_dashboard_egress_cidr` | `""` | The dashboard's own egress CIDR; auto-detected on deploy |
 | `portainer_admin_password` | `""` | First-run admin password; blank auto-generates one |
 | `portainer_ready_timeout_s` | `300` | How long the deploy waits for Portainer to serve |
-| `gcp_portainer_image` | `portainer/portainer-ce:latest` | Server container image |
-| `gcp_portainer_machine_type` | `e2-small` | VM size — Portainer is light |
-| `gcp_portainer_name` | `portainer-server` | VM name |
-| `gcp_portainer_zone` | `""` | Blank auto-picks a zone in the region |
-| `gcp_portainer_boot_disk_gb` | `20` | COS boot disk (holds `/data` when no data disk; auto-deletes) |
-| `portainer_data_disk_enabled` | `false` | Put `/data` on a persistent disk that survives a teardown |
-| `gcp_portainer_data_disk_gb` | `10` | Size of that data disk |
-| `gcp_portainer_network_tag` | `portainer` | VM network tag = firewall target tag |
-| `gcp_portainer_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs are set |
+| `portainer_node_cloud` | `gcp` | `aws` \| `azure` \| `gcp` — which cloud hosts the node. Picked on the deploy form and rewritten to where it actually landed, so teardown and bare redeploys stay put. Defaults to `gcp` because every node deployed before this key existed is a GCE VM |
+| `portainer_data_disk_enabled` | `false` | Put `/data` on a separate volume that survives a teardown |
 | `portainer_ui_web_jump_enabled` | `false` | Broker the UI via a PRA Web Jump (opt-in) |
 | `portainer_ui_verify_certificate` | `false` | Web Jump TLS verification — off for the node's self-signed cert |
 | `portainer_ui_jump_group` | `""` | Jump Group for the Web Jump; blank = `bt_jump_group_name` |
@@ -384,6 +431,26 @@ on the run form is irrelevant — nothing is installed on it.
 | `portainer_ui_vault_account_group_id` | `""` | Vault account group the admin credential is stored in; blank = `bt_vault_account_group_id`, else the password is shown |
 | `portainer_ui_jumpoint_cloud` | `gcp` | Which managed Gateway host brokers the UI; its egress IP is auto-allowed |
 | `portainer_ui_jumpoint_egress_ip` | `""` | Captured egress IP of the SHARED Gateway (runtime-set; auto-added as a `/32`). Gateways you deploy yourself are read from the gateway registry instead, so every cluster node is allowed |
+
+### Per-cloud node keys
+
+One group per cloud, all optional — the defaults are usable. Only the group for the
+cloud the node runs on has any effect, which is why each cloud can keep its own.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `gcp_portainer_image` / `aws_portainer_image` / `azure_portainer_image` | `portainer/portainer-ce:latest` | Server container image |
+| `gcp_portainer_machine_type` | `e2-small` | GCE size — Portainer is light |
+| `aws_portainer_instance_type` | `t3.small` | EC2 size |
+| `azure_portainer_vm_size` | `Standard_B1s` | Azure size |
+| `gcp_portainer_name` / `aws_portainer_name` / `azure_portainer_name` | `portainer-server` | VM (or instance) name, and the base name of its ingress rule (`<name>-allow-mgmt`) and data volume (`<name>-data`) |
+| `gcp_portainer_boot_disk_gb` (20) / `aws_portainer_boot_disk_gb` (20) / `azure_portainer_boot_disk_gb` (30) | — | Boot / root / OS disk. Holds `/data` when no data volume is enabled, and is deleted with the VM |
+| `gcp_portainer_data_disk_gb` / `aws_portainer_data_disk_gb` / `azure_portainer_data_disk_gb` | `10` | Size of the durable data volume (a persistent disk, an EBS volume, a managed disk) |
+| `gcp_portainer_allow_open` / `aws_portainer_allow_open` / `azure_portainer_allow_open` | `false` | Open `0.0.0.0/0` on that cloud when no CIDRs are set |
+| `gcp_portainer_network_tag` | `portainer` | GCE network tag = the firewall rule's target. No analogue on AWS/Azure, where a dedicated security group / NSG *is* the scope |
+| `gcp_portainer_zone` | `""` | Blank auto-picks a zone in the region; overwritten on deploy with the actual one |
+| `aws_portainer_zone` | (runtime) | **Recorded, not chosen** — the availability zone the node (and so its data volume) landed in. The subnet pins it |
+| `azure_portainer_zone` | (runtime) | **Recorded, not chosen** — the location the node landed in, so a bare redeploy stays there |
 
 ---
 
@@ -398,8 +465,8 @@ is missing. Deploy a managed server, or fill both in under **Settings → Integr
 
 **Portainer shows "Your Portainer instance timed out for security purposes"** — the
 node's admin-initialization window closed before an admin was created, so the whole API
-is fenced off. A redeploy can't fix it (the running VM is reused, and the
-`--admin-password` declaration is only read at boot): **delete the node on the
+is fenced off. A redeploy can't fix it on any cloud (the running VM is reused, and
+whatever carries `--admin-password` is only read at boot): **delete the node on the
 Containers page and deploy again**. Nodes deployed by this version initialize their
 admin at startup and can't reach this state.
 
@@ -412,7 +479,25 @@ gateway, or add the IP to `portainer_allowed_source_cidrs`.
 **Deploy fails with "the Portainer node's firewall is closed"** — no allowed source
 CIDRs, and the dashboard couldn't auto-detect its own egress IP. Set
 `portainer_dashboard_egress_cidr` or `portainer_allowed_source_cidrs` in **Settings →
-Containers** — or enable `gcp_portainer_allow_open` — then redeploy.
+Containers** — or enable that cloud's `*_portainer_allow_open` — then redeploy.
+
+**Deploy fails: "cannot be placed in \<region\>: … is not set for that region"** — the
+chosen region has no configured subnet (and, on AWS, no VPC). That is deliberate:
+falling back would put the node in the *default* region's network while the form, the
+job and the row all said otherwise. Run that cloud's sandbox setup for the region, or
+add a per-region config under **Settings → Multi-region**.
+
+**Azure: the node is RUNNING but nothing answers on 9443** — an Azure VM with a
+Standard public IP and no NSG rule denies *every* inbound packet, which looks identical
+to a closed allow-list. Confirm the node's NSG (`<node>-allow-mgmt`) exists and carries
+an `allow-mgmt` inbound rule; a deploy whose ingress step failed leaves the VM up and
+unreachable.
+
+**AWS: the node came up but `/data` is empty on a durable redeploy** — the data volume
+never attached, so user-data refused to start the container rather than letting
+Portainer write to the root volume. Check the instance's console output for
+`node-data volume never appeared`, and that the volume is in the same availability zone
+as the subnet.
 
 **Deploy finishes but reports "the node already had an admin user"** — Portainer only
 allows first-run initialization while no admin exists, and closes that window shortly
@@ -445,10 +530,10 @@ uploaded. It cannot be imported directly (it only restores into a pristine Porta
 open it with a throwaway Portainer and export a bundle first.
 
 **A deploy fails with "the Portainer data disk … already exists"** — durable state is on
-and the disk holds an admin whose password isn't in Settings. Portainer ignores
+and the volume holds an admin whose password isn't in Settings. Portainer ignores
 `--admin-password` on an initialized database, so the node would come up with a password
-nobody knows. Set `portainer_admin_password` to the one the disk was created with, or
-delete the disk to start clean.
+nobody knows. Set `portainer_admin_password` to the one the volume was created with, or
+delete the volume to start clean. Same on all three clouds.
 
 **SSL certificate errors** — for self-signed certificates (including a managed node's)
 turn off **Verify SSL certificate** in the Portainer panel. For production, add your

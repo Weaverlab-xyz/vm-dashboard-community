@@ -192,11 +192,13 @@ Kubernetes" row in [Cloud Sandbox](CLOUD_SANDBOX.md).
 
 ## Management plane
 
-- **Central Rancher** (primary). A single privileged `rancher/rancher` container on a GCE
-  Container-Optimized-OS VM (not a cluster), deployed/torn down from **Containers → Kubernetes
-  (Rancher)**. Every managed cluster is **imported** — `cattle-cluster-agent` dials *out* to
-  the node's public, source-restricted URL, so private clusters on any cloud/on-prem work with
-  no inbound opening. Full setup + config table: [Rancher integration](integrations/rancher.md).
+- **Central Rancher** (primary). A single privileged `rancher/rancher` container on one VM
+  (not a cluster), hosted on **AWS, Azure or GCP** — you pick which at deploy time —
+  deployed/torn down from **Containers → Kubernetes (Rancher)**. Every managed cluster is
+  **imported**: `cattle-cluster-agent` dials *out* to the node's public, source-restricted
+  URL, so private clusters on any cloud/on-prem work with no inbound opening, whichever
+  cloud the node itself is in. Full setup + config table:
+  [Rancher integration](integrations/rancher.md).
 - **External Secrets Operator (ESO)** — `POST /clusters/{id}/secret-delivery` Helm-installs
   ESO + a BeyondTrust `ClusterSecretStore` that syncs **Password Safe → Kubernetes Secrets**
   (auth via the `pscli_*` OAuth client). This is the Kubernetes expression of the **Password
