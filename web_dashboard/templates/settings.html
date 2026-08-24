@@ -307,7 +307,11 @@
     </div>
 
     <!-- Body (scrollable) -->
-    <div class="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+    <!-- @input is delegated here so every masked field in every panel is covered by one
+         handler: secrets render empty, so the save needs to know which boxes were
+         actually typed into. See noteSecretEdit(). -->
+    <div class="flex-1 overflow-y-auto px-6 py-5 space-y-5"
+         @input="noteSecretEdit($event)">
 
       <!-- Loading -->
       <div x-show="panelLoading" class="text-sm text-gray-400 text-center py-8">Loading…</div>
@@ -4451,10 +4455,13 @@
               <label class="block text-sm font-medium text-gray-700 mb-1">Personal Access Token</label>
               <input type="password" x-model="panelCfg.wlc_pat" autocomplete="new-password"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                     placeholder="••••••••">
+                     :placeholder="(panelCfg._secrets_set || []).includes('wlc_pat')
+                                   ? '•••••••• stored — leave blank to keep'
+                                   : 'Paste the token'">
               <p class="text-[11px] text-gray-400 mt-1">
                 Created under <strong>Manage Profile → Personal Access Tokens</strong>. Stored
-                encrypted; leave blank to keep the existing value. A PAT is scoped to a single
+                encrypted; the box is always empty — leave it blank to keep the stored token,
+                type to replace it, or clear it to remove it. A PAT is scoped to a single
                 site. <strong>This is the one long-lived credential this feature still needs</strong>
                 — it replaces the per-cloud static keys rather than eliminating secrets entirely.
               </p>
@@ -4477,6 +4484,24 @@
               The version is sent as the mandatory <code>bt-secrets-api-version</code> header.
               A wrong value fails in a way that looks like an authentication error, so change it
               only when BeyondTrust says to.
+            </p>
+
+            <div class="mt-3 flex items-center gap-2">
+              <button type="button" @click="testWlcConnection()" :disabled="wlcTest.running"
+                      class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">
+                <span x-text="wlcTest.running ? 'Testing…' : 'Test connection'"></span>
+              </button>
+              <span x-show="wlcTest.ok === true" x-cloak
+                    class="text-xs text-green-700" x-text="wlcTest.message"></span>
+            </div>
+            <p x-show="wlcTest.ok === false" x-cloak
+               class="text-xs text-red-600 mt-2" x-text="wlcTest.error"></p>
+            <p class="text-[11px] text-gray-400 mt-1">
+              Authenticates with <code>GET /session</code> — it proves the token, the site ID and
+              the API version together without issuing a credential, so it is <strong>free</strong>
+              and safe to repeat. Tests the <strong>saved</strong> values, so save first. Unlike
+              Active credential source below, this asks BeyondTrust rather than replaying the last
+              stored result.
             </p>
           </div>
 
@@ -4946,6 +4971,9 @@ function settingsPage() {
     // Which credential posture each cloud is actually on. Explicitly fetched rather
     // than polled: it is a diagnostic an operator asks for after flipping a flag.
     wlcSources: { running: false, error: '', clouds: [] },
+    // Unmetered GET /session probe (Test connection in the Workload Credentials panel).
+    // Distinct from wlcSources: that reports stored lease state, this authenticates live.
+    wlcTest: { running: false, ok: null, error: '', message: '' },
 
     // ── Slide-over panel state ───────────────────────────────────────────
     panel: null,
@@ -4953,6 +4981,10 @@ function settingsPage() {
     panelSaving: false,
     panelError: '',
     panelCfg: {},
+    // Masked fields the operator typed into this time the panel was open. The server
+    // sends secrets back empty, so this is the only thing that tells a deliberately
+    // cleared box apart from one that was never touched.
+    panelSecretsTouched: [],
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
     agentAudience: null,     // read-only view of the pinned agent signing audience (Remote Agents panel)
     agentAudienceResetting: false,
@@ -5227,6 +5259,8 @@ function settingsPage() {
     async openPanel(intg) {
       this.panel = intg;
       this.panelCfg = {};
+      this.panelSecretsTouched = [];
+      this.wlcTest = { running: false, ok: null, error: '', message: '' };
       this.panelError = '';
       this.panelLoading = true;
       try {
@@ -5760,8 +5794,36 @@ function settingsPage() {
       }
     },
 
-    // Probe the saved issuer's discovery document. Deliberately reads the stored
-    // value rather than the form, so it tests what a login would actually use.
+    // Records which masked field an edit landed in. Delegated from the panel body so a
+    // new secret input is covered automatically instead of needing its own handler; the
+    // field name comes off x-model, which Alpine leaves on the element.
+    noteSecretEdit(ev) {
+      const el = ev.target;
+      if (!el || el.type !== 'password') return;
+      const model = el.getAttribute('x-model') || '';
+      // Only panelCfg-bound inputs: the notification editor binds notif.draft.secret and
+      // owns its own keep/clear contract.
+      if (!model.startsWith('panelCfg.')) return;
+      const field = model.slice('panelCfg.'.length);
+      if (field && !this.panelSecretsTouched.includes(field)) {
+        this.panelSecretsTouched.push(field);
+      }
+    },
+
+    // Authenticate against Workload Credentials for real. Unmetered, so it costs
+    // nothing to press. Reads the SAVED config, not the form — save before testing.
+    async testWlcConnection() {
+      this.wlcTest = { running: true, ok: null, error: '', message: '' };
+      try {
+        const r = await API.post('/api/secrets/wlc/test', {});
+        this.wlcTest = { running: false, ok: true, error: '', message: r.message || 'Connected.' };
+      } catch (e) {
+        this.wlcTest = { running: false, ok: false, error: e.message || String(e), message: '' };
+      }
+    },
+
+    // Read back the stored lease state for each cloud. Note this does NOT authenticate:
+    // it reports what the last mint recorded, which is why testWlcConnection() exists.
     async checkWlcSources() {
       this.wlcSources = { running: true, error: '', clouds: [] };
       try {
@@ -5809,10 +5871,26 @@ function settingsPage() {
       this.panelSaving = true;
       this.panelError = '';
       try {
-        await API.patch(`/api/setup/feature/${this.panel.key}`, {
-          enabled: this.panel.enabled,
-          ...this.panelCfg,
-        });
+        const body = { enabled: this.panel.enabled, ...this.panelCfg };
+        // Describe-the-secrets metadata, not config values.
+        delete body._secret_fields;
+        delete body._secrets_set;
+        // A non-empty masked box can only have come from typing, so count it as edited
+        // even if noteSecretEdit missed it. That keeps the case this whole contract
+        // exists for — "I pasted a new token and Save did nothing" — working without
+        // depending on the edit handler being able to read x-model off the element.
+        const secretFields = this.panelCfg._secret_fields || [];
+        const typed = secretFields.filter(f => (this.panelCfg[f] || '') !== '');
+        const edited = [...new Set([...this.panelSecretsTouched, ...typed])];
+        // Leave every unedited masked field out of the payload entirely, so a blank box
+        // the operator never visited cannot overwrite a stored credential. Sending
+        // _secrets_touched tells the server this panel is touch-aware, which is what
+        // lets a box the operator DID clear still erase the value.
+        for (const f of secretFields) {
+          if (!edited.includes(f)) delete body[f];
+        }
+        body._secrets_touched = edited;
+        await API.patch(`/api/setup/feature/${this.panel.key}`, body);
         this.showToast(`${this.panel.label} configuration saved.`);
         this.panel = null;
       } catch (e) {

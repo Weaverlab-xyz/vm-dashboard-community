@@ -444,7 +444,13 @@ def test_every_bound_panel_field_is_declared_on_the_model():
     import re
     declared = set(_model_fields())
     bound = set(re.findall(r"panelCfg\.([a-z_0-9]+)", _panel_html()))
-    extra = sorted(bound - declared)
+    # Underscore-prefixed keys are panel metadata _read_feature adds to describe the
+    # fields (which are secret, which already hold a value); savePanelConfig strips them
+    # before the PATCH. Allowlisted by name so the prefix can't hide a real config key.
+    meta = {k for k in bound if k.startswith("_")}
+    assert not (meta - {"_secret_fields", "_secrets_set"}), \
+        f"unknown panelCfg metadata key: {sorted(meta - {'_secret_fields', '_secrets_set'})}"
+    extra = sorted(bound - meta - declared)
     assert not extra, f"bound in settings.html but not declared on the model: {extra}"
 
 
@@ -663,6 +669,55 @@ def test_list_wlc_skips_entries_that_are_not_static():
     src = _read("web_dashboard", "services", "secrets_backend_service.py")
     body = src.split("def list_wlc", 1)[1].split("\ndef ", 1)[0]
     assert '"static"' in body
+
+
+# ── The panel's live auth check ───────────────────────────────────────────────
+#
+# Source-level, because this file loads the service by path and never builds the
+# FastAPI app. The point of the endpoint is diagnostic: /credential-sources replays the
+# last recorded lease error out of the database, so a revoked PAT, a mistyped folder and
+# a stale row all render identically, and the error text can outlive the problem. This
+# is the only surface that actually asks BeyondTrust.
+
+
+def test_test_connection_uses_the_unmetered_session_endpoint():
+    """`GET /session` authenticates without issuing anything. Swapping it for a mint
+    would put a BILLED call behind a button an operator is invited to press repeatedly."""
+    import ast
+    src = _read("web_dashboard", "services", "workload_credentials_service.py")
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef) and n.name == "test_connection")
+    body = ast.get_source_segment(src, fn)
+    assert '"/session"' in body, "test_connection must probe /session"
+    assert "generate" not in body, "a connection test must never mint a metered credential"
+
+
+def test_the_panel_route_is_exposed_and_off_the_hot_path():
+    src = _read("web_dashboard", "api", "secrets.py")
+    assert '@router.post("/wlc/test")' in src, \
+        "the Workload Credentials panel has no live auth check"
+    assert "asyncio.to_thread(wlc.test_connection)" in src, \
+        "test_connection is sync and does network I/O — it must not block the event loop"
+    assert "_require_admin(request)" in src
+
+
+def test_the_panel_has_a_test_connection_button():
+    html = _read("web_dashboard", "templates", "settings.html")
+    assert "testWlcConnection()" in html, "no button calls the probe"
+    assert "/api/secrets/wlc/test" in html, "the button posts to the wrong path"
+
+
+def test_the_pat_field_is_never_prefilled_with_a_mask():
+    """A masked value in a type=password box is indistinguishable from an empty one, so
+    pasting into it appends to the mask and the save silently drops the field. This is
+    the bug that made a wrong PAT look unfixable — the box must render genuinely empty."""
+    html = _read("web_dashboard", "templates", "settings.html")
+    pat = next(line for line in html.splitlines() if "panelCfg.wlc_pat" in line)
+    assert "x-model" in pat and "type=\"password\"" in pat
+    # A :placeholder (bound) is fine — it renders only while the field is empty. A plain
+    # value= or a static bullet placeholder standing in for a stored token is not.
+    assert ":placeholder" in pat or "placeholder" not in pat, \
+        "the stored-token hint must be a bound placeholder, not a pre-filled value"
 
 
 if __name__ == "__main__":

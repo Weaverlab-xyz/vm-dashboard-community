@@ -195,6 +195,38 @@ async def get_credential_sources(request: Request):
     return {"clouds": out}
 
 
+@router.post("/wlc/test")
+async def test_workload_credentials(request: Request):
+    """Authenticate against Workload Credentials without issuing a credential.
+
+    ``GET /session`` validates the PAT, the site id and the API version in one call and
+    is **unmetered**, so this is free to press repeatedly — unlike a dynamic issuance,
+    which is billed.
+
+    Exists because nothing else on the panel answers "is my token good?".
+    ``/credential-sources`` replays the *last recorded* lease error out of the database,
+    so a revoked PAT, a mistyped folder and a stale row all render the same, and the
+    error text can outlive the problem entirely. Until now the only way to separate them
+    was the curl in the integration guide's Troubleshooting section.
+
+    Tests what is **saved**, not what is typed in the form — the same contract as the
+    OIDC discovery probe, and the only one that matches what a real mint would use.
+    """
+    _require_admin(request)
+    from ..services import workload_credentials_service as wlc
+    if not wlc.configured():
+        raise HTTPException(
+            status_code=400,
+            detail="Set the site ID and Personal Access Token, save, then test.")
+    try:
+        return await asyncio.to_thread(wlc.test_connection)
+    except wlc.WorkloadCredentialsError as exc:
+        # 502: the dashboard is fine, the upstream answer was not. The message carries
+        # BeyondTrust's own coded wording, which is the part that distinguishes a
+        # revoked token from a wrong site — so it must reach the operator intact.
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @router.get("/config")
 async def get_backend_config(request: Request):
     _require_admin(request)

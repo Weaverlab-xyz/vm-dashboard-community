@@ -49,12 +49,15 @@ def _install_config_stub():
 
 _install_config_stub()
 try:
-    from web_dashboard.api.setup import (_read_feature, _CONFIG_ONLY_FEATURES,
-                                         _FEATURE_MODELS, AnsibleFeatureConfig,
+    from web_dashboard.api.setup import (_read_feature, _write_feature,
+                                         _CONFIG_ONLY_FEATURES,
+                                         _FEATURE_MODELS, _SECRET_FEATURE_KEYS,
+                                         AnsibleFeatureConfig,
                                          CostExplorerFeatureConfig,
                                          K8sManagementFeatureConfig,
                                          PortainerFeatureConfig,
-                                         ResourceExpiryFeatureConfig)
+                                         ResourceExpiryFeatureConfig,
+                                         WorkloadCredentialsFeatureConfig)
 except Exception as exc:  # pragma: no cover — skip if fastapi/pydantic/app deps missing
     try:
         import pytest
@@ -183,16 +186,29 @@ def test_every_bound_panel_key_exists_on_some_feature_model():
     panel's model still round-trips, a key on no model at all cannot.
     """
     html = open(_SETTINGS_HTML, encoding="utf-8").read()
-    # The regex only sees dotted access. That is complete today, but would silently skip
-    # anything written panelCfg["key"] — fail loudly instead of quietly under-checking.
-    assert "panelCfg[" not in html, \
-        "settings.html gained bracket-style panelCfg access; teach this test to read it"
+    # The regex only sees dotted access, so a LITERAL bracket key would slip past it —
+    # fail loudly instead of quietly under-checking. Dynamic access (panelCfg[someVar])
+    # is fine and deliberately allowed: savePanelConfig iterates the secret-field list
+    # that _read_feature sends, so those keys are model fields by construction and there
+    # is no literal here for this sweep to check.
+    literal_bracket = re.findall(r"panelCfg\[\s*['\"]", html)
+    assert not literal_bracket, \
+        "settings.html gained literal bracket-style panelCfg access; teach this test to read it"
     bound = set(re.findall(r"panelCfg\.([A-Za-z_][A-Za-z_0-9]*)", html))
     assert len(bound) > 200, f"only found {len(bound)} bound keys — did the regex break?"
+    # Underscore-prefixed keys are panel METADATA that _read_feature adds alongside the
+    # config values — they describe the fields rather than being one, and savePanelConfig
+    # strips them before the PATCH. Allowlisted by name rather than by the prefix alone,
+    # so the convention can't become a hole a real config key hides in.
+    _PANEL_META = {"_secret_fields", "_secrets_set"}
+    meta = {k for k in bound if k.startswith("_")}
+    assert not (meta - _PANEL_META), (
+        "settings.html reads an unknown panelCfg metadata key; add it to _PANEL_META "
+        f"here and make sure savePanelConfig strips it: {sorted(meta - _PANEL_META)}")
     fields = {f for model in _FEATURE_MODELS.values() for f in model.model_fields}
-    assert not (bound - fields), (
+    assert not (bound - meta - fields), (
         "bound in settings.html but declared on no feature model, so the value is "
-        f"discarded on save: {sorted(bound - fields)}")
+        f"discarded on save: {sorted(bound - meta - fields)}")
 
 
 def test_promote_runner_keys_match_the_storage_api():
@@ -459,6 +475,131 @@ def test_rancher_ui_web_jump_values_are_preserved():
         K8sManagementFeatureConfig(**data)
     finally:
         CONF.clear()
+
+
+# ── Masked fields: empty on read, and only written when actually edited ───────
+#
+# The Workload Credentials PAT is the worked example. _read_feature used to emit
+# "••••••••" for a set secret, which in a type=password box is pixel-identical to an
+# empty one — so an operator who clicked in and pasted produced "••••••••<token>",
+# _write_feature dropped it as a placeholder, and the PATCH returned 200 having changed
+# nothing. A save that silently does nothing is the worst possible outcome for the one
+# field that was already suspected of being wrong.
+
+
+def _capture_writes():
+    """Swap set_many for a recorder; returns the dict it writes into."""
+    import web_dashboard.services as svc_pkg
+    written = {}
+    svc_pkg.config_service.set_many = lambda pairs: written.update(pairs)
+    return written
+
+
+def test_secrets_read_back_empty_never_masked():
+    """No bullets, no plaintext — and the companion lists say which fields are secret
+    and which already hold a value, which is what the mask used to convey."""
+    CONF.clear()
+    CONF["wlc_pat"] = "super-secret-token"
+    CONF["wlc_site_id"] = "site-guid"
+    try:
+        data = _read_feature("workload_credentials", WorkloadCredentialsFeatureConfig)
+    finally:
+        CONF.clear()
+
+    assert data["wlc_pat"] == "", "a secret must never round-trip to the browser"
+    assert "••" not in str(data), "the bullet mask is what made an appended paste possible"
+    assert "wlc_pat" in data["_secret_fields"]
+    assert "wlc_pat" in data["_secrets_set"], "a stored secret must still be advertised as set"
+    assert "wlc_site_id" not in data["_secret_fields"], "non-secrets must stay editable"
+    assert data["wlc_site_id"] == "site-guid"
+    # The metadata must not break the PATCH round-trip this file exists to protect.
+    WorkloadCredentialsFeatureConfig(**{k: v for k, v in data.items()
+                                        if k in WorkloadCredentialsFeatureConfig.model_fields})
+
+
+def test_an_unset_secret_is_not_advertised_as_stored():
+    CONF.clear()
+    try:
+        data = _read_feature("workload_credentials", WorkloadCredentialsFeatureConfig)
+    finally:
+        CONF.clear()
+    assert data["_secrets_set"] == [], "nothing is stored, so the panel must not claim it is"
+    assert "wlc_pat" in data["_secret_fields"]
+
+
+def test_an_untouched_blank_secret_is_left_alone():
+    """The save sends every field. Without the touch list a blank PAT box would erase a
+    working token on any unrelated edit — e.g. changing the refresh margin."""
+    written = _capture_writes()
+    _write_feature("workload_credentials",
+                   {"wlc_pat": "", "wlc_site_id": "site-guid"},
+                   touched=set())
+    assert "wlc_pat" not in written, "an untouched secret must not be written at all"
+    assert written.get("wlc_site_id") == "site-guid", "non-secrets still save normally"
+
+
+def test_a_touched_blank_secret_still_clears_it():
+    """The other half of the contract: clearing the box must remain a real way to
+    remove a stored credential, or the touch list would just be a one-way lock."""
+    written = _capture_writes()
+    _write_feature("workload_credentials", {"wlc_pat": ""}, touched={"wlc_pat"})
+    assert written.get("wlc_pat") == "", "a deliberately emptied box must clear the value"
+
+
+def test_a_touched_secret_is_written():
+    written = _capture_writes()
+    _write_feature("workload_credentials", {"wlc_pat": "new-token"}, touched={"wlc_pat"})
+    assert written.get("wlc_pat") == "new-token"
+
+
+def test_a_stale_panel_can_never_wipe_a_secret():
+    """No touch list means the caller predates this contract — a browser holding the
+    previous page, which renders secrets empty now and would post them blank. Erring
+    towards keeping the credential is the only safe direction."""
+    written = _capture_writes()
+    _write_feature("workload_credentials", {"wlc_pat": "", "wlc_site_id": "site-guid"})
+    assert "wlc_pat" not in written
+    assert written.get("wlc_site_id") == "site-guid"
+
+
+def test_the_old_bullet_sentinel_is_still_refused():
+    """A cached panel may still post the mask. Storing it would leave a key that looks
+    configured and fails at cloud-call time."""
+    written = _capture_writes()
+    _write_feature("workload_credentials", {"wlc_pat": "••••••••"}, touched={"wlc_pat"})
+    assert "wlc_pat" not in written, "the literal mask must never be persisted"
+
+
+def test_the_panel_omits_untouched_secrets_and_declares_the_touch_list():
+    """The server contract only holds if the client actually implements its half."""
+    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    assert "_secrets_touched" in html, "the panel must tell the server it is touch-aware"
+    assert "noteSecretEdit" in html, "nothing would populate the touch list"
+    assert "delete body._secret_fields" in html and "delete body._secrets_set" in html, \
+        "panel metadata must be stripped before the PATCH"
+    # A typed value must save even if the delegated edit handler never fired — that is
+    # the exact failure this whole contract exists to prevent, so it must not hinge on
+    # noteSecretEdit being able to read x-model back off the element.
+    assert "const typed = secretFields.filter" in html, \
+        "a non-empty secret box must be treated as edited regardless of the touch list"
+
+
+def test_every_secret_input_is_reachable_by_the_delegated_handler():
+    """noteSecretEdit derives the field from x-model, so a panelCfg-bound password input
+    with no x-model would silently never register an edit — and would then be
+    unsavable. Pin that every masked panel input still carries one."""
+    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    inputs = re.findall(r"<input\b[^>]*type=\"password\"[^>]*>", html)
+    assert len(inputs) > 15, f"only found {len(inputs)} password inputs — did the regex break?"
+    missing = [i for i in inputs if "x-model" not in i]
+    assert not missing, f"password input with no x-model: {missing}"
+
+
+def test_secret_keys_the_panel_masks_are_the_ones_setup_declares():
+    """_read_feature masks by _SECRET_FEATURE_KEYS, so a credential field missing from
+    that set is returned to the browser in plaintext."""
+    for name in ("wlc_pat", "oidc_client_secret", "entitle_api_token"):
+        assert name in _SECRET_FEATURE_KEYS, f"{name} would be sent to the browser in the clear"
 
 
 if __name__ == "__main__":
