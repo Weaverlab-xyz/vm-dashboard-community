@@ -483,10 +483,11 @@ those databases provision and get a tunnel, but no Password Safe onboarding. GCP
 | **Afterwards** | The row's **Register in Password Safe** action (and **Remove** to undo it). | The same three steps against a database that already exists. Async — enqueues a `clouddb_ps_register` job; watch it in Jobs. |
 
 The row action is what you want for a database provisioned before Password Safe was
-configured. It is offered only for a **dashboard-provisioned AWS or Azure** database that
+configured. It is offered only for a **dashboard-provisioned AWS, Azure or GCP** database that
 is `available` and not already onboarded — a *registered* database has no admin credential
 stored here to create the managed user with, so onboard it in Password Safe directly and
-use **Import from Password Safe** instead.
+use **Import from Password Safe** instead. GCP additionally covers PostgreSQL and MySQL
+only; see that section.
 
 > **The row action re-brokers the PRA tunnel.** Password Safe rotates the *managed user*,
 > and the PRA Vault mirror pushes each rotation into the vaulted credential the tunnel
@@ -650,14 +651,26 @@ AWS keys above):
 
 ### GCP — `dbgcp` (Cloud SQL Data API)
 
-> **Not functional yet.** The three `.PSPLUGIN` packages install, and their address and
-> functional-account parsing, capability pre-flight and action surface are real — but the
-> channel transports are still stubs. A rotation or verify returns *"the 'data-api'
-> channel is not implemented in this build"* rather than succeeding. Everything below is
-> wired and testable up to that boundary; `passwordsafe_gcp_db_registration_method` ships
-> **`off`** for exactly this reason. Turning it on early is still useful: reaching that
-> message proves the address parsed, the functional account parsed, the platform bound
-> and the pre-flight passed.
+> **`data-api` is not functional yet.** The `.PSPLUGIN` packages install, and their
+> address and functional-account parsing, capability pre-flight and action surface are
+> real, but the channel transports have shipped in a different order than planned:
+>
+> | Channel | State |
+> |---|---|
+> | `cloud-run` | **Built, SQL Server only.** Not yet exercised against a live instance. **The dashboard does not drive this channel yet** — see below. |
+> | `data-api` | Interface-complete, not wired to GCP. Returns *"not implemented in this build"*. |
+> | `admin-api` | Same. |
+>
+> What the dashboard wires today is **`data-api` for PostgreSQL and MySQL**, so a rotation
+> returns that message rather than succeeding, and
+> `passwordsafe_gcp_db_registration_method` ships **`off`** for exactly that reason.
+> Turning it on early is still useful: reaching that message proves the address parsed,
+> the functional account parsed, the platform bound and the pre-flight passed.
+>
+> Driving `cloud-run` — which is what unlocks SQL Server, *Verify Managed Account* and
+> self-rotation — is deliberate follow-on work: it needs the Cloud Run service deployed
+> (the plugin repo ships a `ps-dbops-sqlserver` Terraform module for it), a stable custom
+> audience in address field 4, and the SSL flag in field 5.
 
 Unlike the other two clouds there is **no jump host**. The **`GCP Cloud SQL {engine}`**
 plugins reach a private-IP instance through Google's own control plane — the Cloud SQL

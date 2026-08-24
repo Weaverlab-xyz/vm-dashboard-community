@@ -1159,9 +1159,18 @@ def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
 # Clouds whose DB plugin the dashboard can actually drive. AWS = the "{engine} SSM
 # Custom Plugin", reached with SendCommand to the shared Gateway host; Azure = the
 # "{engine} Azure Run Command Plugin", reached with Run Command on the ref-counted
-# clouddb-jumpoint VM. GCP and OCI have no equivalent transport into a private managed
-# database, so there is nothing to onboard them WITH — not a switch that is off.
-_PS_ONBOARDING_CLOUDS = ("aws", "azure")
+# clouddb-jumpoint VM; GCP = the "GCP Cloud SQL {engine}" plugins, which need no
+# transport into the VPC at all — they reach a private-IP instance through Google's
+# control plane (the Cloud SQL Data API). OCI has no equivalent, so there is nothing to
+# onboard it WITH — not a switch that is off.
+_PS_ONBOARDING_CLOUDS = ("aws", "azure", "gcp")
+
+# Engines each cloud's plugin set can actually manage. Cloud SQL for SQL Server supports
+# IAM database authentication for instance and backup operations only, never for database
+# operations — so the data-api channel would need the functional account's password
+# mirrored into Secret Manager and re-synced on every rotation. That is a property of the
+# platform, not a switch, which is why it lives with the structural blockers.
+_PS_ONBOARDING_ENGINES = {"gcp": ("postgres", "mysql")}
 
 
 def _ps_ineligible_reason(row: CloudDatabase) -> Optional[str]:
@@ -1180,10 +1189,17 @@ def _ps_ineligible_reason(row: CloudDatabase) -> Optional[str]:
                 "to create the rotatable managed user with — onboard it in Password "
                 "Safe directly, then use Import from Password Safe to record it.")
     if (row.cloud or "") not in _PS_ONBOARDING_CLOUDS:
-        return (f"Password Safe onboarding needs a plugin transport into the private "
-                f"database — AWS Systems Manager or Azure Run Command. "
-                f"{(row.cloud or 'this cloud').upper()} has neither, so there is no "
+        return (f"Password Safe onboarding needs a way into the private database — AWS "
+                f"Systems Manager, Azure Run Command, or the GCP Cloud SQL Data API. "
+                f"{(row.cloud or 'this cloud').upper()} has none of them, so there is no "
                 f"supported path for it yet.")
+    engines = _PS_ONBOARDING_ENGINES.get(row.cloud or "")
+    if engines and (row.engine or "") not in engines:
+        return (f"{(row.cloud or '').upper()} Password Safe onboarding covers "
+                f"{' and '.join(engines)} only. Cloud SQL for SQL Server has no IAM "
+                f"database authentication, so the functional account would need a stored "
+                f"password mirrored into Secret Manager — a second authority for the "
+                f"credential Password Safe exists to own.")
     return None
 
 
@@ -1831,6 +1847,9 @@ async def _ps_onboard_post_hoc(db: Session, *, row: CloudDatabase, job_id: str) 
     if row.cloud == "azure":
         ctx = await _create_db_managed_user_azure(
             db, row=row, job_id=prov_job.id, engine=engine, tf_variables=tf_variables)
+    elif row.cloud == "gcp":
+        ctx = await _create_db_managed_user_gcp(
+            db, row=row, job_id=prov_job.id, engine=engine, tf_variables=tf_variables)
     else:
         ctx = await _create_db_managed_user(
             db, row=row, job_id=prov_job.id, engine=engine, tf_variables=tf_variables)
@@ -1914,8 +1933,8 @@ async def run_ps_register(db: Session, *, db_id: str, job_id: str,
                 raise CloudDatabaseError(
                     "Password Safe database onboarding is not enabled for this cloud — "
                     "see Settings → Integrations → Password Safe "
-                    "(clouddb_ps_onboarding_enabled, and for Azure the onboarding "
-                    "method must not be 'off')")
+                    "(clouddb_ps_onboarding_enabled, and for Azure and GCP the "
+                    "per-cloud onboarding method must not be 'off')")
             if row.status != "available":
                 raise CloudDatabaseError(
                     f"database is {row.status!r} — Password Safe onboarding needs a "
