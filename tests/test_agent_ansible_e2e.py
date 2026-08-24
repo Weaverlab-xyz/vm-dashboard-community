@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import tarfile
+from urllib.parse import unquote
 import tempfile
 import textwrap
 
@@ -77,6 +78,8 @@ class Engine:
         self.calls = []
         self.created = None
         self.archives = []
+        self.real_archive_put = agent._archive_put
+        self.put_url = self.put_body = self.put_dest = None
         self.exit_code = exit_code
         self.lines = lines
         self.create_status = create_status
@@ -115,28 +118,66 @@ class Engine:
                 on_line(bytes(held[:nl]).decode())
                 del held[:nl + 1]
 
-    def archive_put(self, container, files):
+    def archive_put(self, container, dest, files):
+        """Stand in for the daemon's archive endpoint, INCLUDING its read-only rule.
+
+        The real ``_archive_put`` runs — only the socket is replaced — because the bug this
+        models lived in the request it builds. A container created with ``ReadonlyRootfs``
+        refuses an extract that does not resolve into a mount, created or running, and the
+        daemon decides that from HostConfig alone: every Config-Management run on every host
+        died at this call with a 400 until the job dir became a volume. A fake that simply
+        recorded the files could not have shown it, and did not.
+        """
         self.archives.append(files)
-        # Prove the tar the real implementation would build is actually well-formed.
-        blob = io.BytesIO()
-        with tarfile.open(fileobj=blob, mode="w") as tar:
-            seen = set()
-            for p, content in files.items():
-                parts = p.strip("/").split("/")[:-1]
-                for i in range(len(parts)):
-                    d = "/".join(parts[:i + 1])
-                    if d in seen:
-                        continue
-                    seen.add(d)
-                    info = tarfile.TarInfo(d)
-                    info.type = tarfile.DIRTYPE
-                    info.mode = 0o700
-                    tar.addfile(info)
-                info = tarfile.TarInfo(p.strip("/"))
-                info.size = len(content)
-                info.mode = 0o600
-                tar.addfile(info, io.BytesIO(content))
-        blob.seek(0)
+        eng = self
+
+        class _Resp:
+            def __init__(self, status, body):
+                self.status, self._body = status, body
+
+            def read(self):
+                return self._body
+
+        class _Conn:
+            def __init__(self, path, timeout=60.0):
+                pass
+
+            def request(self, method, url, body=None, headers=None):
+                eng.put_url, eng.put_body = url, body
+                target = unquote(url.split("path=", 1)[1])
+                eng.put_dest = target
+                host = (eng.created or {}).get("HostConfig") or {}
+                mounts = [m.get("Target", "") for m in (host.get("Mounts") or [])]
+                covering = [t for t in mounts
+                            if target == t or target.startswith(t.rstrip("/") + "/")]
+                if host.get("ReadonlyRootfs") and not covering:
+                    self._resp = _Resp(
+                        400, b'{"message":"container rootfs is marked read-only"}')
+                    return
+                # A tmpfs would take the PUT and then lose it: the daemon mounts it empty
+                # at start, over the top of what was just extracted. Proven against a real
+                # dockerd, and silent — the run fails as "playbook not found".
+                for m in (host.get("Mounts") or []):
+                    if m.get("Target") in covering and m.get("Type") == "tmpfs":
+                        raise AssertionError(
+                            f"{target} is a tmpfs mount, so the files extracted into it are "
+                            f"discarded when the container starts. It must be a volume.")
+                self._resp = _Resp(204, b"")
+
+            def getresponse(self):
+                return self._resp
+
+            def close(self):
+                pass
+
+        orig = agent._UnixHTTP
+        agent._UnixHTTP = _Conn
+        try:
+            self.real_archive_put(container, dest, files)
+        finally:
+            agent._UnixHTTP = orig
+
+        blob = io.BytesIO(self.put_body)
         with tarfile.open(fileobj=blob) as tar:
             self.tar_names = tar.getnames()
             for m in tar.getmembers():
@@ -226,7 +267,16 @@ check("playbook written", "opt/job/playbook.yml" in files, sorted(files))
 check("inventory written", "opt/job/inventory.json" in files, sorted(files))
 check("key written", "opt/job/id_rsa" in files, sorted(files))
 check("vars written", "opt/job/secret_vars.json" in files, sorted(files))
-check("tar has parent dirs", "opt" in eng.tar_names and "opt/job" in eng.tar_names, eng.tar_names)
+check("the extract targets the job dir, not /", eng.put_dest == "/opt/job", eng.put_dest)
+check("tar members are relative to it",
+      "playbook.yml" in eng.tar_names and not any(n.startswith("opt") for n in eng.tar_names),
+      eng.tar_names)
+check("the job dir is a mount, or the daemon refuses the extract",
+      {"Type": "volume", "Target": "/opt/job"} in eng.created["HostConfig"]["Mounts"],
+      eng.created["HostConfig"].get("Mounts"))
+check("the mount is anonymous — no host path",
+      all(not m.get("Source") for m in eng.created["HostConfig"]["Mounts"]),
+      eng.created["HostConfig"]["Mounts"])
 
 inv = json.loads(files["opt/job/inventory.json"])["all"]["hosts"]["target"]
 check("inventory pins the resolved ip", inv["ansible_host"] == "127.0.0.1", inv)

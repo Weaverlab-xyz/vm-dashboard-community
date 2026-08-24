@@ -1124,6 +1124,15 @@ string at 128 KB on a 4 KB-page host and 2 MB on a 64 KB-page arm64 one, so an e
 playbook works on the machine it was developed on and fails on a customer's with `argument
 list too long`. Files land mode 0600 and appear in no `docker inspect` output.
 
+They are extracted into `/opt/job`, which is an **anonymous volume** — the one addition to
+that otherwise mount-free spec, and not optional. The Engine refuses an archive extract with
+`400 container rootfs is marked read-only` on any container whose `HostConfig` sets
+`ReadonlyRootfs`, unless the destination resolves into a mount; it decides that from
+`HostConfig` alone, so extracting before the container starts does not get around it. The
+volume is anonymous, so it still names no path on your host, and it is removed with the
+container. A `tmpfs` will not do in its place: it accepts the extract and is then mounted
+empty over the top of it at start, which loses the run's files with no error at all.
+
 Output **streams** into the existing Live Output pane, and the existing **Cancel** button
 works: a watcher sends SIGTERM to the container, then SIGKILL after ten seconds. There is
 also a wall-clock ceiling, `ansible.max_runtime_minutes` (default 30).
@@ -1282,6 +1291,7 @@ an objection into a demonstration.
 | `this agent's policy.yaml does not enable Config Management` | No `ansible:` block, or `enabled` is not true. It is a separate grant from `sibling:` even though both need the Docker socket. |
 | `policy.yaml enables Config Management but names no ansible.vm_image` (or `db_image`) | A run of that kind has no image. Add the key and `docker pull` it — the agent will not pull for you. `vm_image` is `chrweav/ansible-winrm` (it has pywinrm, so it covers Linux and Windows); `db_image` is `chrweav/ansible-cloud` (it has the database collections). |
 | `the Ansible runner image … is not present on this host` | `docker pull` the image named in `ansible.vm_image` / `ansible.db_image`. |
+| `could not write the run's files into the container (400): container rootfs is marked read-only` | An agent of 2.3.0 exactly. That build created the runner with a read-only rootfs and no mount, and the Engine refuses an archive extract into one — so every Config-Management run failed here, on every host, a few seconds in. Fixed in 2.3.1 by making `/opt/job` an anonymous volume: pull `chrweav/dashboard-agent:latest` and restart. The agent keeps its identity, so no re-enrolment. |
 | A VM is listed in the target picker but **disabled**, hover says "no address" | Its sync reports no guest address. All three of: guest powered on, guest tools installed in it, and `sync_guest_details: true` on that connection in `connections.yaml`. Then **Sync Now**. On Hyper-V this also needs a re-pulled `chrweav/hypervisor-runner` — that image is what asks the guest. |
 | A VM does not appear in the picker at all | Either its connection is not agent-bound, or the row is untagged and you are not an admin — an untagged synced VM is admin-only until an admin assigns a workgroup, the same rule every hypervisor page keeps. |
 | The dashboard refuses to queue: *"needs at least 2.3"* | The bound agent predates agent-executed Config Management. Pull `chrweav/dashboard-agent:latest` and restart; the agent keeps its identity, so no re-enrolment. |
