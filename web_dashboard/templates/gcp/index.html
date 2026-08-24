@@ -79,6 +79,15 @@
               class="py-3 border-b-2 text-sm font-medium transition-colors">
         Build Image
       </button>
+      {% if pra_enabled %}
+      <button @click="switchToOT()"
+              :class="activeTab === 'ot' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        OT Demo Cell
+        <span x-show="otCells.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
+              x-text="otCells.length"></span>
+      </button>
+      {% endif %}
     </nav>
   </div>
 
@@ -909,6 +918,251 @@
     </div>
   </div>
 
+  {% if pra_enabled %}
+  <!-- ── OT Demo Cell ─────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'ot'" x-cloak>
+    <div class="mb-4">
+      <h2 class="text-lg font-semibold text-gray-800">OT Demo Cell</h2>
+      <p class="text-xs text-gray-400 mt-0.5 max-w-3xl">
+        Deploy a simulated plant cell — a Modbus PLC simulator (:502) + FUXA web HMI (:1881) from the
+        Packer-baked <span class="font-mono">ot-sim</span> image — into the egress-less private subnet,
+        with BeyondTrust access auto-wired: Web Jump → HMI, protocol tunnel → PLC port, plus the Shell
+        Jump and optional Password Safe onboarding every GCE deploy gets. Bake the image first on the
+        <em>Build Image</em> tab with <span class="font-mono">provisioners/ot/ot-sim-debian.sh</span>.
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+      <!-- Deploy form -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 self-start">
+        <h3 class="text-sm font-semibold text-gray-700">Deploy a cell</h3>
+
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Image <span class="text-red-500">*</span></label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-500">
+              <input type="checkbox" x-model="otShowAllImages" class="rounded border-gray-300 h-3.5 w-3.5">
+              show all custom images
+            </label>
+          </div>
+          <select x-model="otForm.image_self_link"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— pick the ot-sim image —</option>
+            <template x-for="img in otImages()" :key="img.self_link">
+              <option :value="img.self_link" x-text="img.name"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1" x-show="!imagesLoading && otImages().length === 0">
+            No <span class="font-mono">ot-sim</span> image yet — build one on the <em>Build Image</em> tab, or tick "show all".
+          </p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
+            <input type="text" x-model="otForm.instance_name" placeholder="ot-cell-01"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Machine Type</label>
+            <select x-model="otForm.machine_type"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="m in (networkOpts.machine_types && networkOpts.machine_types.length ? networkOpts.machine_types : ['e2-small'])" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
+            <select x-model="otForm.zone"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">— use default zone —</option>
+              <template x-for="z in networkOpts.zones || []" :key="z">
+                <option :value="z" x-text="z"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+            <select x-model="otForm.workgroup"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">— select a workgroup —</option>
+              <template x-for="wg in availableWorkgroups" :key="wg">
+                <option :value="wg" x-text="wg"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subnetwork</label>
+          <select x-model="otForm.subnetwork"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— configured default (private vm-subnet) —</option>
+            <template x-for="s in networkOpts.subnetworks || []" :key="s.self_link">
+              <option :value="s.self_link" x-text="s.name"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">The cell gets no external IP — access is PRA-brokered only, which is the point.</p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">PLC Protocol (tunnel)</label>
+            <select x-model="otForm.protocol"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="p in otPresets" :key="p.key">
+                <option :value="p.key" x-text="p.label + ' (:' + p.port + ')'"></option>
+              </template>
+              <option value="custom">Custom port…</option>
+            </select>
+          </div>
+          <div x-show="otForm.protocol === 'custom'" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">PLC Port</label>
+            <input type="number" min="1" max="65535" x-model.number="otForm.plc_port"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+        </div>
+
+        {% if password_safe_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="otForm.register_in_passwordsafe"
+                 class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+          Onboard the cell's admin account into Password Safe
+        </label>
+        {% endif %}
+        {% if entitle_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="otForm.register_in_entitle"
+                 class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+          Register the VM in Entitle for just-in-time SSH access
+        </label>
+        {% endif %}
+
+        <div x-show="otError" x-cloak
+             class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700" x-text="otError"></div>
+
+        <button @click="submitOTCell()"
+                :disabled="otSubmitting || !otForm.image_self_link || !otForm.instance_name || !otForm.workgroup"
+                class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
+          <span x-show="!otSubmitting">Deploy OT Cell</span>
+          <span x-show="otSubmitting" x-cloak>Queuing…</span>
+        </button>
+        <p class="text-xs text-gray-400">
+          The gateway backing the Web Jump needs ≥2 GB RAM (<span class="font-mono">gcp_jumpoint_machine_type</span>
+          e2-small minimum, e2-medium preferred) — the deploy checks and refuses early with the remedy otherwise.
+        </p>
+      </div>
+
+      <div class="space-y-6">
+        <!-- Live cells -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-gray-700">Cells</h3>
+            <button @click="loadOTCells()" class="text-xs text-gray-500 hover:text-gray-700">Refresh</button>
+          </div>
+          <p class="text-sm text-gray-400" x-show="!otCells.length">No OT cells yet.</p>
+          <div class="space-y-3">
+            <template x-for="c in otCells" :key="c.vm_job_id">
+              <div class="border border-gray-200 rounded-lg p-3">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono text-sm text-gray-800" x-text="c.instance_name"></span>
+                    <span class="text-xs px-1.5 py-0.5 rounded-full"
+                          :class="c.status === 'completed' ? 'bg-green-50 text-green-700' :
+                                  c.status === 'failed' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'"
+                          x-text="c.status"></span>
+                    <span x-show="c.status === 'completed' && !c.wiring_complete" x-cloak
+                          class="text-xs px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">wiring incomplete</span>
+                  </div>
+                  <a :href="'/jobs/' + c.vm_job_id" class="text-xs text-blue-600 hover:underline">job →</a>
+                </div>
+                <div class="mt-2 text-xs text-gray-500 space-y-0.5">
+                  <div x-show="c.private_ip"><span class="text-gray-400">IP:</span> <span class="font-mono" x-text="c.private_ip"></span>
+                    <span class="text-gray-400 ml-2">zone:</span> <span class="font-mono" x-text="c.zone"></span></div>
+                  <div x-show="c.web_jump_id"><span class="text-gray-400">HMI Web Jump:</span>
+                    <span class="font-mono" x-text="c.web_jump_id"></span>
+                    <span class="text-gray-400" x-text="' (' + c.hmi_url + ')'"></span></div>
+                  <div x-show="c.tunnel_jump_id"><span class="text-gray-400">Tunnel:</span>
+                    <span class="font-mono" x-text="c.tunnel_protocol + ' 127.0.0.1:' + c.tunnel_local_port + ' → :' + c.tunnel_remote_port"></span></div>
+                  <div x-show="c.shell_jump_id"><span class="text-gray-400">Shell Jump:</span>
+                    <span class="font-mono" x-text="c.shell_jump_id"></span></div>
+                  <div x-show="c.expires_at"><span class="text-gray-400">Expires:</span>
+                    <span x-text="(c.expires_at || '').replace('T', ' ').slice(0, 16) + ' UTC'"></span></div>
+                </div>
+                <div class="mt-2 flex gap-2">
+                  <button x-show="c.status === 'completed' && !c.wiring_complete" x-cloak
+                          @click="rewireOTCell(c)"
+                          class="text-xs px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-md transition">
+                    Re-wire
+                  </button>
+                  <button x-show="c.status === 'completed'" x-cloak
+                          @click="destroyOTCell(c)"
+                          class="text-xs px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md transition">
+                    Destroy
+                  </button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Standalone OT tunnels -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <h3 class="text-sm font-semibold text-gray-700 mb-1">Standalone OT Protocol Tunnel</h3>
+          <p class="text-xs text-gray-400 mb-3">
+            A generic-TCP PRA protocol tunnel to any host the gateway can reach — for demoing against
+            your own lab gear without deploying a cell.
+          </p>
+          <div class="grid grid-cols-2 gap-2 mb-2">
+            <input type="text" x-model="otTunnelForm.name" placeholder="name (e.g. lab-plc)"
+                   class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input type="text" x-model="otTunnelForm.hostname" placeholder="host or IP"
+                   class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <select x-model="otTunnelForm.protocol"
+                    class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <template x-for="p in otPresets" :key="p.key">
+                <option :value="p.key" x-text="p.label + ' (:' + p.port + ')'"></option>
+              </template>
+              <option value="custom">Custom port…</option>
+            </select>
+            <input type="number" min="1" max="65535" x-show="otTunnelForm.protocol === 'custom'" x-cloak
+                   x-model.number="otTunnelForm.remote_port" placeholder="port"
+                   class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div x-show="otTunnelForm.error" x-cloak
+               class="mb-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700" x-text="otTunnelForm.error"></div>
+          <div x-show="otTunnelForm.message" x-cloak
+               class="mb-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700" x-text="otTunnelForm.message"></div>
+          <button @click="submitOTTunnel()"
+                  :disabled="otTunnelForm.submitting || !otTunnelForm.name || !otTunnelForm.hostname"
+                  class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition">
+            <span x-show="!otTunnelForm.submitting">Create Tunnel</span>
+            <span x-show="otTunnelForm.submitting" x-cloak>Creating…</span>
+          </button>
+
+          <div class="mt-4 space-y-2" x-show="otTunnels.length" x-cloak>
+            <template x-for="t in otTunnels" :key="t.slug">
+              <div class="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2">
+                <div class="text-xs text-gray-600">
+                  <span class="font-mono text-gray-800" x-text="t.name || t.slug"></span>
+                  <span class="text-gray-400 ml-2" x-text="t.protocol + ' 127.0.0.1:' + t.local_port + ' → ' + t.hostname + ':' + t.remote_port"></span>
+                  <span class="text-gray-400 ml-2" x-text="'jump ' + t.tunnel_jump_id"></span>
+                </div>
+                <button @click="deleteOTTunnel(t)"
+                        class="text-xs text-red-600 hover:text-red-800">Delete</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
 </div><!-- /max-w-7xl -->
 
 <script>
@@ -1027,6 +1281,25 @@ function gcpDashboard() {
       { id: 'rocky9',    label: 'Rocky 9',        image: 'rocky-linux-9'          },
     ],
 
+    // OT demo cell (PRA-gated tab)
+    otLoaded:        false,
+    otPresets:       [],
+    otCells:         [],
+    otTunnels:       [],
+    otError:         '',
+    otSubmitting:    false,
+    otShowAllImages: false,
+    otForm: {
+      image_self_link: '', instance_name: '', machine_type: 'e2-small',
+      zone: '', subnetwork: '', workgroup: '',
+      protocol: 'modbus', plc_port: null, hmi_port: 1881,
+      register_in_passwordsafe: true, register_in_entitle: false,
+    },
+    otTunnelForm: {
+      name: '', hostname: '', protocol: 'modbus', remote_port: null,
+      submitting: false, error: '', message: '',
+    },
+
     async init() {
       this.loadSecretBackends();
       API.get('/api/groups/workgroups')
@@ -1050,6 +1323,121 @@ function gcpDashboard() {
         );
       } catch (e) {
         this.storedScripts = [];
+      }
+    },
+
+    // ── OT demo cell ─────────────────────────────────────────────────────
+    switchToOT() {
+      this.activeTab = 'ot';
+      if (!this.otLoaded) this.loadOTData();
+    },
+
+    async loadOTData() {
+      this.otLoaded = true;
+      if (this.customImages.length === 0 && !this.imagesLoading) this.loadCustomImages();
+      try {
+        const r = await API.get('/api/ot/presets');
+        this.otPresets = r.presets || [];
+      } catch (_) { this.otPresets = []; }
+      this.loadOTCells();
+      this.loadOTTunnels();
+    },
+
+    otImages() {
+      const imgs = this.customImages || [];
+      return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-sim'));
+    },
+
+    async loadOTCells() {
+      try {
+        const r = await API.get('/api/ot/cells');
+        this.otCells = r.cells || [];
+      } catch (e) {
+        this.otError = e.message || 'Failed to load cells';
+      }
+    },
+
+    async loadOTTunnels() {
+      try {
+        const r = await API.get('/api/ot/tunnels');
+        this.otTunnels = r.tunnels || [];
+      } catch (_) { this.otTunnels = []; }
+    },
+
+    async submitOTCell() {
+      this.otError = '';
+      this.otSubmitting = true;
+      try {
+        const f = this.otForm;
+        const img = (this.customImages || []).find(i => i.self_link === f.image_self_link);
+        const res = await API.post('/api/ot/cell', {
+          image_self_link: f.image_self_link,
+          image_name: img ? img.name : '',
+          instance_name: f.instance_name.trim(),
+          machine_type: f.machine_type,
+          zone: f.zone,
+          subnetwork: f.subnetwork,
+          workgroup: f.workgroup,
+          protocol: f.protocol,
+          plc_port: f.protocol === 'custom' ? f.plc_port : null,
+          hmi_port: f.hmi_port,
+          register_in_passwordsafe: f.register_in_passwordsafe,
+          register_in_entitle: f.register_in_entitle,
+        });
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.otError = e.message || 'Deploy failed';
+      } finally {
+        this.otSubmitting = false;
+      }
+    },
+
+    async rewireOTCell(c) {
+      try {
+        const r = await API.post(`/api/ot/cell/${encodeURIComponent(c.vm_job_id)}/rewire`, {});
+        window.location.href = '/jobs/' + r.job_id;
+      } catch (e) {
+        this.showToast(e.message || 'Re-wire failed', 'error');
+      }
+    },
+
+    async destroyOTCell(c) {
+      if (!confirm(`Destroy OT cell ${c.instance_name}? This removes the VM, its PRA jump items (Web Jump, tunnel, Shell Jump) and any Password Safe registration.`)) return;
+      try {
+        await API.delete(`/api/gcp/instances/${encodeURIComponent(c.instance_name)}?zone=${encodeURIComponent(c.zone)}`);
+        this.showToast('Destroy started — the cell disappears once the job completes.');
+      } catch (e) {
+        this.showToast(e.message || 'Destroy failed', 'error');
+      }
+    },
+
+    async submitOTTunnel() {
+      const f = this.otTunnelForm;
+      f.error = ''; f.message = ''; f.submitting = true;
+      try {
+        const res = await API.post('/api/ot/tunnels', {
+          name: f.name.trim(),
+          hostname: f.hostname.trim(),
+          protocol: f.protocol,
+          remote_port: f.protocol === 'custom' ? f.remote_port : null,
+        });
+        f.message = res.message || 'Tunnel created.';
+        f.name = ''; f.hostname = '';
+        this.loadOTTunnels();
+      } catch (e) {
+        f.error = e.message || 'Tunnel creation failed';
+      } finally {
+        f.submitting = false;
+      }
+    },
+
+    async deleteOTTunnel(t) {
+      if (!confirm(`Delete OT tunnel ${t.name || t.slug}? The PRA jump item is destroyed.`)) return;
+      try {
+        await API.delete(`/api/ot/tunnels/${encodeURIComponent(t.slug)}`);
+        this.loadOTTunnels();
+      } catch (e) {
+        this.showToast(e.message || 'Delete failed', 'error');
       }
     },
 

@@ -1,0 +1,41 @@
+# OT demo cell — QUICK PREVIEW (containers only, no BeyondTrust wiring)
+# App-catalog entry: "OT / ICS simulation"
+# Shape: long-running SERVICE, 2 containers — a static Modbus TCP server (:502)
+# and the FUXA web SCADA/HMI (:1881).
+#
+# This is the *unwired* sibling of the real OT Demo Cell (GCP page → OT tab),
+# which deploys the Packer-baked `ot-sim` image and auto-provisions the PRA
+# Web Jump / Protocol Tunnel / Shell Jump + Password Safe onboarding. Use this
+# sample only for a quick look at the containers themselves.
+#
+# ADAPT BEFORE USE:
+#  - Deploys pull at start: on GCE the VM subnet needs egress (gcp_vm_nat_enabled)
+#    — which is exactly the air-gap compromise the baked-image path avoids.
+#  - No volumes in the cloud compose subset, so FUXA project edits and Modbus
+#    values are EPHEMERAL here (oitc/modbus-server serves static demo values).
+#  - On GCE/COS containers share the host network and the port MAPPING below is
+#    informational: this Modbus server listens in-container on 5020, so on COS
+#    reach it at :5020 (on ECS/ACI the published :502 applies). Reachability is
+#    firewall-driven and ports must not collide with anything else on the node.
+services:
+  plc:
+    image: oitc/modbus-server:2.3.0
+    restart: unless-stopped
+    ports:
+      - "502:5020"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  hmi:
+    image: frangoteam/fuxa:1.3.4
+    restart: unless-stopped
+    ports:
+      - "1881:1881"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
