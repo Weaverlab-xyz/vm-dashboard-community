@@ -283,7 +283,20 @@
       <div x-show="!portainerNodeLoading && portainerNodeConfigured" x-cloak>
         <!-- Placement: where the single node runs. Redeploying elsewhere relocates it. -->
         <div class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
+              <!-- Same three-cloud picker as the Gateways tab. Changing it RELOCATES
+                   the single node, so the region list has to follow immediately —
+                   leaving the old cloud's regions selectable is how you deploy into a
+                   region that does not exist. -->
+              <select x-model="portainerDeployForm.cloud" @change="portainerCloudChanged()"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <template x-for="c in portainerClouds" :key="c">
+                  <option :value="c" x-text="c.toUpperCase()"></option>
+                </template>
+              </select>
+            </div>
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
               <select x-model="portainerDeployForm.region"
@@ -294,16 +307,18 @@
                 </template>
               </select>
             </div>
-            <div>
+            <div x-show="portainerDeployForm.cloud === 'gcp'">
               <label class="block text-xs font-medium text-gray-600 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
               <input type="text" x-model="portainerDeployForm.zone"
                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono" placeholder="us-east1-b">
             </div>
           </div>
           <p class="text-[11px] text-gray-400 mt-1">
-            Blank region keeps the node's current region (or the configured default). Blank zone uses the region's
-            first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.
-            Only regions with a configured subnet are listed. Redeploying to a different region <strong>relocates</strong> the node.
+            Blank region keeps the node's current region (or the configured default).
+            Only regions with a configured subnet are listed — the node needs a public subnet, and a subnet is regional on every cloud.
+            <span x-show="portainerDeployForm.cloud === 'gcp'" x-cloak>Blank zone uses the region's
+            first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.</span>
+            Redeploying to a different region <strong>or cloud</strong> <strong>relocates</strong> the node.
           </p>
         </div>
 
@@ -364,6 +379,7 @@
             <thead class="bg-gray-50">
               <tr>
                 <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Cloud</th>
                 <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Zone</th>
                 <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Machine</th>
                 <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">URL</th>
@@ -375,7 +391,8 @@
               <template x-for="n in portainerNodes" :key="n.name">
                 <tr class="hover:bg-gray-50">
                   <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="n.name"></td>
-                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.zone"></td>
+                  <td class="px-4 py-3 text-sm text-gray-600 uppercase" x-text="n.cloud || 'gcp'"></td>
+                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.zone || '—'"></td>
                   <td class="px-4 py-3 text-sm text-gray-600" x-text="n.machine_type || '—'"></td>
                   <td class="px-4 py-3 text-sm">
                     <a x-show="n.url" :href="n.url" target="_blank"
@@ -1128,27 +1145,41 @@
         <!-- Placement (multi-region): where the single node runs. Redeploying to a
              different region relocates it. -->
         <div class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
+              <!-- Rancher stays ONE management plane, so this picks where that node
+                   lives rather than adding another. Changing it relocates the node and
+                   every imported cluster must re-import (the agents dial the old URL). -->
+              <select x-model="deployForm.cloud" @change="rancherCloudChanged()"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <template x-for="c in praOpts.clouds || []" :key="c">
+                  <option :value="c" x-text="c.toUpperCase()"></option>
+                </template>
+              </select>
+            </div>
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
               <select x-model="deployForm.region"
                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
                 <option value="">(current / default)</option>
-                <template x-for="r in praOpts.regions || []" :key="r">
+                <template x-for="r in rancherRegions" :key="r">
                   <option :value="r" x-text="r"></option>
                 </template>
               </select>
             </div>
-            <div>
+            <div x-show="deployForm.cloud === 'gcp'">
               <label class="block text-xs font-medium text-gray-600 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
               <input type="text" x-model="deployForm.zone"
                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono" placeholder="us-east1-b">
             </div>
           </div>
           <p class="text-[11px] text-gray-400 mt-1">
-            Blank region keeps the node's current region (or the configured default). Blank zone uses the region's
-            first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.
-            Only regions with a configured subnet are listed. Redeploying to a different region <strong>relocates</strong> the node.
+            Blank region keeps the node's current region (or the configured default).
+            Only regions with a configured subnet are listed — the node needs a public subnet, and a subnet is regional on every cloud.
+            <span x-show="deployForm.cloud === 'gcp'" x-cloak>Blank zone uses the region's
+            first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.</span>
+            Redeploying to a different region <strong>or cloud</strong> <strong>relocates</strong> the node.
           </p>
         </div>
 
@@ -1208,6 +1239,7 @@
             <thead class="bg-gray-50">
               <tr>
                 <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Cloud</th>
                 <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Zone</th>
                 <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Machine</th>
                 <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">URL</th>
@@ -1219,7 +1251,8 @@
               <template x-for="n in rancherNodes" :key="n.name">
                 <tr class="hover:bg-gray-50">
                   <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="n.name"></td>
-                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.zone"></td>
+                  <td class="px-4 py-3 text-sm text-gray-600 uppercase" x-text="n.cloud || 'gcp'"></td>
+                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.zone || '—'"></td>
                   <td class="px-4 py-3 text-sm text-gray-600" x-text="n.machine_type || '—'"></td>
                   <td class="px-4 py-3 text-sm">
                     <a x-show="n.url" :href="n.url" target="_blank"
@@ -1715,9 +1748,14 @@ function containersDashboard() {
     rancherLoading: false,
     rancherError: null,
     rancherDeploying: false,
-    // Deploy-time region + PRA picks (parity with DB/VM deploys)
-    praOpts: { configured: false, regions: [], jump_groups: [], gateways: [], vault_account_groups: [] },
-    deployForm: { region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
+    // Deploy-time cloud + region + PRA picks (parity with DB/VM deploys)
+    praOpts: { configured: false, cloud: 'gcp', clouds: [], regions: [], jump_groups: [], gateways: [], vault_account_groups: [] },
+    rancherRegionsByCloud: {},
+    // Regions for the CURRENTLY selected cloud. Held separately from praOpts.regions
+    // (which is the node's current cloud, as the server saw it) so switching the cloud
+    // dropdown cannot leave the previous cloud's regions selectable.
+    rancherRegions: [],
+    deployForm: { cloud: 'gcp', region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
     rancherActionPending: null,
     rancherImportName: '',
     rancherManifestCmd: '',
@@ -1734,9 +1772,11 @@ function containersDashboard() {
     portainerNodeDeploying: false,
     portainerNodeActionPending: null,
     portainerRegions: [],
+    portainerClouds: [],
+    portainerRegionsByCloud: {},
     // Deploy-form options: regions + the PRA pickers (same shape as praOpts).
     portainerDeployOpts: { configured: false, regions: [], jump_groups: [], gateways: [], vault_account_groups: [] },
-    portainerDeployForm: { region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
+    portainerDeployForm: { cloud: 'gcp', region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
     // Durable state — drives the teardown confirmation, which has to say something
     // different depending on whether the data disk survives.
     portainerNodeDataDiskEnabled: false,
@@ -2193,6 +2233,11 @@ function containersDashboard() {
         // markup reads exists in both shapes this object takes.
         const o = await API.get('/api/containers/rancher/pra-options');
         this.praOpts = { ...o, gateways: o.jumpoints || [] };
+        // Seed the cloud picker from where the node actually is, then derive its region
+        // list from the same payload — one round trip, so the two can never disagree.
+        if (o.cloud) this.deployForm.cloud = o.cloud;
+        this.rancherRegionsByCloud = o.regions_by_cloud || {};
+        this.rancherRegions = this.rancherRegionsByCloud[this.deployForm.cloud] || o.regions || [];
         // Seed the per-deploy toggle from the CONFIGURED default. The form state hard-codes
         // false and the request model defaults false, so without this a Deploy/Redeploy from
         // this page silently skipped Web Jump registration even with the feature enabled in
@@ -2201,12 +2246,22 @@ function containersDashboard() {
       } catch (e) { /* leave defaults — the fieldset just stays hidden */ }
     },
 
+    // Switching cloud invalidates both the region and the zone: a region name from
+    // another cloud would be rejected, and a zone is GCP-only, so carrying either over
+    // is a 400 the operator did not ask for.
+    rancherCloudChanged() {
+      this.deployForm.region = '';
+      this.deployForm.zone = '';
+      this.rancherRegions = this.rancherRegionsByCloud[this.deployForm.cloud] || [];
+    },
+
     async deployRancher() {
       this.rancherDeploying = true;
       try {
         const body = { web_jump_enabled: this.deployForm.web_jump_enabled };
+        if (this.deployForm.cloud) body.cloud = this.deployForm.cloud;
         if (this.deployForm.region) body.region = this.deployForm.region;
-        if ((this.deployForm.zone || '').trim()) body.zone = this.deployForm.zone.trim();
+        if (this.deployForm.cloud === 'gcp' && (this.deployForm.zone || '').trim()) body.zone = this.deployForm.zone.trim();
         if (this.deployForm.web_jump_enabled) {
           if (this.deployForm.jump_group) body.jump_group = this.deployForm.jump_group;
           if (this.deployForm.jumpoint_name) body.jumpoint_name = this.deployForm.jumpoint_name;
@@ -2224,7 +2279,7 @@ function containersDashboard() {
       if (!confirm(`Tear down Rancher node "${n.name}"? This deletes the VM + firewall and clears its config. Any imported clusters will be orphaned.`)) return;
       this.rancherActionPending = n.name;
       try {
-        const resp = await API.post(`/api/containers/rancher/${encodeURIComponent(n.name)}/stop?zone=${encodeURIComponent(n.zone)}&force=true`);
+        const resp = await API.post(`/api/containers/rancher/${encodeURIComponent(n.name)}/stop?zone=${encodeURIComponent(n.zone)}&cloud=${encodeURIComponent(n.cloud || '')}&force=true`);
         window.location.href = `/jobs/${resp.job_id}`;
       } catch (e) {
         toast(e.message, 'error');
@@ -2383,19 +2438,35 @@ function containersDashboard() {
         // into `gateways` rather than assigning the payload wholesale, so every key the
         // markup reads exists in both shapes this object takes.
         this.portainerDeployOpts = { ...opts, gateways: opts.jumpoints || [] };
-        this.portainerRegions = opts.regions || [];
+        // Seed the cloud picker from where the node actually is, then derive its region
+        // list from the same payload — one round trip, so the two cannot disagree.
+        this.portainerClouds = opts.clouds || [];
+        this.portainerRegionsByCloud = opts.regions_by_cloud || {};
+        if (opts.cloud) this.portainerDeployForm.cloud = opts.cloud;
+        this.portainerRegions = this.portainerRegionsByCloud[this.portainerDeployForm.cloud]
+                                || opts.regions || [];
         // Seed the per-deploy toggle from the CONFIGURED default — see the Rancher fetch
         // above for the defect this closes.
         if (typeof opts.web_jump_enabled === 'boolean') this.portainerDeployForm.web_jump_enabled = opts.web_jump_enabled;
       } catch (e) { /* leave defaults — the select still offers "(current / default)" */ }
     },
 
+    // Switching cloud invalidates both the region and the zone: a region name from
+    // another cloud would be rejected, and a zone is GCP-only, so carrying either over
+    // is a 400 the operator did not ask for.
+    portainerCloudChanged() {
+      this.portainerDeployForm.region = '';
+      this.portainerDeployForm.zone = '';
+      this.portainerRegions = this.portainerRegionsByCloud[this.portainerDeployForm.cloud] || [];
+    },
+
     async deployPortainerNode() {
       this.portainerNodeDeploying = true;
       try {
         const body = { web_jump_enabled: this.portainerDeployForm.web_jump_enabled };
+        if (this.portainerDeployForm.cloud) body.cloud = this.portainerDeployForm.cloud;
         if (this.portainerDeployForm.region) body.region = this.portainerDeployForm.region;
-        if ((this.portainerDeployForm.zone || '').trim()) body.zone = this.portainerDeployForm.zone.trim();
+        if (this.portainerDeployForm.cloud === 'gcp' && (this.portainerDeployForm.zone || '').trim()) body.zone = this.portainerDeployForm.zone.trim();
         if (this.portainerDeployForm.web_jump_enabled) {
           if (this.portainerDeployForm.jump_group) body.jump_group = this.portainerDeployForm.jump_group;
           if (this.portainerDeployForm.jumpoint_name) body.jumpoint_name = this.portainerDeployForm.jumpoint_name;
@@ -2429,7 +2500,7 @@ OK = delete the disk too.  Cancel = keep it.`);
       }
       this.portainerNodeActionPending = n.name;
       try {
-        const resp = await API.post(`/api/containers/portainer/node/${encodeURIComponent(n.name)}/stop?zone=${encodeURIComponent(n.zone)}&delete_data_disk=${deleteDisk}`);
+        const resp = await API.post(`/api/containers/portainer/node/${encodeURIComponent(n.name)}/stop?zone=${encodeURIComponent(n.zone)}&cloud=${encodeURIComponent(n.cloud || '')}&delete_data_disk=${deleteDisk}`);
         window.location.href = `/jobs/${resp.job_id}`;
       } catch (e) {
         toast(e.message, 'error');

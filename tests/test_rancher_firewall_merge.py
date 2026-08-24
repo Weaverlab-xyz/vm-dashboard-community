@@ -127,6 +127,7 @@ def _install_stubs():
 
 _install_stubs()
 try:
+    from web_dashboard.services import managed_node_service as mns
     from web_dashboard.services import rancher_node_service as svc
 except Exception as exc:  # pragma: no cover — skip if other app deps are missing
     try:
@@ -238,16 +239,26 @@ class _LogCapture(logging.Handler):
 
 
 def _capture_warnings(fn):
-    """Run fn while capturing rancher_node_service log records; return warnings+."""
+    """Run fn while capturing log records; return warnings+.
+
+    BOTH loggers are watched, because the allow-list sources live in
+    ``managed_node_service`` (shared with the Portainer node) while the
+    applied-outcome warnings live in ``rancher_node_service``. Watching only one
+    would let a "stays closed"-class regression through on whichever side it moved
+    to — which is the exact failure these tests exist to catch.
+    """
     h = _LogCapture()
-    old_level = svc.logger.level
-    svc.logger.addHandler(h)
-    svc.logger.setLevel(logging.DEBUG)
+    loggers = [svc.logger, mns.logger]
+    old = [(lg, lg.level) for lg in loggers]
+    for lg in loggers:
+        lg.addHandler(h)
+        lg.setLevel(logging.DEBUG)
     try:
         fn()
     finally:
-        svc.logger.setLevel(old_level)
-        svc.logger.removeHandler(h)
+        for lg, lvl in old:
+            lg.setLevel(lvl)
+            lg.removeHandler(h)
     return [r for r in h.records if r.levelno >= logging.WARNING]
 
 

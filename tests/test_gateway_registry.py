@@ -257,15 +257,27 @@ def test_a_gateway_deploy_reapplies_the_node_firewalls():
 def test_every_live_gateway_is_allowed_not_just_the_shared_one():
     """Gateway hosts in a cloud join ONE PRA Gateway cluster and PRA distributes
     sessions across its nodes, so the broker may be any of them. Allowing a single
-    remembered /32 is a coin flip."""
+    remembered /32 is a coin flip.
+
+    Both node features share one implementation in ``managed_node_service``, so the
+    registry read is asserted there — and each feature is asserted to still route
+    through it, which is what stops one of them quietly growing a private copy that
+    allows only the remembered /32 again."""
+    shared = _read("web_dashboard", "services", "managed_node_service.py")
+    assert "def jumpoint_cidrs(" in shared, "the shared gateway allow-list source is gone"
+    block = shared[shared.index("def jumpoint_cidrs("):]
+    block = block[:block.index("\ndef ")]
+    assert "live_egress_ips" in block, (
+        "managed_node_service does not read the gateway registry, so a user-deployed "
+        "gateway is never admitted")
     for module in ("portainer_node_service", "rancher_node_service"):
         src = _read("web_dashboard", "services", f"{module}.py")
         assert "def _jumpoint_cidrs(" in src, f"{module} still allows one gateway /32"
-        block = src[src.index("def _jumpoint_cidrs("):]
-        block = block[:block.index("\ndef ")]
-        assert "live_egress_ips" in block, (
-            f"{module} does not read the gateway registry, so a user-deployed gateway "
-            f"is never admitted")
+        feature = src[src.index("def _jumpoint_cidrs("):]
+        feature = feature[:feature.index("\ndef ")]
+        assert "managed_node_service.jumpoint_cidrs" in feature, (
+            f"{module} no longer uses the shared gateway allow-list, so its node can "
+            f"drift back to allowing only the remembered /32")
 
 
 def test_a_torn_down_gateway_stops_being_allowed():

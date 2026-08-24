@@ -294,7 +294,7 @@ def test_the_deploy_settles_the_credential_before_launching():
                             "portainer_node_service.py"), encoding="utf-8").read()
     body = src[src.index("async def run_deploy"):]
     hash_at = body.index("_admin_password_hash(password)")
-    launch_at = body.index("run_gce_portainer(")
+    launch_at = body.index("_launch_node(")
     assert hash_at < launch_at, "the admin hash is computed after the VM is launched"
     assert "admin_password_hash=pw_hash" in body, "the launcher never receives the hash"
     persist_at = body.index('config_service.set("portainer_admin_password", password)')
@@ -449,8 +449,10 @@ def test_a_preexisting_db_never_gets_a_regenerated_password():
     assert 'if pw_hash and not state_preexisting:' in body, (
         "the password is persisted without checking for a pre-existing DB")
     # And it must refuse BEFORE launching when it has no password for an existing disk.
+    # Anchored on the cloud-agnostic launch seam rather than the GCE call, so the
+    # ordering stays pinned whichever cloud the node is deployed to.
     guard_at = body.index("already exists in")
-    launch_at = body.index("run_gce_portainer(")
+    launch_at = body.index("_launch_node(")
     assert guard_at < launch_at, (
         "the missing-password guard must run before the VM is created")
 

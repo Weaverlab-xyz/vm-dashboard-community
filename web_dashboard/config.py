@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     # (cattle-cluster-agent dials OUT to the server-url — fits private clusters
     # on any cloud / on-prem). The dashboard calls the Rancher v3 API directly
     # over HTTPS with the stored API token. Read live via config_service.
+    rancher_node_cloud: str = "gcp"           # aws|azure|gcp — WHICH cloud hosts the single Rancher node. Picked per deploy (like the region) and rewritten to where it actually landed, so teardown + bare redeploys stay put. Default gcp because every node deployed before this key existed is a GCE VM; redeploying to another cloud RELOCATES the node (the old one is deleted first)
     rancher_server_url: str = ""              # Rancher server-url = https://<node public IP> (set by the deploy job)
     rancher_api_token: str = ""               # Rancher API bearer token minted at bootstrap; encrypted at rest
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap password; encrypted at rest
@@ -720,6 +721,7 @@ class Settings(BaseSettings):
     # Managed Portainer node (deploy/teardown lifecycle; see gcp_portainer_* below).
     # A successful deploy writes portainer_url / portainer_pat / portainer_verify_ssl
     # above, so the integration wires itself up. Read live via config_service.
+    portainer_node_cloud: str = "gcp"          # aws|azure|gcp — WHICH cloud hosts the single managed Portainer node. Picked per deploy (like the region) and rewritten to where it actually landed, so teardown + bare redeploys stay put. Default gcp because every node deployed before this key existed is a GCE VM; redeploying to another cloud RELOCATES the node
     portainer_allowed_source_cidrs: str = ""   # CSV of manual firewall source ranges; empty = rely on the auto-detected dashboard egress CIDR (fail closed unless gcp_portainer_allow_open)
     portainer_dashboard_egress_cidr: str = ""  # the dashboard's own public egress CIDR (auto-detected + persisted on deploy); the worker bootstraps the node over its public IP
     portainer_admin_password: str = ""         # first-run admin password; auto-generated when unset

@@ -1,12 +1,21 @@
-"""Portainer CE server orchestrator (GCE COS).
+"""Portainer CE server orchestrator (AWS / Azure / GCP).
 
 Owns the deploy/teardown JOB lifecycle for the managed Portainer server that runs
-as a single container on a public (source-restricted) GCE COS VM. Keeps
-``gcp_service`` pure-GCE and ``portainer_service`` a pure API client; this module
-glues them to config + the job queue (mirrors ``rancher_node_service``, which is
-the model for this whole layer). Dispatched from ``jobs_worker``
+as a single container on a public (source-restricted) VM. Keeps the per-cloud
+service modules pure-cloud and ``portainer_service`` a pure API client; this module
+glues them to config + the job queue. Dispatched from ``jobs_worker``
 (``portainer_node_deploy`` / ``portainer_node_teardown``) — long ops (VM boot +
 first-run bootstrap poll) that the durable worker's heartbeat protects.
+
+One Portainer server manages many Docker hosts (they dial IN as Edge agents), so
+there is one node and the cloud is a choice about where it lives — picked per
+deploy like the region already is, and persisted (``portainer_node_cloud``) so
+teardown and bare redeploys find it again. Redeploying to a different cloud
+RELOCATES the node.
+
+Everything shared with the Rancher management node — the ingress allow-list merge,
+egress-IP detection, placement resolution, the admin-password generator — lives in
+``managed_node_service``; the private helpers here are thin wrappers over it.
 
 A successful deploy writes ``portainer_url`` / ``portainer_pat`` /
 ``portainer_verify_ssl`` into config, which is exactly what the existing
@@ -27,274 +36,118 @@ recreate, so ``portainer_url`` is still rewritten each deploy.
 """
 import logging
 
-import httpx
-
-from . import (config_service, gcp_service, job_service, portainer_service,
-               region_catalog, region_config)
-# Reused verbatim from the Rancher orchestrator — same strength requirements
-# (Portainer also enforces a 12-char minimum), so there is one implementation.
-from .rancher_node_service import _generate_admin_password
+from . import (config_service, gcp_service, job_service, managed_node_service,
+               portainer_service, region_catalog)
+# Same strength requirements as the Rancher node (Portainer also enforces a 12-char
+# minimum), so there is one implementation, in the shared module.
+from .managed_node_service import generate_admin_password as _generate_admin_password
 
 logger = logging.getLogger(__name__)
 
-# How long to wait for Portainer to start serving after the VM boots. Portainer is
-# much lighter than Rancher, but COS still has to pull the image on a fresh VM.
-_READY_TIMEOUT_S = 300
+_SPEC = managed_node_service.PORTAINER
 
-# Plain-HTTP echo endpoints used to learn the dashboard's own public egress IP.
-# HTTP (not HTTPS) dodges corp TLS-inspection breakage; best-effort, first-wins.
-_IP_ECHO_URLS = (
-    "http://checkip.amazonaws.com",
-    "http://api.ipify.org",
-    "http://ifconfig.me/ip",
-)
+# How long to wait for Portainer to start serving after the VM boots. Portainer is
+# much lighter than Rancher, but the host still has to pull the image on a fresh VM.
+_READY_TIMEOUT_S = 300
 
 # The admin Portainer's first-run init creates.
 _ADMIN_USERNAME = "admin"
 
 # Told to the operator when a node has locked itself out. A REDEPLOY alone won't fix it:
-# the launcher reuses a RUNNING VM as-is, and konlet only reads the container
-# declaration (with --admin-password) at boot — so the VM has to go.
+# the launcher reuses a RUNNING VM as-is, and the container declaration / user-data
+# (with --admin-password) is only read at boot — so the VM has to go.
 _LOCKED_NODE_REMEDY = ("Delete the node on the Containers page and deploy again: the "
                        "replacement VM initializes its admin at boot, so it can't hit "
                        "this window.")
 
 
+def _node_cloud() -> str:
+    """Which cloud hosts the node (persisted on deploy; ``gcp`` for installs that
+    predate the cloud pick)."""
+    return managed_node_service.node_cloud(_SPEC)
+
+
 def _firewall_name(node_name: str) -> str:
-    return f"{node_name}-allow-mgmt"
+    return managed_node_service.firewall_name(node_name)
 
 
-def _node_params(region=None, zone=None) -> dict:
-    """Resolve the node's deploy knobs, region-aware.
+def _node_params(region=None, zone=None, cloud=None) -> dict:
+    """Resolve the node's deploy knobs for ``cloud``, region-aware, plus the durable
+    data-volume fields.
 
-    ``region`` (the operator's pick, else derived from an explicit ``zone`` or the
-    persisted node zone, else the configured default) selects the network / subnet /
-    zone through :func:`region_config.resolve_region`. For the DEFAULT region this
-    returns the flat ``gcp_*`` keys unchanged, so single-region installs behave
-    exactly as before. The effective zone may be blank — the launcher then auto-picks
-    a valid zone in the region and retries siblings on capacity exhaustion.
-
-    Mirrors ``rancher_node_service._node_params``; only the config key prefix differs.
+    Blank ``cloud`` means the persisted node cloud, so every existing caller keeps
+    reading the node that is actually deployed. The data-volume NAME is blank when
+    durable state is off, and that blank is what selects the ephemeral
+    boot-disk/root-volume path all the way down in the launcher.
     """
     from ..config import settings
+    cloud = cloud or _node_cloud()
+    p = managed_node_service.resolve_placement(cloud, _SPEC, region=region, zone=zone)
 
-    default_region = region_catalog.normalize("gcp", region_catalog.default_region("gcp"))
-
-    # Effective region: explicit pick → derived from an explicit zone → derived from
-    # the persisted node zone (gcp_portainer_zone / gcp_zone) → configured default.
-    if region:
-        eff_region = region_catalog.normalize("gcp", region)
-    elif zone:
-        eff_region = region_catalog.region_from_zone(zone)
-    else:
-        persisted = config_service.get("gcp_portainer_zone") or config_service.get("gcp_zone")
-        eff_region = (region_catalog.region_from_zone(persisted) if persisted
-                      else default_region)
-
-    rc = region_config.resolve_region("gcp", eff_region) or {}
-    is_default = (eff_region == default_region)
-
-    def _in_region(z) -> bool:
-        z = (z or "").strip()
-        return bool(z) and region_catalog.region_from_zone(z) == eff_region
-
-    # Effective zone precedence: explicit request zone (kept only if in-region) →
-    # for a region pick: the region's configured zone (only if in-region) →
-    # for a bare redeploy: the persisted node zone, else the region-config zone →
-    # "" so the launcher auto-picks the region's first available zone.
-    eff_zone = ""
-    if zone and _in_region(zone):
-        eff_zone = region_catalog.normalize("gcp", zone)
-    elif region:
-        if _in_region(rc.get("zone")):
-            eff_zone = region_catalog.normalize("gcp", rc.get("zone"))
-    else:
-        for cand in (config_service.get("gcp_portainer_zone"), rc.get("zone")):
-            if _in_region(cand):
-                eff_zone = region_catalog.normalize("gcp", cand)
-                break
-
-    # Network is a global VPC name (region-agnostic); the SUBNET is regional. For a
-    # non-default region take the subnet from the region entry only — never fall back
-    # to the default region's flat subnet name (it wouldn't exist in this region).
-    network = rc.get("network") or settings.gcp_network or "default"
-    if is_default:
-        subnetwork = rc.get("jumpoint_subnetwork") or rc.get("subnetwork") or ""
-    else:
-        entry = region_config.load_region_configs("gcp").get(eff_region, {})
-        subnetwork = (str(entry.get("jumpoint_subnetwork") or "").strip()
-                      or str(entry.get("subnetwork") or "").strip()
-                      or rc.get("jumpoint_subnetwork") or rc.get("subnetwork") or "")
-
+    default_data = getattr(settings, _SPEC.infra_key(cloud, "data_disk_gb"), 10)
     try:
-        boot_disk_gb = int(config_service.get("gcp_portainer_boot_disk_gb")
-                           or settings.gcp_portainer_boot_disk_gb)
+        data_disk_gb = int(config_service.get(_SPEC.infra_key(cloud, "data_disk_gb"))
+                           or default_data)
     except (TypeError, ValueError):
-        boot_disk_gb = settings.gcp_portainer_boot_disk_gb
-    try:
-        data_disk_gb = int(config_service.get("gcp_portainer_data_disk_gb")
-                           or settings.gcp_portainer_data_disk_gb)
-    except (TypeError, ValueError):
-        data_disk_gb = settings.gcp_portainer_data_disk_gb
-    node_name = config_service.get("gcp_portainer_name") or settings.gcp_portainer_name
-    # Blank when durable state is off — that blank is what selects the legacy
-    # boot-disk host path all the way down in the container declaration.
-    data_disk_name = (f"{node_name}-data"
-                      if config_service.get_bool("portainer_data_disk_enabled", False)
-                      else "")
-    return {
-        "project_id":   config_service.get("gcp_project_id") or settings.gcp_project_id,
-        "region":       eff_region,
-        "zone":         eff_zone,
-        "name":         node_name,
-        "image":        config_service.get("gcp_portainer_image") or settings.gcp_portainer_image,
-        "machine_type": (config_service.get("gcp_portainer_machine_type")
-                         or settings.gcp_portainer_machine_type),
-        "boot_disk_gb": boot_disk_gb,
-        "network":      network,
-        # gcp_service normalizes a bare subnet name into a regional self-link using
-        # the launch zone's region, so a region-correct bare name is all we need.
-        "subnetwork":   subnetwork,
-        "network_tag":  (config_service.get("gcp_portainer_network_tag")
-                         or settings.gcp_portainer_network_tag),
-        "data_disk_name": data_disk_name,
-        "data_disk_gb":   data_disk_gb,
-    }
+        data_disk_gb = default_data
+    p["data_disk_name"] = (f"{p['name']}-data"
+                           if config_service.get_bool("portainer_data_disk_enabled", False)
+                           else "")
+    p["data_disk_gb"] = data_disk_gb
+    return p
 
 
 def _allowed_cidrs() -> list[str]:
-    """MANUAL firewall source ranges (CSV), fail-closed. Empty CSV → [] unless allow_open.
+    """MANUAL firewall source ranges (CSV), fail-closed. Empty CSV -> [] unless the
+    node cloud's allow_open is ticked.
 
     Deliberately quiet: the CSV is only one input to the merged set (the dashboard's
-    own egress CIDR joins it), so an empty CSV does NOT necessarily mean the firewall
-    stays closed. The applied-outcome warnings live in
+    own egress CIDR and the gateway /32s join it), so an empty CSV does NOT
+    necessarily mean the firewall stays closed. The applied-outcome warnings live in
     :func:`refresh_portainer_firewall`, which sees the FINAL set."""
-    csv = config_service.get("portainer_allowed_source_cidrs") or ""
-    cidrs = [c.strip() for c in csv.split(",") if c.strip()]
-    if not cidrs:
-        if config_service.get_bool("gcp_portainer_allow_open", False):
-            return ["0.0.0.0/0"]
-        logger.debug("portainer_allowed_source_cidrs is empty — relying on the "
-                     "auto-detected dashboard egress CIDR")
-    return cidrs
+    return managed_node_service.allowed_cidrs(_SPEC, _node_cloud())
 
 
 def _jumpoint_cidrs(db=None) -> list[str]:
     """/32s for the Gateway hosts that can broker this node's Web Jump.
 
     A PRA Web Jump reaches the node THROUGH a Gateway, so the source IP hitting the
-    firewall is that host's egress IP (never the PRA appliance's).
-
-    EVERY live gateway in the Web Jump's cloud counts, not just the shared one: they
-    all join the same PRA Gateway cluster and PRA distributes sessions across its
-    nodes, so the broker for a given session may be any of them. Allowing only the
-    remembered shared /32 left a user-deployed gateway locked out of the node it was
-    deployed to carry.
-
-    Sources: the gateway registry (``Gateway.egress_ip``, authoritative and
-    per-gateway) plus the legacy ``portainer_ui_jumpoint_egress_ip`` key, which still
-    covers a shared host recorded before this table existed. Empty for a pre-existing
-    operator Gateway the dashboard didn't provision — add its IP to the CSV manually."""
-    if not config_service.get_bool("portainer_ui_web_jump_enabled", False):
-        return []
-    ips = set()
-    ip = (config_service.get("portainer_ui_jumpoint_egress_ip") or "").strip()
-    if ip:
-        ips.add(ip)
-    cloud = (config_service.get("portainer_ui_jumpoint_cloud") or "gcp").strip().lower()
-    try:
-        from . import gateway_service
-        if db is not None:
-            ips.update(gateway_service.live_egress_ips(db, cloud))
-        else:
-            # Callers on the read-only path (firewall_status via the API) have a session;
-            # the refresh path may not, so open a short-lived one rather than skip the
-            # registry and quietly narrow the rule.
-            from ..database import SessionLocal
-            _db = SessionLocal()
-            try:
-                ips.update(gateway_service.live_egress_ips(_db, cloud))
-            finally:
-                _db.close()
-    except Exception as exc:  # noqa: BLE001 — never let an inventory read close the rule
-        logger.warning("Portainer firewall: reading gateway egress IPs failed "
-                       "(continuing with %d known): %s", len(ips), exc)
-    return sorted(f"{i}/32" for i in ips)
+    firewall is that host's egress IP (never the PRA appliance's). Every live gateway
+    in the Web Jump's cloud counts -- see
+    :func:`managed_node_service.jumpoint_cidrs` for why."""
+    return managed_node_service.jumpoint_cidrs(_SPEC, db)
 
 
 def _dashboard_cidr() -> list[str]:
     """/32 for the DASHBOARD's own public egress IP.
 
     The worker bootstraps and polls the node over its PUBLIC IP, so this is the
-    source address that hits the node's source-restricted firewall — without it a
-    (re)deploy can't reach its own node and the readiness poll times out. Sourced
-    from ``portainer_dashboard_egress_cidr`` (auto-detected + persisted on deploy, or
-    set manually); a bare IP is normalized to ``/32``."""
-    val = (config_service.get("portainer_dashboard_egress_cidr") or "").strip()
-    if not val:
-        return []
-    return [val if "/" in val else f"{val}/32"]
+    source address that hits the node's source-restricted firewall -- without it a
+    (re)deploy cannot reach its own node and the readiness poll times out."""
+    return managed_node_service.dashboard_cidr(_SPEC)
 
 
 def _ready_timeout_s() -> int:
     """Readiness poll budget (config ``portainer_ready_timeout_s``, default 300s)."""
-    from ..config import settings
-    try:
-        return int(config_service.get("portainer_ready_timeout_s")
-                   or settings.portainer_ready_timeout_s)
-    except (TypeError, ValueError):
-        return _READY_TIMEOUT_S
+    return managed_node_service.ready_timeout_s(_SPEC)
 
 
 async def _detect_egress_ip() -> str:
     """Best-effort: learn the worker's own public egress IP via a plain-HTTP echo.
 
-    Plain HTTP (not HTTPS) avoids corp TLS-inspection breakage; ``trust_env`` honors
-    proxy env vars. Returns a bare IPv4 string, or ``""`` on any failure."""
-    import ipaddress
-    try:
-        async with httpx.AsyncClient(timeout=5.0, trust_env=True, follow_redirects=True) as c:
-            for url in _IP_ECHO_URLS:
-                try:
-                    r = await c.get(url)
-                    ip = (r.text or "").strip()
-                    ipaddress.ip_address(ip)  # validate; raises on junk/HTML
-                    return ip
-                except Exception:
-                    continue
-    except Exception as exc:  # client construction / proxy env issues
-        logger.warning("Portainer egress-IP detection failed (continuing): %s", exc)
-    return ""
+    Kept as a module-level name (rather than calling straight through) because it is
+    the seam the firewall tests replace -- detection must never fire in a unit test.
+    """
+    return await managed_node_service.detect_egress_ip("Portainer")
 
 
 async def _ensure_dashboard_egress_cidr() -> str:
     """Refresh + persist the dashboard's own egress CIDR so the firewall admits the
-    worker. An operator-set CIDR that already CONTAINS the detected IP is kept as-is:
-    corp proxies egress from a per-connection POOL, so pinning whichever /32 detection
-    saw this time would still drop the next connection. On detection failure any
-    operator-set value is left intact. Returns the CIDR now in effect."""
-    import ipaddress
-    ip = await _detect_egress_ip()
-    existing = (config_service.get("portainer_dashboard_egress_cidr") or "").strip()
-    if ip:
-        if existing:
-            try:
-                net = ipaddress.ip_network(existing if "/" in existing else f"{existing}/32",
-                                           strict=False)
-                if ipaddress.ip_address(ip) in net:
-                    return existing  # detected IP already covered — keep the broader pin
-            except ValueError:
-                pass  # malformed stored value — fall through and replace it
-        cidr = f"{ip}/32"
-        if existing != cidr:
-            config_service.set("portainer_dashboard_egress_cidr", cidr)
-            logger.info("Portainer firewall: dashboard egress IP detected as %s", cidr)
-        return cidr
-    if not existing:
-        logger.warning("Portainer firewall: could not auto-detect the dashboard's public egress "
-                       "IP and portainer_dashboard_egress_cidr is unset — the worker may be "
-                       "unable to reach the node. Set it manually in Settings → Containers.")
-    return existing
+    worker. An operator-set CIDR that already CONTAINS the detected IP is kept as-is
+    (corp proxies egress from a pool) -- see
+    :func:`managed_node_service.ensure_dashboard_egress_cidr`."""
+    return await managed_node_service.ensure_dashboard_egress_cidr(
+        _SPEC, detect=_detect_egress_ip)
 
 
 async def refresh_portainer_firewall(db=None) -> dict:
@@ -302,25 +155,25 @@ async def refresh_portainer_firewall(db=None) -> dict:
 
     The merged set is the manual CSV (``_allowed_cidrs``) plus the dashboard's own
     egress /32 plus a /32 for every Gateway that can broker the Web Jump. Fail-closed
-    and idempotent behavior is inherited from ``gcp_service.ensure_portainer_firewall``
-    (empty set → rule deleted; ``0.0.0.0/0`` from allow_open dedupes harmlessly). No-op
-    safe: returns early when no GCP project is configured, so callers can fire it
-    best-effort even when no node is deployed.
+    and idempotent behavior is inherited from the per-cloud apply (empty set → rule
+    removed / every ingress permission revoked; ``0.0.0.0/0`` from allow_open dedupes
+    harmlessly). No-op safe: returns early when the node's cloud has no account
+    configured, so callers can fire it best-effort even when no node is deployed.
 
     ``db`` is optional so best-effort callers can fire it without a session; it is used
     to read the gateway registry."""
-    p = _node_params()
-    if not p["project_id"]:
-        return {"skipped": "no gcp project configured"}
+    cloud = _node_cloud()
+    p = _node_params(cloud=cloud)
+    if not p["account"]:
+        return {"skipped": f"no {cloud} account configured"}
     merged = sorted(set(_allowed_cidrs()) | set(_dashboard_cidr()) | set(_jumpoint_cidrs(db)))
     if not merged:
         logger.warning("Portainer node has NO allowed source CIDRs — firewall stays closed "
                        "(node unreachable). Set portainer_allowed_source_cidrs in Settings.")
     elif "0.0.0.0/0" in merged:
         logger.warning("Portainer node firewall opening 0.0.0.0/0 — node reachable from "
-                       "anywhere (gcp_portainer_allow_open or a manual CSV entry)")
-    return await gcp_service.ensure_portainer_firewall(
-        p["project_id"], p["network"], p["network_tag"], merged, _firewall_name(p["name"]))
+                       "anywhere (%s or a manual CSV entry)", _SPEC.allow_open_key(cloud))
+    return await managed_node_service.apply_ingress(cloud, _SPEC, p, merged)
 
 
 def firewall_status(db=None) -> dict:
@@ -338,9 +191,10 @@ def firewall_status(db=None) -> dict:
         "jumpoint_egress_ip": jump[0] if jump else "",
         "gateway_cidrs": jump,
         "merged": merged,
-        "allow_open": config_service.get_bool("gcp_portainer_allow_open", False),
+        "cloud": _node_cloud(),
+        "allow_open": config_service.get_bool(_SPEC.allow_open_key(_node_cloud()), False),
         "opened": bool(merged),
-        "ports": ["9443", "8000"],
+        "ports": list(_SPEC.ports),
     }
 
 
@@ -521,16 +375,101 @@ async def _bootstrap(db, job_id: str, url: str, password: str,
     return pat, ""
 
 
+async def _launch_node(cloud: str, p: dict, *, admin_password_hash: str) -> dict:
+    """Create (or reuse/start) the node VM on ``cloud`` and return
+    ``{external_ip, internal_ip, url, zone, reused, data_disk_reused}``.
+
+    Per-cloud because the container-launch mechanism has no common API: GCE reads a
+    ``gce-container-declaration`` at boot, AWS runs ``docker run`` from EC2 user-data
+    on a Docker-bearing AMI, Azure does the same from cloud-init. The *shape* is
+    identical everywhere — unprivileged, no Docker socket, host ports 9443/8000, and
+    the admin hash handed over at launch so the node comes up already initialized.
+    """
+    if cloud == "gcp":
+        return await gcp_service.run_gce_portainer(
+            p["project_id"], p["zone"], p["name"], p["image"],
+            network=p["network"], subnetwork=p["subnetwork"],
+            machine_type=p["machine_type"], boot_disk_gb=p["boot_disk_gb"],
+            network_tag=p["network_tag"], create_external_ip=True, region=p["region"],
+            admin_password_hash=admin_password_hash,
+            data_disk_name=p["data_disk_name"], data_disk_gb=p["data_disk_gb"])
+    raise managed_node_service.unsupported(cloud, _SPEC, "node launch")
+
+
+async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
+                     delete_firewall: bool = False, data_disk_name: str = "",
+                     delete_data_disk: bool = False) -> None:
+    """Delete the node VM on ``cloud``, optionally taking its ingress rule and its
+    durable data volume with it."""
+    if cloud == "gcp":
+        await gcp_service.stop_gce_portainer(
+            p["project_id"], zone, name,
+            delete_firewall=delete_firewall,
+            firewall_name=_firewall_name(name) if delete_firewall else None,
+            data_disk_name=data_disk_name, delete_data_disk=delete_data_disk)
+        return
+    raise managed_node_service.unsupported(cloud, _SPEC, "node teardown")
+
+
+async def _find_data_disk(cloud: str, p: dict) -> dict:
+    """The node's durable data volume if it already exists, else ``{}``.
+
+    Read BEFORE launching: a volume that already holds an initialized Portainer DB
+    ignores ``--admin-password``, so a deploy that has no stored password for it
+    would produce a node nobody can sign into.
+    """
+    if cloud == "gcp":
+        return await gcp_service.find_portainer_data_disk(
+            p["project_id"], p["data_disk_name"])
+    raise managed_node_service.unsupported(cloud, _SPEC, "durable data volumes")
+
+
+async def _relocate_across_clouds(db, job_id: str, target_cloud: str) -> None:
+    """Delete the node in its PREVIOUS cloud when the operator moved it.
+
+    One Portainer server is the whole model, so two live nodes is never the intent —
+    and a stranded one keeps billing while Edge agents keep dialling an address the
+    dashboard has stopped tracking. Best-effort: if the old cloud cannot be reached we
+    say so and carry on, because refusing would leave the operator unable to move.
+    """
+    prev_cloud = _node_cloud()
+    if prev_cloud == target_cloud:
+        return
+    logger.info("Relocating Portainer: %s to %s", prev_cloud, target_cloud)
+    job_service.update_progress(db, job_id, 20, f"Relocating from {prev_cloud}")
+    try:
+        prev = _node_params(cloud=prev_cloud)
+        for node in await managed_node_service.list_nodes(prev_cloud, _SPEC, prev):
+            await _stop_node(prev_cloud, prev, name=node.get("name") or prev["name"],
+                             zone=node.get("zone") or prev["zone"], delete_firewall=True,
+                             data_disk_name=prev["data_disk_name"], delete_data_disk=False)
+    except Exception as exc:  # noqa: BLE001 -- never block a move on the old cloud
+        logger.warning("Portainer cross-cloud relocation: deleting the %s node failed "
+                       "(continuing; it may need removing by hand): %s", prev_cloud, exc)
+
+
 async def run_deploy(db, *, job_id: str, meta: dict) -> None:
-    """Deploy (or reuse) the Portainer node: firewall → COS VM → wait ready →
+    """Deploy (or reuse) the Portainer node: firewall → VM → wait ready →
     first-run admin → mint token → wire the integration config."""
     try:
         job_service.set_running(db, job_id)
-        # Deploy-time region/zone pick (blank → the persisted node region, else the
-        # configured default). Selects the node's region-specific subnet/zone.
-        p = _node_params(region=meta.get("region"), zone=meta.get("zone"))
-        if not p["project_id"]:
-            job_service.set_failed(db, job_id, "GCP project is not configured.")
+        # Deploy-time cloud + region/zone pick (blank → the persisted node cloud /
+        # region, else the configured default). Selects the node's region-specific
+        # subnet/zone within the chosen cloud.
+        cloud = (meta.get("cloud") or "").strip().lower() or _node_cloud()
+        if cloud not in managed_node_service.CLOUDS:
+            job_service.set_failed(
+                db, job_id,
+                f"{cloud!r} is not a cloud the Portainer node can run on — "
+                f"choose one of {', '.join(managed_node_service.CLOUDS)}.")
+            return
+        p = _node_params(region=meta.get("region"), zone=meta.get("zone"), cloud=cloud)
+        if not p["account"]:
+            job_service.set_failed(
+                db, job_id,
+                f"{cloud.upper()} is not configured, so the Portainer node has nowhere to "
+                f"go. Set it up under Settings → {cloud.upper()} (or pick a different "
+                f"cloud on the deploy form).")
             return
 
         # Persist the deploy-form PRA choices to config FIRST, so the firewall merge
@@ -562,9 +501,14 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                 "The Portainer node's firewall is closed — no allowed source CIDRs, and the "
                 "dashboard couldn't auto-detect its own public egress IP to open it. Set "
                 "portainer_dashboard_egress_cidr (the dashboard's egress IP) or "
-                "portainer_allowed_source_cidrs in Settings → Containers — or enable "
-                "gcp_portainer_allow_open — then redeploy.")
+                f"portainer_allowed_source_cidrs in Settings → Containers — or enable "
+                f"{_SPEC.allow_open_key(cloud)} — then redeploy.")
             return
+
+        # Moving the node to a DIFFERENT cloud deletes the old one first, for the same
+        # reason a region move does: one server, and a stranded node keeps billing
+        # while answering on an address nothing tracks any more.
+        await _relocate_across_clouds(db, job_id, cloud)
 
         # Single relocatable node. If a node already lives in the TARGET region, reuse
         # that exact zone (the launcher starts/returns it). If one lives in a DIFFERENT
@@ -572,7 +516,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         # ephemeral — state re-bootstraps).
         target_region = p["region"]
         try:
-            existing_nodes = await gcp_service.list_gce_portainer(p["project_id"])
+            existing_nodes = await managed_node_service.list_nodes(cloud, _SPEC, p)
         except Exception as exc:
             logger.warning("Portainer relocation check failed (continuing): %s", exc)
             existing_nodes = []
@@ -599,8 +543,8 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                             node.get("name"), nzone, target_region)
                 job_service.update_progress(db, job_id, 25, f"Relocating to {target_region}")
                 try:
-                    await gcp_service.stop_gce_portainer(
-                        p["project_id"], nzone, node.get("name") or p["name"])
+                    await _stop_node(cloud, p, name=node.get("name") or p["name"],
+                                     zone=nzone)
                 except Exception as exc:
                     logger.warning("Failed to delete old-region Portainer node (continuing): %s", exc)
 
@@ -623,8 +567,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         # BEFORE launching and fail with the remedy instead of deploying a node we
         # cannot sign into.
         if p["data_disk_name"] and generated:
-            prior = await gcp_service.find_portainer_data_disk(
-                p["project_id"], p["data_disk_name"])
+            prior = await _find_data_disk(cloud, p)
             if prior:
                 job_service.set_failed(
                     db, job_id,
@@ -637,14 +580,8 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                     f"the disk to start clean.")
                 return
 
-        job_service.update_progress(db, job_id, 30, "Launching COS VM")
-        res = await gcp_service.run_gce_portainer(
-            p["project_id"], p["zone"], p["name"], p["image"],
-            network=p["network"], subnetwork=p["subnetwork"],
-            machine_type=p["machine_type"], boot_disk_gb=p["boot_disk_gb"],
-            network_tag=p["network_tag"], create_external_ip=True, region=p["region"],
-            admin_password_hash=pw_hash,
-            data_disk_name=p["data_disk_name"], data_disk_gb=p["data_disk_gb"])
+        job_service.update_progress(db, job_id, 30, "Launching the node VM")
+        res = await _launch_node(cloud, p, admin_password_hash=pw_hash)
         # True when Portainer's DB pre-dates this launch: a reused VM, or a fresh VM
         # that picked up an existing data disk. Both mean "do not treat the credential
         # we just computed as authoritative".
@@ -657,9 +594,10 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
 
         # Persist the ACTUAL deployed zone so teardown + bare redeploys stay sticky to
         # the (possibly relocated / auto-picked) region.
+        managed_node_service.set_node_cloud(_SPEC, cloud)
         deployed_zone = res.get("zone") or p["zone"]
         if deployed_zone:
-            config_service.set("gcp_portainer_zone", deployed_zone)
+            config_service.set(_SPEC.infra_key(cloud, "zone"), deployed_zone)
         # portainer_url is the key the EXISTING integration reads, so writing it here
         # is what makes the Containers page work with no manual Settings step. The node
         # serves a self-signed cert on :9443, so TLS verification must be off for it.
@@ -721,6 +659,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             "url": url,
             "external_ip": external_ip,
             "internal_ip": res.get("internal_ip") or "",
+            "cloud": cloud,
             "zone": deployed_zone,
             "region": p["region"],
             "name": p["name"],
@@ -749,13 +688,21 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
     state (users, environments, settings)."""
     try:
         job_service.set_running(db, job_id)
-        p = _node_params()
-        if not p["project_id"]:
-            job_service.set_failed(db, job_id, "GCP project is not configured.")
+        # Teardown follows the node, not the form: the persisted cloud is where it
+        # actually is. An explicit meta cloud is honoured so a stranded node in a
+        # cloud we have since moved away from can still be reaped.
+        cloud = (meta.get("cloud") or "").strip().lower() or _node_cloud()
+        p = _node_params(cloud=cloud)
+        if not p["account"]:
+            job_service.set_failed(
+                db, job_id,
+                f"{cloud.upper()} is not configured, so the Portainer node cannot be "
+                f"reached to tear it down.")
             return
 
         name = meta.get("name") or p["name"]
-        zone = meta.get("zone") or config_service.get("gcp_portainer_zone") or p["zone"]
+        zone = (meta.get("zone") or config_service.get(_SPEC.infra_key(cloud, "zone"))
+                or p["zone"])
         if not zone:
             job_service.set_failed(
                 db, job_id,
@@ -778,15 +725,14 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
         data_disk_name = p["data_disk_name"]
 
         job_service.update_progress(db, job_id, 30, f"Deleting {name} in {zone}")
-        await gcp_service.stop_gce_portainer(
-            p["project_id"], zone, name,
-            delete_firewall=True, firewall_name=_firewall_name(p["name"]),
-            data_disk_name=data_disk_name, delete_data_disk=delete_data_disk)
+        await _stop_node(cloud, p, name=name, zone=zone, delete_firewall=True,
+                         data_disk_name=data_disk_name,
+                         delete_data_disk=delete_data_disk)
 
         job_service.update_progress(db, job_id, 80, "Clearing Portainer configuration")
         # Drop everything the deploy populated. The URL goes too: leaving it would point
         # the Containers page at a VM that no longer exists.
-        cleared = ["portainer_url", "gcp_portainer_zone",
+        cleared = ["portainer_url", _SPEC.infra_key(cloud, "zone"),
                    "portainer_ui_web_jump_id", "portainer_ui_web_jump_tfstate",
                    "portainer_ui_vault_account_id", "portainer_ui_jumpoint_egress_ip"]
         # The admin password and PAT live in Portainer's DB, so they survive exactly as
@@ -803,7 +749,7 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
             except Exception as exc:
                 logger.warning("Failed to clear config key '%s' (continuing): %s", key, exc)
 
-        result = {"name": name, "zone": zone, "deleted": True,
+        result = {"name": name, "zone": zone, "cloud": cloud, "deleted": True,
                   "data_disk_deleted": bool(delete_data_disk and data_disk_name)}
         if state_survives:
             result["note"] = (

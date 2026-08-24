@@ -59,6 +59,34 @@ def flags() -> dict:
         "entitle_request_portal_url": config_service.get("entitle_request_portal_url",   settings.entitle_request_portal_url),
     }
 
+def cloud_configured(cloud: str) -> bool:
+    """Whether ``cloud`` has usable credentials.
+
+    Extracted from :func:`feature_map` so callers that gate on "can I put a resource
+    in this cloud?" — the managed Portainer/Rancher node routes, for one — answer that
+    question the same way the tiles do, rather than each re-deriving it from a
+    different key and disagreeing.
+    """
+    cloud = (cloud or "").strip().lower()
+    if cloud == "aws":
+        return bool(config_service.get("aws_access_key_id")
+                    or os.environ.get("AWS_ACCESS_KEY_ID", ""))
+    if cloud == "azure":
+        return bool(
+            (config_service.get("azure_client_id") or settings.azure_client_id)
+            and (config_service.get("azure_subscription_id")
+                 or settings.azure_subscription_id))
+    if cloud == "gcp":
+        return bool(config_service.get("gcp_project_id") or settings.gcp_project_id)
+    if cloud == "oci":
+        return bool(
+            (config_service.get("oci_tenancy_ocid") or settings.oci_tenancy_ocid)
+            and (config_service.get("oci_user_ocid") or settings.oci_user_ocid)
+            and (config_service.get("oci_private_key") or settings.oci_private_key)
+            and (config_service.get("oci_region") or settings.oci_region))
+    return False
+
+
 def feature_map() -> dict:
     """The map ``/api/features`` serves: raw flags plus the credential-presence checks.
 
@@ -67,23 +95,12 @@ def feature_map() -> dict:
     raw = flags()
     # AWS/Azure/GCP aren't gated by a feature flag — they're "configured" iff
     # credentials are present. The dashboard uses these to hide tiles on bare installs.
-    aws_configured = bool(
-        config_service.get("aws_access_key_id")
-        or os.environ.get("AWS_ACCESS_KEY_ID", "")
-    )
-    azure_configured = bool(
-        (config_service.get("azure_client_id") or settings.azure_client_id)
-        and (config_service.get("azure_subscription_id") or settings.azure_subscription_id)
-    )
-    gcp_configured = bool(config_service.get("gcp_project_id") or settings.gcp_project_id)
+    aws_configured = cloud_configured("aws")
+    azure_configured = cloud_configured("azure")
+    gcp_configured = cloud_configured("gcp")
     # OCI is "configured" iff the API-key signing quad (tenancy + user + key +
     # region) is present — mirrors the AWS/Azure/GCP credential-presence check.
-    oci_configured = bool(
-        (config_service.get("oci_tenancy_ocid") or settings.oci_tenancy_ocid)
-        and (config_service.get("oci_user_ocid") or settings.oci_user_ocid)
-        and (config_service.get("oci_private_key") or settings.oci_private_key)
-        and (config_service.get("oci_region") or settings.oci_region)
-    )
+    oci_configured = cloud_configured("oci")
     # Portainer needs both the toggle AND a URL — enabled-but-unconfigured should
     # hide the dashboard tile rather than show a permanently "unavailable" one.
     portainer_configured = raw["portainer_enabled"] and bool(
