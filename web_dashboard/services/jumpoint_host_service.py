@@ -1029,23 +1029,6 @@ async def _resolve_azure_deploy_key() -> str:
             or "")
 
 
-def _azure_compliant_password() -> str:
-    """A random password meeting Azure's VM complexity rules (3 of 4 categories).
-    The gateway VM's NIC carries a Standard, secure-by-default public IP used only
-    for egress — Standard IPs block all inbound unless an NSG allows it, and none is
-    attached, so no inbound SSH is possible — this just satisfies the API; it is
-    never used to log in."""
-    import secrets
-    import string
-    symbols = "!@#%^*-_"
-    alphabet = string.ascii_letters + string.digits + symbols
-    while True:
-        pw = "".join(secrets.choice(alphabet) for _ in range(24))
-        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
-                and any(c.isdigit() for c in pw) and any(c in symbols for c in pw)):
-            return pw
-
-
 def _azure_gateway_location(region: str) -> str:
     """The Azure region a gateway VM is created in — and torn down from.
 
@@ -1098,7 +1081,7 @@ async def _ensure_jumpoint_host_azure(region: str, name: str = "",
             # headless Chromium on the GATEWAY, and 1 GB gets it OOM-killed, dropping
             # every session on the node. See `gcp_jumpoint_machine_type` in config.py.
             vm_size=_cfg("azure_jumpoint_vm_size") or "Standard_B2s",
-            admin_password=_azure_compliant_password(),
+            admin_password=azure_service._azure_compliant_password(),
             install_db_clients=install_db_clients,
         )
         logger.info("gateway-host(azure): gateway VM %s %s in %s",

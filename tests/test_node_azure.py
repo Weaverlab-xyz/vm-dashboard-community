@@ -29,6 +29,7 @@ Run: python tests/test_node_azure.py   (or under pytest)
 """
 import base64
 import os
+import re
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -142,6 +143,35 @@ def test_a_command_with_quotes_survives_the_runcmd_encoding():
     raw = base64.b64decode(azure_service.container_node_cloud_init(
         "docker run img '--admin-password' '$2y$05$a\"b'")).decode()
     assert '\\"' in raw or "'$2y$05$a" in raw, raw
+
+
+# ── the throwaway VM password ────────────────────────────────────────────────
+
+def test_every_caller_reaches_the_vm_password_helper_where_it_actually_lives():
+    """Azure refuses to create a Linux VM given neither a password nor an SSH key, so
+    both nodes and the Gateway VM pass one. Naming the wrong module is an AttributeError
+    on every Azure deploy, and nothing else here would catch it: the call sits behind a
+    live SDK path that CI never reaches."""
+    for module in ("portainer_node_service", "rancher_node_service",
+                   "jumpoint_host_service"):
+        owners = set(re.findall(r"(\w+)\._azure_compliant_password\(",
+                                _service_src(module)))
+        assert owners, f"{module} no longer calls the helper through a module"
+        for owner in owners:
+            assert "def _azure_compliant_password(" in _service_src(owner), (
+                f"{module} calls {owner}._azure_compliant_password(), but {owner} does "
+                f"not define it — every Azure deploy on that path raises AttributeError")
+
+
+def test_the_vm_password_satisfies_azures_complexity_rules():
+    """Azure rejects a create whose password misses 3 of its 4 character categories,
+    and it surfaces as an opaque validation error partway through the deploy."""
+    for _ in range(20):
+        pw = azure_service._azure_compliant_password()
+        assert 12 <= len(pw) <= 123, f"length {len(pw)} is outside Azure's range: {pw}"
+        classes = (any(c.islower() for c in pw), any(c.isupper() for c in pw),
+                   any(c.isdigit() for c in pw), any(not c.isalnum() for c in pw))
+        assert sum(classes) >= 3, f"only {sum(classes)} character classes: {pw}"
 
 
 # ── the NSG ──────────────────────────────────────────────────────────────────

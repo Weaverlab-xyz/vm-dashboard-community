@@ -807,6 +807,25 @@ def generate_windows_admin_password(length: int = 20) -> str:
     return "".join(chars)
 
 
+def _azure_compliant_password() -> str:
+    """A random password meeting Azure's VM complexity rules (3 of 4 categories).
+
+    Azure refuses to create a Linux VM given neither a password nor an SSH key, so the
+    Gateway VM and both managed nodes pass one purely to satisfy the API — none of them
+    is ever logged into over it. It lives here, with the rest of the Azure VM
+    primitives, because all three callers reach it through this module.
+    """
+    import secrets
+    import string
+    symbols = "!@#%^*-_"
+    alphabet = string.ascii_letters + string.digits + symbols
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(24))
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw) and any(c in symbols for c in pw)):
+            return pw
+
+
 def store_windows_admin_password(vm_name: str, key_suffix: str, password: str) -> tuple[str, str]:
     """Store a generated Windows admin password in the configured secrets
     backend. Returns ``(backend, ref)`` for job metadata — job records carry
