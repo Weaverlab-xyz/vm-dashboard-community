@@ -898,6 +898,54 @@ def _policy_unreadable(path: str, exc: OSError) -> str:
             f"and restart. The agent refuses all work without a readable policy.")
 
 
+class _DuplicatePolicyKey(yaml.constructor.ConstructorError):
+    """A key written twice in policy.yaml. Carries its own finished message."""
+
+
+class _PolicyLoader(yaml.SafeLoader):
+    """``yaml.SafeLoader``, except that a repeated key is an error.
+
+    PyYAML's default is last-wins, silently: an operator who writes two ``targets:``
+    blocks — or, having been told to add a range, adds a second ``cidr:`` line to an
+    entry that already had one — keeps only the second, with nothing logged and no
+    shape error to notice afterwards. Everywhere else that is a merge conflict waiting
+    to happen; in the file that IS the security boundary it is a grant the operator
+    wrote, believes they have, and does not have.
+    """
+
+    def construct_mapping(self, node, deep=False):
+        # Checked BEFORE flatten_mapping, so the keys compared are the ones actually
+        # typed in the file: a mapping merged in with `<<:` is *meant* to be overridden
+        # by the keys beside it, and that is not the mistake being caught here.
+        seen = {}
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            try:
+                key = self.construct_object(key_node, deep=deep)
+                first = seen.get(key)
+            except TypeError:
+                continue        # unhashable key; SafeConstructor refuses it below
+            if first is not None:
+                # A duplicate whose key begins with a dash is not really a duplicate:
+                # it is the same missing space after the dash, twice, and telling that
+                # operator to merge the two would send them the wrong way entirely.
+                fix = (f"Merge them into a single `{key}:` with every entry under it."
+                       if not str(key).startswith("-") else
+                       f"A key beginning with `-` is a missing space after the dash: "
+                       f"`{key}: ...` is a key named `{key}`, while "
+                       f"`{str(key)[0]} {str(key)[1:]}: ...` is a list entry. Add the "
+                       f"space to each of them.")
+                raise _DuplicatePolicyKey(
+                    None, None,
+                    f"policy.yaml: `{key}` is written twice in the same block (line "
+                    f"{first}, and again at line {key_node.start_mark.line + 1}). YAML "
+                    f"keeps only the LAST one, so everything under the earlier copy is "
+                    f"discarded without a word. {fix}", None)
+            seen[key] = key_node.start_mark.line + 1
+        return super().construct_mapping(node, deep=deep)
+
+
 class Policy:
     """The customer's allow-list. Fails closed, always.
 
@@ -1049,13 +1097,50 @@ class Policy:
         One parser for both ``targets:`` and ``ansible.targets:``. They are separate
         *grants* and must never share a list, but they have the same shape — and two
         parsers is how one of them would quietly stop pinning resolved addresses.
+
+        Every shape that is not a target is fatal rather than skipped. A skipped entry
+        is the worst failure this file has: the YAML parses, the agent starts, the
+        digest matches, and the grant the operator wrote is simply not there — so the
+        refusal they eventually read points at a line they can see is correct.
         """
         out = []
-        for entry in entries or []:
+        if entries is None:
+            return out
+        if not isinstance(entries, (list, tuple)):
+            found = ""
+            if isinstance(entries, dict):
+                keys = ", ".join(f"`{k}`" for k in list(entries)[:6])
+                found = (f" It parsed as a mapping with the key(s): {keys}, which is what "
+                         f"a missing space after the dash does — `-cidr: 10.0.0.0/24` is "
+                         f"valid YAML for a key NAMED `-cidr`, not a list entry.")
+            raise AgentFatal(
+                f"policy.yaml: `{where}` must be a list of `- cidr:` / `- fqdn:` entries "
+                f"(a {type(entries).__name__} was written instead).{found} Write "
+                f"`- cidr: 10.0.0.0/24`, with the dash, a space, then the key.")
+        for entry in entries:
             if not isinstance(entry, dict):
-                continue
+                raise AgentFatal(
+                    f"policy.yaml: `{where}` contains {entry!r}, which is not a target. "
+                    f"Every item is a mapping naming `cidr:` or `fqdn:` — write "
+                    f"`- cidr: {entry}` rather than a bare value.")
             ports = entry.get("ports")
-            ports = {int(p) for p in ports} if isinstance(ports, (list, tuple)) else None
+            if ports is None:
+                pass                      # omitted means any port in the range
+            elif isinstance(ports, (list, tuple)):
+                try:
+                    ports = {int(p) for p in ports}
+                except (TypeError, ValueError):
+                    raise AgentFatal(f"policy.yaml: `ports: {list(ports)}` under "
+                                     f"`{where}` must be numbers, e.g. `ports: [22, 5985]`.")
+            else:
+                # Not merely ignored: an unrecognised `ports` used to mean "no ports
+                # named", which means EVERY port in the range. The typo widened the
+                # grant instead of narrowing it, which is the one direction this file
+                # must never fail in.
+                raise AgentFatal(
+                    f"policy.yaml: `ports: {ports!r}` under `{where}` must be a list — "
+                    f"write `ports: [{ports}]`. A bare value would be read as no ports "
+                    f"named at all, which allows EVERY port in that range.")
             if entry.get("cidr"):
                 try:
                     out.append((ipaddress.ip_network(str(entry["cidr"]), strict=False), ports))
@@ -1068,6 +1153,12 @@ class Policy:
                 for addr in _resolve_all(str(entry["fqdn"])):
                     out.append((ipaddress.ip_network(addr + "/32" if ":" not in addr
                                                      else addr + "/128"), ports))
+            else:
+                keys = ", ".join(f"`{k}`" for k in list(entry)[:6]) or "none"
+                raise AgentFatal(
+                    f"policy.yaml: an entry under `{where}` names neither `cidr:` nor "
+                    f"`fqdn:` (it has: {keys}). One of the two is what makes it a target; "
+                    f"an entry with only `ports:` matches no host at all.")
         return out
 
     @classmethod
@@ -1078,7 +1169,9 @@ class Policy:
         except OSError as exc:
             raise AgentFatal(_policy_unreadable(path, exc))
         try:
-            doc = yaml.safe_load(raw) or {}
+            doc = yaml.load(raw, _PolicyLoader) or {}
+        except _DuplicatePolicyKey as exc:
+            raise AgentFatal(str(exc))
         except yaml.YAMLError as exc:
             raise AgentFatal(f"policy.yaml is not valid YAML: {exc}")
         if not isinstance(doc, dict):
