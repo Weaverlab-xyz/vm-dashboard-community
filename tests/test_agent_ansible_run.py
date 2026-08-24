@@ -24,11 +24,14 @@ Standalone or under pytest:
     python tests/test_agent_ansible_run.py
 """
 import importlib.util
+import io as _io
 import json
 import os
 import sys
+import tarfile
 import tempfile
 import textwrap
+from urllib.parse import unquote
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _AGENT_PATH = os.path.join(_ROOT, "runners", "agent", "agent.py")
@@ -241,6 +244,8 @@ def test_no_hostconfig_field_is_derived_from_a_job():
     no softening."""
     cfg = agent._ANSIBLE_HOSTCONFIG
     assert cfg["Binds"] == [], "a bind mount would be a path the job could influence"
+    assert all(not m.get("Source") for m in cfg.get("Mounts") or []), (
+        "a mount Source is a host path, which is the thing Binds: [] exists to prevent")
     assert cfg["Privileged"] is False
     assert cfg["CapDrop"] == ["ALL"]
     assert cfg["ReadonlyRootfs"] is True
@@ -249,6 +254,109 @@ def test_no_hostconfig_field_is_derived_from_a_job():
     assert cfg["PidsLimit"] and cfg["Memory"]
     assert cfg["MemorySwap"] == cfg["Memory"], "swap must not defeat the memory limit"
     assert "NetworkMode" not in cfg, "the network comes from policy, per run"
+
+
+def _capture_put(files, dest=None):
+    """Run the real ``_archive_put`` with only the socket replaced, and hand back what it
+    would have sent: (destination, tar member names, {name: TarInfo})."""
+    sent = {}
+
+    class _Conn:
+        def __init__(self, path, timeout=60.0):
+            pass
+
+        def request(self, method, url, body=None, headers=None):
+            sent["url"], sent["body"] = url, body
+
+        def getresponse(self):
+            class _R:
+                status = 204
+
+                def read(self):
+                    return b""
+            return _R()
+
+        def close(self):
+            pass
+
+    orig = agent._UnixHTTP
+    agent._UnixHTTP = _Conn
+    try:
+        agent._archive_put("cid", dest or agent._JOB_DIR, files)
+    finally:
+        agent._UnixHTTP = orig
+
+    with tarfile.open(fileobj=_io.BytesIO(sent["body"])) as tar:
+        members = {m.name: m for m in tar.getmembers()}
+    return unquote(sent["url"].split("path=", 1)[1]), list(members), members
+
+
+def test_the_job_dir_is_a_mount_or_the_daemon_refuses_every_run():
+    """The one that killed the feature on every host at once.
+
+    `PUT /containers/<id>/archive` is answered 400 "container rootfs is marked read-only"
+    whenever HostConfig sets ReadonlyRootfs and the destination does not resolve into a
+    mount. The daemon reads that off HostConfig, so extracting BEFORE the container starts
+    — which is what the code does, and why this looked safe — makes no difference at all.
+    """
+    cfg = agent._ANSIBLE_HOSTCONFIG
+    assert cfg["ReadonlyRootfs"] is True
+    targets = [m.get("Target") for m in cfg.get("Mounts") or []]
+    assert agent._JOB_DIR in targets, (
+        f"{agent._JOB_DIR} is not a mount, so the Engine will refuse the archive PUT and "
+        f"no Config-Management run can start: {targets}")
+
+
+def test_the_job_dir_mount_is_a_volume_and_never_a_tmpfs():
+    """A tmpfs here ACCEPTS the PUT and then loses the files: it is mounted empty when the
+    container starts, over the top of what was just extracted. The run then fails as a
+    missing playbook, pointing at the dashboard instead of at this line."""
+    for m in agent._ANSIBLE_HOSTCONFIG.get("Mounts") or []:
+        if m.get("Target") == agent._JOB_DIR:
+            assert m.get("Type") == "volume", m
+
+
+def test_the_job_dir_mount_names_no_host_path():
+    """Anonymous, so the sibling's `Binds: []` property — nothing of this host is reachable
+    from a run — survives the mount that had to be added."""
+    for m in agent._ANSIBLE_HOSTCONFIG.get("Mounts") or []:
+        assert not m.get("Source"), m
+
+
+def test_the_extract_targets_the_job_dir_with_relative_members():
+    """Two halves of one contract: ``path=`` must be the mount (extracting into ``/`` is
+    refused even with the mount present, because ``/`` is not in it), and the members must
+    then be named relative to it or they land in /opt/job/opt/job/."""
+    dest, names, members = _capture_put({
+        f"{agent._JOB_DIR}/playbook.yml": b"- hosts: all",
+        f"{agent._JOB_DIR}/assets/site.tar": b"asset",
+        f"{agent._JOB_DIR}/id_rsa": b"key",
+    })
+    assert dest == agent._JOB_DIR, dest
+    assert "playbook.yml" in names and "assets/site.tar" in names, names
+    assert not any(n.startswith("opt") for n in names), names
+    assert members["assets"].isdir() and members["assets"].mode == 0o700
+    assert members["id_rsa"].mode == 0o600, "the private key must never be group-readable"
+
+
+def test_the_keys_may_still_be_written_as_absolute_paths():
+    """The files dict stays keyed by where each file ENDS UP, which is what the argv and the
+    dashboard both talk in. Stripping the prefix is this function's job, not the caller's."""
+    dest, names, _ = _capture_put({"/opt/job/playbook.yml": b"x",
+                                   "opt/job/inventory.json": b"{}"})
+    assert sorted(names) == ["inventory.json", "playbook.yml"], names
+
+
+def test_a_file_outside_the_job_dir_is_refused():
+    """Everything is extracted relative to the mount, so a path outside it would silently
+    land somewhere else entirely — and the one path assembled from anything the dashboard
+    sends is the asset name."""
+    for path in ("/etc/cron.d/x", "opt/job-other/x", "/opt/job"):
+        try:
+            _capture_put({path: b"x"})
+            raise AssertionError(f"{path} was accepted")
+        except agent.PolicyRefusal:
+            pass
 
 
 def test_the_log_driver_is_pinned_to_a_readable_one():

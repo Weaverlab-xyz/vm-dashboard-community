@@ -102,7 +102,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 #     any `ansible_*` extra var. A dashboard-supplied inventory could set
 #     `ansible_connection: local`, which would run the operator's playbook inside the runner
 #     container on this network instead of against the target it names.
-AGENT_VERSION = "2.3.0"
+AGENT_VERSION = "2.3.1"
 
 log = logging.getLogger("agent")
 
@@ -3278,6 +3278,26 @@ def _run_sibling(policy: "Policy", env: dict, emit, cancelled,
 # it is, and bending it to do both would put a `follow` flag through code where the failure
 # mode is a corrupted stream.
 
+# Where the run's files are extracted, and a VOLUME rather than a directory in the image.
+# Both halves of that were found the hard way against a real dockerd:
+#
+#   NOT under /tmp, because the tmpfs below is mounted over /tmp when the container starts,
+#   which shadows anything placed there beforehand and takes it away with no diagnostic
+#   whatsoever.
+#
+#   A volume, because `PUT /containers/<id>/archive` is refused outright — 400 "container
+#   rootfs is marked read-only" — on any container whose HostConfig sets ReadonlyRootfs,
+#   unless the extract destination resolves INTO a mount. The daemon decides that from
+#   HostConfig alone, so "put the files in before it starts" does not get around it.
+#
+# A tmpfs mount here would take the PUT and pass every test, and then lose the files: the
+# tmpfs is mounted empty at start, over the top of what was just extracted. It has to be a
+# volume, which the daemon mounts for the extract as well and which therefore survives.
+# Anonymous, so the `?force=1&v=1` removals below take it away with the container.
+#
+# Must match agent_ansible_bundle.JOB_DIR on the dashboard.
+_JOB_DIR = "/opt/job"
+
 # Every value is a CONSTANT. `run_kind` selects the image (from policy) and nothing else, so
 # no HostConfig field is derived from anything the dashboard sends — the property
 # tests/test_agent_sibling_runner.py::test_no_hostconfig_field_comes_from_the_job asserts.
@@ -3298,7 +3318,11 @@ def _run_sibling(policy: "Policy", env: dict, emit, cancelled,
 _ANSIBLE_MEMORY = 1024 * 1024 * 1024
 _ANSIBLE_HOSTCONFIG = {
     "AutoRemove": False,        # the log stream and /wait both outlive the container
-    "Binds": [],               # files arrive through the archive API, not a mount
+    "Binds": [],               # no bind mount: nothing of this host is exposed to a run
+    # The job dir, and the only writable thing besides /tmp. Anonymous — no Source, so
+    # there is still no host path here for a job to influence. See _JOB_DIR above for why
+    # the archive PUT does not work without it.
+    "Mounts": [{"Type": "volume", "Target": _JOB_DIR}],
     "Privileged": False,
     "CapDrop": ["ALL"],
     "ReadonlyRootfs": True,
@@ -3333,19 +3357,14 @@ _ANSIBLE_ENV = {
     "PYTHONDONTWRITEBYTECODE": "1",
 }
 
-# Where the run's files are extracted. NOT under /tmp: the tmpfs above is mounted over /tmp
-# when the container starts, which would shadow anything placed there beforehand and delete
-# it with no diagnostic whatsoever. Must match agent_ansible_bundle.JOB_DIR on the dashboard.
-_JOB_DIR = "/opt/job"
-
 # One log line the agent will forward without a newline before giving up on finding one.
 # Matches Reporter.emit's own truncation so a line cannot be counted long here and short
 # there.
 _MAX_STREAM_LINE = 8192
 
 
-def _archive_put(container: str, files: dict) -> None:
-    """Write ``{path: bytes}`` into a created-but-not-started container as a tar.
+def _archive_put(container: str, dest: str, files: dict) -> None:
+    """Write ``{absolute path: bytes}`` into a created-but-not-started container as a tar.
 
     This is how the playbook, the inventory and the SSH key get in. The alternative —
     base64 in the environment, as the cloud runners use — cannot work here: ``execve``
@@ -3359,18 +3378,33 @@ def _archive_put(container: str, files: dict) -> None:
 
     Modes are set in the tar rather than by a shell step afterwards, so the private key is
     never briefly world-readable. ``tarfile`` is stdlib, so the three-dependency rule holds.
+
+    Everything is extracted into ``dest``, which must be a mount — see ``_JOB_DIR``. Members
+    are named relative to it, so ``files`` stays keyed by the absolute path each file will
+    have inside the container and there is one place that says where a file lands.
     """
     import io
     import tarfile
 
+    prefix = "/" + dest.strip("/") + "/"
     blob = io.BytesIO()
     # No compression: this is a loopback socket, and gzip would only add CPU.
     with tarfile.open(fileobj=blob, mode="w") as tar:
         seen = set()
         for path, content in files.items():
+            abs_path = "/" + path.strip("/")
+            if not abs_path.startswith(prefix):
+                # Refused rather than written: extraction is relative to `dest`, so a file
+                # from outside it would silently land somewhere else entirely — and the one
+                # place that could happen is a path assembled from a dashboard-supplied
+                # asset name.
+                raise PolicyRefusal(
+                    f"refusing to place {abs_path!r}: the run's files must all be under "
+                    f"{dest}")
+            rel = abs_path[len(prefix):]
             # Explicit parent directories. Docker's extractor does not create them, and a
             # missing one fails the whole PUT rather than the single entry.
-            parts = path.strip("/").split("/")[:-1]
+            parts = rel.split("/")[:-1]
             for i in range(len(parts)):
                 d = "/".join(parts[:i + 1])
                 if d in seen:
@@ -3380,7 +3414,7 @@ def _archive_put(container: str, files: dict) -> None:
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o700
                 tar.addfile(info)
-            info = tarfile.TarInfo(path.strip("/"))
+            info = tarfile.TarInfo(rel)
             info.size = len(content)
             info.mode = 0o600
             tar.addfile(info, io.BytesIO(content))
@@ -3388,7 +3422,9 @@ def _archive_put(container: str, files: dict) -> None:
 
     conn = _UnixHTTP(DOCKER_SOCKET, timeout=120.0)
     try:
-        conn.request("PUT", f"/containers/{container}/archive?path=%2F", body=payload,
+        conn.request("PUT",
+                     f"/containers/{container}/archive?path={_quote(dest, safe='')}",
+                     body=payload,
                      headers={"Content-Type": "application/x-tar",
                               "Content-Length": str(len(payload))})
         resp = conn.getresponse()
@@ -3401,9 +3437,14 @@ def _archive_put(container: str, files: dict) -> None:
         except Exception:  # noqa: BLE001
             pass
     if resp.status not in (200, 204):
+        detail = body[:200].decode("utf-8", "replace")
+        if "read-only" in detail:
+            detail += (" — the runner is created with a read-only root filesystem, so the "
+                       f"Engine only accepts an extract into a mount. {dest} should be one "
+                       "of HostConfig.Mounts; if this agent has been patched, that is what "
+                       "to put back.")
         raise PolicyRefusal(
-            f"could not write the run's files into the container ({resp.status}): "
-            f"{body[:200].decode('utf-8', 'replace')}")
+            f"could not write the run's files into the container ({resp.status}): {detail}")
 
 
 def _stream_logs(container: str, on_line, deadline: float) -> None:
@@ -3563,9 +3604,10 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
 
     watcher = threading.Thread(target=_watch, name="ansible-watch", daemon=True)
     try:
-        # The files go in BEFORE start: the tmpfs is mounted over /tmp at start, and the
-        # root filesystem is read-only once running.
-        _archive_put(container, files)
+        # The files go in BEFORE start, into the job-dir volume: the tmpfs is mounted over
+        # /tmp at start, and the Engine refuses an extract anywhere but a mount on a
+        # container whose rootfs is read-only — created or running, it reads HostConfig.
+        _archive_put(container, _JOB_DIR, files)
 
         status, start_body = _engine("POST", f"/containers/{container}/start")
         if status not in (204, 304):
