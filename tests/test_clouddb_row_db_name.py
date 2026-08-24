@@ -67,6 +67,8 @@ class _CloudDatabase:
         self.status = "available"
         self.jump_item_id = None
         self.entitle_integration_id = None
+        self.ps_managed_system_id = None
+        self.ps_managed_account_id = None
         self.created_by = "admin"
         self.created_at = datetime(2026, 8, 21, 12, 0, 0)
         self.__dict__.update(kw)

@@ -474,6 +474,32 @@ OCI has no per-region config sets.
 and keeps the PRA-vaulted credential in sync. **GCP and OCI are not supported** — those
 databases provision and get a tunnel, but no Password Safe onboarding.
 
+### Two ways in: at provision, or afterwards
+
+| | Where | What it does |
+|---|---|---|
+| **At provision** | The **Onboard into Password Safe** checkbox on the Provision form. Starts ticked when `clouddb_ps_onboarding_enabled` is on. | Onboards as part of the provisioning job, interleaved with the apply. Clearing it skips the onboarding for that database. (It does not skip the separate legacy admin-credential staging, which is on its own `pscli_*` gate.) |
+| **Afterwards** | The row's **Register in Password Safe** action (and **Remove** to undo it). | The same three steps against a database that already exists. Async — enqueues a `clouddb_ps_register` job; watch it in Jobs. |
+
+The row action is what you want for a database provisioned before Password Safe was
+configured. It is offered only for a **dashboard-provisioned AWS or Azure** database that
+is `available` and not already onboarded — a *registered* database has no admin credential
+stored here to create the managed user with, so onboard it in Password Safe directly and
+use **Import from Password Safe** instead.
+
+> **The row action re-brokers the PRA tunnel.** Password Safe rotates the *managed user*,
+> and the PRA Vault mirror pushes each rotation into the vaulted credential the tunnel
+> injects — so that credential has to be the managed user, not the master admin. The
+> existing jump and Vault account are **destroyed first** and a new pair brokered (the
+> `sra` provider has no import, so re-brokering without the destroy would strand them).
+> Any open session drops. If the re-broker then fails the job fails loudly, saying the
+> database currently has no tunnel — run the action again once the provider error is
+> fixed.
+>
+> **Remove leaves the managed database user in place.** Unlike a decommission the database
+> is still there, and that user is what the tunnel injects. The job log says so; drop it by
+> hand if you want the database back on its admin login.
+
 > **Setting this up or testing the plugins?**
 > [docs/runbooks/clouddb-password-safe-plugin-setup.md](runbooks/clouddb-password-safe-plugin-setup.md)
 > is the field-by-field operator runbook: prerequisites, exactly what to put in each
@@ -700,8 +726,11 @@ relays to is only reachable from there.
   not the form's region field.
 - **Password Safe onboarding didn't happen (AWS/Azure).** It's gated by
   `clouddb_ps_onboarding_enabled` **and** `pscli_*` being configured (and, for Azure,
-  `passwordsafe_azure_db_registration_method != off`). Failures are non-fatal and fall back
-  to the legacy admin-credential staging — check the job log for the warning.
+  `passwordsafe_azure_db_registration_method != off`) — **and** by the provision form's
+  **Onboard into Password Safe** checkbox, which is recorded per database. Failures are
+  non-fatal and fall back to the legacy admin-credential staging — check the job log for
+  the warning. Whatever the cause, the row's **Register in Password Safe** action retries
+  it without rebuilding the database.
 - **Registering: "no Password Safe managed accounts found for this host."** The lookup is by
   the host string you typed and needs an already-onboarded managed system in Password Safe.
   Onboard the database there first, and check `password_safe_enabled` plus the `pscli_*` OAuth

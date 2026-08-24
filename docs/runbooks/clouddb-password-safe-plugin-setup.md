@@ -346,7 +346,7 @@ always read the job log, not just its status.
 
 | Symptom | Cause |
 |---|---|
-| Job green, no `onboarded DB managed system` line | onboarding was gated off — `clouddb_ps_onboarding_enabled`, or `pscli` not configured |
+| Job green, no `onboarded DB managed system` line | onboarding was gated off — `clouddb_ps_onboarding_enabled`, `pscli` not configured, or the provision form's **Onboard into Password Safe** box was cleared (the job log then says `the provision opted out`). The row's **Register in Password Safe** action onboards it without rebuilding the database |
 | Platform name quoted in the error | uploaded platform name ≠ the configured name |
 | Rotation fails, decrypt error, provisioning was clean | *Plugin Private Key* was blank → no key material on the jump host. Both clouds log this now; grep the job for `NOT staging plugin key material` |
 | AWS rotation fails to decrypt but Azure works | the two clouds use separate key pairs — check the AWS `clouddb_ps_ssm_*` fields, not the Azure ones |

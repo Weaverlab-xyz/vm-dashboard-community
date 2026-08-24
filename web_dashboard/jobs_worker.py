@@ -58,6 +58,7 @@ HANDLED_TYPES = (
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
+    "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
     "clouddb_adapter_pair",
@@ -117,6 +118,10 @@ MEDIUM_TYPES = (
     # Password Safe managed systems, each a terraform apply in a tempdir)
     "k8s_tunnel", "k8s_api_tunnel", "k8s_entitle_register", "k8s_ps_token",
     "rancher_entitle_register", "clouddb_entitle_register", "cloudfn_entitle_register",
+    # SSM SendCommand / Azure Run Command against the shared jump host, then one short
+    # terraform per Password Safe managed system (ps_resource_service) and — on the
+    # register path — a re-broker of the DB's PRA tunnel. No streaming, no long process.
+    "clouddb_ps_register",
     # cloud SDK + HTTP readiness poll + an OPT-IN short terraform for the PRA Web Jump
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown",
@@ -375,6 +380,10 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                 db, db_id=meta["db_id"], job_id=job_id)
         elif job_type == "clouddb_entitle_register":
             await cloud_database_service.run_entitle_register(
+                db, db_id=meta["db_id"], job_id=job_id,
+                action=meta.get("action", "register"))
+        elif job_type == "clouddb_ps_register":
+            await cloud_database_service.run_ps_register(
                 db, db_id=meta["db_id"], job_id=job_id,
                 action=meta.get("action", "register"))
         elif job_type == "cloudfn_deploy":

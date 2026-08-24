@@ -556,6 +556,14 @@ whole feature — base provisioning, per-cloud prerequisites, and the Password S
 is documented separately in **[Databases](../databases.md)**. The tunnel half needs
 [Privileged Remote Access](privileged-remote-access.md).
 
+Onboarding is asked for **per database**, in one of two places: the **Onboard into Password
+Safe** checkbox on the Provision form (ticked by default once `clouddb_ps_onboarding_enabled`
+is on), or the row's **Register in Password Safe** action afterwards — which is how a
+database built before Password Safe was configured gets onboarded without being rebuilt.
+Registering after the fact **re-brokers the PRA tunnel** so it injects the rotatable managed
+user rather than the master admin; see
+[Databases → Two ways in](../databases.md#two-ways-in-at-provision-or-afterwards).
+
 The dashboard can also **register** a database it did not create — on-premises or in a cloud —
 so it can be a Configuration Management target. That path has no tunnel and no onboarding: its
 admin login is a Password Safe **managed account**, checked out just-in-time per run and never
