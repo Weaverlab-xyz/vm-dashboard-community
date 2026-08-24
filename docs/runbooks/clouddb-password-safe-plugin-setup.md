@@ -195,12 +195,25 @@ cross-account EC2-broker mode).
 
 ### 1.5 AWS — the jump-host RSA prep is manual
 
-Unlike Azure, **the dashboard does not stage the AWS key material.** Put `private.pem` and
-`passphrase.txt` in the **`ssm-user` home** on the shared ECS gateway host yourself, and
-make sure the DB client binary exists at the path the plugin invokes. The dashboard's own
-managed-user creation uses a `docker run` client image and does *not* need any of this —
-so a green provisioning job tells you nothing about whether the plugin's ongoing rotation
-will work.
+**The dashboard now stages the AWS key material**, the same way it does for Azure. Paste
+`private.pem` into *Plugin Private Key (PEM)* and its passphrase into *Plugin Key
+Passphrase* in the AWS block, and set *Key Directory* to wherever the plugin reads them
+(default `/home/ssm-user`). The dashboard drops both onto the shared Gateway host over SSM
+before creating the managed user, dir `700` / files `600`.
+
+**Use a separate key pair from Azure's.** The two private keys land on different hosts —
+this one on the ECS gateway host, Azure's on `clouddb-jumpoint` — so one shared pair means
+a compromise of either host also decrypts the other cloud's payloads.
+`scripts/sandbox/Linux/make-clouddb-plugin-keys.sh` generates both pairs and verifies each
+matches its own certificate.
+
+Leaving the fields blank is still supported and still means you place the files by hand;
+the difference is that the skip is now logged rather than silent.
+
+What the dashboard does **not** do is put a DB client on that host's PATH. Its own
+managed-user creation uses a `docker run` client image and needs none, and the ECS host is
+shared with the gateway workload — so a green provisioning job still tells you nothing
+about whether the plugin's ongoing rotation will work.
 
 Set *Public Key Path (on PS node)* to where the matching public key lives on the PS
 node/broker; it is **address field 5**.
@@ -273,6 +286,9 @@ Same panel, the fields above the Azure subsection.
 | **IAM Secret Access Key** | `create` mode only — the secret (encrypted at rest) | `clouddb_ps_ssm_secret_access_key` |
 | **Account Suffix** | `local` | `clouddb_ps_ssm_account_suffix` |
 | **Public Key Path (on PS node)** | public-key path on the PS node/broker, e.g. `C:\Utils\public_ssm.pem` | `clouddb_ps_ssm_public_key_path` |
+| **Plugin Private Key (PEM)** | the full `private.pem` for the **AWS** pair, BEGIN/END included | `clouddb_ps_ssm_plugin_private_key` |
+| **Plugin Key Passphrase** | its passphrase | `clouddb_ps_ssm_plugin_passphrase` |
+| **Key Directory** | where the SSM plugin reads that key on the jump host | `clouddb_ps_ssm_key_directory` |
 
 In `create` mode all three IAM fields are load-bearing together: the code only takes
 IAM-user mode when username **and** key id **and** secret are all non-empty. Two out of
@@ -332,7 +348,9 @@ always read the job log, not just its status.
 |---|---|
 | Job green, no `onboarded DB managed system` line | onboarding was gated off — `clouddb_ps_onboarding_enabled`, or `pscli` not configured |
 | Platform name quoted in the error | uploaded platform name ≠ the configured name |
-| Rotation fails, decrypt error, provisioning was clean | *Plugin Private Key* was blank → no `/root/psplugin` on the jump VM (§1.2) |
+| Rotation fails, decrypt error, provisioning was clean | *Plugin Private Key* was blank → no key material on the jump host. Both clouds log this now; grep the job for `NOT staging plugin key material` |
+| AWS rotation fails to decrypt but Azure works | the two clouds use separate key pairs — check the AWS `clouddb_ps_ssm_*` fields, not the Azure ones |
+| `jump-host plugin prep failed` | the SSM key drop itself failed — a bad *Key Directory*, or the Gateway host is not reachable over SSM |
 | Rotation fails, functional account is `EC2` | two-of-three IAM fields in `create` mode — fell back to EC2 mode (§3) |
 | `PSPLUGIN_CHANGE_FAILED: … must have admin option on role` / `CREATE USER denied` / `ALTER ANY LOGIN` | self-rotation is **off**, so Password Safe called the via-functional-account action against a server with no privileged login — turn on `clouddb_ps_self_rotation` (§0) |
 | `PSPLUGIN_CHANGE_FAILED: … password authentication failed for user psafe_…` (self-rotation) | Password Safe's stored current password drifted from the server |

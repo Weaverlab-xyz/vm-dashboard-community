@@ -487,6 +487,17 @@ class Settings(BaseSettings):
     clouddb_ps_ssm_secret_access_key: str = ""     # encrypted at rest
     clouddb_ps_ssm_account_suffix: str = "local"   # DNS-name 6th field: "local" or a cross-account AssumeRole ARN
     clouddb_ps_ssm_public_key_path: str = ""        # DNS-name 5th field: public key path on the PS node/broker
+    # Plugin RSA key material the dashboard drops onto the shared SSM jump host, the
+    # AWS counterpart of clouddb_ps_azure_plugin_private_key. Use a SEPARATE key pair
+    # from Azure's: the two private keys land on different hosts (this one on the ECS
+    # gateway host, Azure's on clouddb-jumpoint), so one shared pair would mean a
+    # compromise of either host also decrypts the other cloud's payloads.
+    clouddb_ps_ssm_plugin_private_key: str = ""     # PEM, encrypted at rest
+    clouddb_ps_ssm_plugin_passphrase: str = ""      # encrypted at rest
+    # Directory on the jump host the SSM plugin reads private.pem/passphrase.txt from.
+    # Configurable because it is the plugin's choice, not ours — Azure's counterpart is
+    # /root/psplugin. Blank disables the drop entirely (leave the staging manual).
+    clouddb_ps_ssm_key_directory: str = "/home/ssm-user"
     # PRA Configuration-API OAuth account for the PRA Vault plugin (blank → reuse bt_client_*).
     pra_config_api_client_id: str = ""
     pra_config_api_client_secret: str = ""          # encrypted at rest

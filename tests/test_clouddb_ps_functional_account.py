@@ -310,6 +310,81 @@ def test_the_managed_system_is_registered_against_the_referenced_account():
     assert ("register", 77, 909) in CALLS, "the system must inherit the account's platform"
 
 
+# ── staging the plugin key material on the jump host ─────────────────────────
+#
+# The AWS side used to be manual ("the dashboard does not stage the AWS key material"),
+# so an operator had to place private.pem/passphrase.txt in the jump host's key
+# directory by hand. It now mirrors the Azure drop. Both halves fail the same way when
+# absent -- provisioning goes green and only the FIRST ROTATION fails to decrypt -- so
+# what these pin is that the commands are actually emitted, and that a blank config is
+# a logged no-op rather than a silent one.
+
+def test_ssm_prep_drops_the_key_material_with_tight_permissions():
+    _reset(clouddb_ps_ssm_plugin_private_key="-----BEGIN ENCRYPTED PRIVATE KEY-----\nabc\n-----END ENCRYPTED PRIVATE KEY-----",
+           clouddb_ps_ssm_plugin_passphrase="s3cret",
+           clouddb_ps_ssm_key_directory="/home/ssm-user")
+    cmds = svc._ssm_jump_prep_commands()
+    joined = "\n".join(cmds)
+    assert "mkdir -p /home/ssm-user" in joined
+    assert "chmod 700 /home/ssm-user" in joined
+    assert "/home/ssm-user/private.pem" in joined
+    assert "/home/ssm-user/passphrase.txt" in joined
+    assert "chmod 600 /home/ssm-user/private.pem /home/ssm-user/passphrase.txt" in joined
+    # The PEM is base64'd, never inlined: a literal newline or quote in a shell command
+    # would break the drop, and the key would land truncated rather than not at all.
+    assert "BEGIN ENCRYPTED PRIVATE KEY" not in joined
+    assert "s3cret" not in joined
+
+
+def test_ssm_prep_is_a_no_op_without_a_key_or_a_directory():
+    # Not an error: an operator who staged the files by hand should not be forced to
+    # paste the key here. The caller logs it, so it is visible either way.
+    _reset()
+    assert svc._ssm_jump_prep_commands() == []
+    _reset(clouddb_ps_ssm_plugin_private_key="pem")           # no directory
+    assert svc._ssm_jump_prep_commands() == []
+    _reset(clouddb_ps_ssm_key_directory="/home/ssm-user")     # no key
+    assert svc._ssm_jump_prep_commands() == []
+
+
+def test_a_trailing_slash_does_not_produce_a_double_slash_path():
+    _reset(clouddb_ps_ssm_plugin_private_key="pem", clouddb_ps_ssm_key_directory="/opt/psplugin/")
+    joined = "\n".join(svc._ssm_jump_prep_commands())
+    assert "/opt/psplugin/private.pem" in joined
+    assert "//" not in joined
+
+
+def test_the_two_clouds_use_separate_key_pairs():
+    # The AWS private key lands on the ECS gateway host and the Azure one on
+    # clouddb-jumpoint, so they must come from different config keys -- sharing one pair
+    # would mean compromising either host also decrypts the other cloud's payloads.
+    _reset(clouddb_ps_ssm_plugin_private_key="aws-key",
+           clouddb_ps_ssm_key_directory="/home/ssm-user",
+           clouddb_ps_azure_plugin_private_key="azure-key")
+    import base64
+    aws = "\n".join(svc._ssm_jump_prep_commands())
+    azure = "\n".join(svc._azure_jump_prep_commands())
+    assert base64.b64encode(b"aws-key").decode() in aws
+    assert base64.b64encode(b"azure-key").decode() in azure
+    assert base64.b64encode(b"azure-key").decode() not in aws
+    assert base64.b64encode(b"aws-key").decode() not in azure
+    # And they write to their own host's directory.
+    assert "/root/psplugin/private.pem" in azure
+    assert "/home/ssm-user/private.pem" in aws
+
+
+def test_azure_prep_still_installs_clients_and_aws_prep_does_not():
+    # Deliberate asymmetry: the dashboard's own managed-user creation runs the client as
+    # a docker run, and the ECS gateway host is shared with the gateway workload, so what
+    # the SSM plugin needs on its PATH is the operator's call.
+    _reset(clouddb_ps_azure_plugin_private_key="k",
+           clouddb_ps_ssm_plugin_private_key="k", clouddb_ps_ssm_key_directory="/d")
+    azure = "\n".join(svc._azure_jump_prep_commands())
+    aws = "\n".join(svc._ssm_jump_prep_commands())
+    assert "postgresql-client" in azure and "mssql-tools18" in azure
+    assert "apt-get" not in aws
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
