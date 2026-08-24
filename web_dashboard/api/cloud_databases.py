@@ -7,6 +7,7 @@ Database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
   GET    /api/databases/options         — pickers for the provision form (region-scoped)
   GET    /api/databases/{id}/connection — connection info (the PRA jump is Phase 2)
   DELETE /api/databases/{id}            — decommission, or deregister if registered
+  POST   /api/databases/{id}/ps-register — onboard into Password Safe (or remove that)
 
 Provisioning is cloud-only because it needs a Terraform module; registering needs
 only somewhere to reach, so it also covers on-premises (``cloud='local'``).
@@ -77,6 +78,11 @@ class ProvisionRequest(BaseModel):
     jumpoint_name: Optional[str] = None       # PRA Jumpoint name override (else bt_jumpoint_name)
     pra_credential_ref: Optional[str] = None  # secret ref → bt_client_secret override
     register_in_entitle: bool = False         # opt in to registering this DB as an Entitle integration
+    # Onboard this database into Password Safe (managed system + rotatable managed
+    # account) once it is up. Tri-state on purpose: None — the field the form omits and
+    # every pre-existing caller sends — means "follow the configured default", which is
+    # the clouddb_ps_onboarding_enabled setting, i.e. the behaviour before the checkbox.
+    register_in_passwordsafe: Optional[bool] = None
 
 
 class DatabaseOptions(BaseModel):
@@ -196,7 +202,8 @@ async def provision_database(
             vault_account_group_id=payload.vault_account_group_id,
             jump_group=payload.jump_group, jumpoint_name=payload.jumpoint_name,
             pra_credential_ref=payload.pra_credential_ref,
-            register_in_entitle=payload.register_in_entitle, **opts,
+            register_in_entitle=payload.register_in_entitle,
+            register_in_passwordsafe=payload.register_in_passwordsafe, **opts,
         )
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -745,6 +752,76 @@ async def register_database_in_entitle(
             raise HTTPException(status_code=400, detail=reason)
     job = job_service.create_job(
         db, job_type="clouddb_entitle_register", created_by=current_user.username,
+        metadata={"db_id": db_id, "action": payload.action},
+    )
+    return {"ok": True,
+            "status": "registering" if payload.action == "register" else "deregistering",
+            "db_id": db_id, "action": payload.action, "job_id": job.id}
+
+
+class PSDatabaseRegisterRequest(BaseModel):
+    action: str = "register"   # register | deregister
+
+
+@router.post("/{db_id}/ps-register", status_code=202)
+async def register_database_in_password_safe(
+    db_id: str,
+    payload: PSDatabaseRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
+):
+    """Onboard a provisioned database into BeyondTrust Password Safe — a dedicated
+    rotatable managed user on the database, a managed system on the cloud's DB plugin
+    platform (AWS Systems Manager / Azure Run Command), and, when the database has a
+    PRA tunnel, the "PRA Vault Username Password" mirror that pushes each rotation into
+    the vaulted credential the tunnel injects. ``deregister`` removes those again and
+    leaves the database running.
+
+    The post-provision counterpart of the provision form's checkbox, for a database
+    built before Password Safe was configured. Async — enqueues a
+    ``clouddb_ps_register`` job; open the job for status/error. Mirrors the
+    ``entitle-register`` endpoint above and the k8s cluster ``ps-token`` one.
+
+    Registering RE-BROKERS the PRA tunnel so it injects the managed user instead of the
+    master admin — the old jump and Vault account are destroyed first. Without that the
+    first rotation would overwrite the vaulted admin password with the managed user's."""
+    _require_enabled()
+    if payload.action not in cloud_database_service.VALID_PS_DB_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown action {payload.action!r} (expected one of "
+                   f"{', '.join(cloud_database_service.VALID_PS_DB_ACTIONS)})",
+        )
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"database {db_id} not found")
+    # Pre-check the same gates the job checks, in the same order and from the same
+    # functions, so a queued-then-failed job is never the way an operator finds out the
+    # answer. Deregister skips them: a previously-created onboarding must stay removable
+    # even after the feature is switched off or its cloud support is withdrawn.
+    if payload.action == "register":
+        reason = cloud_database_service._ps_ineligible_reason(row)
+        if reason:
+            raise HTTPException(status_code=400, detail=reason)
+        if not cloud_database_service._ps_db_onboarding_enabled(row):
+            raise HTTPException(
+                status_code=409,
+                detail="Password Safe database onboarding is not enabled for this cloud "
+                       "— see Settings → Integrations → Password Safe "
+                       "(clouddb_ps_onboarding_enabled, and for Azure the onboarding "
+                       "method must not be 'off')")
+        if row.status != "available":
+            raise HTTPException(
+                status_code=409,
+                detail=f"database is {row.status!r} — Password Safe onboarding needs a "
+                       f"database that has finished provisioning")
+        if row.ps_managed_system_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"already onboarded as Password Safe managed system "
+                       f"{row.ps_managed_system_id} — deregister it first to redo it")
+    job = job_service.create_job(
+        db, job_type="clouddb_ps_register", created_by=current_user.username,
         metadata={"db_id": db_id, "action": payload.action},
     )
     return {"ok": True,

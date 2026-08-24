@@ -1206,7 +1206,17 @@ async def databases_page(request: Request):
     """Cloud database infrastructure page. Nav-gated on cloud_database_enabled;
     the /api/databases router self-gates per call. PostgreSQL/MySQL/SQL Server
     are live across AWS/Azure/GCP."""
-    return templates.TemplateResponse("databases/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("databases/index.html", {
+        "request": request,
+        # Not in the shared feature map: this is a sub-setting of the Password Safe
+        # panel, not an integration toggle. The provision form needs it as the INITIAL
+        # state of its "Onboard into Password Safe" checkbox — the API treats an absent
+        # choice as "the configured default", so a box that started unticked while the
+        # setting was on would silently turn onboarding off for that database.
+        "clouddb_ps_onboarding_enabled": config_service.get_bool(
+            "clouddb_ps_onboarding_enabled", settings.clouddb_ps_onboarding_enabled),
+        **_feature_flags(),
+    })
 
 
 @app.get("/functions", response_class=HTMLResponse, include_in_schema=False)

@@ -61,6 +61,8 @@ class _CloudDatabase:
     created_at = None
     jump_item_id = None
     entitle_integration_id = None
+    ps_managed_system_id = None
+    ps_managed_account_id = None
 
     def __init__(self, **kw):
         self.__dict__.update(kw)

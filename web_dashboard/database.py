@@ -1368,6 +1368,18 @@ class CloudDatabase(Base):
     pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override
     entitle_integration_id = Column(String(64), nullable=True)  # Entitle DB integration registered on apply
 
+    # Password Safe DB onboarding (optional; the AWS SSM / Azure Run Command custom
+    # plugins). Ids, not credentials — exactly what an operator reads back in the
+    # Password Safe UI — so the Databases page can show whether a row is onboarded
+    # without loading every clouddb_provision job on each poll.
+    #
+    # The AUTHORITATIVE teardown state stays on the provisioning job's metadata
+    # (ps_db_* / ps_pravault_*, which decommission reads); these two are written in
+    # the same commit as that stash and cleared by the same teardown, so the pair
+    # cannot drift into disagreeing about whether onboarding happened.
+    ps_managed_system_id = Column(String(64), nullable=True)
+    ps_managed_account_id = Column(String(64), nullable=True)
+
     # Which remote agent can reach this database, for a Config-Management run. NULL = the
     # dashboard runs it itself, which is the behaviour before this column and the only one
     # available to a provisioned cloud database.
@@ -1650,6 +1662,8 @@ def init_db():
             "ALTER TABLE cloud_databases ADD COLUMN jumpoint_name VARCHAR(128)",
             "ALTER TABLE cloud_databases ADD COLUMN pra_credential_ref VARCHAR(256)",
             "ALTER TABLE cloud_databases ADD COLUMN entitle_integration_id VARCHAR(64)",
+            "ALTER TABLE cloud_databases ADD COLUMN ps_managed_system_id VARCHAR(64)",
+            "ALTER TABLE cloud_databases ADD COLUMN ps_managed_account_id VARCHAR(64)",
             # Tamper-evident audit log: hash-chain columns + unique seq. Existing
             # rows are chained by the one-time backfill in init_db (below).
             "ALTER TABLE audit_log ADD COLUMN seq INTEGER",

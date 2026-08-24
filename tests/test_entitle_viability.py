@@ -89,6 +89,8 @@ def _row(**kw):
         # Registered vs dashboard-provisioned. _serialize surfaces it so the page can
         # pick the right delete verb; these rows are all the provisioned kind.
         source="provisioned", db_name=None,
+        # Password Safe DB onboarding — unset, i.e. never onboarded.
+        ps_managed_system_id=None, ps_managed_account_id=None,
     )
     defaults.update(kw)
     return types.SimpleNamespace(**defaults)

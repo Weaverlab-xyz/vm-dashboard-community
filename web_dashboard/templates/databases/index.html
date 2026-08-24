@@ -131,21 +131,45 @@
                 <span x-show="d.jump_item_id" class="text-emerald-700" title="PRA tunnel brokered">brokered</span>
                 <span x-show="!d.jump_item_id" class="text-gray-400">none</span>
               </td>
-              <td class="px-4 py-3 text-right whitespace-nowrap">
+              <!-- The cell was text-right + whitespace-nowrap, so the buttons ran off the
+                   right edge of the card and the trailing Decommission was unreachable —
+                   the same break the k8s cluster row had, fixed the same way. flex-wrap
+                   flows them onto a second line instead of off the page; see
+                   templates/k8s/index.html. Buttons carry no ml-1 because the flex gap
+                   spaces them, and a margin on a wrapped row misaligns it. -->
+              <td class="px-4 py-3">
+                <div class="flex flex-wrap justify-end items-center gap-1">
                 <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
+                {% if password_safe_enabled %}
+                <!-- Password Safe onboarding, post-creation. ps_viable is the structural
+                     half of the gate (provisioned + a cloud with a plugin transport) and
+                     comes from the same function the API rejects with, so the button can
+                     never offer what the endpoint refuses. -->
+                <button @click="psRegister(d)"
+                        x-show="d.status === 'available' && !d.ps_onboarded && d.ps_viable"
+                        title="Onboard this database into Password Safe: a dedicated rotatable managed user, a managed system on the cloud's DB plugin, and the PRA Vault mirror. Re-brokers the PRA tunnel so it injects the managed user instead of the master admin."
+                        class="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-medium">Register in Password Safe</button>
+                <span x-show="d.ps_onboarded" x-cloak
+                      :title="'Password Safe managed system ' + d.ps_managed_system_id"
+                      class="text-xs px-2 py-1 text-amber-700 font-medium">Password Safe ✓</span>
+                <button @click="psDeregister(d)" x-show="d.ps_onboarded" x-cloak
+                        title="Remove this database's Password Safe managed systems (and any functional accounts the dashboard minted). The database and its managed user stay."
+                        class="text-xs px-2 py-1 text-amber-700 hover:underline">Remove</button>
+                {% endif %}
                 <button @click="entitleRegister(d)"
                         x-show="entitleRegEnabled && d.status === 'available' && !d.entitle_integration_id && d.entitle_viable"
                         title="Register this database as an Entitle integration so users request JIT access (ephemeral accounts)"
-                        class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium ml-1">Register in Entitle</button>
+                        class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium">Register in Entitle</button>
                 <button @click="entitleDeregister(d)"
                         x-show="entitleRegEnabled && d.entitle_integration_id"
                         title="Remove this database's Entitle integration"
-                        class="text-xs px-2 py-1 text-fuchsia-700 hover:underline ml-1">Deregister</button>
+                        class="text-xs px-2 py-1 text-fuchsia-700 hover:underline">Deregister</button>
                 <!-- Verb follows source, the same branch decommission() takes: a registered
                      row is deregistered, not destroyed. -->
                 <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
-                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1"
+                        class="text-xs px-2 py-1 text-red-600 hover:underline"
                         x-text="d.source === 'registered' ? 'Deregister' : 'Decommission'"></button>
+                </div>
               </td>
             </tr>
           </template>
@@ -639,6 +663,30 @@
           The admin password is generated and stored encrypted — never shown.
         </p>
 
+        {% if password_safe_enabled %}
+        <!-- Password Safe onboarding opt-in. The API field is tri-state (absent = the
+             configured default), so this box starts at that default and always sends a
+             definite answer: a box that started unticked while the setting was on would
+             silently turn onboarding off for every database provisioned from this form. -->
+        <div>
+          <label class="flex items-start gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="form.register_in_passwordsafe"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span>
+              Onboard into Password Safe
+              <span class="text-gray-400">(managed system + rotatable managed account)</span>
+              <span class="block text-[11px] text-gray-400">
+                Creates a dedicated database user for Password Safe to rotate, and points the PRA
+                tunnel's injected credential at it instead of the master admin. Needs Password Safe
+                database onboarding enabled and its plugin configured (Settings → Integrations →
+                Password Safe); <strong>AWS and Azure only</strong>. You can also do this later
+                with the row's <strong>Register in Password Safe</strong> action.
+              </span>
+            </span>
+          </label>
+        </div>
+        {% endif %}
+
         <!-- BeyondTrust PRA options (optional per-DB overrides) -->
         <div class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
           <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
@@ -761,7 +809,11 @@ function databasesPage() {
             tier: 'db-f1-micro', disk_size: null, private_network: '',
             sku_name: 'B_Standard_B1ms', storage_gb: 32,
             oci_db_workload: 'OLTP', oci_beyond_free: false, oci_cpu_core_count: 1, oci_data_storage_tbs: 1, oci_subnet_ocid: '',
-            jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
+            jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '',
+            // Seeded from the configured default rather than false — see the checkbox's
+            // comment in the markup. submitProvision always sends it, so the API's
+            // "absent means default" branch is only ever taken by other callers.
+            register_in_passwordsafe: {{ clouddb_ps_onboarding_enabled | default(false) | tojson }} },
 
     _pollTimer: null,
 
@@ -1108,6 +1160,10 @@ function databasesPage() {
         if (this.form.jump_group) body.jump_group = this.form.jump_group;
         if (this.form.jumpoint_name) body.jumpoint_name = this.form.jumpoint_name;
         if (this.form.pra_credential_ref) body.pra_credential_ref = this.form.pra_credential_ref;
+        // Always sent, both ways: this form knows the operator's answer, and letting a
+        // cleared box fall through as "absent" would have the server apply the default
+        // and onboard it anyway.
+        body.register_in_passwordsafe = !!this.form.register_in_passwordsafe;
         await API.post('/api/databases', body);
         this.showForm = false;
         this.flash('Provisioning started — watch the row status.');
@@ -1143,6 +1199,37 @@ function databasesPage() {
         await this.refresh();
       } catch (e) {
         this.flash(e.message || (registered ? 'Deregister failed.' : 'Decommission failed.'), 'error');
+      }
+    },
+
+    async psRegister(d) {
+      if (!confirm(`Onboard the "${d.engine}" database in ${d.region} into Password Safe?\n\n`
+                 + `Creates a dedicated managed database user for Password Safe to rotate, `
+                 + `registers the database as a managed system on its cloud's DB plugin, and `
+                 + `mirrors the PRA Vault account so each rotation reaches the vaulted credential.`
+                 + `\n\nThe PRA tunnel is re-brokered so it injects that managed user instead `
+                 + `of the master admin — the current jump is removed first, so any open session `
+                 + `will drop. Track progress in Jobs.`)) return;
+      try {
+        await API.post(`/api/databases/${d.id}/ps-register`, { action: 'register' });
+        this.flash('Onboarding into Password Safe — track progress in Jobs.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Password Safe onboarding failed.', 'error');
+      }
+    },
+
+    async psDeregister(d) {
+      if (!confirm(`Remove "${d.engine}" from Password Safe?\n\nThis deletes its managed `
+                 + `systems (and any functional accounts the dashboard minted for it). The `
+                 + `database, its PRA tunnel and the managed database user are left alone — so `
+                 + `the tunnel keeps injecting a credential nothing rotates any more.`)) return;
+      try {
+        await API.post(`/api/databases/${d.id}/ps-register`, { action: 'deregister' });
+        this.flash('Removing from Password Safe — track progress in Jobs.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Password Safe removal failed.', 'error');
       }
     },
 

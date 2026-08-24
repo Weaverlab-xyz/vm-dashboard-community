@@ -515,7 +515,8 @@ def provision(
     vault_account_group_id: Optional[int] = None,
     jump_group: Optional[str] = None, jumpoint_name: Optional[str] = None,
     pra_credential_ref: Optional[str] = None,
-    register_in_entitle: bool = False, **opts,
+    register_in_entitle: bool = False,
+    register_in_passwordsafe: Optional[bool] = None, **opts,
 ) -> dict:
     """Record a new managed database: validate, mint the admin credential, write
     the ``CloudDatabase`` row + a provisioning ``Job``, and return the Terraform
@@ -571,6 +572,14 @@ def provision(
 
     job_meta = {"db_id": row.id, "engine": engine, "cloud": cloud, "name": name,
                 "register_in_entitle": bool(register_in_entitle)}
+    # Password Safe onboarding is a THREE-state choice, and absent is the important
+    # one: True/False are the operator's explicit answer from the provision form's
+    # checkbox, and ABSENT means "whatever the Password Safe DB onboarding setting says
+    # when the apply gets there". Every caller that predates the checkbox — the API
+    # without the field, the tests, any script — sends absent, so their behaviour is
+    # exactly what it was. Only written when the caller actually chose.
+    if register_in_passwordsafe is not None:
+        job_meta["register_in_passwordsafe"] = bool(register_in_passwordsafe)
     if vault_account_group_id:
         # Carried via job metadata (not tf_variables — those map 1:1 to the
         # cloud module's declared variables) for _broker_tunnel to pick up.
@@ -800,6 +809,9 @@ def _registration_enabled() -> bool:
 
 # Actions accepted by the post-provision entitle-register endpoint / job.
 VALID_ENTITLE_DB_ACTIONS = ("register", "deregister")
+
+# Actions accepted by the post-provision ps-register endpoint / job.
+VALID_PS_DB_ACTIONS = ("register", "deregister")
 
 
 def _provision_job_for(db: Session, db_id: str) -> Optional[Job]:
@@ -1120,6 +1132,48 @@ def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
     return False
 
 
+# Clouds whose DB plugin the dashboard can actually drive. AWS = the "{engine} SSM
+# Custom Plugin", reached with SendCommand to the shared Gateway host; Azure = the
+# "{engine} Azure Run Command Plugin", reached with Run Command on the ref-counted
+# clouddb-jumpoint VM. GCP and OCI have no equivalent transport into a private managed
+# database, so there is nothing to onboard them WITH — not a switch that is off.
+_PS_ONBOARDING_CLOUDS = ("aws", "azure")
+
+
+def _ps_ineligible_reason(row: CloudDatabase) -> Optional[str]:
+    """``None`` if this database can be onboarded into Password Safe, else the reason it
+    can't, worded for the user. One source of truth for the button (via
+    :func:`_serialize`'s ``ps_viable``), the API pre-flight and the job — the same
+    arrangement :func:`_entitle_ineligible_reason` has, and for the same reason: three
+    places deciding independently is how a button ends up offering what the API rejects.
+
+    STRUCTURAL blockers only — facts about the row that no amount of configuration
+    changes. Whether the feature is switched on is the separate, configuration-time
+    question :func:`_ps_db_onboarding_enabled` answers."""
+    if (row.source or "provisioned") == "registered":
+        return ("Password Safe onboarding is only supported on dashboard-provisioned "
+                "databases. A registered database has no admin credential stored here "
+                "to create the rotatable managed user with — onboard it in Password "
+                "Safe directly, then use Import from Password Safe to record it.")
+    if (row.cloud or "") not in _PS_ONBOARDING_CLOUDS:
+        return (f"Password Safe onboarding needs a plugin transport into the private "
+                f"database — AWS Systems Manager or Azure Run Command. "
+                f"{(row.cloud or 'this cloud').upper()} has neither, so there is no "
+                f"supported path for it yet.")
+    return None
+
+
+def _ps_onboarding_opted(meta: dict) -> bool:
+    """The per-database Password Safe choice recorded on the provisioning job.
+
+    Absent means "follow the configured default", which is simply the capability flag —
+    i.e. exactly the behaviour before the provision form offered a checkbox. Resolved
+    HERE, at apply time, rather than at provision time, so the answer reflects the
+    settings as they are when the work actually runs."""
+    opted = (meta or {}).get("register_in_passwordsafe")
+    return True if opted is None else bool(opted)
+
+
 def _managed_user_name(db_id: str) -> str:
     """A safe, per-database DB identifier for the dedicated managed user
     (letter-led, ``[A-Za-z0-9_]`` — see cloud_db_sql_service._IDENT_RE)."""
@@ -1373,6 +1427,21 @@ async def _resolve_db_functional_account(*, config_key: str, platform_id: int,
     return int(fa["id"]), int(fa["platform_id"]), False
 
 
+def _stash_on_job(db: Session, job_id: str, update: dict) -> None:
+    """Merge ``update`` into a job's metadata and commit. The Password Safe onboarding
+    calls this after EACH remote object it creates rather than once at the end, so a
+    later failure can never strand an object with nothing recorded to remove it."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job is None:
+        logger.warning("clouddb: job %s is gone — cannot record %s",
+                       job_id, sorted(update))
+        return
+    meta = job.metadata_dict or {}
+    meta.update(update)
+    job.metadata_dict = meta
+    db.commit()
+
+
 async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id: str,
                                       engine: str, tf_variables: dict, ctx: dict) -> None:
     """Onboard the DB into Password Safe: a managed system + managed account on the
@@ -1470,6 +1539,15 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     stash["ps_db_registration_tf_state"] = reg.get("tf_state_json")
     stash["ps_db_system_id"] = reg.get("managed_system_id")
     stash["ps_db_account_id"] = reg.get("managed_account_id")
+    # Commit what exists NOW, before the PRA Vault half is attempted. Everything used to
+    # be written in one go at the end, so a PRA Vault failure — which the caller treats
+    # as non-fatal — left a real managed system and a real functional account in the
+    # customer's Password Safe with nothing recorded to tear them down. The row columns
+    # ride the same commit as the metadata stash they mirror, so the page's "onboarded"
+    # badge cannot disagree with what teardown will find.
+    row.ps_managed_system_id = str(reg.get("managed_system_id") or "") or None
+    row.ps_managed_account_id = str(reg.get("managed_account_id") or "") or None
+    _stash_on_job(db, job_id, stash)
     logger.info("clouddb: onboarded DB managed system db_id=%s system_id=%s account_id=%s",
                 row.id, reg.get("managed_system_id"), reg.get("managed_account_id"))
 
@@ -1506,12 +1584,150 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     else:
         logger.info("clouddb: no PRA Vault account for db_id=%s — skipping PRA Vault onboarding", row.id)
 
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if job is not None:
-        meta = job.metadata_dict or {}
-        meta.update(stash)
-        job.metadata_dict = meta
-        db.commit()
+    _stash_on_job(db, job_id, stash)
+
+
+async def _ps_onboard_post_hoc(db: Session, *, row: CloudDatabase, job_id: str) -> None:
+    """Onboard an already-provisioned database into Password Safe: create the dedicated
+    managed DB user, re-point the PRA tunnel at it, then register the managed systems.
+
+    The same three steps :func:`run_provision_apply` interleaves with the apply, run
+    against a database that already exists — so Password Safe can be turned on for one
+    built before the feature was configured, or with the provision checkbox cleared.
+
+    Everything is recorded on the PROVISIONING job's metadata, not on this action's job,
+    because that is the single place :func:`run_decommission` looks for it. This job
+    carries the progress and the error.
+
+    **Re-pointing the tunnel is not optional.** Password Safe rotates the managed user,
+    and the "PRA Vault Username Password" mirror pushes each rotation into the vaulted
+    credential the tunnel injects — so leaving that credential as the master admin means
+    the first rotation overwrites an admin password with the managed user's and
+    credential injection quietly breaks. The existing jump + Vault account are destroyed
+    from their stored Terraform state FIRST: the sra provider offers no import, so
+    re-brokering without the destroy would strand the old jump and Vault account in the
+    appliance with nothing tracking them."""
+    engine = row.engine
+    prov_job = _provision_job_for(db, row.id)
+    if prov_job is None:
+        raise CloudDatabaseError(
+            "no provisioning job recorded for this database — Password Safe onboarding "
+            "needs its Terraform variables (the admin login and catalog) and has "
+            "nowhere to record the ids it creates")
+    tf_variables = dict((prov_job.metadata_dict or {}).get("tf_variables") or {})
+
+    job_service.update_progress(db, job_id, 25,
+                                "Creating the rotatable managed database user…")
+    if row.cloud == "azure":
+        ctx = await _create_db_managed_user_azure(
+            db, row=row, job_id=prov_job.id, engine=engine, tf_variables=tf_variables)
+    else:
+        ctx = await _create_db_managed_user(
+            db, row=row, job_id=prov_job.id, engine=engine, tf_variables=tf_variables)
+
+    if _pra_configured():
+        job_service.update_progress(db, job_id, 55,
+                                    "Re-pointing the PRA tunnel at the managed user…")
+        old_state = (prov_job.metadata_dict or {}).get("tunnel_tf_state")
+        if old_state:
+            from . import terraform_pra_service as pra
+            # Raises on failure, deliberately: stopping here leaves the database exactly
+            # as it was, where carrying on would put a second jump for the same database
+            # in the appliance and orphan the first.
+            await pra.remove_db_tunnel(old_state)
+            row.jump_item_id = None
+            fresh = dict(prov_job.metadata_dict or {})
+            for key in ("tunnel_tf_state", "vault_account_id", "vault_account_name"):
+                fresh.pop(key, None)
+            prov_job.metadata_dict = fresh
+            db.commit()
+            logger.info("clouddb: removed the admin-credential tunnel for db_id=%s "
+                        "before re-brokering against %s", row.id, ctx["managed_user"])
+        await _broker_tunnel(db, row=row, job_id=prov_job.id, engine=engine,
+                             tf_variables=tf_variables,
+                             override_cred=(ctx["managed_user"], ctx["managed_pw"]))
+        # _broker_tunnel is non-fatal by design (a provision keeps the database when the
+        # tunnel fails). Here it is fatal: the old jump is already gone, so a silent
+        # failure would leave the database unreachable with a green job.
+        if not row.jump_item_id:
+            raise CloudDatabaseError(
+                "the PRA tunnel could not be brokered against the managed user, and the "
+                "previous jump was removed first — this database currently has no "
+                "tunnel. Check the app log for the sra provider error, then run "
+                "Register in Password Safe again.")
+
+    job_service.update_progress(db, job_id, 75,
+                                "Registering the Password Safe managed systems…")
+    await _onboard_ps_managed_systems(db, row=row, job_id=prov_job.id, engine=engine,
+                                      tf_variables=tf_variables, ctx=ctx)
+    if not row.ps_managed_system_id:
+        raise CloudDatabaseError("Password Safe returned no managed system id")
+
+
+async def run_ps_register(db: Session, *, db_id: str, job_id: str,
+                          action: str = "register") -> None:
+    """Worker entry for a ``clouddb_ps_register`` job: onboard the database into
+    Password Safe, or remove that onboarding again. The post-provision counterpart of
+    the checkbox on the provision form, and the sibling of
+    :func:`run_entitle_register` — like it, failures are FATAL to the job (a post-hoc
+    request the operator is watching should not go green on a skipped step)."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        job_service.set_failed(db, job_id, f"database {db_id} not found")
+        return
+    job_service.set_running(db, job_id)
+    try:
+        if action == "deregister":
+            prov_job = _provision_job_for(db, row.id)
+            if not _has_ps_onboarding((prov_job.metadata_dict or {}) if prov_job else {}):
+                raise CloudDatabaseError(
+                    "this database has no Password Safe onboarding recorded — nothing "
+                    "to remove. An onboarding done outside the dashboard has to be "
+                    "removed in Password Safe.")
+            errors = await _teardown_ps_onboarding(
+                db, row=row, prov_job=prov_job, progress_job_id=job_id, progress=40)
+            if errors:
+                raise CloudDatabaseError("; ".join(errors))
+            # The managed DB user outlives a deregister — unlike a decommission, the
+            # database is still here. Say so rather than leaving a login nobody expects.
+            leftover = (prov_job.metadata_dict or {}).get("ps_db_managed_user") if prov_job else None
+            job_service.append_job_log(
+                db, job_id,
+                f"The managed database user {leftover or _managed_user_name(row.id)!r} was "
+                f"left in place — it is what the PRA tunnel injects. Drop it by hand if "
+                f"you want the database back on its admin login.")
+        else:
+            reason = _ps_ineligible_reason(row)
+            if reason:
+                raise CloudDatabaseError(reason)
+            if not _ps_db_onboarding_enabled(row):
+                raise CloudDatabaseError(
+                    "Password Safe database onboarding is not enabled for this cloud — "
+                    "see Settings → Integrations → Password Safe "
+                    "(clouddb_ps_onboarding_enabled, and for Azure the onboarding "
+                    "method must not be 'off')")
+            if row.status != "available":
+                raise CloudDatabaseError(
+                    f"database is {row.status!r} — Password Safe onboarding needs a "
+                    f"database that has finished provisioning")
+            if not row.private_host:
+                raise CloudDatabaseError("database has no endpoint yet")
+            if row.ps_managed_system_id:
+                raise CloudDatabaseError(
+                    f"already onboarded as Password Safe managed system "
+                    f"{row.ps_managed_system_id} — deregister it first to redo it")
+            await _ps_onboard_post_hoc(db, row=row, job_id=job_id)
+        job_service.set_completed(db, job_id, {
+            "db_id": db_id, "action": action,
+            "ps_managed_system_id": row.ps_managed_system_id,
+            "ps_managed_account_id": row.ps_managed_account_id,
+        })
+        logger.info("clouddb Password Safe %s complete db_id=%s system_id=%s",
+                    action, db_id, row.ps_managed_system_id)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("clouddb Password Safe %s job failed db_id=%s: %s",
+                         action, db_id, exc)
 
 
 # Generic terraform line → (pct, message) milestones for the DB job's progress bar
@@ -1669,11 +1885,20 @@ async def run_provision_apply(
         row.status = "available"
         db.commit()
 
-        # Optional Password Safe DB onboarding (AWS-only, opt-in). Create the
+        # Optional Password Safe DB onboarding (AWS + Azure, opt-in). Create the
         # dedicated managed user FIRST so the tunnel/vault injects it, then let PS
         # own its rotation. Any failure falls back to the legacy admin staging.
+        #
+        # Two gates, and they answer different questions: _ps_db_onboarding_enabled is
+        # "is this deployment set up for it", _ps_onboarding_opted is "did the operator
+        # ask for it on THIS database" (absent → yes, see there). The choice covers THIS
+        # onboarding only — the legacy admin-credential staging in the else branch is a
+        # separate thing on its own gate (pscli), and quietly switching it off here would
+        # make a checkbox labelled "managed system + managed account" do more than it says.
+        _ps_job = db.query(Job).filter(Job.id == job_id).first()
+        _ps_choice = _ps_onboarding_opted((_ps_job.metadata_dict or {}) if _ps_job else {})
         onboard_ctx = None
-        if row.private_host and _ps_db_onboarding_enabled(row):
+        if row.private_host and _ps_choice and _ps_db_onboarding_enabled(row):
             try:
                 if row.cloud == "azure":
                     onboard_ctx = await _create_db_managed_user_azure(
@@ -1707,6 +1932,10 @@ async def run_provision_apply(
                 job_service.append_job_log(
                     db, job_id, f"Password Safe onboarding skipped (non-fatal): {exc}")
         else:
+            if not _ps_choice:
+                logger.info("clouddb: Password Safe onboarding skipped for db_id=%s — the "
+                            "provision opted out; the Databases page's Register in Password "
+                            "Safe action onboards it later", db_id)
             # Legacy: stage the admin credential (functional account + Secrets Safe doc)
             # — independent of PRA (gated only on pscli_* config). Non-fatal.
             try:
@@ -1742,6 +1971,99 @@ async def run_provision_apply(
         db.commit()
         job_service.set_failed(db, job_id, str(exc))
         logger.exception("clouddb apply failed db_id=%s: %s", db_id, exc)
+
+
+# Password Safe DB onboarding teardown, as (managed-system state key, functional-account
+# key, label) triples. PRA Vault first: it is the mirror, and removing the DB system
+# first would leave the mirror pointing at nothing for the width of the teardown.
+_PS_TEARDOWN_STEPS = (
+    ("ps_pravault_registration_tf_state", "ps_pravault_functional_account_id", "PRA Vault"),
+    ("ps_db_registration_tf_state", "ps_db_functional_account_id", "DB"),
+)
+# Everything else the onboarding records: context for the plugins and the ids an
+# operator reads back. Nothing to delete remotely, so these are cleared once the
+# managed systems they describe are gone.
+_PS_CONTEXT_KEYS = (
+    "ps_db_managed_user", "ps_db_jump_host_id", "ps_db_region", "ps_db_admin_username",
+    "ps_db_client_image", "ps_db_name", "ps_db_system_id", "ps_db_account_id",
+    "ps_pravault_system_id", "ps_pravault_account_id",
+    "ps_db_functional_account_ref", "ps_pravault_functional_account_ref",
+)
+
+
+def _has_ps_onboarding(meta: dict) -> bool:
+    """Whether a provisioning job's metadata records Password Safe objects to remove."""
+    return any((meta or {}).get(k) for step in _PS_TEARDOWN_STEPS for k in step[:2])
+
+
+async def _teardown_ps_onboarding(db: Session, *, row: Optional[CloudDatabase],
+                                  prov_job: Optional[Job], progress_job_id: str,
+                                  progress: int = 50) -> list[str]:
+    """Remove the Password Safe DB onboarding artifacts recorded on the provisioning
+    job's metadata: each managed system (from its stored Terraform state) and then the
+    functional account it used — in that order, because a managed system that still
+    references a functional account blocks the account's delete.
+
+    Shared by :func:`run_decommission`, where the database goes away too, and by the
+    standalone Deregister in :func:`run_ps_register`, where it does not. That second
+    caller is why each key is cleared INDIVIDUALLY, on the success of its own step: a
+    key left behind after a successful removal has the next decommission destroy
+    something that is already gone, and a key cleared after a FAILED removal is an
+    object in the customer's Password Safe that nothing will ever retry.
+
+    Only accounts the dashboard MINTED are deleted. In ``reference`` mode the id was
+    stashed under ``ps_*_functional_account_ref`` — a key this loop never reads — so an
+    operator-created functional account survives every teardown.
+
+    Returns the error strings; empty means everything recorded was removed."""
+    meta = (prov_job.metadata_dict or {}) if prov_job else {}
+    if not _has_ps_onboarding(meta):
+        return []
+    db_id = row.id if row is not None else "?"
+    errors: list[str] = []
+    done: list[str] = []
+    job_service.update_progress(db, progress_job_id, progress,
+                                "Removing Password Safe managed systems…")
+    from . import ps_resource_service, ps_api_service
+    for state_key, fa_key, label in _PS_TEARDOWN_STEPS:
+        state = meta.get(state_key)
+        if state:
+            try:
+                await ps_resource_service.deregister(state)
+                done.append(state_key)
+                logger.info("clouddb %s managed system removed db_id=%s", label, db_id)
+            except Exception as exc:
+                errors.append(f"{label} managed system: {exc}")
+                logger.warning("clouddb %s managed system removal for %s failed: %s",
+                               label, db_id, exc)
+                continue   # its functional account is still referenced — leave it
+        fa = meta.get(fa_key)
+        if fa:
+            try:
+                await ps_api_service.delete_functional_account(int(fa))
+                done.append(fa_key)
+                logger.info("clouddb %s functional account %s deleted db_id=%s",
+                            label, fa, db_id)
+            except Exception as exc:
+                errors.append(f"{label} functional account: {exc}")
+                logger.warning("clouddb %s functional-account delete for %s failed: %s",
+                               label, db_id, exc)
+
+    if prov_job is not None and done:
+        # Clear only what came off cleanly; the context keys go with the DB managed
+        # system, since they exist to describe it.
+        if "ps_db_registration_tf_state" in done:
+            done += [k for k in _PS_CONTEXT_KEYS if k in meta]
+        fresh = dict(prov_job.metadata_dict or {})
+        for key in done:
+            fresh.pop(key, None)
+        prov_job.metadata_dict = fresh
+        db.commit()
+    if row is not None and "ps_db_registration_tf_state" in done:
+        row.ps_managed_system_id = None
+        row.ps_managed_account_id = None
+        db.commit()
+    return errors
 
 
 def start_decommission(db: Session, db_id: str, created_by: str = "") -> dict:
@@ -1858,37 +2180,12 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
             logger.warning("clouddb secrets-safe delete for %s failed: %s", db_id, exc)
 
     # 3b. Password Safe DB onboarding artifacts (managed systems + functional
-    #     accounts). Deregister each managed system BEFORE deleting its functional
-    #     account — a managed system that still references the functional account
-    #     blocks the delete. The managed DB user itself dies with the database
-    #     instance (step 4), so no DB-side drop is needed here.
-    if any(meta.get(k) for k in ("ps_db_registration_tf_state", "ps_pravault_registration_tf_state",
-                                 "ps_db_functional_account_id", "ps_pravault_functional_account_id")):
-        job_service.update_progress(db, job_id, 50, "Removing Password Safe managed systems…")
-        from . import ps_resource_service, ps_api_service
-        for key, label in (("ps_pravault_registration_tf_state", "PRA Vault managed system"),
-                           ("ps_db_registration_tf_state", "DB managed system")):
-            state = meta.get(key)
-            if state:
-                try:
-                    await ps_resource_service.deregister(state)
-                    logger.info("clouddb %s removed db_id=%s", label, db_id)
-                except Exception as exc:
-                    errors.append(f"{label}: {exc}")
-                    logger.warning("clouddb %s removal for %s failed: %s", label, db_id, exc)
-        # Only accounts the dashboard MINTED are deleted. In "reference" mode the id was
-        # stashed as ps_*_functional_account_ref instead — a key nothing here reads — so
-        # an operator-created functional account survives every decommission.
-        for key, label in (("ps_pravault_functional_account_id", "PRA Vault functional account"),
-                           ("ps_db_functional_account_id", "DB functional account")):
-            fa = meta.get(key)
-            if fa:
-                try:
-                    await ps_api_service.delete_functional_account(int(fa))
-                    logger.info("clouddb %s %s deleted db_id=%s", label, fa, db_id)
-                except Exception as exc:
-                    errors.append(f"{label}: {exc}")
-                    logger.warning("clouddb %s delete for %s failed: %s", label, db_id, exc)
+    #     accounts). The managed DB user itself dies with the database instance
+    #     (step 4), so no DB-side drop is needed here. Shared with the standalone
+    #     Deregister action, which runs the identical teardown on its own.
+    errors += await _teardown_ps_onboarding(
+        db, row=row, prov_job=deploy_job, progress_job_id=job_id, progress=50)
+    meta = (deploy_job.metadata_dict or {}) if deploy_job else {}
 
     # 4. The RDS instance itself (the long step).
     job_service.update_progress(db, job_id, 60, "Destroying the database instance…")
@@ -2290,6 +2587,15 @@ def _serialize(r: CloudDatabase) -> dict:
         "connect_db_name": connection_db_name(r),
         "entitle_integration_id": r.entitle_integration_id,
         "entitle_viable": _entitle_viable(r.engine, r.provider, r.source),
+        # Password Safe DB onboarding. The ids are not secrets — they are what an
+        # operator reads back in the Password Safe UI — and ps_viable is the STRUCTURAL
+        # half of the button's gate (see _ps_ineligible_reason); whether the feature is
+        # switched on is answered separately, by the page's password_safe_enabled and
+        # then by the API.
+        "ps_managed_system_id": r.ps_managed_system_id or "",
+        "ps_managed_account_id": r.ps_managed_account_id or "",
+        "ps_onboarded": bool(r.ps_managed_system_id),
+        "ps_viable": _ps_ineligible_reason(r) is None,
         "created_by": r.created_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         # Which remote agent brokers Config-Management runs against this database, or None
