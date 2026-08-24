@@ -126,8 +126,14 @@ def test_no_disk_means_no_mount_machinery():
 def test_cloud_init_is_valid_yaml_shaped_and_base64():
     ci = _cloud_init()
     assert ci.startswith("#cloud-config"), ci[:40]
-    assert "packages:" in ci and "docker.io" in ci
-    assert "runcmd:" in ci
+    assert "packages:" in ci and "runcmd:" in ci
+    # Read the packages block as a list rather than searching the whole document for
+    # the package name: a bare substring test also passes on a mention inside the
+    # docker command, so it would not notice the install entry going missing.
+    block = ci[ci.index("packages:"):ci.index("runcmd:")]
+    packages = [ln[4:] for ln in block.splitlines() if ln.startswith("  - ")]
+    assert packages.count("docker.io") == 1, (
+        f"cloud-init does not install Docker exactly once: {packages}")
 
 
 def test_a_command_with_quotes_survives_the_runcmd_encoding():
