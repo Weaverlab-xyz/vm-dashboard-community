@@ -113,7 +113,10 @@ Four things follow from durable state, and they are the whole reason it is opt-i
   the volume exists but no password is stored, the deploy **fails up front** rather
   than launching a node nobody can sign into.
 - **The volume keeps billing** until something deletes it. Teardown asks separately;
-  see [Teardown](#teardown).
+  see [Teardown](#teardown). Moving the node to a **different cloud** keeps the old
+  cloud's volume too — it is zonal, so it cannot follow, and deleting your only copy of
+  the node's state as a side effect of a move would be indefensible. The job logs a
+  warning naming it; delete it by hand once you are sure.
 
 ### Prerequisites
 

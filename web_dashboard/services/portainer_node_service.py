@@ -150,7 +150,7 @@ async def _ensure_dashboard_egress_cidr() -> str:
         _SPEC, detect=_detect_egress_ip)
 
 
-async def refresh_portainer_firewall(db=None) -> dict:
+async def refresh_portainer_firewall(db=None, placement=None) -> dict:
     """Recompute the node's firewall source set and re-apply it idempotently.
 
     The merged set is the manual CSV (``_allowed_cidrs``) plus the dashboard's own
@@ -162,8 +162,11 @@ async def refresh_portainer_firewall(db=None) -> dict:
 
     ``db`` is optional so best-effort callers can fire it without a session; it is used
     to read the gateway registry."""
-    cloud = _node_cloud()
-    p = _node_params(cloud=cloud)
+    # A caller mid-deploy passes the placement it already resolved. Without that this
+    # would re-resolve with NO region and, on AWS/Azure, apply the allow-list to the
+    # DEFAULT region's VPC / resource group while the node launches in the picked one.
+    p = placement or _node_params()
+    cloud = p.get("cloud") or _node_cloud()
     if not p["account"]:
         return {"skipped": f"no {cloud} account configured"}
     merged = sorted(set(_allowed_cidrs()) | set(_dashboard_cidr()) | set(_jumpoint_cidrs(db)))
@@ -494,9 +497,7 @@ async def _launch_node_azure(p: dict, *, admin_password_hash: str) -> dict:
         disk = await azure_service.ensure_node_data_disk(
             p["resource_group"], p["region"], name=p["data_disk_name"],
             size_gb=p["data_disk_gb"])
-    nsg = await azure_service.ensure_node_nsg(
-        p["resource_group"], p["region"], name=_firewall_name(p["name"]),
-        ports=list(_SPEC.ports), source_cidrs=[])
+    nsg_id = await _node_nsg_id(p)
     cloud_init = azure_service.container_node_cloud_init(
         managed_node_service.docker_run_command(
             p["image"], name=_SPEC.feature, ports=_SPEC.ports,
@@ -507,7 +508,7 @@ async def _launch_node_azure(p: dict, *, admin_password_hash: str) -> dict:
     res = await azure_service.run_vm_container_node(
         p["resource_group"], p["region"], subnet_id=p["subnet_id"], name=p["name"],
         vm_size=p["vm_size"], admin_password=_azure_vm_password(),
-        cloud_init_b64=cloud_init, nsg_id=nsg.get("id", ""),
+        cloud_init_b64=cloud_init, nsg_id=nsg_id,
         os_disk_gb=p["boot_disk_gb"], data_disk_id=disk.get("disk_id", ""),
         purpose=_SPEC.feature, container_image=p["image"])
     ip = res.get("external_ip") or ""
@@ -517,6 +518,27 @@ async def _launch_node_azure(p: dict, *, admin_password_hash: str) -> dict:
             # ignores --admin-password -- so the stored credential, not the one just
             # computed, is the only one that can sign in.
             "data_disk_reused": bool(disk) and not disk.get("created", False)}
+
+
+async def _node_nsg_id(p: dict) -> str:
+    """The id of the node's NSG, which the ingress refresh created just before this
+    launch.
+
+    Looked up rather than re-ensured: ensuring it with an empty source set would delete
+    the allow rule the refresh had just written, and the node would come up denying
+    every inbound packet -- which reads as a broken deploy no allow-list change can fix.
+    Mirrors the AWS launcher's security-group lookup.
+    """
+    name = _firewall_name(p["name"])
+    nsg_id = await azure_service.find_node_nsg_id(p["resource_group"], name)
+    if not nsg_id:
+        raise managed_node_service.ManagedNodeError(
+            f"The NSG {name!r} does not exist in {p['resource_group']}, so there is no "
+            f"source-restricted group to attach to the node's NIC. A Standard public IP "
+            f"denies all inbound without one, so the node would be unreachable. The "
+            f"ingress refresh should have created it -- check the job log above for why "
+            f"it did not.")
+    return nsg_id
 
 
 def _azure_vm_password() -> str:
@@ -610,6 +632,17 @@ async def _relocate_across_clouds(db, job_id: str, target_cloud: str) -> None:
             await _stop_node(prev_cloud, prev, name=node.get("name") or prev["name"],
                              zone=node.get("zone") or prev["zone"], delete_firewall=True,
                              data_disk_name=prev["data_disk_name"], delete_data_disk=False)
+        if prev["data_disk_name"]:
+            # The volume is KEPT on purpose -- it is zonal, so it cannot follow the node
+            # to another cloud, and deleting the only copy of the node's users and
+            # environments as a side effect of a move would be indefensible. But it now
+            # bills in a cloud nothing is looking at, so say so loudly rather than
+            # leaving it to turn up on an invoice.
+            logger.warning(
+                "Portainer relocation %s -> %s: the data volume %r was KEPT in %s. It "
+                "cannot move clouds, so the new node starts with empty state and the old "
+                "volume keeps billing until you delete it by hand.",
+                prev_cloud, target_cloud, prev["data_disk_name"], prev_cloud)
     except Exception as exc:  # noqa: BLE001 -- never block a move on the old cloud
         logger.warning("Portainer cross-cloud relocation: deleting the %s node failed "
                        "(continuing; it may need removing by hand): %s", prev_cloud, exc)
@@ -659,7 +692,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         # the worker bootstraps + polls the node over its public IP, so that source
         # must be in the firewall or the deploy can't reach its own node.
         await _ensure_dashboard_egress_cidr()
-        fw = await refresh_portainer_firewall(db)
+        fw = await refresh_portainer_firewall(db, placement=p)
         if not fw.get("opened"):
             # Fail closed AND fast: polling a node no source can reach just burns the
             # readiness timeout and reports a misleading "not ready".

@@ -2023,6 +2023,30 @@ async def ensure_node_nsg(rg: str, location: str, *, name: str, ports: list,
         raise AzureError(f"Failed to apply ingress for {name}: {e}") from e
 
 
+def _find_node_nsg_id_sync(cred, sub_id: str, rg: str, name: str) -> str:
+    network = _get_network(cred, sub_id)
+    try:
+        return network.network_security_groups.get(rg, name).id or ""
+    except Exception:
+        return ""
+
+
+async def find_node_nsg_id(rg: str, name: str) -> str:
+    """The id of the node's NSG, or ``""``.
+
+    A LOOKUP, deliberately, not an ensure: the launcher needs the id to attach the group
+    to the node's NIC, and re-ensuring it with an empty source set would delete the very
+    allow rule the ingress refresh just created moments earlier.
+    """
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_find_node_nsg_id_sync, cred, sub_id, rg, name)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to look up the NSG {name}: {e}") from e
+
+
 def _delete_node_nsg_sync(cred, sub_id: str, rg: str, name: str) -> None:
     network = _get_network(cred, sub_id)
     network.network_security_groups.begin_delete(rg, name).result()

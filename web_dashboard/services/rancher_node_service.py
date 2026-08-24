@@ -153,7 +153,7 @@ async def _ensure_dashboard_egress_cidr() -> str:
         _SPEC, detect=_detect_egress_ip)
 
 
-async def refresh_rancher_firewall(db) -> dict:
+async def refresh_rancher_firewall(db, placement=None) -> dict:
     """Recompute the node's firewall source set and re-apply it idempotently.
 
     The merged set is the manual CSV (``_allowed_cidrs``) plus the auto-discovered
@@ -165,8 +165,12 @@ async def refresh_rancher_firewall(db) -> dict:
     harmlessly). No-op safe: returns early when the node's cloud has no account
     configured, so callers can fire it best-effort even when the node isn't deployed.
     """
-    cloud = _node_cloud()
-    p = _node_params(cloud=cloud)
+    # A caller mid-deploy passes the placement it already resolved. Without that this
+    # would re-resolve with NO region and, on AWS/Azure, apply the allow-list to the
+    # DEFAULT region's VPC / resource group while the node launches in the picked one.
+    # On GCP the rule is a global VPC resource, so it never showed up there.
+    p = placement or _node_params()
+    cloud = p.get("cloud") or _node_cloud()
     if not p["account"]:
         return {"skipped": f"no {cloud} account configured"}
     merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db))
@@ -333,9 +337,7 @@ async def _launch_node_azure(p: dict, bootstrap_password: str) -> dict:
     NIC is created -- attaching it afterwards would leave a window in which the
     Standard public IP denied everything, which reads as a broken deploy.
     """
-    nsg = await azure_service.ensure_node_nsg(
-        p["resource_group"], p["region"], name=_firewall_name(p["name"]),
-        ports=list(_SPEC.ports), source_cidrs=[])
+    nsg_id = await _node_nsg_id(p)
     cloud_init = azure_service.container_node_cloud_init(
         managed_node_service.docker_run_command(
             p["image"], name=_SPEC.feature, ports=_SPEC.ports,
@@ -344,11 +346,32 @@ async def _launch_node_azure(p: dict, bootstrap_password: str) -> dict:
     res = await azure_service.run_vm_container_node(
         p["resource_group"], p["region"], subnet_id=p["subnet_id"], name=p["name"],
         vm_size=p["vm_size"], admin_password=_azure_vm_password(),
-        cloud_init_b64=cloud_init, nsg_id=nsg.get("id", ""),
+        cloud_init_b64=cloud_init, nsg_id=nsg_id,
         os_disk_gb=p["boot_disk_gb"], purpose=_SPEC.feature,
         container_image=p["image"])
     ip = res.get("external_ip") or ""
     return {**res, "url": f"https://{ip}" if ip else ""}
+
+
+async def _node_nsg_id(p: dict) -> str:
+    """The id of the node's NSG, which the ingress refresh created just before this
+    launch.
+
+    Looked up rather than re-ensured: ensuring it with an empty source set would delete
+    the allow rule the refresh had just written, and the node would come up denying
+    every inbound packet -- which reads as a broken deploy no allow-list change can fix.
+    Mirrors the AWS launcher's security-group lookup.
+    """
+    name = _firewall_name(p["name"])
+    nsg_id = await azure_service.find_node_nsg_id(p["resource_group"], name)
+    if not nsg_id:
+        raise managed_node_service.ManagedNodeError(
+            f"The NSG {name!r} does not exist in {p['resource_group']}, so there is no "
+            f"source-restricted group to attach to the node's NIC. A Standard public IP "
+            f"denies all inbound without one, so the node would be unreachable. The "
+            f"ingress refresh should have created it -- check the job log above for why "
+            f"it did not.")
+    return nsg_id
 
 
 def _azure_vm_password() -> str:
@@ -471,7 +494,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         # it with manual CIDRs + provisioned-cluster egress /32s + the Web-Jump
         # Jumpoint /32 so a (re)deploy always reflects the current source set.
         await _ensure_dashboard_egress_cidr()
-        fw = await refresh_rancher_firewall(db)
+        fw = await refresh_rancher_firewall(db, placement=p)
         if not fw.get("opened"):
             # Fail closed AND fast: polling a node no source can reach just burns the
             # readiness timeout and reports a misleading "not ready". Tell the operator

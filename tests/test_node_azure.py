@@ -185,13 +185,47 @@ def test_the_nsg_is_attached_to_the_nic_at_creation():
         "network_interfaces.begin_create_or_update")
 
 
-def test_both_launchers_create_the_nsg_before_the_vm():
+def test_both_launchers_look_the_nsg_up_rather_than_re_ensuring_it():
+    """The ingress refresh creates the NSG — carrying the real allow-list — just before
+    the launch. Re-ensuring it here with an empty source set would DELETE that rule, and
+    the node would come up denying every packet: a broken deploy no allow-list change
+    can fix. So the launcher resolves the id, and fails loudly when it is missing."""
     for module in ("rancher_node_service", "portainer_node_service"):
         src = _service_src(module)
         body = src[src.index("async def _launch_node_azure("):]
         body = body[:body.index("\n\ndef ") if "\n\ndef " in body else len(body)]
-        assert body.index("ensure_node_nsg") < body.index("run_vm_container_node"), (
-            f"{module} launches the VM before its NSG exists")
+        assert "_node_nsg_id(" in body, f"{module} does not resolve the node's NSG"
+        assert "ensure_node_nsg" not in body, (
+            f"{module} re-ensures the NSG at launch, which would revoke the allow rule "
+            f"the ingress refresh just wrote")
+        assert body.index("_node_nsg_id(") < body.index("run_vm_container_node"), (
+            f"{module} launches the VM before resolving its NSG")
+
+
+def test_a_missing_nsg_fails_the_launch_rather_than_shipping_a_dead_node():
+    for module in ("rancher_node_service", "portainer_node_service"):
+        src = _service_src(module)
+        body = src[src.index("async def _node_nsg_id("):]
+        body = body[:body.index("\ndef ")]
+        assert "ManagedNodeError" in body, (
+            f"{module} launches with no NSG when the lookup misses — a Standard public "
+            f"IP then denies all inbound and the node is unreachable")
+
+
+def test_the_ingress_refresh_uses_the_placement_the_deploy_resolved():
+    """Re-resolving here would drop the deploy's region pick, and on Azure/AWS that puts
+    the allow-list on a DIFFERENT resource group / VPC than the node — so the node comes
+    up closed while a stray NSG somewhere else holds the rules."""
+    for module, fn in (("rancher_node_service", "refresh_rancher_firewall"),
+                       ("portainer_node_service", "refresh_portainer_firewall")):
+        src = _service_src(module)
+        assert f"{fn}(db, placement=p)" in src, (
+            f"{module}'s deploy does not hand its resolved placement to {fn}, so the "
+            f"ingress rule can land in the wrong region")
+        body = src[src.index(f"async def {fn}("):]
+        body = body[:body.index("\ndef ")]
+        assert "placement or _node_params()" in body, (
+            f"{fn} ignores a caller-supplied placement")
 
 
 # ── the public IP ────────────────────────────────────────────────────────────
