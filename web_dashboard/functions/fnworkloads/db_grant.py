@@ -302,12 +302,64 @@ def _is_minted(username: str) -> bool:
     return str(username or "").startswith(_JIT_PREFIX)
 
 
+# Where the requester's identity can arrive, in precedence order. Entitle's
+# **Ephemeral Accounts** mode sends ``provisioning_data``; the Standing contract (and
+# every hand-rolled call) sends ``actor``. Reading only ``actor`` is why every real
+# ephemeral grant came back 400 "needs an actor with an email or identifier" — the
+# field was simply somewhere else.
+_IDENTITY_HOLDERS = ("provisioning_data", "actor")
+_IDENTITY_KEYS = ("email", "identifier", "name", "username", "user_email")
+
+# Where a role can arrive. ``role_code`` is the documented Standing spelling and stays
+# first; the others are read because Ephemeral mode passes the role alongside the
+# asset and the published docs render that field name illegibly. An unrecognised name
+# is deliberately NOT an error — see _role_code.
+_ROLE_KEYS = ("role_code", "role", "permission")
+
+
+def _identity(payload: dict) -> str:
+    """The person an ephemeral account is named after, from whichever shape sent it."""
+    for holder in [payload.get(name) for name in _IDENTITY_HOLDERS] + [payload]:
+        if not isinstance(holder, dict):
+            continue
+        for key in _IDENTITY_KEYS:
+            value = str(holder.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
 def _role_code(payload: dict) -> str:
-    return str(payload.get("role_code") or "read").strip().lower()
+    """The requested access level, defaulting to ``read``.
+
+    Defaults rather than refusing because the Ephemeral-mode field name is not
+    reliably documented: a role this cannot find must degrade to the LEAST
+    privileged level offered, never the most. A wrong-but-present code still fails
+    loudly in the SQL builders rather than being silently downgraded.
+    """
+    for holder in (payload, payload.get("asset")):
+        if not isinstance(holder, dict):
+            continue
+        for key in _ROLE_KEYS:
+            value = str(holder.get(key) or "").strip().lower()
+            if value:
+                return value
+    return "read"
 
 
 def _actor_identifier(payload: dict) -> str:
     return str(payload.get("actor_identifier") or "").strip()
+
+
+def _requested_asset(payload: dict) -> str:
+    """The asset identifier a request names, or ``""``.
+
+    Read EXPLICITLY rather than through :func:`_resolve_target`'s single-database
+    fallback, because on create_actor its presence is what distinguishes Entitle's
+    two modes — and a single-database adapter would otherwise take the ephemeral
+    branch for a Standing request and grant a role before give_access asked for one.
+    """
+    return str((payload.get("asset") or {}).get("identifier") or "").strip()
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -451,20 +503,35 @@ def _get_asset_permissions(req, ctx, targets):
 
 
 def _create_actor(req, ctx, targets):
-    """Mint the account, with no privileges anywhere.
+    """Mint the account — and, in Entitle's Ephemeral mode, grant it too.
 
-    Entitle's ``create_actor`` carries **no asset** — an actor belongs to the
-    adapter, not to an asset — so this cannot know which database the grant will be
-    for, and creates a role-less account across every database served. That is the
-    same "useless and harmless until give_access" guarantee as the single-database
-    case, just applied N times.
+    **The mode changes what this route means**, and getting it wrong is invisible.
+    Entitle's Ephemeral Accounts mode never calls ``give_access`` or
+    ``revoke_access``: ``create_actor`` IS the grant and ``delete_actor`` is the
+    revoke. An adapter that minted a role-less account here and waited for a
+    ``give_access`` that never came would report success, hand the requester a
+    working credential with **no privileges on anything**, and drop it on expiry —
+    a grant that fails in the one way nobody thinks to check.
+
+    So an ``asset`` in the request selects the ephemeral path: create + grant, on
+    that one database. Its ABSENCE keeps the Standing behaviour, where an actor
+    belongs to the adapter rather than to an asset, nothing can know which database
+    the grant will be for, and a role-less account is created across every database
+    served. Both leave the same thing behind: exactly the access that was asked
+    for, and none that was not.
     """
     payload = req.json()
-    actor = payload.get("actor") or payload
-    identity = str(actor.get("email") or actor.get("identifier")
-                   or actor.get("name") or "").strip()
+    identity = _identity(payload)
     if not identity:
-        return Response(400, {"error": "create_actor needs an actor with an email or identifier"})
+        return Response(400, {
+            "error": "create_actor needs an email or identifier "
+                     "(in provisioning_data, actor, or the body itself)"})
+
+    asset_identifier = _requested_asset(payload)
+    if asset_identifier:
+        return _create_actor_with_access(payload, ctx, targets, identity=identity,
+                                         asset_identifier=asset_identifier)
+
     server = next(iter(targets.values()))
     databases = [target["database"] for target in targets.values()]
     username = _sqlplan.ephemeral_username(identity, ctx.request_id)
@@ -494,7 +561,55 @@ def _create_actor(req, ctx, targets):
     return _apply(plan, server, ctx, extra)
 
 
+def _create_actor_with_access(payload: dict, ctx: Context, targets: dict, *,
+                             identity: str, asset_identifier: str) -> Response:
+    """Entitle Ephemeral mode: one call that mints the account AND grants the role.
+
+    Composed from the same two plan builders the four-operation path uses, through
+    ``sqlplan.grant_plan`` — so there is still exactly one copy of every statement
+    and the SQL that runs is the SQL already under test. The account is created only
+    on the database being granted, which is tighter than the Standing path can
+    manage: with an asset in hand there is no reason to put a principal anywhere
+    else.
+    """
+    target, refusal = _resolve_target(asset_identifier, targets)
+    if refusal:
+        return refusal
+    role = _role_code(payload)
+    username = _sqlplan.ephemeral_username(identity, ctx.request_id)
+    password = _generate_password()
+    try:
+        plan = _sqlplan.grant_plan(
+            target["engine"], username=username, password=password,
+            database=target["database"], role=role, flavor=target["flavor"])
+    except _sqlplan.CloudDbSqlError as exc:
+        return Response(400, {"error": str(exc)})
+
+    logs.emit("info", "create_actor", request_id=ctx.request_id, mode="ephemeral",
+              identity=identity, username=username, engine=target["engine"],
+              role_code=role, asset=_asset_identifier(target), dry_run=_dry_run())
+
+    extra = {"identifier": username, "name": username,
+             "type": "database_account", "role_code": role}
+    if not _dry_run():
+        # The credentials ARE the point of create_actor — Entitle hands them to the
+        # requester. In dry run nothing was created, so returning one would be a
+        # secret with no account behind it.
+        extra.update({"username": username, "password": password,
+                      "host": target["host"], "port": target["port"],
+                      "database": target["database"]})
+    return _apply(plan, target, ctx, extra)
+
+
 def _delete_actor(req, ctx, targets):
+    """Drop the account everywhere it could exist.
+
+    Entitle's Ephemeral mode sends an ``asset`` here too; it is deliberately
+    ignored. The account is a server-level principal, and scoping the drop to one
+    asset would leave a SQL Server user behind in every other served database — an
+    orphaned principal a later login of the same name silently re-adopts, along with
+    whatever it was granted.
+    """
     payload = req.json()
     username = _actor_identifier(payload) or str(payload.get("identifier") or "").strip()
     if not username:

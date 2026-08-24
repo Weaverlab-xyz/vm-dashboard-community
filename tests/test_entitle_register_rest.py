@@ -61,10 +61,11 @@ def test_every_generated_path_is_a_route_the_adapter_actually_serves():
     from fnworkloads import db_grant
 
     served = {route for _method, route in db_grant._ROUTES}
-    hcl = _hcl()
-    for _field, path in ers._REST_ROUTES + ers._REST_EPHEMERAL_ROUTES:
-        assert path in served, f"{path} is configured but the adapter does not serve it"
-        assert BASE + path in hcl, f"{path} missing from the generated HCL"
+    for ephemeral in (True, False):
+        hcl = _hcl(ephemeral=ephemeral)
+        for _field, path in ers._rest_routes(ephemeral):
+            assert path in served, f"{path} is configured, the adapter does not serve it"
+            assert f'"{path}"' in hcl, f"{path} missing from the generated HCL"
 
 
 def test_the_adapter_serves_everything_entitle_will_call():
@@ -73,7 +74,8 @@ def test_the_adapter_serves_everything_entitle_will_call():
     from web_dashboard import functions  # noqa: F401
     from fnworkloads import db_grant
 
-    configured = {path for _f, path in ers._REST_ROUTES + ers._REST_EPHEMERAL_ROUTES}
+    configured = {path for _f, path in
+                  ers._REST_STANDING_ROUTES + ers._REST_EPHEMERAL_ROUTES}
     served = {route for _method, route in db_grant._ROUTES}
     # check_config and get_asset_permissions are served but not configured by us:
     # Entitle probes the first itself and the second is an alternative to
@@ -83,19 +85,64 @@ def test_the_adapter_serves_everything_entitle_will_call():
         f"served but never configured: {served - configured}"
 
 
-def test_full_urls_are_used_so_a_base_path_survives():
-    """Azure's base carries an /api prefix. Relative paths under schema+host would
-    drop it; full URLs cannot."""
+# ── The two modes are disjoint key sets, not a base plus extras ──────────────
+
+def test_the_modes_never_share_one_payload():
+    """Entitle validates connection_json per MODE with additionalProperties: false,
+    so a union of the two key sets is rejected outright — and the Terraform provider
+    does not run that validation, so it saves and then fails every resource sync.
+    That is the exact failure this file previously encoded as correct."""
+    standing = {f for f, _p in ers._REST_STANDING_ROUTES}
+    ephemeral = {f for f, _p in ers._REST_EPHEMERAL_ROUTES}
+    assert "get_actors_path" in standing and "get_actors_path" not in ephemeral
+    for field in ("give_access_path", "revoke_access_path"):
+        assert field in standing and field not in ephemeral, field
+    for field in ("create_actor_path", "delete_actor_path"):
+        assert field in ephemeral and field not in standing, field
+
+
+def test_ephemeral_sends_only_the_four_keys_the_mode_accepts():
+    hcl = _hcl(ephemeral=True)
+    for absent in ("get_actors_path", "give_access_path", "revoke_access_path"):
+        assert absent not in hcl, f"{absent} is not valid in Ephemeral mode"
+
+
+def test_the_host_is_declared_once_rather_than_repeated_per_route():
+    """The full-URL-per-field form is what a live tenant answered 'Missing host
+    scope!' to; the split form also makes the host one value to eyeball."""
+    hcl = _hcl()
+    assert 'schema = "https"' in hcl
+    assert 'host   = "abc123.lambda-url.us-east-1.on.aws"' in hcl
+    assert BASE + "/get_assets" not in hcl, "paths must be relative to host"
+
+
+def test_an_azure_base_path_is_kept_on_every_route():
+    """Azure serves under /api and the base URL carries it. Dropping the prefix when
+    switching to relative paths would 404 every call — this is the case the old
+    full-URL shortcut existed to avoid."""
     hcl = ers._generate_rest_hcl(
         name="x", base_url="https://app.azurewebsites.net/api", private=False,
         ephemeral=True, auth_header="Authorization")
-    assert '"https://app.azurewebsites.net/api/give_access"' in hcl
+    assert 'host   = "app.azurewebsites.net"' in hcl
+    assert '"/api/create_actor"' in hcl
+    assert '"/create_actor"' not in hcl.replace('"/api/create_actor"', "")
 
 
 def test_a_trailing_slash_on_the_base_does_not_double_up():
     hcl = _hcl(base_url=BASE + "/")
-    assert BASE + "//" not in hcl
-    assert BASE + "/give_access" in hcl
+    assert "//get_assets" not in hcl
+    assert '"/get_assets"' in hcl
+    assert 'host   = "abc123.lambda-url.us-east-1.on.aws"' in hcl
+
+
+def test_a_base_url_with_no_host_is_refused():
+    for bad in ("https://", "/just/a/path"):
+        try:
+            ers._split_base_url(bad)
+        except ers.EntitleRegistrationError:
+            pass
+        else:
+            raise AssertionError(f"accepted base_url {bad!r}")
 
 
 # ── Ephemeral is what unlocks MySQL ──────────────────────────────────────────
@@ -104,6 +151,16 @@ def test_ephemeral_adds_the_actor_routes_and_enables_account_creation():
     hcl = _hcl(ephemeral=True)
     assert "create_actor_path" in hcl and "delete_actor_path" in hcl
     assert "allow_creating_accounts = true" in hcl
+
+
+def test_the_route_set_and_the_account_flag_cannot_disagree():
+    """Ephemeral routes with allow_creating_accounts=false describes a lifecycle
+    Entitle will not run; the reverse describes one it cannot. They come from the
+    same argument so they can never drift."""
+    assert "allow_creating_accounts = true" in _hcl(ephemeral=True)
+    assert "create_actor_path" in _hcl(ephemeral=True)
+    assert "allow_creating_accounts = false" in _hcl(ephemeral=False)
+    assert "create_actor_path" not in _hcl(ephemeral=False)
 
 
 def test_non_ephemeral_omits_both_actor_routes_together():
@@ -193,10 +250,12 @@ def test_a_missing_base_url_is_refused():
 def test_the_connection_json_is_valid_json_once_the_variable_is_bound():
     """It is emitted as HCL jsonencode({...}); the field names must still be exactly
     what the integration config expects."""
-    hcl = _hcl()
-    for field, _path in ers._REST_ROUTES + ers._REST_EPHEMERAL_ROUTES:
-        assert f"{field} = " in hcl, field
-    assert "headers = {" in hcl
+    for ephemeral in (True, False):
+        hcl = _hcl(ephemeral=ephemeral)
+        for field, _path in ers._rest_routes(ephemeral):
+            assert f"{field} = " in hcl, field
+        assert "headers = {" in hcl
+        assert "schema = " in hcl and "host   = " in hcl
 
 
 if __name__ == "__main__":

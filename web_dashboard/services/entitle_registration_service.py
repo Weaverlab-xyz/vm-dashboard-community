@@ -64,6 +64,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -557,10 +558,18 @@ async def register_database(
 # docs.beyondtrust.com/entitle/docs/open-api-definition; the routes below match
 # what web_dashboard/functions/fnworkloads/db_grant.py serves.
 
-# Entitle supports relative paths under a schema+host, or a full URL per field. Full
-# URLs are used here so a base with its own path prefix (Azure's /api) needs no
-# splitting — one fewer thing to get subtly wrong per cloud.
-_REST_ROUTES = (
+# Entitle validates connection_json against a per-MODE JSON schema with
+# additionalProperties: false, so these are NOT a base plus extras: a Standing-mode
+# key in an Ephemeral payload is rejected outright ("must NOT have additional
+# properties"). The Terraform provider does not run that validation, which is how
+# the mixed payload this used to emit created an integration that saved cleanly and
+# then failed every resource sync with "Missing host scope!" — passing at the only
+# moment anyone was watching. One tuple per mode, nothing shared.
+#
+# Ephemeral is a shorter LIFECYCLE, not just a shorter list. Entitle never calls
+# give_access or revoke_access in that mode: create_actor IS the grant and
+# delete_actor is the revoke, which is what db_grant._create_actor implements.
+_REST_STANDING_ROUTES = (
     ("get_assets_path", "/get_assets"),
     ("get_actors_path", "/get_actors"),
     ("get_all_permissions_path", "/get_all_permissions"),
@@ -568,12 +577,20 @@ _REST_ROUTES = (
     ("revoke_access_path", "/revoke_access"),
 )
 
-# Only sent when the integration is ephemeral. Entitle requires BOTH to manage a
-# temporary account's lifecycle, so they are all-or-nothing.
+# No get_actors_path on purpose: in Ephemeral mode Entitle owns the account
+# lifecycle and tracks its own actors, and sending the key fails validation.
 _REST_EPHEMERAL_ROUTES = (
+    ("get_assets_path", "/get_assets"),
+    ("get_all_permissions_path", "/get_all_permissions"),
     ("create_actor_path", "/create_actor"),
     ("delete_actor_path", "/delete_actor"),
 )
+
+
+def _rest_routes(ephemeral: bool) -> tuple:
+    """The route fields this mode accepts — see the note above on why it is either
+    one set or the other and never a union."""
+    return _REST_EPHEMERAL_ROUTES if ephemeral else _REST_STANDING_ROUTES
 
 
 def _rest_app_slug() -> str:
@@ -590,22 +607,46 @@ def _rest_app_slug() -> str:
     return (_cfg("entitle_rest_app_slug") or _APP_SLUG["rest"]).strip().lower()
 
 
+def _split_base_url(base_url: str) -> tuple:
+    """``(schema, host, prefix)`` from the adapter's endpoint.
+
+    Entitle takes either a full URL per path field or ``schema`` + ``host`` with
+    relative paths. The split form is used because the full-URL form is what a live
+    tenant answered "Missing host scope!" to, and because the host is then one value
+    to eyeball rather than the same string repeated across seven fields.
+
+    ``prefix`` is any path the endpoint itself carries, and it stays on the front of
+    every route: Azure serves under ``/api``, so dropping it would 404 every call.
+    Preserving it is the whole reason the full-URL form looked attractive.
+    """
+    # strip() first: a whitespace-only value is truthy and would generate paths like
+    # "   /give_access" that fail only at the first real grant. The trailing slash is
+    # dropped from the PATH after parsing rather than from the whole string before
+    # it — "https://".rstrip("/") is "https:", which urlsplit then reads as a host.
+    base = (base_url or "").strip()
+    if not base:
+        raise EntitleRegistrationError("REST registration needs the adapter's base URL")
+    parts = urlsplit(base if "://" in base else f"https://{base}")
+    if not parts.netloc:
+        raise EntitleRegistrationError(
+            "REST registration needs a host in the adapter's base URL "
+            f"(got {base_url!r})")
+    return (parts.scheme or "https"), parts.netloc, parts.path.rstrip("/")
+
+
 def _rest_connection_json_hcl(*, base_url: str, ephemeral: bool,
                               auth_header: str) -> str:
-    """``connection_json`` for a REST integration.
+    """``connection_json`` for a REST integration, in that mode's own key set.
 
     The bearer secret is referenced as ``var.rest_secret`` rather than interpolated,
     so it never lands in the HCL written to disk — the same discipline the DB path
     uses for ``db_password``.
     """
-    # strip() before rstrip("/"): a whitespace-only value is truthy and would
-    # generate paths like "   /give_access" that fail only at the first real grant.
-    base = (base_url or "").strip().rstrip("/")
-    if not base:
-        raise EntitleRegistrationError("REST registration needs the adapter's base URL")
-
-    routes = list(_REST_ROUTES) + (list(_REST_EPHEMERAL_ROUTES) if ephemeral else [])
-    lines = [f"    {field} = {json.dumps(base + path)}" for field, path in routes]
+    schema, host, prefix = _split_base_url(base_url)
+    lines = [f"    schema = {json.dumps(schema)}",
+             f"    host   = {json.dumps(host)}"]
+    lines += [f"    {field} = {json.dumps(prefix + path)}"
+              for field, path in _rest_routes(ephemeral)]
     # Token auth: Entitle sends these verbatim on every request, which is exactly
     # what fnruntime.auth verifies. The alternative the docs offer (oauth_data) buys
     # nothing here — the adapter has no OAuth server in front of it.
@@ -650,8 +691,19 @@ async def register_rest(*, name: str, base_url: str, shared_secret: str,
     FUNCTION that is VPC-attached, not the integration. Pass ``private=True`` only
     if the function's own ingress is restricted and Entitle needs the agent.
 
-    ``ephemeral`` adds the create_actor/delete_actor routes and turns on
-    ``allow_creating_accounts`` — the just-in-time account lifecycle.
+    ``ephemeral`` selects Entitle's **Ephemeral Accounts** connection mode: the
+    create_actor/delete_actor route set (see _REST_EPHEMERAL_ROUTES) plus
+    ``allow_creating_accounts``. Those two have to agree — a payload carrying the
+    ephemeral routes with ``allow_creating_accounts = false`` describes a lifecycle
+    Entitle will not run, and the reverse describes one it cannot.
+
+    ⚠️  Entitle's UI picks the mode from an explicit **Connection** dropdown (four
+        options: Standing/Ephemeral × get_all_permissions/get_asset_permissions).
+        Whether the API takes a discriminator of its own, or infers the mode from
+        ``allow_creating_accounts`` and the key set as this assumes, is UNCONFIRMED
+        against a live tenant. If a generated integration comes back showing
+        "Standing Accounts" in that dropdown, the discriminator is real and belongs
+        here — check the integration's Settings after the first registration.
 
     Returns ``{integration_id, tf_state_json}``; stash the state so ``deregister``
     can remove it.
