@@ -70,9 +70,9 @@ def test_the_zero_runtime_egress_contract_holds():
     time, so the deployed VM boots the stack with no outbound internet."""
     for path in _SCRIPTS:
         src = _read(path)
-        assert "mirror.gcr.io" in src, (
-            f"{os.path.basename(path)}: registry mirror dropped — bakes become "
-            "hostage to Docker Hub anonymous rate limits")
+        assert re.search(r'"registry-mirrors"\s*:\s*\[\s*"https://mirror\.gcr\.io"', src), (
+            f"{os.path.basename(path)}: registry mirror dropped from the docker "
+            "daemon config — bakes become hostage to Docker Hub anonymous rate limits")
         assert "compose" in src and "up -d" in src, (
             f"{os.path.basename(path)}: the bake-time smoke test is gone — a dead "
             "stack would only be discovered inside an air-gapped subnet")
