@@ -351,6 +351,27 @@ function Invoke-AzureRollback {
     if ($LASTEXITCODE -ne 0) {
         Write-Info "Resource group $rg does not exist."
     } else {
+        # Guard: a managed Portainer/Rancher node lives in this RG, and `az group delete`
+        # cascades EVERYTHING in it - including a Portainer data disk holding the only
+        # copy of its users, environments and settings. The AWS and GCP arms refuse under
+        # a live node; this one had no guard, so the loss was silent.
+        $nodeVms = (az vm list -g $rg `
+            --query "[?tags.\"managed-by\"=='vm-dashboard' && tags.purpose!=null].name" `
+            -o tsv 2>$null)
+        if ($nodeVms) {
+            Write-Warn "Managed node VM(s) in ${rg}: $($nodeVms -join ' ')"
+            Write-Warn "Tear them down via the dashboard (Containers) first - deleting this resource group would cascade their durable data disks. Aborting."
+            return
+        }
+        # A DETACHED node data disk outlives its VM by design, so it can be the only
+        # thing left - and it is exactly what a cascade would destroy without asking.
+        $nodeDisks = (az disk list -g $rg `
+            --query "[?tags.\"managed-by\"=='vm-dashboard'].name" -o tsv 2>$null)
+        if ($nodeDisks) {
+            Write-Warn "Managed node data disk(s) still in ${rg}: $($nodeDisks -join ' ')"
+            Write-Warn "These hold a Portainer node's users, environments and settings. Delete them from the dashboard's teardown (tick 'delete the data disk') or by hand, then re-run rollback. Aborting."
+            return
+        }
         if (-not $Yes) {
             if (-not (Confirm-Action "Delete entire resource group $rg (cascades all sandbox resources)?")) { return }
         }

@@ -149,11 +149,11 @@ async def ensure_rancher_ui_jumpoint() -> Optional[str]:
     Rancher-UI Web Jump is up, capture its egress IP into
     ``rancher_ui_jumpoint_egress_ip``, and return it.
 
-    Cloud is picked by ``rancher_ui_jumpoint_cloud`` (default ``gcp`` — same cloud as
-    the Rancher node, and its GCE host exposes a clean external IP). The Azure host
-    has no public IP, so nothing is captured there and the operator must add the IP
-    to ``rancher_allowed_source_cidrs`` manually. A pre-existing operator Gateway
-    (not dashboard-provisioned) likewise can't be auto-detected."""
+    Cloud is picked by ``rancher_ui_jumpoint_cloud`` (default ``gcp`` — the same cloud
+    the node has historically run on). All three managed hosts expose a knowable egress
+    IP: GCP and AWS via the host's public IP, Azure via a Standard, secure-by-default
+    public IP on its NIC. A pre-existing operator Gateway (not dashboard-provisioned)
+    still can't be auto-detected — add its IP to ``rancher_allowed_source_cidrs``."""
     from . import config_service
     cloud = (_cfg("rancher_ui_jumpoint_cloud") or "gcp").lower()
     try:
@@ -171,9 +171,10 @@ async def ensure_portainer_ui_jumpoint() -> Optional[str]:
     Same shape as :func:`ensure_rancher_ui_jumpoint` — the Gateway host itself is
     SHARED, so when both Web Jumps run on the same cloud this is a no-op that just
     re-reads the (possibly refreshed) IP. Cloud is picked by
-    ``portainer_ui_jumpoint_cloud`` (default ``gcp`` — same cloud as the node). The
-    Azure host has no public IP, so nothing is captured there and the operator must
-    add it to ``portainer_allowed_source_cidrs`` manually."""
+    ``portainer_ui_jumpoint_cloud`` (default ``gcp``). All three managed hosts expose a
+    knowable egress IP (see :func:`ensure_rancher_ui_jumpoint`); only a Gateway the
+    dashboard did not provision has to be added to
+    ``portainer_allowed_source_cidrs`` by hand."""
     from . import config_service
     cloud = (_cfg("portainer_ui_jumpoint_cloud") or "gcp").lower()
     try:

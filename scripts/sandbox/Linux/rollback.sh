@@ -385,6 +385,32 @@ rollback_azure() {
   if ! az group show -n "$rg" >/dev/null 2>&1; then
     info "Resource group $rg does not exist."
   else
+    # Guard: a managed Portainer/Rancher node lives in this RG, and an `az group delete`
+    # cascades EVERYTHING in it — including a Portainer data disk holding the only copy
+    # of its users, environments and settings. Unlike the AWS and GCP arms (which refuse
+    # under a live instance / a live Rancher node) this one had no guard at all, so the
+    # loss was silent. Tear the node down via the dashboard first: that path knows
+    # whether the disk is meant to survive.
+    local node_vms
+    node_vms="$(az vm list -g "$rg" \
+      --query "[?tags.\"managed-by\"=='vm-dashboard' && tags.purpose!=null].name" \
+      -o tsv 2>/dev/null || true)"
+    if [[ -n "$node_vms" ]]; then
+      warn "Managed node VM(s) in $rg: ${node_vms//$'\n'/ }"
+      warn "Tear them down via the dashboard (Containers → Portainer / Kubernetes) first — deleting this resource group would cascade their durable data disks. Aborting."
+      return 0
+    fi
+    # Guard: a DETACHED node data disk outlives its VM by design (that is what durable
+    # state means), so it can be the only thing left — and it is exactly what a cascade
+    # would destroy without asking.
+    local node_disks
+    node_disks="$(az disk list -g "$rg" \
+      --query "[?tags.\"managed-by\"=='vm-dashboard'].name" -o tsv 2>/dev/null || true)"
+    if [[ -n "$node_disks" ]]; then
+      warn "Managed node data disk(s) still in $rg: ${node_disks//$'\n'/ }"
+      warn "These hold a Portainer node's users, environments and settings. Delete them from the dashboard's teardown (tick 'delete the data disk') or by hand, then re-run rollback. Aborting."
+      return 0
+    fi
     if (( !ASSUME_YES )); then
       confirm "Delete entire resource group $rg (cascades all sandbox resources)?" || return 0
     fi

@@ -28,8 +28,8 @@ import logging
 
 import httpx
 
-from . import (aws_service, config_service, gcp_service, job_service,
-               managed_node_service, rancher_service, region_catalog)
+from . import (aws_service, azure_service, config_service, gcp_service,
+               job_service, managed_node_service, rancher_service, region_catalog)
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +265,8 @@ async def _launch_node(cloud: str, p: dict, bootstrap_password: str) -> dict:
             create_external_ip=True, region=p["region"])
     if cloud == "aws":
         return await _launch_node_aws(p, bootstrap_password)
+    if cloud == "azure":
+        return await _launch_node_azure(p, bootstrap_password)
     raise managed_node_service.unsupported(cloud, _SPEC, "node launch")
 
 
@@ -324,6 +326,42 @@ async def _launch_node_aws(p: dict, bootstrap_password: str) -> dict:
     return {**node, "reused": False}
 
 
+async def _launch_node_azure(p: dict, bootstrap_password: str) -> dict:
+    """Find-or-create the Rancher node as an Azure VM running one container.
+
+    Idempotent on name, like the other two launchers. The NSG has to exist before the
+    NIC is created -- attaching it afterwards would leave a window in which the
+    Standard public IP denied everything, which reads as a broken deploy.
+    """
+    nsg = await azure_service.ensure_node_nsg(
+        p["resource_group"], p["region"], name=_firewall_name(p["name"]),
+        ports=list(_SPEC.ports), source_cidrs=[])
+    cloud_init = azure_service.container_node_cloud_init(
+        managed_node_service.docker_run_command(
+            p["image"], name=_SPEC.feature, ports=_SPEC.ports,
+            env={"CATTLE_BOOTSTRAP_PASSWORD": bootstrap_password},
+            privileged=True))
+    res = await azure_service.run_vm_container_node(
+        p["resource_group"], p["region"], subnet_id=p["subnet_id"], name=p["name"],
+        vm_size=p["vm_size"], admin_password=_azure_vm_password(),
+        cloud_init_b64=cloud_init, nsg_id=nsg.get("id", ""),
+        os_disk_gb=p["boot_disk_gb"], purpose=_SPEC.feature,
+        container_image=p["image"])
+    ip = res.get("external_ip") or ""
+    return {**res, "url": f"https://{ip}" if ip else ""}
+
+
+def _azure_vm_password() -> str:
+    """A throwaway password that satisfies Azure's VM complexity rules.
+
+    Never used to log in: no NSG rule opens SSH, and the node is administered over its
+    own API. Azure simply refuses to create a Linux VM with neither a password nor an
+    SSH key, so this exists to satisfy the API -- the same reasoning as the Gateway VM's
+    ``_azure_compliant_password``, which is the implementation reused here.
+    """
+    return azure_service._azure_compliant_password()
+
+
 async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
                      delete_firewall: bool = False) -> None:
     """Delete the node VM on ``cloud`` (delete, not stop — the node is disposable),
@@ -349,6 +387,14 @@ async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
                 ports=list(_SPEC.ports), source_cidrs=[])
             await aws_service.release_node_security_group(
                 p["region"], vpc_id=p["vpc_id"], name=_firewall_name(name))
+        return
+    if cloud == "azure":
+        # The VM delete takes the NIC and the public IP with it; the NSG can only go
+        # once the NIC that references it is gone, which is why it is last.
+        await azure_service.stop_vm_container_node(p["resource_group"], name)
+        if delete_firewall:
+            await azure_service.delete_node_nsg(p["resource_group"],
+                                                _firewall_name(name))
         return
     raise managed_node_service.unsupported(cloud, _SPEC, "node teardown")
 

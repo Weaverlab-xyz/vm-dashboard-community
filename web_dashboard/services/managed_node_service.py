@@ -511,6 +511,67 @@ def _placement_aws(spec: NodeSpec, region=None, zone=None) -> dict:
     }
 
 
+def _placement_azure(spec: NodeSpec, region=None, zone=None) -> dict:
+    """Azure VM placement: a subnet in the chosen location, inside a resource group.
+
+    Reuses the Gateway host's per-region ``jumpoint_subnet_id`` for the same reason the
+    AWS side does -- the node wants exactly that network shape, and a second field would
+    only drift out of agreement with what the sandbox actually created.
+
+    Blank ``region`` falls back to the location the node was last deployed to (recorded
+    in ``azure_<feature>_zone``) before the configured default, so a bare redeploy stays
+    where the node is rather than quietly relocating it -- the same stickiness
+    ``gcp_<feature>_zone`` gives the GCE path.
+
+    ``zone`` is accepted but ignored: Azure availability zones are not modelled for
+    these nodes, and the gateway VM they are built from does not use them either.
+    """
+    from ..config import settings
+    f = spec.feature
+
+    persisted = (config_service.get(spec.infra_key("azure", "zone")) or "").strip()
+    eff_region = region_catalog.normalize(
+        "azure", region or persisted or region_catalog.default_region("azure"))
+    rc = region_config.resolve_region("azure", eff_region) or {}
+    rg = (rc.get("resource_group") or "").strip()
+    subnet_id = (rc.get("jumpoint_subnet_id") or "").strip()
+    missing = [k for k, v in (("azure_resource_group", rg),
+                              ("azure_jumpoint_subnet_id", subnet_id)) if not v]
+    if missing:
+        raise ManagedNodeError(
+            f"The managed {spec.label} node cannot be placed in Azure {eff_region}: "
+            f"{', '.join(missing)} is not set for that location. Run the Azure sandbox "
+            f"setup for it, or add a per-region config under Settings -> Multi-region.")
+
+    default_boot = getattr(settings, spec.infra_key("azure", "boot_disk_gb"), 30)
+    try:
+        boot_disk_gb = int(config_service.get(spec.infra_key("azure", "boot_disk_gb"))
+                           or default_boot)
+    except (TypeError, ValueError):
+        boot_disk_gb = default_boot
+    return {
+        "cloud":          "azure",
+        # The resource group is the Azure answer to "where does this live": it is what
+        # every resource is created in, and without it the node has nowhere to go -- so
+        # it is also the honest truthiness check.
+        "account":        rg,
+        "resource_group": rg,
+        "subnet_id":      subnet_id,
+        "region":         eff_region,
+        # Azure has one location per node and no separate zone, so the zone column
+        # shows the location rather than sitting blank.
+        "zone":           eff_region,
+        "name":           (config_service.get(spec.infra_key("azure", "name"))
+                           or getattr(settings, spec.infra_key("azure", "name"),
+                                      f"{f}-server")),
+        "image":          (config_service.get(spec.infra_key("azure", "image"))
+                           or getattr(settings, spec.infra_key("azure", "image"), "")),
+        "vm_size":        (config_service.get(spec.infra_key("azure", "vm_size"))
+                           or getattr(settings, spec.infra_key("azure", "vm_size"), "")),
+        "boot_disk_gb":   boot_disk_gb,
+    }
+
+
 def resolve_placement(cloud: str, spec: NodeSpec, region=None, zone=None) -> dict:
     """Where this node goes, on ``cloud``.
 
@@ -523,6 +584,8 @@ def resolve_placement(cloud: str, spec: NodeSpec, region=None, zone=None) -> dic
         p = _placement_gcp(spec, region=region, zone=zone)
     elif cloud == "aws":
         p = _placement_aws(spec, region=region, zone=zone)
+    elif cloud == "azure":
+        p = _placement_azure(spec, region=region, zone=zone)
     else:
         raise unsupported(cloud, spec, "placement")
     p["firewall_name"] = firewall_name(p["name"])
@@ -557,6 +620,12 @@ async def apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
             placement["region"], vpc_id=placement["vpc_id"],
             name=placement["firewall_name"], ports=list(spec.ports),
             source_cidrs=source_cidrs)
+    if cloud == "azure":
+        from . import azure_service
+        return await azure_service.ensure_node_nsg(
+            placement["resource_group"], placement["region"],
+            name=placement["firewall_name"], ports=list(spec.ports),
+            source_cidrs=source_cidrs)
     raise unsupported(cloud, spec, "ingress rules")
 
 
@@ -575,4 +644,8 @@ async def list_nodes(cloud: str, spec: NodeSpec, placement: dict) -> list:
         from . import aws_service
         return await aws_service.list_ec2_container_nodes(
             placement["region"], spec.feature)
+    if cloud == "azure":
+        from . import azure_service
+        return await azure_service.list_vm_container_nodes(
+            placement["resource_group"], spec.feature)
     raise unsupported(cloud, spec, "node listing")

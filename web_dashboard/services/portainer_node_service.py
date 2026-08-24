@@ -36,8 +36,8 @@ recreate, so ``portainer_url`` is still rewritten each deploy.
 """
 import logging
 
-from . import (aws_service, config_service, gcp_service, job_service,
-               managed_node_service, portainer_service, region_catalog)
+from . import (aws_service, azure_service, config_service, gcp_service,
+               job_service, managed_node_service, portainer_service, region_catalog)
 # Same strength requirements as the Rancher node (Portainer also enforces a 12-char
 # minimum), so there is one implementation, in the shared module.
 from .managed_node_service import generate_admin_password as _generate_admin_password
@@ -395,6 +395,8 @@ async def _launch_node(cloud: str, p: dict, *, admin_password_hash: str) -> dict
             data_disk_name=p["data_disk_name"], data_disk_gb=p["data_disk_gb"])
     if cloud == "aws":
         return await _launch_node_aws(p, admin_password_hash=admin_password_hash)
+    if cloud == "azure":
+        return await _launch_node_azure(p, admin_password_hash=admin_password_hash)
     raise managed_node_service.unsupported(cloud, _SPEC, "node launch")
 
 
@@ -479,6 +481,50 @@ async def _launch_node_aws(p: dict, *, admin_password_hash: str) -> dict:
     return {**node, "reused": False, "data_disk_reused": data_disk_reused}
 
 
+async def _launch_node_azure(p: dict, *, admin_password_hash: str) -> dict:
+    """Find-or-create the Portainer node as an Azure VM running one container.
+
+    The durable path is simpler here than on AWS: an Azure data disk can be attached at
+    VM CREATE time, so cloud-init mounts it before the container starts with no polling
+    -- which is the guarantee konlet gives on GCE, and the one the AWS path has to
+    rebuild with a wait loop.
+    """
+    disk = {}
+    if p["data_disk_name"]:
+        disk = await azure_service.ensure_node_data_disk(
+            p["resource_group"], p["region"], name=p["data_disk_name"],
+            size_gb=p["data_disk_gb"])
+    nsg = await azure_service.ensure_node_nsg(
+        p["resource_group"], p["region"], name=_firewall_name(p["name"]),
+        ports=list(_SPEC.ports), source_cidrs=[])
+    cloud_init = azure_service.container_node_cloud_init(
+        managed_node_service.docker_run_command(
+            p["image"], name=_SPEC.feature, ports=_SPEC.ports,
+            volumes=[(azure_service.NODE_DATA_MOUNT, "/data")] if disk else [],
+            args=(["--admin-password", admin_password_hash]
+                  if admin_password_hash else ())),
+        data_device=azure_service._NODE_DATA_DEVICE if disk else "")
+    res = await azure_service.run_vm_container_node(
+        p["resource_group"], p["region"], subnet_id=p["subnet_id"], name=p["name"],
+        vm_size=p["vm_size"], admin_password=_azure_vm_password(),
+        cloud_init_b64=cloud_init, nsg_id=nsg.get("id", ""),
+        os_disk_gb=p["boot_disk_gb"], data_disk_id=disk.get("disk_id", ""),
+        purpose=_SPEC.feature, container_image=p["image"])
+    ip = res.get("external_ip") or ""
+    return {**res,
+            "url": f"https://{ip}:9443" if ip else "",
+            # A disk that already existed carries an initialized Portainer DB, which
+            # ignores --admin-password -- so the stored credential, not the one just
+            # computed, is the only one that can sign in.
+            "data_disk_reused": bool(disk) and not disk.get("created", False)}
+
+
+def _azure_vm_password() -> str:
+    """A throwaway password satisfying Azure's VM complexity rules -- see the Rancher
+    node's copy for why one is needed at all (it is never used to log in)."""
+    return azure_service._azure_compliant_password()
+
+
 async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
                      delete_firewall: bool = False, data_disk_name: str = "",
                      delete_data_disk: bool = False) -> None:
@@ -512,6 +558,18 @@ async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
             if vol.get("volume_id"):
                 await aws_service.delete_node_data_volume(p["region"], vol["volume_id"])
         return
+    if cloud == "azure":
+        # The VM delete takes the NIC and public IP with it and DETACHES the data disk
+        # (delete_option=Detach), which is what makes the state durable. The NSG can
+        # only go once the NIC referencing it is gone.
+        await azure_service.stop_vm_container_node(p["resource_group"], name)
+        if delete_firewall:
+            await azure_service.delete_node_nsg(p["resource_group"],
+                                                _firewall_name(name))
+        if delete_data_disk and data_disk_name:
+            await azure_service.delete_node_data_disk(p["resource_group"],
+                                                      data_disk_name)
+        return
     raise managed_node_service.unsupported(cloud, _SPEC, "node teardown")
 
 
@@ -527,6 +585,9 @@ async def _find_data_disk(cloud: str, p: dict) -> dict:
             p["project_id"], p["data_disk_name"])
     if cloud == "aws":
         return await aws_service.find_node_data_volume(p["region"], p["data_disk_name"])
+    if cloud == "azure":
+        return await azure_service.find_node_data_disk(p["resource_group"],
+                                                       p["data_disk_name"])
     raise managed_node_service.unsupported(cloud, _SPEC, "durable data volumes")
 
 

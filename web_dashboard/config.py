@@ -130,7 +130,7 @@ class Settings(BaseSettings):
     rancher_ui_vault_account_group_id: str = ""  # PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; chosen at deploy. "" = no vault (fall back to bt_vault_account_group_id, else surface the password)
     rancher_ui_vault_account_id: str = ""     # PRA Vault account id created for the Rancher admin credential (runtime-set; cleared on teardown)
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
-    rancher_ui_jumpoint_egress_ip: str = ""   # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
+    rancher_ui_jumpoint_egress_ip: str = ""   # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). all three managed Gateway hosts expose one: GCP + AWS via the host's public IP, Azure via a Standard, secure-by-default public IP on its NIC (Standard IPs block all inbound unless an NSG allows it, so it is egress-only)
     rancher_dashboard_egress_cidr: str = ""   # the DASHBOARD's own public egress IP/CIDR — the source the worker uses to bootstrap + poll the node over its PUBLIC IP, so it MUST be in the firewall or the deploy can't reach its own node. Auto-detected + persisted on deploy (best-effort IP-echo); a manually-set CIDR that CONTAINS the detected IP is kept (corp proxies egress from an IP pool — set the pool's CIDR, e.g. 104.28.182.0/24). Bare IP → /32.
     # Dashboard→Rancher API transport. Corp networks that TLS-inspect (e.g.
     # Cloudflare Gateway) reject the node's self-signed cert IN TRANSIT, killing
@@ -741,7 +741,7 @@ class Settings(BaseSettings):
     portainer_ui_vault_account_group_id: str = "" # PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; chosen at deploy. "" = no vault (fall back to bt_vault_account_group_id, else surface the password)
     portainer_ui_vault_account_id: str = ""       # PRA Vault account id created for the Portainer admin credential (runtime-set; cleared on teardown)
     portainer_ui_jumpoint_cloud: str = "gcp"      # which dashboard-managed Jumpoint host brokers the Portainer UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
-    portainer_ui_jumpoint_egress_ip: str = ""     # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
+    portainer_ui_jumpoint_egress_ip: str = ""     # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). all three managed Gateway hosts expose one: GCP + AWS via the host's public IP, Azure via a Standard, secure-by-default public IP on its NIC (Standard IPs block all inbound unless an NSG allows it, so it is egress-only)
     ansible_local_image: str = "chrweav/ansible-winrm:latest"
     # Ansible runner image for Kubernetes-cluster / cloud-database config-management
     # targets (localhost plays that reach out via kubeconfig / DB login vars). Carries
@@ -1377,6 +1377,36 @@ class Settings(BaseSettings):
     # Portainer would come up against an unmounted directory and write its database to
     # the root volume, losing it on the next recreate.
     aws_portainer_data_disk_gb: int = 10                 # size of that EBS data volume
+
+    # -- Managed nodes on Azure (same two features, an Azure VM) ---------------
+    # Cloud-init runs `docker run`, the same mechanism the Gateway VM already uses. ACI
+    # is deliberately NOT used: Rancher needs --privileged, which a container group
+    # cannot give it, so ACI could serve at most one of the two features -- and two
+    # different Azure shapes for two near-identical nodes is worse than one.
+    #
+    # Two differences from AWS, both in Azure's favour. The public IP is Standard SKU
+    # and a Standard IP must be Static, so the node KEEPS ITS ADDRESS across a recreate
+    # -- Portainer Edge keys and Rancher's server-url survive here where they do not on
+    # GCP or AWS. And a data disk can be attached at CREATE time, so cloud-init mounts
+    # it before the container starts with no polling (the AWS path cannot: an existing
+    # EBS volume is only attachable after the instance is running).
+    #
+    # Ingress is a dedicated NSG on the NIC. A Standard public IP denies all inbound
+    # unless a rule allows it, so fail-closed here is DELETING the allow rule -- the
+    # same shape as GCE's "delete the firewall rule", not AWS's "revoke everything".
+    azure_rancher_image: str = "rancher/rancher:latest"   # Rancher server container image
+    azure_rancher_vm_size: str = "Standard_B2s"           # Rancher needs >=4 GB RAM; Standard_B1s (1 GB) OOMs
+    azure_rancher_name: str = "rancher-server"            # VM + NSG base name
+    azure_rancher_boot_disk_gb: int = 30                  # OS disk (holds /var/lib/rancher; deleted with the VM)
+    azure_rancher_allow_open: bool = False                # opt-in to open 0.0.0.0/0 when rancher_allowed_source_cidrs is empty
+    azure_rancher_zone: str = ""                          # RECORDED, not chosen: the location the node landed in, so a bare redeploy stays there
+    azure_portainer_image: str = "portainer/portainer-ce:latest"  # Portainer server container image
+    azure_portainer_vm_size: str = "Standard_B1s"         # Portainer is light; 1 GB is ample
+    azure_portainer_name: str = "portainer-server"        # VM + NSG base name
+    azure_portainer_boot_disk_gb: int = 30                # OS disk (holds /data when no data disk)
+    azure_portainer_allow_open: bool = False              # opt-in to open 0.0.0.0/0 when portainer_allowed_source_cidrs is empty
+    azure_portainer_zone: str = ""                        # RECORDED, not chosen: the location the node (and so its data disk) landed in
+    azure_portainer_data_disk_gb: int = 10                # size of the durable managed data disk (delete_option=Detach, so it outlives the VM)
 
     # ── Oracle Cloud Infrastructure (OCI) ─────────────────────────────────────
     # The fourth cloud provider. Compute VM CRUD is SDK-based (the `oci` Python

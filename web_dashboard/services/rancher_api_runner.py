@@ -19,6 +19,7 @@ INTERNAL address, so the runner needs VPC reach to it:
     connector. Its egress is private-ranges-only, so RFC1918 is exactly what routes;
     a public IP would not.
   * **AWS** — an ECS Fargate task in the node's own VPC, reaching its private IP.
+  * **Azure** — an ACI container group on a VNet-delegated subnet in the node's VNet.
 
 The backend is NOT configured separately: it follows the cloud the node is in,
 because the whole point is to reach that node's private address from inside its own
@@ -193,6 +194,34 @@ def _resolve_ecs():
     return cfg
 
 
+def _resolve_aci():
+    """ACI knobs, reusing the k8s runner's resolution.
+
+    The container group must sit on a VNet-DELEGATED subnet in the node's VNet, or it
+    has no route to the node's private address -- the same requirement the k8s runner
+    already has for private cluster APIs, which is why its subnet fallback chain is
+    reused rather than a second one invented. Azure has no cross-region wrinkle to undo
+    here: the resource group and location already come from the node's own placement.
+
+    The node's NSG must admit the container group's address, which is what
+    ``rancher_runner_source_cidr`` is for (set it to the runner subnet's CIDR). It is
+    auto-merged into the allow-list while the transport is ``runner``.
+    """
+    from . import k8s_runner_service
+    try:
+        cfg = k8s_runner_service._resolve_aci()
+    except Exception as exc:
+        raise RancherRunnerError(
+            f"Rancher API runner (ACI) is not configured: {exc}") from exc
+    if not cfg.get("subnet_id"):
+        raise RancherRunnerError(
+            "rancher_api_transport=runner needs VNet reach to the node's internal IP: "
+            "set ansible_aci_subnet_id (or azure_aci_subnet_id) to a VNet-delegated "
+            "subnet in the node's VNet. Without it the container group runs with a "
+            "public address and cannot route to the node.")
+    return cfg
+
+
 async def _run(command: str, *, stdin_b64: str = "", job_id: str = "") -> tuple:
     """Run one shell command in an in-cloud runner job; return ``(exit_code, output)``.
 
@@ -221,10 +250,19 @@ async def _run(command: str, *, stdin_b64: str = "", job_id: str = "") -> tuple:
             execution_role_arn=cfg["execution_role_arn"],
             command=command, kubeconfig_b64=_DUMMY_KUBECONFIG_B64,
             stdin_b64=stdin_b64, job_id=job_id)
+    if cloud == "azure":
+        from . import azure_service
+        cfg = _resolve_aci()
+        return await azure_service.run_aci_k8s_task(
+            rg=cfg["rg"], location=cfg["location"], subnet_id=cfg["subnet_id"],
+            image=cfg["image"], command=command,
+            kubeconfig_b64=_DUMMY_KUBECONFIG_B64, stdin_b64=stdin_b64, job_id=job_id,
+            acr_server=cfg["acr_server"], acr_username=cfg["acr_username"],
+            acr_password=cfg["acr_password"])
     raise RancherRunnerError(
         f"rancher_api_transport=runner is not implemented for a node on {cloud!r}. "
         f"Use rancher_api_transport=direct, or host the node on a cloud that has a "
-        f"runner (aws, gcp).")
+        f"runner (aws, azure, gcp).")
 
 
 def _q(val: str) -> str:
