@@ -28,8 +28,8 @@ import logging
 
 import httpx
 
-from . import (config_service, gcp_service, job_service, managed_node_service,
-               rancher_service, region_catalog)
+from . import (aws_service, config_service, gcp_service, job_service,
+               managed_node_service, rancher_service, region_catalog)
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +263,65 @@ async def _launch_node(cloud: str, p: dict, bootstrap_password: str) -> dict:
             machine_type=p["machine_type"],
             boot_disk_gb=p["boot_disk_gb"], network_tag=p["network_tag"],
             create_external_ip=True, region=p["region"])
+    if cloud == "aws":
+        return await _launch_node_aws(p, bootstrap_password)
     raise managed_node_service.unsupported(cloud, _SPEC, "node launch")
+
+
+async def _node_security_group_id(p: dict) -> str:
+    """The id of the node's own security group, which the ingress refresh created just
+    before this launch.
+
+    Looked up rather than threaded through because the refresh is reached by several
+    paths (deploy, gateway churn, cluster provision) and only one of them is a launch.
+    A miss is fatal and says so: launching into the VPC's default group would put the
+    node behind whatever rules that group happens to carry, which is the opposite of
+    source-restricted.
+    """
+    name = _firewall_name(p["name"])
+    sg_id = await aws_service.find_security_group_id(
+        p["region"], vpc_id=p["vpc_id"], name=name)
+    if not sg_id:
+        raise managed_node_service.ManagedNodeError(
+            f"The security group {name!r} does not exist in {p['vpc_id']}, so there is "
+            f"no source-restricted group to launch the node into. The ingress refresh "
+            f"should have created it -- check the job log above for why it did not.")
+    return sg_id
+
+
+async def _launch_node_aws(p: dict, bootstrap_password: str) -> dict:
+    """Find-or-create the Rancher node as an EC2 instance running one container.
+
+    Idempotent on the Name tag, matching the GCE launcher's find-or-create-by-name: a
+    redeploy onto a live node reuses it rather than standing up a second management
+    plane. A reused node is reported ``reused=True``, which is what lets the deploy
+    skip re-bootstrapping a Rancher that already holds state.
+    """
+    region = p["region"]
+    existing = await aws_service.list_ec2_container_nodes(region, _SPEC.feature)
+    live = [i for i in existing if i.get("status") in ("PENDING", "RUNNING")]
+    if live:
+        node = live[0]
+        logger.info("Rancher node: reusing EC2 instance %s (%s)",
+                    node.get("instance_id"), node.get("name"))
+        return {**node, "reused": True}
+
+    ami_id = await aws_service.get_ssm_parameter(region, aws_service.ECS_OPTIMIZED_AMI_SSM)
+    user_data = aws_service.container_node_user_data(
+        managed_node_service.docker_run_command(
+            p["image"], name=_SPEC.feature, ports=_SPEC.ports,
+            env={"CATTLE_BOOTSTRAP_PASSWORD": bootstrap_password},
+            privileged=True))
+    inst = await aws_service.run_ec2_container_node(
+        region, ami_id=ami_id, instance_type=p["instance_type"],
+        subnet_id=p["subnet_id"], security_group_ids=[await _node_security_group_id(p)],
+        user_data=user_data, name_tag=p["name"], purpose=_SPEC.feature,
+        root_disk_gb=p["boot_disk_gb"])
+    # The launch response carries no addresses yet, so read the node back the same way
+    # the UI does -- one shape for "what is this node", however it was created.
+    node = await aws_service.await_container_node(region, inst["instance_id"],
+                                                 _SPEC.feature)
+    return {**node, "reused": False}
 
 
 async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
@@ -275,6 +333,22 @@ async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
             p["project_id"], zone, name,
             delete_firewall=delete_firewall,
             firewall_name=_firewall_name(name) if delete_firewall else None)
+        return
+    if cloud == "aws":
+        for node in await aws_service.list_ec2_container_nodes(p["region"], _SPEC.feature):
+            if node.get("name") == name and node.get("instance_id"):
+                await aws_service.terminate_instance(p["region"], node["instance_id"])
+        if delete_firewall:
+            # Two steps, in this order. Revoke FIRST: it is immediate and it is what
+            # makes the node unreachable, which must not wait on anything. Then reclaim
+            # the now-empty group -- it cannot be deleted while the terminating
+            # instance still holds its ENI, and an orphaned group blocks a later VPC
+            # delete with an opaque DependencyViolation.
+            await aws_service.ensure_node_security_group(
+                p["region"], vpc_id=p["vpc_id"], name=_firewall_name(name),
+                ports=list(_SPEC.ports), source_cidrs=[])
+            await aws_service.release_node_security_group(
+                p["region"], vpc_id=p["vpc_id"], name=_firewall_name(name))
         return
     raise managed_node_service.unsupported(cloud, _SPEC, "node teardown")
 
@@ -556,6 +630,11 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         elif config_service.get("rancher_ui_vault_account_id"):
             completion["admin_credential"] = "stored in PRA Vault — use the rancher-ui Web Jump"
         job_service.set_completed(db, job_id, completion)
+    except managed_node_service.ManagedNodeError as exc:
+        # A placement/support problem, not a crash: the message already names the
+        # config key to set, so a traceback would only bury it.
+        logger.warning("Rancher node deploy: %s", exc)
+        job_service.set_failed(db, job_id, str(exc))
     except Exception as exc:
         logger.exception("Rancher node deploy failed (job %s)", job_id)
         job_service.set_failed(db, job_id, str(exc))
@@ -624,6 +703,11 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
             config_service.set("rancher_admin_password_generated", "")
 
         job_service.set_completed(db, job_id, {"name": name, "zone": zone, "cloud": cloud})
+    except managed_node_service.ManagedNodeError as exc:
+        # A placement/support problem, not a crash: the message already names the
+        # config key to set, so a traceback would only bury it.
+        logger.warning("Rancher node teardown: %s", exc)
+        job_service.set_failed(db, job_id, str(exc))
     except Exception as exc:
         logger.exception("Rancher node teardown failed (job %s)", job_id)
         job_service.set_failed(db, job_id, str(exc))

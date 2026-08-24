@@ -36,8 +36,8 @@ recreate, so ``portainer_url`` is still rewritten each deploy.
 """
 import logging
 
-from . import (config_service, gcp_service, job_service, managed_node_service,
-               portainer_service, region_catalog)
+from . import (aws_service, config_service, gcp_service, job_service,
+               managed_node_service, portainer_service, region_catalog)
 # Same strength requirements as the Rancher node (Portainer also enforces a 12-char
 # minimum), so there is one implementation, in the shared module.
 from .managed_node_service import generate_admin_password as _generate_admin_password
@@ -393,7 +393,90 @@ async def _launch_node(cloud: str, p: dict, *, admin_password_hash: str) -> dict
             network_tag=p["network_tag"], create_external_ip=True, region=p["region"],
             admin_password_hash=admin_password_hash,
             data_disk_name=p["data_disk_name"], data_disk_gb=p["data_disk_gb"])
+    if cloud == "aws":
+        return await _launch_node_aws(p, admin_password_hash=admin_password_hash)
     raise managed_node_service.unsupported(cloud, _SPEC, "node launch")
+
+
+async def _node_security_group_id(p: dict) -> str:
+    """The id of the node's own security group, which the ingress refresh created just
+    before this launch.
+
+    Looked up rather than threaded through because the refresh is reached by several
+    paths (deploy, gateway churn, cluster provision) and only one of them is a launch.
+    A miss is fatal and says so: launching into the VPC's default group would put the
+    node behind whatever rules that group happens to carry, which is the opposite of
+    source-restricted.
+    """
+    name = _firewall_name(p["name"])
+    sg_id = await aws_service.find_security_group_id(
+        p["region"], vpc_id=p["vpc_id"], name=name)
+    if not sg_id:
+        raise managed_node_service.ManagedNodeError(
+            f"The security group {name!r} does not exist in {p['vpc_id']}, so there is "
+            f"no source-restricted group to launch the node into. The ingress refresh "
+            f"should have created it -- check the job log above for why it did not.")
+    return sg_id
+
+
+async def _launch_node_aws(p: dict, *, admin_password_hash: str) -> dict:
+    """Find-or-create the Portainer node as an EC2 instance running one container.
+
+    The durable-state path is the interesting half. An existing EBS volume cannot be
+    attached by ``run_instances``, so the order is: ensure the volume (which pins the
+    AZ), launch with user-data that WAITS for it, attach once the instance is running.
+    The wait is what makes it safe -- without it Portainer would start against an
+    unmounted /data and write its database to the root volume, losing it on the next
+    recreate. That is the same guarantee konlet gives on GCE, reconstructed.
+    """
+    region = p["region"]
+    existing = await aws_service.list_ec2_container_nodes(region, _SPEC.feature)
+    live = [i for i in existing if i.get("status") in ("PENDING", "RUNNING")]
+
+    volume = {}
+    if p["data_disk_name"]:
+        volume = await aws_service.find_node_data_volume(region, p["data_disk_name"])
+
+    if live:
+        node = live[0]
+        logger.info("Portainer node: reusing EC2 instance %s (%s)",
+                    node.get("instance_id"), node.get("name"))
+        # A reused instance already has whatever volume it was launched with; the
+        # attach is idempotent and returns immediately when it is already ours.
+        if volume.get("volume_id"):
+            await aws_service.attach_node_data_volume(
+                region, volume_id=volume["volume_id"],
+                instance_id=node["instance_id"])
+        return {**node, "reused": True, "data_disk_reused": bool(volume)}
+
+    data_disk_reused = bool(volume)
+    if p["data_disk_name"] and not volume:
+        # A fresh volume needs an AZ, and the subnet's is the only one the instance can
+        # land in -- asking the subnet is what keeps the two in the same zone.
+        az = await aws_service.subnet_availability_zone(region, p["subnet_id"])
+        volume = await aws_service.ensure_node_data_volume(
+            region, name=p["data_disk_name"], az=az, size_gb=p["data_disk_gb"])
+
+    volumes = [(aws_service.NODE_DATA_MOUNT, "/data")] if volume else []
+    user_data = aws_service.container_node_user_data(
+        managed_node_service.docker_run_command(
+            p["image"], name=_SPEC.feature, ports=_SPEC.ports,
+            volumes=volumes,
+            args=(["--admin-password", admin_password_hash]
+                  if admin_password_hash else ())),
+        data_volume_id=volume.get("volume_id", ""))
+    ami_id = await aws_service.get_ssm_parameter(region, aws_service.ECS_OPTIMIZED_AMI_SSM)
+    inst = await aws_service.run_ec2_container_node(
+        region, ami_id=ami_id, instance_type=p["instance_type"],
+        subnet_id=p["subnet_id"], security_group_ids=[await _node_security_group_id(p)],
+        user_data=user_data, name_tag=p["name"], purpose=_SPEC.feature,
+        root_disk_gb=p["boot_disk_gb"])
+    if volume.get("volume_id"):
+        await aws_service.attach_node_data_volume(
+            region, volume_id=volume["volume_id"], instance_id=inst["instance_id"])
+    node = await aws_service.await_container_node(region, inst["instance_id"],
+                                                 _SPEC.feature)
+    return {**node, "reused": False, "data_disk_reused": data_disk_reused}
 
 
 async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
@@ -408,6 +491,27 @@ async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
             firewall_name=_firewall_name(name) if delete_firewall else None,
             data_disk_name=data_disk_name, delete_data_disk=delete_data_disk)
         return
+    if cloud == "aws":
+        for node in await aws_service.list_ec2_container_nodes(p["region"], _SPEC.feature):
+            if node.get("name") == name and node.get("instance_id"):
+                await aws_service.terminate_instance(p["region"], node["instance_id"])
+        if delete_firewall:
+            # Revoke first (immediate, and what closes the node), then reclaim the empty
+            # group once the terminating instance releases its ENI -- see the Rancher
+            # teardown for why an orphaned group is not merely untidy.
+            await aws_service.ensure_node_security_group(
+                p["region"], vpc_id=p["vpc_id"], name=_firewall_name(name),
+                ports=list(_SPEC.ports), source_cidrs=[])
+            await aws_service.release_node_security_group(
+                p["region"], vpc_id=p["vpc_id"], name=_firewall_name(name))
+        # The volume delete comes LAST and only when asked: it cannot happen until the
+        # instance has released it, and it is the one part of a teardown that cannot
+        # be undone.
+        if delete_data_disk and data_disk_name:
+            vol = await aws_service.find_node_data_volume(p["region"], data_disk_name)
+            if vol.get("volume_id"):
+                await aws_service.delete_node_data_volume(p["region"], vol["volume_id"])
+        return
     raise managed_node_service.unsupported(cloud, _SPEC, "node teardown")
 
 
@@ -421,6 +525,8 @@ async def _find_data_disk(cloud: str, p: dict) -> dict:
     if cloud == "gcp":
         return await gcp_service.find_portainer_data_disk(
             p["project_id"], p["data_disk_name"])
+    if cloud == "aws":
+        return await aws_service.find_node_data_volume(p["region"], p["data_disk_name"])
     raise managed_node_service.unsupported(cloud, _SPEC, "durable data volumes")
 
 
@@ -677,6 +783,11 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         if note:
             completion["note"] = note
         job_service.set_completed(db, job_id, completion)
+    except managed_node_service.ManagedNodeError as exc:
+        # A placement/support problem, not a crash: the message already names the
+        # config key to set, so a traceback would only bury it.
+        logger.warning("Portainer node deploy: %s", exc)
+        job_service.set_failed(db, job_id, str(exc))
     except Exception as exc:
         logger.exception("Portainer node deploy failed")
         job_service.set_failed(db, job_id, str(exc))
@@ -703,7 +814,10 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
         name = meta.get("name") or p["name"]
         zone = (meta.get("zone") or config_service.get(_SPEC.infra_key(cloud, "zone"))
                 or p["zone"])
-        if not zone:
+        if cloud == "gcp" and not zone:
+            # GCE addresses a VM BY zone, so without one there is nothing to delete.
+            # Elsewhere the node is found by tag and the zone is only a record, so a
+            # blank one is not a reason to refuse.
             job_service.set_failed(
                 db, job_id,
                 "No zone is known for the Portainer node — pass ?zone= to the stop call.")
@@ -758,6 +872,11 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
                 f"back with its users, environments and settings. It keeps costing "
                 f"storage until it is deleted.")
         job_service.set_completed(db, job_id, result)
+    except managed_node_service.ManagedNodeError as exc:
+        # A placement/support problem, not a crash: the message already names the
+        # config key to set, so a traceback would only bury it.
+        logger.warning("Portainer node teardown: %s", exc)
+        job_service.set_failed(db, job_id, str(exc))
     except Exception as exc:
         logger.exception("Portainer node teardown failed")
         job_service.set_failed(db, job_id, str(exc))

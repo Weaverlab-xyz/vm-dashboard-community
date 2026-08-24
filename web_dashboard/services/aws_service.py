@@ -932,6 +932,272 @@ async def run_nat_instance(
         raise AWSError("AWS credentials not configured.")
 
 
+# ── Managed container nodes on EC2 (Portainer server / Rancher server) ───────
+# The dashboard's two managed-container nodes -- the Portainer CE server and the
+# Rancher management plane -- run as ONE container on ONE VM with a public,
+# source-restricted IP. On GCP that is a COS instance whose container comes from the
+# `gce-container-declaration` metadata; there is no AWS equivalent of konlet, so the
+# EC2 side runs `docker run` from user-data instead.
+#
+# The AMI is the ECS-optimized Amazon Linux 2023 image, resolved per region from its
+# SSM public parameter (the same one the Gateway host uses). It already carries Docker,
+# so nothing is installed at boot -- but the instance deliberately does NOT join an ECS
+# cluster and gets no instance profile: these nodes need no AWS API access, exactly like
+# their GCE counterparts, and joining a cluster would add a task definition and the
+# ecsInstanceRole policy dependency for no benefit.
+#
+# NOTE ON USER-DATA AND SECRETS: user-data is readable from inside the instance (IMDS)
+# and via ec2:DescribeInstanceAttribute. The Rancher bootstrap password and Portainer's
+# bcrypt admin hash therefore live at the same exposure as GCE instance metadata does
+# for the same two values -- this is parity with the existing GCP path, not a new
+# weakening, but it is the reason neither node is given a real secret beyond its own
+# first-run credential.
+
+_NODE_MANAGED_TAG = "vm-dashboard"
+
+#: The ECS-optimized Amazon Linux 2023 AMI, per region, from its SSM public parameter.
+#: Public because the managed nodes want the same image the Gateway host uses -- it
+#: already carries Docker -- and resolving it here means there is no per-region AMI map
+#: to maintain anywhere.
+ECS_OPTIMIZED_AMI_SSM = "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"
+
+#: Where a durable data volume gets mounted, and the device slot it is asked for.
+#: On Nitro instances the requested name is NOT what appears in /dev, which is why the
+#: user-data below resolves the volume through /dev/disk/by-id instead of trusting it.
+NODE_DATA_MOUNT = "/mnt/node-data"
+_NODE_DATA_DEVICE = "/dev/sdf"
+
+
+def container_node_user_data(docker_cmd: str, *, data_volume_id: str = "",
+                             mount_path: str = NODE_DATA_MOUNT) -> str:
+    """Cloud-init-free bash user-data that starts one container, after mounting the
+    node's durable volume if it has one.
+
+    The wait loop is load-bearing rather than defensive. An existing EBS volume cannot
+    be attached by ``run_instances`` (block-device mappings only create new ones), so
+    the attach happens *after* the instance is running -- which is after user-data has
+    started. Without the wait, Portainer would come up against an unmounted directory
+    and write its database to the root volume, which is precisely the failure GCP avoids
+    by letting konlet own the mount. Mount first, container second, always.
+
+    The device is resolved through ``/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_*``
+    because on Nitro instances the requested ``/dev/sdf`` is not what shows up in /dev;
+    the requested path is kept as a fallback for the older instance families where it is.
+    """
+    lines = ["#!/bin/bash", "set -uo pipefail",
+             "systemctl enable --now docker || true"]
+    if data_volume_id:
+        by_id = f"/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{data_volume_id.replace('-', '')}"
+        lines += [
+            f'MP={mount_path}',
+            f'BYID={by_id}',
+            f'DEV={_NODE_DATA_DEVICE}',
+            'mkdir -p "$MP"',
+            # Up to 5 minutes: the attach is issued once the instance reaches `running`,
+            # which can trail user-data by a while on a cold start.
+            'for _ in $(seq 1 60); do',
+            '  if [ -b "$BYID" ]; then DEV="$BYID"; break; fi',
+            '  if [ -b "$DEV" ]; then break; fi',
+            '  sleep 5',
+            'done',
+            'if [ -b "$DEV" ]; then',
+            # blkid is the "has this ever been formatted?" test. Formatting a volume that
+            # already holds the node's state would be an unrecoverable data loss, so the
+            # mkfs is strictly conditional on blkid finding nothing.
+            '  if ! blkid "$DEV" >/dev/null 2>&1; then mkfs.ext4 -F "$DEV"; fi',
+            '  mount "$DEV" "$MP"',
+            '  echo "$DEV $MP ext4 defaults,nofail 0 2" >> /etc/fstab',
+            'else',
+            # Fail loudly in the log rather than silently starting the container against
+            # the root volume -- a node that looks fine and loses its state on the next
+            # recreate is the worse outcome.
+            '  echo "node-data volume never appeared; refusing to start the container" >&2',
+            '  exit 1',
+            'fi',
+        ]
+    lines.append(docker_cmd)
+    return "\n".join(lines) + "\n"
+
+
+def _root_device_name_sync(region: str, ami_id: str) -> str:
+    """The AMI's root device name, so a resized root volume maps to the right slot.
+
+    Guessing ``/dev/xvda`` works until it doesn't: a block-device mapping whose name
+    does not match the AMI's root device silently creates a SECOND volume and leaves the
+    root at its default size.
+    """
+    ec2 = _get_ec2(region)
+    images = ec2.describe_images(ImageIds=[ami_id]).get("Images") or []
+    return (images[0].get("RootDeviceName") if images else "") or "/dev/xvda"
+
+
+def _run_ec2_container_node_sync(
+    region: str, ami_id: str, instance_type: str, subnet_id: str,
+    security_group_ids: list, user_data: str, name_tag: str, purpose: str,
+    root_disk_gb: int,
+) -> dict:
+    ec2 = _get_ec2(region)
+    root_dev = _root_device_name_sync(region, ami_id)
+    kwargs = {
+        "ImageId": ami_id,
+        "InstanceType": instance_type,
+        "MinCount": 1,
+        "MaxCount": 1,
+        # Auto-assigned public IP, not an Elastic IP: the node is disposable and an
+        # unattached EIP bills. This matches the GCE side's ephemeral external IP, and
+        # with it the caveat that a recreate changes the address.
+        "NetworkInterfaces": [{
+            "DeviceIndex": 0,
+            "SubnetId": subnet_id,
+            "Groups": security_group_ids,
+            "AssociatePublicIpAddress": True,
+        }],
+        "UserData": user_data,  # boto3 base64-encodes for run_instances
+        "TagSpecifications": [{
+            "ResourceType": "instance",
+            "Tags": [
+                {"Key": "Name", "Value": name_tag},
+                {"Key": "managed-by", "Value": _NODE_MANAGED_TAG},
+                # `purpose` is how the node is found again, mirroring the GCE label of
+                # the same name. Without it a node is indistinguishable from any other
+                # dashboard EC2 instance.
+                {"Key": "purpose", "Value": purpose},
+            ],
+        }],
+    }
+    if root_disk_gb:
+        kwargs["BlockDeviceMappings"] = [{
+            "DeviceName": root_dev,
+            "Ebs": {"VolumeSize": int(root_disk_gb), "VolumeType": "gp3",
+                    "DeleteOnTermination": True},
+        }]
+    inst = ec2.run_instances(**kwargs)["Instances"][0]
+    return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
+
+
+async def run_ec2_container_node(
+    region: str, *, ami_id: str, instance_type: str, subnet_id: str,
+    security_group_ids: list, user_data: str, name_tag: str, purpose: str,
+    root_disk_gb: int = 0,
+) -> dict:
+    """Launch a managed container node (no instance profile, auto public IP)."""
+    try:
+        return await _to_thread(
+            _run_ec2_container_node_sync, region, ami_id, instance_type, subnet_id,
+            security_group_ids, user_data, name_tag, purpose, root_disk_gb,
+        )
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to launch the {purpose} node: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _format_container_node(inst: dict, purpose: str) -> dict:
+    """Project an EC2 instance into the cloud-neutral node shape the UI reads.
+
+    ``zone`` carries the availability zone: it is the field the node tables and the
+    relocation check already read, and an AZ is the AWS answer to the same question.
+    """
+    tags = {t.get("Key"): t.get("Value") for t in (inst.get("Tags") or [])}
+    ports = {"rancher": 443, "portainer": 9443}.get(purpose, 443)
+    ip = inst.get("PublicIpAddress") or ""
+    launched = inst.get("LaunchTime")
+    return {
+        "name": tags.get("Name", "") or inst.get("InstanceId", ""),
+        "instance_id": inst.get("InstanceId", ""),
+        "zone": (inst.get("Placement") or {}).get("AvailabilityZone", ""),
+        # EC2 state names are lowercase; the node tables badge on RUNNING, so normalise
+        # here rather than making every reader know which cloud it is looking at.
+        "status": (inst.get("State") or {}).get("Name", "unknown").upper(),
+        "machine_type": inst.get("InstanceType", ""),
+        "image": tags.get("container-image", ""),
+        "internal_ip": inst.get("PrivateIpAddress") or "",
+        "external_ip": ip,
+        "url": (f"https://{ip}" if ports == 443 else f"https://{ip}:{ports}") if ip else "",
+        "created_at": launched.isoformat() if launched else None,
+    }
+
+
+def _list_ec2_container_nodes_sync(region: str, purpose: str) -> list:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_instances(Filters=[
+        {"Name": "tag:purpose", "Values": [purpose]},
+        {"Name": "tag:managed-by", "Values": [_NODE_MANAGED_TAG]},
+        # A terminated instance is gone but lingers in describe_instances for an hour;
+        # reporting it would make a torn-down node look like it is still there.
+        {"Name": "instance-state-name",
+         "Values": ["pending", "running", "stopping", "stopped"]},
+    ])
+    out = []
+    for res in resp.get("Reservations", []):
+        for inst in res.get("Instances", []):
+            out.append(_format_container_node(inst, purpose))
+    return out
+
+
+async def list_ec2_container_nodes(region: str, purpose: str) -> list:
+    """Every managed container node of ``purpose`` in ``region`` (tag query)."""
+    try:
+        return await _to_thread(_list_ec2_container_nodes_sync, region, purpose)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to list {purpose} nodes: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+_NODE_READY_TIMEOUT_S = 240
+_NODE_READY_POLL_S = 5
+
+
+async def await_container_node(region: str, instance_id: str, purpose: str) -> dict:
+    """Read a just-launched node back once it has an address, in the same shape the UI
+    and the relocation check use.
+
+    ``run_instances`` answers before the instance has a public IP or an AZ recorded, and
+    the deploy needs both immediately: the URL it pins, and the zone it persists so a
+    later teardown looks in the right place. Polling here rather than in the caller
+    keeps "what is this node" answered by one function whatever created it.
+    """
+    import asyncio
+    deadline = asyncio.get_event_loop().time() + _NODE_READY_TIMEOUT_S
+    last = {}
+    while asyncio.get_event_loop().time() < deadline:
+        for node in await list_ec2_container_nodes(region, purpose):
+            if node.get("instance_id") == instance_id:
+                last = node
+                if node.get("external_ip"):
+                    return node
+        await asyncio.sleep(_NODE_READY_POLL_S)
+    # Hand back whatever was seen rather than raising: the caller checks for the
+    # address and reports a far more specific failure than "timed out" would be.
+    return last or {"instance_id": instance_id, "status": "UNKNOWN"}
+
+
+def _subnet_availability_zone_sync(region: str, subnet_id: str) -> str:
+    ec2 = _get_ec2(region)
+    subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []
+    return (subnets[0].get("AvailabilityZone") if subnets else "") or ""
+
+
+async def subnet_availability_zone(region: str, subnet_id: str) -> str:
+    """The AZ a subnet lives in.
+
+    A data volume is zonal and may only be attached inside one AZ, so this is the only
+    AZ a new one may be created in -- guessing would produce a volume the instance can
+    never mount, which surfaces as a mount failure at boot rather than an API error.
+    """
+    try:
+        az = await _to_thread(_subnet_availability_zone_sync, region, subnet_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to read subnet {subnet_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+    if not az:
+        raise AWSError(f"Subnet {subnet_id} was not found in {region}, so the node's "
+                       f"data volume has no availability zone to be created in.")
+    return az
+
+
 def _set_source_dest_check_sync(region: str, instance_id: str, value: bool) -> None:
     ec2 = _get_ec2(region)
     ec2.modify_instance_attribute(InstanceId=instance_id, SourceDestCheck={"Value": value})
@@ -1119,6 +1385,264 @@ async def ensure_ssm_vpce_security_group(region: str, *, vpc_id: str, vpc_cidr: 
         return await _to_thread(_ensure_ssm_vpce_security_group_sync, region, vpc_id, vpc_cidr, name)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to ensure SSM endpoint security group: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _node_ingress_permissions(pairs) -> list:
+    """Group ``(port, cidr)`` pairs into IpPermissions -- one per port, carrying every
+    CIDR for it. Both the authorize and the revoke call take this shape, so grouping it
+    once is what keeps the two halves of the diff from disagreeing."""
+    by_port: dict = {}
+    for port, cidr in sorted(pairs):
+        by_port.setdefault(int(port), []).append(cidr)
+    return [{"IpProtocol": "tcp", "FromPort": p, "ToPort": p,
+             "IpRanges": [{"CidrIp": c} for c in cidrs]}
+            for p, cidrs in sorted(by_port.items())]
+
+
+def _current_node_ingress(sg: dict, ports) -> set:
+    """The ``(port, cidr)`` pairs currently allowed on the node's ports.
+
+    Scoped to the node's own ports on purpose: a rule someone added by hand on another
+    port is theirs, and revoking it would be this code quietly taking ownership of a
+    group it only manages one aspect of.
+    """
+    wanted = {int(p) for p in ports}
+    have = set()
+    for perm in sg.get("IpPermissions") or []:
+        if (perm.get("IpProtocol") or "").lower() != "tcp":
+            continue
+        frm, to = perm.get("FromPort"), perm.get("ToPort")
+        if frm is None or frm != to or frm not in wanted:
+            continue
+        for r in perm.get("IpRanges") or []:
+            if r.get("CidrIp"):
+                have.add((frm, r["CidrIp"]))
+    return have
+
+
+def _ensure_node_security_group_sync(
+    region: str, vpc_id: str, name: str, ports: list, source_cidrs: list,
+) -> dict:
+    """Make the node's security group allow exactly ``source_cidrs`` on ``ports``.
+
+    The GCE analogue is one firewall rule that gets PATCHed, and whose absence means
+    closed. A security group has no such single-shot replace, so the group is diffed:
+    authorize what is missing, revoke what is no longer wanted. That difference matters
+    for fail-closed -- an EMPTY source set revokes every rule rather than deleting the
+    group, because a group attached to a running instance cannot be deleted. The node
+    ends up unreachable either way, which is the contract callers key off ``opened`` for.
+    """
+    ec2 = _get_ec2(region)
+    created = False
+    sg_id = _find_security_group_id_sync(region, vpc_id, name)
+    if not sg_id:
+        if not source_cidrs:
+            # Nothing to open and nothing to close. Creating an empty group here would
+            # leave litter behind on an install that never finishes a deploy.
+            return {"name": name, "id": "", "opened": False, "created": False}
+        sg_id = ec2.create_security_group(
+            GroupName=name, VpcId=vpc_id,
+            Description="vm-dashboard managed node: source-restricted ingress",
+        )["GroupId"]
+        created = True
+        try:
+            ec2.create_tags(Resources=[sg_id], Tags=[
+                {"Key": "Name", "Value": name},
+                {"Key": "managed-by", "Value": _NODE_MANAGED_TAG},
+            ])
+        except (ClientError, BotoCoreError) as e:  # tags are cosmetic
+            logger.warning("node SG %s: tagging failed (continuing): %s", name, e)
+
+    sg = ec2.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"][0]
+    have = _current_node_ingress(sg, ports)
+    want = {(int(p), c) for p in ports for c in source_cidrs}
+
+    to_add, to_remove = want - have, have - want
+    if to_add:
+        ec2.authorize_security_group_ingress(
+            GroupId=sg_id, IpPermissions=_node_ingress_permissions(to_add))
+    if to_remove:
+        ec2.revoke_security_group_ingress(
+            GroupId=sg_id, IpPermissions=_node_ingress_permissions(to_remove))
+    return {"name": name, "id": sg_id, "opened": bool(source_cidrs), "created": created}
+
+
+async def ensure_node_security_group(
+    region: str, *, vpc_id: str, name: str, ports: list, source_cidrs: list,
+) -> dict:
+    """Converge a managed node's ingress on ``source_cidrs``. Fail-closed on empty."""
+    try:
+        return await _to_thread(
+            _ensure_node_security_group_sync, region, vpc_id, name,
+            list(ports), list(source_cidrs),
+        )
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to apply ingress for {name}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _release_node_security_group_sync(region: str, vpc_id: str, name: str) -> bool:
+    """Delete the node's own security group once nothing references it.
+
+    A teardown revokes the group's rules while the instance is still terminating
+    (fail-closed can't wait), which leaves an EMPTY group behind. That is not
+    cosmetic: an unreferenced security group blocks a later VPC delete with an opaque
+    DependencyViolation, and nothing else in the sandbox rollback claims it -- the
+    group carries the dashboard's own tag, not the sandbox's.
+
+    Retried rather than waited on, because the blocker is the terminating instance's
+    ENI being released, and there is no waiter for that.
+    """
+    import time
+    ec2 = _get_ec2(region)
+    sg_id = _find_security_group_id_sync(region, vpc_id, name)
+    if not sg_id:
+        return True
+    for attempt in range(12):
+        try:
+            ec2.delete_security_group(GroupId=sg_id)
+            return True
+        except ClientError as exc:
+            code = (exc.response.get("Error") or {}).get("Code", "")
+            if code != "DependencyViolation":
+                raise
+            if attempt == 11:
+                logger.warning(
+                    "node SG %s (%s) is still referenced after termination — leaving it; "
+                    "it will block a VPC delete until removed", name, sg_id)
+                return False
+            time.sleep(5)
+    return False
+
+
+async def release_node_security_group(region: str, *, vpc_id: str, name: str) -> bool:
+    """Best-effort: remove the node's security group after its instance is gone."""
+    try:
+        return await _to_thread(_release_node_security_group_sync, region, vpc_id, name)
+    except (ClientError, BotoCoreError) as e:
+        logger.warning("node SG %s: delete failed (continuing): %s", name, e)
+        return False
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+# ── Durable data volume for a managed node (Portainer /data) ─────────────────
+
+def _find_node_data_volume_sync(region: str, name: str) -> dict:
+    ec2 = _get_ec2(region)
+    vols = ec2.describe_volumes(Filters=[
+        {"Name": "tag:Name", "Values": [name]},
+        {"Name": "tag:managed-by", "Values": [_NODE_MANAGED_TAG]},
+        {"Name": "status", "Values": ["available", "in-use", "creating"]},
+    ]).get("Volumes") or []
+    if not vols:
+        return {}
+    v = vols[0]
+    return {"volume_id": v["VolumeId"], "zone": v.get("AvailabilityZone", ""),
+            "size_gb": v.get("Size", 0), "state": v.get("State", "")}
+
+
+async def find_node_data_volume(region: str, name: str) -> dict:
+    """The node's durable data volume, or ``{}``.
+
+    Read BEFORE a launch: an EBS volume is zonal, so an existing one pins the node's AZ,
+    and a volume that already holds an initialized Portainer database means the stored
+    admin credential -- not a freshly generated one -- is the only one that can sign in.
+    """
+    try:
+        return await _to_thread(_find_node_data_volume_sync, region, name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to look up the data volume {name}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _ensure_node_data_volume_sync(region: str, name: str, az: str, size_gb: int) -> dict:
+    existing = _find_node_data_volume_sync(region, name)
+    if existing:
+        return {**existing, "created": False}
+    ec2 = _get_ec2(region)
+    v = ec2.create_volume(
+        AvailabilityZone=az, Size=int(size_gb), VolumeType="gp3",
+        TagSpecifications=[{"ResourceType": "volume", "Tags": [
+            {"Key": "Name", "Value": name},
+            {"Key": "managed-by", "Value": _NODE_MANAGED_TAG},
+        ]}],
+    )
+    ec2.get_waiter("volume_available").wait(
+        VolumeIds=[v["VolumeId"]],
+        WaiterConfig={"Delay": 5, "MaxAttempts": 24})
+    return {"volume_id": v["VolumeId"], "zone": az, "size_gb": int(size_gb),
+            "state": "available", "created": True}
+
+
+async def ensure_node_data_volume(region: str, *, name: str, az: str,
+                                  size_gb: int) -> dict:
+    """Find-or-create the node's durable data volume in ``az``."""
+    try:
+        return await _to_thread(_ensure_node_data_volume_sync, region, name, az, size_gb)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to ensure the data volume {name}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _attach_node_data_volume_sync(region: str, volume_id: str, instance_id: str,
+                                  device: str) -> None:
+    ec2 = _get_ec2(region)
+    vol = ec2.describe_volumes(VolumeIds=[volume_id])["Volumes"][0]
+    for att in vol.get("Attachments") or []:
+        if att.get("InstanceId") == instance_id:
+            return  # already ours -- a redeploy that reused the instance
+    ec2.get_waiter("instance_running").wait(
+        InstanceIds=[instance_id], WaiterConfig={"Delay": 5, "MaxAttempts": 60})
+    ec2.attach_volume(VolumeId=volume_id, InstanceId=instance_id, Device=device)
+    ec2.get_waiter("volume_in_use").wait(
+        VolumeIds=[volume_id], WaiterConfig={"Delay": 5, "MaxAttempts": 24})
+    # Without this the volume goes away with the instance, which is the opposite of what
+    # "durable state" means -- and it would be discovered only on the next teardown.
+    ec2.modify_instance_attribute(
+        InstanceId=instance_id,
+        BlockDeviceMappings=[{"DeviceName": device,
+                              "Ebs": {"DeleteOnTermination": False}}])
+
+
+async def attach_node_data_volume(region: str, *, volume_id: str, instance_id: str,
+                                  device: str = _NODE_DATA_DEVICE) -> None:
+    """Attach the durable volume to a running node, and pin it to survive termination."""
+    try:
+        await _to_thread(_attach_node_data_volume_sync, region, volume_id,
+                         instance_id, device)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to attach the data volume {volume_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _delete_node_data_volume_sync(region: str, volume_id: str) -> None:
+    ec2 = _get_ec2(region)
+    try:
+        ec2.get_waiter("volume_available").wait(
+            VolumeIds=[volume_id], WaiterConfig={"Delay": 5, "MaxAttempts": 36})
+    except Exception as exc:  # noqa: BLE001 -- try the delete anyway and report ITS error
+        logger.warning("data volume %s did not detach cleanly (%s) — attempting delete",
+                       volume_id, exc)
+    ec2.delete_volume(VolumeId=volume_id)
+
+
+async def delete_node_data_volume(region: str, volume_id: str) -> None:
+    """Delete a node's data volume once its instance has released it.
+
+    Waits for ``available`` first: a volume still attached to a terminating instance
+    refuses deletion, and the raw error ("VolumeInUse") reads as a permissions problem.
+    """
+    try:
+        await _to_thread(_delete_node_data_volume_sync, region, volume_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to delete the data volume {volume_id}: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
 

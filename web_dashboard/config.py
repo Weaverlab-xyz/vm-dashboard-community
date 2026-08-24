@@ -1343,6 +1343,41 @@ class Settings(BaseSettings):
     portainer_data_disk_enabled: bool = False   # back /data with a persistent disk that survives teardown
     gcp_portainer_data_disk_gb: int = 10        # size of that data disk (Portainer's DB is small; 10 GB is ample)
 
+    # ── Managed nodes on AWS (same two features, EC2 instead of GCE) ──────────
+    # No konlet equivalent exists on AWS, so the container is started by `docker run`
+    # from EC2 user-data on the ECS-optimized Amazon Linux 2023 AMI (resolved per
+    # region from its SSM public parameter — the same image the Gateway host uses, so
+    # Docker is already installed). The instance deliberately does NOT join an ECS
+    # cluster and gets no instance profile: like its GCE counterpart the node needs no
+    # cloud API access, and joining a cluster would add a task definition plus the
+    # ecsInstanceRole policy dependency for nothing.
+    #
+    # There is no aws_*_zone: an EC2 subnet already pins the availability zone, so a
+    # zone knob could only contradict it. There is no network tag either — a dedicated
+    # security group named <node>-allow-mgmt replaces GCE's target-tag model, and
+    # fail-closed means "every ingress rule revoked" rather than "rule deleted",
+    # because a security group in use by a running instance cannot be deleted.
+    aws_rancher_image: str = "rancher/rancher:latest"    # Rancher server container image
+    aws_rancher_instance_type: str = "t3.medium"         # Rancher needs ≥4 GB RAM; t3.small (2 GB) OOMs
+    aws_rancher_name: str = "rancher-server"             # Name tag + security-group base name
+    aws_rancher_boot_disk_gb: int = 30                   # gp3 root volume (holds /var/lib/rancher; deleted with the instance)
+    aws_rancher_allow_open: bool = False                 # opt-in to open 0.0.0.0/0 when rancher_allowed_source_cidrs is empty; otherwise empty = no ingress (fail closed)
+    aws_rancher_zone: str = ""                           # RECORDED, not chosen: the availability zone the node landed in (the subnet pins it). Written on deploy for diagnostics + teardown
+    aws_portainer_image: str = "portainer/portainer-ce:latest"  # Portainer server container image
+    aws_portainer_instance_type: str = "t3.small"        # Portainer is light; t3.small is ample
+    aws_portainer_name: str = "portainer-server"         # Name tag + security-group base name
+    aws_portainer_boot_disk_gb: int = 20                 # gp3 root volume (holds /data when no data volume; deleted with the instance)
+    aws_portainer_allow_open: bool = False               # opt-in to open 0.0.0.0/0 when portainer_allowed_source_cidrs is empty
+    aws_portainer_zone: str = ""                          # RECORDED, not chosen: the availability zone the node (and so its data volume) landed in
+    # Durable /data on AWS is a separate gp3 EBS volume with DeleteOnTermination=false.
+    # An EBS volume is ZONAL like a GCE PD, so an existing one PINS the node's AZ — and
+    # because an existing volume cannot be attached by run_instances (block-device
+    # mappings only create new ones), it is attached after the instance is running and
+    # the user-data WAITS for it before starting the container. Without that wait
+    # Portainer would come up against an unmounted directory and write its database to
+    # the root volume, losing it on the next recreate.
+    aws_portainer_data_disk_gb: int = 10                 # size of that EBS data volume
+
     # ── Oracle Cloud Infrastructure (OCI) ─────────────────────────────────────
     # The fourth cloud provider. Compute VM CRUD is SDK-based (the `oci` Python
     # SDK), mirroring aws_service / gcp_service; Autonomous DB + OKE go through

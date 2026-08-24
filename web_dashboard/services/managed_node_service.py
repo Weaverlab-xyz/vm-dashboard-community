@@ -307,6 +307,44 @@ async def ensure_dashboard_egress_cidr(spec: NodeSpec, detect=None) -> str:
     return existing
 
 
+# -- the container command (AWS + Azure; GCP has konlet instead) -------------
+
+def docker_run_command(image: str, *, name: str, ports=(), env=None, args=(),
+                       privileged: bool = False, volumes=()) -> str:
+    """A ``docker run`` line for a managed node, for whichever cloud runs it from
+    user-data / cloud-init.
+
+    Written once and shared because the container is the SAME container on every
+    cloud -- only the mechanism that starts it differs (GCE reads a
+    ``gce-container-declaration``; AWS and Azure run this). Two details are
+    load-bearing rather than stylistic:
+
+    * Values are single-quoted. A bcrypt hash (Portainer's ``--admin-password``) is
+      full of ``$``, and an unquoted one would be expanded by the shell into
+      something Portainer cannot verify -- producing a node that boots fine and
+      rejects the only password anybody has.
+    * ``--restart always`` matches konlet's ``restartPolicy: Always``, so a reboot
+      brings the node back rather than leaving a running VM serving nothing.
+
+    Ports are PUBLISHED rather than run on the host network. COS happens to use host
+    networking, but ``-p`` is what both upstreams document, and the observable result
+    (those ports answering on the VM) is identical.
+    """
+    parts = ["docker run -d --restart always", f"--name {name}"]
+    if privileged:
+        parts.append("--privileged")
+    for p in ports:
+        parts.append(f"-p {p}:{p}")
+    for host_path, container_path in volumes:
+        parts.append(f"-v {host_path}:{container_path}")
+    for key, val in (env or {}).items():
+        parts.append(f"-e {key}='{val}'")
+    parts.append(image)
+    # Container ARGS go after the image, and are quoted for the same reason as env.
+    parts += [f"'{a}'" for a in args]
+    return " ".join(parts)
+
+
 # -- placement ---------------------------------------------------------------
 
 def unsupported(cloud: str, spec: NodeSpec, what: str) -> ManagedNodeError:
@@ -411,6 +449,68 @@ def _placement_gcp(spec: NodeSpec, region=None, zone=None) -> dict:
     }
 
 
+def _placement_aws(spec: NodeSpec, region=None, zone=None) -> dict:
+    """EC2 placement: a public subnet in the chosen region, plus its VPC for the
+    security group.
+
+    The node needs exactly the network shape a Gateway host needs, so it reuses the
+    same per-region fields (``jumpoint_subnet_id``, falling back to the sandbox's
+    public ``ecs_subnet_id``) rather than introducing a second set that could drift
+    out of agreement with what the sandbox actually created.
+
+    Missing prerequisites RAISE, naming the key -- following ``_resolve_ecs``. A
+    placement that quietly fell back would put the node in the default region's
+    network while the form, the job and the row all said otherwise; that exact defect
+    is what the Gateways region picker exists to prevent.
+
+    ``zone`` is not accepted: an EC2 subnet already pins the availability zone, so a
+    zone here could only contradict it.
+    """
+    from ..config import settings
+    f = spec.feature
+
+    eff_region = (region_catalog.normalize("aws", region) if region
+                  else region_catalog.normalize("aws", region_catalog.default_region("aws")))
+    rc = region_config.resolve_region("aws", eff_region) or {}
+    subnet_id = (rc.get("jumpoint_subnet_id") or rc.get("ecs_subnet_id") or "").strip()
+    vpc_id = (rc.get("vpc_id") or "").strip()
+    missing = [k for k, v in (("aws_jumpoint_subnet_id (or ansible_ecs_subnet_id)", subnet_id),
+                              ("aws_vpc_id", vpc_id)) if not v]
+    if missing:
+        raise ManagedNodeError(
+            f"The managed {spec.label} node cannot be placed in AWS {eff_region}: "
+            f"{', '.join(missing)} is not set for that region. Run the AWS sandbox setup "
+            f"for it, or add a per-region config under Settings -> Multi-region.")
+
+    default_boot = getattr(settings, spec.infra_key("aws", "boot_disk_gb"), 30)
+    try:
+        boot_disk_gb = int(config_service.get(spec.infra_key("aws", "boot_disk_gb"))
+                           or default_boot)
+    except (TypeError, ValueError):
+        boot_disk_gb = default_boot
+    return {
+        "cloud":         "aws",
+        # The VPC is the AWS answer to "where does this live": it is regional, it is
+        # what the security group is created in, and without it the node has nowhere
+        # to go -- so it is also the honest truthiness check.
+        "account":       vpc_id,
+        "vpc_id":        vpc_id,
+        "subnet_id":     subnet_id,
+        "region":        eff_region,
+        # Filled in from the launched instance -- an AZ is a property of the subnet,
+        # not something the operator picks.
+        "zone":          "",
+        "name":          (config_service.get(spec.infra_key("aws", "name"))
+                          or getattr(settings, spec.infra_key("aws", "name"),
+                                     f"{f}-server")),
+        "image":         (config_service.get(spec.infra_key("aws", "image"))
+                          or getattr(settings, spec.infra_key("aws", "image"), "")),
+        "instance_type": (config_service.get(spec.infra_key("aws", "instance_type"))
+                          or getattr(settings, spec.infra_key("aws", "instance_type"), "")),
+        "boot_disk_gb":  boot_disk_gb,
+    }
+
+
 def resolve_placement(cloud: str, spec: NodeSpec, region=None, zone=None) -> dict:
     """Where this node goes, on ``cloud``.
 
@@ -421,6 +521,8 @@ def resolve_placement(cloud: str, spec: NodeSpec, region=None, zone=None) -> dic
     cloud = (cloud or "gcp").strip().lower()
     if cloud == "gcp":
         p = _placement_gcp(spec, region=region, zone=zone)
+    elif cloud == "aws":
+        p = _placement_aws(spec, region=region, zone=zone)
     else:
         raise unsupported(cloud, spec, "placement")
     p["firewall_name"] = firewall_name(p["name"])
@@ -440,8 +542,8 @@ async def apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
     cannot be deleted), Azure deletes the NSG rule -- but ``opened`` is False either
     way, and callers key off that.
     """
-    from . import gcp_service
     if cloud == "gcp":
+        from . import gcp_service
         if spec is RANCHER:
             return await gcp_service.ensure_rancher_firewall(
                 placement["project_id"], placement["network"], placement["network_tag"],
@@ -449,6 +551,12 @@ async def apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
         return await gcp_service.ensure_portainer_firewall(
             placement["project_id"], placement["network"], placement["network_tag"],
             source_cidrs, placement["firewall_name"])
+    if cloud == "aws":
+        from . import aws_service
+        return await aws_service.ensure_node_security_group(
+            placement["region"], vpc_id=placement["vpc_id"],
+            name=placement["firewall_name"], ports=list(spec.ports),
+            source_cidrs=source_cidrs)
     raise unsupported(cloud, spec, "ingress rules")
 
 
@@ -458,9 +566,13 @@ async def list_nodes(cloud: str, spec: NodeSpec, placement: dict) -> list:
     The cloud is the source of truth -- there is no registry table -- so this is a
     tag/label query, and it is what the relocation check and the UI both read.
     """
-    from . import gcp_service
     if cloud == "gcp":
+        from . import gcp_service
         if spec is RANCHER:
             return await gcp_service.list_gce_rancher(placement["project_id"])
         return await gcp_service.list_gce_portainer(placement["project_id"])
+    if cloud == "aws":
+        from . import aws_service
+        return await aws_service.list_ec2_container_nodes(
+            placement["region"], spec.feature)
     raise unsupported(cloud, spec, "node listing")

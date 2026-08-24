@@ -168,6 +168,22 @@ rollback_aws() {
         && ok "Deleted SG $sg" || warn "Could not delete SG $sg (possibly referenced)"
     done
 
+    # 2b-node. The managed Portainer/Rancher nodes own a `<node>-allow-mgmt` group,
+    # tagged managed-by=vm-dashboard rather than the sandbox tag above — so the sweep
+    # misses it. A node teardown reclaims its own group, but a teardown that raced the
+    # instance's ENI release leaves an empty one behind, and an unreferenced group
+    # blocks the VPC delete below with an opaque DependencyViolation.
+    local node_sgs
+    node_sgs="$(aws ec2 describe-security-groups --region "$region" \
+      --filters "Name=vpc-id,Values=$vpc_id" "Name=group-name,Values=*-allow-mgmt" \
+      --query 'SecurityGroups[].GroupId' --output text 2>/dev/null || true)"
+    for sg in $node_sgs; do
+      [[ -n "$sg" && "$sg" != "None" ]] || continue
+      aws ec2 delete-security-group --region "$region" --group-id "$sg" >/dev/null 2>&1 \
+        && ok "Deleted managed-node SG $sg" \
+        || warn "Could not delete managed-node SG $sg — tear the node down via the dashboard (Containers) first"
+    done
+
     # 2c. Route table associations + tables (skip the main RT).
     local rts
     rts="$(aws ec2 describe-route-tables --region "$region" --filters "$filter" \

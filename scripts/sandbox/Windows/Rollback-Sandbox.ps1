@@ -146,6 +146,19 @@ function Invoke-AwsRollback {
             else { Write-Warn "Could not delete SG $sg (possibly referenced)" }
         }
 
+        # Managed Portainer/Rancher node groups. These carry managed-by=vm-dashboard,
+        # not the sandbox tag, so the sweep above misses them — and an unreferenced
+        # group blocks the VPC delete with an opaque DependencyViolation.
+        $nodeSgs = (aws ec2 describe-security-groups --region $region `
+            --filters "Name=vpc-id,Values=$vpcId" "Name=group-name,Values=*-allow-mgmt" `
+            --query 'SecurityGroups[].GroupId' --output text).Trim()
+        foreach ($sg in $nodeSgs.Split()) {
+            if (-not $sg -or $sg -eq 'None') { continue }
+            & aws ec2 delete-security-group --region $region --group-id $sg *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted managed-node SG $sg" }
+            else { Write-Warn "Could not delete managed-node SG $sg - tear the node down via the dashboard (Containers) first" }
+        }
+
         # Route tables.
         $rts = (aws ec2 describe-route-tables --region $region --filters $filter `
             --query 'RouteTables[].RouteTableId' --output text).Trim()

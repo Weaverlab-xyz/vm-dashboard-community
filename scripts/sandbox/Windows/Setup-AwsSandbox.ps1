@@ -674,6 +674,7 @@ $DashboardPolicy = @"
         "ec2:DeleteSnapshot",
         "ec2:ModifySnapshotAttribute",
         "ec2:CopySnapshot",
+        "ec2:*Volume*",
         "ec2:CreateSecurityGroup",
         "ec2:DeleteSecurityGroup",
         "ec2:AuthorizeSecurityGroupIngress",

@@ -33,10 +33,6 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ECS-optimized Amazon Linux 2023 AMI — public SSM parameter (the agent + tun
-# module ship in it). Mirrors scripts/sandbox/Linux/setup-aws.sh.
-_ECS_AMI_SSM = "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"
-
 _REGISTER_TIMEOUT_S = 180   # wait for the EC2 host to register as an ECS container instance
 _REGISTER_POLL_S = 10
 
@@ -444,7 +440,11 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "",
     # find-or-create race (acceptable residual window for a single-operator lab).
     rc = _aws_region_cfg(region)
     cluster = rc["ecs_cluster"]
-    ami_id = await aws_service.get_ssm_parameter(region, _ECS_AMI_SSM)
+    # The ECS-optimized AL2023 AMI (the ECS agent + tun module ship in it). Same
+    # image the managed Portainer/Rancher nodes use, so the parameter path has one
+    # definition, in aws_service.
+    ami_id = await aws_service.get_ssm_parameter(
+        region, aws_service.ECS_OPTIMIZED_AMI_SSM)
     user_data = (f"#!/bin/bash\n"
                  f"echo \"ECS_CLUSTER={cluster}\" >> /etc/ecs/ecs.config\n"
                  f"modprobe tun || true\n")
