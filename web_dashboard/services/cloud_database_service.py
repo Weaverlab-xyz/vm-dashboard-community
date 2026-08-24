@@ -1152,6 +1152,23 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
     managed_pw = sql.generate_password()
     image = _cfg(f"clouddb_db_client_image_{engine}") or sql.default_client_image(engine)
     port = row.port or sql.default_port(engine)
+    # Make the jump host plugin-ready. A separate SSM call from the onboard batch, as
+    # on Azure, so a staging failure is distinguishable from a managed-user failure.
+    # Short timeout: unlike Azure this installs nothing.
+    prep = _ssm_jump_prep_commands()
+    if prep:
+        prep_res = await aws_service.ssm_send_command(region, host_id, prep, timeout=120)
+        if prep_res.get("status") != "Success" or int(prep_res.get("response_code", -1)) != 0:
+            detail = (prep_res.get("stderr") or prep_res.get("stdout") or "")[:400]
+            raise CloudDatabaseError(
+                f"jump-host plugin prep failed (status={prep_res.get('status')}, "
+                f"rc={prep_res.get('response_code')}): {detail}")
+        logger.info("clouddb: staged plugin key material on %s db_id=%s", host_id, row.id)
+    else:
+        logger.warning("clouddb: clouddb_ps_ssm_plugin_private_key / "
+                       "clouddb_ps_ssm_key_directory is blank — NOT staging plugin key "
+                       "material on the jump host; the first AWS rotation will fail to "
+                       "decrypt unless you placed it there by hand")
     cmds = sql.onboard_commands(
         engine, host=row.private_host, port=port,
         database=db_name, admin_user=admin_username, admin_password=admin_password,
@@ -1169,15 +1186,51 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
             "client_image": image, "port": port}
 
 
+def _plugin_key_drop_commands(kdir: str, private_key: str, passphrase: str) -> list:
+    """Shell commands that drop the plugin RSA key material into ``kdir`` (dir 700,
+    files 600) so a custom plugin can decrypt the RSA-wrapped login password.
+
+    Shared by both clouds. The key and passphrase are base64-encoded here and decoded
+    on the host, so no PEM newline or quote ever hits the shell literally."""
+    import base64
+    b64key = base64.b64encode(private_key.encode()).decode()
+    b64pass = base64.b64encode(passphrase.encode()).decode()
+    return [
+        f"mkdir -p {kdir}",
+        f"chmod 700 {kdir}",
+        f"printf '%s' '{b64key}' | base64 -d > {kdir}/private.pem",
+        f"printf '%s' '{b64pass}' | base64 -d > {kdir}/passphrase.txt",
+        f"chmod 600 {kdir}/private.pem {kdir}/passphrase.txt",
+    ]
+
+
+def _ssm_jump_prep_commands() -> list:
+    """Commands (run as root on the shared Gateway host over SSM) that make it ready
+    for the "{engine} SSM Custom Plugin": drop the plugin RSA key material where the
+    plugin reads it. The AWS counterpart of :func:`_azure_jump_prep_commands`.
+
+    Unlike Azure this installs no DB clients. The dashboard's own managed-user creation
+    runs the client as a ``docker run``, and the ECS gateway host is shared with the
+    gateway workload, so what the plugin needs on its own PATH is the operator's call
+    rather than something to guess at here.
+
+    Returns ``[]`` when there is nothing to stage; the caller logs that, because an
+    absent drop is a failure that only ever surfaces at the first rotation."""
+    priv = _cfg("clouddb_ps_ssm_plugin_private_key")
+    kdir = _cfg("clouddb_ps_ssm_key_directory")
+    if not priv or not kdir:
+        return []
+    return _plugin_key_drop_commands(
+        kdir.rstrip("/"), priv, _cfg("clouddb_ps_ssm_plugin_passphrase"))
+
+
 def _azure_jump_prep_commands() -> list:
     """Shell commands (run as root on the jump VM over Azure Run Command) that make
     it plugin-ready: ensure the native DB clients are installed — idempotent, so an
     already-prepped or fresh (cloud-init) VM is a fast no-op, and a reused VM the
     head start missed gets them — and drop the plugin RSA key material to
     /root/psplugin so the "{engine} Azure Run Command Plugin" can decrypt the
-    RSA-wrapped login password. The key/passphrase are base64-encoded here and
-    decoded on the VM so no PEM/newline/quote ever hits the shell literally."""
-    import base64
+    RSA-wrapped login password."""
     cmds = [
         "command -v psql >/dev/null 2>&1 || { apt-get update && apt-get install -y postgresql-client; }",
         "command -v mysql >/dev/null 2>&1 || { apt-get update && apt-get install -y mysql-client; }",
@@ -1188,17 +1241,16 @@ def _azure_jump_prep_commands() -> list:
     ]
     priv = config_service.get("clouddb_ps_azure_plugin_private_key") or ""
     if priv:
-        passphrase = config_service.get("clouddb_ps_azure_plugin_passphrase") or ""
-        kdir = "/root/psplugin"
-        b64key = base64.b64encode(priv.encode()).decode()
-        b64pass = base64.b64encode(passphrase.encode()).decode()
-        cmds += [
-            f"mkdir -p {kdir}",
-            f"chmod 700 {kdir}",
-            f"printf '%s' '{b64key}' | base64 -d > {kdir}/private.pem",
-            f"printf '%s' '{b64pass}' | base64 -d > {kdir}/passphrase.txt",
-            f"chmod 600 {kdir}/private.pem {kdir}/passphrase.txt",
-        ]
+        cmds += _plugin_key_drop_commands(
+            "/root/psplugin", priv,
+            config_service.get("clouddb_ps_azure_plugin_passphrase") or "")
+    else:
+        # Historically silent, and the single worst trap in this feature: prep reports
+        # success, the DB provisions, the managed system registers, and only the first
+        # rotation fails, with nothing in the job pointing here.
+        logger.warning("clouddb: clouddb_ps_azure_plugin_private_key is blank — NOT "
+                       "staging plugin key material on the jump VM; the first Azure "
+                       "rotation will fail to decrypt")
     return cmds
 
 

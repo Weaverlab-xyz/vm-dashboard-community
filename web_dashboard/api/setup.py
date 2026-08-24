@@ -708,6 +708,11 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_ssm_secret_access_key: str = ""      # encrypted at rest
     clouddb_ps_ssm_account_suffix: str = "local"    # "local" or a cross-account AssumeRole ARN
     clouddb_ps_ssm_public_key_path: str = ""         # public key path on the PS node/broker
+    # AWS counterpart of clouddb_ps_azure_plugin_* — see config.py. Use a separate key
+    # pair from Azure's; the private keys land on different hosts.
+    clouddb_ps_ssm_plugin_private_key: str = ""      # PEM, encrypted at rest
+    clouddb_ps_ssm_plugin_passphrase: str = ""       # encrypted at rest
+    clouddb_ps_ssm_key_directory: str = "/home/ssm-user"
     # Azure cloud-DATABASE Password Safe onboarding (Run Command plugins) — see config.py.
     # The three custom plugins + the RSA keypair are one-time MANUAL setup.
     passwordsafe_azure_db_registration_method: str = "runcommand"  # "runcommand" (Azure Run Command plugins) | "off"
@@ -1465,6 +1470,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "clouddb_ps_ssm_secret_access_key", "pra_config_api_client_secret",
     "clouddb_ps_azure_sp_client_secret", "clouddb_ps_azure_plugin_private_key",
     "clouddb_ps_azure_plugin_passphrase",
+    "clouddb_ps_ssm_plugin_private_key", "clouddb_ps_ssm_plugin_passphrase",
     "portainer_pat", "portainer_admin_password",
     "entitle_api_token", "entitle_api_key", "entitle_rest_secret",
     "proxmox_token_secret", "proxmox_password",

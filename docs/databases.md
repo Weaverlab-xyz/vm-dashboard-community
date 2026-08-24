@@ -564,6 +564,8 @@ rotation (no elevated DB privilege needed).
 | `clouddb_ps_ssm_access_key_id` / `_secret_access_key` | — | `create` mode only: IAM-mode credentials |
 | `clouddb_ps_ssm_account_suffix` | `local` | DNS-name suffix; an AssumeRole ARN for cross-account mode |
 | `clouddb_ps_ssm_public_key_path` | — | Public-key path on the PS node/broker |
+| `clouddb_ps_ssm_plugin_private_key` / `_passphrase` | — | Plugin RSA key material the dashboard drops onto the Gateway host over SSM. **Use a separate pair from Azure's** — the private keys land on different hosts |
+| `clouddb_ps_ssm_key_directory` | `/home/ssm-user` | Where the SSM plugin reads that key on the jump host; blank leaves the staging manual |
 | `pra_config_api_client_id` / `_secret` | — | PRA Config-API account; blank → reuse `bt_client_id` / `bt_client_secret` |
 
 ### Azure — `dbazure` (Azure VM Run Command)

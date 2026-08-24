@@ -1443,6 +1443,30 @@
                          placeholder="C:\Utils\public_ssm.pem">
                 </div>
               </div>
+              <p class="text-xs text-gray-400">Plugin RSA key material the dashboard drops onto the shared SSM jump
+                host so the SSM plugin can decrypt the RSA-wrapped login password. Use a <strong>separate</strong> key pair
+                from the Azure one below: these two private keys land on different hosts, so sharing one would mean a
+                compromise of either host also decrypts the other cloud&#39;s payloads. Blank leaves the staging manual.</p>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Plugin Private Key (PEM)</label>
+                  <textarea x-model="panelCfg.clouddb_ps_ssm_plugin_private_key" rows="3"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="-----BEGIN ENCRYPTED PRIVATE KEY-----"></textarea>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Plugin Key Passphrase</label>
+                  <input type="password" x-model="panelCfg.clouddb_ps_ssm_plugin_passphrase"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Key Directory <span class="text-gray-400 font-normal">(on the jump host)</span></label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_key_directory"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="/home/ssm-user">
+                </div>
+              </div>
               <p class="text-xs text-gray-400">
                 The PRA Vault plugin authenticates with the PRA Configuration API account on the
                 <button type="button" @click="openPanelByKey('pra')" class="underline text-blue-600">Privileged
