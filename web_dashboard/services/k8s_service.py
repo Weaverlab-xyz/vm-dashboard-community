@@ -2233,37 +2233,100 @@ def _entitle_k8s_rbac_manifest(namespace: str, sa: str, secret: str) -> str:
     )
 
 
-async def _get_secret_b64_via_runner(kubeconfig: str, namespace: str, secret: str, key: str, target_cloud: str = "") -> str:
-    """Return the **base64** value of ``.data[<key>]`` from a Secret (the caller
-    decodes it in Python). Local (``k8s_runner=local``) uses the baked-in kubectl
-    in-process; otherwise it runs as a one-shot cloud task (see
-    ``k8s_runner_service``). Missing secret/key → ``""`` either way."""
+def _sa_token_oneshot_command(ns: str, sa: str, secret: str, *, marker: str,
+                              fallback_duration: str, unavailable: str,
+                              fallback_notice: str = "") -> str:
+    """One shell command that applies the RBAC manifest from stdin (its output
+    redirected to stderr so stdout stays clean), polls the token Secret's
+    ``.data.token``, falls back to a bound TokenRequest (``kubectl create token``)
+    when the controller doesn't populate it, and prints the token sentinel-wrapped
+    (``<marker><…><marker>``). The sentinel is what makes the readback safe: a cloud
+    runner's log capture interleaves stderr and can carry non-command lines, so the
+    raw output must never be treated as the value itself (a Cloud Run platform line
+    returned as the whole output is how the Entitle registration once base64-decoded
+    "Container called exit(0)." into garbage). One command on purpose: on a Cloud Run
+    runner each kubectl call is a fresh ~2-min container, so apply-then-poll as
+    separate calls is ~7 containers (~14 min). ``fallback_notice``, when set, is
+    echoed (to stderr) before the TokenRequest fallback so the caller can tell which
+    path produced the token."""
+    q_ns, q_sa, q_sec = shlex.quote(ns), shlex.quote(sa), shlex.quote(secret)
+    notice = f"echo {fallback_notice} 1>&2; " if fallback_notice else ""
+    return (
+        "kubectl apply -f - 1>&2 && { tok=''; "
+        "for i in $(seq 1 10); do "
+        f"v=$(kubectl -n {q_ns} get secret {q_sec} -o jsonpath='{{.data.token}}' 2>/dev/null || true); "
+        "if [ -n \"$v\" ]; then tok=$(printf '%s' \"$v\" | base64 -d 2>/dev/null); break; fi; sleep 2; done; "
+        f"if [ -z \"$tok\" ]; then {notice}tok=$(kubectl -n {q_ns} create token {q_sa} --duration={fallback_duration} 2>/dev/null || true); fi; "
+        f"if [ -z \"$tok\" ]; then echo {unavailable} 1>&2; exit 3; fi; "
+        f"printf '{marker}<%s>{marker}\\n' \"$tok\"; }}"
+    )
+
+
+def _extract_marker_token(out: str, marker: str) -> str:
+    """The sentinel-wrapped value from runner output, or ``""``. rfind → the LAST
+    marker, so a reused runner-job name that pulled more than one run's logs still
+    yields THIS run's (newest) token. Never treat the raw output as the value: a
+    cloud runner's log capture interleaves stderr and platform lines (e.g. Cloud
+    Run's "Container called exit(0).")."""
+    out = out or ""
+    start = marker + "<"
+    _i = out.rfind(start)
+    return out[_i + len(start):].partition(">" + marker)[0].strip() if _i != -1 else ""
+
+
+async def _run_sa_token_oneshot(kubeconfig: str, manifest: str, command: str,
+                                target_cloud: str, *, marker: str) -> tuple:
+    """Run a ``_sa_token_oneshot_command`` (manifest on stdin) — in-process when
+    ``k8s_runner=local``, otherwise as a one-shot cloud task — and extract the
+    sentinel-wrapped token. Returns ``(token, output)``; ``token`` is ``""`` when no
+    marker was found."""
     from . import k8s_runner_service
-    jsonpath = "{.data." + key.replace(".", "\\.") + "}"
     if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
-            kpath = os.path.join(tmpdir, "kubeconfig")
-            cmd = ["kubectl", "--kubeconfig", kpath, "-n", namespace,
-                   "get", "secret", secret, "-o", "jsonpath=" + jsonpath]
-            try:
-                return (await _to_thread(_run_sync, cmd)).strip()
-            except K8sError:
-                return ""
+            out = await _to_thread(_run_sync, ["sh", "-c", command], manifest, _helm_env(tmpdir))
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-
-    command = (
-        f"kubectl -n {shlex.quote(namespace)} get secret {shlex.quote(secret)} "
-        f"-o {shlex.quote('jsonpath=' + jsonpath)}"
-    )
-    try:
+    else:
         out = await k8s_runner_service.run(
             kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
-            target_cloud=target_cloud, stdin_text=None, job_id="")
-        return out.strip()
-    except (K8sError, k8s_runner_service.K8sRunnerError):
-        return ""
+            target_cloud=target_cloud, stdin_text=manifest, job_id="")
+    out = out or ""
+    return _extract_marker_token(out, marker), out
+
+
+async def _mint_entitle_sa_token(kubeconfig: str, ns: str, sa: str, secret: str,
+                                 *, target_cloud: str = "") -> str:
+    """Apply the Entitle External-Access RBAC (namespace + cluster-admin SA + token
+    Secret) and read the SA bearer token back in a single runner invocation.
+
+    Prefers the long-lived Secret token — Entitle stores this credential for the
+    life of the integration. The TokenRequest fallback covers clusters whose
+    controller doesn't populate manually-created token Secrets, but its lifetime is
+    capped by the cluster (hours-to-days), so getting it logs a loud warning that
+    the integration will die when it expires."""
+    manifest = _entitle_k8s_rbac_manifest(ns, sa, secret)
+    command = _sa_token_oneshot_command(
+        ns, sa, secret, marker="ETKN", fallback_duration="8760h",
+        unavailable="entitle-token-unavailable",
+        fallback_notice="entitle-token-source-tokenrequest")
+    token, out = await _run_sa_token_oneshot(
+        kubeconfig, manifest, command, target_cloud, marker="ETKN")
+    if not token:
+        logger.error("entitle SA token mint: no ETKN marker in runner output (len=%d): %r",
+                     len(out), out[-1200:])
+        raise K8sError(
+            "could not obtain the Entitle service-account token — the token Secret "
+            "never populated and the TokenRequest fallback failed; see the worker "
+            "logs. If this cluster's API is private, install the Entitle agent and "
+            "re-register for In-Cluster access instead.")
+    if "entitle-token-source-tokenrequest" in out:
+        logger.warning(
+            "entitle SA token for external access came from the TokenRequest fallback "
+            "— its lifetime is capped by the cluster (e.g. ~48h on GKE), so this "
+            "integration will stop working when it expires. Re-register then, or "
+            "install the Entitle agent and use In-Cluster access.")
+    return token
 
 
 async def register_cluster_in_entitle(cluster_id: str, action: str = "register") -> None:
@@ -2306,16 +2369,14 @@ async def register_cluster_in_entitle(cluster_id: str, action: str = "register")
             ns = _cfg("entitle_agent_namespace", "entitle")
             sa = _cfg("entitle_k8s_sa_name", "entitle-access")
             secret = f"{sa}-token"
-            await _apply_manifest_via_runner(kubeconfig, _entitle_k8s_rbac_manifest(ns, sa, secret), target_cloud=row.cloud)
-            token = ""
-            for _ in range(6):  # the token controller populates .data.token async
-                b64 = await _get_secret_b64_via_runner(kubeconfig, ns, secret, "token", target_cloud=row.cloud)
-                if b64:
-                    token = base64.b64decode(b64).decode("utf-8")
-                    break
-                await asyncio.sleep(2)
-            if not token:
-                raise K8sError("the Entitle service-account token did not populate — retry")
+            # Apply + token readback in ONE runner invocation, sentinel-wrapped.
+            # The old apply-then-poll-the-Secret loop was both slow (each poll is a
+            # fresh ~2-min container on a cloud runner) and unsafe: it base64-decoded
+            # the runner's raw combined output, which on Cloud Run could be a platform
+            # log line instead of the jsonpath value ("Container called exit(0)." →
+            # UnicodeDecodeError 0x89). Same pattern as _mint_pra_sa_token.
+            token = await _mint_entitle_sa_token(kubeconfig, ns, sa, secret,
+                                                 target_cloud=row.cloud)
             result = await ent.register_kubernetes(
                 name=row.name, private=False, user_prefix=user_prefix,
                 host=host, token=token, ca_cert=ca)
@@ -2515,47 +2576,24 @@ async def _mint_pra_sa_token(kubeconfig: str, target_cloud: str = "") -> str:
     **single** runner invocation: apply the SA + cluster-admin binding + token Secret,
     then read the token — preferring the long-lived Secret token (K8s populates
     ``.data.token`` for a manually-created service-account-token Secret) and falling
-    back to a bound ``kubectl create token`` (TokenRequest) when the controller doesn't
-    populate it, e.g. GKE. The token is echoed sentinel-wrapped (``BTKN<…>BTKN``) so it
-    survives the runner's combined stdout/stderr log capture.
-
-    One command on purpose: on a Cloud Run runner each kubectl call is a fresh ~2-min
-    container, so the old apply-then-poll-``.data.token``-6× loop was ~7 containers
-    (~14 min) and still timed out on GKE, which never populated the Secret."""
+    back to a bound ``kubectl create token`` (TokenRequest) when the controller
+    doesn't populate it. The token is echoed sentinel-wrapped (``BTKN<…>BTKN``) so it
+    survives the runner's combined stdout/stderr log capture (see
+    ``_sa_token_oneshot_command`` — shared with the Entitle External-Access mint)."""
     ns = _cfg("pra_k8s_namespace", "pra-access")
     sa = _cfg("pra_k8s_sa_name", "pra-access")
     secret = f"{sa}-token"
     manifest = _entitle_k8s_rbac_manifest(ns, sa, secret)
-    q_ns, q_sa, q_sec = shlex.quote(ns), shlex.quote(sa), shlex.quote(secret)
     # stdin (the manifest) is piped into `kubectl apply -f -`; the rest runs after `&&`
     # and reads no stdin. KUBECONFIG is exported by the runner (cloud) / _helm_env (local).
-    command = (
-        "kubectl apply -f - 1>&2 && { tok=''; "
-        "for i in $(seq 1 10); do "
-        f"v=$(kubectl -n {q_ns} get secret {q_sec} -o jsonpath='{{.data.token}}' 2>/dev/null || true); "
-        "if [ -n \"$v\" ]; then tok=$(printf '%s' \"$v\" | base64 -d 2>/dev/null); break; fi; sleep 2; done; "
-        f"if [ -z \"$tok\" ]; then tok=$(kubectl -n {q_ns} create token {q_sa} --duration=24h 2>/dev/null || true); fi; "
-        "if [ -z \"$tok\" ]; then echo pra-token-unavailable 1>&2; exit 3; fi; "
-        "printf 'BTKN<%s>BTKN\\n' \"$tok\"; }"
-    )
-    from . import k8s_runner_service
-    if k8s_runner_service.mode(target_cloud) == "local":
-        tmpdir = _write_kubeconfig(kubeconfig)
-        try:
-            out = await _to_thread(_run_sync, ["sh", "-c", command], manifest, _helm_env(tmpdir))
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-    else:
-        out = await k8s_runner_service.run(
-            kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
-            target_cloud=target_cloud, stdin_text=manifest, job_id="")
-    # rfind → the LAST marker, so a reused runner-job name that pulled more than one
-    # run's logs still yields THIS run's (newest) token.
-    _i = (out or "").rfind("BTKN<")
-    token = out[_i + 5:].partition(">BTKN")[0].strip() if _i != -1 else ""
+    command = _sa_token_oneshot_command(
+        ns, sa, secret, marker="BTKN", fallback_duration="24h",
+        unavailable="pra-token-unavailable")
+    token, out = await _run_sa_token_oneshot(
+        kubeconfig, manifest, command, target_cloud, marker="BTKN")
     if not token:
         logger.error("PRA token mint: no BTKN marker in runner output (len=%d): %r",
-                     len(out or ""), (out or "")[-1200:])
+                     len(out), out[-1200:])
         raise K8sError("could not mint the PRA ServiceAccount token — see the job logs")
     return token
 
