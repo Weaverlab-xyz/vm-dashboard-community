@@ -511,6 +511,30 @@ def test_the_job_runner_enters_the_provisioning_scope():
     assert "with correlation(job_id), _wlc_provisioning():" not in body
 
 
+def test_the_pool_the_sdk_calls_run_on_carries_the_provisioning_marker():
+    """The guard on the seam this whole section relies on.
+
+    _aws_kwargs resolves the lease INSIDE a cloud_executor pool thread (every service's
+    _to_thread routes there — test_cloud_executor pins that). A bare pool.submit starts
+    the thread on a fresh context, so the provisioning() marker entered in _run_job
+    never reaches the credential lookup and every job is silently served the everyday
+    lease. Live failure 2026-08-25: ec2_deploy ran as bt-dashboard-everyday-…, and
+    iam:PassRole was denied by that lease's session policy. copy_context in the
+    executor is what closes it; test_cloud_executor proves the behaviour."""
+    src = _read("web_dashboard", "services", "cloud_executor.py")
+    assert "copy_context" in src, \
+        "cloud_executor stopped copying the caller's context into its pool threads"
+
+
+def test_the_passrole_hint_never_offers_iam_surgery_for_a_session_policy_deny():
+    """An explicit deny in a session policy beats any identity policy, so the static-tier
+    remedy ("attach iam:PassRole to the principal") cannot work on the dynamic tier and
+    sends the operator to widen IAM for nothing. The launch hint must branch on it."""
+    src = _read("web_dashboard", "services", "aws_service.py")
+    assert '"sessionpolicy" in low' in src, \
+        "a session-policy PassRole deny gets the static-key remedy, which cannot work"
+
+
 # ── Azure (Phase 3) ──────────────────────────────────────────────────────────
 #
 # The asymmetry that makes Azure different from AWS: Workload Credentials mints a

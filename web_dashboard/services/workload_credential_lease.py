@@ -104,8 +104,13 @@ _memo_lock = threading.Lock()
 #
 # contextvars are snapshotted per Task at create_task time, so this must be entered
 # INSIDE the job's own task — see jobs_worker._run_job, which enters `correlation` there
-# for exactly the same reason. asyncio.to_thread copies the context, so the synchronous
-# credential lookups a job makes off the event loop inherit it.
+# for exactly the same reason. The blocking SDK calls a job makes run on cloud_executor's
+# pool threads, and that executor submits under contextvars.copy_context() so the
+# credential lookup made inside the thread inherits this marker. That copy is
+# load-bearing: a bare pool.submit starts the thread on a FRESH context, the marker set
+# here is invisible there, and every deploy is silently served the everyday lease — the
+# live ec2_deploy failure of 2026-08-25 (iam:PassRole: explicit deny in a session
+# policy). asyncio.to_thread would copy it too, but the services are pinned off it.
 _purpose_ctx = contextvars.ContextVar("wlc_purpose", default="")
 
 

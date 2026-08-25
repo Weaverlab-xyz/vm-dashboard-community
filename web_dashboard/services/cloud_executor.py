@@ -43,6 +43,7 @@ deadline inside the SDK client; until every client carries one, the pool boundar
 keeps one provider's bad day off the other three.
 """
 import asyncio
+import contextvars
 import functools
 import logging
 import threading
@@ -236,8 +237,17 @@ async def run(provider: str, fn, /, *args, deadline: Optional[float] = None, **k
             raise CloudProviderBusy(provider, busy, size)
         _busy[provider] = busy + 1
 
+    # Submit under a copy of the caller's context. asyncio.to_thread — which every one
+    # of these call sites was migrated FROM — copies contextvars into the thread; a bare
+    # pool.submit starts the thread on a fresh context. Two things the services read are
+    # context-local: the job correlation id that tags log lines, and
+    # workload_credential_lease's provisioning() marker, which the credential lookup
+    # resolves INSIDE the pool thread. Without this copy a provisioning job's SDK calls
+    # are silently served the everyday (read-only) lease — observed live 2026-08-25 as
+    # an ec2_deploy failing iam:PassRole with an explicit session-policy deny.
+    ctx = contextvars.copy_context()
     try:
-        future = pool.submit(fn, *args, **kwargs)
+        future = pool.submit(ctx.run, fn, *args, **kwargs)
     except BaseException:
         # submit() never ran the work, so no done-callback will ever fire for it.
         _release(provider)
