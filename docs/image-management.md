@@ -410,10 +410,17 @@ Work without configuration). Per build cloud:
 
 When the build cloud matches the hub backend, the native export *is*
 the hub upload — no extra copy. When they differ (e.g. AWS build with
-hub = Azure Blob), the dashboard runs `storage_service.copy()` to
-stream the VHD from same-cloud staging into the hub, then deletes the
-staging copy so you don't pay for two. See `_land_on_hub()` in
-[`api/packer.py`](../web_dashboard/api/packer.py).
+hub = Azure Blob), the dashboard runs `storage_service.copy()` to move
+the VHD from same-cloud staging into the hub, then deletes the
+staging copy so you don't pay for two. With the hub on Azure Blob the
+copy is fully server-side: the staging object gets a presigned URL and
+the Azure storage service pulls each block itself, so no image bytes
+transit the dashboard container. With the hub on S3/GCS/OCI and a
+*different* build cloud, the copy stages through the container's
+ephemeral disk — which multi-GB VHDs can overflow — so for
+cross-cloud building either put the hub on Azure Blob or match it to
+the build cloud. See `_land_on_hub()` in
+[`services/packer_build_service.py`](../web_dashboard/services/packer_build_service.py).
 
 #### Manual export (recovery path)
 

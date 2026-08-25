@@ -236,8 +236,14 @@ dashboard exports a portable VHD via the cloud's native export API
 into same-cloud storage. If that same-cloud storage *is* the hub (e.g.
 build cloud = AWS, hub = S3), no extra hop. If it isn't (build cloud
 = AWS, hub = Azure Blob), the dashboard runs
-`storage_service.copy(build_backend, build_key, hub, hub_key)` to
-stream the VHD into the hub and deletes the build-side staging copy.
+`storage_service.copy(build_backend, build_key, hub, hub_key)` to move
+the VHD into the hub and deletes the build-side staging copy. Into an
+Azure Blob hub this copy is fully server-side (the staging object is
+presigned and Azure pulls each block itself — no bytes through the
+dashboard container); into an S3/GCS/OCI hub from a *different* build
+cloud it stages through the container's ephemeral disk, which
+multi-GB VHDs can overflow — pick an Azure Blob hub or the build
+cloud's own backend if you build cross-cloud.
 
 The same export-and-land-on-hub path runs when an operator clicks
 **Export VHD** on a cloud-native image in the per-cloud Images tab

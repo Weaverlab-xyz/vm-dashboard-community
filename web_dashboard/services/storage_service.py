@@ -1119,6 +1119,40 @@ def _azure_presigned_url_sync(key: str, expiry_seconds: int, method: str) -> str
     return f"https://{account}.blob.core.windows.net/{container}/{key}?{sas}"
 
 
+# stage_block_from_url has a 4000 MiB per-block ceiling; 256 MiB keeps each
+# server-side range fetch short enough that one flaky pull retries cheaply,
+# and a 50k-block blob limit still allows ~12 TB artefacts.
+_AZURE_STAGE_BLOCK_SIZE = 256 * 1024 * 1024
+
+
+def _azure_pull_image_from_url_sync(dst_key: str, src_url: str, size: int, progress_cb=None) -> None:
+    """Server-side cross-cloud pull into Azure Blob: the storage service itself
+    fetches each block from `src_url` (a presigned S3/GCS/OCI URL) via
+    stage_block_from_url — the same mechanism azcopy uses for S3/GCS→Azure.
+    No image bytes transit this process, so multi-GB VHDs need neither memory
+    nor local disk here (the container's ephemeral disk is single-digit GiB
+    and a staged VHD overflows it with [Errno 28])."""
+    from azure.storage.blob import BlobBlock
+    svc = _azure_blob_client()
+    blob_client = svc.get_blob_client(container=_azure_container(), blob=dst_key)
+    if size <= 0:
+        blob_client.upload_blob(b"", overwrite=True)
+        return
+    block_ids: list[str] = []
+    offset = 0
+    while offset < size:
+        length = min(_AZURE_STAGE_BLOCK_SIZE, size - offset)
+        block_id = base64.b64encode(f"{len(block_ids):08d}".encode()).decode()
+        blob_client.stage_block_from_url(
+            block_id, src_url, source_offset=offset, source_length=length)
+        block_ids.append(block_id)
+        offset += length
+        if progress_cb:
+            progress_cb(
+                f"Server-side copy to hub: {offset / 1024**3:.1f} / {size / 1024**3:.1f} GiB")
+    blob_client.commit_block_list([BlobBlock(bid) for bid in block_ids])
+
+
 def _gcs_upload_image_sync(key: str, fileobj) -> None:
     client = _gcs_client()
     bucket = client.bucket(_cfg("storage_gcs_bucket"))
@@ -1544,13 +1578,22 @@ async def presigned_url(
         raise StorageError(f"Failed to mint presigned URL for {backend}/{key}: {e}") from e
 
 
-async def copy(src_backend: str, src_key: str, dst_backend: str, dst_key: str) -> None:
+async def copy(
+    src_backend: str, src_key: str, dst_backend: str, dst_key: str,
+    progress_cb=None,
+) -> None:
     """Copy an image-path blob. Same-backend uses the SDK's server-side copy
     (S3 CopyObject, Azure start_copy_from_url, GCS rewrite) and is cheap for
-    any size. Cross-backend streams through a temp file on disk — fine for
-    administrative / small-file moves but the heavy promote-time transfers
-    are routed through per-target-cloud runners in later PRs, not this
-    function."""
+    any size. Cross-backend INTO Azure Blob is also fully server-side: the
+    source gets a presigned GET URL and the Azure storage service pulls each
+    block itself, so multi-GB VHDs never touch this container. The remaining
+    cross-backend pairs (hub on s3/gcs/oci with a different build cloud, or a
+    local source) still stage through a local temp file, which is bounded by
+    the container's ephemeral disk — fine for small artefacts, surfaced as an
+    actionable error when the disk fills.
+
+    `progress_cb(line)` (optional) receives human-readable transfer progress;
+    it may be invoked from a worker thread."""
     _validate_backend(src_backend)
     _validate_backend(dst_backend)
     if not _is_image_filename(dst_key):
@@ -1570,16 +1613,52 @@ async def copy(src_backend: str, src_key: str, dst_backend: str, dst_key: str) -
                 f"Failed to copy {src_backend}/{src_key} → {dst_backend}/{dst_key}: {e}"
             ) from e
 
-    # Cross-backend: stream through a temp file so memory stays bounded for
-    # multi-GB images. Heavy promote transfers in later PRs use cloud-native
-    # runners with presigned URLs; this fallback covers admin moves.
+    # Cross-backend into Azure Blob: server-side pull, no local staging.
+    # `local` can't be presigned, so it stays on the temp-file path below.
+    if dst_backend == "azure_blob" and src_backend != "local":
+        head = await head_image_in(src_backend, src_key)
+        if head is None:
+            raise StorageError(
+                f"Cannot copy {src_backend}/{src_key} → {dst_backend}/{dst_key}: "
+                f"source object does not exist.")
+        # 24h validity: the pull fetches blocks continuously, so this only has
+        # to outlive one transfer — and it stays within every provider's cap
+        # (S3/GCS presign and Azure user-delegation SAS all allow up to 7 days).
+        src_url = await presigned_url(src_backend, src_key, expiry_seconds=86400)
+        try:
+            await _to_thread(
+                _azure_pull_image_from_url_sync, dst_key, src_url,
+                head.get("size") or 0, progress_cb)
+            return
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Failed to copy {src_backend}/{src_key} → {dst_backend}/{dst_key}: {e}"
+            ) from e
+
+    # Cross-backend fallback: stream through a temp file so memory stays
+    # bounded. This is the container's ephemeral disk — a multi-GB image can
+    # overflow it, which we turn into an error that names the fix.
+    import errno
     import os
     import tempfile
     fd, tmp_path = tempfile.mkstemp(prefix="storage_copy_")
     os.close(fd)
     try:
-        with open(tmp_path, "wb") as out:
-            await _to_thread(_IMAGE_OPS[src_backend]["download"], src_key, out)
+        try:
+            with open(tmp_path, "wb") as out:
+                await _to_thread(_IMAGE_OPS[src_backend]["download"], src_key, out)
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                raise StorageError(
+                    f"Ran out of local disk staging {src_backend}/{src_key} for the copy to "
+                    f"{dst_backend} — the dashboard container's ephemeral disk can't hold this "
+                    f"image. Set the image-registry hub (storage_hub_backend on /storage) to "
+                    f"azure_blob (copied fully server-side) or to the build cloud's own backend "
+                    f"(no cross-backend copy at all)."
+                ) from e
+            raise
         with open(tmp_path, "rb") as inp:
             await _to_thread(_IMAGE_OPS[dst_backend]["upload"], dst_key, inp)
     finally:

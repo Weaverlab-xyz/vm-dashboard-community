@@ -777,6 +777,7 @@ async def _land_on_hub(
     await storage_service.copy(
         src_backend=build_backend, src_key=build_key,
         dst_backend=hub, dst_key=hub_key,
+        progress_cb=lambda line: job_service.update_progress(db, job_id, 97, line[:200]),
     )
     # Clean up the build-side staging copy so the operator doesn't pay for
     # two copies of every multi-GB VHD. Best-effort — log if it fails but
