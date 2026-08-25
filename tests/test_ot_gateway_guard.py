@@ -66,6 +66,18 @@ def test_adequate_and_unknown_types_pass():
     assert ot.gateway_size_remedy("c4a-standard-1-exotic", "x", "config") == ""
 
 
+def test_the_guard_steps_aside_only_for_a_real_gateway_override():
+    """The guard reasons about the DASHBOARD-MANAGED shared gateway. A cell wired
+    through an operator-picked Gateway must not be refused on OUR config default
+    (the sandbox seeds e2-micro!), but picking the default by name is no override."""
+    ot = _load()
+    ot._cfg = lambda key: {"gcp_jumpoint_name": "gcp-shared-gw"}.get(key, "")
+    assert not ot.jumpoint_overridden({})
+    assert not ot.jumpoint_overridden({"jumpoint_name": "   "})
+    assert not ot.jumpoint_overridden({"jumpoint_name": "gcp-shared-gw"})
+    assert ot.jumpoint_overridden({"jumpoint_name": "centralus-gw"})
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

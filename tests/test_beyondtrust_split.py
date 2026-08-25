@@ -54,7 +54,11 @@ FLAGS = ("password_safe_enabled", "pra_enabled", "epml_enabled")
 # sizing guard tells operators to change it "in Settings" and until then it was declared
 # only on the wizard's GCPSetup — settable by API, findable nowhere; and
 # `clouddb_ps_ssm_ssl`, the AWS SSM mysql address's trailing sslTRUE|sslFALSE segment,
-# added when the addresses were aligned with the vendor plugins' per-engine parse).
+# added when the addresses were aligned with the vendor plugins' per-engine parse;
+# and the three `ot_ps_*` keys — the OT cell's PRA-checkout pair (a synced PRA Vault
+# account per cell, docs/cloud-ot.md), on the Password Safe panel because they name
+# Password Safe platform/functional-account objects, exactly like the
+# clouddb_ps_pravault_* pair they fall back to).
 # A key that vanishes from all three models is a field an
 # operator can no longer set; one that appears on two breaks the union-check equivalence
 # test_setup_feature_roundtrip documents in its own docstring.
@@ -109,6 +113,7 @@ k8s_ps_rotator_aks_sp_object_id k8s_ps_rotator_eks_username
 k8s_ps_rotator_eks_principal_arn k8s_ps_rotator_eks_create_access_entry
 k8s_ps_rotator_bootstrap_namespace k8s_ps_rotator_bootstrap_sa
 pra_k8s_namespace pra_k8s_sa_name bt_vault_account_group_id
+ot_ps_pra_checkout_enabled ot_ps_pravault_platform ot_ps_pravault_functional_account
 """.split())
 
 # RETIRED, deliberately absent from LEGACY_KEYS above: the six `k8s_token_sync_*` keys

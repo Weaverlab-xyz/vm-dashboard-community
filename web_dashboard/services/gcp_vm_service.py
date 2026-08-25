@@ -566,6 +566,40 @@ async def _run_destroy(
                 result["ot_error"] = (result.get("ot_error", "") +
                                       f" tunnel removal failed: {e}").strip()
 
+        # The OT cell's PRA-checkout pair (services/ot_service._wire_ps_checkout):
+        # unlink the SyncedAccounts pair first (ps_k8s deregistration orders it the
+        # same way), then off-board the Password Safe mirror, then destroy the PRA
+        # Vault account. All before ps_vm_hook.deregister below removes the parent
+        # adminuser account the link hangs off.
+        if deploy_meta.get("ot_ps_mirror_tf_state"):
+            job_service.update_progress(db, job_id, 44, "Removing the PRA-checkout mirror…")
+            from ..services import ps_api_service, ps_resource_service
+            parent_id = str(deploy_meta.get("ps_managed_account_id") or "")
+            sub_id = str(deploy_meta.get("ot_ps_mirror_account_id") or "")
+            if parent_id.isdigit() and sub_id.isdigit():
+                try:
+                    await ps_api_service.unlink_synced_account(
+                        parent_account_id=int(parent_id), synced_account_id=int(sub_id))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("OT checkout unlink failed for %s: %s", instance_name, e)
+            try:
+                await ps_resource_service.deregister(deploy_meta["ot_ps_mirror_tf_state"])
+                result["ot_ps_mirror_removed"] = deploy_meta.get("ot_ps_mirror_system_id") or True
+            except Exception as e:  # noqa: BLE001
+                logger.error("OT checkout mirror removal failed for %s: %s", instance_name, e)
+                result["ot_error"] = (result.get("ot_error", "") +
+                                      f" PS mirror removal failed: {e}").strip()
+        if deploy_meta.get("ot_vault_tf_state"):
+            job_service.update_progress(db, job_id, 46, "Removing the PRA Vault checkout account…")
+            try:
+                from ..services import terraform_pra_service
+                await terraform_pra_service.remove_vault_account(deploy_meta["ot_vault_tf_state"])
+                result["ot_vault_removed"] = deploy_meta.get("ot_vault_account_name") or True
+            except Exception as e:  # noqa: BLE001
+                logger.error("OT vault account removal failed for %s: %s", instance_name, e)
+                result["ot_error"] = (result.get("ot_error", "") +
+                                      f" vault account removal failed: {e}").strip()
+
         # Remove the Entitle SSH integration if this deploy registered one.
         if deploy_meta.get("entitle_registration_tf_state"):
             from ..services import entitle_vm_hook

@@ -31,10 +31,18 @@ def _fn_src(path, name):
 def test_the_gce_destroy_removes_the_ot_wiring():
     src = _fn_src(_GCP_VM, "_run_destroy")
     for needle in ("ot_web_jump_tf_state", "remove_web_jump",
-                   "ot_tunnel_tf_state", "remove_api_tunnel"):
+                   "ot_tunnel_tf_state", "remove_api_tunnel",
+                   "ot_ps_mirror_tf_state", "unlink_synced_account",
+                   "ot_vault_tf_state", "remove_vault_account"):
         assert needle in src, (
             f"_run_destroy lost its {needle!r} handling — destroying (or expiring) "
-            "an OT cell would orphan its PRA jump items")
+            "an OT cell would orphan its PRA jump items or its PRA-checkout pair")
+    # The mirror + vault teardown must run BEFORE ps_vm_hook.deregister removes the
+    # parent adminuser account: the SyncedAccounts unlink needs both account ids, and
+    # off-boarding the parent first would strand a dangling link.
+    assert src.index("ot_ps_mirror_tf_state") < src.index("ps_registration_tf_state"), (
+        "the PRA-checkout teardown moved below the Password Safe deregistration — "
+        "the unlink would then run against an already-removed parent account")
 
 
 def test_the_wiring_writes_the_keys_the_destroy_reads():
@@ -46,6 +54,15 @@ def test_the_wiring_writes_the_keys_the_destroy_reads():
     assert "update_metadata" in src, (
         "_wire_cell must persist each artifact onto the CHILD's metadata the "
         "moment it exists, or a partial failure leaves untracked PRA items")
+
+
+def test_the_checkout_wiring_writes_the_keys_the_destroy_reads():
+    src = _fn_src(_OT, "_wire_ps_checkout")
+    for needle in ("ot_vault_tf_state", "ot_ps_mirror_tf_state",
+                   "ot_ps_mirror_account_id", "ot_ps_synced", "update_metadata"):
+        assert needle in src, (
+            f"_wire_ps_checkout no longer persists {needle!r} onto the child job — "
+            "the destroy path and the rewire idempotency both key off exactly it")
 
 
 def test_standalone_tunnels_hold_a_gateway_reference():

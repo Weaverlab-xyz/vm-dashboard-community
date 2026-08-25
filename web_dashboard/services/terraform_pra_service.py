@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import subprocess
 import tempfile
 from pathlib import Path
@@ -1474,3 +1475,125 @@ async def remove_k8s_tunnel(tf_state_json: Optional[str] = None, jump_id=None) -
     if jump_id:
         from . import pra_api_service
         await pra_api_service.delete_protocol_tunnel_jump(jump_id)
+
+
+# ── Standalone Vault username/password account (OT cell PRA checkout) ─────────
+#
+# The OT cell's Password Safe onboarding creates the VM's adminuser managed
+# account; making that credential USABLE in PRA — checkout in /login, injection
+# into the cell's jump items — additionally needs a Vault username/password
+# account scoped to the cell's Jump Group. The password seeded here is a
+# throwaway placeholder: Password Safe overwrites it through the "PRA Vault
+# Username Password" plugin the first time the SyncedAccounts pair rotates, so
+# the real credential never passes through the dashboard.
+
+def _generate_vault_up_account_hcl(vault_account_name: str, username: str,
+                                   jump_group_name: str,
+                                   vault_account_group_id: Optional[int] = None) -> str:
+    """HCL for one standalone ``sra_vault_username_password_account``, associated to a
+    Jump Group by NAME via ``criteria.shared_jump_groups`` (per-jump-item association is
+    rejected by the PRA backend for tunnel jump types — same wall the DB and k8s vault
+    accounts hit, see ``_generate_db_tunnel_hcl``). The password rides
+    ``TF_VAR_vault_password`` (sensitive), never the HCL; the criteria arrays must all
+    be present (empty) or the API 4xxes."""
+    group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
+                  if vault_account_group_id else "")
+    return f"""\
+terraform {{
+  required_providers {{
+    sra = {{
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }}
+  }}
+}}
+
+variable "bt_host"          {{ sensitive = false }}
+variable "bt_client_id"     {{ sensitive = true }}
+variable "bt_client_secret" {{ sensitive = true }}
+variable "vault_password"   {{ sensitive = true }}
+
+provider "sra" {{
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}}
+
+data "sra_jump_group_list" "jg" {{
+  name = {json.dumps(jump_group_name)}
+}}
+
+resource "sra_vault_username_password_account" "checkout" {{
+  name        = {json.dumps(vault_account_name)}
+  username    = {json.dumps(username)}
+  password    = var.vault_password
+  description = "Auto-provisioned by Infrastructure Management Dashboard (OT cell PRA checkout)"
+{group_line}  jump_item_association = {{
+    filter_type = "criteria"
+    criteria = {{
+      shared_jump_groups = [tonumber(data.sra_jump_group_list.jg.items[0].id)]
+      host               = []
+      name               = []
+      tag                = []
+      comment            = []
+    }}
+    jump_items = []
+  }}
+}}
+
+output "vault_account_id" {{
+  value = sra_vault_username_password_account.checkout.id
+}}
+"""
+
+
+def _provision_vault_account_sync(name, username, jump_group_name,
+                                  vault_account_group_id=None, password="",
+                                  client_secret="") -> dict:
+    extra_env = {"TF_VAR_vault_password": password or secrets.token_urlsafe(24)}
+    if client_secret:
+        extra_env["TF_VAR_bt_client_secret"] = client_secret
+    with tempfile.TemporaryDirectory(prefix="pra_vault_up_tf_") as work_dir:
+        Path(work_dir, "main.tf").write_text(
+            _generate_vault_up_account_hcl(name, username, jump_group_name,
+                                           vault_account_group_id))
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
+        if apply.returncode != 0:
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120,
+                    extra_env=extra_env)
+            raise TerraformPRAError(
+                f"vault account apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
+        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        vault_account_id: Optional[str] = None
+        if out.returncode == 0 and out.stdout.strip():
+            try:
+                vault_raw = json.loads(out.stdout).get("vault_account_id", {}).get("value", "")
+                vault_account_id = str(vault_raw) if vault_raw else None
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        state_path = Path(work_dir, "terraform.tfstate")
+        tf_state_json = state_path.read_text() if state_path.exists() else None
+        return {
+            "vault_account_id": vault_account_id,
+            "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
+        }
+
+
+async def provision_vault_account(*, name: str, username: str, jump_group_name: str,
+                                  vault_account_group_id: Optional[int] = None,
+                                  password: str = "", client_secret: str = "") -> dict:
+    """Provision one standalone PRA Vault username/password account, associated to
+    ``jump_group_name`` for injection. Returns ``{vault_account_id, tf_state_json}``
+    (state scrubbed of the password)."""
+    return await asyncio.to_thread(
+        _provision_vault_account_sync, name, username, jump_group_name,
+        vault_account_group_id, password, client_secret)
+
+
+async def remove_vault_account(tf_state_json: str) -> None:
+    """Destroy a standalone Vault account from its stored state."""
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)

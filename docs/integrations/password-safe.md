@@ -474,6 +474,11 @@ account.
 > rotation landing while no tunnel exists fails the PRA half — visibly, in Password Safe's
 > change log.
 
+The **OT demo cell** uses the same primitive for its `adminuser` credential — parent on the
+GCP VM SSH Rotation platform, subscriber on the **PRA Vault Username Password** plugin, PRA
+Vault account associated to the cell's Jump Group for checkout/injection. See
+[cloud-ot.md](../cloud-ot.md#pra-checkout-of-the-cells-admin-credential).
+
 **The LongLived break window.** Rotation revokes the old token immediately. Password Safe
 applies the new value to the subscriber as part of the same change, but change operations are
 queued, so there is a short window where PRA still holds the revoked token. Set the cluster's

@@ -55,7 +55,9 @@ class OTCellDeployRequest(BaseModel):
     image_self_link: str
     image_name: str = ""
     instance_name: str
-    machine_type: str = "e2-small"
+    # e2-medium, not e2-small: the cell runs Docker + the PLC sim + FUXA, and a
+    # 2 GB e2-small proved too tight in live use (validated on ot-cell-01).
+    machine_type: str = "e2-medium"
     zone: str = ""                    # defaults to configured gcp_zone
     subnetwork: str = ""              # defaults to the sandbox vm-subnet
     disk_size_gb: int = 20
@@ -91,6 +93,11 @@ class OTCellInfo(BaseModel):
     tunnel_local_port: int = 0
     tunnel_remote_port: int = 0
     shell_jump_id: str = ""
+    # PRA checkout of the cell's admin credential: the Vault account PRA users
+    # check out / inject, kept current by a Password Safe SyncedAccounts link.
+    vault_account_id: str = ""
+    vault_account_name: str = ""
+    ps_checkout_synced: bool = False
     workgroup: str = ""
     expires_at: Optional[str] = None
     wiring_complete: bool = False
