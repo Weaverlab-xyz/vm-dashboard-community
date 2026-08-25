@@ -818,6 +818,15 @@ class PRAFeatureConfig(BaseModel):
     # ref-counted Jumpoint host or starts its own bt-jumpoint-<vm>. Editable here so
     # the choice is reversible without a redeploy. Batches always share.
     gcp_vm_jumpoint_mode: str = "shared"
+    # Machine type for the managed shared GCP Gateway host. A Web Jump renders headless
+    # Chromium ON the Gateway and is OOM-killed below 2 GB — e2-small minimum, e2-medium
+    # preferred (see the note on `gcp_jumpoint_machine_type` in config.py). Blank keeps
+    # the config.py default (e2-medium). Also declared on the wizard's GCPSetup, but that
+    # model is reachable only via PUT /api/setup/config — the OT cell's sizing guard
+    # sends operators to Settings, so the key has to live on a panel model too. Changing
+    # it never resizes a live Gateway: delete the Gateway VM and the next deploy
+    # recreates it at the new size.
+    gcp_jumpoint_machine_type: str = ""
     # The identity PRA injects into a managed cluster. Previously env-only, promoted
     # alongside the Password Safe rotation feature that makes them operationally
     # load-bearing (the managed account name is <namespace>/<sa>).

@@ -55,11 +55,13 @@ shows live process data, not a static mock.
 
 A Web Jump renders **headless Chromium on the PRA gateway host**. Below ~2 GB the
 renderer is OOM-killed, and the session error is indistinguishable from a blocked
-firewall. The GCP gateway's default machine type is `e2-micro` (1 GB), so the cell
-deploy checks the **live** gateway VM (falling back to `gcp_jumpoint_machine_type`)
-and refuses early — before launching anything — with the remedy in the job error:
-set `gcp_jumpoint_machine_type` to `e2-small` minimum / `e2-medium` preferred, delete
-the existing gateway VM so it recreates at the new size, retry.
+firewall. Fresh installs default to `e2-medium`, but the cloud-sandbox setup scripts
+seed `gcp_jumpoint_machine_type=e2-micro` (1 GB) to keep standing cost down, so the
+cell deploy checks the **live** gateway VM (falling back to the configured
+`gcp_jumpoint_machine_type`) and refuses early — before launching anything — with the
+remedy in the job error: set `gcp_jumpoint_machine_type` to `e2-small` minimum /
+`e2-medium` preferred under **Settings → Integrations → Privileged Remote Access**
+(GCP overrides), delete the existing gateway VM so it recreates at the new size, retry.
 
 ### Partial failures and re-wiring
 

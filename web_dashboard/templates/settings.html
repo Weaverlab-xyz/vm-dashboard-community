@@ -2125,6 +2125,20 @@
                 deploy key is always paired, since the shared host uses the configured key.
               </p>
             </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Gateway machine type <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <input type="text" x-model="panelCfg.gcp_jumpoint_machine_type"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="e2-medium (default)">
+              <p class="text-xs text-gray-400 mt-1">
+                Size of the shared Gateway host. A Web Jump renders headless Chromium on the
+                Gateway and needs ≥2 GB — <span class="font-mono">e2-small</span> minimum,
+                <span class="font-mono">e2-medium</span> preferred; below that the session is
+                OOM-killed and the failure looks identical to a blocked firewall. Changing this
+                never resizes a live Gateway: delete the Gateway VM and the next deploy
+                recreates it at the new size. Blank keeps the default (e2-medium).
+              </p>
+            </div>
           </div>
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Kubernetes tunnel identity</p>

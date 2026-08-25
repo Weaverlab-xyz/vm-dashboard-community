@@ -2,10 +2,13 @@
 
 A PRA Web Jump renders headless Chromium ON the gateway host; below ~2 GB the
 renderer is OOM-killed and the session error is indistinguishable from a blocked
-firewall — and the GCP gateway's DEFAULT machine type is e2-micro (1 GB), so
-without this guard the failure mode is the out-of-the-box experience. These tests
-pin the guard's memory model and, critically, that the refusal message carries
-the remedy: the failed-job page renders error_message and NOTHING else.
+firewall. config.py's default is e2-medium (4 GB), but the cloud-sandbox setup
+scripts deliberately seed gcp_jumpoint_machine_type=e2-micro (1 GB) to keep
+standing cost down — so on a sandbox install the failure mode is the
+out-of-the-box experience, and this guard is what turns it into a refusal with a
+remedy. These tests pin the guard's memory model and, critically, that the
+refusal message carries the remedy: the failed-job page renders error_message
+and NOTHING else.
 
 Run: python tests/test_ot_gateway_guard.py   (or under pytest)
 """
@@ -27,7 +30,7 @@ def _load():
 def test_known_types_and_the_2gb_threshold():
     ot = _load()
     assert ot.MIN_WEB_JUMP_GATEWAY_MB == 2048
-    assert ot.gateway_mem_mb("e2-micro") == 1024      # the config DEFAULT — too small
+    assert ot.gateway_mem_mb("e2-micro") == 1024      # the sandbox-seeded size — too small
     assert ot.gateway_mem_mb("e2-small") == 2048      # documented minimum
     assert ot.gateway_mem_mb("e2-medium") == 4096     # documented preference
     assert ot.gateway_mem_mb("E2-Micro ") == 1024     # case/space tolerant
@@ -45,8 +48,13 @@ def test_custom_and_family_types_parse_conservatively():
 def test_the_refusal_message_carries_the_remedy():
     ot = _load()
     msg = ot.gateway_size_remedy("e2-micro", "clouddb-shared-jumpoint", "the live gateway VM")
+    # "Settings → Integrations → Privileged Remote Access" is load-bearing: the key had
+    # no Settings control at all when this message first shipped, so operators went
+    # looking for a field that did not exist. The panel input and this pointer landed
+    # together; losing either recreates that dead end.
     for needle in ("gcp_jumpoint_machine_type", "e2-small", "e2-medium",
-                   "clouddb-shared-jumpoint", "firewall", "No VM was launched"):
+                   "clouddb-shared-jumpoint", "firewall", "No VM was launched",
+                   "Settings → Integrations → Privileged Remote Access"):
         assert needle in msg, f"remedy message lost {needle!r}: {msg}"
 
 

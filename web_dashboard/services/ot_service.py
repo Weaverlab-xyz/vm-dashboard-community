@@ -161,7 +161,8 @@ def gateway_size_remedy(machine_type: str, gateway_name: str, source: str) -> st
         "Web Jump renders headless Chromium ON the gateway and is OOM-killed below "
         "2 GB — the resulting session failure looks identical to a blocked "
         "firewall. Set gcp_jumpoint_machine_type to e2-small (minimum) or "
-        f"e2-medium (preferred) in Settings, delete the gateway VM {gateway_name} "
+        "e2-medium (preferred) in Settings → Integrations → Privileged Remote "
+        f"Access (GCP overrides), delete the gateway VM {gateway_name} "
         "so the next deploy recreates it at the new size, then retry this cell. "
         "No VM was launched."
     )
@@ -171,7 +172,7 @@ async def gateway_size_problem(project_id: str, region: str) -> str:
     """Resolve the effective gateway machine type — the LIVE managed VM when it
     exists (a config change never resizes an existing gateway), else the config
     default — and return the remedy string when it is too small, "" otherwise."""
-    from . import config_service, gcp_service, jumpoint_host_service as jhs
+    from . import gcp_service, jumpoint_host_service as jhs
     name = jhs.managed_host_name("gcp")
     machine, source = "", ""
     try:
@@ -183,7 +184,11 @@ async def gateway_size_problem(project_id: str, region: str) -> str:
     except Exception as exc:  # noqa: BLE001 — the config fallback below still guards
         logger.debug("OT gateway guard: live lookup failed (%s) — using config", exc)
     if not machine:
-        machine = config_service.get("gcp_jumpoint_machine_type") or "e2-micro"
+        # _cfg, not config_service.get: the gateway CREATION path (jumpoint_host_service)
+        # falls back through config.py's default (e2-medium) when the key is unset or
+        # blank, so the guard must read the same way — a raw row read predicted e2-micro
+        # for fresh installs and refused a deploy that would in fact have built e2-medium.
+        machine = _cfg("gcp_jumpoint_machine_type") or "e2-micro"
         source = "gcp_jumpoint_machine_type (the configured gateway size)"
     return gateway_size_remedy(machine, name, source)
 
