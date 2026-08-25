@@ -2205,6 +2205,50 @@ async def _reclaim_gcp_create_wait_instance(
     )
 
 
+# Create-time capacity stockouts, keyed by cloud: (error code the cloud embeds in
+# the raw apply output, the tf variable naming the size that sold out, a sizing
+# hint for the retry). Azure polls the create for many minutes before admitting
+# CapacityNotAvailable ("Capacity is not available in this region/zone"), so the
+# raw TerraformError is hundreds of plan/"Still creating…" lines with the one
+# actionable line at the bottom. GCP is deliberately absent: its create-wait
+# failure mode is handled by _reclaim_gcp_create_wait_instance, and Cloud SQL has
+# no comparable stockout code to key on.
+_DB_CAPACITY_STOCKOUTS = {
+    "azure": ("Azure", "CapacityNotAvailable", "sku_name",
+              "Burstable B-series SKUs stock out most often; a General Purpose "
+              "SKU (e.g. GP_Standard_D2s_v3) usually has capacity."),
+    "aws": ("AWS", "InsufficientDBInstanceCapacity", "instance_class",
+            "Small burstable classes (db.t3.*) stock out most often; a larger "
+            "class usually has capacity."),
+}
+
+
+def _distill_provision_failure(row: CloudDatabase, tf_variables: dict,
+                               exc: Exception) -> str:
+    """The ``set_failed`` string for a provision failure. The failed-job detail
+    shows ``error_message`` ONLY, so a known failure must carry its cause and
+    remedy here — and for a capacity stockout the raw TerraformError buries that
+    one actionable line under the whole streamed apply (which the job's Live
+    Output already persists verbatim). Unknown failures pass through unchanged.
+    """
+    if not isinstance(exc, terraform.TerraformError):
+        return str(exc)
+    sig = _DB_CAPACITY_STOCKOUTS.get(row.cloud)
+    if not sig or sig[1].lower() not in str(exc).lower():
+        return str(exc)
+    cloud_name, code, size_var, hint = sig
+    size = tf_variables.get(size_var) or "the requested size"
+    region = row.region or "the requested region"
+    return (
+        f"{cloud_name} has no {size} capacity in {region} right now ({code}: a "
+        f"capacity stockout on the cloud side, not a quota or configuration "
+        f"problem). Delete this database — that also cleans up the failed create "
+        f"attempt — then provision again with a different compute size, or in a "
+        f"different region that has database networking configured. {hint} "
+        f"The full Terraform output is in this job's Live Output."
+    )
+
+
 async def run_provision_apply(
     db: Session, *, db_id: str, job_id: str, engine: str, tf_variables: dict,
 ) -> None:
@@ -2375,7 +2419,8 @@ async def run_provision_apply(
     except Exception as exc:
         row.status = "failed"
         db.commit()
-        job_service.set_failed(db, job_id, str(exc))
+        job_service.set_failed(db, job_id,
+                               _distill_provision_failure(row, tf_variables, exc))
         logger.exception("clouddb apply failed db_id=%s: %s", db_id, exc)
 
 
