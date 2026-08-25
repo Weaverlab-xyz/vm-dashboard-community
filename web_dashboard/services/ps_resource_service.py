@@ -743,9 +743,10 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     cert path/SSL flag), ``port`` is the real DB port, ``managed_account_name`` is the dedicated
     DB user the functional-account DB login rotates, and the account is password-managed.
 
-    ``method="pravault"`` uses the "PRA Vault Username Password" plugin: ``host_name`` must be
-    the PRA appliance URL and ``managed_account_name`` the exact PRA Vault account name; the
-    account is password-managed.
+    ``method="pravault"`` uses the "PRA Vault Username Password" / "PRA Vault Token" plugins:
+    ``host_name`` must be the PRA appliance URL and ``managed_account_name`` the exact PRA
+    Vault account name; ``dns_name`` defaults to ``host_name`` (the Username Password
+    platform requires a DnsName on create); the account is password-managed.
 
     ``method="k8ssa"`` uses the "Kubernetes Service Account Token" plugin: ``dns_name`` must
     be a cluster address (``eks;<region>;<cluster>``, ``aks;<subscriptionId>;<resourceGroup>;
@@ -887,10 +888,14 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             method="dbgcp", dns_name=dns_name, emit_private_key=False,
             dss_auto_management=False, use_own_credentials=use_own_credentials)
     elif method == "pravault":
-        # "PRA Vault Username Password" plugin: Password Safe PATCHes the rotated
-        # password into a PRA Vault username_password account via the PRA Config API.
-        # The managed system's network address (host_name) is the PRA appliance URL;
-        # the managed account name is the exact PRA Vault account name. Password-managed.
+        # "PRA Vault *" plugins: Password Safe PATCHes the rotated credential into a
+        # PRA Vault account via the PRA Config API. The managed account name is the
+        # exact PRA Vault account name, and the PRA appliance URL rides in BOTH
+        # host_name and dns_name: the "PRA Vault Username Password" platform's create
+        # API rejects a system without a DnsName (live 400 "DnsName is required" —
+        # the field is required on the platform, unlike "PRA Vault Token"), and the
+        # plugin walks the populated host fields in Password Safe's order, so a second
+        # copy of the URL is at worst never read. Password-managed.
         if not host_name:
             raise PSResourceError(
                 "PRA Vault onboarding requires host_name set to the PRA appliance URL")
@@ -902,7 +907,7 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             managed_account_name=managed_account_name,
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
-            method="pravault", dns_name="", emit_private_key=False,
+            method="pravault", dns_name=dns_name or host_name, emit_private_key=False,
             dss_auto_management=False)
     elif method == "k8ssa":
         # "Kubernetes Service Account Token" plugin: dns_name carries the cluster
