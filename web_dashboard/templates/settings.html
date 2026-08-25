@@ -2283,55 +2283,162 @@
                 </p>
               </div>
 
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
-                  <input type="text" x-model="panelCfg.gcp_portainer_image"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
-                  <input type="text" x-model="panelCfg.gcp_portainer_machine_type"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
-                  <input type="text" x-model="panelCfg.gcp_portainer_name"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
-                  <input type="text" x-model="panelCfg.gcp_portainer_zone"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                         placeholder="(auto-picked in the region)">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
-                  <input type="number" x-model.number="panelCfg.gcp_portainer_boot_disk_gb"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Network tag</label>
-                  <input type="text" x-model="panelCfg.gcp_portainer_network_tag"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Ready timeout (s)</label>
-                  <input type="number" x-model.number="panelCfg.portainer_ready_timeout_s"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
-                </div>
+              <div class="w-40">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Ready timeout (s)</label>
+                <input type="number" x-model.number="panelCfg.portainer_ready_timeout_s"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
               </div>
 
-              <div class="flex items-center gap-3">
-                <button @click="panelCfg.gcp_portainer_allow_open = !panelCfg.gcp_portainer_allow_open"
-                        class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
-                        :class="panelCfg.gcp_portainer_allow_open ? 'bg-red-600' : 'bg-gray-300'">
-                  <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
-                        :class="panelCfg.gcp_portainer_allow_open ? 'translate-x-6' : 'translate-x-1'"></span>
-                </button>
-                <span class="text-sm text-gray-700">
-                  Allow open (<code class="bg-gray-100 px-1 rounded">0.0.0.0/0</code>) when no CIDRs are set
-                </span>
+              <!-- Per-cloud node settings. The selector below is a VIEW control, not a
+                   setting: which cloud the node actually runs on is chosen on the
+                   Containers page at deploy time (and recorded there), so binding it
+                   here would create a second source of truth that the next deploy
+                   silently overwrites. Each cloud keeps its own image / size / name so
+                   switching clouds does not mean re-entering all of them. -->
+              <div class="pt-3 border-t border-gray-100 space-y-3"
+                   x-data="{ nodeCloud: 'gcp' }">
+                <div class="flex items-center gap-3">
+                  <label class="text-sm font-medium text-gray-700">Settings for cloud</label>
+                  <select x-model="nodeCloud"
+                          class="border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                    <option value="aws">AWS</option>
+                    <option value="azure">Azure</option>
+                    <option value="gcp">GCP</option>
+                  </select>
+                  <span class="text-xs text-gray-400">
+                    Where the node runs is picked on <a href="/containers#portainer" class="underline">Containers &rarr; Portainer</a> when you deploy.
+                  </span>
+                </div>
+
+                <!-- GCP -->
+                <div x-show="nodeCloud === 'gcp'" class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                    <input type="text" x-model="panelCfg.gcp_portainer_image"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
+                    <input type="text" x-model="panelCfg.gcp_portainer_machine_type"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
+                    <input type="text" x-model="panelCfg.gcp_portainer_name"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
+                    <input type="text" x-model="panelCfg.gcp_portainer_zone"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                           placeholder="(auto-picked in the region)">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
+                    <input type="number" x-model.number="panelCfg.gcp_portainer_boot_disk_gb"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Network tag</label>
+                    <input type="text" x-model="panelCfg.gcp_portainer_network_tag"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                </div>
+
+                <!-- AWS. No zone field: an EC2 subnet already pins the availability
+                     zone, so one here could only contradict it. No network tag either
+                     — a dedicated security group replaces GCE's target-tag model. -->
+                <div x-show="nodeCloud === 'aws'" class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                    <input type="text" x-model="panelCfg.aws_portainer_image"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Instance type</label>
+                    <input type="text" x-model="panelCfg.aws_portainer_instance_type"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Instance name</label>
+                    <input type="text" x-model="panelCfg.aws_portainer_name"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Root volume (GB)</label>
+                    <input type="number" x-model.number="panelCfg.aws_portainer_boot_disk_gb"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                </div>
+
+                <!-- Azure. Same omissions as AWS, plus: the Standard public IP is
+                     Static, so this node KEEPS its address across a recreate. -->
+                <div x-show="nodeCloud === 'azure'" class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                    <input type="text" x-model="panelCfg.azure_portainer_image"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">VM size</label>
+                    <input type="text" x-model="panelCfg.azure_portainer_vm_size"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
+                    <input type="text" x-model="panelCfg.azure_portainer_name"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">OS disk (GB)</label>
+                    <input type="number" x-model.number="panelCfg.azure_portainer_boot_disk_gb"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  </div>
+                </div>
+
+                <!-- Fail-open is per cloud, because each one closes differently: GCP
+                     deletes its firewall rule, AWS revokes every ingress permission,
+                     Azure deletes its NSG rule. Three explicit toggles rather than one
+                     dynamically-keyed one: a computed key cannot be checked against the
+                     panel model, and an unmodelled key is DISCARDED on save -- which is
+                     why tests/test_setup_feature_roundtrip.py refuses bracket-style
+                     access outright. -->
+                <div x-show="nodeCloud === 'gcp'" class="flex items-center gap-3">
+                  <button @click="panelCfg.gcp_portainer_allow_open = !panelCfg.gcp_portainer_allow_open"
+                          class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                          :class="panelCfg.gcp_portainer_allow_open ? 'bg-red-600' : 'bg-gray-300'">
+                    <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                          :class="panelCfg.gcp_portainer_allow_open ? 'translate-x-6' : 'translate-x-1'"></span>
+                  </button>
+                  <span class="text-sm text-gray-700">
+                    Allow open (<code class="bg-gray-100 px-1 rounded">0.0.0.0/0</code>) when no CIDRs are set
+                    <span class="text-gray-400">&mdash; GCP</span>
+                  </span>
+                </div>
+                <div x-show="nodeCloud === 'aws'" class="flex items-center gap-3">
+                  <button @click="panelCfg.aws_portainer_allow_open = !panelCfg.aws_portainer_allow_open"
+                          class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                          :class="panelCfg.aws_portainer_allow_open ? 'bg-red-600' : 'bg-gray-300'">
+                    <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                          :class="panelCfg.aws_portainer_allow_open ? 'translate-x-6' : 'translate-x-1'"></span>
+                  </button>
+                  <span class="text-sm text-gray-700">
+                    Allow open (<code class="bg-gray-100 px-1 rounded">0.0.0.0/0</code>) when no CIDRs are set
+                    <span class="text-gray-400">&mdash; AWS</span>
+                  </span>
+                </div>
+                <div x-show="nodeCloud === 'azure'" class="flex items-center gap-3">
+                  <button @click="panelCfg.azure_portainer_allow_open = !panelCfg.azure_portainer_allow_open"
+                          class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                          :class="panelCfg.azure_portainer_allow_open ? 'bg-red-600' : 'bg-gray-300'">
+                    <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                          :class="panelCfg.azure_portainer_allow_open ? 'translate-x-6' : 'translate-x-1'"></span>
+                  </button>
+                  <span class="text-sm text-gray-700">
+                    Allow open (<code class="bg-gray-100 px-1 rounded">0.0.0.0/0</code>) when no CIDRs are set
+                    <span class="text-gray-400">&mdash; AZURE</span>
+                  </span>
+                </div>
               </div>
 
               <!-- Durable state: /data on a persistent disk that survives a teardown -->
@@ -2348,16 +2455,29 @@
                   </span>
                 </div>
                 <div x-show="panelCfg.portainer_data_disk_enabled" class="pl-14 space-y-2">
-                  <div class="w-40">
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Data disk (GB)</label>
-                    <input type="number" x-model.number="panelCfg.gcp_portainer_data_disk_gb"
-                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                  <div class="flex gap-3">
+                    <div class="w-32">
+                      <label class="block text-sm font-medium text-gray-700 mb-1">GCP (GB)</label>
+                      <input type="number" x-model.number="panelCfg.gcp_portainer_data_disk_gb"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                    </div>
+                    <div class="w-32">
+                      <label class="block text-sm font-medium text-gray-700 mb-1">AWS (GB)</label>
+                      <input type="number" x-model.number="panelCfg.aws_portainer_data_disk_gb"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                    </div>
+                    <div class="w-32">
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Azure (GB)</label>
+                      <input type="number" x-model.number="panelCfg.azure_portainer_data_disk_gb"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                    </div>
                   </div>
                   <p class="text-xs text-gray-500">
                     Users, environments and settings survive a teardown and come back on the
-                    next deploy. The disk is <strong>zonal</strong>, so it pins the node's zone —
-                    moving region needs a snapshot, not a redeploy. It keeps billing until you
-                    tear the node down with <em>Delete the data disk</em> ticked.
+                    next deploy. On GCP and AWS the disk is <strong>zonal</strong>, so it pins
+                    the node's zone — moving region needs a snapshot, not a redeploy. It keeps
+                    billing on every cloud until you tear the node down with
+                    <em>Delete the data disk</em> ticked.
                   </p>
                 </div>
               </div>
@@ -4110,33 +4230,147 @@
                 </p>
               </div>
             </template>
-            <div class="grid grid-cols-2 gap-3 mt-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
-                <input type="text" x-model="panelCfg.gcp_rancher_machine_type"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                       placeholder="e2-medium">
-                <p class="text-[11px] text-gray-400 mt-1">Rancher needs ≥4 GB RAM.</p>
+            <!-- Per-cloud node settings. The selector is a VIEW control, not a setting:
+                 which cloud the node runs on is chosen on the Containers page at deploy
+                 time (and recorded there), so binding it here would create a second
+                 source of truth the next deploy silently overwrites. Each cloud keeps
+                 its own image / size / name so switching does not mean re-entering all
+                 of them. -->
+            <div class="mt-4 pt-3 border-t border-gray-100 space-y-3"
+                 x-data="{ nodeCloud: 'gcp' }">
+              <div class="flex items-center gap-3">
+                <label class="text-sm font-medium text-gray-700">Settings for cloud</label>
+                <select x-model="nodeCloud"
+                        class="border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="aws">AWS</option>
+                  <option value="azure">Azure</option>
+                  <option value="gcp">GCP</option>
+                </select>
+                <span class="text-xs text-gray-400">
+                  Where the node runs is picked on <a href="/containers#rancher" class="underline">Containers &rarr; Kubernetes (Rancher)</a> when you deploy.
+                </span>
               </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
-                <input type="text" x-model="panelCfg.gcp_rancher_zone"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                       placeholder="(blank → GCP default zone)">
+
+              <!-- GCP -->
+              <div x-show="nodeCloud === 'gcp'" class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_machine_type"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="e2-medium">
+                  <p class="text-[11px] text-gray-400 mt-1">Rancher needs ≥4 GB RAM.</p>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_zone"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="(blank → GCP default zone)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_image"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher/rancher:latest">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
+                  <input type="number" min="20" x-model.number="panelCfg.gcp_rancher_boot_disk_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="30">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher-server">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Network tag</label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_network_tag"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher">
+                </div>
               </div>
-            </div>
-            <div class="grid grid-cols-2 gap-3 mt-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
-                <input type="text" x-model="panelCfg.gcp_rancher_image"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                       placeholder="rancher/rancher:latest">
+
+              <!-- AWS. No zone: an EC2 subnet already pins the availability zone. No
+                   network tag: a dedicated security group replaces the target-tag model. -->
+              <div x-show="nodeCloud === 'aws'" class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Instance type</label>
+                  <input type="text" x-model="panelCfg.aws_rancher_instance_type"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="t3.medium">
+                  <p class="text-[11px] text-gray-400 mt-1">Rancher needs ≥4 GB RAM — t3.small (2 GB) OOMs.</p>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                  <input type="text" x-model="panelCfg.aws_rancher_image"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher/rancher:latest">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Instance name</label>
+                  <input type="text" x-model="panelCfg.aws_rancher_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher-server">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Root volume (GB)</label>
+                  <input type="number" min="20" x-model.number="panelCfg.aws_rancher_boot_disk_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="30">
+                </div>
               </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
-                <input type="number" min="20" x-model.number="panelCfg.gcp_rancher_boot_disk_gb"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                       placeholder="30">
+
+              <!-- Azure. Same omissions, plus: the Standard public IP is Static, so this
+                   node keeps its address (and its imported clusters' agent URL) across a
+                   recreate. -->
+              <div x-show="nodeCloud === 'azure'" class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VM size</label>
+                  <input type="text" x-model="panelCfg.azure_rancher_vm_size"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="Standard_B2s">
+                  <p class="text-[11px] text-gray-400 mt-1">Rancher needs ≥4 GB RAM — Standard_B1s (1 GB) OOMs.</p>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                  <input type="text" x-model="panelCfg.azure_rancher_image"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher/rancher:latest">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
+                  <input type="text" x-model="panelCfg.azure_rancher_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher-server">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OS disk (GB)</label>
+                  <input type="number" min="20" x-model.number="panelCfg.azure_rancher_boot_disk_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="30">
+                </div>
+              </div>
+
+              <!-- Fail-open is per cloud: GCP deletes its firewall rule, AWS revokes
+                   every ingress permission, Azure deletes its NSG rule. Three explicit
+                   checkboxes rather than one computed key, which the panel model cannot
+                   check and which would be discarded on save. -->
+              <div x-show="nodeCloud === 'gcp'" class="flex items-center gap-2">
+                <input type="checkbox" id="gcp_rancher_allow_open" x-model="panelCfg.gcp_rancher_allow_open"
+                       class="rounded border-gray-300">
+                <label for="gcp_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended) — GCP</span></label>
+              </div>
+              <div x-show="nodeCloud === 'aws'" class="flex items-center gap-2">
+                <input type="checkbox" id="aws_rancher_allow_open" x-model="panelCfg.aws_rancher_allow_open"
+                       class="rounded border-gray-300">
+                <label for="aws_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended) — AWS</span></label>
+              </div>
+              <div x-show="nodeCloud === 'azure'" class="flex items-center gap-2">
+                <input type="checkbox" id="azure_rancher_allow_open" x-model="panelCfg.azure_rancher_allow_open"
+                       class="rounded border-gray-300">
+                <label for="azure_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended) — Azure</span></label>
               </div>
             </div>
             <div class="grid grid-cols-2 gap-3 mt-3">
@@ -4147,11 +4381,6 @@
                        placeholder="360">
                 <p class="text-[11px] text-gray-400 mt-1">How long the deploy waits for Rancher to serve after boot. Raise it for a cold image pull / slow disk.</p>
               </div>
-            </div>
-            <div class="mt-3 flex items-center gap-2">
-              <input type="checkbox" id="gcp_rancher_allow_open" x-model="panelCfg.gcp_rancher_allow_open"
-                     class="rounded border-gray-300">
-              <label for="gcp_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended)</span></label>
             </div>
             <div class="mt-2 flex items-center gap-2">
               <input type="checkbox" id="rancher_verify_tls" x-model="panelCfg.rancher_verify_tls"

@@ -847,7 +847,9 @@ class PortainerFeatureConfig(BaseModel):
     portainer_url: str = ""
     portainer_pat: str = ""             # encrypted at rest; token or vault ref (bt_safe:// etc.)
     portainer_verify_ssl: bool = True
-    # Managed-node deploy knobs (COS on GCE; mirrors the Rancher node's panel)
+    # Managed-node deploy knobs. Cloud-neutral first, then one group per cloud -- the
+    # node runs on ONE of them (picked on the deploy form), but each keeps its own
+    # image / size / name so switching clouds does not mean re-entering everything.
     portainer_allowed_source_cidrs: str = ""   # CSV of manual firewall source ranges (9443/8000)
     portainer_dashboard_egress_cidr: str = ""  # the dashboard's own egress CIDR; auto-detected on deploy
     portainer_admin_password: str = ""         # encrypted at rest; blank → auto-generated on first run
@@ -859,10 +861,27 @@ class PortainerFeatureConfig(BaseModel):
     gcp_portainer_boot_disk_gb: int = 20
     gcp_portainer_network_tag: str = "portainer"
     gcp_portainer_allow_open: bool = False     # open 0.0.0.0/0 when the CIDR list is empty (fail-open opt-in)
-    # Durable state: /data on a separate persistent disk that survives a teardown.
-    # Off by default — the disk outlives the node and bills until something deletes it.
+    # AWS: no zone (the subnet pins the AZ) and no network tag (a dedicated security
+    # group replaces GCE's target-tag model).
+    aws_portainer_image: str = "portainer/portainer-ce:latest"
+    aws_portainer_instance_type: str = "t3.small"
+    aws_portainer_name: str = "portainer-server"
+    aws_portainer_boot_disk_gb: int = 20
+    aws_portainer_allow_open: bool = False
+    # Azure: same omissions, and the Standard public IP is Static so the node keeps its
+    # address across a recreate.
+    azure_portainer_image: str = "portainer/portainer-ce:latest"
+    azure_portainer_vm_size: str = "Standard_B1s"
+    azure_portainer_name: str = "portainer-server"
+    azure_portainer_boot_disk_gb: int = 30
+    azure_portainer_allow_open: bool = False
+    # Durable state: /data on a separate volume that survives a teardown. Off by
+    # default — it outlives the node and bills until something deletes it. The size is
+    # per cloud because a PD, an EBS volume and a managed disk are three resources.
     portainer_data_disk_enabled: bool = False
     gcp_portainer_data_disk_gb: int = 10
+    aws_portainer_data_disk_gb: int = 10
+    azure_portainer_data_disk_gb: int = 10
     # Optional PRA Web Jump brokering the node's UI (chosen per-deploy on the form;
     # these are the Settings-level defaults)
     portainer_ui_web_jump_enabled: bool = False
@@ -1146,6 +1165,20 @@ class K8sManagementFeatureConfig(BaseModel):
     gcp_rancher_boot_disk_gb: int = 30
     gcp_rancher_network_tag: str = "rancher"
     gcp_rancher_allow_open: bool = False      # open 0.0.0.0/0 when allowed_source_cidrs is empty
+    # AWS: no zone (an EC2 subnet pins the AZ) and no network tag (a dedicated security
+    # group replaces GCE's target-tag model).
+    aws_rancher_image: str = "rancher/rancher:latest"
+    aws_rancher_instance_type: str = "t3.medium"   # ≥4 GB required; t3.small (2 GB) OOMs
+    aws_rancher_name: str = "rancher-server"
+    aws_rancher_boot_disk_gb: int = 30
+    aws_rancher_allow_open: bool = False
+    # Azure: same omissions, and the Standard public IP is Static so the node keeps its
+    # address across a recreate.
+    azure_rancher_image: str = "rancher/rancher:latest"
+    azure_rancher_vm_size: str = "Standard_B2s"    # ≥4 GB required; Standard_B1s (1 GB) OOMs
+    azure_rancher_name: str = "rancher-server"
+    azure_rancher_boot_disk_gb: int = 30
+    azure_rancher_allow_open: bool = False
     # Rancher UI PRA web-broker (opt-in zero-trust access without opening CIDRs).
     # Bound in the k8s_management panel, mirroring the Portainer panel's
     # portainer_ui_* group — these are the DEFAULTS the Containers deploy form

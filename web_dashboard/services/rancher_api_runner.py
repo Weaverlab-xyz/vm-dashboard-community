@@ -8,14 +8,23 @@ node answered ``/ping`` over plain HTTP and over an IAP tunnel, while direct HTT
 died at ClientHello 100% of the time.
 
 Fix: when ``rancher_api_transport = runner``, each Rancher HTTP call executes as a
-one-shot ``curl`` inside a **GCP Cloud Run job** (the same corp-CA-dodging pattern
-as the Ansible / k8s / promote cloud runners — see ``k8s_runner_service``), which
-egresses from GCP with no inspecting proxy in the path. The job rides the shared
-k8s-runner plumbing (``gcp_service.run_cloud_run_k8s_task``: stock
-``dtzar/helm-kubectl`` image — it ships curl — output via Cloud Logging, secrets in
-env not argv) and targets the node's INTERNAL IP through the Cloud Run VPC
-connector (its egress annotation is ``private-ranges-only``, so RFC1918 is exactly
-what routes through the connector; a public IP would not).
+one-shot ``curl`` inside an in-cloud job (the same corp-CA-dodging pattern as the
+Ansible / k8s / promote cloud runners — see ``k8s_runner_service``), which egresses
+from the cloud with no inspecting proxy in the path. The job rides the shared
+k8s-runner plumbing (stock ``dtzar/helm-kubectl`` image — it ships curl — output
+through the cloud's own log, secrets in env not argv) and targets the node's
+INTERNAL address, so the runner needs VPC reach to it:
+
+  * **GCP** — a Cloud Run job, over direct VPC egress or a Serverless VPC Access
+    connector. Its egress is private-ranges-only, so RFC1918 is exactly what routes;
+    a public IP would not.
+  * **AWS** — an ECS Fargate task in the node's own VPC, reaching its private IP.
+  * **Azure** — an ACI container group on a VNet-delegated subnet in the node's VNet.
+
+The backend is NOT configured separately: it follows the cloud the node is in,
+because the whole point is to reach that node's private address from inside its own
+network. A node on a cloud with no runner implementation says so rather than
+launching a job that cannot route.
 
 Request marshalling: method/URL/headers/body travel as a **curl config file** on
 the runner's stdin (``STDIN_B64`` → ``curl -K -``), so the API token and payload
@@ -52,21 +61,42 @@ class RancherRunnerError(Exception):
     """The runner job could not be launched, or its output had no HTTP response."""
 
 
-def _node_region() -> str:
-    """The GCP region the Rancher node lives in, from the persisted node zone.
+def _node_cloud() -> str:
+    """Which cloud the Rancher node is in. The runner has to be there too."""
+    try:
+        from . import managed_node_service
+        return managed_node_service.node_cloud(managed_node_service.RANCHER)
+    except Exception:  # noqa: BLE001 — config unreadable; the GCP default is the
+        return "gcp"   # only node that can exist on an install this old
 
-    Set on every deploy (``gcp_rancher_zone``, e.g. ``us-east1-b`` → ``us-east1``)
-    BEFORE the readiness poll, so it's the authoritative node region at every
-    runner call. ``""`` when unknown (no node deployed yet, or config unreadable) —
-    the caller then keeps the default ``gcp_region``."""
+
+def _node_region(cloud: str = "") -> str:
+    """The region the Rancher node lives in, derived from the zone the deploy
+    persisted for that cloud.
+
+    Recorded on every deploy BEFORE the readiness poll, so it is the authoritative
+    node region at every runner call. ``""`` when unknown (no node deployed yet, or
+    config unreadable) — the caller then keeps the runner's default region.
+
+    The two clouds spell a zone differently, and neither split is safe on the other:
+    GCP is ``<region>-<letter>`` (``us-east1-b``), AWS is ``<region><letter>``
+    (``us-east-1a``), so ``us-east-1a`` naively rsplit on ``-`` would yield ``us-east``.
+    """
+    cloud = cloud or _node_cloud()
     try:
         from . import config_service
-        zone = (config_service.get("gcp_rancher_zone") or "").strip()
+        zone = (config_service.get(f"{cloud}_rancher_zone") or "").strip()
     except Exception:
         return ""
-    # A zone is region-plus-a-suffix (two hyphens: "us-east1-b"); anything else
-    # (a bare region, junk) is not safely splittable → fall back.
-    return zone.rsplit("-", 1)[0] if zone.count("-") >= 2 else ""
+    if not zone:
+        return ""
+    if cloud == "gcp":
+        # A zone is region-plus-a-suffix (two hyphens: "us-east1-b"); anything else
+        # (a bare region, junk) is not safely splittable → fall back.
+        return zone.rsplit("-", 1)[0] if zone.count("-") >= 2 else ""
+    if cloud == "aws":
+        return zone[:-1] if zone[-1:].isalpha() else zone
+    return ""
 
 
 def _retarget_region(subnet_ref: str, region: str) -> str:
@@ -82,7 +112,7 @@ def _retarget_region(subnet_ref: str, region: str) -> str:
 
 
 def _resolve():
-    """GCP Cloud Run knobs — reuse the k8s runner's resolution (same project /
+    """GCP Cloud Run knobs (the ``gcp`` backend of :func:`_run`) — reuse the k8s runner's resolution (same project /
     region / image / VPC keys) so runner installs need nothing new. Unlike the
     generic k8s runner (which reaches PUBLIC cluster endpoints), the Rancher
     runner dials the node's INTERNAL IP — so VPC reach is REQUIRED: fail fast
@@ -115,13 +145,124 @@ def _resolve():
     # Direct VPC egress wins over a connector in run_cloud_run_k8s_task (it's used
     # whenever a network/subnet is set), so mirror that test here before overriding.
     using_direct = bool(cfg.get("vpc_network") or cfg.get("vpc_subnetwork"))
-    node_region = _node_region()
+    node_region = _node_region("gcp")
     if using_direct and node_region and node_region != cfg.get("region"):
         logger.info("Rancher runner: pinning Cloud Run region to the node's region %s "
                     "(was %s) — direct VPC egress is region-locked", node_region, cfg.get("region"))
         cfg = {**cfg, "region": node_region,
                "vpc_subnetwork": _retarget_region(cfg.get("vpc_subnetwork", ""), node_region)}
     return cfg
+
+
+def _resolve_ecs():
+    """ECS Fargate knobs, re-pointed at the NODE's region.
+
+    Reuses the k8s runner's ECS plumbing so a runner install needs nothing new, then
+    overrides the network from the node's own per-region config: a task in the default
+    region's VPC has no route to a node's private IP in another region, and the
+    failure is a silent dropped SYN rather than an error — the same defect that had to
+    be fixed for Cloud Run's region-locked direct egress.
+
+    The node's ingress rule must admit the task's private address, which is what
+    ``rancher_runner_source_cidr`` is for (set it to the runner subnet's or the VPC's
+    CIDR). It is auto-merged into the allow-list while the transport is ``runner``.
+    """
+    from . import k8s_runner_service, region_config
+    try:
+        cfg = k8s_runner_service._resolve_ecs()
+    except Exception as exc:
+        raise RancherRunnerError(
+            f"Rancher API runner (ECS) is not configured: {exc}") from exc
+    node_region = _node_region("aws")
+    if node_region and node_region != cfg.get("region"):
+        rc = region_config.resolve_region("aws", node_region) or {}
+        subnet = (rc.get("ecs_subnet_id") or "").strip()
+        if not subnet:
+            raise RancherRunnerError(
+                f"The Rancher node is in {node_region} but no runner subnet is configured "
+                f"there (ansible_ecs_subnet_id for that region), so an ECS task has no "
+                f"route to the node's private IP. Add a per-region config, or move the "
+                f"node.")
+        sgs = [s.strip() for s in (rc.get("ecs_security_group_ids") or "").split(",")
+               if s.strip()]
+        logger.info("Rancher runner: pinning the ECS task to the node's region %s "
+                    "(was %s) — a task in another VPC cannot reach the node",
+                    node_region, cfg.get("region"))
+        cfg = {**cfg, "region": node_region, "subnet_id": subnet,
+               "security_group_ids": sgs or cfg.get("security_group_ids", []),
+               "cluster": (rc.get("ecs_cluster") or cfg.get("cluster"))}
+    return cfg
+
+
+def _resolve_aci():
+    """ACI knobs, reusing the k8s runner's resolution.
+
+    The container group must sit on a VNet-DELEGATED subnet in the node's VNet, or it
+    has no route to the node's private address -- the same requirement the k8s runner
+    already has for private cluster APIs, which is why its subnet fallback chain is
+    reused rather than a second one invented. Azure has no cross-region wrinkle to undo
+    here: the resource group and location already come from the node's own placement.
+
+    The node's NSG must admit the container group's address, which is what
+    ``rancher_runner_source_cidr`` is for (set it to the runner subnet's CIDR). It is
+    auto-merged into the allow-list while the transport is ``runner``.
+    """
+    from . import k8s_runner_service
+    try:
+        cfg = k8s_runner_service._resolve_aci()
+    except Exception as exc:
+        raise RancherRunnerError(
+            f"Rancher API runner (ACI) is not configured: {exc}") from exc
+    if not cfg.get("subnet_id"):
+        raise RancherRunnerError(
+            "rancher_api_transport=runner needs VNet reach to the node's internal IP: "
+            "set ansible_aci_subnet_id (or azure_aci_subnet_id) to a VNet-delegated "
+            "subnet in the node's VNet. Without it the container group runs with a "
+            "public address and cannot route to the node.")
+    return cfg
+
+
+async def _run(command: str, *, stdin_b64: str = "", job_id: str = "") -> tuple:
+    """Run one shell command in an in-cloud runner job; return ``(exit_code, output)``.
+
+    The COMMANDS are cloud-independent (a shell string in a stock helm-kubectl image),
+    so only the launcher differs — which is why both callers below share this rather
+    than each carrying its own per-cloud fan-out.
+    """
+    cloud = _node_cloud()
+    if cloud == "gcp":
+        from . import gcp_service
+        cfg = _resolve()
+        return await gcp_service.run_cloud_run_k8s_task(
+            project_id=cfg["project_id"], region=cfg["region"], image=cfg["image"],
+            command=command, kubeconfig_b64=_DUMMY_KUBECONFIG_B64,
+            stdin_b64=stdin_b64, job_id=job_id, vpc_connector=cfg["vpc_connector"],
+            vpc_network=cfg.get("vpc_network", ""),
+            vpc_subnetwork=cfg.get("vpc_subnetwork", ""))
+    if cloud == "aws":
+        from . import aws_service
+        cfg = _resolve_ecs()
+        return await aws_service.run_ecs_k8s_task(
+            region=cfg["region"], cluster=cfg["cluster"],
+            task_family=cfg["task_family"], image=cfg["image"],
+            cpu=cfg["cpu"], memory=cfg["memory"], subnet_id=cfg["subnet_id"],
+            security_group_ids=cfg["security_group_ids"],
+            execution_role_arn=cfg["execution_role_arn"],
+            command=command, kubeconfig_b64=_DUMMY_KUBECONFIG_B64,
+            stdin_b64=stdin_b64, job_id=job_id)
+    if cloud == "azure":
+        from . import azure_service
+        cfg = _resolve_aci()
+        return await azure_service.run_aci_k8s_task(
+            rg=cfg["rg"], location=cfg["location"], subnet_id=cfg["subnet_id"],
+            image=cfg["image"], command=command,
+            kubeconfig_b64=_DUMMY_KUBECONFIG_B64, stdin_b64=stdin_b64, job_id=job_id,
+            acr_server=cfg["acr_server"], acr_username=cfg["acr_username"],
+            acr_password=cfg["acr_password"])
+    raise RancherRunnerError(
+        f"rancher_api_transport=runner is not implemented for a node on {cloud!r}. "
+        f"Use rancher_api_transport=direct, or host the node on a cloud that has a "
+        f"runner (aws, azure, gcp).")
 
 
 def _q(val: str) -> str:
@@ -187,8 +328,6 @@ async def request(method: str, url: str, *, token: str = "",
     connector only carries private ranges. Raises :class:`RancherRunnerError` on
     launch/transport failure (an HTTP error status is returned, not raised —
     callers keep their own status handling, same as the direct path)."""
-    from . import gcp_service
-    cfg = _resolve()
     # The runner shell prepends `printf %s "$STDIN_B64" | base64 -d | ` to this
     # command, and a pipe binds to the FIRST simple command only — so the whole
     # thing must be ONE brace group with curl first, so `curl -K -` receives the
@@ -203,11 +342,7 @@ async def request(method: str, url: str, *, token: str = "",
     stdin_b64 = base64.b64encode(
         _curl_config(method, url, token=token, json_body=json_body,
                      timeout_s=timeout_s).encode()).decode()
-    exit_code, output = await gcp_service.run_cloud_run_k8s_task(
-        project_id=cfg["project_id"], region=cfg["region"], image=cfg["image"],
-        command=command, kubeconfig_b64=_DUMMY_KUBECONFIG_B64,
-        stdin_b64=stdin_b64, job_id=job_id, vpc_connector=cfg["vpc_connector"],
-        vpc_network=cfg.get("vpc_network", ""), vpc_subnetwork=cfg.get("vpc_subnetwork", ""))
+    exit_code, output = await _run(command, stdin_b64=stdin_b64, job_id=job_id)
     # curl is ||-guarded so the job exits 0 even on transport failure; the parse
     # below is what distinguishes an HTTP response from a dead transport.
     if exit_code != 0:
@@ -220,8 +355,6 @@ async def wait_ready(url: str, timeout_s: int, *, job_id: str = "") -> str:
     """Poll ``<url>/ping`` from INSIDE one Cloud Run job (a single job runs the
     whole retry loop — one job per probe would burn ~30s of cold-start each).
     Returns ``"ready"`` or ``"timeout"``."""
-    from . import gcp_service
-    cfg = _resolve()
     tries = max(1, min(int(timeout_s), _MAX_READY_S) // _POLL_S)
     ping = f"{url.rstrip('/')}/ping"
     # On exhaustion, run one VERBOSE probe whose stderr is kept — so a timeout log
@@ -235,16 +368,12 @@ async def wait_ready(url: str, timeout_s: int, *, job_id: str = "") -> str:
         f"sleep {_POLL_S}; done; "
         f"echo {_NOT_READY}; echo '--- final probe ---'; curl -sk -m 8 -v {ping} 2>&1 | tail -8"
     )
-    exit_code, output = await gcp_service.run_cloud_run_k8s_task(
-        project_id=cfg["project_id"], region=cfg["region"], image=cfg["image"],
-        command=command, kubeconfig_b64=_DUMMY_KUBECONFIG_B64,
-        stdin_b64="", job_id=job_id, vpc_connector=cfg["vpc_connector"],
-        vpc_network=cfg.get("vpc_network", ""), vpc_subnetwork=cfg.get("vpc_subnetwork", ""))
+    exit_code, output = await _run(command, job_id=job_id)
     if _READY in (output or ""):
         return "ready"
     if exit_code != 0 and _NOT_READY not in (output or ""):
         raise RancherRunnerError(
             f"Rancher readiness runner job exited {exit_code}. Log tail:\n{(output or '').strip()[-1500:]}")
-    logger.warning("Rancher runner readiness timed out from region %s against %s — probe tail:\n%s",
-                   cfg.get("region"), ping, (output or "").strip()[-800:])
+    logger.warning("Rancher runner readiness timed out against %s (node cloud %s) — "
+                   "probe tail:\n%s", ping, _node_cloud(), (output or "").strip()[-800:])
     return "timeout"

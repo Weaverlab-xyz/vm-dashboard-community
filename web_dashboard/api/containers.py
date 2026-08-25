@@ -665,6 +665,57 @@ def _gcp_project_id() -> str:
     return config_service.get("gcp_project_id") or settings.gcp_project_id
 
 
+def _node_cloud(spec, requested: str = "") -> str:
+    """The cloud a managed-node request targets: the operator's pick, else where the
+    node already lives.
+
+    Validated here rather than in the job so a bad value is a 400 the form can show,
+    not a failed job the operator has to go read.
+    """
+    from ..services import managed_node_service
+    cloud = (requested or "").strip().lower()
+    if not cloud:
+        return managed_node_service.node_cloud(spec)
+    if cloud not in managed_node_service.CLOUDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Invalid cloud {cloud!r} — choose one of "
+                    f"{', '.join(managed_node_service.CLOUDS)}."))
+    return cloud
+
+
+def _safe_placement(cloud: str, spec) -> dict:
+    """Resolve a node's placement, or ``{}`` if that can't be done yet.
+
+    The READ routes must render on a bare install: a cloud with no credentials, or one
+    whose node support hasn't landed, has to produce the "not configured" card rather
+    than a 500 on every request. Only the deploy/teardown routes are allowed to be
+    strict about it.
+    """
+    from ..services import managed_node_service
+    try:
+        return managed_node_service.resolve_placement(cloud, spec)
+    except Exception:  # noqa: BLE001 — an unusable cloud reads as "nothing deployed"
+        return {}
+
+
+def _require_node_cloud(spec, requested: str = "") -> str:
+    """As :func:`_node_cloud`, but 503s when that cloud has no credentials.
+
+    Uses the same credential check as the dashboard tiles
+    (``feature_flags.cloud_configured``) so the deploy form and the tiles cannot
+    disagree about whether a cloud is usable.
+    """
+    from ..services import feature_flags
+    cloud = _node_cloud(spec, requested)
+    if not feature_flags.cloud_configured(cloud):
+        raise HTTPException(
+            status_code=503,
+            detail=(f"{cloud.upper()} is not configured, so the node has nowhere to go. "
+                    f"Add its credentials under Settings, or pick another cloud."))
+    return cloud
+
+
 @router.get("/gce-jumpoints", response_model=GCEJumpointListResponse)
 async def list_gce_jumpoints_endpoint(
     current_user: User = Depends(require_permission("containers", "read")),
@@ -860,12 +911,15 @@ async def get_rancher_node(
 ):
     """List the Rancher management-node COS instance(s) (labels.purpose=rancher)
     and report whether the integration is configured + its pinned server URL."""
-    from ..services import config_service, gcp_service
+    from ..services import config_service, managed_node_service
     from ..services.gcp_service import GCPError
 
-    project_id = _gcp_project_id()
+    spec = managed_node_service.RANCHER
+    cloud = managed_node_service.node_cloud(spec)
+    placement = _safe_placement(cloud, spec)
+    account = placement.get("account", "")
     bootstrap = config_service.get("rancher_bootstrap_password")
-    configured = bool(project_id and bootstrap)
+    configured = bool(account and bootstrap)
     server_url = config_service.get("rancher_server_url") or ""
     # How to log in — shown once the node is bootstrapped. An AUTO-GENERATED admin
     # password is echoed (the operator has no other way to learn it — accepted
@@ -885,18 +939,18 @@ async def get_rancher_node(
             login_hint = "Log in as admin with your configured Rancher admin password."
         else:
             login_hint = "Log in as admin with your Rancher bootstrap password."
-    if not project_id:
+    if not account:
         # Not configured yet — return an empty, not-configured shell (no 503, so
         # the tab can render the setup card like Portainer does).
-        return RancherNodeResponse(nodes=[], project_id="", count=0,
-                                   configured=False, server_url=server_url)
+        return RancherNodeResponse(nodes=[], cloud=cloud, account="", project_id="",
+                                   count=0, configured=False, server_url=server_url)
     try:
-        raw = await gcp_service.list_gce_rancher(project_id)
-    except GCPError as exc:
+        raw = await managed_node_service.list_nodes(cloud, spec, placement)
+    except (GCPError, managed_node_service.ManagedNodeError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     nodes = [
         RancherNodeInfo(
-            name=i.get("name", ""), zone=i.get("zone", ""),
+            name=i.get("name", ""), cloud=cloud, zone=i.get("zone", ""),
             status=i.get("status", "UNKNOWN"), machine_type=i.get("machine_type", ""),
             image=i.get("image", ""), internal_ip=i.get("internal_ip", ""),
             external_ip=i.get("external_ip", ""), url=i.get("url", ""),
@@ -904,7 +958,9 @@ async def get_rancher_node(
         )
         for i in raw
     ]
-    return RancherNodeResponse(nodes=nodes, project_id=project_id, count=len(nodes),
+    return RancherNodeResponse(nodes=nodes, cloud=cloud, account=account,
+                               project_id=account if cloud == "gcp" else "",
+                               count=len(nodes),
                                configured=configured, server_url=server_url,
                                login_hint=login_hint)
 
@@ -936,22 +992,40 @@ async def get_rancher_pra_options(
     deploy launched from the Containers page silently opted OUT of Web Jump
     registration even with the feature switched on in Settings — leaving whatever stale
     jump item already existed in place."""
-    from ..services import config_service, pra_api_service
+    from ..services import config_service, managed_node_service, pra_api_service
     pickers = await pra_api_service.list_pickers()
+    cloud = managed_node_service.node_cloud(managed_node_service.RANCHER)
     return {
         "configured": pra_api_service.configured(),
-        "regions": _rancher_deploy_regions(),
+        "cloud": cloud,
+        "clouds": list(managed_node_service.CLOUDS),
+        "regions": _node_deploy_regions(cloud),
+        "regions_by_cloud": _node_regions_by_cloud(),
         "web_jump_enabled": config_service.get_bool("rancher_ui_web_jump_enabled", False),
         **pickers,
     }
 
 
-def _rancher_deploy_regions() -> list[str]:
-    """Regions the Rancher node can be deployed into: the configured default region
-    plus every region that has a per-region config set (`gcp_region_configs`), default
-    first. Restricting to configured regions keeps the operator from picking a region
-    with no subnet (the node's subnet is regional)."""
-    return region_config.deployable_regions("gcp")
+def _node_deploy_regions(cloud: str) -> list[str]:
+    """Regions a managed node can be deployed into on ``cloud``: the configured default
+    region plus every region that has a per-region config set, default first.
+    Restricting to configured regions keeps the operator from picking a region with no
+    subnet (the node needs a public subnet, and a subnet is regional on every cloud)."""
+    return region_config.deployable_regions(cloud)
+
+
+def _node_regions_by_cloud() -> dict:
+    """Deployable regions for every cloud at once, so the deploy form can repopulate
+    its region list the instant the cloud dropdown changes — without a round trip that
+    would leave the previous cloud's regions selectable in the meantime."""
+    from ..services import managed_node_service
+    out = {}
+    for c in managed_node_service.CLOUDS:
+        try:
+            out[c] = region_config.deployable_regions(c)
+        except Exception:  # noqa: BLE001 — a cloud with no config contributes nothing
+            out[c] = []
+    return out
 
 
 @router.post("/rancher/deploy", response_model=DeployContainerResponse)
@@ -965,21 +1039,28 @@ async def deploy_rancher_node(
     follow progress at /jobs/{job_id}. Deploy-time PRA choices (Web Jump + Jump
     Group / Jumpoint / Vault Account Group) ride the job metadata; anything omitted
     falls back to Settings."""
-    from ..services import config_service
+    from ..services import config_service, managed_node_service
 
-    if not _gcp_project_id():
-        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    cloud = _require_node_cloud(managed_node_service.RANCHER, req.cloud or "")
     if not config_service.get("rancher_bootstrap_password"):
         raise HTTPException(
             status_code=400,
             detail="Set a Rancher bootstrap password in Settings → Kubernetes before deploying.")
     # Only carry fields the operator actually set, so blanks fall back to config.
-    meta: dict = {"web_jump_enabled": bool(req.web_jump_enabled)}
+    meta: dict = {"cloud": cloud, "web_jump_enabled": bool(req.web_jump_enabled)}
     if req.region:
-        if not region_catalog.validate("gcp", req.region):
-            raise HTTPException(status_code=400, detail=f"Invalid GCP region: {req.region!r}")
-        meta["region"] = region_catalog.normalize("gcp", req.region)
+        if not region_catalog.validate(cloud, req.region):
+            raise HTTPException(
+                status_code=400, detail=f"Invalid {cloud.upper()} region: {req.region!r}")
+        meta["region"] = region_catalog.normalize(cloud, req.region)
     if req.zone:
+        # Zones are a GCP concept in this shape: on AWS the subnet pins the AZ, and
+        # Azure has none. Rejecting rather than ignoring it keeps a stale form field
+        # from looking like it took effect.
+        if cloud != "gcp":
+            raise HTTPException(
+                status_code=400,
+                detail=f"A zone can only be chosen on GCP, not on {cloud.upper()}.")
         if not region_catalog.validate_zone(req.zone):
             raise HTTPException(status_code=400, detail=f"Invalid GCP zone: {req.zone!r}")
         zone = region_catalog.normalize("gcp", req.zone)
@@ -1004,19 +1085,20 @@ async def deploy_rancher_node(
 @router.post("/rancher/{name}/stop", response_model=DeployContainerResponse)
 async def stop_rancher_node(
     name: str,
-    zone: str = Query("", description="GCE zone (blank → configured Rancher zone)"),
+    zone: str = Query("", description="GCE zone / AZ (blank → the node's recorded zone)"),
+    cloud: str = Query("", description="Cloud the node is in (blank → the recorded one)"),
     force: bool = Query(False, description="Tear down even if clusters are still imported"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "delete")),
 ):
-    """Tear down the Rancher node (VM + firewall) and clean up Entitle / PRA /
+    """Tear down the Rancher node (VM + ingress rule) and clean up Entitle / PRA /
     config. Enqueues a durable `rancher_node_teardown` job. Refuses (unless
     `force`) while clusters are still imported."""
-    if not _gcp_project_id():
-        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    from ..services import managed_node_service
+    node_cloud = _require_node_cloud(managed_node_service.RANCHER, cloud)
     job = job_service.create_job(
         db, job_type="rancher_node_teardown", created_by=current_user.username,
-        metadata={"name": name, "zone": zone, "force": force})
+        metadata={"name": name, "zone": zone, "cloud": node_cloud, "force": force})
     return DeployContainerResponse(
         job_id=job.id, status="pending", message=f"Tearing down Rancher node '{name}'…")
 
@@ -1054,15 +1136,18 @@ async def import_cluster_into_rancher(
 async def get_portainer_node(
     current_user: User = Depends(require_permission("containers", "read")),
 ):
-    """List the managed Portainer server COS instance(s) (labels.purpose=portainer)
-    and report whether a deploy is possible + the pinned server URL."""
-    from ..services import config_service, gcp_service
+    """List the managed Portainer server instance(s) (purpose=portainer, in whichever
+    cloud hosts the node) and report whether a deploy is possible + the pinned URL."""
+    from ..services import config_service, managed_node_service
     from ..services.gcp_service import GCPError
 
-    project_id = _gcp_project_id()
-    # A deploy needs nothing but a GCP project — unlike Rancher there's no bootstrap
-    # password to pre-set; the admin credential is generated during first-run.
-    configured = bool(project_id)
+    spec = managed_node_service.PORTAINER
+    cloud = managed_node_service.node_cloud(spec)
+    placement = _safe_placement(cloud, spec)
+    account = placement.get("account", "")
+    # A deploy needs nothing but a configured cloud — unlike Rancher there's no
+    # bootstrap password to pre-set; the admin credential is generated at first-run.
+    configured = bool(account)
     server_url = config_service.get("portainer_url") or ""
     token_configured = bool(config_service.get("portainer_pat"))
     # How to log in. An AUTO-GENERATED admin password is echoed (the operator has no
@@ -1076,18 +1161,19 @@ async def get_portainer_node(
                           f"change it in Portainer after first login).")
         elif config_service.get("portainer_admin_password"):
             login_hint = "Log in as admin with your configured Portainer admin password."
-    if not project_id:
+    if not account:
         # Not configured yet — return an empty, not-configured shell (no 503, so the
         # tab can render the setup card).
-        return PortainerNodeResponse(nodes=[], project_id="", count=0, configured=False,
+        return PortainerNodeResponse(nodes=[], cloud=cloud, account="", project_id="",
+                                     count=0, configured=False,
                                      server_url=server_url, token_configured=token_configured)
     try:
-        raw = await gcp_service.list_gce_portainer(project_id)
-    except GCPError as exc:
+        raw = await managed_node_service.list_nodes(cloud, spec, placement)
+    except (GCPError, managed_node_service.ManagedNodeError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     nodes = [
         PortainerNodeInfo(
-            name=i.get("name", ""), zone=i.get("zone", ""),
+            name=i.get("name", ""), cloud=cloud, zone=i.get("zone", ""),
             status=i.get("status", "UNKNOWN"), machine_type=i.get("machine_type", ""),
             image=i.get("image", ""), internal_ip=i.get("internal_ip", ""),
             external_ip=i.get("external_ip", ""), url=i.get("url", ""),
@@ -1096,9 +1182,11 @@ async def get_portainer_node(
         for i in raw
     ]
     data_disk_enabled = config_service.get_bool("portainer_data_disk_enabled", False)
-    node_name = config_service.get("gcp_portainer_name") or settings.gcp_portainer_name
+    node_name = placement.get("name", "")
     return PortainerNodeResponse(
-        nodes=nodes, project_id=project_id, count=len(nodes), configured=configured,
+        nodes=nodes, cloud=cloud, account=account,
+        project_id=account if cloud == "gcp" else "",
+        count=len(nodes), configured=configured,
         server_url=server_url, token_configured=token_configured, login_hint=login_hint,
         data_disk_enabled=data_disk_enabled,
         data_disk_name=f"{node_name}-data" if data_disk_enabled else "",
@@ -1120,29 +1208,27 @@ async def get_portainer_node_firewall(
 async def get_portainer_node_deploy_options(
     current_user: User = Depends(require_permission("containers", "read")),
 ):
-    """Deploy-form options for the Portainer node: the GCP regions it can be placed in
-    (the default plus every region with a configured subnet — the node's subnet is
-    regional), plus the PRA pickers (Jump Groups, Jumpoints, Vault account groups;
-    best-effort). ``configured`` is false when PRA OAuth isn't set, so the form shows
-    a note instead of empty dropdowns. Same payload shape as
-    /api/containers/rancher/pra-options.
+    """Deploy-form options for the Portainer node: the clouds it can be hosted on and
+    the regions available in each (the default plus every region with a configured
+    subnet — the node needs a public subnet, which is regional on every cloud), plus
+    the PRA pickers (Jump Groups, Jumpoints, Vault account groups; best-effort).
+    ``configured`` is false when PRA OAuth isn't set, so the form shows a note instead
+    of empty dropdowns. Same payload shape as /api/containers/rancher/pra-options.
 
     ``web_jump_enabled`` is the CONFIGURED default for the per-deploy checkbox — see
     that endpoint for why a form with nothing to seed from silently opted out."""
-    from ..services import config_service, pra_api_service
+    from ..services import config_service, managed_node_service, pra_api_service
     pickers = await pra_api_service.list_pickers()
+    cloud = managed_node_service.node_cloud(managed_node_service.PORTAINER)
     return {
         "configured": pra_api_service.configured(),
-        "regions": _portainer_deploy_regions(),
+        "cloud": cloud,
+        "clouds": list(managed_node_service.CLOUDS),
+        "regions": _node_deploy_regions(cloud),
+        "regions_by_cloud": _node_regions_by_cloud(),
         "web_jump_enabled": config_service.get_bool("portainer_ui_web_jump_enabled", False),
         **pickers,
     }
-
-
-def _portainer_deploy_regions() -> list[str]:
-    """Regions the Portainer node can be deployed into — same rule as
-    :func:`_rancher_deploy_regions` (the node's subnet is regional)."""
-    return region_config.deployable_regions("gcp")
 
 
 @router.post("/portainer/node/deploy", response_model=DeployContainerResponse)
@@ -1155,15 +1241,24 @@ async def deploy_portainer_node(
     `portainer_node_deploy` job (VM boot + first-run bootstrap can take minutes);
     follow progress at /jobs/{job_id}. On success the job writes portainer_url +
     portainer_pat, so the Containers tab starts working with no manual setup."""
-    if not _gcp_project_id():
-        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    from ..services import managed_node_service
+
+    cloud = _require_node_cloud(managed_node_service.PORTAINER, req.cloud or "")
     # Only carry fields the operator actually set, so blanks fall back to config.
-    meta: dict = {"web_jump_enabled": bool(req.web_jump_enabled)}
+    meta: dict = {"cloud": cloud, "web_jump_enabled": bool(req.web_jump_enabled)}
     if req.region:
-        if not region_catalog.validate("gcp", req.region):
-            raise HTTPException(status_code=400, detail=f"Invalid GCP region: {req.region!r}")
-        meta["region"] = region_catalog.normalize("gcp", req.region)
+        if not region_catalog.validate(cloud, req.region):
+            raise HTTPException(
+                status_code=400, detail=f"Invalid {cloud.upper()} region: {req.region!r}")
+        meta["region"] = region_catalog.normalize(cloud, req.region)
     if req.zone:
+        # Zones are a GCP concept in this shape: on AWS the subnet pins the AZ, and
+        # Azure has none. Rejecting rather than ignoring it keeps a stale form field
+        # from looking like it took effect.
+        if cloud != "gcp":
+            raise HTTPException(
+                status_code=400,
+                detail=f"A zone can only be chosen on GCP, not on {cloud.upper()}.")
         if not region_catalog.validate_zone(req.zone):
             raise HTTPException(status_code=400, detail=f"Invalid GCP zone: {req.zone!r}")
         zone = region_catalog.normalize("gcp", req.zone)
@@ -1188,24 +1283,25 @@ async def deploy_portainer_node(
 @router.post("/portainer/node/{name}/stop", response_model=DeployContainerResponse)
 async def stop_portainer_node(
     name: str,
-    zone: str = Query("", description="GCE zone (blank → configured Portainer zone)"),
+    zone: str = Query("", description="GCE zone / AZ (blank → the node's recorded zone)"),
+    cloud: str = Query("", description="Cloud the node is in (blank → the recorded one)"),
     delete_data_disk: bool = Query(
         False, description="Also delete the persistent data disk (irreversible)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "delete")),
 ):
-    """Tear down the Portainer node (VM + firewall) and clear the URL config.
+    """Tear down the Portainer node (VM + ingress rule) and clear the URL config.
     Enqueues a durable `portainer_node_teardown` job.
 
     Without a persistent data disk the node is EPHEMERAL and this discards all
     Portainer state (users, environments, settings). With one, the state survives and
     the next deploy reattaches it — unless `delete_data_disk` is set, which is the one
     irreversible part of a teardown."""
-    if not _gcp_project_id():
-        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    from ..services import managed_node_service
+    node_cloud = _require_node_cloud(managed_node_service.PORTAINER, cloud)
     job = job_service.create_job(
         db, job_type="portainer_node_teardown", created_by=current_user.username,
-        metadata={"name": name, "zone": zone,
+        metadata={"name": name, "zone": zone, "cloud": node_cloud,
                   "delete_data_disk": bool(delete_data_disk)})
     return DeployContainerResponse(
         job_id=job.id, status="pending", message=f"Tearing down Portainer node '{name}'…")

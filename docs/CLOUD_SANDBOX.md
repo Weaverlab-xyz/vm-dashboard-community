@@ -528,6 +528,13 @@ Like the running-VM guard, it also **refuses** if a live Rancher management
 node or an active GKE↔sandbox-VPC peering is still attached — decommission
 those via the dashboard first.
 
+For **Azure** the whole resource group goes in one call, which cascades everything
+in it — so that arm **refuses** while a managed Portainer/Rancher node VM, or an
+orphaned node data disk, is still present. A data disk is meant to outlive its VM,
+so it can be the only thing left, and cascading over it would destroy the node's
+only copy of its users, environments and settings. Tear the node down via the
+dashboard (which asks about the disk separately) first.
+
 Service principals (Azure) and service accounts (GCP) are also deleted.
 The AWS `ecsTaskExecutionRole` is only deleted if it was tagged by us; an
 existing role created outside the sandbox is preserved.

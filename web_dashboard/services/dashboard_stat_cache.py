@@ -76,6 +76,10 @@ _PROVIDER_LOCK_KEYS = {
     "aws": 1, "azure": 2, "gcp": 3, "oci": 4,
     "proxmox": 5, "nutanix": 6, "vsphere": 7, "hyperv": 8, "xcpng": 9,
     "k8s": 10, "storage": 11, "clouddb": 12, "portainer": 13, "local": 14,
+    # The managed Rancher node is its own provider rather than "gcp": the node can be
+    # hosted on any cloud, and an unknown provider here silently refuses the lock, so
+    # the tile would never be claimed by anyone.
+    "rancher": 15,
 }
 
 # Cooldown shape. Softer than cost_cache's, because these failures are mostly "the host is

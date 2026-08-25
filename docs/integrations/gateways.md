@@ -334,9 +334,10 @@ Azure's 64, because the in-guest hostname is `name[:15]`.
 *Web-Jump Gateways* in **Settings → Containers**; if not, its egress IP was never recorded —
 redeploy the gateway, or add the IP to the node's `*_allowed_source_cidrs` manually.
 
-**A Web Jump times out after its node was recreated** — the Rancher and Portainer nodes are
-ephemeral, so a recreate gives them a new address, and a Web Jump carries the URL it was
-made with. The registration now compares the two and re-points the jump item (destroy +
+**A Web Jump times out after its node was recreated** — on GCP and AWS the Rancher and
+Portainer nodes take an ephemeral address, so a recreate moves them, and a Web Jump carries
+the URL it was made with. (An Azure-hosted node keeps its Standard, static IP, so it does not
+hit this.) The registration now compares the two and re-points the jump item (destroy +
 recreate) when they disagree; before that it reused the stored id unconditionally, so the
 item kept dialling the dead address and no redeploy could converge it. If you are on an
 older build, tear the node down (**Stop**, which removes the jump item) rather than

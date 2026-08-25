@@ -181,7 +181,8 @@ class CloudRunJobListResponse(BaseModel):
 
 class RancherNodeInfo(BaseModel):
     name: str
-    zone: str
+    cloud: str = "gcp"     # which cloud the node is in (aws|azure|gcp)
+    zone: str              # GCE zone / AWS AZ / Azure location the node landed in
     status: str  # RUNNING | TERMINATED | STOPPING | PROVISIONING | ...
     machine_type: str = ""
     image: str = ""
@@ -193,18 +194,27 @@ class RancherNodeInfo(BaseModel):
 
 class RancherNodeResponse(BaseModel):
     nodes: list[RancherNodeInfo]
+    cloud: str = "gcp"     # the cloud the node is hosted on
+    account: str = ""      # cloud-neutral "where": GCP project / AWS account region scope / Azure subscription
+    # Legacy alias for `account`, kept because the Containers page still reads it.
+    # Blank on a non-GCP node rather than misreporting a project that doesn't exist.
     project_id: str
     count: int
-    configured: bool       # GCP project + bootstrap password present
+    configured: bool       # node cloud credentials + bootstrap password present
     server_url: str = ""   # the pinned rancher_server_url (if the node is bootstrapped)
     login_hint: str = ""   # how to log in (username + which configured password); never the secret itself
 
 
 class RancherDeployRequest(BaseModel):
+    # Deploy-time cloud pick. Blank → the persisted node cloud (gcp for installs that
+    # predate this field). Rancher is a SINGLE management plane, so choosing a
+    # different cloud RELOCATES the node rather than adding a second one.
+    cloud: Optional[str] = None              # aws | azure | gcp
     # Deploy-time region pick (multi-region). Blank → the persisted node region, else
     # the configured default. zone is optional within the region (blank → the region's
-    # first available zone, with same-region capacity fallback).
-    region: Optional[str] = None             # GCP region for the Rancher node
+    # first available zone, with same-region capacity fallback) and is GCP-only —
+    # on AWS the subnet pins the AZ and Azure has no zone in this shape.
+    region: Optional[str] = None             # region for the Rancher node
     zone: Optional[str] = None               # optional GCP zone within `region`
     # Deploy-time PRA choices (parity with DB/VM deploys). All optional — omitted
     # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault
@@ -229,7 +239,8 @@ class RancherImportResponse(BaseModel):
 
 class PortainerNodeInfo(BaseModel):
     name: str
-    zone: str
+    cloud: str = "gcp"     # which cloud the node is in (aws|azure|gcp)
+    zone: str              # GCE zone / AWS AZ / Azure location the node landed in
     status: str  # RUNNING | TERMINATED | STOPPING | PROVISIONING | ...
     machine_type: str = ""
     image: str = ""
@@ -241,9 +252,12 @@ class PortainerNodeInfo(BaseModel):
 
 class PortainerNodeResponse(BaseModel):
     nodes: list[PortainerNodeInfo]
+    cloud: str = "gcp"     # the cloud the node is hosted on
+    account: str = ""      # cloud-neutral "where": GCP project / AWS account / Azure subscription
+    # Legacy alias for `account`, kept because the Containers page still reads it.
     project_id: str
     count: int
-    configured: bool       # GCP project present (all a deploy needs — no pre-set secret)
+    configured: bool       # node cloud credentials present (all a deploy needs — no pre-set secret)
     server_url: str = ""   # the pinned portainer_url (if a node is deployed)
     token_configured: bool = False  # a portainer_pat is stored, so the Containers tab can talk to it
     login_hint: str = ""   # how to log in; the auto-generated password is echoed, an operator-set one never is
@@ -257,10 +271,14 @@ class PortainerNodeResponse(BaseModel):
 
 
 class PortainerDeployRequest(BaseModel):
+    # Deploy-time cloud pick. Blank → the persisted node cloud (gcp for installs that
+    # predate this field). One Portainer server manages many Docker hosts, so choosing
+    # a different cloud RELOCATES the node rather than adding a second one.
+    cloud: Optional[str] = None              # aws | azure | gcp
     # Deploy-time region pick (multi-region). Blank → the persisted node region, else
     # the configured default. zone is optional within the region (blank → the region's
-    # first available zone, with same-region capacity fallback).
-    region: Optional[str] = None             # GCP region for the Portainer node
+    # first available zone, with same-region capacity fallback) and is GCP-only.
+    region: Optional[str] = None             # region for the Portainer node
     zone: Optional[str] = None               # optional GCP zone within `region`
     # Deploy-time PRA choices (parity with the Rancher node). All optional — omitted
     # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault

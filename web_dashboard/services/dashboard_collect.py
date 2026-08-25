@@ -219,24 +219,34 @@ async def _cloud_run_jobs():
     return count_payload(await gcp_service.list_cloud_run_jobs(project_id, limit=20))
 
 
+async def _managed_node_count(spec):
+    """Count the managed nodes of one feature in whichever cloud hosts it.
+
+    The node used to be GCE-only, so this tile read the GCP project directly and went
+    "unavailable" on an install with no GCP at all -- which, once the node could live
+    on AWS or Azure, meant a deployed node reported as missing.
+    """
+    from . import managed_node_service
+    cloud = managed_node_service.node_cloud(spec)
+    try:
+        placement = managed_node_service.resolve_placement(cloud, spec)
+    except managed_node_service.ManagedNodeError as exc:
+        raise TileUnavailable(str(exc))
+    if not placement.get("account"):
+        raise TileUnavailable(f"no {cloud} account configured")
+    return count_payload(
+        await managed_node_service.list_nodes(cloud, spec, placement),
+        running=_upper_running("status"))
+
+
 async def _rancher_nodes():
-    from ..api import containers as containers_api
-    from . import gcp_service
-    project_id = containers_api._gcp_project_id()
-    if not project_id:
-        raise TileUnavailable("no GCP project configured")
-    return count_payload(await gcp_service.list_gce_rancher(project_id),
-                         running=_upper_running("status"))
+    from . import managed_node_service
+    return await _managed_node_count(managed_node_service.RANCHER)
 
 
 async def _portainer_node():
-    from ..api import containers as containers_api
-    from . import gcp_service
-    project_id = containers_api._gcp_project_id()
-    if not project_id:
-        raise TileUnavailable("no GCP project configured")
-    return count_payload(await gcp_service.list_gce_portainer(project_id),
-                         running=_upper_running("status"))
+    from . import managed_node_service
+    return await _managed_node_count(managed_node_service.PORTAINER)
 
 
 async def _portainer_endpoints():
@@ -268,8 +278,12 @@ TILES = (
     TileSpec("gcp_images",          "gcp",       _gcp_images,          feature="gcp"),
     TileSpec("gce_containers",      "gcp",       _gce_containers,      feature="gcp"),
     TileSpec("cloud_run_jobs",      "gcp",       _cloud_run_jobs,      feature="gcp"),
-    TileSpec("portainer_node",      "gcp",       _portainer_node,      feature="gcp"),
-    TileSpec("rancher_nodes",       "gcp",       _rancher_nodes,       feature="k8s_management"),
+    # The managed nodes are NOT gcp-provider tiles any more: the node can be hosted on
+    # any cloud, so grouping them under "gcp" would attribute an AWS timeout to GCP's
+    # cooldown, and gating them on feature="gcp" hid a deployed node on an install with
+    # no GCP at all. They gate on their own feature and lock on their own key.
+    TileSpec("portainer_node",      "portainer", _portainer_node,      feature="portainer"),
+    TileSpec("rancher_nodes",       "rancher",   _rancher_nodes,       feature="k8s_management"),
     TileSpec("oci_instances",       "oci",       _oci_instances,       feature="oci",
              rbac="oci"),
     TileSpec("oci_images",          "oci",       _oci_images,          feature="oci"),

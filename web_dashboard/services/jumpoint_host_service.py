@@ -33,10 +33,6 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ECS-optimized Amazon Linux 2023 AMI — public SSM parameter (the agent + tun
-# module ship in it). Mirrors scripts/sandbox/Linux/setup-aws.sh.
-_ECS_AMI_SSM = "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"
-
 _REGISTER_TIMEOUT_S = 180   # wait for the EC2 host to register as an ECS container instance
 _REGISTER_POLL_S = 10
 
@@ -153,11 +149,11 @@ async def ensure_rancher_ui_jumpoint() -> Optional[str]:
     Rancher-UI Web Jump is up, capture its egress IP into
     ``rancher_ui_jumpoint_egress_ip``, and return it.
 
-    Cloud is picked by ``rancher_ui_jumpoint_cloud`` (default ``gcp`` — same cloud as
-    the Rancher node, and its GCE host exposes a clean external IP). The Azure host
-    has no public IP, so nothing is captured there and the operator must add the IP
-    to ``rancher_allowed_source_cidrs`` manually. A pre-existing operator Gateway
-    (not dashboard-provisioned) likewise can't be auto-detected."""
+    Cloud is picked by ``rancher_ui_jumpoint_cloud`` (default ``gcp`` — the same cloud
+    the node has historically run on). All three managed hosts expose a knowable egress
+    IP: GCP and AWS via the host's public IP, Azure via a Standard, secure-by-default
+    public IP on its NIC. A pre-existing operator Gateway (not dashboard-provisioned)
+    still can't be auto-detected — add its IP to ``rancher_allowed_source_cidrs``."""
     from . import config_service
     cloud = (_cfg("rancher_ui_jumpoint_cloud") or "gcp").lower()
     try:
@@ -175,9 +171,10 @@ async def ensure_portainer_ui_jumpoint() -> Optional[str]:
     Same shape as :func:`ensure_rancher_ui_jumpoint` — the Gateway host itself is
     SHARED, so when both Web Jumps run on the same cloud this is a no-op that just
     re-reads the (possibly refreshed) IP. Cloud is picked by
-    ``portainer_ui_jumpoint_cloud`` (default ``gcp`` — same cloud as the node). The
-    Azure host has no public IP, so nothing is captured there and the operator must
-    add it to ``portainer_allowed_source_cidrs`` manually."""
+    ``portainer_ui_jumpoint_cloud`` (default ``gcp``). All three managed hosts expose a
+    knowable egress IP (see :func:`ensure_rancher_ui_jumpoint`); only a Gateway the
+    dashboard did not provision has to be added to
+    ``portainer_allowed_source_cidrs`` by hand."""
     from . import config_service
     cloud = (_cfg("portainer_ui_jumpoint_cloud") or "gcp").lower()
     try:
@@ -444,7 +441,11 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "",
     # find-or-create race (acceptable residual window for a single-operator lab).
     rc = _aws_region_cfg(region)
     cluster = rc["ecs_cluster"]
-    ami_id = await aws_service.get_ssm_parameter(region, _ECS_AMI_SSM)
+    # The ECS-optimized AL2023 AMI (the ECS agent + tun module ship in it). Same
+    # image the managed Portainer/Rancher nodes use, so the parameter path has one
+    # definition, in aws_service.
+    ami_id = await aws_service.get_ssm_parameter(
+        region, aws_service.ECS_OPTIMIZED_AMI_SSM)
     user_data = (f"#!/bin/bash\n"
                  f"echo \"ECS_CLUSTER={cluster}\" >> /etc/ecs/ecs.config\n"
                  f"modprobe tun || true\n")
@@ -1042,23 +1043,6 @@ async def _resolve_azure_deploy_key() -> str:
             or "")
 
 
-def _azure_compliant_password() -> str:
-    """A random password meeting Azure's VM complexity rules (3 of 4 categories).
-    The gateway VM's NIC carries a Standard, secure-by-default public IP used only
-    for egress — Standard IPs block all inbound unless an NSG allows it, and none is
-    attached, so no inbound SSH is possible — this just satisfies the API; it is
-    never used to log in."""
-    import secrets
-    import string
-    symbols = "!@#%^*-_"
-    alphabet = string.ascii_letters + string.digits + symbols
-    while True:
-        pw = "".join(secrets.choice(alphabet) for _ in range(24))
-        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
-                and any(c.isdigit() for c in pw) and any(c in symbols for c in pw)):
-            return pw
-
-
 def _azure_gateway_location(region: str) -> str:
     """The Azure region a gateway VM is created in — and torn down from.
 
@@ -1111,7 +1095,7 @@ async def _ensure_jumpoint_host_azure(region: str, name: str = "",
             # headless Chromium on the GATEWAY, and 1 GB gets it OOM-killed, dropping
             # every session on the node. See `gcp_jumpoint_machine_type` in config.py.
             vm_size=_cfg("azure_jumpoint_vm_size") or "Standard_B2s",
-            admin_password=_azure_compliant_password(),
+            admin_password=azure_service._azure_compliant_password(),
             install_db_clients=install_db_clients,
         )
         logger.info("gateway-host(azure): gateway VM %s %s in %s",

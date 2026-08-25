@@ -807,6 +807,25 @@ def generate_windows_admin_password(length: int = 20) -> str:
     return "".join(chars)
 
 
+def _azure_compliant_password() -> str:
+    """A random password meeting Azure's VM complexity rules (3 of 4 categories).
+
+    Azure refuses to create a Linux VM given neither a password nor an SSH key, so the
+    Gateway VM and both managed nodes pass one purely to satisfy the API — none of them
+    is ever logged into over it. It lives here, with the rest of the Azure VM
+    primitives, because all three callers reach it through this module.
+    """
+    import secrets
+    import string
+    symbols = "!@#%^*-_"
+    alphabet = string.ascii_letters + string.digits + symbols
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(24))
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw) and any(c in symbols for c in pw)):
+            return pw
+
+
 def store_windows_admin_password(vm_name: str, key_suffix: str, password: str) -> tuple[str, str]:
     """Store a generated Windows admin password in the configured secrets
     backend. Returns ``(backend, ref)`` for job metadata — job records carry
@@ -1886,6 +1905,473 @@ def _get_storage_account_key_sync(cred, sub_id: str, rg: str, account_name: str)
     # ``.value`` (also item-accessible on older/newer models).
     first = result["keys"][0]
     return first["value"] if isinstance(first, dict) else first.value
+
+
+# ── Managed container nodes on Azure VMs (Portainer server / Rancher server) ──
+# The dashboard's two managed-container nodes run as ONE container on ONE VM with a
+# public, source-restricted IP. GCE gets its container from `gce-container-declaration`
+# (konlet); the Azure side runs `docker run` from cloud-init, the same mechanism the
+# Gateway VM already uses.
+#
+# ACI is deliberately NOT used for these. Rancher needs `--privileged`, which a
+# container group cannot give it, so ACI could serve at most one of the two features --
+# and having two different Azure shapes for two near-identical nodes is worse than
+# having one. A VM also means the durable data disk is a plain managed disk.
+#
+# Two things differ from the AWS side, both in Azure's favour:
+#   * The public IP is Standard SKU, and a Standard IP must be Static -- so the node
+#     KEEPS ITS ADDRESS across a recreate. Portainer Edge keys and Rancher's server-url
+#     survive here where they do not on GCP or AWS.
+#   * A data disk can be attached AT CREATE TIME, so cloud-init mounts it before the
+#     container starts without needing to poll for it (the AWS path cannot: an existing
+#     EBS volume can only be attached after the instance is running).
+#
+# Ingress is a dedicated NSG on the NIC. A Standard public IP is secure-by-default --
+# all inbound is denied unless an NSG allows it -- so fail-closed here is DELETING the
+# allow rule, which is the same shape as GCE's "delete the firewall rule" rather than
+# AWS's "revoke every permission".
+
+_NODE_MANAGED_TAG = "vm-dashboard"
+
+#: Where a durable data disk is mounted, and the LUN it is attached at. The device path
+#: is deterministic on Azure (unlike AWS's Nitro renaming), so cloud-init can mount it
+#: without discovery.
+NODE_DATA_MOUNT = "/mnt/node-data"
+_NODE_DATA_LUN = 0
+_NODE_DATA_DEVICE = f"/dev/disk/azure/scsi1/lun{_NODE_DATA_LUN}"
+
+#: One inbound allow rule per node, named after the rule set itself. Priority is low
+#: enough to sit under anything an operator adds by hand and high enough to beat the
+#: default deny.
+_NODE_RULE_NAME = "allow-mgmt"
+_NODE_RULE_PRIORITY = 300
+
+
+def container_node_cloud_init(docker_cmd: str, *, data_device: str = "",
+                              mount_path: str = NODE_DATA_MOUNT) -> str:
+    """Base64 cloud-init that installs Docker and starts one container, mounting the
+    node's durable disk first when it has one.
+
+    The mount ordering is the whole point, and it is why this is cloud-init rather than
+    a post-boot step: Portainer coming up against an unmounted ``/data`` writes its
+    database to the OS disk, which is then lost on the next recreate with nothing in any
+    log to say so. konlet gives that ordering for free on GCE; here it is explicit.
+
+    Unlike AWS there is no wait loop, because an Azure data disk is attached at VM
+    create time and its device path is deterministic.
+    """
+    import base64
+    packages = ["docker.io"]
+    runcmd = ["systemctl enable --now docker"]
+    if data_device:
+        runcmd = [
+            f"mkdir -p {mount_path}",
+            # blkid is the "has this ever been formatted?" test. An unconditional mkfs
+            # would destroy the only copy of the node's users, environments and settings.
+            f"if ! blkid {data_device} >/dev/null 2>&1; then mkfs.ext4 -F {data_device}; fi",
+            f"mount {data_device} {mount_path}",
+            f"echo '{data_device} {mount_path} ext4 defaults,nofail 0 2' >> /etc/fstab",
+        ] + runcmd
+    runcmd.append(docker_cmd)
+    lines = ["#cloud-config", "package_update: true", "packages:"]
+    lines += [f"  - {p}" for p in packages]
+    lines.append("runcmd:")
+    lines += [f"  - [ sh, -c, {json.dumps(c)} ]" for c in runcmd]
+    return base64.b64encode(("\n".join(lines) + "\n").encode()).decode()
+
+
+def _ensure_node_nsg_sync(cred, sub_id: str, rg: str, location: str, name: str,
+                          ports: list, source_cidrs: list) -> dict:
+    """Converge the node's NSG on ``source_cidrs`` for ``ports``.
+
+    Fail-closed is DELETING the allow rule rather than writing an empty one: an NSG
+    rule with no source prefixes is rejected by the API, and a Standard public IP with
+    no allow rule denies all inbound by default -- so removing it is both valid and
+    exactly as closed as GCE deleting its firewall rule.
+
+    The NSG itself is left in place when closed. It is attached to the node's NIC, so
+    it could not be deleted anyway, and recreating it on the next open would detach and
+    reattach for no gain.
+    """
+    network = _get_network(cred, sub_id)
+    tags = {"managed-by": _NODE_MANAGED_TAG}
+    created = False
+    try:
+        network.network_security_groups.get(rg, name)
+    except Exception:
+        if not source_cidrs:
+            # Nothing to open and nothing to close. Creating the group here would leave
+            # litter behind on an install that never finishes a deploy.
+            return {"name": name, "id": "", "opened": False, "created": False}
+        network.network_security_groups.begin_create_or_update(
+            rg, name, {"location": location, "tags": tags}).result()
+        created = True
+
+    if source_cidrs:
+        network.security_rules.begin_create_or_update(rg, name, _NODE_RULE_NAME, {
+            "protocol": "Tcp",
+            "source_address_prefixes": list(source_cidrs),
+            "source_port_range": "*",
+            "destination_address_prefix": "*",
+            "destination_port_ranges": [str(p) for p in ports],
+            "access": "Allow",
+            "direction": "Inbound",
+            "priority": _NODE_RULE_PRIORITY,
+            "description": "vm-dashboard managed node: source-restricted ingress",
+        }).result()
+    else:
+        try:
+            network.security_rules.begin_delete(rg, name, _NODE_RULE_NAME).result()
+        except Exception as exc:  # noqa: BLE001 — already absent is the desired state
+            logger.info("node NSG %s: no allow rule to remove (%s)", name, exc)
+
+    nsg = network.network_security_groups.get(rg, name)
+    return {"name": name, "id": nsg.id, "opened": bool(source_cidrs), "created": created}
+
+
+async def ensure_node_nsg(rg: str, location: str, *, name: str, ports: list,
+                          source_cidrs: list) -> dict:
+    """Converge a managed node's inbound NSG rule. Fail-closed on an empty set."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_ensure_node_nsg_sync, cred, sub_id, rg, location,
+                                name, list(ports), list(source_cidrs))
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to apply ingress for {name}: {e}") from e
+
+
+def _find_node_nsg_id_sync(cred, sub_id: str, rg: str, name: str) -> str:
+    network = _get_network(cred, sub_id)
+    try:
+        return network.network_security_groups.get(rg, name).id or ""
+    except Exception:
+        return ""
+
+
+async def find_node_nsg_id(rg: str, name: str) -> str:
+    """The id of the node's NSG, or ``""``.
+
+    A LOOKUP, deliberately, not an ensure: the launcher needs the id to attach the group
+    to the node's NIC, and re-ensuring it with an empty source set would delete the very
+    allow rule the ingress refresh just created moments earlier.
+    """
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_find_node_nsg_id_sync, cred, sub_id, rg, name)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to look up the NSG {name}: {e}") from e
+
+
+def _delete_node_nsg_sync(cred, sub_id: str, rg: str, name: str) -> None:
+    network = _get_network(cred, sub_id)
+    network.network_security_groups.begin_delete(rg, name).result()
+
+
+async def delete_node_nsg(rg: str, name: str) -> None:
+    """Remove the node's NSG once its NIC is gone. Best-effort by contract: the group
+    is harmless on its own, and a teardown must not fail on tidying up."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        await _to_thread(_delete_node_nsg_sync, cred, sub_id, rg, name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("node NSG %s: delete failed (continuing): %s", name, e)
+
+
+def _find_node_data_disk_sync(cred, sub_id: str, rg: str, name: str) -> dict:
+    compute = _get_compute(cred, sub_id)
+    try:
+        d = compute.disks.get(rg, name)
+    except Exception:
+        return {}
+    return {"disk_id": d.id, "name": name, "zone": d.location,
+            "size_gb": d.disk_size_gb or 0, "state": d.disk_state or ""}
+
+
+async def find_node_data_disk(rg: str, name: str) -> dict:
+    """The node's durable managed disk, or ``{}``.
+
+    Read BEFORE a launch: a disk that already holds an initialized Portainer database
+    means the stored admin credential -- not a freshly generated one -- is the only one
+    that can sign in, and a managed disk cannot cross regions.
+    """
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_find_node_data_disk_sync, cred, sub_id, rg, name)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to look up the data disk {name}: {e}") from e
+
+
+def _ensure_node_data_disk_sync(cred, sub_id: str, rg: str, location: str,
+                                name: str, size_gb: int) -> dict:
+    existing = _find_node_data_disk_sync(cred, sub_id, rg, name)
+    if existing:
+        return {**existing, "created": False}
+    compute = _get_compute(cred, sub_id)
+    d = compute.disks.begin_create_or_update(rg, name, {
+        "location": location,
+        "sku": {"name": "StandardSSD_LRS"},
+        "disk_size_gb": int(size_gb),
+        "creation_data": {"create_option": "Empty"},
+        "tags": {"managed-by": _NODE_MANAGED_TAG},
+    }).result()
+    return {"disk_id": d.id, "name": name, "zone": location,
+            "size_gb": int(size_gb), "state": "Unattached", "created": True}
+
+
+async def ensure_node_data_disk(rg: str, location: str, *, name: str,
+                                size_gb: int) -> dict:
+    """Find-or-create the node's durable managed disk."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_ensure_node_data_disk_sync, cred, sub_id, rg,
+                                location, name, size_gb)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to ensure the data disk {name}: {e}") from e
+
+
+def _delete_node_data_disk_sync(cred, sub_id: str, rg: str, name: str) -> None:
+    compute = _get_compute(cred, sub_id)
+    compute.disks.begin_delete(rg, name).result()
+
+
+async def delete_node_data_disk(rg: str, name: str) -> None:
+    """Delete the node's data disk. Only ever called on explicit request -- it is the
+    one part of a teardown that cannot be undone."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        await _to_thread(_delete_node_data_disk_sync, cred, sub_id, rg, name)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to delete the data disk {name}: {e}") from e
+
+
+def _node_public_ip_sync(network, rg: str, name: str) -> str:
+    try:
+        return network.public_ip_addresses.get(rg, f"{name}-pip").ip_address or ""
+    except Exception:
+        return ""
+
+
+def _run_vm_container_node_sync(
+    cred, sub_id: str, rg: str, location: str, subnet_id: str, name: str,
+    vm_size: str, admin_username: str, admin_password: str, cloud_init_b64: str,
+    nsg_id: str, os_disk_gb: int, data_disk_id: str, purpose: str,
+    container_image: str,
+) -> dict:
+    """Find-or-create the node VM. Idempotent on name: an existing VM is returned with
+    ``reused=True`` rather than recreated, matching the GCE launcher -- a redeploy onto
+    a live node must not stand up a second management plane."""
+    compute = _get_compute(cred, sub_id)
+    network = _get_network(cred, sub_id)
+    pip_name = f"{name}-pip"
+    tags = {"managed-by": _NODE_MANAGED_TAG, "purpose": purpose,
+            "container-image": container_image}
+
+    try:
+        existing = compute.virtual_machines.get(rg, name, expand="instanceView")
+    except Exception:
+        existing = None
+    if existing is not None:
+        nic_ips = _node_nic_ips_sync(network, existing)
+        return {"name": name, "vm_id": existing.id, "reused": True,
+                "zone": location, "status": _node_power_state(existing),
+                "machine_type": existing.hardware_profile.vm_size,
+                "image": container_image,
+                "internal_ip": nic_ips.get("private", ""),
+                "external_ip": nic_ips.get("public", "")
+                or _node_public_ip_sync(network, rg, name),
+                "created_at": None}
+
+    # Standard + Static: secure-by-default (no inbound without an NSG rule) AND stable
+    # across a recreate, which is what lets Edge keys and a pinned server-url survive.
+    pip = network.public_ip_addresses.begin_create_or_update(
+        rg, pip_name,
+        {"location": location, "sku": {"name": "Standard"},
+         "public_ip_allocation_method": "Static", "tags": tags},
+    ).result()
+    ip_config = {"name": "ipconfig1", "subnet": {"id": subnet_id},
+                 "private_ip_address_allocation": "Dynamic",
+                 "public_ip_address": {"id": pip.id}}
+    nic_params = {"location": location, "ip_configurations": [ip_config], "tags": tags}
+    if nsg_id:
+        # Without this the Standard IP denies every inbound packet and the node reads
+        # as a firewall problem no allow-list change can fix.
+        nic_params["network_security_group"] = {"id": nsg_id}
+    nic = network.network_interfaces.begin_create_or_update(rg, f"{name}-nic",
+                                                           nic_params).result()
+
+    storage_profile = {
+        "image_reference": {"publisher": "Canonical",
+                            "offer": "0001-com-ubuntu-server-jammy",
+                            "sku": "22_04-lts", "version": "latest"},
+        "os_disk": {"create_option": "FromImage", "delete_option": "Delete",
+                    **({"disk_size_gb": int(os_disk_gb)} if os_disk_gb else {})},
+    }
+    if data_disk_id:
+        # Attached AT CREATE, so cloud-init can mount it before starting the container.
+        # delete_option=Detach is what "durable" means: the disk outlives the VM.
+        storage_profile["data_disks"] = [{
+            "lun": _NODE_DATA_LUN, "create_option": "Attach",
+            "delete_option": "Detach", "managed_disk": {"id": data_disk_id},
+        }]
+
+    vm = compute.virtual_machines.begin_create_or_update(rg, name, {
+        "location": location, "tags": tags,
+        "hardware_profile": {"vm_size": vm_size},
+        "storage_profile": storage_profile,
+        "os_profile": {
+            "computer_name": name[:15],
+            "admin_username": admin_username,
+            "admin_password": admin_password,
+            "linux_configuration": {"disable_password_authentication": False},
+            "custom_data": cloud_init_b64,
+        },
+        "network_profile": {"network_interfaces": [{"id": nic.id, "primary": True}]},
+    }).result()
+    return {"name": name, "vm_id": vm.id, "reused": False, "zone": location,
+            "status": "RUNNING", "machine_type": vm_size, "image": container_image,
+            "internal_ip": (nic.ip_configurations[0].private_ip_address
+                            if nic.ip_configurations else ""),
+            "external_ip": pip.ip_address or "", "created_at": None}
+
+
+async def run_vm_container_node(
+    rg: str, location: str, *, subnet_id: str, name: str, vm_size: str,
+    admin_password: str, cloud_init_b64: str, nsg_id: str = "", os_disk_gb: int = 0,
+    data_disk_id: str = "", purpose: str = "", container_image: str = "",
+    admin_username: str = "nodeadmin",
+) -> dict:
+    """Ensure the managed node VM (idempotent on name)."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(
+            _run_vm_container_node_sync, cred, sub_id, rg, location, subnet_id, name,
+            vm_size, admin_username, admin_password, cloud_init_b64, nsg_id,
+            os_disk_gb, data_disk_id, purpose, container_image,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to start the {purpose or 'container'} node {name}: {e}") from e
+
+
+def _node_power_state(vm) -> str:
+    """Normalise Azure's power state to the RUNNING/... vocabulary the node tables
+    badge on, so no reader has to know which cloud it is looking at."""
+    view = getattr(vm, "instance_view", None)
+    for st in (getattr(view, "statuses", None) or []):
+        code = (st.code or "")
+        if code.startswith("PowerState/"):
+            return code.split("/", 1)[1].upper()
+    return "UNKNOWN"
+
+
+def _node_nic_ips_sync(network, vm) -> dict:
+    """The VM's private + public address, read through its primary NIC."""
+    out = {"private": "", "public": ""}
+    nics = getattr(getattr(vm, "network_profile", None), "network_interfaces", None) or []
+    if not nics:
+        return out
+    nic_id = nics[0].id or ""
+    try:
+        parts = nic_id.split("/")
+        nic = network.network_interfaces.get(parts[parts.index("resourceGroups") + 1],
+                                            parts[-1])
+    except Exception:
+        return out
+    for cfg in (nic.ip_configurations or []):
+        out["private"] = out["private"] or (cfg.private_ip_address or "")
+        pip_ref = getattr(cfg, "public_ip_address", None)
+        if pip_ref is not None and getattr(pip_ref, "id", ""):
+            pid = pip_ref.id.split("/")
+            try:
+                pip = network.public_ip_addresses.get(
+                    pid[pid.index("resourceGroups") + 1], pid[-1])
+                out["public"] = out["public"] or (pip.ip_address or "")
+            except Exception:
+                pass
+    return out
+
+
+def _list_vm_container_nodes_sync(cred, sub_id: str, rg: str, purpose: str) -> list:
+    compute = _get_compute(cred, sub_id)
+    network = _get_network(cred, sub_id)
+    out = []
+    for vm in compute.virtual_machines.list(rg):
+        tags = vm.tags or {}
+        if tags.get("purpose") != purpose or tags.get("managed-by") != _NODE_MANAGED_TAG:
+            continue
+        try:
+            vm = compute.virtual_machines.get(rg, vm.name, expand="instanceView")
+        except Exception:
+            pass
+        ips = _node_nic_ips_sync(network, vm)
+        ip = ips.get("public", "") or _node_public_ip_sync(network, rg, vm.name)
+        port = {"rancher": 443, "portainer": 9443}.get(purpose, 443)
+        out.append({
+            "name": vm.name,
+            "zone": vm.location,
+            "status": _node_power_state(vm),
+            "machine_type": getattr(vm.hardware_profile, "vm_size", ""),
+            "image": tags.get("container-image", ""),
+            "internal_ip": ips.get("private", ""),
+            "external_ip": ip,
+            "url": (f"https://{ip}" if port == 443 else f"https://{ip}:{port}") if ip else "",
+            "created_at": None,
+        })
+    return out
+
+
+async def list_vm_container_nodes(rg: str, purpose: str) -> list:
+    """Every managed container node of ``purpose`` in ``rg`` (tag query)."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_list_vm_container_nodes_sync, cred, sub_id, rg, purpose)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to list {purpose} nodes: {e}") from e
+
+
+def _stop_vm_container_node_sync(cred, sub_id: str, rg: str, name: str) -> None:
+    """Delete the node VM and the per-node resources it owns.
+
+    Order matters: the NIC holds the public IP and the NSG, so both stay undeletable
+    until the VM and then the NIC are gone. Each step is independently best-effort so a
+    resource that somebody already removed by hand cannot strand the rest.
+    """
+    compute = _get_compute(cred, sub_id)
+    network = _get_network(cred, sub_id)
+    for what, fn in (
+        ("vm", lambda: compute.virtual_machines.begin_delete(rg, name).result()),
+        ("nic", lambda: network.network_interfaces.begin_delete(rg, f"{name}-nic").result()),
+        ("public IP", lambda: network.public_ip_addresses.begin_delete(rg, f"{name}-pip").result()),
+    ):
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("node %s: deleting its %s failed (continuing): %s",
+                           name, what, exc)
+
+
+async def stop_vm_container_node(rg: str, name: str) -> None:
+    """Delete the node VM plus its NIC and public IP."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        await _to_thread(_stop_vm_container_node_sync, cred, sub_id, rg, name)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to delete the node {name}: {e}") from e
 
 
 def _run_aci_jumpoint_sync(

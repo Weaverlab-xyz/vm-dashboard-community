@@ -151,17 +151,22 @@ def test_gce_endpoints_503_when_project_missing():
         containers._gcp_project_id = saved["proj"]
 
 
-def _patch_config_service(saved):
+def _patch_config_service(saved, gcp_project: str = ""):
     """Stub config_service reads used by the Portainer-node routes.
 
-    ``get_portainer_node`` reads portainer_url / portainer_pat BEFORE the project
-    check, and ``firewall_status`` reads the CIDR keys — both would hit an
-    uninitialised DB here and turn a handled path into a 500. Same reason this file
-    stubs ``_aci_rg`` above."""
+    ``get_portainer_node`` reads portainer_url / portainer_pat BEFORE the "is this
+    cloud configured" check, and ``firewall_status`` reads the CIDR keys — both would
+    hit an uninitialised DB here and turn a handled path into a 500. Same reason this
+    file stubs ``_aci_rg`` above.
+
+    ``gcp_project`` is how a test says "GCP IS configured": the node routes resolve
+    their placement through ``managed_node_service``, which reads ``gcp_project_id``
+    from config — so config is the only seam that decides it."""
     from web_dashboard.services import config_service
     saved["cfg_get"] = config_service.get
     saved["cfg_get_bool"] = config_service.get_bool
-    config_service.get = lambda key, default=None: ""
+    config_service.get = lambda key, default=None: (
+        gcp_project if key == "gcp_project_id" else "")
     config_service.get_bool = lambda key, default=False: False
 
 
@@ -183,7 +188,7 @@ def test_portainer_node_endpoints_handled_when_gcp_unreachable():
     (or a clean 200 for the routes that make no cloud call) — never a 500."""
     client = _make_client()
     saved = {}
-    _patch_config_service(saved)
+    _patch_config_service(saved, gcp_project="test-project")
 
     from web_dashboard.services import gcp_service
     saved["list_portainer"] = gcp_service.list_gce_portainer
@@ -232,7 +237,7 @@ def test_portainer_node_returns_shell_when_project_missing():
 def test_portainer_node_ok_when_configured():
     client = _make_client()
     saved = {}
-    _patch_config_service(saved)
+    _patch_config_service(saved, gcp_project="test-project")
 
     from web_dashboard.services import gcp_service
     saved["list_portainer"] = gcp_service.list_gce_portainer
