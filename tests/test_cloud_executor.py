@@ -250,6 +250,34 @@ def test_the_error_from_the_call_itself_is_not_swallowed():
     assert ce.stats()["aws"]["busy"] == 0, "a failed call leaked its slot"
 
 
+def test_the_callers_contextvars_are_visible_inside_the_pool_thread():
+    """asyncio.to_thread copies the caller's context into its thread; this executor
+    replaced asyncio.to_thread at every cloud call site (pinned below), so it must keep
+    that property. It is not a nicety: the job runner marks provisioning jobs with a
+    contextvar (workload_credential_lease.provisioning) and the AWS credential lookup
+    reads it INSIDE the pool thread. With a bare pool.submit the thread starts on a
+    fresh context, the marker is invisible, and a deploy is silently served the
+    read-only everyday lease — the live ec2_deploy failure of 2026-08-25
+    (iam:PassRole: explicit deny in a session policy)."""
+    import contextvars
+    ce = _fresh()
+    var = contextvars.ContextVar("wlc_purpose_probe", default="outside")
+
+    async def scenario():
+        token = var.set("inside-the-job")
+        try:
+            assert await ce.run("aws", var.get, deadline=5) == "inside-the-job", \
+                "the pool thread did not see the caller's contextvars"
+            # And it must be a COPY: a set made inside the thread may not leak back.
+            await ce.run("aws", lambda: var.set("leaked"), deadline=5)
+            assert var.get() == "inside-the-job", \
+                "the pool thread mutated the caller's own context"
+        finally:
+            var.reset(token)
+
+    asyncio.run(scenario())
+
+
 # ── Bounds a misconfiguration cannot defeat ──────────────────────────────────
 
 def test_pool_size_has_a_floor_and_a_ceiling():

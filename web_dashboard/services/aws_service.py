@@ -623,7 +623,21 @@ async def launch_instance(
     except (ClientError, BotoCoreError) as e:
         msg = str(e)
         low = msg.lower().replace(" ", "")
-        if "passrole" in low:
+        if "passrole" in low and "sessionpolicy" in low:
+            # A session policy only exists here when the credential is a Workload
+            # Credentials dynamic lease, and an explicit deny in it beats ANY identity
+            # policy — the static-key remedy below cannot work and must not be offered.
+            msg += (
+                " — Hint: the deny came from a session policy, so this call ran on a "
+                "BeyondTrust Workload Credentials dynamic lease (the session name above "
+                "embeds the dynamic secret's name). No IAM policy can override an "
+                "explicit session-policy deny, so do not widen IAM. If the session "
+                "names the everyday secret, a provisioning job was served the read-only "
+                "lease, which excludes IAM by design — deploys must run on the "
+                "provision lease. If it names the provision secret, that secret's "
+                "session policy in Workload Credentials needs iam:PassRole."
+            )
+        elif "passrole" in low:
             msg += (
                 " — Hint: launching an instance with an SSM instance profile requires "
                 "the dashboard's own AWS identity to hold iam:PassRole for the role "
