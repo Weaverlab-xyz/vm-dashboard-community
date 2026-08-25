@@ -93,7 +93,8 @@ RESOURCE BROKER (both clouds, same broker -- these are PUBLIC, safe to copy free
                             (clouddb_ps_azure_cert_path, address field 7)
                             e.g. C:\\BeyondTrust\\certs\\public_cert.cer
   aws/public.pem         -> the path you put in "Public Key Path (on PS node)"
-     (or aws/public_cert.cer) (clouddb_ps_ssm_public_key_path, address field 5)
+     (or aws/public_cert.cer) (clouddb_ps_ssm_public_key_path -- the certPath address
+                            segment: field 4 for mssql, field 5 for psql/mysql)
                             e.g. C:\\Utils\\public_ssm.pem
                             Use whichever encoding the SSM plugin actually reads.
 

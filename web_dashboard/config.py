@@ -480,14 +480,26 @@ class Settings(BaseSettings):
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
     clouddb_db_client_image_sqlserver: str = "mcr.microsoft.com/mssql-tools18"
-    # AWS IAM user = Password Safe functional account for SSM SendCommand. EC2 mode
-    # (default, no keys): username "EC2", role on the PS node/broker authorizes SSM. IAM
-    # mode (set username + keys): username "{iam}", password "{AKID}:{secret}".
+    # AWS credentials packed into the Password Safe functional account for SSM
+    # SendCommand. The plugin parses username "<EC2|IAM>:<dbAdminUser>" and password
+    # "<AKID>:<secret>:<dbAdminPassword>" (always three parts). The mode is selected by
+    # the key pair's PRESENCE: both set → IAM mode; either blank → EC2 mode (the PS
+    # node/broker's own instance role authorizes SSM, parts 1–2 become "x" placeholders).
+    # The IAM username itself never reaches the plugin — the field is informational.
     clouddb_ps_ssm_iam_username: str = ""
     clouddb_ps_ssm_access_key_id: str = ""
     clouddb_ps_ssm_secret_access_key: str = ""     # encrypted at rest
-    clouddb_ps_ssm_account_suffix: str = "local"   # DNS-name 6th field: "local" or a cross-account AssumeRole ARN
-    clouddb_ps_ssm_public_key_path: str = ""        # DNS-name 5th field: public key path on the PS node/broker
+    # The address's assumeRole segment: "NoAssumeRole" or a cross-account AssumeRole
+    # ARN. MUST be ≥ 12 characters — the plugin Substring(0,12)'s it, so the old
+    # "local" default crashed every action; a persisted short value is coerced on read.
+    clouddb_ps_ssm_account_suffix: str = "NoAssumeRole"
+    # The address's certPath segment (field 4 for mssql, 5 for psql/mysql): RSA public
+    # certificate path on the PS node/broker. Required — an empty segment fails inside
+    # the plugin at the first rotation.
+    clouddb_ps_ssm_public_key_path: str = ""
+    # The mysql address's trailing segment: sslTRUE | sslFALSE (mysql is the only
+    # engine with an ssl field; anything but the literal sslTRUE disables TLS).
+    clouddb_ps_ssm_ssl: bool = True
     # Plugin RSA key material the dashboard drops onto the shared SSM jump host, the
     # AWS counterpart of clouddb_ps_azure_plugin_private_key. Use a SEPARATE key pair
     # from Azure's: the two private keys land on different hosts (this one on the ECS

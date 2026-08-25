@@ -704,11 +704,12 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
     clouddb_db_client_image_sqlserver: str = "mcr.microsoft.com/mssql-tools18"
-    clouddb_ps_ssm_iam_username: str = ""           # blank → EC2 role mode
-    clouddb_ps_ssm_access_key_id: str = ""
+    clouddb_ps_ssm_iam_username: str = ""           # informational; mode = key-pair presence
+    clouddb_ps_ssm_access_key_id: str = ""          # both set → IAM mode; either blank → EC2
     clouddb_ps_ssm_secret_access_key: str = ""      # encrypted at rest
-    clouddb_ps_ssm_account_suffix: str = "local"    # "local" or a cross-account AssumeRole ARN
-    clouddb_ps_ssm_public_key_path: str = ""         # public key path on the PS node/broker
+    clouddb_ps_ssm_account_suffix: str = "NoAssumeRole"  # assumeRole segment: ≥12 chars (ARN or the placeholder)
+    clouddb_ps_ssm_public_key_path: str = ""         # certPath segment: RSA public cert on the PS node/broker
+    clouddb_ps_ssm_ssl: bool = True                  # mysql-only trailing segment: sslTRUE | sslFALSE
     # AWS counterpart of clouddb_ps_azure_plugin_* — see config.py. Use a separate key
     # pair from Azure's; the private keys land on different hosts.
     clouddb_ps_ssm_plugin_private_key: str = ""      # PEM, encrypted at rest

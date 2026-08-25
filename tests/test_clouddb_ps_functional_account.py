@@ -286,17 +286,27 @@ def test_reference_mode_fails_open_on_an_unknown_platform_name():
 
 # ── the teardown-safety half, through the real onboarding entry point ─────────
 
-def _onboard(**conf):
+_AWS_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433}
+
+
+def _onboard(engine="postgres", **conf):
+    # The certPath address segment is required (a blank one is refused up front), so
+    # default it the way an operator must; a test proving the refusal passes "".
+    conf.setdefault("clouddb_ps_ssm_public_key_path", r"C:\Utils\public_ssm.pem")
     _reset(**conf)
     job_row = _FakeJobRow()
     row = _CloudDatabase(id="abcdef0123456789abcd", cloud="aws",
-                         private_host="db.internal", engine="postgres")
-    ctx = {"managed_user": "psafe_abcdef012345", "jump_host_id": "i-123", "region": "us-east-1",
-           "admin_username": "dbadmin", "client_image": "postgres:16", "db_name": "appdb",
-           "port": 5432}
+                         private_host="db.internal", engine=engine)
+    ctx = {"managed_user": "psafe_abcdef012345",
+           "jump_host_id": "i-0eaa6a10886717ed", "region": "us-east-1",
+           "admin_username": "sqladmin" if engine == "sqlserver" else "dbadmin",
+           "client_image": "postgres:16",
+           "db_name": "master" if engine == "sqlserver" else "appdb",
+           "port": _AWS_PORTS[engine]}
     _run(svc._onboard_ps_managed_systems(
-        _FakeDB(job_row), row=row, job_id="job-1", engine="postgres",
-        tf_variables={"identifier": "clouddb-abcdef01"}, ctx=ctx))
+        _FakeDB(job_row), row=row, job_id="job-1", engine=engine,
+        tf_variables={"identifier": "clouddb-abcdef01",
+                      "master_password": "s3cr3t-admin-pw"}, ctx=ctx))
     return job_row.metadata_dict
 
 
@@ -605,6 +615,147 @@ def test_sqlserver_reference_mode_inherits_the_cloud_sql_platform():
 
 
 
+# -- the AWS branch (dbssm = "{engine} SSM Custom Plugin") ----------------------
+#
+# The vendor plugins (v24.2.x) index the ';'-packed address at fixed PER-ENGINE
+# positions -- mssql has no database segment, mysql alone carries a trailing ssl flag
+# -- and split the functional-account username/password on ':' BEFORE looking at the
+# auth mode. These pin the composed shapes against that parse, including the two
+# crashes the old composition shipped at every rotation: a "local" assumeRole segment
+# (shorter than the plugin's Substring(0,12)) and a two-part functional-account
+# password.
+
+def _real_dbssm_validator():
+    """The REAL _validate_dbssm_dns_name, lifted out of ps_resource_service by source
+    -- same rationale and mechanism as _real_dbgcp_validator above: that module is
+    stubbed here, but the address this service BUILDS must be one the validator
+    ACCEPTS, and nothing else pins the two modules together."""
+    import re as _re
+    src_path = os.path.join(_ROOT, "web_dashboard", "services", "ps_resource_service.py")
+    with open(src_path, encoding="utf-8") as fh:
+        src = fh.read()
+    block = src[src.index("_DBSSM_SEGMENT_ENGINES"):
+                src.index("# ── GCP Cloud SQL address grammar")]
+
+    class _Err(Exception):
+        pass
+
+    ns = {"re": _re, "PSResourceError": _Err}
+    exec(block, ns)  # noqa: S102 - test-local, reads our own source
+    return ns["_validate_dbssm_dns_name"], _Err
+
+
+def test_aws_postgres_address_is_the_six_field_form():
+    _onboard(clouddb_ps_platform_postgres="psql SSM Custom Plugin")
+    fields = LAST_REGISTER["dns_name"].split(";")
+    assert fields == ["i-0eaa6a10886717ed", "us-east-1", "db.internal", "appdb",
+                      r"C:\Utils\public_ssm.pem", "NoAssumeRole"], fields
+    assert LAST_REGISTER["method"] == "dbssm"
+    assert LAST_REGISTER["port"] == 5432
+
+
+def test_aws_sqlserver_address_has_no_database_segment():
+    # mssql actions always land in master and the plugin's 5-position parse has no
+    # slot for a catalog -- packing one shifts certPath into the assumeRole position.
+    _onboard(engine="sqlserver", clouddb_ps_platform_sqlserver="mssql SSM Custom Plugin")
+    fields = LAST_REGISTER["dns_name"].split(";")
+    assert len(fields) == 5, fields
+    assert "master" not in fields, fields
+    assert fields[3] == r"C:\Utils\public_ssm.pem", fields
+    assert LAST_REGISTER["port"] == 1433
+
+
+def test_aws_mysql_address_carries_the_trailing_ssl_flag():
+    # mysql is the only engine with an ssl segment, and only the literal sslTRUE
+    # enables TLS -- the flag must be a real toggle, in canonical spelling.
+    _onboard(engine="mysql", clouddb_ps_platform_mysql="mysql SSM Custom Plugin")
+    assert LAST_REGISTER["dns_name"].split(";")[6] == "sslTRUE"
+    _onboard(engine="mysql", clouddb_ps_platform_mysql="mysql SSM Custom Plugin",
+             clouddb_ps_ssm_ssl=False)
+    assert LAST_REGISTER["dns_name"].split(";")[6] == "sslFALSE"
+
+
+def test_aws_addresses_the_service_builds_pass_the_plugin_grammar():
+    validate, Err = _real_dbssm_validator()
+    for engine in ("postgres", "mysql", "sqlserver"):
+        _onboard(engine=engine,
+                 **{f"clouddb_ps_platform_{engine}": "X SSM Custom Plugin"})
+        addr = LAST_REGISTER["dns_name"]
+        try:
+            validate(addr)
+        except Err as exc:
+            raise AssertionError(f"{engine}: the service built {addr!r}, which the "
+                                 f"plugin grammar rejects: {exc}")
+
+
+def test_aws_short_assume_role_is_coerced_not_shipped():
+    # "local" was this key's own pre-spec default, and anything under 12 characters
+    # crashes the plugin's Substring(0,12) at every action -- rows persisted under the
+    # old default are healed on read rather than crashed at the first rotation.
+    _onboard(clouddb_ps_ssm_account_suffix="local")
+    assert LAST_REGISTER["dns_name"].split(";")[5] == "NoAssumeRole"
+
+
+def test_aws_a_real_assume_role_arn_is_kept():
+    arn = "arn:aws:iam::123456789012:role/psafe-broker"
+    _onboard(clouddb_ps_ssm_account_suffix=arn)
+    assert LAST_REGISTER["dns_name"].split(";")[5] == arn
+
+
+def test_aws_ec2_mode_packs_mode_admin_user_and_placeholder_keys():
+    # The plugin splits the FA password into three ':'-parts BEFORE the mode check, so
+    # EC2 mode still ships the two placeholders; part 3 is the DB admin credential
+    # Verify FA logs in with (the old composition was a bare random token, which
+    # mis-split at every action).
+    _onboard()
+    _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
+    assert account_name == "EC2:dbadmin", account_name
+    assert password == "x:x:s3cr3t-admin-pw", password
+
+
+def test_aws_iam_mode_is_selected_by_the_key_pair_alone():
+    # The IAM username never reaches the plugin, so it plays no part in mode selection
+    # (the old code required all three fields and silently fell back to EC2 on two).
+    _onboard(clouddb_ps_ssm_access_key_id="AKIAXXXX",
+             clouddb_ps_ssm_secret_access_key="sekret")
+    _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
+    assert account_name == "IAM:dbadmin", account_name
+    assert password == "AKIAXXXX:sekret:s3cr3t-admin-pw", password
+
+
+def test_aws_a_colon_in_fa_material_is_refused():
+    # ':' is the plugin's functional-account field delimiter; a value carrying one
+    # would mis-split at every verify/change action, silently.
+    try:
+        svc._dbssm_fa_fields(admin_user="dbadmin", admin_password="a:b",
+                             access_key_id="", secret_access_key="")
+        raise AssertionError("expected a ':' in the DB admin password to be refused")
+    except svc.CloudDatabaseError as exc:
+        assert "':'" in str(exc)
+
+
+def test_aws_registration_gets_no_placeholder_ip():
+    # The SSM DB plugins parse EVERY populated host field as the packed address and
+    # crash on a bare IP, so -- unlike dbazure/dbgcp, whose plugins skip non-parsing
+    # candidates -- the register call ships an empty ip for dbssm only.
+    _onboard()
+    assert LAST_REGISTER["ip_address"] == "", LAST_REGISTER
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL")
+    assert LAST_REGISTER["ip_address"] == "127.0.0.1", LAST_REGISTER
+
+
+def test_aws_blank_cert_path_fails_loudly_before_any_object_is_created():
+    # The old composition packed ';;' silently and the plugin failed at the first
+    # rotation; now onboarding refuses up front, naming the config key -- and before
+    # the functional account is minted, so the refusal strands nothing remote.
+    try:
+        _onboard(clouddb_ps_ssm_public_key_path="")
+        raise AssertionError("expected a blank public-key path to be refused")
+    except svc.CloudDatabaseError as exc:
+        assert "clouddb_ps_ssm_public_key_path" in str(exc)
+    assert not any(c[0] == "create" for c in CALLS), CALLS
+
+
 def _gate(engine, **conf):
     _reset(pscli_api_url="https://ps.example/BeyondTrust/api/public/v3",
            pscli_client_id="cid", pscli_client_secret="sec",
@@ -726,14 +877,15 @@ def test_azure_prep_still_installs_clients_and_aws_prep_does_not():
 # that, because the fix is invisible on a happy path and easy to undo by moving a line.
 
 def test_the_managed_system_id_is_committed_before_the_pra_vault_half():
-    _reset(bt_api_host="pra.example.com")
+    _reset(bt_api_host="pra.example.com",
+           clouddb_ps_ssm_public_key_path=r"C:\Utils\public_ssm.pem")
     job_row = _FakeJobRow()
     job_row.metadata_dict = {"vault_account_name": "va-1"}   # makes the PRA Vault block run
     row = _CloudDatabase(id="abcdef0123456789abcd", cloud="aws",
                          private_host="db.internal", engine="postgres")
-    ctx = {"managed_user": "psafe_abcdef012345", "jump_host_id": "i-123", "region": "us-east-1",
-           "admin_username": "dbadmin", "client_image": "postgres:16", "db_name": "appdb",
-           "port": 5432}
+    ctx = {"managed_user": "psafe_abcdef012345", "jump_host_id": "i-0eaa6a10886717ed",
+           "region": "us-east-1", "admin_username": "dbadmin",
+           "client_image": "postgres:16", "db_name": "appdb", "port": 5432}
 
     calls = {"n": 0}
 
