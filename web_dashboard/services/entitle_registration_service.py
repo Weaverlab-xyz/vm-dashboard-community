@@ -909,6 +909,39 @@ async def ensure_agent_token(name: str = "") -> str:
     return minted["token"]
 
 
+async def destroy_agent_token() -> str:
+    """Destroy the auto-minted Entitle Agent token and clear its stash. Returns the
+    destroyed token's name ("" when there was nothing of ours to destroy).
+
+    Entitle refuses to re-mint an existing name and the value can never be read back,
+    so a token that outlives the agent it bootstrapped wedges every future install on
+    an unrecoverable "already exists". Call this whenever the agent's lifecycle ends —
+    the ``remove`` action and the decommission of its hosting cluster.
+
+    Only OUR mint is destroyed: the stored ``entitle_agent_token_tf_state`` is the
+    proof of ownership, so an operator-supplied token (``entitle_agent_token_ref``
+    pre-set, no state) is never touched. On a failed destroy the stash is KEPT — the
+    state is the only remaining handle on the tenant-side token (a retry can destroy
+    it, and the next install can still recover the value); clearing it would recreate
+    exactly the orphan this function exists to prevent."""
+    from . import config_service
+    state = _cfg("entitle_agent_token_tf_state")
+    if not state:
+        return ""
+    _, name = _agent_token_from_state(state)
+    await asyncio.to_thread(_destroy_sync, state)
+    config_service.set("entitle_agent_token_tf_state", "")
+    config_service.set(_AGENT_TOKEN_CONFIG_KEY, "")
+    config_service.set("entitle_agent_token_name", "")
+    # Only un-point the ref when it points at our stash — an external/operator ref
+    # (aws_sm://…, a custom key) stays theirs even after our mint is gone.
+    if config_service.get("entitle_agent_token_ref") == f"config://{_AGENT_TOKEN_CONFIG_KEY}":
+        config_service.set("entitle_agent_token_ref", "")
+    logger.info("Entitle agent token destroyed (name=%s) — the name is free to re-mint",
+                name or "unknown")
+    return name or "unknown"
+
+
 async def deregister(tf_state_json: str) -> None:
     """Destroy a previously registered Entitle integration using its stored state."""
     await asyncio.to_thread(_destroy_sync, tf_state_json)

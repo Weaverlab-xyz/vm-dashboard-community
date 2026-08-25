@@ -95,6 +95,20 @@ recover — or if a *different* name was requested, which is how an operator del
 forces a fresh token. An unrecoverable conflict is a dead end by construction and fails with the
 remedies spelled out in the message — see the [troubleshooting entry](../integrations/entitle.md#troubleshooting).
 
+**The mint's lifecycle ends with the agent's** (`destroy_agent_token`). Because the
+conflict above is a dead end, a minted token must never outlive its agent: the `remove`
+action and the decommission of the hosting cluster destroy the token via the stashed
+state and clear the stash (`entitle/agent-token`, `entitle_agent_token_name`,
+`entitle_agent_token_tf_state`, and the ref — the ref only when it still points at
+`config://entitle/agent-token`; an operator-supplied ref, which has no stashed state,
+is never touched). Two deliberate asymmetries: the destroy runs only when the target
+cluster **is** the recorded `entitle_agent_cluster_id` host (removing a non-host
+cluster must not kill the live agent's token), and a **failed** destroy keeps the
+stash + host marker and fails the job loudly — the state is the only remaining handle
+on the tenant-side token, so a retry converges instead of orphaning it. Re-installing
+after a remove mints a fresh token under the same (default or env-pinned) name, so
+`agent_token = {name}` references on private integrations stay valid.
+
 `setup_entitle_agent` then, using the **same primitives** the ESO/management installs
 already use:
 
