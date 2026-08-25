@@ -275,7 +275,8 @@ _DBSSM = dict(name="clouddb-pg", host_name="db.abc.us-east-1.rds.amazonaws.com",
 _PRAVAULT = dict(name="clouddb-pg-pravault", host_name="https://pra.example.com",
                  ip_address="127.0.0.1", port=443, functional_account_id=7, platform_id=21,
                  entity_type_id=1, workgroup_id="55", managed_account_name="clouddb-pg-admin",
-                 ssh_key_enforcement_mode=2, method="pravault", dns_name="",
+                 ssh_key_enforcement_mode=2, method="pravault",
+                 dns_name="https://pra.example.com",
                  emit_private_key=False, dss_auto_management=False)
 
 
@@ -378,13 +379,38 @@ def test_a_realistic_mysql_ssm_address_still_fits():
     ps._check_address_length(addr, "dbssm")        # must not raise
 
 
-def test_pravault_system_uses_host_url_no_dns_no_ssh():
+def test_pravault_system_carries_the_appliance_url_in_host_and_dns_no_ssh():
+    # The "PRA Vault Username Password" platform REQUIRES a DnsName on managed-system
+    # create (live 400 "DnsName is required" — the first OT cell deploy failed on it),
+    # so the appliance URL rides in both host_name and dns_name.
     hcl = ps._generate_managed_system_hcl(**_PRAVAULT)
     assert ps._line("host_name", '"https://pra.example.com"') in hcl
-    assert "dns_name" not in hcl
+    assert ps._line("dns_name", '"https://pra.example.com"') in hcl
     assert ps._line("ip_address", '"127.0.0.1"') in hcl
     assert "remote_client_type" not in hcl
     assert "ssh_key_enforcement_mode" not in hcl
+
+
+def test_pravault_register_defaults_dns_name_to_the_appliance_url():
+    # None of the pravault callers (OT cell, cloud-DB, k8s token) pass dns_name — the
+    # register branch itself must fill it, or every mirror create 400s as above.
+    import asyncio
+    captured = {}
+
+    def _fake_apply(hcl, tf_vars):
+        captured["hcl"] = hcl
+        return {"tf_state_json": "{}", "managed_system_id": "1", "managed_account_id": "2"}
+
+    real = ps._apply_hcl_sync
+    ps._apply_hcl_sync = _fake_apply
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="pv", host_name="https://pra.example.com", functional_account_id=1,
+            platform_id=21, workgroup_id="wg", managed_account_name="cell-adminuser",
+            ip_address="127.0.0.1", port=443, method="pravault"))
+    finally:
+        ps._apply_hcl_sync = real
+    assert ps._line("dns_name", '"https://pra.example.com"') in captured["hcl"]
 
 
 def test_pravault_account_is_the_vault_account_name_password_managed():
