@@ -398,6 +398,14 @@ class Settings(BaseSettings):
     # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
     passwordsafe_gcp_registration_method: str = "gcpvm"  # "gcpvm" (GCP VM SSH Rotation plugin, default) | "ssh"
     passwordsafe_gcp_change_password_on_register: bool = True  # mint first key via GCE metadata on onboard (adminuser has none baked in)
+    # OT demo cell → PRA checkout. When the cell's adminuser is onboarded into Password
+    # Safe, the wiring also creates a PRA Vault username/password account (associated to
+    # the cell's Jump Group) plus a managed-account mirror on the "PRA Vault Username
+    # Password" plugin, and links the pair with SyncedAccounts — so the credential can be
+    # checked out / injected in PRA and every Password Safe rotation propagates into it.
+    ot_ps_pra_checkout_enabled: bool = True
+    ot_ps_pravault_platform: str = ""            # mirror platform name; falls back to clouddb_ps_pravault_platform
+    ot_ps_pravault_functional_account: str = ""  # FA on that platform; falls back to clouddb_ps_pravault_functional_account
     bt_api_host: str = ""        # PRA host, used by terraform_pra_service
     bt_client_id: str = ""
     bt_client_secret: str = ""

@@ -101,6 +101,19 @@ def resolve_jump_targets(jump_group: Optional[str], jumpoint_name: Optional[str]
     return jg, jp
 
 
+def jumpoint_overridden(ot_params: dict) -> bool:
+    """True when the cell names a Jumpoint other than the configured default — the
+    case where the gateway sizing guard must step aside, because it can only reason
+    about the dashboard-managed shared gateway (live VM or gcp_jumpoint_machine_type),
+    and refusing an operator-managed Gateway on OUR config default would be a false
+    refusal."""
+    override = ((ot_params or {}).get("jumpoint_name") or "").strip()
+    if not override:
+        return False
+    _, default_jp = resolve_jump_targets(None, None)
+    return override != default_jp
+
+
 def pra_preflight_problem() -> str:
     """"" when PRA is usable, else the remedy string for the failed-job page.
     Mirrors ``portainer_node_service._pra_configured`` (host + OAuth client +
@@ -221,12 +234,15 @@ async def create_standalone_tunnel(*, name: str, hostname: str, protocol: str,
         raise OTError("PRA Jump Group / Gateway are not configured "
                       "(bt_jump_group_name / bt_jumpoint_name)")
     # Best-effort, like the k8s API tunnel: the target may be reachable through an
-    # operator-managed Jumpoint the dashboard doesn't run a host for.
-    try:
-        from . import jumpoint_host_service
-        await jumpoint_host_service.ensure_jumpoint_host("gcp", region)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("OT tunnel: ensure jumpoint host failed (non-fatal): %s", exc)
+    # operator-managed Jumpoint the dashboard doesn't run a host for. Skipped
+    # entirely on a Gateway override — the tunnel rides the NAMED Jumpoint, so
+    # spinning up the shared host would be a billable VM nothing uses.
+    if not jumpoint_overridden({"jumpoint_name": jumpoint_name or ""}):
+        try:
+            from . import jumpoint_host_service
+            await jumpoint_host_service.ensure_jumpoint_host("gcp", region)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OT tunnel: ensure jumpoint host failed (non-fatal): %s", exc)
 
     result = await pra.provision_api_tunnel(
         name=name, hostname=hostname, jump_group_name=jg, jumpoint_name=jp,
@@ -337,19 +353,27 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
             job_service.set_failed(db, job_id, problem)
             return
 
-        job_service.update_progress(db, job_id, 5,
-                                    "Checking the PRA gateway size (a Web Jump needs ≥2 GB)…")
-        remedy = await gateway_size_problem(project_id, region)
-        if remedy:
-            job_service.set_cancelled(db, child_id)
-            job_service.set_failed(db, job_id, remedy)
-            return
-
         child_row = job_service.get_job(db, child_id)
         if child_row is None:
             job_service.set_failed(db, job_id, f"child VM job {child_id} not found")
             return
         child_meta = child_row.metadata_dict
+
+        ot_params = child_meta.get("ot_params") or {}
+        if jumpoint_overridden(ot_params):
+            job_service.update_progress(
+                db, job_id, 5,
+                f"Gateway override '{(ot_params.get('jumpoint_name') or '').strip()}' — "
+                f"skipping the shared-gateway size check; the host behind that Jumpoint "
+                f"needs ≥2 GB RAM for the Web Jump.")
+        else:
+            job_service.update_progress(db, job_id, 5,
+                                        "Checking the PRA gateway size (a Web Jump needs ≥2 GB)…")
+            remedy = await gateway_size_problem(project_id, region)
+            if remedy:
+                job_service.set_cancelled(db, child_id)
+                job_service.set_failed(db, job_id, remedy)
+                return
 
         job_service.update_progress(db, job_id, 12,
                                     f"Deploying the OT cell VM ({child_meta.get('instance_name')})…")
@@ -505,6 +529,13 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict) -> dict:
         job_service.update_metadata(db, child_id, wired)
         cmeta.update(wired)
 
+    ps_note = ps_checkout_skip_reason(cmeta)
+    if not ps_note:
+        ps_note = await _wire_ps_checkout(db, parent_id, child_id, cmeta,
+                                          jump_group=jump_group,
+                                          client_secret=client_secret,
+                                          rewire_hint=rewire_hint)
+
     return {
         "vm_job_id": child_id,
         "instance_name": vm,
@@ -516,4 +547,157 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict) -> dict:
         "tunnel_local_port": local_port,
         "tunnel_remote_port": remote_port,
         "shell_jump_id": cmeta.get("bt_shell_jump_id") or "",
+        "vault_account_id": cmeta.get("ot_vault_account_id") or "",
+        "vault_account_name": cmeta.get("ot_vault_account_name") or "",
+        "ps_checkout": ps_note,
     }
+
+
+def ps_checkout_skip_reason(cmeta: dict) -> str:
+    """"" when the PRA-checkout pair should be wired for this cell, else why not.
+    The reason lands verbatim in the parent job's result, so it says what would
+    make the step apply rather than just that it didn't."""
+    from . import config_service
+    if not config_service.get_bool("ot_ps_pra_checkout_enabled"):
+        return "skipped — disabled (ot_ps_pra_checkout_enabled)"
+    if not cmeta.get("ps_managed_account_id"):
+        detail = cmeta.get("ps_error") or "Password Safe onboarding was not selected"
+        return (f"skipped — the cell has no Password Safe managed account ({detail}); "
+                "the PRA checkout account is a SyncedAccounts subscriber of it")
+    return ""
+
+
+async def _wire_ps_checkout(db, parent_id: str, child_id: str, cmeta: dict, *,
+                            jump_group: str, client_secret: str,
+                            rewire_hint: str) -> str:
+    """Make the cell's admin credential checkout-able in PRA. Three artifacts, each
+    persisted onto the CHILD the moment it exists (so destroy removes exactly what
+    is there and rewire retries only what is missing, like the Web Jump/tunnel):
+
+      1. ``ot_vault_tf_state`` — a PRA Vault username/password account, associated
+         to the cell's Jump Group for injection, seeded with a placeholder;
+      2. ``ot_ps_mirror_tf_state`` — a managed system + account on the "PRA Vault
+         Username Password" plugin, named exactly like the Vault account (the
+         plugin resolves its PRA-side target by NAME);
+      3. ``ot_ps_synced`` — the SyncedAccounts link making the mirror a subscriber
+         of the cell's adminuser account, then one Change on the parent so PRA
+         holds a real credential now instead of after the next scheduled rotation
+         (the deploy-time initial mint ran BEFORE this link existed).
+    """
+    from . import config_service, job_service, ps_api_service, ps_resource_service, \
+        ps_vm_hook, terraform_pra_service as pra
+
+    vm = cmeta.get("instance_name") or "ot-cell"
+    admin_user = _cfg("passwordsafe_managed_account_name") or "adminuser"
+    vault_name = cmeta.get("ot_vault_account_name") or f"{vm}-{admin_user}"
+    platform_name = (_cfg("ot_ps_pravault_platform")
+                     or _cfg("clouddb_ps_pravault_platform")
+                     or "PRA Vault Username Password")
+
+    if not cmeta.get("ot_vault_tf_state"):
+        job_service.update_progress(
+            db, parent_id, 95,
+            f"Creating the PRA Vault account {vault_name} (checkout/injection)…")
+        group_raw = (_cfg("bt_vault_account_group_id") or "").strip()
+        try:
+            res = await pra.provision_vault_account(
+                name=vault_name, username=admin_user, jump_group_name=jump_group,
+                vault_account_group_id=int(group_raw) if group_raw.isdigit() else None,
+                client_secret=client_secret)
+        except Exception as exc:  # noqa: BLE001
+            raise OTCellError(
+                f"The cell VM {vm} and its jump items are in place, but the PRA Vault "
+                f"checkout account failed: {exc} — check the PRA OAuth client's Vault "
+                f"account-management permission. {rewire_hint}")
+        wired = {"ot_vault_account_id": str(res.get("vault_account_id") or ""),
+                 "ot_vault_account_name": vault_name,
+                 "ot_vault_tf_state": res.get("tf_state_json") or ""}
+        job_service.update_metadata(db, child_id, wired)
+        cmeta.update(wired)
+
+    if not cmeta.get("ot_ps_mirror_tf_state"):
+        job_service.update_progress(
+            db, parent_id, 96,
+            f"Onboarding the {platform_name} mirror into Password Safe…")
+        fa_name = (_cfg("ot_ps_pravault_functional_account")
+                   or _cfg("clouddb_ps_pravault_functional_account"))
+        if not fa_name:
+            raise OTCellError(
+                f"The PRA Vault account {vault_name} exists, but no functional account "
+                f"is configured for the {platform_name!r} plugin — create one in "
+                f"Password Safe (username = the PRA OAuth client id, password = its "
+                f"secret) and set ot_ps_pravault_functional_account (or "
+                f"clouddb_ps_pravault_functional_account). {rewire_hint}")
+        try:
+            fa = await ps_api_service.get_functional_account(fa_name)
+            pname = fa.get("platform_name") or ""
+            if not ps_vm_hook._platform_name_ok(pname, "pra vault"):
+                raise OTCellError(
+                    f"functional account {fa_name!r} is on platform {pname!r}, not a "
+                    f"'PRA Vault' plugin platform — the mirror would land on the wrong "
+                    f"platform and never write into PRA. {rewire_hint}")
+            platform_id = await ps_api_service.get_platform_id(platform_name)
+            workgroup_id = await ps_api_service.get_workgroup_id(_cfg("passwordsafe_workgroup"))
+            pra_url = _cfg("bt_api_host")
+            if not pra_url.lower().startswith("http"):
+                pra_url = f"https://{pra_url}"
+            reg = await ps_resource_service.register_managed_system(
+                name=f"{vm}-pravault", host_name=pra_url, ip_address="127.0.0.1",
+                port=443, functional_account_id=fa["id"], platform_id=platform_id,
+                workgroup_id=workgroup_id, managed_account_name=vault_name,
+                method="pravault")
+        except OTCellError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise OTCellError(
+                f"The PRA Vault account {vault_name} exists, but its Password Safe "
+                f"mirror (the {platform_name!r} managed account) failed: {exc}. "
+                f"{rewire_hint}")
+        wired = {"ot_ps_mirror_tf_state": reg.get("tf_state_json") or "",
+                 "ot_ps_mirror_system_id": str(reg.get("managed_system_id") or ""),
+                 "ot_ps_mirror_account_id": str(reg.get("managed_account_id") or "")}
+        job_service.update_metadata(db, child_id, wired)
+        cmeta.update(wired)
+
+    if not cmeta.get("ot_ps_synced"):
+        sub = str(cmeta.get("ot_ps_mirror_account_id") or "").strip()
+        if not sub.isdigit():
+            raise OTCellError(
+                f"The Password Safe mirror system for {vault_name} exists but recorded "
+                f"no managed-account id — remove managed system {vm}-pravault in "
+                f"Password Safe, then re-wire to recreate it. {rewire_hint}")
+        job_service.update_progress(
+            db, parent_id, 97,
+            f"Syncing {vault_name} to the cell's {admin_user} account…")
+        try:
+            link = await ps_api_service.link_synced_account(
+                parent_account_id=int(cmeta["ps_managed_account_id"]),
+                synced_account_id=int(sub),
+                expect_subscriber_platform=platform_name)
+        except Exception as exc:  # noqa: BLE001
+            raise OTCellError(
+                f"The PRA Vault account and its Password Safe mirror exist, but the "
+                f"SyncedAccounts link failed: {exc} — without it rotations never reach "
+                f"PRA. {rewire_hint}")
+        if not link.get("confirmed"):
+            raise OTCellError(
+                f"Password Safe accepted the sync of account {sub} to "
+                f"{cmeta['ps_managed_account_id']} but the subscriber is not in the "
+                f"parent's synced list — rotations would not reach PRA. {rewire_hint}")
+        job_service.update_metadata(db, child_id, {"ot_ps_synced": True})
+        cmeta["ot_ps_synced"] = True
+        # Converge now rather than at the next scheduled rotation: the deploy-time
+        # initial mint ran before the link existed, so PRA still holds the
+        # placeholder. Best-effort — the link guarantees the next change lands.
+        if config_service.get_bool("passwordsafe_gcp_change_password_on_register", True):
+            try:
+                await ps_api_service.change_managed_account_password(
+                    int(cmeta["ps_managed_account_id"]))
+                job_service.update_metadata(db, child_id, {"ot_ps_change_triggered": True})
+                cmeta["ot_ps_change_triggered"] = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("OT cell %s: post-link Change Password failed (the pair "
+                               "converges at the next scheduled rotation): %s", vm, exc)
+
+    return (f"{vault_name} synced"
+            + (" (rotation triggered)" if cmeta.get("ot_ps_change_triggered") else ""))

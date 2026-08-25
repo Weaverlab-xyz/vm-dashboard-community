@@ -312,6 +312,12 @@ async def list_cells(
             continue
         if accessible is not None and (row.workgroup or "").lower() not in accessible:
             continue
+        # The PRA-checkout pair counts toward "wired" only when it applies to this
+        # cell (skip_reason "") — so a pre-feature cell with Password Safe onboarding
+        # shows "wiring incomplete" and its Re-wire button retrofits exactly the
+        # missing checkout pieces, while a cell without PS onboarding stays green.
+        checkout_pending = (not ot_service.ps_checkout_skip_reason(meta)
+                            and not meta.get("ot_ps_synced"))
         cells.append(OTCellInfo(
             vm_job_id=row.id,
             instance_name=meta.get("instance_name") or "",
@@ -325,9 +331,13 @@ async def list_cells(
             tunnel_local_port=int(meta.get("ot_tunnel_local_port") or 0),
             tunnel_remote_port=int(meta.get("ot_tunnel_remote_port") or 0),
             shell_jump_id=str(meta.get("bt_shell_jump_id") or ""),
+            vault_account_id=str(meta.get("ot_vault_account_id") or ""),
+            vault_account_name=meta.get("ot_vault_account_name") or "",
+            ps_checkout_synced=bool(meta.get("ot_ps_synced")),
             workgroup=row.workgroup or "",
             expires_at=row.expires_at.isoformat() if row.expires_at else None,
             wiring_complete=bool(meta.get("ot_web_jump_tf_state")
-                                 and meta.get("ot_tunnel_tf_state")),
+                                 and meta.get("ot_tunnel_tf_state")
+                                 and not checkout_pending),
         ))
     return OTCellListResponse(cells=cells)

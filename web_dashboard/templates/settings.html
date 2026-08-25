@@ -1243,6 +1243,34 @@
                 the managed system DNS name is <code class="bg-gray-100 px-1 rounded">{instance-id}:{region}</code>
                 and the account name is <code class="bg-gray-100 px-1 rounded">{name};{suffix}</code>.
               </p>
+              <!-- OT demo cell → PRA checkout (docs/cloud-ot.md) -->
+              <div class="pt-2 border-t border-gray-100 space-y-3">
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.ot_ps_pra_checkout_enabled" class="rounded text-blue-600">
+                  OT demo cell: also create a synced PRA Vault checkout account for the cell's admin credential
+                </label>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault mirror platform</label>
+                    <input type="text" x-model="panelCfg.ot_ps_pravault_platform"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="(clouddb_ps_pravault_platform)">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Functional account on it</label>
+                    <input type="text" x-model="panelCfg.ot_ps_pravault_functional_account"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="(clouddb_ps_pravault_functional_account)">
+                  </div>
+                </div>
+                <p class="text-xs text-gray-400">
+                  A PRA Vault username/password account named <code class="bg-gray-100 px-1 rounded">&lt;cell&gt;-adminuser</code>
+                  is associated to the cell's Jump Group and kept current via a Password Safe
+                  <em>SyncedAccounts</em> link through the <em>PRA Vault Username Password</em> plugin — so the
+                  credential is check-out-able and injectable in PRA. Blank fields fall back to the cloud-database
+                  PRA Vault settings below.
+                </p>
+              </div>
             </div>
           </div>
           <!-- Database import (reads Password Safe; writes nothing to it) -->

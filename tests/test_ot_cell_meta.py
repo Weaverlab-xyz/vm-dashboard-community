@@ -89,6 +89,21 @@ def test_the_rewire_endpoint_creates_no_children_parent():
         assert "rewire_child_job_id" in keys
 
 
+def test_the_default_machine_type_is_e2_medium_everywhere():
+    """e2-small (2 GB) proved too tight for Docker + PLC sim + FUXA on a live cell
+    (ot-cell-01), so the model default is e2-medium — and the FORM must agree: an
+    Alpine x-model preselects whatever the JS state holds, so a stale 'e2-small'
+    there silently reverts the model's default for every UI deploy."""
+    models = open(os.path.join(_ROOT, "web_dashboard", "models", "ot.py"),
+                  encoding="utf-8").read()
+    assert 'machine_type: str = "e2-medium"' in models, (
+        "OTCellDeployRequest.machine_type is no longer e2-medium")
+    tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", "gcp", "index.html"),
+                encoding="utf-8").read()
+    assert "machine_type: 'e2-small'" not in tmpl, (
+        "a GCP-page form still defaults its machine type to e2-small")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
