@@ -734,14 +734,18 @@ def test_aws_a_colon_in_fa_material_is_refused():
         assert "':'" in str(exc)
 
 
-def test_aws_registration_gets_no_placeholder_ip():
-    # The SSM DB plugins parse EVERY populated host field as the packed address and
-    # crash on a bare IP, so -- unlike dbazure/dbgcp, whose plugins skip non-parsing
-    # candidates -- the register call ships an empty ip for dbssm only.
+def test_aws_registration_defers_the_ip_to_the_resource_service():
+    # The register call picks no ip at all: register_managed_system owns the per-plugin
+    # fill -- the packed address itself for dbssm (its platform refuses a create with no
+    # IPAddress, "The field 'IPAddress' is required.", while its plugins crash parsing a
+    # bare one) and the 127.0.0.1 placeholder for dbazure/dbgcp, whose plugins skip
+    # non-parsing candidates. test_ps_resource pins the fills themselves; this pins that
+    # the caller leaves the choice there instead of re-encoding it per cloud -- the two
+    # copies of that rule are how the live "IPAddress is required" rejection happened.
     _onboard()
-    assert LAST_REGISTER["ip_address"] == "", LAST_REGISTER
+    assert "ip_address" not in LAST_REGISTER, LAST_REGISTER
     _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL")
-    assert LAST_REGISTER["ip_address"] == "127.0.0.1", LAST_REGISTER
+    assert "ip_address" not in LAST_REGISTER, LAST_REGISTER
 
 
 def test_aws_blank_cert_path_fails_loudly_before_any_object_is_created():

@@ -442,8 +442,10 @@ psql  (6):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole
 mysql (7):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole;sslTRUE|sslFALSE
 ```
 
-The managed system is registered with **no IP address** on purpose: these plugins try
-every populated host field as the packed address, and a bare IP — the `127.0.0.1`
+The managed system's **IP Address field carries the packed address again** — the same
+string as its DNS Name. Neither alternative survives both sides: the platform refuses a
+create with no IP at all (`The field 'IPAddress' is required.`), and these plugins try
+every populated host field as the packed address, so a bare IP — the `127.0.0.1`
 placeholder every other onboarding shape uses — always fails the parse.
 
 ---
@@ -526,13 +528,15 @@ to prefer `reference` mode with self-rotation.
 > bound, and the capability pre-flight passed. A parse error, a platform mismatch or an
 > "address is *n* characters" message is a real failure; that one is not.
 
-**Every onboarding step is best-effort.** A failure leaves the database up and the job
-**green**. Note the two different fallbacks: if the *managed-user creation* fails the run
-falls back to legacy admin-credential staging, but if *managed-system onboarding* fails there
-is no fallback at all — you get no Password Safe artifacts and a green job. That branch now
-appends `Password Safe onboarding skipped (non-fatal): …` to the job log, so the job page
-carries the reason. Either way, "the deploy worked" is not evidence the onboarding worked —
-always read the job log, not just its status.
+**A failure leaves the database up — but not the job green.** If the *managed-user
+creation* fails, the run falls back to legacy admin-credential staging and appends a
+`Password Safe managed-user creation failed …` line to the job log; the tunnel keeps the
+admin credential and the job completes, so read the log. If *managed-system onboarding*
+fails there is no fallback, and the job **fails**: the error message quotes the cause and
+names the remedy. The database row stays `available` in both cases — fix the cause, then
+use the row's **Register in Password Safe** action instead of re-provisioning. (This step
+used to be best-effort: a rejected managed-system create once shipped a *completed* job
+whose only trace was a `Password Safe onboarding skipped (non-fatal)` log line.)
 
 | Symptom | Cause |
 |---|---|
@@ -554,7 +558,7 @@ always read the job log, not just its status.
 | Managed-system address rejected or truncated | Password Safe's address column is **255 characters**; the eight-field Azure address gets close with two GUIDs, a flexible-server FQDN and a long cert path. The dashboard now refuses over-long addresses up front and names the number |
 | `Verify Functional Account` fails on every new managed system | the functional account's DB login does not exist on the provisioned server (§0) |
 | `Run Command in progress (409)` after retries | every database shares `clouddb-jumpoint` and Azure allows one action-style Run Command per VM; the plugin retries 5 times at 15s (6 attempts) — stagger rotations or add jump VMs |
-| Job log says `Password Safe onboarding skipped (non-fatal): … no … functional account is configured` | `reference` mode with a blank name — set the `clouddb_ps_functional_account_*` key the message quotes |
+| Job fails with `Password Safe onboarding failed: … no … functional account is configured` | `reference` mode with a blank name — set the `clouddb_ps_functional_account_*` key the message quotes, then use **Register in Password Safe** on the row |
 | Job log says `functional account … is on platform …, not a …` | the named account is on the wrong plugin platform; the managed system would inherit it (§0) |
 | `functional account 'x' not found in Password Safe` | typo, or the account exists on a platform the API identity cannot see |
 | `create`-mode functional accounts still appearing | the mode never took effect — reopen the panel and confirm it reads `Reference an existing account` |

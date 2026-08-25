@@ -510,10 +510,13 @@ All three paths create a **dedicated managed DB user** as the rotation target (n
 master admin), point the PRA tunnel's injected credential at it, onboard the DB as a
 Password Safe **managed system + managed account**, and onboard the PRA Vault account on the
 **`PRA Vault Username Password`** plugin so rotations propagate into the tunnel credential.
-Every step is **non-fatal** and leaves the database up. A failure in the *managed-user
-creation* falls back to legacy admin-credential staging; a failure in *managed-system
-onboarding* has no fallback — it appends `Password Safe onboarding skipped (non-fatal): …`
-to the job log and moves on, so read the log rather than the job status.
+Failures leave the database up, but they are reported differently. A failure in the
+*managed-user creation* falls back to legacy admin-credential staging and appends a
+`Password Safe managed-user creation failed …` line to the job log — the tunnel keeps the
+admin credential and the job stays green. A failure in *managed-system onboarding* has no
+fallback and **fails the job**: the error message carries the cause and the remedy. The
+database row stays `available` either way, so the row's **Register in Password Safe**
+action finishes the onboarding without re-provisioning.
 
 ### Where the functional account comes from
 
@@ -571,10 +574,11 @@ mysql (7):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole;sslTRU
   action with *"Index and length must refer to a location within the string"*. The
   placeholder is `NoAssumeRole`; a full role ARN switches EC2 mode to STS AssumeRole. A
   configured value under 12 characters is coerced to the placeholder on read.
-- The managed system is registered with **no IP address**: the plugin tries every
-  populated host field as the packed address, and a bare IP (the `127.0.0.1`
-  placeholder the other clouds keep) always fails the parse with *"Index was outside
-  the bounds of the array"*.
+- The managed system's **IP Address field carries the packed address again**, identical
+  to the DNS Name. The platform refuses a create with no IP at all (*"The field
+  'IPAddress' is required."*), and the plugin tries every populated host field as the
+  packed address — so a bare IP (the `127.0.0.1` placeholder the other clouds keep)
+  always fails the parse with *"Index was outside the bounds of the array"*.
 
 In `create` mode the **functional account packs the AWS transport credential *and* the
 DB admin credential**: username `EC2:<dbAdmin>` or `IAM:<dbAdmin>`, password always the

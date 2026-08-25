@@ -274,6 +274,27 @@ def test_the_checkbox_does_not_also_switch_off_the_legacy_credential_staging():
     assert not gated, "the per-database choice must not gate the legacy admin staging"
 
 
+def test_a_failed_onboarding_fails_the_job_instead_of_going_green():
+    """It shipped once as best-effort: Password Safe rejected the managed-system create
+    ("The field 'IPAddress' is required.") and the job page said *completed* — the
+    operator opted in, got no Password Safe artifacts, and only a mid-log line said so.
+    Every except arm inside the ``if onboard_ctx:`` branch must re-raise (the outer
+    handler marks the JOB failed), never append-and-continue."""
+    src = ast.parse(open(_SVC, encoding="utf-8").read())
+    fn = next(n for n in ast.walk(src)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_provision_apply")
+    branch = next(n for n in ast.walk(fn)
+                  if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
+                  and n.test.id == "onboard_ctx")
+    handlers = [h for t in ast.walk(ast.Module(body=branch.body, type_ignores=[]))
+                if isinstance(t, ast.Try) for h in t.handlers]
+    assert handlers, "the onboarding call lost its try/except"
+    for handler in handlers:
+        assert any(isinstance(n, ast.Raise) for n in ast.walk(handler)), \
+            "an onboarding failure must propagate — a green job with no Password Safe " \
+            "artifacts is the exact bug this pins"
+
+
 # ── eligibility has one owner ─────────────────────────────────────────────────
 
 def test_a_provisioned_aws_azure_or_gcp_database_is_onboardable():
