@@ -49,7 +49,10 @@ FLAGS = ("password_safe_enabled", "pra_enabled", "epml_enabled")
 # the split is provably lossless, PLUS keys deliberately added since (the thirteen
 # `*_gcp_*` cloud-DB onboarding keys, which wire the GCP Cloud SQL plugins as the third
 # Layer-2 cloud alongside AWS SSM and Azure Run Command — eight for the data-api channel
-# and five more for cloud-run, which is what adds SQL Server). A key that vanishes from all three models is a field an
+# and five more for cloud-run, which is what adds SQL Server; and
+# `gcp_jumpoint_machine_type`, promoted onto the PRA panel because the OT cell's gateway
+# sizing guard tells operators to change it "in Settings" and until then it was declared
+# only on the wizard's GCPSetup — settable by API, findable nowhere). A key that vanishes from all three models is a field an
 # operator can no longer set; one that appears on two breaks the union-check equivalence
 # test_setup_feature_roundtrip documents in its own docstring.
 LEGACY_KEYS = frozenset("""
@@ -89,7 +92,7 @@ clouddb_ps_gcp_impersonate_target clouddb_ps_gcp_rotator_service_account
 clouddb_ps_platform_gcp_sqlserver clouddb_ps_functional_account_gcp_sqlserver
 clouddb_ps_gcp_channel clouddb_ps_gcp_dbops_audience clouddb_ps_gcp_dbops_ssl
 azure_bt_jump_group_name azure_jumpoint_name azure_vm_jumpoint_mode
-gcp_bt_jump_group_name gcp_jumpoint_name gcp_vm_jumpoint_mode
+gcp_bt_jump_group_name gcp_jumpoint_name gcp_vm_jumpoint_mode gcp_jumpoint_machine_type
 epml_site_id epml_pat
 k8s_ps_token_rotation_enabled k8s_ps_token_platform k8s_ps_pravault_token_platform
 k8s_ps_functional_account_aws k8s_ps_functional_account_azure
