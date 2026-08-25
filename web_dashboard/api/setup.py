@@ -806,6 +806,11 @@ class PRAFeatureConfig(BaseModel):
     # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
     bt_jump_group_name: str = ""
     bt_jumpoint_name: str = ""
+    # Instance type for the managed shared AWS ECS Gateway host — same Web-Jump OOM
+    # story as gcp_jumpoint_machine_type below: t3.small minimum, t3.medium preferred.
+    # Blank keeps the config.py default (t3.small). Changing it never resizes a live
+    # host: terminate the Gateway host instance and the next deploy recreates it.
+    bt_ecs_host_instance_type: str = ""
     # PRA Configuration API account — the few calls the SRA provider can't make
     # (PRA Vault accounts for cloud-DB onboarding). Blank reuses the credentials above.
     pra_config_api_client_id: str = ""              # blank → reuse bt_client_id
@@ -817,6 +822,11 @@ class PRAFeatureConfig(BaseModel):
     # ref-counted clouddb-jumpoint VM or starts its own ACI container group. Editable
     # here so the choice is reversible without a redeploy. Batches always share one ACI.
     azure_vm_jumpoint_mode: str = "shared"
+    # VM size for the managed shared Azure Gateway VM — same Web-Jump OOM story as
+    # gcp_jumpoint_machine_type below: Standard_B1ms minimum, Standard_B2s preferred.
+    # Blank keeps the config.py default (Standard_B2s). Changing it never resizes a
+    # live Gateway: delete the Gateway VM and the next deploy recreates it.
+    azure_jumpoint_vm_size: str = ""
     # GCP-specific overrides (leave blank to fall back to the AWS values above)
     gcp_bt_jump_group_name: str = ""
     gcp_jumpoint_name: str = ""

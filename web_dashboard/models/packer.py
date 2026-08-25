@@ -45,7 +45,14 @@ class ProvisionerEnvVar(BaseModel):
 
 class AWSPackerBuildRequest(BaseModel):
     image_name: str
-    source_ami: str
+    # Exactly one source: a literal AMI id, or an OS family the build resolves to
+    # the newest public AMI at build time (aws_service.AMI_FAMILIES — the EC2
+    # counterpart of the GCP build's source_image_family, so "source family
+    # debian-12" recipes work on both clouds). When a family is used and
+    # ssh_username is left at its default, the family's canonical login user wins
+    # (Debian AMIs log in as `admin`, not ec2-user).
+    source_ami: str = ""
+    source_ami_family: str = ""
     instance_type: str = "t3.micro"
     ssh_username: str = "ec2-user"
     provisioner_script: str = ""
@@ -56,6 +63,12 @@ class AWSPackerBuildRequest(BaseModel):
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
     bt_epml_source: Optional[str] = None       # "beyondtrust" (default) | "storage" — where BT_EPML_URL points
+
+    @model_validator(mode="after")
+    def _one_source(self):
+        if not (self.source_ami.strip() or self.source_ami_family.strip()):
+            raise ValueError("one of source_ami or source_ami_family is required")
+        return self
 
 
 class AzurePackerBuildRequest(BaseModel):

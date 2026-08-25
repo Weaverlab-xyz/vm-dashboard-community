@@ -77,6 +77,7 @@ NOT_COLLECTED = {
     "k8s_clusters":       "dashboard DB, creator-scoped",
     "workstation_vms":    "HypervisorVMCache rows an agent synced",
     "gateways":           "gateway registry table (reconcile=false on the tile)",
+    "ot_cells":           "Job rows (the cell's deploy child IS its inventory record)",
     "cloud_cost":         "already durable — services/cost_cache",
     # The hypervisor listings are agent-synced DB reads when conn.via_agent, and a live
     # call otherwise. Collecting them needs the per-connection `scope` the table reserves

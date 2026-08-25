@@ -85,6 +85,17 @@
             class="px-4 py-2 rounded-lg text-sm transition">
       Build Image
     </button>
+    {% if pra_enabled %}
+    <button @click="switchToOT()"
+            :class="activeTab === 'ot'
+              ? 'bg-white shadow text-gray-900 font-semibold'
+              : 'text-gray-500 hover:text-gray-700'"
+            class="px-4 py-2 rounded-lg text-sm transition">
+      OT Demo Cell
+      <span x-show="otCells.length" class="ml-1.5 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full font-normal"
+            x-text="otCells.length"></span>
+    </button>
+    {% endif %}
   </div>
 
   <!-- ── TAB: Community Images ───────────────────────────────────────────── -->
@@ -1252,16 +1263,21 @@
           <label class="block text-sm font-medium text-gray-700 mb-1">Source AMI <span class="text-red-500">*</span></label>
           <div class="flex gap-2 mb-2 flex-wrap">
             <template x-for="p in awsImagePresets" :key="p.id">
-              <button @click="packerForm.source_ami = p.ami; packerForm.ssh_username = p.user"
-                      :class="packerForm.source_ami === p.ami ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
+              <button @click="packerForm.source_ami_family = p.family; packerForm.source_ami = ''; packerForm.ssh_username = p.user"
+                      :class="packerForm.source_ami_family === p.family ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
                       class="text-xs font-medium px-3 py-1.5 rounded-md transition"
                       x-text="p.label"></button>
             </template>
           </div>
           <input type="text" x-model="packerForm.source_ami"
-                 placeholder="ami-0abc123def456789a"
+                 @input="packerForm.source_ami_family = ''"
+                 :placeholder="packerForm.source_ami_family ? ('newest ' + packerForm.source_ami_family + ' AMI (resolved at build)') : 'ami-0abc123def456789a'"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
-          <p class="text-xs text-gray-400 mt-1">Use presets above or paste any AMI ID from your account or the AWS console.</p>
+          <p class="text-xs text-gray-400 mt-1">
+            A preset resolves to the newest public AMI of that family at build time
+            (like the GCP build's source family) — or paste any AMI ID from your account
+            or the AWS console.
+          </p>
         </div>
 
         <!-- Instance Type + SSH Username -->
@@ -1395,7 +1411,7 @@
 
         <!-- Submit -->
         <button @click="submitAwsPackerBuild()"
-                :disabled="packerBuilding || !packerForm.image_name || !packerForm.source_ami"
+                :disabled="packerBuilding || !packerForm.image_name || !(packerForm.source_ami || packerForm.source_ami_family)"
                 class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
           <span x-show="!packerBuilding">Start Packer Build</span>
           <span x-show="packerBuilding" x-cloak>Queuing build…</span>
@@ -1403,6 +1419,323 @@
       </div>
     </div>
   </div>
+
+  {% if pra_enabled %}
+  <!-- ── TAB: OT Demo Cell (mirrors the GCP page's tab; docs/cloud-ot.md) ──── -->
+  <div x-show="activeTab === 'ot'" x-cloak>
+    <div class="mb-4">
+      <h2 class="text-lg font-semibold text-gray-800">OT Demo Cell</h2>
+      <p class="text-xs text-gray-400 mt-0.5 max-w-3xl">
+        Deploy a simulated plant cell — a Modbus PLC simulator (:502) + FUXA web HMI (:1881) from the
+        Packer-baked <span class="font-mono">ot-sim</span> AMI — into the private sandbox subnet,
+        with BeyondTrust access auto-wired: Web Jump → HMI, protocol tunnel → PLC port, plus the Shell
+        Jump and optional Password Safe onboarding every EC2 deploy gets. Bake the AMI first on the
+        <em>Build Image</em> tab (Debian 12 preset + <span class="font-mono">provisioners/ot/ot-sim-debian.sh</span>).
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+      <!-- Deploy form -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 self-start">
+        <h3 class="text-sm font-semibold text-gray-700">Deploy a cell</h3>
+
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">AMI <span class="text-red-500">*</span></label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-500">
+              <input type="checkbox" x-model="otShowAllImages" class="rounded border-gray-300 h-3.5 w-3.5">
+              show all private AMIs
+            </label>
+          </div>
+          <select x-model="otForm.ami_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— pick the ot-sim AMI —</option>
+            <template x-for="img in otImages()" :key="img.ami_id">
+              <option :value="img.ami_id" x-text="img.name || img.ami_id"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1" x-show="!loadingAmis && otImages().length === 0">
+            No <span class="font-mono">ot-sim</span> AMI yet — build one on the <em>Build Image</em> tab, or tick "show all".
+          </p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
+            <input type="text" x-model="otForm.instance_name" placeholder="ot-cell-01"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Type</label>
+            <select x-model="otForm.instance_type"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="t in (networkOpts.instance_types && networkOpts.instance_types.length ? networkOpts.instance_types : ['t3.medium'])" :key="t">
+                <option :value="t" x-text="t"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Region</label>
+            <select x-model="otForm.region" @change="onOTRegionChange()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="r in regionCatalog" :key="r.id">
+                <option :value="r.id" x-text="r.label ? (r.id + ' — ' + r.label) : r.id"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+            <select x-model="otForm.workgroup"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">— select a workgroup —</option>
+              <template x-for="wg in availableWorkgroups" :key="wg">
+                <option :value="wg" x-text="wg"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subnet <span class="text-red-500">*</span></label>
+          <select x-model="otForm.subnet_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select subnet…</option>
+            <template x-for="s in networkOpts.subnets || []" :key="s.id">
+              <option :value="s.id" x-text="s.name"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">Pick the PRIVATE sandbox subnet — EC2 has no per-instance
+            public-IP switch here, and a public cell deflates the air-gap story.</p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Security Groups <span class="text-red-500">*</span></label>
+          <div class="border border-gray-300 rounded-lg max-h-36 overflow-y-auto p-2 space-y-1">
+            <p x-show="(networkOpts.security_groups || []).length === 0"
+               class="text-xs text-gray-400 p-1">No security groups found.</p>
+            <template x-for="sg in networkOpts.security_groups || []" :key="sg.id">
+              <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                <input type="checkbox" :value="sg.id"
+                       @change="toggleOTSG($event, sg.id)"
+                       :checked="otForm.security_group_ids.includes(sg.id)"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                <span class="text-xs text-gray-700" x-text="sg.name"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">PLC Protocol (tunnel)</label>
+            <select x-model="otForm.protocol"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="p in otPresets" :key="p.key">
+                <option :value="p.key" x-text="p.label + ' (:' + p.port + ')'"></option>
+              </template>
+              <option value="custom">Custom port…</option>
+            </select>
+          </div>
+          <div x-show="otForm.protocol === 'custom'" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">PLC Port</label>
+            <input type="number" min="1" max="65535" x-model.number="otForm.plc_port"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+        </div>
+
+        <!-- BeyondTrust PRA placement — same pickers as the VM deploy modal. All three
+             jump items (Web Jump, tunnel, Shell Jump) land in this Jump Group and ride
+             this Gateway, so pick the pair that matches the cell's region rather than
+             letting a us-east-2 cell wire into another region's defaults. -->
+        <div class="pt-1 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA placement
+            <span class="font-normal text-gray-400">— where the cell's jump items land; defaults are the configured bt_jump_group_name / bt_jumpoint_name.</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+              <select x-model="otForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                      class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+              <select x-model="otForm.jumpoint_name" :disabled="!praPickers.gateways.length"
+                      class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in praPickers.gateways || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <p class="text-xs text-gray-400">Pick the pair matching the cell's region. With a Gateway
+            override the deploy skips the shared-gateway size check — the host behind that Gateway
+            needs ≥2 GB RAM for the Web Jump.</p>
+        </div>
+
+        {% if password_safe_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="otForm.register_in_passwordsafe"
+                 class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+          Onboard the cell's admin account into Password Safe
+          <span class="text-xs text-gray-400">(+ a synced PRA Vault account for checkout/injection)</span>
+        </label>
+        {% endif %}
+        {% if entitle_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="otForm.register_in_entitle"
+                 class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+          Register the VM in Entitle for just-in-time SSH access
+        </label>
+        {% endif %}
+
+        <div x-show="otError" x-cloak
+             class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700" x-text="otError"></div>
+
+        <button @click="submitOTCell()"
+                :disabled="otSubmitting || !otForm.ami_id || !otForm.instance_name || !otForm.workgroup || !otForm.subnet_id || !otForm.security_group_ids.length"
+                class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
+          <span x-show="!otSubmitting">Deploy OT Cell</span>
+          <span x-show="otSubmitting" x-cloak>Queuing…</span>
+        </button>
+        <p class="text-xs text-gray-400">
+          The gateway backing the Web Jump needs ≥2 GB RAM (<span class="font-mono">bt_ecs_host_instance_type</span>
+          t3.small minimum, t3.medium preferred — Settings → Integrations → Privileged Remote Access) —
+          the deploy checks and refuses early with the remedy otherwise.
+        </p>
+      </div>
+
+      <div class="space-y-6">
+        <!-- Live cells -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-gray-700">Cells</h3>
+            <button @click="loadOTCells()" class="text-xs text-gray-500 hover:text-gray-700">Refresh</button>
+          </div>
+          <p class="text-sm text-gray-400" x-show="!otCells.length">No OT cells yet.</p>
+          <div class="space-y-3">
+            <template x-for="c in otCells" :key="c.vm_job_id">
+              <div class="border border-gray-200 rounded-lg p-3">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono text-sm text-gray-800" x-text="c.instance_name"></span>
+                    <span class="text-xs px-1.5 py-0.5 rounded-full"
+                          :class="c.status === 'completed' ? 'bg-green-50 text-green-700' :
+                                  c.status === 'failed' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'"
+                          x-text="c.status"></span>
+                    <span x-show="c.status === 'completed' && !c.wiring_complete" x-cloak
+                          class="text-xs px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">wiring incomplete</span>
+                  </div>
+                  <a :href="'/jobs/' + c.vm_job_id" class="text-xs text-blue-600 hover:underline">job →</a>
+                </div>
+                <div class="mt-2 text-xs text-gray-500 space-y-0.5">
+                  <div x-show="c.private_ip"><span class="text-gray-400">IP:</span> <span class="font-mono" x-text="c.private_ip"></span>
+                    <span class="text-gray-400 ml-2">region:</span> <span class="font-mono" x-text="c.zone"></span></div>
+                  <div x-show="c.web_jump_id"><span class="text-gray-400">HMI Web Jump:</span>
+                    <span class="font-mono" x-text="c.web_jump_id"></span>
+                    <span class="text-gray-400" x-text="' (' + c.hmi_url + ')'"></span></div>
+                  <div x-show="c.tunnel_jump_id"><span class="text-gray-400">Tunnel:</span>
+                    <span class="font-mono" x-text="c.tunnel_protocol + ' 127.0.0.1:' + c.tunnel_local_port + ' → :' + c.tunnel_remote_port"></span></div>
+                  <div x-show="c.shell_jump_id"><span class="text-gray-400">Shell Jump:</span>
+                    <span class="font-mono" x-text="c.shell_jump_id"></span></div>
+                  <div x-show="c.vault_account_name"><span class="text-gray-400">PRA checkout:</span>
+                    <span class="font-mono" x-text="c.vault_account_name"></span>
+                    <span :class="c.ps_checkout_synced ? 'text-green-600' : 'text-amber-600'"
+                          x-text="c.ps_checkout_synced ? 'synced' : 'not synced'"></span></div>
+                  <div x-show="c.expires_at"><span class="text-gray-400">Expires:</span>
+                    <span x-text="(c.expires_at || '').replace('T', ' ').slice(0, 16) + ' UTC'"></span></div>
+                </div>
+                <div class="mt-2 flex gap-2">
+                  <button x-show="c.status === 'completed' && !c.wiring_complete" x-cloak
+                          @click="rewireOTCell(c)"
+                          class="text-xs px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-md transition">
+                    Re-wire
+                  </button>
+                  <button x-show="c.status === 'completed' && c.instance_id" x-cloak
+                          @click="destroyOTCell(c)"
+                          class="text-xs px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md transition">
+                    Destroy
+                  </button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Standalone OT tunnels -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <h3 class="text-sm font-semibold text-gray-700 mb-1">Standalone OT Protocol Tunnel</h3>
+          <p class="text-xs text-gray-400 mb-3">
+            A generic-TCP PRA protocol tunnel to any host the gateway can reach — for demoing against
+            your own lab gear without deploying a cell.
+          </p>
+          <div class="grid grid-cols-2 gap-2 mb-2">
+            <input type="text" x-model="otTunnelForm.name" placeholder="name (e.g. lab-plc)"
+                   class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input type="text" x-model="otTunnelForm.hostname" placeholder="host or IP"
+                   class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <select x-model="otTunnelForm.protocol"
+                    class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <template x-for="p in otPresets" :key="p.key">
+                <option :value="p.key" x-text="p.label + ' (:' + p.port + ')'"></option>
+              </template>
+              <option value="custom">Custom port…</option>
+            </select>
+            <input type="number" min="1" max="65535" x-show="otTunnelForm.protocol === 'custom'" x-cloak
+                   x-model.number="otTunnelForm.remote_port" placeholder="port"
+                   class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <select x-model="otTunnelForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                    class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">Jump group: (configured default)</option>
+              <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                <option :value="g.name" x-text="g.name"></option>
+              </template>
+            </select>
+            <select x-model="otTunnelForm.jumpoint_name" :disabled="!praPickers.gateways.length"
+                    class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">Gateway: (configured default)</option>
+              <template x-for="j in praPickers.gateways || []" :key="j.id">
+                <option :value="j.name" x-text="j.name"></option>
+              </template>
+            </select>
+          </div>
+          <div x-show="otTunnelForm.error" x-cloak
+               class="mb-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700" x-text="otTunnelForm.error"></div>
+          <div x-show="otTunnelForm.message" x-cloak
+               class="mb-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700" x-text="otTunnelForm.message"></div>
+          <button @click="submitOTTunnel()"
+                  :disabled="otTunnelForm.submitting || !otTunnelForm.name || !otTunnelForm.hostname"
+                  class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition">
+            <span x-show="!otTunnelForm.submitting">Create Tunnel</span>
+            <span x-show="otTunnelForm.submitting" x-cloak>Creating…</span>
+          </button>
+
+          <div class="mt-4 space-y-2" x-show="otTunnels.length" x-cloak>
+            <template x-for="t in otTunnels" :key="t.slug">
+              <div class="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2">
+                <div class="text-xs text-gray-600">
+                  <span class="font-mono text-gray-800" x-text="t.name || t.slug"></span>
+                  <span class="text-gray-400 ml-2" x-text="t.protocol + ' 127.0.0.1:' + t.local_port + ' → ' + t.hostname + ':' + t.remote_port"></span>
+                  <span class="text-gray-400 ml-2" x-text="'jump ' + t.tunnel_jump_id"></span>
+                </div>
+                <button @click="deleteOTTunnel(t)"
+                        class="text-xs text-red-600 hover:text-red-800">Delete</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
 </div>
 {% endblock %}
@@ -1514,6 +1847,7 @@
       packerForm: {
         image_name: '',
         source_ami: '',
+        source_ami_family: '',
         instance_type: 't3.micro',
         ssh_username: 'ec2-user',
         provisioner_script: '',
@@ -1532,17 +1866,48 @@
       // offers them so operators don't have to copy-paste from elsewhere.
       storedScripts: [],
       loadingScript: false,
+      // Each preset names an OS FAMILY (aws_service.AMI_FAMILIES) the build
+      // resolves to the newest public AMI at build time — these used to carry a
+      // hardcoded `ami: ''`, so clicking one blanked the field and set only the
+      // username. The ot-sim image contract (provisioners/ot/README.md) bakes on
+      // debian-12, same as the GCP recipe.
       awsImagePresets: [
-        { id: 'al2023',  label: 'Amazon Linux 2023', ami: '', user: 'ec2-user' },
-        { id: 'ubuntu',  label: 'Ubuntu 22.04',       ami: '', user: 'ubuntu'  },
-        { id: 'debian',  label: 'Debian 12',          ami: '', user: 'admin'   },
+        { id: 'al2023',  label: 'Amazon Linux 2023', family: 'al2023',       user: 'ec2-user' },
+        { id: 'ubuntu',  label: 'Ubuntu 22.04',      family: 'ubuntu-22.04', user: 'ubuntu'  },
+        { id: 'debian',  label: 'Debian 12',         family: 'debian-12',    user: 'admin'   },
       ],
+
+      // ── OT demo cell (mirrors the GCP page's tab; docs/cloud-ot.md) ────────
+      otLoaded:        false,
+      otPresets:       [],
+      otCells:         [],
+      otTunnels:       [],
+      otError:         '',
+      otSubmitting:    false,
+      otShowAllImages: false,
+      otForm: {
+        ami_id: '', instance_name: '', instance_type: 't3.medium',
+        region: '', subnet_id: '', security_group_ids: [], workgroup: '',
+        protocol: 'modbus', plc_port: null, hmi_port: 1881,
+        jump_group: '', jumpoint_name: '',
+        register_in_passwordsafe: true, register_in_entitle: false,
+      },
+      otTunnelForm: {
+        name: '', hostname: '', protocol: 'modbus', remote_port: null,
+        jump_group: '', jumpoint_name: '',
+        submitting: false, error: '', message: '',
+      },
 
       async init() {
         requireAuth();
         this.loadSecretBackends();
         this.loadDefaultRegion();
         const hash = window.location.hash.slice(1);
+        {% if pra_enabled %}
+        if (hash === 'ot') {
+          this.switchToOT();
+        } else
+        {% endif %}
         if (['community', 'amis', 'instances', 'build'].includes(hash)) {
           this.activeTab = hash;
         }
@@ -1809,6 +2174,152 @@
           const r = await API.get('/api/pra/pickers');
           if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], gateways: r.jumpoints || [], loaded: true };
         } catch (e) { /* non-fatal */ }
+      },
+
+      // ── OT demo cell (mirrors the GCP page's tab; docs/cloud-ot.md) ────────
+      switchToOT() {
+        this.activeTab = 'ot';
+        if (!this.otLoaded) this.loadOTData();
+      },
+
+      async loadOTData() {
+        this.otLoaded = true;
+        if (!this.otForm.region) this.otForm.region = this.region || '';
+        this.loadPraPickers();
+        this.onOTRegionChange();
+        try {
+          const r = await API.get('/api/ot/presets');
+          this.otPresets = r.presets || [];
+        } catch (_) { this.otPresets = []; }
+        this.loadOTCells();
+        this.loadOTTunnels();
+      },
+
+      otImages() {
+        const imgs = this.amis || [];
+        return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-sim'));
+      },
+
+      // Subnets, SGs and AMIs are region-scoped — refetch on change, then default
+      // to the sandbox private subnet + VM SG (the same preselects the deploy
+      // modal gets), which is exactly where an air-gapped cell belongs.
+      async onOTRegionChange() {
+        this.otForm.subnet_id = '';
+        this.otForm.security_group_ids = [];
+        await Promise.all([
+          this.loadNetworkOptsFor(this.otForm.region, true),
+          this.loadAmis(this.otForm.region),
+        ]);
+        const o = this.networkOpts || {};
+        if (!this.otForm.subnet_id && o.default_subnet_id) this.otForm.subnet_id = o.default_subnet_id;
+        if (!this.otForm.security_group_ids.length && o.default_security_group_id) this.otForm.security_group_ids = [o.default_security_group_id];
+      },
+
+      toggleOTSG(event, sgId) {
+        if (event.target.checked) {
+          this.otForm.security_group_ids = [...this.otForm.security_group_ids, sgId];
+        } else {
+          this.otForm.security_group_ids = this.otForm.security_group_ids.filter(id => id !== sgId);
+        }
+      },
+
+      async loadOTCells() {
+        try {
+          const r = await API.get('/api/ot/cells?cloud=aws');
+          this.otCells = r.cells || [];
+        } catch (e) {
+          this.otError = e.message || 'Failed to load cells';
+        }
+      },
+
+      async loadOTTunnels() {
+        try {
+          const r = await API.get('/api/ot/tunnels?cloud=aws');
+          this.otTunnels = r.tunnels || [];
+        } catch (_) { this.otTunnels = []; }
+      },
+
+      async submitOTCell() {
+        this.otError = '';
+        this.otSubmitting = true;
+        try {
+          const f = this.otForm;
+          const img = (this.amis || []).find(i => i.ami_id === f.ami_id);
+          const res = await API.post('/api/ot/cell/aws', {
+            ami_id: f.ami_id,
+            ami_name: img ? (img.name || '') : '',
+            instance_name: f.instance_name.trim(),
+            instance_type: f.instance_type,
+            region: f.region || null,
+            subnet_id: f.subnet_id,
+            security_group_ids: f.security_group_ids,
+            workgroup: f.workgroup,
+            protocol: f.protocol,
+            plc_port: f.protocol === 'custom' ? f.plc_port : null,
+            hmi_port: f.hmi_port,
+            jump_group: f.jump_group || null,
+            jumpoint_name: f.jumpoint_name || null,
+            register_in_passwordsafe: f.register_in_passwordsafe,
+            register_in_entitle: f.register_in_entitle,
+          });
+          window.location.href = '/jobs/' + res.job_id;
+        } catch (e) {
+          this.otError = e.message || 'Deploy failed';
+        } finally {
+          this.otSubmitting = false;
+        }
+      },
+
+      async rewireOTCell(c) {
+        try {
+          const r = await API.post(`/api/ot/cell/${encodeURIComponent(c.vm_job_id)}/rewire`, {});
+          window.location.href = '/jobs/' + r.job_id;
+        } catch (e) {
+          toast(e.message || 'Re-wire failed', 'error');
+        }
+      },
+
+      async destroyOTCell(c) {
+        if (!confirm(`Destroy OT cell ${c.instance_name}? This removes the VM, its PRA jump items (Web Jump, tunnel, Shell Jump), the PRA Vault checkout account and any Password Safe registration.`)) return;
+        try {
+          await API.delete(`/api/aws/instances/${encodeURIComponent(c.instance_id)}`);
+          toast('Destroy started — the cell disappears once the job completes.', 'success');
+        } catch (e) {
+          toast(e.message || 'Destroy failed', 'error');
+        }
+      },
+
+      async submitOTTunnel() {
+        const f = this.otTunnelForm;
+        f.error = ''; f.message = ''; f.submitting = true;
+        try {
+          const res = await API.post('/api/ot/tunnels', {
+            name: f.name.trim(),
+            hostname: f.hostname.trim(),
+            protocol: f.protocol,
+            remote_port: f.protocol === 'custom' ? f.remote_port : null,
+            jump_group: f.jump_group || null,
+            jumpoint_name: f.jumpoint_name || null,
+            cloud: 'aws',
+          });
+          f.message = res.message || 'Tunnel created.';
+          f.name = ''; f.hostname = '';
+          this.loadOTTunnels();
+        } catch (e) {
+          f.error = e.message || 'Tunnel creation failed';
+        } finally {
+          f.submitting = false;
+        }
+      },
+
+      async deleteOTTunnel(t) {
+        if (!confirm(`Delete OT tunnel ${t.name || t.slug}? The PRA jump item is destroyed.`)) return;
+        try {
+          await API.delete(`/api/ot/tunnels/${encodeURIComponent(t.slug)}`);
+          this.loadOTTunnels();
+        } catch (e) {
+          toast(e.message || 'Delete failed', 'error');
+        }
       },
 
       async openDeployModal(ami) {
@@ -2144,7 +2655,7 @@
       async submitAwsPackerBuild() {
         this.packerError = '';
         if (!this.packerForm.image_name) { this.packerError = 'Image name is required.'; return; }
-        if (!this.packerForm.source_ami) { this.packerError = 'Source AMI is required.'; return; }
+        if (!this.packerForm.source_ami && !this.packerForm.source_ami_family) { this.packerError = 'Pick a source preset or paste an AMI ID.'; return; }
         this.packerBuilding = true;
         try {
           const resp = await API.post('/api/packer/aws/build', this.packerForm);

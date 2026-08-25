@@ -2096,6 +2096,19 @@
                        placeholder="AWS ECS">
               </div>
             </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Gateway host instance type <span class="text-gray-400 font-normal">(AWS)</span></label>
+              <input type="text" x-model="panelCfg.bt_ecs_host_instance_type"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="t3.small (default)">
+              <p class="text-xs text-gray-400 mt-1">
+                Size of the shared ECS Gateway host. A Web Jump renders headless Chromium on the
+                Gateway and needs ≥2 GB — <span class="font-mono">t3.small</span> minimum,
+                <span class="font-mono">t3.medium</span> preferred. Changing this never resizes a
+                live host: terminate the Gateway host instance and the next deploy recreates it
+                at the new size. Blank keeps the default (t3.small).
+              </p>
+            </div>
             <p class="text-xs text-gray-400 mb-2">Azure overrides — leave blank to reuse the AWS values above.</p>
             <div class="grid grid-cols-2 gap-3 mb-3">
               <div>
@@ -2127,6 +2140,19 @@
                 the same <span class="font-mono">/jpt</span> share, so they contend over one
                 Gateway identity. A deploy that supplies its own Gateway deploy key always
                 gets ACI, since the shared host uses the configured key.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Gateway VM size <span class="text-gray-400 font-normal">(Azure)</span></label>
+              <input type="text" x-model="panelCfg.azure_jumpoint_vm_size"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="Standard_B2s (default)">
+              <p class="text-xs text-gray-400 mt-1">
+                Size of the shared Gateway VM. A Web Jump renders headless Chromium on the
+                Gateway and needs ≥2 GB — <span class="font-mono">Standard_B1ms</span> minimum,
+                <span class="font-mono">Standard_B2s</span> preferred. Changing this never
+                resizes a live Gateway: delete the Gateway VM and the next deploy recreates it
+                at the new size. Blank keeps the default (Standard_B2s).
               </p>
             </div>
             <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>

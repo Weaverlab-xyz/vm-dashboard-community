@@ -300,11 +300,14 @@
           // other tile (a user without read permission sees "unavailable").
           id: 'managed',
           label: 'Managed Services',
-          gridClass: 'grid grid-cols-1 sm:grid-cols-2 gap-4',
+          gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
           refreshable: true,
           tiles: [
             { key: 'cloud_databases', title: 'Databases',           href: '/databases', flag: 'cloud_database',  description: 'provisioned + registered' },
             { key: 'k8s_clusters',    title: 'Kubernetes Clusters', href: '/k8s',       flag: 'k8s_management',  description: 'managed clusters' },
+            // Counted from the cells' own VM-deploy job rows (DB-only, all three
+            // clouds); gated on `pra` because the OT router itself is.
+            { key: 'ot_cells',        title: 'OT Demo Cells',       href: '/gcp#ot',    flag: 'pra',             secondaryLabel: 'wired' },
           ],
         },
         {

@@ -1359,6 +1359,19 @@ function gcpDashboard() {
 
     async init() {
       this.loadSecretBackends();
+      // Deep links (the home page's OT tile lands on /gcp#ot). switchToOT, not a
+      // bare activeTab write, so the tab's lazy data load runs. The ot branch is
+      // template-gated with the tab pane itself — with PRA off the pane doesn't
+      // render, and activating it would blank the page body.
+      const hash = window.location.hash.slice(1);
+      {% if pra_enabled %}
+      if (hash === 'ot') {
+        this.switchToOT();
+      } else
+      {% endif %}
+      if (['public', 'custom', 'instances', 'build'].includes(hash)) {
+        this.activeTab = hash;
+      }
       API.get('/api/groups/workgroups')
         .then(r => { this.availableWorkgroups = r || []; })
         .catch(() => { this.availableWorkgroups = []; });
