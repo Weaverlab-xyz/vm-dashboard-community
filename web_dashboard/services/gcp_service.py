@@ -3329,8 +3329,17 @@ def _require_run():
 
 
 def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: str, creds,
-                              start_rfc3339: str = "") -> str:
-    """Retrieve Cloud Run job stdout/stderr from Cloud Logging via REST."""
+                              start_rfc3339: str = "", container_only: bool = False) -> str:
+    """Retrieve Cloud Run job stdout/stderr from Cloud Logging via REST.
+
+    ``container_only`` restricts the query to the container's own stdout/stderr
+    logNames. Without it, `resource.type="cloud_run_job"` also matches Cloud Run
+    platform entries — audit events with no textPayload, and varlog/system lines
+    like "Container called exit(0)." — which both satisfy the ingestion-wait loop
+    below before the real stdout arrives AND pollute the returned text. Callers
+    that *parse* the output as a value (the k8s runner: minted SA tokens, jsonpath
+    reads) must pass True; the Ansible callers keep the platform lines because
+    system messages (e.g. an OOM kill) are useful in failure logs."""
     try:
         from google.auth.transport.requests import AuthorizedSession
         import requests as _requests
@@ -3346,6 +3355,11 @@ def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: st
         'resource.type="cloud_run_job"',
         f'resource.labels.job_name="{job_name}"',
     ]
+    if container_only:
+        filter_parts.append(
+            f'logName=("projects/{project_id}/logs/run.googleapis.com%2Fstdout"'
+            f' OR "projects/{project_id}/logs/run.googleapis.com%2Fstderr")'
+        )
     # Scope to THIS run by timestamp rather than the per-execution label: the label
     # (run.googleapis.com/execution_name) IS on the entries, but it lags Cloud Logging
     # ingestion past our retry window, so filtering on it returned nothing. The floor is
@@ -3707,9 +3721,14 @@ def _run_cloud_run_k8s_sync(
             # Scope the log query to this execution's start (create_time) so a reused
             # job name doesn't pull a prior run's output; the label-based scope lagged
             # ingestion. run_v2 exposes create_time as a tz-aware datetime.
+            # container_only: callers parse this output as a VALUE (minted SA tokens,
+            # jsonpath reads), so platform entries must not satisfy the ingestion wait
+            # — a "Container called exit(0)." line returned as the whole output is what
+            # a token readback then base64-decodes into garbage.
             _ct = getattr(execution, "create_time", None)
             _floor = _ct.isoformat().replace("+00:00", "Z") if hasattr(_ct, "isoformat") else ""
-            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds, start_rfc3339=_floor)
+            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds,
+                                               start_rfc3339=_floor, container_only=True)
         except Exception as log_err:
             logger.warning("Cloud Run k8s: could not retrieve logs: %s", log_err)
 

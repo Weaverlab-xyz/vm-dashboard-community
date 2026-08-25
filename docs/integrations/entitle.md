@@ -105,6 +105,14 @@ cert passed as Terraform variables. A **private** cluster registers through the 
 instead and passes no credentials — the same public/private split as every other
 resource type.
 
+The public path's token is the minted ServiceAccount's **long-lived token Secret**,
+applied and read back in a single runner invocation (sentinel-wrapped, so noisy
+runner log capture can't corrupt it). If the cluster never populates that Secret,
+the job falls back to a TokenRequest (`kubectl create token`) and logs a warning:
+TokenRequest lifetimes are capped by the cluster (e.g. ~48 h on GKE), so an
+integration registered that way stops working when the token expires — re-register
+before then, or install the agent and use In-Cluster access.
+
 **The fine-grained tier is the impersonator model.** Rather than Entitle minting cluster
 credentials, `POST /api/k8s/clusters/{id}/impersonator` grants the Entra group
 cluster-wide `impersonate` on `users`. Entitle then JIT-binds `<prefix>:<email>` to a
