@@ -1,19 +1,23 @@
-"""Structural invariants of the OT cell deploy endpoint (api/ot.py).
+"""Structural invariants of the OT cell deploy endpoints (api/ot.py).
 
 The cell is a parent/child job pair: an ``ot_cell_deploy`` parent that drives one
-``gce_deploy`` child. Both halves of that contract have failure modes that leave
-no trace at request time, so they are pinned statically here (the same technique
-tests/test_worker_dispatch.py uses):
+VM-deploy child — ``gce_deploy`` / ``ec2_deploy`` / ``azure_deploy`` per cloud.
+Both halves of that contract have failure modes that leave no trace at request
+time, so they are pinned statically here (the same technique
+tests/test_worker_dispatch.py uses), for every cloud's endpoint:
 
-* the child MUST be created ``status="queued"`` — a pending gce_deploy would be
+* the child MUST be created ``status="queued"`` — a pending deploy child would be
   claimed by the runner and deployed a SECOND time alongside the parent;
 * the child's metadata must carry the keys the orchestrator and destroy path key
-  off (``ot_cell``, ``ot_params``, ``req``) — a dropped key means wiring or
-  teardown silently skips;
+  off (``ot_cell``, ``ot_params``, plus everything that cloud's vm service
+  ``run()`` rebuilds the deploy from) — a dropped key means wiring or teardown
+  silently skips, or the runner KeyErrors mid-deploy;
 * the parent's metadata must carry ``children`` — that key is what the repo-wide
-  queued-children rule in test_worker_dispatch matches on;
-* the cell's VM must never get an external IP and must carry the ``ot-sim`` tag
-  (the forward hook for tag-scoped Purdue-zone firewalling).
+  queued-children rule in test_worker_dispatch matches on — and ``cloud``, which
+  is what run_cell_deploy dispatches on;
+* the cell's VM must never get an external IP (GCP/Azure carry the flag; EC2 has
+  none — the subnet decides, which the form and model docstring pin instead) and
+  the GCP cell must carry the ``ot-sim`` tag (the tag-scoped Purdue-zoning hook).
 
 Run: python tests/test_ot_cell_meta.py   (or under pytest)
 """
@@ -47,35 +51,60 @@ def _create_job_calls(fn):
                    keys)
 
 
+# Every cloud's cell endpoint, its child job type, and the child-metadata keys that
+# cloud's vm service run() (plus the OT orchestrator) reads back. GCP/Azure runners
+# rebuild the request from "req"; the AWS runner reads flat keys.
+_CLOUD_ENDPOINTS = {
+    "gcp": ("deploy_cell", "gce_deploy",
+            ("ot_cell", "ot_params", "req", "instance_name",
+             "project_id", "zone", "region")),
+    "aws": ("deploy_cell_aws", "ec2_deploy",
+            ("ot_cell", "ot_params", "ami_id", "instance_name", "instance_type",
+             "region", "subnet_id", "security_group_ids", "workgroup")),
+    "azure": ("deploy_cell_azure", "azure_deploy",
+              ("ot_cell", "ot_params", "req", "vm_name", "image_id",
+               "location", "resource_group")),
+}
+
+
 def test_the_child_is_queued_and_carries_the_ot_keys():
-    calls = list(_create_job_calls(_fn("deploy_cell")))
-    child = [c for c in calls if c[0] == "gce_deploy"]
-    assert len(child) == 1, f"expected exactly one gce_deploy create, got {calls}"
-    _, status, keys = child[0]
-    assert status == "queued", (
-        "the cell's gce_deploy child must be created status='queued' — pending "
-        "would be claimed by the runner and deployed twice")
-    for needed in ("ot_cell", "ot_params", "req", "instance_name",
-                   "project_id", "zone", "region"):
-        assert needed in keys, f"child metadata lost the {needed!r} key"
+    for cloud, (fn_name, child_type, needed_keys) in _CLOUD_ENDPOINTS.items():
+        calls = list(_create_job_calls(_fn(fn_name)))
+        child = [c for c in calls if c[0] == child_type]
+        assert len(child) == 1, f"{cloud}: expected exactly one {child_type} create, got {calls}"
+        _, status, keys = child[0]
+        assert status == "queued", (
+            f"{cloud}: the cell's {child_type} child must be created status='queued' — "
+            "pending would be claimed by the runner and deployed twice")
+        for needed in needed_keys:
+            assert needed in keys, f"{cloud}: child metadata lost the {needed!r} key"
 
 
-def test_the_parent_declares_its_children():
-    calls = list(_create_job_calls(_fn("deploy_cell")))
-    parents = [c for c in calls if c[0] == "ot_cell_deploy"]
-    assert len(parents) == 1
-    assert "children" in parents[0][2], (
-        "the parent's metadata must carry `children` — the key the repo-wide "
-        "queued-children rule (test_worker_dispatch) matches on")
+def test_the_parent_declares_its_children_and_cloud():
+    for cloud, (fn_name, _child_type, _keys) in _CLOUD_ENDPOINTS.items():
+        calls = list(_create_job_calls(_fn(fn_name)))
+        parents = [c for c in calls if c[0] == "ot_cell_deploy"]
+        assert len(parents) == 1, f"{cloud}: expected exactly one ot_cell_deploy create"
+        assert "children" in parents[0][2], (
+            f"{cloud}: the parent's metadata must carry `children` — the key the "
+            "repo-wide queued-children rule (test_worker_dispatch) matches on")
+        assert "cloud" in parents[0][2], (
+            f"{cloud}: the parent's metadata must carry `cloud` — what "
+            "run_cell_deploy dispatches the child's vm service on")
 
 
 def test_the_cell_vm_is_private_and_tagged():
     fn = _fn("deploy_cell")
     src = ast.unparse(fn)
     assert "create_external_ip=False" in src, (
-        "the cell VM must never get an external IP — access is PRA-brokered only")
+        "the GCP cell VM must never get an external IP — access is PRA-brokered only")
     assert "'ot-sim'" in src or '"ot-sim"' in ast.dump(fn), (
-        "the cell VM must carry the ot-sim network tag (the Purdue-zoning hook)")
+        "the GCP cell VM must carry the ot-sim network tag (the Purdue-zoning hook)")
+    # Azure has the same knob; EC2 has none (the subnet decides), which the model
+    # docstring and the form's subnet help text pin instead.
+    azure_src = ast.unparse(_fn("deploy_cell_azure"))
+    assert "create_public_ip=False" in azure_src, (
+        "the Azure cell VM must never get a public IP — access is PRA-brokered only")
 
 
 def test_the_rewire_endpoint_creates_no_children_parent():
@@ -93,15 +122,29 @@ def test_the_default_machine_type_is_e2_medium_everywhere():
     """e2-small (2 GB) proved too tight for Docker + PLC sim + FUXA on a live cell
     (ot-cell-01), so the model default is e2-medium — and the FORM must agree: an
     Alpine x-model preselects whatever the JS state holds, so a stale 'e2-small'
-    there silently reverts the model's default for every UI deploy."""
+    there silently reverts the model's default for every UI deploy. The AWS and
+    Azure cells budget the same 4 GB (t3.medium / Standard_B2s)."""
     models = open(os.path.join(_ROOT, "web_dashboard", "models", "ot.py"),
                   encoding="utf-8").read()
     assert 'machine_type: str = "e2-medium"' in models, (
         "OTCellDeployRequest.machine_type is no longer e2-medium")
-    tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", "gcp", "index.html"),
-                encoding="utf-8").read()
-    assert "machine_type: 'e2-small'" not in tmpl, (
+    assert 'instance_type: str = "t3.medium"' in models, (
+        "OTCellDeployRequestAWS.instance_type is no longer t3.medium")
+    assert 'vm_size: str = "Standard_B2s"' in models, (
+        "OTCellDeployRequestAzure.vm_size is no longer Standard_B2s")
+    gcp_tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", "gcp", "index.html"),
+                    encoding="utf-8").read()
+    assert "machine_type: 'e2-small'" not in gcp_tmpl, (
         "a GCP-page form still defaults its machine type to e2-small")
+    # AWS/Azure: assert the OT form's own default is the 4 GB shape (presence, not
+    # absence — the pages legitimately carry smaller types elsewhere, e.g. the
+    # Packer BUILD instance).
+    for page, ot_default in (("aws", "instance_type: 't3.medium'"),
+                             ("azure", "vm_size: 'Standard_B2s'")):
+        tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", page, "index.html"),
+                    encoding="utf-8").read()
+        assert ot_default in tmpl, (
+            f"the {page}-page OT form no longer defaults to the 4 GB cell size ({ot_default})")
 
 
 if __name__ == "__main__":

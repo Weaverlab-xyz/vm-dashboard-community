@@ -882,6 +882,62 @@ async def find_nat_ami(region: str, arch: str = "arm64") -> str:
         raise AWSError("AWS credentials not configured.")
 
 
+# OS-family → newest-AMI resolution for the Packer "Build Image" path. The GCP
+# build takes a source image *family* (debian-12) and Compute Engine resolves it;
+# EC2 has no equivalent, so this map is ours — the same publisher owners/name
+# patterns the community-AMI browser uses, pinned per family so a build recipe
+# ("source family debian-12") works identically on both clouds. ssh_username is
+# the image's canonical login user: Debian AMIs use `admin`, not ec2-user.
+AMI_FAMILIES = {
+    "debian-12":    {"owners": ["136693071363"], "name": "debian-12-amd64-*",
+                     "ssh_username": "admin"},
+    "debian-13":    {"owners": ["136693071363"], "name": "debian-13-amd64-*",
+                     "ssh_username": "admin"},
+    "ubuntu-22.04": {"owners": ["099720109477"],
+                     "name": "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*",
+                     "ssh_username": "ubuntu"},
+    "ubuntu-24.04": {"owners": ["099720109477"],
+                     "name": "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*",
+                     "ssh_username": "ubuntu"},
+    "al2023":       {"owners": ["amazon"], "name": "al2023-ami-2023.*-kernel-*-x86_64",
+                     "ssh_username": "ec2-user"},
+}
+
+
+def _find_ami_by_family_sync(region: str, family: str) -> dict:
+    spec = AMI_FAMILIES.get((family or "").strip().lower())
+    if not spec:
+        raise AWSError(
+            f"unknown source AMI family {family!r} — one of {', '.join(sorted(AMI_FAMILIES))}")
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_images(
+        Owners=spec["owners"],
+        Filters=[
+            {"Name": "name", "Values": [spec["name"]]},
+            {"Name": "state", "Values": ["available"]},
+            {"Name": "architecture", "Values": ["x86_64"]},
+        ],
+    )
+    imgs = sorted(resp.get("Images", []), key=lambda i: i.get("CreationDate", ""), reverse=True)
+    if not imgs:
+        raise AWSError(f"no available {family} AMI found in {region}")
+    return {"ami_id": imgs[0]["ImageId"], "name": imgs[0].get("Name", ""),
+            "ssh_username": spec["ssh_username"]}
+
+
+async def find_ami_by_family(region: str, family: str) -> dict:
+    """Newest public AMI for an OS family (``AMI_FAMILIES``) via DescribeImages.
+    Returns ``{ami_id, name, ssh_username}``."""
+    try:
+        return await _to_thread(_find_ami_by_family_sync, region, family)
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to resolve {family} AMI: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _run_nat_instance_sync(
     region: str, ami_id: str, instance_type: str, subnet_id: str,
     security_group_ids: list, user_data: str, name_tag: str,

@@ -740,6 +740,66 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
                     result["bt_error"] = err
                     job_service.update_progress(db, destroy_job_id, 85, err)
 
+            # OT demo cell wiring rides the VM's lifecycle: the Web Jump and protocol
+            # tunnel were written onto this deploy's metadata the moment they existed
+            # (services/ot_service._wire_cell), so this one destroy path — reached by
+            # the Destroy button AND the expiry reaper — cleans whatever subset exists.
+            # Best-effort like the Shell Jump above: a PRA-side failure must not stop
+            # the destroy. Mirrors gcp_vm_service._run_destroy key for key.
+            if meta.get("ot_web_jump_tf_state"):
+                job_service.update_progress(db, destroy_job_id, 86, "Removing the OT HMI Web Jump…")
+                try:
+                    from ..services import terraform_pra_service
+                    await terraform_pra_service.remove_web_jump(meta["ot_web_jump_tf_state"])
+                    result["ot_web_jump_removed"] = meta.get("ot_web_jump_id") or True
+                except Exception as e:  # noqa: BLE001
+                    logger.error("OT web jump removal failed for %s: %s", vm_name, e)
+                    result["ot_error"] = f"Web Jump removal failed: {e}"
+            if meta.get("ot_tunnel_tf_state"):
+                job_service.update_progress(db, destroy_job_id, 86, "Removing the OT protocol tunnel…")
+                try:
+                    from ..services import terraform_pra_service
+                    await terraform_pra_service.remove_api_tunnel(meta["ot_tunnel_tf_state"])
+                    result["ot_tunnel_removed"] = meta.get("ot_tunnel_jump_id") or True
+                except Exception as e:  # noqa: BLE001
+                    logger.error("OT tunnel removal failed for %s: %s", vm_name, e)
+                    result["ot_error"] = (result.get("ot_error", "") +
+                                          f" tunnel removal failed: {e}").strip()
+
+            # The OT cell's PRA-checkout pair (services/ot_service._wire_ps_checkout):
+            # unlink the SyncedAccounts pair first, then off-board the Password Safe
+            # mirror, then destroy the PRA Vault account. All before
+            # ps_vm_hook.deregister below removes the parent adminuser account the
+            # link hangs off.
+            if meta.get("ot_ps_mirror_tf_state"):
+                job_service.update_progress(db, destroy_job_id, 87, "Removing the PRA-checkout mirror…")
+                from ..services import ps_api_service, ps_resource_service
+                parent_id = str(meta.get("ps_managed_account_id") or "")
+                sub_id = str(meta.get("ot_ps_mirror_account_id") or "")
+                if parent_id.isdigit() and sub_id.isdigit():
+                    try:
+                        await ps_api_service.unlink_synced_account(
+                            parent_account_id=int(parent_id), synced_account_id=int(sub_id))
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("OT checkout unlink failed for %s: %s", vm_name, e)
+                try:
+                    await ps_resource_service.deregister(meta["ot_ps_mirror_tf_state"])
+                    result["ot_ps_mirror_removed"] = meta.get("ot_ps_mirror_system_id") or True
+                except Exception as e:  # noqa: BLE001
+                    logger.error("OT checkout mirror removal failed for %s: %s", vm_name, e)
+                    result["ot_error"] = (result.get("ot_error", "") +
+                                          f" PS mirror removal failed: {e}").strip()
+            if meta.get("ot_vault_tf_state"):
+                job_service.update_progress(db, destroy_job_id, 87, "Removing the PRA Vault checkout account…")
+                try:
+                    from ..services import terraform_pra_service
+                    await terraform_pra_service.remove_vault_account(meta["ot_vault_tf_state"])
+                    result["ot_vault_removed"] = meta.get("ot_vault_account_name") or True
+                except Exception as e:  # noqa: BLE001
+                    logger.error("OT vault account removal failed for %s: %s", vm_name, e)
+                    result["ot_error"] = (result.get("ot_error", "") +
+                                          f" vault account removal failed: {e}").strip()
+
             # Remove the Entitle SSH integration if this deploy registered one.
             if meta.get("entitle_registration_tf_state"):
                 from ..services import entitle_vm_hook

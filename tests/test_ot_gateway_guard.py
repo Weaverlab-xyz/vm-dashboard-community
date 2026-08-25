@@ -78,6 +78,77 @@ def test_the_guard_steps_aside_only_for_a_real_gateway_override():
     assert ot.jumpoint_overridden({"jumpoint_name": "centralus-gw"})
 
 
+def test_the_override_check_resolves_per_cloud_defaults():
+    """Each cloud's cell compares against ITS OWN default chain (aws: bt_* only;
+    azure: azure_jumpoint_name → bt_*) — comparing every cloud against the GCP
+    default would misread 'the AWS default, picked by name' as an override and
+    skip the guard exactly where it applies."""
+    ot = _load()
+    ot._cfg = lambda key: {"gcp_jumpoint_name": "gcp-gw",
+                           "azure_jumpoint_name": "az-gw",
+                           "bt_jumpoint_name": "aws-gw"}.get(key, "")
+    assert not ot.jumpoint_overridden({"jumpoint_name": "aws-gw"}, "aws")
+    assert ot.jumpoint_overridden({"jumpoint_name": "gcp-gw"}, "aws")
+    assert not ot.jumpoint_overridden({"jumpoint_name": "az-gw"}, "azure")
+    assert ot.jumpoint_overridden({"jumpoint_name": "aws-gw"}, "azure")
+    # Azure falls back to bt_* when its own key is blank.
+    ot._cfg = lambda key: {"bt_jumpoint_name": "shared-gw"}.get(key, "")
+    assert not ot.jumpoint_overridden({"jumpoint_name": "shared-gw"}, "azure")
+
+
+# ── AWS / Azure memory models (the cell went multi-cloud) ─────────────────────
+
+def test_aws_types_and_the_2gb_threshold():
+    ot = _load()
+    assert ot.aws_gateway_mem_mb("t3.micro") == 1024     # too small
+    assert ot.aws_gateway_mem_mb("t3.small") == 2048     # the creation default — minimum
+    assert ot.aws_gateway_mem_mb("t3.medium") == 4096    # documented preference
+    assert ot.aws_gateway_mem_mb(" T3.Small ") == 2048   # case/space tolerant
+    # Size-suffix floor for unmapped families — conservative, like the GCE per-vCPU
+    # floors: c-family .medium/.large are the smallest at 4 GB, every *.xlarge ≥8.
+    assert ot.aws_gateway_mem_mb("m7i.large") == 4096
+    assert ot.aws_gateway_mem_mb("c6i.2xlarge") == 8192
+    assert ot.aws_gateway_mem_mb("weird-shape") is None  # unknown → not blocked
+
+
+def test_azure_sizes_and_the_2gb_threshold():
+    ot = _load()
+    assert ot.azure_gateway_mem_mb("Standard_B1s") == 1024    # too small
+    assert ot.azure_gateway_mem_mb("Standard_B1ms") == 2048   # documented minimum
+    assert ot.azure_gateway_mem_mb("Standard_B2s") == 4096    # the creation default
+    assert ot.azure_gateway_mem_mb(" standard_b2s ") == 4096  # case/space tolerant
+    assert ot.azure_gateway_mem_mb("Standard_X99_v9") is None  # unknown → not blocked
+
+
+def test_the_refusal_message_carries_the_remedy_per_cloud():
+    """The failed-job page renders error_message and NOTHING else, so every cloud's
+    refusal has to name ITS OWN size key, sizes and Settings location."""
+    ot = _load()
+    aws = ot.gateway_size_remedy("t3.micro", "dashboard-sandbox-jumpoint-host",
+                                 "the live gateway host", cloud="aws")
+    for needle in ("bt_ecs_host_instance_type", "t3.small", "t3.medium",
+                   "dashboard-sandbox-jumpoint-host", "firewall", "No VM was launched",
+                   "Settings → Integrations → Privileged Remote Access"):
+        assert needle in aws, f"AWS remedy message lost {needle!r}: {aws}"
+    az = ot.gateway_size_remedy("Standard_B1s", "clouddb-jumpoint",
+                                "the live gateway VM", cloud="azure")
+    for needle in ("azure_jumpoint_vm_size", "Standard_B1ms", "Standard_B2s",
+                   "clouddb-jumpoint", "firewall", "No VM was launched",
+                   "Settings → Integrations → Privileged Remote Access"):
+        assert needle in az, f"Azure remedy message lost {needle!r}: {az}"
+
+
+def test_adequate_aws_azure_sizes_pass():
+    ot = _load()
+    assert ot.gateway_size_remedy("t3.small", "x", "config", cloud="aws") == ""
+    assert ot.gateway_size_remedy("t3.medium", "x", "config", cloud="aws") == ""
+    assert ot.gateway_size_remedy("Standard_B1ms", "x", "config", cloud="azure") == ""
+    assert ot.gateway_size_remedy("Standard_B2s", "x", "config", cloud="azure") == ""
+    # Unknown types must not block a deploy on any cloud.
+    assert ot.gateway_size_remedy("u-9tb1.metal", "x", "config", cloud="aws") == ""
+    assert ot.gateway_size_remedy("Standard_NV6", "x", "config", cloud="azure") == ""
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

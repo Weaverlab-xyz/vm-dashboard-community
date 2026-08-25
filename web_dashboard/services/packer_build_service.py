@@ -208,6 +208,24 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         env["AWS_DEFAULT_REGION"] = region
         env["PKR_VAR_region"] = region
 
+        # Resolve an OS family to the newest public AMI (the EC2 counterpart of
+        # the GCP builder's source_image_family) — a literal source_ami wins.
+        source_ami = (req.source_ami or "").strip()
+        ssh_username = req.ssh_username
+        if not source_ami:
+            from . import aws_service
+            job_service.update_progress(
+                db, job_id, 3, f"Resolving the newest {req.source_ami_family} AMI in {region}…")
+            fam = await aws_service.find_ami_by_family(region, req.source_ami_family)
+            source_ami = fam["ami_id"]
+            # The family's canonical login user wins over an untouched default —
+            # Debian images log in as `admin`, and ec2-user would hang the build
+            # at SSH. An explicit non-default username is respected.
+            if ssh_username == "ec2-user":
+                ssh_username = fam["ssh_username"]
+            job_service.update_progress(
+                db, job_id, 4, f"Source AMI {source_ami} ({fam['name']}, user {ssh_username})")
+
         # Generate template
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
         if req.provisioner_script.strip():
@@ -216,9 +234,9 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
             plain_env, secret_vars, pkr_env = {}, {}, {}
         env.update(pkr_env)
         template = packer_service.generate_aws_template(
-            source_ami=req.source_ami,
+            source_ami=source_ami,
             instance_type=req.instance_type,
-            ssh_username=req.ssh_username,
+            ssh_username=ssh_username,
             image_name=req.image_name,
             has_provisioner=bool(req.provisioner_script.strip()),
             provisioner_env=plain_env,

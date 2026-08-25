@@ -1,10 +1,10 @@
 # OT Demo Cell
 
 The dashboard can stand up a simulated **OT/ICS plant cell** — a Modbus TCP PLC
-simulator plus the FUXA web SCADA/HMI — inside the GCP sandbox's **egress-less private
-subnet**, then layer the BeyondTrust PAM stack on top. Same **provisioning + three
-layers** model as [Cloud VMs](cloud-vms.md); the OT twist is that the air-gapped subnet
-*is* the plant network, and every path in is PRA-brokered:
+simulator plus the FUXA web SCADA/HMI — inside a cloud sandbox's **private,
+egress-less subnet**, then layer the BeyondTrust PAM stack on top. Same
+**provisioning + three layers** model as [Cloud VMs](cloud-vms.md); the OT twist is
+that the air-gapped subnet *is* the plant network, and every path in is PRA-brokered:
 
 - **Provisioning** *(stand it up)* — deploy a VM from the Packer-baked **`ot-sim`**
   image (`provisioners/ot/ot-sim-debian.sh`). Everything is baked at build time, so the
@@ -15,20 +15,26 @@ layers** model as [Cloud VMs](cloud-vms.md); the OT twist is that the air-gapped
   - **Web Jump** → `http://<vm>:1881` (the HMI, rendered and recorded on the gateway);
   - **Protocol Tunnel** (generic TCP) → the PLC port, with presets for
     **Modbus :502, OPC UA :4840, DNP3 :20000, Siemens S7 :102, EtherNet/IP :44818**;
-  - **Shell Jump** → SSH, inherited from the normal GCE deploy path.
+  - **Shell Jump** → SSH, inherited from the cloud's normal VM deploy path.
 - **Layer 2 — Password Safe** *(manage its secrets)* — *optional, default on.* The
-  image's `adminuser` is onboarded via the cloud-native **`gcpvm`** plugin (managed
-  system address `projectId/zone/instanceName`), inherited from the GCE deploy path.
-  On top of that, the wiring makes the credential **usable in PRA**: a PRA Vault
-  username/password account plus a Password Safe mirror on the "PRA Vault Username
-  Password" plugin, linked with SyncedAccounts — see
+  image's `adminuser` is onboarded via the cloud-native plugin the cloud's VM deploy
+  path already uses — **`gcpvm`** on GCP (managed system address
+  `projectId/zone/instanceName`), **`ssm`** on AWS (managed system DNS
+  `{instance-id}:{region}`, over Systems Manager), **`azurevm`** on Azure (address
+  `tenantId/subscriptionId/resourceGroup/vmName`, over Run Command). On top of that,
+  the wiring makes the credential **usable in PRA**: a PRA Vault username/password
+  account plus a Password Safe mirror on the "PRA Vault Username Password" plugin,
+  linked with SyncedAccounts — see
   [PRA checkout of the cell's admin credential](#pra-checkout-of-the-cells-admin-credential).
 - **Layer 3 — Entitle** *(grant time-boxed access)* — *optional.* SSH ephemeral
-  accounts, inherited from the GCE deploy path.
+  accounts, inherited from the VM deploy path.
 
-GCP-only in this slice. The whole feature is gated on **`pra_enabled`** (the router and
-the GCP page's *OT Demo Cell* tab both follow it) — a cell without PRA would be a VM
-nobody can reach, by design.
+Runs on **GCP, AWS and Azure** — each cloud page has its own *OT Demo Cell* tab, and
+the cell's VM is that cloud's plain deploy child (`gce_deploy` / `ec2_deploy` /
+`azure_deploy`), so admission policy, expiry, Shell Jump and Password Safe behave
+exactly as on a normal VM there. The whole feature is gated on **`pra_enabled`** (the
+router and the tabs all follow it) — a cell without PRA would be a VM nobody can
+reach, by design.
 
 ---
 
@@ -44,43 +50,62 @@ shows live process data, not a static mock.
 
 ## Deploying a cell
 
-1. **Bake the image once**: Storage page → upload `provisioners/ot/ot-sim-debian.sh`;
-   GCP page → *Build Image* → name `ot-sim`, source family `debian-12`, load the script
-   from storage, build (~10–15 min). See `provisioners/ot/README.md` for the image
-   contract and pins.
-2. **GCP page → OT Demo Cell tab**: pick the image (the picker pre-filters names
+1. **Bake the image once per cloud**: Storage page → upload
+   `provisioners/ot/ot-sim-debian.sh`; then that cloud's *Build Image* tab → name
+   `ot-sim`, pick the Debian 12 source, load the script from storage, build
+   (~10–15 min). See `provisioners/ot/README.md` for the image contract and pins.
+   - **GCP**: source family `debian-12` (Compute Engine resolves the family itself).
+   - **AWS**: the *Debian 12* preset — it names an OS **family** the build resolves
+     to the newest public AMI at launch (and sets the image's `admin` login user);
+     a literal AMI ID pasted into the field still wins.
+   - **Azure**: the *Debian 12* preset (marketplace `Debian/debian-12/12-gen2`).
+     Linux builds always publish a **Compute Gallery image version** — Azure's
+     managed-image export path is broken, gallery-version is the supported route.
+2. **The cloud page → OT Demo Cell tab**: pick the image (the picker pre-filters names
    containing `ot-sim`), name the cell, pick the protocol preset, pick the **PRA Jump
-   Group + Gateway** that match the cell's region (see below), deploy. The cell VM
-   never gets an external IP, always carries the **`ot-sim`** network tag (the forward
-   hook for Purdue-zone firewalling), and defaults to `e2-medium` — an `e2-small`
-   (2 GB) proved too tight for Docker + the PLC sim + FUXA in live use.
-3. The job page shows the parent `ot_cell_deploy` job driving one `gce_deploy` child —
-   the child **is** the cell's inventory record.
+   Group + Gateway** that match the cell's region (see below), deploy. The VM defaults
+   to the 4 GB shape everywhere (`e2-medium` / `t3.medium` / `Standard_B2s`) — a 2 GB
+   cell proved too tight for Docker + the PLC sim + FUXA in live use. On GCP and Azure
+   the cell never gets a public IP (the form pins it); the GCP cell also carries the
+   **`ot-sim`** network tag (the forward hook for Purdue-zone firewalling). **On AWS
+   there is no per-instance public-IP switch — the subnet decides — so keep the form's
+   default private sandbox subnet**, or the air-gap story quietly deflates.
+3. The job page shows the parent `ot_cell_deploy` job driving one deploy child
+   (`gce_deploy` / `ec2_deploy` / `azure_deploy`) — the child **is** the cell's
+   inventory record.
 
 ### Choosing the Jump Group and Gateway
 
 PRA objects are not region-scoped, so nothing stops a us-east1 cell from wiring into a
 Jump Group named `centralus` through a us-central1 Gateway — which is exactly what the
-configured defaults (`gcp_bt_jump_group_name` / `gcp_jumpoint_name`, falling back to
-`bt_jump_group_name` / `bt_jumpoint_name`) will do if they were set up for another
-region. The deploy form's **BeyondTrust PRA placement** pickers (fed by
-`GET /api/pra/pickers`, same as the VM deploy modal) override the defaults per cell:
-all three jump items land in the chosen Jump Group and ride the chosen Gateway, and
-the PRA Vault checkout account is associated to the same Jump Group. The standalone
-tunnel form has the same two pickers. Left at "(configured default)", behaviour is
-unchanged.
+configured defaults will do if they were set up for another region. Each cloud's cell
+resolves the same fallback chain its own Shell Jump uses: GCP
+`gcp_bt_jump_group_name` / `gcp_jumpoint_name`, Azure `azure_bt_jump_group_name` /
+`azure_jumpoint_name`, AWS straight to the shared `bt_jump_group_name` /
+`bt_jumpoint_name` — all falling back to the shared pair. The deploy form's
+**BeyondTrust PRA placement** pickers (fed by `GET /api/pra/pickers`, same as the VM
+deploy modal) override the defaults per cell: all three jump items land in the chosen
+Jump Group and ride the chosen Gateway, and the PRA Vault checkout account is
+associated to the same Jump Group. The standalone tunnel form has the same two
+pickers. Left at "(configured default)", behaviour is unchanged.
 
 ### The gateway sizing guard
 
 A Web Jump renders **headless Chromium on the PRA gateway host**. Below ~2 GB the
 renderer is OOM-killed, and the session error is indistinguishable from a blocked
-firewall. Fresh installs default to `e2-medium`, but the cloud-sandbox setup scripts
-seed `gcp_jumpoint_machine_type=e2-micro` (1 GB) to keep standing cost down, so the
-cell deploy checks the **live** gateway VM (falling back to the configured
-`gcp_jumpoint_machine_type`) and refuses early — before launching anything — with the
-remedy in the job error: set `gcp_jumpoint_machine_type` to `e2-small` minimum /
-`e2-medium` preferred under **Settings → Integrations → Privileged Remote Access**
-(GCP overrides), delete the existing gateway VM so it recreates at the new size, retry.
+firewall. The cell deploy therefore checks the **live** managed gateway host (falling
+back to the configured size key) and refuses early — before launching anything — with
+the remedy in the job error. Per cloud, the key and the sizes the remedy names (all
+under **Settings → Integrations → Privileged Remote Access**):
+
+| Cloud | Size key | Minimum | Preferred | Fresh-install default |
+|---|---|---|---|---|
+| GCP | `gcp_jumpoint_machine_type` | `e2-small` | `e2-medium` | `e2-medium` — but the sandbox setup scripts seed `e2-micro` (1 GB) to keep standing cost down, so on a sandbox install the refusal is the out-of-the-box experience |
+| AWS | `bt_ecs_host_instance_type` | `t3.small` | `t3.medium` | `t3.small` (2 GB — exactly the minimum) |
+| Azure | `azure_jumpoint_vm_size` | `Standard_B1ms` | `Standard_B2s` | `Standard_B2s` (4 GB) |
+
+Changing a key never resizes a live gateway: delete the existing gateway host so the
+next deploy recreates it at the new size, then retry the cell.
 
 The guard reasons about the **dashboard-managed shared gateway only**. When the form's
 Gateway picker overrides it with another Gateway, the Web Jump renders on a host
@@ -115,6 +140,12 @@ checkbox is off, or via `ot_ps_pra_checkout_enabled=false`):
 3. a **SyncedAccounts link** making the mirror a subscriber of the cell's `adminuser`
    account, followed by one Change Password on the parent so PRA holds a real
    credential immediately (the deploy-time initial mint ran before the link existed).
+   This converge follows the cloud's own change-on-register flag
+   (`passwordsafe_gcp_change_password_on_register` /
+   `passwordsafe_azure_change_password_on_register`, both default **on**;
+   `passwordsafe_ssm_change_password_on_register` defaults **off** because SSM
+   auto-management rotates on schedule) — with the flag off, PRA holds the
+   placeholder until the parent's next rotation.
 
 From then on Password Safe owns the propagation: every `adminuser` rotation lands in
 the PRA Vault account, no credential passes through the dashboard, and in the PRA rep
@@ -170,26 +201,35 @@ Notes that save demo time:
 
 ## Lifecycle
 
-- **Destroy** (OT tab button → the normal `DELETE /api/gcp/instances/{name}`) and the
-  **auto-delete timer** both run the same extended `gce_destroy`: remove the Web Jump
-  and tunnel from their stored Terraform state, unlink the SyncedAccounts pair and
-  off-board the PRA-checkout mirror, destroy the PRA Vault checkout account, then the
-  Shell Jump, Password Safe and Entitle deregistrations, then the instance — and
-  release the shared gateway reference last. There is no separate OT teardown path to
-  forget.
-- **Expiry**: the child is a normal `gce_deploy` row, so the cell participates in the
-  auto-delete timer with no extra configuration (see [auto-delete-timer](auto-delete-timer.md)).
-- **Air-gap**: keep **`gcp_vm_nat_enabled` off**. Turning it on gives cell subnets
-  egress and silently deflates the "no path out of the plant" story.
+- **Destroy** (OT tab button → the cloud's normal delete endpoint:
+  `DELETE /api/gcp/instances/{name}` / `DELETE /api/aws/instances/{instance-id}` /
+  `DELETE /api/azure/vms/{name}`) and the **auto-delete timer** both run that cloud's
+  same extended destroy (`gce_destroy` / `ec2_destroy` / `azure_destroy`): remove the
+  Web Jump and tunnel from their stored Terraform state, unlink the SyncedAccounts
+  pair and off-board the PRA-checkout mirror, destroy the PRA Vault checkout account,
+  then the Shell Jump, Password Safe and Entitle deregistrations, then the instance —
+  and release the shared gateway reference last. There is no separate OT teardown
+  path to forget, on any cloud.
+- **Expiry**: the child is a normal deploy row for its cloud, so the cell participates
+  in the auto-delete timer with no extra configuration (see
+  [auto-delete-timer](auto-delete-timer.md)).
+- **Air-gap**: keep the on-demand egress flags **off** for the cell's cloud
+  (`gcp_vm_nat_enabled` / `aws_nat_instance_enabled`; Azure VMs have no dashboard
+  NAT toggle). Turning one on gives cell subnets egress and silently deflates the
+  "no path out of the plant" story. One deliberate AWS exception:
+  `aws_ssm_endpoints_enabled` adds **interface endpoints inside the VPC** for the
+  Password Safe SSM onboarding — private AWS API access, not internet egress, so it
+  doesn't break the story.
 
 ## Standalone OT protocol tunnels
 
-The OT tab also creates a **standalone tunnel** to *any* host the gateway can reach —
-for demoing against real lab gear without deploying a cell. It is the same generic-TCP
-protocol tunnel the k8s API tunnel uses, with the OT port presets and the same Jump
-Group / Gateway pickers as the cell form. State lives in config keys (`ot_tunnel_*`),
-and live tunnels hold a reference in the shared GCP gateway's idle-teardown count, so
-an unrelated decommission cannot reap the gateway mid-session. Connection details and
+Each cloud's OT tab also creates a **standalone tunnel** to *any* host the gateway can
+reach — for demoing against real lab gear without deploying a cell. It is the same
+generic-TCP protocol tunnel the k8s API tunnel uses, with the OT port presets and the
+same Jump Group / Gateway pickers as the cell form. State lives in config keys
+(`ot_tunnel_*`, each recording which cloud's shared gateway it rides), and live
+tunnels hold a reference in **that cloud's** gateway idle-teardown count, so an
+unrelated decommission cannot reap the gateway mid-session. Connection details and
 per-protocol clients: [Using the protocol tunnels](#using-the-protocol-tunnels).
 
 ## First-time FUXA wiring
@@ -200,6 +240,16 @@ cell (~1 minute, inside the recorded Web Jump session): FUXA → Connections →
 drop them on a view. The project persists on the VM.
 
 ## E2E verification checklist
+
+Written for GCP (the first cloud); on AWS/Azure substitute that cloud's deploy child
+(`ec2_deploy` / `azure_deploy`), destroy endpoint, functional account
+(`passwordsafe_vm_functional_account_aws` / `_azure`), managed-system address shape
+(`{instance-id}:{region}` / `tenantId/subscriptionId/resourceGroup/vmName`) and
+gateway size key (see [the sizing guard](#the-gateway-sizing-guard)). On AWS also
+verify the cell landed in the **private** subnet (no public IP on the child job) and,
+for Password Safe over SSM, that `aws_ssm_endpoints_enabled` is on or the subnet
+otherwise reaches the SSM control plane. **As of 2026-08-25 the AWS and Azure slices
+have not been E2E-verified live** — this checklist is the script for that pass.
 
 1. Settings: `pra_enabled` on; `bt_api_host` / `bt_client_id` / `bt_client_secret` /
    `bt_jump_group_name` / `bt_jumpoint_name` set; `gcp_jumpoint_machine_type=e2-medium`
@@ -236,8 +286,12 @@ drop them on a view. The project persists on the VM.
 | Cell deploy fails immediately with a sizing message | Working as designed — the gateway is <2 GB; follow the remedy in the error |
 | Web Jump session dies with "internal timeout starting session" | Gateway too small (if the guard was bypassed by resizing after deploy), or the gateway host is down — check the Gateways tab against reality |
 | Tunnel connects but the Modbus client times out | The cell VM isn't running the stack — Shell Jump in and check `systemctl status ot-sim` / `docker ps` |
+| Azure: Web Jump/Shell Jump work but the tunnel never establishes | The cell's Gateway resolves to an **ACI** gateway — ACI is serverless and cannot do protocol tunneling. Keep `azure_vm_jumpoint_mode=shared` and point `azure_jumpoint_name` / the form's Gateway picker at the shared **VM** gateway |
 | Registers read but never change | The PLC sim container restarted into a crash loop — `docker logs ot-plc` |
 | `ot-sim` bake fails at image pull | Docker Hub rate limit or a stale pin — see `provisioners/ot/README.md` (re-pin via `OT_FUXA_IMAGE`) |
+| AWS bake hangs at "Waiting for SSH" | The build resolved a Debian AMI but the SSH username isn't `admin` — use the Debian 12 preset (it sets both), or fix the username field |
+| AWS cell got a public IP | The chosen subnet auto-assigns them — EC2 has no per-instance switch; redeploy into the private sandbox subnet |
+| AWS Password Safe onboarding fails / never rotates | The private subnet can't reach the SSM control plane — turn on `aws_ssm_endpoints_enabled` (interface endpoints, not internet egress) |
 | Parent job failed after "VM deployed" | Wiring failure — the error names the failed piece; fix and **Re-wire** |
 | Jump items landed in the wrong Jump Group / Gateway | The configured defaults were set up for another region — use the form's PRA placement pickers; existing cells: destroy + redeploy (jump items don't move) |
 | Cell shows "wiring incomplete" but Web Jump + tunnel work | The PRA-checkout pair is missing (pre-feature cell, or it failed) — **Re-wire** creates only the missing pieces |

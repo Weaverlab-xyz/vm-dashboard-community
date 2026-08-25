@@ -239,6 +239,37 @@ def _db_tiles(db: Session, user: User) -> dict:
                      secondary=sum(1 for g in rows if g.get("status") == "running"))
     _safe("gateways", _gateways)
 
+    def _ot_cells():
+        # OT demo cells across all three clouds. A cell's VM-deploy child row IS
+        # its inventory record (metadata ot_cell=True), so this is a Job-table
+        # read — never a cloud call, which is the whole contract of this endpoint.
+        # Same filters and workgroup scoping as GET /api/ot/cells, summed over the
+        # clouds this caller may read; secondary counts fully wired cells.
+        from ..services import ot_service
+        perms = user.effective_permissions_dict
+        readable = [
+            job_type for cloud, job_type in ot_service.CELL_CHILD_JOB_TYPE.items()
+            if user.is_effective_admin or not perms or "read" in perms.get(cloud, [])
+        ]
+        if not readable:
+            return _forbidden()
+        accessible = _accessible_for("gcp", user)   # same workgroup rule on every cloud module
+        total = wired = 0
+        for row in db.query(Job).filter(Job.job_type.in_(readable)).all():
+            meta = row.metadata_dict
+            if not meta.get("ot_cell") or meta.get("destroyed") or row.status == "cancelled":
+                continue
+            if accessible is not None and (row.workgroup or "").lower() not in accessible:
+                continue
+            total += 1
+            checkout_pending = (not ot_service.ps_checkout_skip_reason(meta)
+                                and not meta.get("ot_ps_synced"))
+            if (row.status == "completed" and meta.get("ot_web_jump_tf_state")
+                    and meta.get("ot_tunnel_tf_state") and not checkout_pending):
+                wired += 1
+        return _tile(total, secondary=wired)
+    _safe("ot_cells", _ot_cells)
+
     return out
 
 

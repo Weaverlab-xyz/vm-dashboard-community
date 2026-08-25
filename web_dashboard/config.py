@@ -696,6 +696,10 @@ class Settings(BaseSettings):
     # by scripts/sandbox/Linux/setup-aws.sh; bt_ecs_jumpoint_subnet_id /
     # bt_ecs_jumpoint_security_group_id below are the host's subnet + SG.
     bt_ecs_host_instance_type: str = "t3.small"
+    # VM size for the managed shared Azure Gateway VM (jumpoint_host_service). Same
+    # Web-Jump OOM constraint as gcp_jumpoint_machine_type: headless Chromium renders
+    # ON the Gateway and needs ≥2 GB — Standard_B1ms minimum, Standard_B2s preferred.
+    azure_jumpoint_vm_size: str = "Standard_B2s"
     bt_ecs_host_instance_profile: str = "ecsInstanceRole"
     bt_ecs_host_name: str = "dashboard-sandbox-jumpoint-host"  # EC2 Name tag (find-or-create key)
     bt_ecs_execution_role_arn: str = ""  # Set to your ecsTaskExecutionRole ARN if required

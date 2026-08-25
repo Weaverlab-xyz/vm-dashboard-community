@@ -52,7 +52,9 @@ FLAGS = ("password_safe_enabled", "pra_enabled", "epml_enabled")
 # and five more for cloud-run, which is what adds SQL Server;
 # `gcp_jumpoint_machine_type`, promoted onto the PRA panel because the OT cell's gateway
 # sizing guard tells operators to change it "in Settings" and until then it was declared
-# only on the wizard's GCPSetup — settable by API, findable nowhere; and
+# only on the wizard's GCPSetup — settable by API, findable nowhere (and its AWS/Azure
+# counterparts `bt_ecs_host_instance_type` / `azure_jumpoint_vm_size`, promoted for the
+# same reason when the OT cell went multi-cloud — the guard's remedy names them); and
 # `clouddb_ps_ssm_ssl`, the AWS SSM mysql address's trailing sslTRUE|sslFALSE segment,
 # added when the addresses were aligned with the vendor plugins' per-engine parse;
 # and the three `ot_ps_*` keys — the OT cell's PRA-checkout pair (a synced PRA Vault
@@ -98,8 +100,9 @@ clouddb_ps_functional_account_gcp_mysql clouddb_ps_gcp_auth_mode
 clouddb_ps_gcp_impersonate_target clouddb_ps_gcp_rotator_service_account
 clouddb_ps_platform_gcp_sqlserver clouddb_ps_functional_account_gcp_sqlserver
 clouddb_ps_gcp_channel clouddb_ps_gcp_dbops_audience clouddb_ps_gcp_dbops_ssl
-azure_bt_jump_group_name azure_jumpoint_name azure_vm_jumpoint_mode
+azure_bt_jump_group_name azure_jumpoint_name azure_vm_jumpoint_mode azure_jumpoint_vm_size
 gcp_bt_jump_group_name gcp_jumpoint_name gcp_vm_jumpoint_mode gcp_jumpoint_machine_type
+bt_ecs_host_instance_type
 epml_site_id epml_pat
 k8s_ps_token_rotation_enabled k8s_ps_token_platform k8s_ps_pravault_token_platform
 k8s_ps_functional_account_aws k8s_ps_functional_account_azure

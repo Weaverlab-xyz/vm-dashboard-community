@@ -113,6 +113,9 @@ def _load(fake, active=0, web_jumps=0):
     # unstubbed it raises into the teardown's best-effort try/except and every teardown
     # assertion below would pass without the teardown having run.
     m._active_web_jump_count = lambda cloud="": web_jumps
+    # Same again: standalone OT tunnels read config rows (ot_service), and the AWS sum
+    # gained this term when the OT cell went multi-cloud.
+    m._active_ot_tunnel_count = lambda cloud="gcp": 0
     # The teardown forgets the host it just deleted; that write needs a session.
     m._clear_managed_egress_ip = lambda cloud, name: None
     return m
