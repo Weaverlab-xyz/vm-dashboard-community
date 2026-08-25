@@ -239,6 +239,91 @@ def _validate_k8ssa_dns_name(dns_name: str) -> None:
                 f"letters, digits and hyphens, starting and ending alphanumeric")
 
 
+# ── AWS SSM DB plugin address grammar ─────────────────────────────────────────
+#
+# Transcribed from the "{engine} SSM Custom Plugin" v24.2.x action source (the vendor
+# zip's Actions/*.cs — all four actions parse identically within an engine), for the
+# same reason as its two sibling grammars: the plugin splits every host candidate on
+# ';' and indexes FIXED positions, so a wrong segment count — or a host field holding
+# a bare IP/hostname — dies as "Index was outside the bounds of the array" before any
+# AWS call. The layout is PER-ENGINE: mssql has no database segment, and mysql alone
+# carries a trailing ssl flag:
+#
+#   mssql (5):  instanceId;region;dbEndpoint;certPath;assumeRole
+#   psql  (6):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole
+#   mysql (7):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole;ssl
+#
+# assumeRole is Substring(0,12)'d UNCONDITIONALLY (that is how "arn:aws:iam:" is
+# detected), so any value under 12 characters — such as "local", this codebase's old
+# default — crashes every action with "Index and length must refer to a location
+# within the string". The documented placeholder is "NoAssumeRole" (exactly 12);
+# anything not starting with "arn:aws:iam:" means "use the broker's own AWS
+# credentials". The mysql ssl segment enables TLS only on the literal "sslTRUE" and
+# silently disables it for anything else, so only the two canonical spellings are
+# accepted here — a shifted or mistyped flag must fail at registration, not quietly
+# downgrade the connection.
+_DBSSM_SEGMENT_ENGINES = {5: "mssql", 6: "psql", 7: "mysql"}
+_DBSSM_FORMATS = (
+    "'instanceId;region;dbEndpoint;certPath;assumeRole' (mssql), "
+    "'instanceId;region;dbEndpoint;databaseName;certPath;assumeRole' (psql) or "
+    "'instanceId;region;dbEndpoint;databaseName;certPath;assumeRole;sslTRUE|sslFALSE' "
+    "(mysql)")
+_DBSSM_MIN_ASSUME_ROLE_LEN = 12
+_DBSSM_SSL_FLAGS = frozenset({"sslTRUE", "sslFALSE"})
+_DBSSM_INSTANCE_ID = re.compile(r"^i-[0-9a-f]{8,17}$")
+
+
+def _validate_dbssm_dns_name(dns_name: str) -> None:
+    """Raise PSResourceError unless ``dns_name`` is an address the plugin will parse.
+
+    Grammar only — the shared 255-character check runs separately in the caller. The
+    engine is inferred from the segment count (5/6/7 are disjoint), then each position
+    is checked for the mistakes that otherwise surface as a mid-rotation parse crash:
+    an empty positional field, a first field that is not an EC2 instance id, an
+    assumeRole segment the plugin's Substring(0,12) would throw on, and a mysql ssl
+    flag that is neither canonical spelling."""
+    addr = (dns_name or "").strip()
+    if not addr:
+        raise PSResourceError(
+            f"DB SSM onboarding requires a dns_name of the form {_DBSSM_FORMATS}")
+    fields = addr.split(";")
+    engine = _DBSSM_SEGMENT_ENGINES.get(len(fields))
+    if engine is None:
+        raise PSResourceError(
+            f"managed system address {addr!r} has {len(fields)} ';'-separated field(s); "
+            f"the {{engine}} SSM plugins index fixed positions, so it must be exactly 5 "
+            f"(mssql), 6 (psql) or 7 (mysql) — {_DBSSM_FORMATS}")
+    names = (["instanceId", "region", "dbEndpoint"]
+             + (["databaseName"] if engine != "mssql" else [])
+             + ["certPath", "assumeRole"]
+             + (["ssl"] if engine == "mysql" else []))
+    for pos, (field_name, value) in enumerate(zip(names, fields), start=1):
+        if not value.strip():
+            raise PSResourceError(
+                f"field {pos} ({field_name}) of managed system address {addr!r} is "
+                f"empty — every position is consumed, so an empty one does not error "
+                f"here; it produces a broken command at the first rotation instead")
+    if not _DBSSM_INSTANCE_ID.match(fields[0]):
+        raise PSResourceError(
+            f"field 1 of managed system address {addr!r} must be the EC2 instance id "
+            f"of the SSM jump host that runs the DB client (i-xxxxxxxxxxxxxxxxx), not "
+            f"{fields[0]!r}")
+    assume_role = fields[names.index("assumeRole")]
+    if len(assume_role) < _DBSSM_MIN_ASSUME_ROLE_LEN:
+        raise PSResourceError(
+            f"assumeRole segment {assume_role!r} is shorter than "
+            f"{_DBSSM_MIN_ASSUME_ROLE_LEN} characters — the plugin calls Substring(0,12) "
+            f"on it unconditionally and crashes with 'Index and length must refer to a "
+            f"location within the string'. Use a full IAM role ARN or the literal "
+            f"'NoAssumeRole'")
+    if engine == "mysql" and fields[6] not in _DBSSM_SSL_FLAGS:
+        raise PSResourceError(
+            f"field 7 of a mysql address must be 'sslTRUE' or 'sslFALSE', not "
+            f"{fields[6]!r} — the plugin enables TLS only on the literal 'sslTRUE' and "
+            f"silently disables it for anything else, so only the canonical spellings "
+            f"are accepted")
+
+
 # ── GCP Cloud SQL address grammar ─────────────────────────────────────────────
 #
 # Transcribed from the plugin's Factories/AddressFormat.cs + ParameterFactory.cs, for
@@ -643,9 +728,14 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     defaults to a ``127.0.0.1`` placeholder.
 
     ``method="dbssm"`` uses the cloud-DB "{engine} SSM Custom Plugin": ``dns_name`` must be
-    ``{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};local`` (six ``;``-separated
-    parts), ``port`` is the real DB port, ``managed_account_name`` is the dedicated DB user,
-    and the account is password-managed (no SSH DSS key).
+    the per-engine ``;``-packed address — ``instanceId;region;dbEndpoint;certPath;assumeRole``
+    for mssql (5 fields, NO database segment), plus a ``databaseName`` fourth field for psql
+    (6), plus a trailing ``sslTRUE|sslFALSE`` for mysql (7); ``port`` is the real DB port
+    (never appended to the address), ``managed_account_name`` is the dedicated DB user, and
+    the account is password-managed (no SSH DSS key). Unlike every other plugin method,
+    ``ip_address`` must stay EMPTY (or equal the packed address): these plugins parse every
+    populated host field at fixed positions, so the usual ``127.0.0.1`` placeholder crashes
+    each action with "Index was outside the bounds of the array".
 
     ``method="dbazure"`` uses the cloud-DB "{engine} Azure Run Command Plugin": ``dns_name``
     must be ``vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;sslTRUE|sslFALSE``
@@ -734,15 +824,23 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     elif method == "dbssm":
         # Cloud-DB via the "{engine} SSM Custom Plugin": Password Safe reaches the
         # private RDS instance by running the DB client on a jump host over SSM.
-        # dns_name encodes everything the plugin parses, ip is a placeholder, the
+        # dns_name is the ';'-packed per-engine address (see the grammar above), the
         # real DB port applies, and the account is PASSWORD-managed (no SSH key).
-        if not dns_name or dns_name.count(";") != 5:
-            raise PSResourceError(
-                "DB SSM onboarding requires a dns_name of the form "
-                "'{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};local'")
+        # Unlike the other custom-plugin methods there is NO placeholder ip: these
+        # plugins try EVERY populated host field as the packed address and crash on
+        # one that does not parse, so the ip stays empty (or, per the vendor
+        # guidance, the identical packed string).
+        _validate_dbssm_dns_name(dns_name)
         _check_address_length(dns_name, "dbssm")
+        if ip_address and ip_address != dns_name:
+            raise PSResourceError(
+                f"DB SSM onboarding must not set ip_address to {ip_address!r}: the "
+                f"{{engine}} SSM plugins parse every populated host field as the "
+                f"';'-packed address, and a bare IP always fails with 'Index was "
+                f"outside the bounds of the array'. Leave it empty, or set it to the "
+                f"same packed address as dns_name.")
         hcl = _generate_managed_system_hcl(
-            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
+            name=name, host_name=host_name, ip_address=ip_address, port=port,
             functional_account_id=functional_account_id, platform_id=platform_id,
             entity_type_id=entity_type_id, workgroup_id=workgroup_id,
             managed_account_name=managed_account_name,

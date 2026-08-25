@@ -13,7 +13,9 @@ account):
   placeholder ip, no SSH-only fields, and no pushed private key (Password Safe mints
   the key);
 - the three cloud-DB shapes (dbssm, dbazure, dbgcp), whose accounts are password-
-  managed instead; dbgcp additionally has an options-bearing address grammar and its
+  managed instead; dbssm has a per-engine positional grammar (5 fields mssql / 6 psql /
+  7 mysql), a 12-character assumeRole floor and — alone among the plugin shapes — NO
+  placeholder ip; dbgcp additionally has an options-bearing address grammar and its
   own tighter 249-character limit;
 - _scrub_state redacts password + private_key so neither lands in stashed state.
 
@@ -256,11 +258,16 @@ def test_gcpvm_register_rejects_non_three_part_address():
 
 
 # ── Cloud-DB onboarding shapes (dbssm = "{engine} SSM Custom Plugin"; pravault =
-# "PRA Vault Username Password") — password-managed (no SSH key, dss flag off). ─
+# "PRA Vault Username Password") — password-managed (no SSH key, dss flag off). The
+# dbssm address is PER-ENGINE (5 fields mssql / 6 psql / 7 mysql), its assumeRole
+# segment must be ≥ 12 characters (the plugin Substring(0,12)'s it), and unlike every
+# other plugin shape it carries NO placeholder ip — the plugin parses every populated
+# host field as the packed address and crashes on a bare IP. ─────────────────────
 
-_DB_DNS = "i-0eaa6a10886717ed;us-east-1;db.abc.us-east-1.rds.amazonaws.com;appdb;C:\\Utils\\public_ssm.pem;local"
+_DB_DNS = ("i-0eaa6a10886717ed;us-east-1;db.abc.us-east-1.rds.amazonaws.com;appdb;"
+           "C:\\Utils\\public_ssm.pem;NoAssumeRole")
 _DBSSM = dict(name="clouddb-pg", host_name="db.abc.us-east-1.rds.amazonaws.com",
-              ip_address="127.0.0.1", port=5432, functional_account_id=42, platform_id=20,
+              ip_address="", port=5432, functional_account_id=42, platform_id=20,
               entity_type_id=1, workgroup_id="55", managed_account_name="psafe_ab12cd34ef56",
               ssh_key_enforcement_mode=2, method="dbssm", dns_name=_DB_DNS,
               emit_private_key=False, dss_auto_management=False)
@@ -272,10 +279,12 @@ _PRAVAULT = dict(name="clouddb-pg-pravault", host_name="https://pra.example.com"
                  emit_private_key=False, dss_auto_management=False)
 
 
-def test_dbssm_system_block_uses_dns_name_placeholder_ip_and_no_ssh():
+def test_dbssm_system_block_uses_dns_name_no_placeholder_ip_and_no_ssh():
     hcl = ps._generate_managed_system_hcl(**_DBSSM)
     assert ps._line("dns_name", json.dumps(_DB_DNS)) in hcl
-    assert ps._line("ip_address", '"127.0.0.1"') in hcl
+    # No ip line at all: the SSM DB plugins parse every populated host field as the
+    # packed address, so the placeholder the other shapes use would crash each action.
+    assert "ip_address" not in hcl
     assert ps._line("platform_id", 20) in hcl
     assert ps._line("port", 5432) in hcl
     assert "remote_client_type" not in hcl
@@ -293,16 +302,80 @@ def test_dbssm_account_is_password_managed_no_key_no_dss():
     assert 'variable "ps_account_private_key"' not in hcl
 
 
-def test_dbssm_register_rejects_dns_name_without_six_parts():
+def test_dbssm_register_rejects_addresses_the_plugin_would_crash_on():
+    # Each entry is a shape the plugin dies on mid-rotation ("Index was outside the
+    # bounds of the array" / "Index and length must refer to a location within the
+    # string") rather than at registration, so the validator has to catch it here.
     import asyncio
-    for bad in ("", "a;b;c", "a;b;c;d;e;f;g", "no-semicolons"):
+    bad = (
+        "",                                                     # blank
+        "no-semicolons",
+        "a;b;c",                                                # no engine has 3 fields
+        ("i-0eaa6a10886717ed;us-east-1;db;x;C:\\c.cer;"
+         "NoAssumeRole;sslTRUE;extra"),                         # none has 8 either
+        # six fields but field 1 is not an instance id (segments shifted / wrong order)
+        ("db.abc.us-east-1.rds.amazonaws.com;us-east-1;i-0eaa6a10886717ed;appdb;"
+         "C:\\c.cer;NoAssumeRole"),
+        # the old dashboard default: assumeRole shorter than the plugin's Substring(0,12)
+        ("i-0eaa6a10886717ed;us-east-1;db.abc.us-east-1.rds.amazonaws.com;appdb;"
+         "C:\\c.cer;local"),
+        # an empty certPath — every position is consumed, so blank is a broken command
+        ("i-0eaa6a10886717ed;us-east-1;db.abc.us-east-1.rds.amazonaws.com;appdb;"
+         ";NoAssumeRole"),
+        # seven fields (mysql) whose ssl flag is not a canonical spelling — anything
+        # but the literal sslTRUE silently disables TLS
+        ("i-0eaa6a10886717ed;us-east-1;db.abc.us-east-1.rds.amazonaws.com;appdb;"
+         "C:\\c.cer;NoAssumeRole;ssl"),
+    )
+    for addr in bad:
         try:
             asyncio.run(ps.register_managed_system(
                 name="pg", host_name="pg", functional_account_id=1, platform_id=20,
-                workgroup_id="wg", method="dbssm", dns_name=bad))
-            raise AssertionError("expected PSResourceError for dns_name=%r" % bad)
+                workgroup_id="wg", method="dbssm", dns_name=addr))
+            raise AssertionError("expected PSResourceError for dns_name=%r" % addr)
         except ps.PSResourceError:
             pass
+
+
+def test_dbssm_accepts_each_engines_layout():
+    # 5 fields = mssql (NO database segment), 6 = psql, 7 = mysql (trailing ssl flag);
+    # the assumeRole segment takes the placeholder or a full cross-account role ARN.
+    base = ("i-0eaa6a10886717ed;us-east-2;"
+            "clouddb-074c3615.cjtnhgpj0e7l.us-east-2.rds.amazonaws.com")
+    cert = "C:\\BeyondTrust\\certs\\aws_public_cert.cer"
+    for addr in (f"{base};{cert};NoAssumeRole",
+                 f"{base};app_db;{cert};NoAssumeRole",
+                 f"{base};app_db;{cert};NoAssumeRole;sslTRUE",
+                 f"{base};app_db;{cert};NoAssumeRole;sslFALSE",
+                 f"{base};app_db;{cert};arn:aws:iam::123456789012:role/psafe-broker"):
+        ps._validate_dbssm_dns_name(addr)          # must not raise
+
+
+def test_dbssm_register_refuses_a_bare_ip_host_candidate():
+    # The plugin tries EVERY populated host field as the packed address, so the
+    # 127.0.0.1 placeholder every other plugin shape uses crashes each action here;
+    # registration must refuse it before Terraform ever runs.
+    import asyncio
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="pg", host_name="pg", functional_account_id=1, platform_id=20,
+            workgroup_id="wg", method="dbssm", dns_name=_DB_DNS,
+            ip_address="127.0.0.1"))
+        raise AssertionError("expected PSResourceError for ip_address=127.0.0.1")
+    except ps.PSResourceError as exc:
+        assert "127.0.0.1" in str(exc)
+
+
+def test_a_realistic_mysql_ssm_address_still_fits():
+    # The 7-field mysql form with a full cross-account ARN is the longest AWS shape;
+    # guard against the 255 limit being tighter than the real thing.
+    addr = ";".join(["i-0eaa6a10886717ed", "us-east-2",
+                     "clouddb-074c3615.cjtnhgpj0e7l.us-east-2.rds.amazonaws.com",
+                     "app_db", r"C:\BeyondTrust\certs\aws_public_cert.cer",
+                     "arn:aws:iam::123456789012:role/psafe-cross-account", "sslTRUE"])
+    assert len(addr) <= ps._MAX_MANAGED_SYSTEM_ADDRESS, len(addr)
+    ps._validate_dbssm_dns_name(addr)              # must not raise
+    ps._check_address_length(addr, "dbssm")        # must not raise
 
 
 def test_pravault_system_uses_host_url_no_dns_no_ssh():

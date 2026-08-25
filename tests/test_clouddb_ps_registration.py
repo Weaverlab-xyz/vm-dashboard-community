@@ -342,7 +342,8 @@ def test_the_db_managed_system_is_recorded_before_the_pra_vault_half_runs():
     """The failure this was written for: the PRA Vault half raised, the caller logged it
     as non-fatal, and a real managed system + functional account sat in the customer's
     Password Safe with nothing recorded to tear them down."""
-    _reset(bt_api_host="pra.example.com")
+    _reset(bt_api_host="pra.example.com",
+           clouddb_ps_ssm_public_key_path=r"C:\Utils\public_ssm.pem")
     FAIL_ON_REGISTER.append("clouddb-abc-pravault")
     row, job = _row(), _FakeJobRow({"vault_account_name": "clouddb-abc-admin"})
     try:
@@ -357,7 +358,7 @@ def test_the_db_managed_system_is_recorded_before_the_pra_vault_half_runs():
 
 
 def test_the_row_columns_mirror_the_stash_that_teardown_reads():
-    _reset()
+    _reset(clouddb_ps_ssm_public_key_path=r"C:\Utils\public_ssm.pem")
     row, job = _row(), _FakeJobRow()
     _onboard(row, job)
     assert row.ps_managed_system_id == "1"

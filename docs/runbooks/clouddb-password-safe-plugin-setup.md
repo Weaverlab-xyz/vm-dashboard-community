@@ -57,11 +57,14 @@ Only relevant if you stay on the legacy default. The dashboard calls
 |---|---|---|
 | **Azure** (`SP` mode) | `SP:<db-admin-login>` | `<clientId>:<clientSecret>:<adminPassword>` |
 | **Azure** (`MSI` mode) | `MSI:<db-admin-login>` | `-:-:<adminPassword>` |
-| **AWS** (IAM-user mode) | your IAM username | `<AccessKeyId>:<SecretAccessKey>` |
-| **AWS** (EC2-role mode) | literal `EC2` | a random placeholder |
+| **AWS** (IAM mode — both key fields set) | `IAM:<db-admin-login>` | `<AccessKeyId>:<SecretAccessKey>:<adminPassword>` |
+| **AWS** (EC2-role mode — either key field blank) | `EC2:<db-admin-login>` | `x:x:<adminPassword>` |
 
-Note the Azure rows embed the **per-database** minted admin password. That is why a single
-pre-created Azure account only works with self-rotation — see the next section.
+The AWS password is **always three `:`-parts** — the plugin splits it before it looks at
+the mode, so EC2 mode ships the two `x` placeholders rather than dropping the parts.
+
+Note the Azure **and AWS** rows embed the **per-database** minted admin password. That is
+why a single pre-created account only works with self-rotation — see the next section.
 
 ### Self-rotation is the other half of `reference` mode
 
@@ -197,17 +200,23 @@ a blank one shifts nothing — it just yields an empty field the plugin cannot r
 
 Because the plugin runs on a Password Safe node / Resource Broker that is **not** an EC2
 instance, EC2-role mode is not available to you. In `reference` mode the access key goes
-**into the functional account you create** and the panel's IAM fields are not read; in
-`create` mode leaving them blank writes a functional account whose username is the literal
-`EC2` and whose password is a throwaway token, and rotation fails. Either way, create an IAM
-user with:
+**into the functional account you create** and the panel's key fields are not read; in
+`create` mode leaving either key field blank selects EC2-role mode (username
+`EC2:<dbAdmin>`, password `x:x:<adminPassword>`), which parses fine but authenticates with
+the broker host's own AWS credentials — credentials an off-EC2 broker does not have, so
+rotation fails at the AWS call. Either way, create an IAM user with:
 
 - `ssm:SendCommand`
 - `ssm:GetCommandInvocation`
 - `ssm:ListCommandInvocations`
 
-and an access key. Keep *Account Suffix* at `local` (it is only an AssumeRole ARN in the
-cross-account EC2-broker mode).
+and an access key. The *IAM Username* field is informational only — the plugin never sees
+it; the mode is selected purely by the key pair's presence.
+
+Keep *Assume Role* at `NoAssumeRole` (a full AssumeRole ARN belongs there only in the
+cross-account EC2-broker mode). The segment must be **≥ 12 characters** — the plugin
+`Substring(0,12)`s it, so the old `local` value crashes every action; the dashboard
+coerces a shorter value to `NoAssumeRole` on read.
 
 ### 1.5 AWS — the jump-host RSA prep is manual
 
@@ -231,8 +240,10 @@ managed-user creation uses a `docker run` client image and needs none, and the E
 shared with the gateway workload — so a green provisioning job still tells you nothing
 about whether the plugin's ongoing rotation will work.
 
-Set *Public Key Path (on PS node)* to where the matching public key lives on the PS
-node/broker; it is **address field 5**.
+Set *Public Key Path (on PS node)* to where the matching public certificate lives on the
+PS node/broker; it is the address's **certPath segment** (field 4 for mssql, field 5 for
+psql/mysql) and is **required** — onboarding refuses a blank rather than packing an empty
+positional field the plugin only trips over at the first rotation.
 
 ### 1.6 All three clouds
 
@@ -405,25 +416,35 @@ Same panel, the fields above the Azure subsection.
 | **PRA Vault Platform** | blank → `PRA Vault Username Password` | `clouddb_ps_pravault_platform` |
 | **PRA Vault Functional Account** | `reference` mode only — your PRA Config-API account on the PRA Vault platform | `clouddb_ps_pravault_functional_account` |
 | **Workgroup** | blank → reuses `passwordsafe_workgroup` | `clouddb_ps_workgroup` |
-| **IAM Username** | `create` mode only — the IAM user from §1.4, **required in your topology**. In `reference` mode leave **blank** | `clouddb_ps_ssm_iam_username` |
-| **IAM Access Key ID** | `create` mode only — `AKIA…` | `clouddb_ps_ssm_access_key_id` |
-| **IAM Secret Access Key** | `create` mode only — the secret (encrypted at rest) | `clouddb_ps_ssm_secret_access_key` |
-| **Account Suffix** | `local` | `clouddb_ps_ssm_account_suffix` |
-| **Public Key Path (on PS node)** | public-key path on the PS node/broker, e.g. `C:\Utils\public_ssm.pem` | `clouddb_ps_ssm_public_key_path` |
+| IAM Username | informational only — the plugin never sees it. Blank is fine in both modes | `clouddb_ps_ssm_iam_username` |
+| **IAM Access Key ID** | `create` mode — `AKIA…`. **Both key fields set → IAM mode**; either blank → EC2-role mode (broken in your topology, §1.4) | `clouddb_ps_ssm_access_key_id` |
+| **IAM Secret Access Key** | `create` mode — the secret (encrypted at rest) | `clouddb_ps_ssm_secret_access_key` |
+| **Assume Role** | `NoAssumeRole` (a cross-account AssumeRole ARN only in EC2-broker mode). **≥ 12 chars** — shorter crashes the plugin and is coerced to the placeholder | `clouddb_ps_ssm_account_suffix` |
+| **Public Key Path (on PS node)** | RSA public-cert path on the PS node/broker, e.g. `C:\Utils\public_ssm.pem`. **Required** | `clouddb_ps_ssm_public_key_path` |
+| **Require TLS (MySQL)** | on — the trailing `sslTRUE`/`sslFALSE` segment MySQL alone carries; only the literal `sslTRUE` enables TLS | `clouddb_ps_ssm_ssl` |
 | **Plugin Private Key (PEM)** | the full `private.pem` for the **AWS** pair, BEGIN/END included | `clouddb_ps_ssm_plugin_private_key` |
 | **Plugin Key Passphrase** | its passphrase | `clouddb_ps_ssm_plugin_passphrase` |
 | **Key Directory** | where the SSM plugin reads that key on the jump host | `clouddb_ps_ssm_key_directory` |
 
-In `create` mode all three IAM fields are load-bearing together: the code only takes
-IAM-user mode when username **and** key id **and** secret are all non-empty. Two out of
-three silently falls back to EC2 mode. `reference` mode sidesteps the whole trap — the
-credential is in the functional account and these three are never read.
+In `create` mode the two key fields are load-bearing **together**: IAM mode needs key id
+**and** secret, and one-of-two selects EC2 mode (the plugin still parses, but the broker
+has no AWS credentials to use — §1.4). The IAM Username field no longer participates.
+`reference` mode sidesteps the whole choice — the credential is in the functional account
+and none of these are read.
 
-**Address the plugin receives** — six `;`-separated fields:
+**Address the plugin receives** — `;`-packed at fixed **per-engine** positions (mssql has
+no database segment; mysql alone ends in an ssl flag). The DB port is the managed
+system's Port field, never part of the address:
 
 ```
-instanceId;region;dbEndpoint;dbName;publicKeyPath;suffix
+mssql (5):  instanceId;region;dbEndpoint;certPath;assumeRole
+psql  (6):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole
+mysql (7):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole;sslTRUE|sslFALSE
 ```
+
+The managed system is registered with **no IP address** on purpose: these plugins try
+every populated host field as the packed address, and a bare IP — the `127.0.0.1`
+placeholder every other onboarding shape uses — always fails the parse.
 
 ---
 
@@ -520,7 +541,11 @@ always read the job log, not just its status.
 | Rotation fails, decrypt error, provisioning was clean | *Plugin Private Key* was blank → no key material on the jump host. Both clouds log this now; grep the job for `NOT staging plugin key material` |
 | AWS rotation fails to decrypt but Azure works | the two clouds use separate key pairs — check the AWS `clouddb_ps_ssm_*` fields, not the Azure ones |
 | `jump-host plugin prep failed` | the SSM key drop itself failed — a bad *Key Directory*, or the Gateway host is not reachable over SSM |
-| Rotation fails, functional account is `EC2` | two-of-three IAM fields in `create` mode — fell back to EC2 mode (§3) |
+| (AWS) `Index was outside the bounds of the array` in the plugin log | a packed field has too few segments for the plugin's fixed-position parse: an address with the wrong per-engine count (5 mssql / 6 psql / 7 mysql), a functional-account username without its `:`, a password without both `:`s, or a bare IP/hostname host candidate. Systems onboarded before the per-engine formats carry the old six-field address and a `127.0.0.1` IP — use the row's **Register in Password Safe** action to rebuild them |
+| (AWS) `Index and length must refer to a location within the string` | the address's assumeRole segment is under 12 characters — the pre-fix `local` default; re-register, or fix the address in BeyondInsight (`NoAssumeRole` or a full role ARN) |
+| (AWS) rotation fails and the functional account's name has no `:` (a bare `EC2`, or an IAM username) | a pre-fix `create`-mode account — the plugin parses `EC2:<dbAdmin>` / `IAM:<dbAdmin>` over a three-part password; delete it and re-register |
+| (AWS) `Caught exception when trying to Send Command` | the parse succeeded — the failure is AWS-side: credentials (EC2 mode on an off-EC2 broker, §1.4), instance id, region, or SSM permissions |
+| (AWS) Verify reports success within seconds but nothing changed | the plugins misread the managed system's Timeout (seconds) as **milliseconds** between SSM status polls, so a still-`InProgress` command can fall through as success — leave Timeout at its default and treat instant Verify results as advisory (plugin-side fix pending) |
 | `PSPLUGIN_CHANGE_FAILED: … must have admin option on role` / `CREATE USER denied` / `ALTER ANY LOGIN` | self-rotation is **off**, so Password Safe called the via-functional-account action against a server with no privileged login — turn on `clouddb_ps_self_rotation` (§0) |
 | `PSPLUGIN_CHANGE_FAILED: … password authentication failed for user psafe_…` (self-rotation) | Password Safe's stored current password drifted from the server |
 | `CredentialUnavailableException` / `DefaultAzureCredential failed to retrieve a token` | an `MSI:` functional account reached tier 3 on a broker with no managed identity — switch the FA to `SP:`, assign an MI, or configure `ControlPlane` (§0) |

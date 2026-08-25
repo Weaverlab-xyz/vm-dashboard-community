@@ -1411,14 +1411,14 @@
                          placeholder="pra-config-api">
                 </div>
               </div>
-              <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode !== 'reference'">Functional account = the AWS IAM user for SSM SendCommand. Leave the IAM fields blank to use the EC2 instance-role mode (Password Safe node/broker on an EC2 with the SSM role).</p>
+              <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode !== 'reference'">The functional account packs the AWS credentials for SSM SendCommand: setting <strong>both</strong> the Access Key ID and Secret selects IAM-user mode; leaving either blank selects EC2 instance-role mode (Password Safe node/broker on an EC2 with the SSM role). The account's username becomes <code>EC2:&lt;dbAdmin&gt;</code> / <code>IAM:&lt;dbAdmin&gt;</code> and its password the <code>keyId:secret:dbAdminPassword</code> triple the plugin parses.</p>
               <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">Not used in this mode — the functional account you name above carries it.</p>
               <div class="grid grid-cols-3 gap-3" :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
                 <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">IAM Username</label>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">IAM Username <span class="text-gray-400 font-normal">(informational)</span></label>
                   <input type="text" x-model="panelCfg.clouddb_ps_ssm_iam_username" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="(blank = EC2 role mode)">
+                         placeholder="(never reaches the plugin)">
                 </div>
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">IAM Access Key ID</label>
@@ -1433,18 +1433,25 @@
                          placeholder="••••••••">
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-3 gap-3">
                 <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Account Suffix</label>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Assume Role <span class="text-gray-400 font-normal">(address segment, ≥12 chars)</span></label>
                   <input type="text" x-model="panelCfg.clouddb_ps_ssm_account_suffix"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="local (or a cross-account AssumeRole ARN)">
+                         placeholder="NoAssumeRole (or a cross-account AssumeRole ARN)">
                 </div>
                 <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Public Key Path <span class="text-gray-400 font-normal">(on PS node)</span></label>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Public Key Path <span class="text-gray-400 font-normal">(on PS node — required)</span></label>
                   <input type="text" x-model="panelCfg.clouddb_ps_ssm_public_key_path"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="C:\Utils\public_ssm.pem">
+                </div>
+                <div class="flex items-end">
+                  <label class="flex items-center gap-2 text-sm text-gray-700 pb-2">
+                    <input type="checkbox" x-model="panelCfg.clouddb_ps_ssm_ssl"
+                           class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                    Require TLS (sslTRUE — MySQL only)
+                  </label>
                 </div>
               </div>
               <p class="text-xs text-gray-400">Plugin RSA key material the dashboard drops onto the shared SSM jump

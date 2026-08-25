@@ -49,10 +49,13 @@ FLAGS = ("password_safe_enabled", "pra_enabled", "epml_enabled")
 # the split is provably lossless, PLUS keys deliberately added since (the thirteen
 # `*_gcp_*` cloud-DB onboarding keys, which wire the GCP Cloud SQL plugins as the third
 # Layer-2 cloud alongside AWS SSM and Azure Run Command — eight for the data-api channel
-# and five more for cloud-run, which is what adds SQL Server; and
+# and five more for cloud-run, which is what adds SQL Server;
 # `gcp_jumpoint_machine_type`, promoted onto the PRA panel because the OT cell's gateway
 # sizing guard tells operators to change it "in Settings" and until then it was declared
-# only on the wizard's GCPSetup — settable by API, findable nowhere). A key that vanishes from all three models is a field an
+# only on the wizard's GCPSetup — settable by API, findable nowhere; and
+# `clouddb_ps_ssm_ssl`, the AWS SSM mysql address's trailing sslTRUE|sslFALSE segment,
+# added when the addresses were aligned with the vendor plugins' per-engine parse).
+# A key that vanishes from all three models is a field an
 # operator can no longer set; one that appears on two breaks the union-check equivalence
 # test_setup_feature_roundtrip documents in its own docstring.
 LEGACY_KEYS = frozenset("""
@@ -74,7 +77,7 @@ clouddb_ps_import_workgroup clouddb_ps_import_default_cloud clouddb_ps_import_ma
 clouddb_ps_import_platform_map clouddb_db_client_image_postgres
 clouddb_db_client_image_mysql clouddb_db_client_image_sqlserver
 clouddb_ps_ssm_iam_username clouddb_ps_ssm_access_key_id clouddb_ps_ssm_secret_access_key
-clouddb_ps_ssm_account_suffix clouddb_ps_ssm_public_key_path
+clouddb_ps_ssm_account_suffix clouddb_ps_ssm_public_key_path clouddb_ps_ssm_ssl
 clouddb_ps_ssm_plugin_private_key clouddb_ps_ssm_plugin_passphrase
 clouddb_ps_ssm_key_directory
 pra_config_api_client_id pra_config_api_client_secret

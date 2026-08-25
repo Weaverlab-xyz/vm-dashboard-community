@@ -1597,6 +1597,59 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
 
 _FA_MODE_REFERENCE = "reference"
 
+# The "{engine} SSM Custom Plugin" address's assumeRole segment is Substring(0,12)'d
+# unconditionally by the plugin (that is how an "arn:aws:iam:" prefix is detected), so
+# anything shorter crashes every credential action. The placeholder is exactly 12
+# characters, which is also the minimum ps_resource_service._DBSSM_MIN_ASSUME_ROLE_LEN
+# enforces — the round-trip test pins the two modules together.
+_DBSSM_ASSUME_ROLE_PLACEHOLDER = "NoAssumeRole"
+
+
+def _dbssm_assume_role() -> str:
+    """The address's assumeRole segment: a full IAM role ARN for the cross-account
+    EC2-broker mode, else the placeholder. A configured value too short for the
+    plugin's ``Substring(0,12)`` is coerced rather than shipped — ``local`` was this
+    key's own pre-spec default, so rows persisted under it are healed here instead of
+    crashing the first rotation with "Index and length must refer to a location
+    within the string"."""
+    role = (_cfg("clouddb_ps_ssm_account_suffix") or "").strip()
+    if len(role) >= len(_DBSSM_ASSUME_ROLE_PLACEHOLDER):
+        return role
+    if role and role.lower() != "local":
+        logger.warning(
+            "clouddb: clouddb_ps_ssm_account_suffix %r is shorter than 12 characters, "
+            "which crashes the SSM DB plugin (Substring(0,12)) — using %r; set a full "
+            "IAM role ARN or leave the field blank", role,
+            _DBSSM_ASSUME_ROLE_PLACEHOLDER)
+    return _DBSSM_ASSUME_ROLE_PLACEHOLDER
+
+
+def _dbssm_fa_fields(*, admin_user: str, admin_password: str,
+                     access_key_id: str, secret_access_key: str) -> tuple:
+    """Functional-account ``(username, password)`` for the "{engine} SSM Custom Plugin".
+
+    Username is ``<mode>:<dbAdminUser>`` and the password is ALWAYS the three-part
+    ``<accessKeyId>:<secretAccessKey>:<dbAdminPassword>`` — the plugin splits both
+    BEFORE it looks at the mode, so EC2 mode (no access-key pair configured) still
+    ships the two ``x`` placeholders. The mode is selected by the key pair's presence:
+    with both, parts 1–2 are the credentials Password Safe calls AWS with (IAM mode);
+    without, the broker host's own AWS credentials are used and parts 1–2 are ignored.
+    The DB admin credential rides part 3 in both modes — Verify Functional Account
+    logs into the database with it, and the mssql/mysql managed-account change ships
+    ``<newMaPwd>;<faDbPwd>`` through it."""
+    mode = "IAM" if (access_key_id and secret_access_key) else "EC2"
+    for label, value in (("DB admin username", admin_user),
+                         ("AWS access key id", access_key_id),
+                         ("AWS secret access key", secret_access_key),
+                         ("DB admin password", admin_password)):
+        if ":" in (value or ""):
+            raise CloudDatabaseError(
+                f"the {label} contains ':', the SSM DB plugin's functional-account "
+                f"field delimiter — the credential would mis-split at every "
+                f"verify/change action")
+    return (f"{mode}:{admin_user}",
+            f"{access_key_id or 'x'}:{secret_access_key or 'x'}:{admin_password}")
+
 
 def _ps_fa_mode() -> str:
     """Where the DB plugin's functional account comes from: ``"reference"`` (the
@@ -1679,7 +1732,8 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
                                       engine: str, tf_variables: dict, ctx: dict) -> None:
     """Onboard the DB into Password Safe: a managed system + managed account on the
     cloud-specific DB plugin platform — AWS "{engine} SSM Custom Plugin" (functional
-    account = the AWS IAM user for SSM), Azure "{engine} Azure Run Command Plugin"
+    account = "<EC2|IAM>:<dbAdmin>" packing the AWS SSM credential and the DB admin
+    password), Azure "{engine} Azure Run Command Plugin"
     (functional account = the Azure SP + the privileged DB admin login) or GCP
     "GCP Cloud SQL {engine}" (functional account = a GCP identity and, under IAM
     database authentication, no database password at all) — and, when a
@@ -1788,10 +1842,17 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             _cfg("azure_tenant_id"), row.private_host, ctx["db_name"] or "",
             _cfg("clouddb_ps_azure_cert_path"), ssl_flag])
     else:
-        # "{engine} SSM Custom Plugin": in "create" mode the functional account is the
-        # AWS IAM user (SSM transport) and the managed account self-rotates; in
-        # "reference" mode the operator's own account carries the IAM credential, so the
-        # keys below are not read. Address is six ;-separated fields.
+        # "{engine} SSM Custom Plugin" (vendor v24.2.x). The plugin indexes ';'-packed
+        # host fields at fixed per-engine positions — mssql has NO database segment and
+        # mysql alone carries a trailing ssl flag; ps_resource_service holds the full
+        # grammar and validates the composed address at registration. In "create" mode
+        # the functional account is "<EC2|IAM>:<dbAdminUser>" over the always-three-part
+        # "<akid>:<secret>:<dbAdminPassword>": the AWS pair is the SSM transport
+        # credential (or two ignored-but-required placeholders in EC2 mode), and the DB
+        # admin credential rides part 3 — Verify FA logs into the database with it, and
+        # the via-functional-account change works because the RDS master user IS
+        # privileged. In "reference" mode the operator's own account carries all of
+        # that, so none of the credential material is read here.
         db_platform_id = 0 if fa_mode == _FA_MODE_REFERENCE else (
             await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_{engine}")))
         fa_label, db_method = "ssm", "dbssm"
@@ -1799,17 +1860,42 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         fa_tokens = ("ssm",)
         fa_username = fa_password = ""
         if fa_mode != _FA_MODE_REFERENCE:
-            iam_user = _cfg("clouddb_ps_ssm_iam_username")
-            akid = _cfg("clouddb_ps_ssm_access_key_id")
-            secret = _cfg("clouddb_ps_ssm_secret_access_key")
-            if iam_user and akid and secret:
-                fa_username, fa_password = iam_user, f"{akid}:{secret}"   # IAM-user mode
-            else:
-                fa_username, fa_password = "EC2", secrets.token_urlsafe(16)  # EC2 mode: role-based; PS still stores a value
-        # DNS name: {instance};{region};{db endpoint};{db name};{public key path};{suffix}
-        dns_name = ";".join([
-            ctx["jump_host_id"], ctx["region"], row.private_host, ctx["db_name"] or "",
-            _cfg("clouddb_ps_ssm_public_key_path"), _cfg("clouddb_ps_ssm_account_suffix") or "local"])
+            admin_password = (config_service.get(f"clouddb/{row.id}/admin")
+                              or tf_variables.get("master_password") or "")
+            if not admin_password:
+                logger.warning(
+                    "clouddb: no admin credential available for db_id=%s — the SSM "
+                    "functional account's dbAdminPassword segment will be empty, so "
+                    "Verify Functional Account and rotation will fail until it is "
+                    "corrected in Password Safe", row.id)
+            fa_username, fa_password = _dbssm_fa_fields(
+                admin_user=ctx["admin_username"], admin_password=admin_password,
+                access_key_id=_cfg("clouddb_ps_ssm_access_key_id"),
+                secret_access_key=_cfg("clouddb_ps_ssm_secret_access_key"))
+        cert_path = _cfg("clouddb_ps_ssm_public_key_path")
+        if not cert_path:
+            raise CloudDatabaseError(
+                "clouddb_ps_ssm_public_key_path is blank — it is packed into the "
+                "managed-system address as the plugin's certPath segment (the RSA "
+                "public certificate path on the Resource Broker host), and an empty "
+                "positional field fails inside the plugin at the first rotation "
+                "rather than here")
+        # Per-engine address (grammar + rationale in ps_resource_service):
+        #   sqlserver: instanceId;region;dbEndpoint;certPath;assumeRole
+        #   postgres:  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole
+        #   mysql:     …;databaseName;certPath;assumeRole;sslTRUE|sslFALSE
+        addr = [ctx["jump_host_id"], ctx["region"], row.private_host]
+        if engine != "sqlserver":
+            # The psql/mysql actions connect to this catalog; mssql has no segment for
+            # it (its actions always land in master). connection_db_name can be blank
+            # on an old un-backfilled row, so fall back to a catalog every RDS instance
+            # of the engine is guaranteed to have.
+            addr.append(ctx["db_name"] or ("postgres" if engine == "postgres" else "mysql"))
+        addr += [cert_path, _dbssm_assume_role()]
+        if engine == "mysql":
+            addr.append("sslTRUE" if config_service.get_bool("clouddb_ps_ssm_ssl", True)
+                        else "sslFALSE")
+        dns_name = ";".join(addr)
     db_fa_id, db_platform_id, db_fa_owned = await _resolve_db_functional_account(
         config_key=fa_key, platform_id=db_platform_id, platform_tokens=fa_tokens,
         label=fa_label, create={
@@ -1838,7 +1924,11 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
                     "the managed user instead", row.id, _gcp_channel(engine))
         self_rotate = False
     reg = await ps_resource_service.register_managed_system(
-        name=f"{name}-db", host_name=row.private_host, ip_address="127.0.0.1",
+        name=f"{name}-db", host_name=row.private_host,
+        # The SSM DB plugins parse EVERY populated host field as the packed address
+        # and crash on a bare IP, so dbssm gets no placeholder; the other two clouds'
+        # plugins skip non-parsing candidates and keep it.
+        ip_address="" if db_method == "dbssm" else "127.0.0.1",
         port=ctx["port"], functional_account_id=db_fa_id, platform_id=db_platform_id,
         workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
         method=db_method, dns_name=dns_name,

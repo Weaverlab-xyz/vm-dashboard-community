@@ -553,11 +553,37 @@ config keys to match what you uploaded.
 The dashboard creates the managed user by running the DB client (`psql` / `mysql` /
 `sqlcmd`, as a `docker run`) on the shared **ECS gateway host over AWS SSM
 `SendCommand`** — the only dashboard component with line-of-sight to the private DB. It
-registers the DB on the **`{engine} SSM Custom Plugin`** platform with DNS name
-`{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};{suffix}`. The **functional
-account is the AWS IAM user** used for SSM (EC2-role mode by default, or IAM-key mode) —
-**there is no privileged DB login**; the managed account changes *its own* password on
-rotation (no elevated DB privilege needed).
+registers the DB on the **`{engine} SSM Custom Plugin`** platform (v24.2.x). The plugin
+indexes the managed-system address at fixed **per-engine** positions — mssql has no
+database segment, and mysql alone carries a trailing ssl flag:
+
+```
+mssql (5):  instanceId;region;dbEndpoint;certPath;assumeRole
+psql  (6):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole
+mysql (7):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole;sslTRUE|sslFALSE
+```
+
+- `instanceId` is the shared gateway host's EC2 instance id (the SSM target). The DB
+  **port rides the managed system's Port field, never the address** — a `Server=…:5432`
+  in the plugin log is the log line appending the Port field, not an address mistake.
+- `assumeRole` must be **≥ 12 characters**: the plugin `Substring(0,12)`s it to detect
+  an `arn:aws:iam:` prefix, so anything shorter (the old `local` default) crashes every
+  action with *"Index and length must refer to a location within the string"*. The
+  placeholder is `NoAssumeRole`; a full role ARN switches EC2 mode to STS AssumeRole. A
+  configured value under 12 characters is coerced to the placeholder on read.
+- The managed system is registered with **no IP address**: the plugin tries every
+  populated host field as the packed address, and a bare IP (the `127.0.0.1`
+  placeholder the other clouds keep) always fails the parse with *"Index was outside
+  the bounds of the array"*.
+
+In `create` mode the **functional account packs the AWS transport credential *and* the
+DB admin credential**: username `EC2:<dbAdmin>` or `IAM:<dbAdmin>`, password always the
+three-part `<AccessKeyId>:<SecretAccessKey>:<dbAdminPassword>` — the plugin splits
+before it looks at the mode, so EC2 mode ships `x:x:` placeholders for parts 1–2. IAM
+mode is selected by setting **both** key fields. Part 3 is what *Verify Functional
+Account* logs into the database with, and it gives the via-functional-account change a
+privileged login (the RDS master user); none of these values may contain `:` (the
+field delimiter) — dashboard-generated credentials never do.
 
 **Prerequisites (manual):**
 
@@ -587,10 +613,11 @@ rotation (no elevated DB privilege needed).
 | `clouddb_ps_pravault_functional_account` | — | `reference` mode: the operator-created account on the PRA Vault platform |
 | `clouddb_ps_workgroup` | — | Workgroup; blank → `passwordsafe_workgroup` |
 | `clouddb_db_client_image_postgres` / `_mysql` / `_sqlserver` | `postgres:16` / `mysql:8.4` / `mcr.microsoft.com/mssql-tools18` | DB-client images on the jump host |
-| `clouddb_ps_ssm_iam_username` | — | `create` mode only: IAM user (functional account); blank → EC2 role mode |
-| `clouddb_ps_ssm_access_key_id` / `_secret_access_key` | — | `create` mode only: IAM-mode credentials |
-| `clouddb_ps_ssm_account_suffix` | `local` | DNS-name suffix; an AssumeRole ARN for cross-account mode |
-| `clouddb_ps_ssm_public_key_path` | — | Public-key path on the PS node/broker |
+| `clouddb_ps_ssm_iam_username` | — | Informational only — the plugin never sees it; the mode is selected by the key pair below |
+| `clouddb_ps_ssm_access_key_id` / `_secret_access_key` | — | `create` mode only: **both set → IAM mode**, either blank → EC2 role mode |
+| `clouddb_ps_ssm_account_suffix` | `NoAssumeRole` | The address's `assumeRole` segment: the placeholder or a cross-account AssumeRole ARN. **≥ 12 chars** — shorter crashes the plugin, so a short persisted value is coerced on read |
+| `clouddb_ps_ssm_public_key_path` | — | The address's `certPath` segment (field 4 mssql / field 5 psql+mysql): RSA public-cert path on the PS node/broker. **Required** — onboarding refuses a blank rather than packing an empty segment |
+| `clouddb_ps_ssm_ssl` | `true` | mysql only: the trailing `sslTRUE` / `sslFALSE` segment (only the literal `sslTRUE` enables TLS) |
 | `clouddb_ps_ssm_plugin_private_key` / `_passphrase` | — | Plugin RSA key material the dashboard drops onto the Gateway host over SSM. **Use a separate pair from Azure's** — the private keys land on different hosts |
 | `clouddb_ps_ssm_key_directory` | `/home/ssm-user` | Where the SSM plugin reads that key on the jump host; blank leaves the staging manual |
 | `pra_config_api_client_id` / `_secret` | — | PRA Config-API account; blank → reuse `bt_client_id` / `bt_client_secret` |

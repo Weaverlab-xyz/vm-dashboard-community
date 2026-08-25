@@ -22,12 +22,14 @@
   within a plugin family. A name that resolves to a sibling platform therefore passes
   the guard, and the managed system silently inherits the WRONG platform. So:
     - Azure gets distinct names per engine (SP:psfa_pg / _mysql / _mssql), which the
-      plugin allows because the suffix is just the DB login name.
-    - AWS cannot: the plugin requires the account name to BE the IAM username, so all
-      three are identical. Those are referenced by NUMERIC ID, which the resolver
-      accepts and which cannot be ambiguous.
-    - PRA Vault is referenced by id too, because the Username Password / Token /
-      Private Key platforms routinely share one client id as the account name.
+      plugin allows because the part after the ':' is just the DB login name.
+    - AWS follows the same shape: the plugin parses the name as <EC2|IAM>:<dbAdminUser>
+      (the IAM username never appears in any plugin-consumed field — the access-key
+      pair inside the password is the whole AWS identity), so IAM:psfa_pg / _mysql /
+      _mssql are distinct per engine too.
+    - PRA Vault is referenced by NUMERIC ID, because the Username Password / Token /
+      Private Key platforms routinely share one client id as the account name; the
+      resolver accepts an id anywhere a name is expected.
 
 .PARAMETER JumpVmResourceGroup
   Azure only. The resource group the ref-counted `clouddb-jumpoint` VM lands in; it
@@ -80,9 +82,9 @@ $AZURE_PLATFORMS = [ordered]@{
     sqlserver = @{ Name = $AzurePlatformNameSqlserver; Account = 'SP:psfa_mssql' }
 }
 $AWS_PLATFORMS = [ordered]@{
-    postgres  = @{ Name = $AwsPlatformNamePostgres }
-    mysql     = @{ Name = $AwsPlatformNameMysql }
-    sqlserver = @{ Name = $AwsPlatformNameSqlserver }
+    postgres  = @{ Name = $AwsPlatformNamePostgres;  Account = 'IAM:psfa_pg' }
+    mysql     = @{ Name = $AwsPlatformNameMysql;     Account = 'IAM:psfa_mysql' }
+    sqlserver = @{ Name = $AwsPlatformNameSqlserver; Account = 'IAM:psfa_mssql' }
 }
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -222,6 +224,22 @@ if ($doAws) {
         $w = $AWS_PLATFORMS[$engine]
         $w.Id = Resolve-PlatformId -All $allPlatforms -Name $w.Name
         Write-Host ("  {0,-9} -> platform {1} '{2}'" -f $engine, $w.Id, $w.Name)
+        # Same re-run contract as Azure: reuse an account already on the RIGHT
+        # platform, refuse one on a different platform (reference mode resolves by
+        # name and the managed system inherits the account's platform silently).
+        $dupes = @($existingFas | Where-Object { $_.AccountName -eq $w.Account })
+        if ($dupes.Count -gt 1) {
+            throw ("{0} functional accounts are named '{1}' (ids {2}). Reference mode resolves by name and would pick one arbitrarily — delete the extras." -f
+                   $dupes.Count, $w.Account, ($dupes.FunctionalAccountID -join ', '))
+        }
+        if ($dupes.Count -eq 1) {
+            if ([int]$dupes[0].PlatformID -ne $w.Id) {
+                throw ("functional account '{0}' already exists on platform {1}, but this engine needs {2} '{3}'. The managed system inherits the account's platform, so reusing it would onboard databases onto the wrong plugin." -f
+                       $w.Account, $dupes[0].PlatformID, $w.Id, $w.Name)
+            }
+            $w.Existing = [int]$dupes[0].FunctionalAccountID
+            Write-Host ("             reusing existing account id {0}" -f $w.Existing) -ForegroundColor Green
+        }
     }
 }
 $PRAVAULT_PLATFORM_ID = if ($SkipPraVault) { 0 } else { Resolve-PlatformId -All $allPlatforms -Name $PraVaultPlatformName }
@@ -358,7 +376,14 @@ if ($doAws) {
 
     # Placeholders keep the dry run previewing the accounts, as on the Azure side.
     $akid = '<access-key-id>'; $awsSecret = '<secret-access-key>'
-    if ($userExists) {
+    # Only issue a key if an account will actually carry it — same reasoning as the
+    # Azure client secret: the accounts store the secret, they do not look it up.
+    $needAwsKey = @(@($AWS_PLATFORMS.Keys) | Where-Object { -not $AWS_PLATFORMS[$_].Contains('Existing') }).Count -gt 0
+    if (-not $needAwsKey) {
+        Write-Host '  all three accounts already exist — not issuing a new access key'
+        Write-Host '  (the existing accounts keep the one they already hold).'
+    }
+    if ($needAwsKey -and $userExists) {
         $keys = (Invoke-Aws "iam list-access-keys --user-name $AwsIamUserName").AccessKeyMetadata
         if ($keys -and $keys.Count -ge 2) {
             throw "$AwsIamUserName already has 2 access keys (the AWS limit). Delete one first: aws iam delete-access-key --user-name $AwsIamUserName --access-key-id <id>"
@@ -367,22 +392,30 @@ if ($doAws) {
             Write-Warning ("  $AwsIamUserName already has access key {0}. Its secret is unrecoverable, so a new one is needed for the account password." -f $keys[0].AccessKeyId)
         }
     }
-    if ($PSCmdlet.ShouldProcess($AwsIamUserName, 'create an access key')) {
+    if ($needAwsKey -and $PSCmdlet.ShouldProcess($AwsIamUserName, 'create an access key')) {
         $k = (Invoke-Aws "iam create-access-key --user-name $AwsIamUserName").AccessKey
         $akid = $k.AccessKeyId; $awsSecret = $k.SecretAccessKey
         Write-Host "  access key $akid issued (secret not displayed)" -ForegroundColor Green
     }
 
     Write-Host "`n== Functional accounts (AWS SSM) ==" -ForegroundColor Cyan
-    Write-Host '  All three share the IAM username as their account name, because the plugin'
-    Write-Host '  requires that. Reference them by ID in the panel, not by name.'
+    Write-Host '  The plugin parses the name as <EC2|IAM>:<dbAdminUser> and the password as the'
+    Write-Host '  three-part <keyId>:<secret>:<dbAdminPassword> — the IAM username itself never'
+    Write-Host '  reaches the plugin. The DB password segment here is a generated throwaway:'
+    Write-Host '  when you create the psfa_* logins on each server, set the account password at'
+    Write-Host '  the same time — Verify Functional Account is what logs in with it.'
     foreach ($engine in $AWS_PLATFORMS.Keys) {
         $w = $AWS_PLATFORMS[$engine]
-        $id = New-FunctionalAccount -AccountName $AwsIamUserName -PlatformId $w.Id `
-            -Password ('{0}:{1}' -f $akid, $awsSecret) `
-            -DisplayName "clouddb $engine SSM" `
-            -Description "Cloud-DB onboarding (reference mode). IAM user $AwsIamUserName for SSM SendCommand."
-        $panel["AWS $engine Functional Account"] = if ($id) { "$id   (id, not the name — all three share '$AwsIamUserName')" } else { "<id assigned on create> (id, not the name)" }
+        if ($w.Contains('Existing')) {
+            Write-Host ("  '{0}' already on platform {1} (id {2}) — left alone" -f $w.Account, $w.Id, $w.Existing)
+        } else {
+            $dbUser = $w.Account -replace '^IAM:', ''
+            New-FunctionalAccount -AccountName $w.Account -PlatformId $w.Id `
+                -Password ('{0}:{1}:{2}' -f $akid, $awsSecret, (New-Passphrase)) `
+                -DisplayName "clouddb $engine SSM" `
+                -Description "Cloud-DB onboarding (reference mode). IAM user $AwsIamUserName for SSM SendCommand; DB login $dbUser." | Out-Null
+        }
+        $panel["AWS $engine Functional Account"] = $w.Account
     }
 }
 
@@ -426,7 +459,7 @@ Write-Host '                                                    action and every
 foreach ($k in $panel.Keys) { Write-Host ("  {0,-42} {1}" -f $k, $panel[$k]) }
 Write-Host '  IAM / SP Client ID / Secret / Auth Mode .... leave BLANK (now in the accounts)'
 Write-Host '  Platform fields ............................ leave blank (advisory in this mode)'
-Write-Host '  Account Suffix ............................. local'
+Write-Host '  Assume Role ................................ NoAssumeRole (>=12 chars; "local" crashes the plugin)'
 Write-Host ''
 Write-Host '  Still required, and NOT covered by this script:' -ForegroundColor Yellow
 Write-Host '   - Azure: Plugin Private Key (PEM) + passphrase. Blank SILENTLY skips the key'
@@ -434,7 +467,10 @@ Write-Host '     drop, so provisioning stays green and the first rotation fails 
 Write-Host '   - Azure: Broker Cert Path must be where public_cert.cer really is on the broker.'
 Write-Host '   - AWS: the jump-host RSA prep is manual — put private.pem and passphrase.txt in'
 Write-Host '     the ssm-user home on the shared ECS gateway host yourself, and set Public Key'
-Write-Host '     Path to the public key on the PS node (address field 5).'
+Write-Host '     Path to the public cert on the PS node (the certPath address segment: field 4'
+Write-Host '     for mssql, field 5 for psql/mysql). Required — a blank refuses onboarding.'
+Write-Host '   - AWS: create each psfa_* DB login on the servers it will verify against, with'
+Write-Host '     the password you set on that functional account (segment 3).'
 Write-Host '   - azure_subscription_id / azure_tenant_id on the Azure panel (address fields 3'
 Write-Host '     and 4, parsed positionally — a blank one yields an unresolvable empty field).'
 Write-Host ''
