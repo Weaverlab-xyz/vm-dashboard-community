@@ -14,9 +14,10 @@ account):
   the key);
 - the three cloud-DB shapes (dbssm, dbazure, dbgcp), whose accounts are password-
   managed instead; dbssm has a per-engine positional grammar (5 fields mssql / 6 psql /
-  7 mysql), a 12-character assumeRole floor and — alone among the plugin shapes — NO
-  placeholder ip; dbgcp additionally has an options-bearing address grammar and its
-  own tighter 249-character limit;
+  7 mysql), a 12-character assumeRole floor and — alone among the plugin shapes — the
+  packed address as its ip rather than a placeholder (the platform requires an
+  IPAddress, the plugin crashes parsing a bare one); dbgcp additionally has an
+  options-bearing address grammar and its own tighter 249-character limit;
 - _scrub_state redacts password + private_key so neither lands in stashed state.
 
 Imports ps_resource_service with a stubbed web_dashboard.config (no app deps).
