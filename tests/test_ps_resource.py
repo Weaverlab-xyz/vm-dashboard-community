@@ -261,13 +261,15 @@ def test_gcpvm_register_rejects_non_three_part_address():
 # "PRA Vault Username Password") — password-managed (no SSH key, dss flag off). The
 # dbssm address is PER-ENGINE (5 fields mssql / 6 psql / 7 mysql), its assumeRole
 # segment must be ≥ 12 characters (the plugin Substring(0,12)'s it), and unlike every
-# other plugin shape it carries NO placeholder ip — the plugin parses every populated
-# host field as the packed address and crashes on a bare IP. ─────────────────────
+# other plugin shape its ip is the packed address AGAIN — the platform refuses a create
+# with no IPAddress at all, while the plugin parses every populated host field as the
+# packed address and crashes on a bare IP, so the identical string is the only value
+# both sides take. ────────────────────────────────────────────────────────────────
 
 _DB_DNS = ("i-0eaa6a10886717ed;us-east-1;db.abc.us-east-1.rds.amazonaws.com;appdb;"
            "C:\\Utils\\public_ssm.pem;NoAssumeRole")
 _DBSSM = dict(name="clouddb-pg", host_name="db.abc.us-east-1.rds.amazonaws.com",
-              ip_address="", port=5432, functional_account_id=42, platform_id=20,
+              ip_address=_DB_DNS, port=5432, functional_account_id=42, platform_id=20,
               entity_type_id=1, workgroup_id="55", managed_account_name="psafe_ab12cd34ef56",
               ssh_key_enforcement_mode=2, method="dbssm", dns_name=_DB_DNS,
               emit_private_key=False, dss_auto_management=False)
@@ -280,16 +282,42 @@ _PRAVAULT = dict(name="clouddb-pg-pravault", host_name="https://pra.example.com"
                  emit_private_key=False, dss_auto_management=False)
 
 
-def test_dbssm_system_block_uses_dns_name_no_placeholder_ip_and_no_ssh():
+def test_dbssm_system_block_uses_the_packed_address_for_both_host_fields():
     hcl = ps._generate_managed_system_hcl(**_DBSSM)
     assert ps._line("dns_name", json.dumps(_DB_DNS)) in hcl
-    # No ip line at all: the SSM DB plugins parse every populated host field as the
-    # packed address, so the placeholder the other shapes use would crash each action.
-    assert "ip_address" not in hcl
+    # The ip is the packed address AGAIN, not the 127.0.0.1 placeholder the other
+    # shapes use: the platform refuses a create with no IPAddress at all, and the
+    # plugins parse every populated host field as the packed address, so the identical
+    # string is the one value that satisfies both.
+    assert ps._line("ip_address", json.dumps(_DB_DNS)) in hcl
     assert ps._line("platform_id", 20) in hcl
     assert ps._line("port", 5432) in hcl
     assert "remote_client_type" not in hcl
     assert "ssh_key_enforcement_mode" not in hcl
+
+
+def test_dbssm_registration_defaults_the_ip_to_the_packed_address():
+    """Live regression (2026-08-25): registering with NO ip at all — the previous
+    reading of the vendor guidance — is rejected by the platform with "The field
+    'IPAddress' is required.", after a 7-minute RDS apply and inside a branch the
+    caller then reported as a green job. An empty ip_address must therefore default
+    to the packed address, the value the plugin parses and the API accepts."""
+    import asyncio
+    captured = {}
+
+    def _capture(hcl, tf_vars):
+        captured["hcl"] = hcl
+        return {"managed_system_id": "1", "managed_account_id": "2", "tf_state_json": None}
+
+    real = ps._apply_hcl_sync
+    ps._apply_hcl_sync = _capture
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="pg", host_name="pg", functional_account_id=1, platform_id=20,
+            workgroup_id="wg", method="dbssm", dns_name=_DB_DNS))
+    finally:
+        ps._apply_hcl_sync = real
+    assert ps._line("ip_address", json.dumps(_DB_DNS)) in captured["hcl"]
 
 
 def test_dbssm_account_is_password_managed_no_key_no_dss():

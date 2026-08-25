@@ -733,9 +733,11 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     (6), plus a trailing ``sslTRUE|sslFALSE`` for mysql (7); ``port`` is the real DB port
     (never appended to the address), ``managed_account_name`` is the dedicated DB user, and
     the account is password-managed (no SSH DSS key). Unlike every other plugin method,
-    ``ip_address`` must stay EMPTY (or equal the packed address): these plugins parse every
-    populated host field at fixed positions, so the usual ``127.0.0.1`` placeholder crashes
-    each action with "Index was outside the bounds of the array".
+    ``ip_address`` defaults to the packed address itself, not ``127.0.0.1``: the platform
+    refuses a create with no ip at all ("The field 'IPAddress' is required." — seen live
+    2026-08-25), while the plugins parse every populated host field at fixed positions, so
+    the usual placeholder crashes each action with "Index was outside the bounds of the
+    array". The packed address is the one value both sides accept.
 
     ``method="dbazure"`` uses the cloud-DB "{engine} Azure Run Command Plugin": ``dns_name``
     must be ``vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;sslTRUE|sslFALSE``
@@ -827,10 +829,12 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
         # private RDS instance by running the DB client on a jump host over SSM.
         # dns_name is the ';'-packed per-engine address (see the grammar above), the
         # real DB port applies, and the account is PASSWORD-managed (no SSH key).
-        # Unlike the other custom-plugin methods there is NO placeholder ip: these
-        # plugins try EVERY populated host field as the packed address and crash on
-        # one that does not parse, so the ip stays empty (or, per the vendor
-        # guidance, the identical packed string).
+        # Unlike the other custom-plugin methods the ip is the packed address AGAIN,
+        # not a placeholder: the create API refuses these platforms with no IPAddress
+        # at all ("The field 'IPAddress' is required." — seen live 2026-08-25, a green
+        # apply's worth of RDS with zero Password Safe artifacts), and the plugins try
+        # EVERY populated host field as the packed address and crash on one that does
+        # not parse — so neither empty nor 127.0.0.1 survives both sides.
         _validate_dbssm_dns_name(dns_name)
         _check_address_length(dns_name, "dbssm")
         if ip_address and ip_address != dns_name:
@@ -838,10 +842,11 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
                 f"DB SSM onboarding must not set ip_address to {ip_address!r}: the "
                 f"{{engine}} SSM plugins parse every populated host field as the "
                 f"';'-packed address, and a bare IP always fails with 'Index was "
-                f"outside the bounds of the array'. Leave it empty, or set it to the "
-                f"same packed address as dns_name.")
+                f"outside the bounds of the array'. Leave it empty (the platform "
+                f"requires SOME ip, so it defaults to the packed address) or set it "
+                f"to the same packed address as dns_name.")
         hcl = _generate_managed_system_hcl(
-            name=name, host_name=host_name, ip_address=ip_address, port=port,
+            name=name, host_name=host_name, ip_address=ip_address or dns_name, port=port,
             functional_account_id=functional_account_id, platform_id=platform_id,
             entity_type_id=entity_type_id, workgroup_id=workgroup_id,
             managed_account_name=managed_account_name,

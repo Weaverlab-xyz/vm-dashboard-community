@@ -1740,7 +1740,8 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     PRA Vault account exists for this DB, a managed system + managed account on the
     "PRA Vault Username Password" platform so Password Safe propagates rotations into
     the vaulted credential the tunnel injects. Ids + teardown state are stashed on the
-    provisioning job's metadata. Best-effort."""
+    provisioning job's metadata the moment each half exists, so whatever a part-way
+    failure created is still tracked for teardown. Failures propagate to the caller."""
     from . import ps_api_service, ps_resource_service
     name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
     workgroup_id = await ps_api_service.get_workgroup_id(
@@ -1925,10 +1926,11 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         self_rotate = False
     reg = await ps_resource_service.register_managed_system(
         name=f"{name}-db", host_name=row.private_host,
-        # The SSM DB plugins parse EVERY populated host field as the packed address
-        # and crash on a bare IP, so dbssm gets no placeholder; the other two clouds'
-        # plugins skip non-parsing candidates and keep it.
-        ip_address="" if db_method == "dbssm" else "127.0.0.1",
+        # ip_address is deliberately NOT passed: register_managed_system owns the
+        # per-plugin fill. dbssm gets the packed address itself — its platform refuses
+        # a create with no ip ("The field 'IPAddress' is required.") while its plugins
+        # crash parsing a bare one — and the other clouds' plugins skip non-parsing
+        # host candidates, so they keep the 127.0.0.1 placeholder.
         port=ctx["port"], functional_account_id=db_fa_id, platform_id=db_platform_id,
         workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
         method=db_method, dns_name=dns_name,
@@ -2315,6 +2317,15 @@ async def run_provision_apply(
             except Exception as exc:
                 logger.warning("clouddb: PS managed-user creation failed db_id=%s "
                                "(falling back to admin staging): %s", db_id, exc)
+                # The fallback keeps the database reachable (the tunnel is brokered
+                # with the admin credential), but it must be visible on the job page —
+                # a warning only in the app log is invisible to the operator who
+                # ticked the box.
+                job_service.append_job_log(
+                    db, job_id,
+                    f"Password Safe managed-user creation failed — the tunnel keeps "
+                    f"the admin credential and onboarding was skipped: {exc}. Use "
+                    f"'Register in Password Safe' on the Databases page to retry.")
                 onboard_ctx = None
 
         # Phase 2: broker the PRA tunnel (only when PRA is configured + we have a host).
@@ -2326,17 +2337,24 @@ async def run_provision_apply(
 
         if onboard_ctx:
             # Full Password Safe onboarding (managed systems + accounts + PRA Vault sync).
+            # A failure here FAILS the job. It shipped once as best-effort: the managed-
+            # system create was rejected ("The field 'IPAddress' is required.") and the
+            # job page said completed — the operator opted in, got no Password Safe
+            # artifacts, and only a mid-log line said so. This branch has no fallback,
+            # so a green job here is simply false. The ROW stays "available": the
+            # database exists and the tunnel is brokered, and run_ps_register — the
+            # remedy — refuses any row that is not.
             try:
                 await _onboard_ps_managed_systems(
                     db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables, ctx=onboard_ctx)
             except Exception as exc:
-                logger.warning("clouddb: PS managed-system onboarding failed db_id=%s "
-                               "(non-fatal): %s", db_id, exc)
-                # Non-fatal, and this branch has no legacy-staging fallback — so without
-                # a log line the job goes green with no Password Safe artifacts and no
-                # explanation anywhere the operator looks.
-                job_service.append_job_log(
-                    db, job_id, f"Password Safe onboarding skipped (non-fatal): {exc}")
+                logger.warning("clouddb: PS managed-system onboarding failed db_id=%s: %s",
+                               db_id, exc)
+                raise CloudDatabaseError(
+                    f"the database was created and is available, but Password Safe "
+                    f"onboarding failed: {exc}. Fix the cause, then use 'Register in "
+                    f"Password Safe' on the Databases page to finish onboarding — the "
+                    f"database does not need to be re-provisioned.") from exc
         else:
             if not _ps_choice:
                 logger.info("clouddb: Password Safe onboarding skipped for db_id=%s — the "
@@ -2373,7 +2391,13 @@ async def run_provision_apply(
         logger.info("clouddb apply complete db_id=%s host=%s tunnel=%s",
                     db_id, row.private_host, row.jump_item_id)
     except Exception as exc:
-        row.status = "failed"
+        # Only a failure BEFORE the database reached "available" demotes the row. After
+        # that point (Password Safe onboarding, Entitle registration) the database is
+        # real and usable, and the retry actions for those steps (run_ps_register,
+        # run_entitle_register) refuse any row that is not "available" — demoting it
+        # would lock the operator out of the very remedy the failure message names.
+        if row.status != "available":
+            row.status = "failed"
         db.commit()
         job_service.set_failed(db, job_id, str(exc))
         logger.exception("clouddb apply failed db_id=%s: %s", db_id, exc)

@@ -286,6 +286,76 @@ def test_run_provision_apply_refuses_to_apply_without_the_admin_password():
         f"the failure must name the missing credential, got {message!r}")
 
 
+def test_a_failed_ps_onboarding_fails_the_job_but_keeps_the_row_available():
+    """The live shape of 2026-08-25: the RDS apply succeeded, then Password Safe
+    rejected the managed-system create ("The field 'IPAddress' is required.") — and the
+    job page said *completed*. The operator opted in, so the job must FAIL and its
+    error_message (the only detail a failed job shows) must carry both the cause and
+    the remedy. The ROW must stay "available": the database is real and reachable, and
+    run_ps_register — the remedy — refuses any row that is not."""
+    _CAPTURED.clear()
+    CONF.clear()
+    CACHE.clear()
+    APPLIED.clear()
+    FAILED.clear()
+    result = svc.provision(
+        _FakeDB(), engine="postgres", cloud="aws", region="us-east-2",
+        name="appdb", created_by="admin")
+    row = _CloudDatabase(cloud="aws", engine="postgres", region="us-east-2",
+                         status="provisioning", private_host="", instance_id="",
+                         port=5432, created_by="admin", jump_item_id=None)
+    # The runner's snapshot: Password Safe onboarding configured and switched on.
+    CACHE.update({"pscli_api_url": "https://ps", "pscli_client_id": "id",
+                  "pscli_client_secret": "sec", "clouddb_ps_onboarding_enabled": True})
+    # The AWS path best-effort-imports this before the apply; keep it inert.
+    ssm = types.ModuleType("web_dashboard.services.ssm_endpoint_service")
+
+    async def _no_endpoints(region):
+        return None
+
+    ssm.ensure_ssm_endpoints = _no_endpoints
+    sys.modules["web_dashboard.services.ssm_endpoint_service"] = ssm
+
+    tf = sys.modules["web_dashboard.services.terraform"]
+
+    async def _apply_returns_a_live_db(deploy_dir, variables, template_dir=None,
+                                       env=None, on_line=None):
+        APPLIED["variables"] = dict(variables)
+        return {"instance_id": "db-X", "private_host": "h.rds.amazonaws.com",
+                "port": 5432}
+
+    async def _user_created(*a, **k):
+        return {"managed_user": "psafe_x", "managed_pw": "pw", "jump_host_id": "i-j",
+                "region": "us-east-2", "db_name": "appdb", "admin_username": "dbadmin",
+                "port": 5432}
+
+    async def _onboarding_rejected(*a, **k):
+        raise RuntimeError(
+            "terraform apply failed: Error: Error creating managed system by workgroup "
+            "Id … { The field 'IPAddress' is required.")
+
+    originals = (tf.apply, svc._create_db_managed_user, svc._onboard_ps_managed_systems)
+    tf.apply = _apply_returns_a_live_db
+    svc._create_db_managed_user = _user_created
+    svc._onboard_ps_managed_systems = _onboarding_rejected
+    try:
+        asyncio.run(svc.run_provision_apply(
+            _FakeDB(row=row), db_id=result["db_id"], job_id="job-abc",
+            engine="postgres",
+            tf_variables=dict(_CAPTURED["metadata"]["tf_variables"])))
+    finally:
+        tf.apply, svc._create_db_managed_user, svc._onboard_ps_managed_systems = originals
+
+    message = FAILED.get("message") or ""
+    assert "Password Safe onboarding failed" in message, (
+        f"the job must fail — a green job with no PS artifacts was the bug; got {message!r}")
+    assert "IPAddress" in message and "Register in Password Safe" in message, (
+        f"the failure must carry the cause and the remedy, got {message!r}")
+    assert row.status == "available", (
+        f"the row must stay available (run_ps_register refuses any other status), "
+        f"got {row.status!r}")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
