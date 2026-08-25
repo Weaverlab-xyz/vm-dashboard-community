@@ -1184,11 +1184,12 @@ def start_decommission(db: Session, cluster_id: str, created_by: str = "") -> di
 
 async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None:
     """Background teardown for a **provisioned** cluster: best-effort remove the PRA
-    tunnel, then ``terraform destroy`` the cluster, then drop the record + stored
-    kubeconfig. Errors are ACCUMULATED → the row/job end ``failed`` (an orphaned
-    cluster stays visible) rather than a false ``decommissioned``. Mirrors
-    ``cloud_database_service.run_decommission``."""
-    from . import config_service, job_service, terraform, terraform_provider_env
+    tunnel + Entitle registrations (the k8s integration, and the auto-minted agent
+    token when this cluster hosts the Entitle agent), then ``terraform destroy`` the
+    cluster, then drop the record + stored kubeconfig. Errors are ACCUMULATED → the
+    row/job end ``failed`` (an orphaned cluster stays visible) rather than a false
+    ``decommissioned``. Mirrors ``cloud_database_service.run_decommission``."""
+    from . import config_service, entitle_registration_service, job_service, terraform, terraform_provider_env
     from ..api.websocket import broadcast_progress
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if not row:
@@ -1235,6 +1236,34 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
             config_service.set(f"rancher_manifest_url_{cluster_id}", "")
         except Exception as exc:
             logger.warning("k8s decommission: Rancher removal for %s failed: %s", cluster_id, exc)
+
+    # 1c. Entitle: deregister the cluster's Kubernetes integration, and when this
+    #     cluster hosts the Entitle agent, destroy the auto-minted agent token with it.
+    #     Entitle refuses to re-mint an existing token name and the value can never be
+    #     read back, so a token that outlives its host cluster wedges every future
+    #     agent install on an unrecoverable "already exists". Failures are accumulated
+    #     like the other teardown steps; the stash/host marker are kept on failure so
+    #     a decommission retry converges.
+    if (config_service.get(f"entitle_k8s_tfstate_{cluster_id}")
+            or config_service.get(f"entitle_k8s_integration_id_{cluster_id}")):
+        job_service.update_progress(db, job_id, 30, "Deregistering from Entitle…")
+        try:
+            await register_cluster_in_entitle(cluster_id, action="deregister")
+        except Exception as exc:
+            errors.append(f"Entitle k8s integration deregister: {exc}")
+            logger.warning("k8s decommission: Entitle k8s deregister for %s failed: %s", cluster_id, exc)
+    if config_service.get("entitle_agent_cluster_id") == cluster_id:
+        job_service.update_progress(db, job_id, 32, "Destroying the Entitle agent token…")
+        try:
+            destroyed = await entitle_registration_service.destroy_agent_token()
+            config_service.set("entitle_agent_cluster_id", "")
+            if destroyed:
+                logger.info("k8s decommission: destroyed minted Entitle agent token '%s' "
+                            "(host cluster %s is going away)", destroyed, cluster_id)
+        except Exception as exc:
+            errors.append(f"Entitle agent token destroy: {exc} — the token stash was kept, "
+                          "so a decommission retry will destroy it")
+            logger.warning("k8s decommission: agent-token destroy for %s failed: %s", cluster_id, exc)
 
     # 2. terraform destroy (the long step). State lives in the active storage
     #    backend, so destroy recovers a deploy dir lost to a container recreate —
@@ -1952,11 +1981,13 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         ``ENTITLE_TOKEN`` Secret via the kubectl runner, then
         ``helm upgrade --install entitle-agent`` referencing it. Records the hosting
         cluster in ``entitle_agent_cluster_id``.
-      * ``remove``  → ``helm uninstall`` + delete the Secret (best-effort); clears
-        ``entitle_agent_cluster_id`` when it pointed here.
+      * ``remove``  → ``helm uninstall`` + delete the Secret (best-effort); when this
+        cluster hosted the agent, also destroy the auto-minted agent token (Entitle
+        refuses to re-mint an existing name, so a surviving token wedges every future
+        install) and clear ``entitle_agent_cluster_id``.
     """
     from ..database import SessionLocal
-    from . import config_service
+    from . import config_service, entitle_registration_service
     db = SessionLocal()
     try:
         row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
@@ -1979,7 +2010,24 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
             except Exception as exc:
                 logger.warning("entitle-agent teardown for %s partially failed: %s", cluster_id, exc)
             if config_service.get("entitle_agent_cluster_id") == cluster_id:
+                # This cluster hosted the agent, so the auto-minted token dies with it.
+                # Only OUR mint is destroyed (proof = the stored tf state); an
+                # operator-supplied ENTITLE_AGENT_TOKEN_REF is never touched. A failed
+                # destroy fails the job loudly and KEEPS the stash + host marker so a
+                # retry converges — clearing them would orphan the tenant-side token,
+                # which is exactly the wedge this destroy exists to prevent.
+                try:
+                    destroyed = await entitle_registration_service.destroy_agent_token()
+                except entitle_registration_service.EntitleRegistrationError as exc:
+                    raise K8sError(
+                        f"Entitle agent uninstalled, but destroying its minted agent token "
+                        f"failed: {exc} — the token stash was kept; retry the remove to "
+                        "destroy it (a re-install would reuse the stashed value). Until "
+                        "then the token name stays taken in the tenant.") from exc
                 config_service.set("entitle_agent_cluster_id", "")
+                if destroyed:
+                    logger.info("entitle-agent remove: destroyed minted agent token '%s' — "
+                                "the name is free to re-mint", destroyed)
             return
 
         # action == "install"
@@ -1990,7 +2038,6 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         # Resolve the agent token, auto-minting one (via the entitleio/entitle provider)
         # when none is configured yet — so the install stays one-click. Resolved
         # server-side; never persisted on this install's row/TF state.
-        from . import entitle_registration_service
         try:
             token = await entitle_registration_service.ensure_agent_token()
         except entitle_registration_service.EntitleRegistrationError as exc:
@@ -2235,10 +2282,10 @@ async def register_cluster_in_entitle(cluster_id: str, action: str = "register")
         if action == "deregister":
             state = config_service.get(f"entitle_k8s_tfstate_{cluster_id}")
             if state:
-                try:
-                    await ent.deregister(state)
-                except Exception as exc:
-                    logger.warning("entitle k8s deregister %s failed (non-fatal): %s", cluster_id, exc)
+                # Raise on a failed destroy and KEEP the stored state — it is the only
+                # handle on the tenant-side integration, so clearing it after a failure
+                # would orphan the object in Entitle with no way to remove it later.
+                await ent.deregister(state)
             config_service.set(f"entitle_k8s_tfstate_{cluster_id}", "")
             config_service.set(f"entitle_k8s_integration_id_{cluster_id}", "")
             return

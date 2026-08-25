@@ -36,6 +36,10 @@ private targets) that the Entitle agent makes them reachable. See
    `https://anycred.github.io/entitle-charts/`; add `entitle_agent_helm_extra_set` only if the
    bundled Datadog needs it. Track the `k8s_entitle_agent` job; expect the agent pod healthy
    and `entitle_agent_cluster_id` set.
+3. **Teardown**: the `remove` action — and the decommission of the hosting cluster —
+   uninstalls the agent **and destroys the auto-minted token** (an operator-supplied
+   `entitle_agent_token_ref` is never touched), so the name is free for the next
+   install. A failed token destroy fails the job and keeps the stash; retry to converge.
 
 ## 3. Private resource (agent path)
 1. Build a **private** cloud database (RDS) — or a private VM — with **Register in

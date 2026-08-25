@@ -83,7 +83,10 @@ dashboard already brokers is the separate *access* path the user connects throug
 > **wired up**: `POST /api/k8s/clusters/{id}/entitle-agent` Helm-installs the agent into
 > a dashboard-managed cluster as a `k8s_entitle_agent` job, mints its token via the
 > provider, stashes the value in the secrets backend and records
-> `entitle_agent_token_name` for later private registrations. See
+> `entitle_agent_token_name` for later private registrations. The token's lifecycle is
+> tied to the agent's: the `remove` action and the decommission of the hosting cluster
+> **destroy the auto-minted token** (freeing the name for the next mint) — an
+> operator-supplied `entitle_agent_token_ref` is never touched. See
 > [`docs/design/entitle-resource-registration.md`](../design/entitle-resource-registration.md).
 
 ### Kubernetes clusters
@@ -229,7 +232,10 @@ token of that name while this dashboard holds no copy of its value. The value is
 only at creation and cannot be read back, and `ensure_agent_token` already tries to recover
 it from `entitle_agent_token_tf_state` before minting — so reaching this error means there
 is no stored state either (config migration treats all three keys as runtime handles and
-drops them: see `config_migrate/classify.py` `_RUNTIME_HANDLES`). Fix by one of: delete
+drops them: see `config_migrate/classify.py` `_RUNTIME_HANDLES`). Teardown now destroys the
+auto-minted token (the agent `remove` action, and the decommission of the hosting cluster),
+so a conflicting token was minted by an earlier dashboard version, a different
+dashboard/environment, or by hand. Fix by one of: delete
 that token in Entitle and retry — which breaks any agent still using it; set
 `ENTITLE_AGENT_TOKEN_NAME` to an unused name so a fresh token is minted; or set
 `ENTITLE_AGENT_TOKEN_REF` to the existing token value. Both keys are **env/`.env` only** —
