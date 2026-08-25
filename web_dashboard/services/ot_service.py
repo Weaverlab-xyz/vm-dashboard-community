@@ -102,7 +102,7 @@ def resolve_jump_targets(jump_group: Optional[str], jumpoint_name: Optional[str]
 
 
 def jumpoint_overridden(ot_params: dict) -> bool:
-    """True when the cell names a Jumpoint other than the configured default — the
+    """True when the cell names a Gateway other than the configured default — the
     case where the gateway sizing guard must step aside, because it can only reason
     about the dashboard-managed shared gateway (live VM or gcp_jumpoint_machine_type),
     and refusing an operator-managed Gateway on OUR config default would be a false
@@ -234,15 +234,15 @@ async def create_standalone_tunnel(*, name: str, hostname: str, protocol: str,
         raise OTError("PRA Jump Group / Gateway are not configured "
                       "(bt_jump_group_name / bt_jumpoint_name)")
     # Best-effort, like the k8s API tunnel: the target may be reachable through an
-    # operator-managed Jumpoint the dashboard doesn't run a host for. Skipped
-    # entirely on a Gateway override — the tunnel rides the NAMED Jumpoint, so
+    # operator-managed Gateway the dashboard doesn't run a host for. Skipped
+    # entirely on a Gateway override — the tunnel rides the NAMED Gateway, so
     # spinning up the shared host would be a billable VM nothing uses.
     if not jumpoint_overridden({"jumpoint_name": jumpoint_name or ""}):
         try:
             from . import jumpoint_host_service
             await jumpoint_host_service.ensure_jumpoint_host("gcp", region)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("OT tunnel: ensure jumpoint host failed (non-fatal): %s", exc)
+            logger.warning("OT tunnel: ensure Gateway host failed (non-fatal): %s", exc)
 
     result = await pra.provision_api_tunnel(
         name=name, hostname=hostname, jump_group_name=jg, jumpoint_name=jp,
@@ -364,7 +364,7 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
             job_service.update_progress(
                 db, job_id, 5,
                 f"Gateway override '{(ot_params.get('jumpoint_name') or '').strip()}' — "
-                f"skipping the shared-gateway size check; the host behind that Jumpoint "
+                f"skipping the shared-gateway size check; the host behind that Gateway "
                 f"needs ≥2 GB RAM for the Web Jump.")
         else:
             job_service.update_progress(db, job_id, 5,

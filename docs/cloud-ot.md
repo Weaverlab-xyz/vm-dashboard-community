@@ -83,7 +83,7 @@ remedy in the job error: set `gcp_jumpoint_machine_type` to `e2-small` minimum /
 (GCP overrides), delete the existing gateway VM so it recreates at the new size, retry.
 
 The guard reasons about the **dashboard-managed shared gateway only**. When the form's
-Gateway picker overrides the Jumpoint to something else, the Web Jump renders on a host
+Gateway picker overrides it with another Gateway, the Web Jump renders on a host
 this install cannot size, so the guard steps aside (noted in the job progress) — the
 ≥2 GB requirement then rests on whoever runs that Gateway.
 

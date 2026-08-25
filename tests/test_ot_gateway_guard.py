@@ -68,7 +68,7 @@ def test_adequate_and_unknown_types_pass():
 
 def test_the_guard_steps_aside_only_for_a_real_gateway_override():
     """The guard reasons about the DASHBOARD-MANAGED shared gateway. A cell wired
-    through an operator-picked Jumpoint must not be refused on OUR config default
+    through an operator-picked Gateway must not be refused on OUR config default
     (the sandbox seeds e2-micro!), but picking the default by name is no override."""
     ot = _load()
     ot._cfg = lambda key: {"gcp_jumpoint_name": "gcp-shared-gw"}.get(key, "")
