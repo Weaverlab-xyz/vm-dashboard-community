@@ -93,6 +93,35 @@ def test_the_parent_declares_its_children_and_cloud():
             "run_cell_deploy dispatches the child's vm service on")
 
 
+def test_every_cloud_persists_the_protocol_list():
+    """A cell gets one PRA tunnel per protocol, and the worker reads the list off
+    ot_params. An endpoint that persisted only the old singular `protocol` would
+    silently give a multi-vendor cell exactly one tunnel."""
+    for cloud, (fn_name, _child, _keys) in _CLOUD_ENDPOINTS.items():
+        src = ast.unparse(_fn("_validate_cell_protocols"))
+        assert "resolve_cell_protocols" in src, (
+            "the endpoint no longer resolves the protocol list through ot_service")
+        body = ast.unparse(_fn(fn_name))
+        assert "'protocols': protocols" in body or '"protocols": protocols' in body, (
+            f"{cloud}: ot_params does not carry the resolved `protocols` list")
+        assert "_validate_cell_protocols" in body, (
+            f"{cloud}: the endpoint does not validate its protocols, so a cell could "
+            "be deployed asking for a protocol the image never simulates")
+
+
+def test_the_cell_form_offers_only_simulated_protocols():
+    """The picker is fed by cellPresets(), which filters on the `cell` flag the
+    presets endpoint sends. Offering an unsimulated protocol would provision a
+    tunnel to a dead port — a session failure that reads as a firewall block."""
+    for page in ("gcp", "aws", "azure"):
+        tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", page, "index.html"),
+                    encoding="utf-8").read()
+        assert "cellPresets()" in tmpl, (
+            f"{page}: the cell protocol picker no longer filters to simulated protocols")
+        assert "p.cell" in tmpl, (
+            f"{page}: cellPresets() no longer reads the presets' `cell` flag")
+
+
 def test_the_cell_vm_is_private_and_tagged():
     fn = _fn("deploy_cell")
     src = ast.unparse(fn)

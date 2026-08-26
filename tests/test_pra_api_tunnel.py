@@ -69,8 +69,10 @@ def test_api_tunnel_definitions_built_from_ports():
     import asyncio
     calls = {}
 
-    def _fake_sync(name, hostname, jgn, jpn, tunnel_definitions, tag="Kubernetes", client_secret=""):
+    def _fake_sync(name, hostname, jgn, jpn, tunnel_definitions, tag="Kubernetes",
+                   client_secret="", comments=""):
         calls["tunnel_definitions"] = tunnel_definitions
+        calls["comments"] = comments
         return {"tunnel_jump_id": "1", "jump_group_name": jgn, "tf_state_json": None}
 
     orig = pra._provision_api_tunnel_sync
@@ -82,6 +84,8 @@ def test_api_tunnel_definitions_built_from_ports():
     finally:
         pra._provision_api_tunnel_sync = orig
     assert calls["tunnel_definitions"] == "6443;443"
+    # A caller that says nothing gets the k8s wording it always had.
+    assert calls["comments"] == ""
 
 
 # ── Part B: kubeconfig transform ──────────────────────────────────────────────

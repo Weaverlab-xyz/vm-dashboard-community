@@ -755,16 +755,31 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
                 except Exception as e:  # noqa: BLE001
                     logger.error("OT web jump removal failed for %s: %s", vm_name, e)
                     result["ot_error"] = f"Web Jump removal failed: {e}"
-            if meta.get("ot_tunnel_tf_state"):
-                job_service.update_progress(db, destroy_job_id, 86, "Removing the OT protocol tunnel…")
-                try:
-                    from ..services import terraform_pra_service
-                    await terraform_pra_service.remove_api_tunnel(meta["ot_tunnel_tf_state"])
-                    result["ot_tunnel_removed"] = meta.get("ot_tunnel_jump_id") or True
-                except Exception as e:  # noqa: BLE001
-                    logger.error("OT tunnel removal failed for %s: %s", vm_name, e)
-                    result["ot_error"] = (result.get("ot_error", "") +
-                                          f" tunnel removal failed: {e}").strip()
+            # One entry per protocol the cell serves. ot_service.cell_tunnels also
+            # projects a pre-multi-protocol cell's singular ot_tunnel_* keys into this
+            # shape, so old and new cells tear down through the same loop — and each
+            # tunnel is removed exactly once (reading both would double-destroy the
+            # primary, whose state is in the list AND the legacy keys).
+            from ..services import ot_service as _ot
+            _ot_tunnels = [t for t in _ot.cell_tunnels(meta) if t.get("tf_state")]
+            if _ot_tunnels:
+                job_service.update_progress(
+                    db, destroy_job_id, 86,
+                    f"Removing {len(_ot_tunnels)} OT protocol tunnel(s)…")
+                removed = []
+                for _t in _ot_tunnels:
+                    try:
+                        from ..services import terraform_pra_service
+                        await terraform_pra_service.remove_api_tunnel(_t["tf_state"])
+                        removed.append(_t.get("jump_id") or _t.get("protocol") or True)
+                    except Exception as e:  # noqa: BLE001
+                        logger.error("OT tunnel removal failed for %s (%s): %s",
+                                     vm_name, _t.get("protocol") or "?", e)
+                        result["ot_error"] = (
+                            result.get("ot_error", "")
+                            + f" {_t.get('protocol') or 'tunnel'} tunnel removal failed: {e}").strip()
+                if removed:
+                    result["ot_tunnels_removed"] = removed
 
             # The OT cell's PRA-checkout pair (services/ot_service._wire_ps_checkout):
             # unlink the SyncedAccounts pair first, then off-board the Password Safe
