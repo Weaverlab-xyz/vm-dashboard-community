@@ -1,0 +1,136 @@
+# POV instance — a SECOND dashboard, alongside the demo one.
+#
+# Same image, same code, its own everything else: its own database, its own JWT key, its
+# own users, its own agents, and only the POV-relevant features. Bring it up with an
+# explicit project name so nothing collides with the demo stack:
+#
+#   docker compose -p vmdash-pov -f docker-compose.pov.yml up -d
+#
+# Why a separate instance rather than a mode inside the demo one: a demo instance resolves
+# its BeyondTrust tenant from the global singletons (bt_api_host / pscli_api_url /
+# entitle_api_key), while a POV instance holds a registry of many named tenants and each
+# POV references rows in it. One instance claiming both would have two answers to "which
+# tenant?" at every call site, and the wrong answer is silent — a demo deploy onboarding
+# into a customer's Password Safe, or a POV onboarding into the demo tenant. So
+# INSTALL_PROFILE below is a hard gate: see services/feature_flags.enabled().
+#
+# Read docs/pov-instance.md before the first run. The short version: its JWT_SECRET_KEY
+# must be its OWN value, and you cannot pg_dump config between the two instances.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dashboardadmin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: vmclipov
+    # 5434 — the demo stack already takes 5433 and a local Postgres 5432.
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata_pov:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboardadmin -d vmclipov"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      args:
+        BUILD_SKIP_DEBIAN_UPDATES: ${BUILD_SKIP_DEBIAN_UPDATES:-0}
+    restart: unless-stopped
+    # 8002 — the demo stack takes 8001. Browse at http://localhost:8002 .
+    ports:
+      - "8002:8000"
+    env_file:
+      - .env.pov
+    environment:
+      - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclipov
+      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key_pov
+      # The gate. Everything else in this file follows from it.
+      - INSTALL_PROFILE=pov
+      # The POV feature itself, plus the three BeyondTrust products and the remote-agent
+      # endpoint it needs. Nothing else is listed, and the profile mask makes the demo
+      # features unavailable regardless of what a stored config row says.
+      - POV_ENVIRONMENTS_ENABLED=true
+      - PRA_ENABLED=true
+      - PASSWORD_SAFE_ENABLED=true
+      - REMOTE_AGENTS_ENABLED=true
+      # Config Management, for the playbooks that install a POV's Jumpoint and Resource
+      # Broker on its in-environment broker VM. Those run ON THE AGENT, which is why this
+      # stack needs no docker.sock — see the volumes note below.
+      - ANSIBLE_ENABLED=true
+      # Auto-delete + notifications: a POV is a 30-day resource, and the warning ladder is
+      # useless without somewhere to send it. Both still default to observe-only/dry-run —
+      # arming them is a deliberate step in Settings, not something this file can do.
+      - RESOURCE_EXPIRY_ENABLED=true
+      - NOTIFICATIONS_ENABLED=true
+    secrets:
+      - jwt_key_pov
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./web_dashboard
+        target: /app/web_dashboard
+      # Deliberately NOT mounted, unlike the demo stack:
+      #   * /var/run/docker.sock — the demo stack needs it to launch sibling Ansible and
+      #     kubectl/helm containers. A POV instance runs Ansible on the remote agent
+      #     inside the customer environment, and Kubernetes is masked off entirely, so
+      #     handing this stack the host's Docker daemon would buy nothing and grant a lot.
+      #   * runner_work — same reason: no local kubectl/helm runner ever starts here.
+      # If you turn on local Config Management runs later you will need the socket back.
+
+  worker:
+    build:
+      context: .
+      args:
+        BUILD_SKIP_DEBIAN_UPDATES: ${BUILD_SKIP_DEBIAN_UPDATES:-0}
+    command: ["python", "-m", "web_dashboard.jobs_worker"]
+    restart: unless-stopped
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+      resources:
+        limits:
+          cpus: "${WORKER_CPU_LIMIT:-2}"
+          memory: ${WORKER_MEM_LIMIT:-2g}
+    env_file:
+      - .env.pov
+    environment:
+      - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclipov
+      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key_pov
+      - INSTALL_PROFILE=pov
+      - POV_ENVIRONMENTS_ENABLED=true
+      - PRA_ENABLED=true
+      - PASSWORD_SAFE_ENABLED=true
+      - REMOTE_AGENTS_ENABLED=true
+      - ANSIBLE_ENABLED=true
+      - RESOURCE_EXPIRY_ENABLED=true
+      - NOTIFICATIONS_ENABLED=true
+    secrets:
+      - jwt_key_pov
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./web_dashboard
+        target: /app/web_dashboard
+
+volumes:
+  # Its own volume. Sharing pgdata with the demo stack would put both instances' config
+  # in one database under one Fernet key, which is the thing this file exists to avoid.
+  pgdata_pov:
+
+secrets:
+  # Its OWN key file, not the demo stack's. This is the Fernet root for `app_config`, so
+  # two instances sharing it is the only way their encrypted config could be swapped —
+  # and two instances with DIFFERENT keys is why a pg_dump restore between them yields
+  # unreadable ciphertext with no error. Use the config-migration tool if you need to
+  # copy settings across: docs/config-migration.md.
+  jwt_key_pov:
+    file: .jwt_secret_key.pov

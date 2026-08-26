@@ -113,7 +113,11 @@ def test_the_api_supplies_every_field_the_map_reads():
     read_fields = set(re.findall(r":\s*features\.([a-z_0-9]+)", html[start:end]))
 
     flags = _read(_FLAGS)
-    body_start = flags.index('return {\n        "vmware":')
+    # Anchor on the function rather than on its first key: the return dict's leading
+    # entries change (install_profile and pov_environments now precede "vmware"), and a
+    # test that breaks on reordering teaches nothing.
+    fn_start = flags.index("def feature_map()")
+    body_start = flags.index("return {", fn_start)
     body_end = flags.index("\n    }", body_start)
     supplied = set(re.findall(r'"([a-z_0-9]+)":', flags[body_start:body_end]))
 
@@ -193,10 +197,22 @@ def test_the_remote_agents_key_derives_the_existing_flag():
     assert 'return f"{feature}_enabled"' in setup, \
         "the key-derivation rule changed; re-check that remote_agents still maps to " \
         "remote_agents_enabled"
-    # And that flag is what the nav gate and the router gate both read.
-    assert ('"remote_agents_enabled": config_service.get_bool("remote_agents_enabled"'
-            in _read(_FLAGS))
-    assert '_feature_gate("remote_agents_enabled")' in _read(_MAIN)
+    # And that flag is what the nav gate and the router gate both read — through the
+    # SAME resolver. `feature_flags.enabled` applies the install-profile mask, so a gate
+    # that went straight to config_service would serve a router the nav has hidden (or
+    # the reverse) on a POV instance.
+    flags_src = _read(_FLAGS)
+    assert '"remote_agents_enabled": enabled("remote_agents_enabled"' in flags_src
+    assert "def enabled(" in flags_src, \
+        "feature_flags.enabled is the single flag resolver; it went missing"
+    assert "config_service.get_bool(" not in flags_src.split("def flags()")[1], \
+        "flags() reads config_service directly again — it must go through enabled() so " \
+        "the install-profile mask cannot be bypassed by one of the two readers"
+    main_src = _read(_MAIN)
+    assert '_feature_gate("remote_agents_enabled")' in main_src
+    assert "feature_flags.enabled(flag)" in main_src, \
+        "_feature_gate no longer resolves through feature_flags.enabled — the router " \
+        "gate and the nav links would drift"
     nav = _read(os.path.join(_ROOT, "web_dashboard", "templates", "_nav_links.html"))
     assert "remote_agents_enabled" in nav, "the nav link lost its gate"
 

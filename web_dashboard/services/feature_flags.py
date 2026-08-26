@@ -19,43 +19,123 @@ from ..config import settings
 from . import config_service
 
 
+VALID_PROFILES = ("demo", "pov")
+
+# Flags that belong to exactly ONE install profile. Anything absent from both tuples is
+# profile-neutral (auth, notifications, secret scanning, the auto-delete timer, ...) and
+# available in either kind of instance.
+#
+# The split is drawn around **which BeyondTrust tenant a feature would use**, not around
+# taste. Every demo-only entry below either provisions demo infrastructure or reaches for
+# the global `bt_*` / `pscli_*` / `entitle_*` singletons. A POV instance resolves tenants
+# from a registry instead, so letting these run there is how a demo deploy ends up
+# onboarding into a customer's Password Safe -- silently, because both paths "work".
+_DEMO_ONLY = (
+    "vmware_enabled",
+    "portainer_enabled",
+    "epml_enabled",
+    # On-prem hypervisors. Listed here because their deploys and Web Jumps resolve the
+    # global PRA tenant. NOTE for a later slice: the plan floats reusing a Proxmox/vSphere
+    # connection as an on-prem POV lab platform. That is a real option, and it needs this
+    # entry revisited deliberately rather than quietly deleted -- the tenancy argument
+    # above has to be answered first.
+    "proxmox_enabled",
+    "vsphere_enabled",
+    "hyperv_enabled",
+    "nutanix_enabled",
+    "xcpng_enabled",
+    "vdesktops_enabled",
+    "cloud_database_enabled",
+    "k8s_management_enabled",
+    "cloud_functions_enabled",
+    "cost_explorer_enabled",
+)
+
+# POV-only. `pra_enabled`, `password_safe_enabled`, `remote_agents_enabled`,
+# `ansible_enabled` and the Entitle flags are deliberately NOT here: a POV instance needs
+# all of them, so they are neutral rather than POV-owned.
+_POV_ONLY = (
+    "pov_environments_enabled",
+)
+
+_PROFILE_OF = {f: "demo" for f in _DEMO_ONLY}
+_PROFILE_OF.update({f: "pov" for f in _POV_ONLY})
+
+
+def install_profile() -> str:
+    """This instance's profile, defaulting to ``demo``.
+
+    An unrecognised value resolves to ``demo`` rather than raising: the profile is read on
+    the request path by :func:`enabled`, and a typo in one config row must not take the
+    whole app down. It also means the mask can only ever fall back to *today's* behaviour.
+    """
+    raw = (config_service.get("install_profile") or settings.install_profile or "demo")
+    raw = raw.strip().lower()
+    return raw if raw in VALID_PROFILES else "demo"
+
+
+def profile_masks(flag: str) -> bool:
+    """Whether this instance's profile makes ``flag`` unavailable regardless of config."""
+    owner = _PROFILE_OF.get(flag)
+    return owner is not None and owner != install_profile()
+
+
+def enabled(flag: str, default: bool = False) -> bool:
+    """Resolve a feature flag. **The one place this happens.**
+
+    Both readers must come through here or they drift: ``main._feature_gate`` decides
+    whether a router 404s, and :func:`flags` decides whether the nav link and the Settings
+    toggle render. A mask applied in only one of them yields a page you can see and cannot
+    use, or the reverse -- which is exactly the shape of bug
+    ``tests/test_cache_warmer_parity`` was written about.
+
+    The mask only ever subtracts. A profile can refuse a feature; it can never turn one on
+    that config left off.
+    """
+    if profile_masks(flag):
+        return False
+    return config_service.get_bool(flag, default)
+
+
 def flags() -> dict:
     """Read feature flags from config_service (DB) with env-var fallback.
     Called per-request so wizard changes are visible without a restart."""
     return {
-        "vmware_enabled":       config_service.get_bool("vmware_enabled",        settings.vmware_enabled),
-        "portainer_enabled":    config_service.get_bool("portainer_enabled",     settings.portainer_enabled),
-        "ansible_enabled":      config_service.get_bool("ansible_enabled",       settings.ansible_enabled),
-        "entitle_enabled":      config_service.get_bool("entitle_enabled",       settings.entitle_enabled),
+        "vmware_enabled":       enabled("vmware_enabled",        settings.vmware_enabled),
+        "portainer_enabled":    enabled("portainer_enabled",     settings.portainer_enabled),
+        "ansible_enabled":      enabled("ansible_enabled",       settings.ansible_enabled),
+        "entitle_enabled":      enabled("entitle_enabled",       settings.entitle_enabled),
         # The three BeyondTrust products gate independently — a Password Safe-only
         # deployment should not render Gateway tabs or EPM-L sections it cannot use.
-        "password_safe_enabled": config_service.get_bool("password_safe_enabled", settings.password_safe_enabled),
-        "pra_enabled":          config_service.get_bool("pra_enabled",           settings.pra_enabled),
-        "epml_enabled":         config_service.get_bool("epml_enabled",          settings.epml_enabled),
-        "proxmox_enabled":      config_service.get_bool("proxmox_enabled",       settings.proxmox_enabled),
-        "vsphere_enabled":      config_service.get_bool("vsphere_enabled",       settings.vsphere_enabled),
-        "hyperv_enabled":       config_service.get_bool("hyperv_enabled",        settings.hyperv_enabled),
-        "nutanix_enabled":      config_service.get_bool("nutanix_enabled",       settings.nutanix_enabled),
-        "xcpng_enabled":        config_service.get_bool("xcpng_enabled",         settings.xcpng_enabled),
-        "vdesktops_enabled":    config_service.get_bool("vdesktops_enabled",     settings.vdesktops_enabled),
-        "cloud_database_enabled": config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled),
-        "entitle_registration_enabled": config_service.get_bool("entitle_registration_enabled", settings.entitle_registration_enabled),
-        "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
-        "cloud_functions_enabled": config_service.get_bool("cloud_functions_enabled", settings.cloud_functions_enabled),
-        "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
-        "remote_agents_enabled": config_service.get_bool("remote_agents_enabled", settings.remote_agents_enabled),
-        "admission_control_enabled": config_service.get_bool("admission_control_enabled", settings.admission_control_enabled),
+        "password_safe_enabled": enabled("password_safe_enabled", settings.password_safe_enabled),
+        "pra_enabled":          enabled("pra_enabled",           settings.pra_enabled),
+        "epml_enabled":         enabled("epml_enabled",          settings.epml_enabled),
+        "proxmox_enabled":      enabled("proxmox_enabled",       settings.proxmox_enabled),
+        "vsphere_enabled":      enabled("vsphere_enabled",       settings.vsphere_enabled),
+        "hyperv_enabled":       enabled("hyperv_enabled",        settings.hyperv_enabled),
+        "nutanix_enabled":      enabled("nutanix_enabled",       settings.nutanix_enabled),
+        "xcpng_enabled":        enabled("xcpng_enabled",         settings.xcpng_enabled),
+        "vdesktops_enabled":    enabled("vdesktops_enabled",     settings.vdesktops_enabled),
+        "cloud_database_enabled": enabled("cloud_database_enabled", settings.cloud_database_enabled),
+        "entitle_registration_enabled": enabled("entitle_registration_enabled", settings.entitle_registration_enabled),
+        "k8s_management_enabled": enabled("k8s_management_enabled", settings.k8s_management_enabled),
+        "cloud_functions_enabled": enabled("cloud_functions_enabled", settings.cloud_functions_enabled),
+        "cost_explorer_enabled": enabled("cost_explorer_enabled", settings.cost_explorer_enabled),
+        "remote_agents_enabled": enabled("remote_agents_enabled", settings.remote_agents_enabled),
+        # POV environments. Masked off entirely on a demo instance — see _POV_ONLY.
+        "pov_environments_enabled": enabled("pov_environments_enabled", settings.pov_environments_enabled),
+        "admission_control_enabled": enabled("admission_control_enabled", settings.admission_control_enabled),
         # Auto-delete timer — gates the Expires column on /inventory and the dashboard's
         # "expiring soon" warning. Deletion has its own second gate
         # (resource_expiry_enforce), read server-side only.
-        "resource_expiry_enabled": config_service.get_bool("resource_expiry_enabled", settings.resource_expiry_enabled),
+        "resource_expiry_enabled": enabled("resource_expiry_enabled", settings.resource_expiry_enabled),
         # Was missing, so Settings → Integrations rendered the Notifications toggle
         # permanently off: the switch saved fine, but its initial state is read from
         # /api/features and this key never reached it.
-        "notifications_enabled": config_service.get_bool("notifications_enabled", settings.notifications_enabled),
+        "notifications_enabled": enabled("notifications_enabled", settings.notifications_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
-        "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
+        "entitle_user_jit_enabled":   enabled("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
         "entitle_request_portal_url": config_service.get("entitle_request_portal_url",   settings.entitle_request_portal_url),
     }
 
@@ -107,6 +187,10 @@ def feature_map() -> dict:
         config_service.get("portainer_url") or settings.portainer_url
     )
     return {
+        # Not a feature flag: the instance's profile, so the UI can say *why* a
+        # demo-only integration is unavailable rather than showing a dead toggle.
+        "install_profile": install_profile(),
+        "pov_environments": raw["pov_environments_enabled"],
         "vmware":       raw["vmware_enabled"],
         # Named to match the Settings panel keys, so settings.html's flag map needs no
         # translation layer. There is deliberately no combined "beyondtrust" key: an
