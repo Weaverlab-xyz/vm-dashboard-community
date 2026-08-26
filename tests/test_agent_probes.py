@@ -351,7 +351,8 @@ def test_handlers_are_a_closed_dict_not_a_dynamic_dispatch():
     Spelled out rather than derived, so adding a handler is a deliberate edit here as well
     as there — this set is the list of everything a dashboard can ask this agent to do.
     """
-    assert set(agent.HANDLERS) == {"agent_discover", "agent_hypervisor", "agent_ansible"}
+    assert set(agent.HANDLERS) == {"agent_discover", "agent_hypervisor", "agent_ansible",
+                                   "agent_gateway"}
     src = open(_PATH, encoding="utf-8").read()
     assert "getattr(sys.modules" not in src and "eval(" not in src and "exec(" not in src
 

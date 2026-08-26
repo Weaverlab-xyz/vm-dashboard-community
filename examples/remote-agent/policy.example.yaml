@@ -65,6 +65,10 @@ job_types:
   # enough on its own — see the `ansible:` block further down, which has its own target
   # list because this is a much larger grant than a port probe.
   # - agent_ansible
+  # Uncomment to let this agent run a BeyondTrust GATEWAY beside itself. Also not enough
+  # on its own — see the `gateway:` block, which needs an image and an explicit
+  # `privileged: true` because a Gateway cannot tunnel without it.
+  # - agent_gateway
 
 # ── What may be done to each hypervisor ───────────────────────────────────────
 # Per-connection verb grants. YOU decide what may be done to each target; the
@@ -205,6 +209,38 @@ job_types:
 # `sync_guest_details: true` on that connection in your connections.yaml. Without the
 # last one the agent does not ask, because reading each guest's addresses costs a call
 # per VM on every sync.
+
+# ── The BeyondTrust Gateway (OFF, needs the Docker socket, and PRIVILEGED) ────
+# A Gateway node running on THIS host, brokering PRA sessions into this network. Unlike
+# everything above it, this is not a one-shot container that finishes — it is long-lived
+# and it stays.
+#
+# READ THE `privileged:` LINE BEFORE ENABLING THIS. A Gateway carries protocol tunnels,
+# which needs NET_ADMIN, NET_RAW, IPC_LOCK and /dev/net/tun. Docker has no granular way
+# to grant that set here, so it is the all-or-nothing flag — and a privileged container
+# is, for practical purposes, root on this host. The agent will not start a Gateway
+# without the flag rather than start one that cannot work: without it the Gateway
+# registers ONLINE and every tunnel silently times out, which reads as a firewall problem
+# for a long time.
+#
+# The image comes from HERE and never from a job, like the runners above. A job says only
+# whether to install one or take it away. Pull it yourself; the agent will not:
+#
+#   docker pull beyondtrust/sra-jumpoint:latest
+#
+# Pin a tag rather than tracking `latest` on anything you care about — an SRA image that
+# moves under a registered Gateway is a support case nobody enjoys.
+#
+# The DEPLOY KEY is not here. It is per-Gateway, it is a real credential, and the agent
+# fetches it from the dashboard per job, sealed to a key that exists only for that fetch.
+# Nothing about a Gateway's identity is written in this file.
+#
+# gateway:
+#   enabled: true
+#   image: beyondtrust/sra-jumpoint:24.2.1
+#   privileged: true
+#   # Which Docker network the Gateway joins. Defaults to `sibling.network`, then `bridge`.
+#   # network: bridge
 
 # ── Ceilings ──────────────────────────────────────────────────────────────────
 # Applied on top of whatever the dashboard requested; the smaller number always wins.

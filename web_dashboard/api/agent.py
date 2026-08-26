@@ -620,6 +620,91 @@ async def job_secret(job_id: str, body: SecretRequest, request: Request,
         headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
+class GatewayKeyRequest(BaseModel):
+    """What the agent must say to be handed a Gateway deploy key.
+
+    Only the ephemeral reply key, exactly like ``BundleRequest``. There is deliberately
+    nothing to *select* with: the key is derived wholly from the job row, so a stolen
+    agent identity cannot ask for another POV's Gateway. The body is covered by the
+    request signature, so the key cannot be substituted in flight.
+    """
+    reply_key: str = ""
+
+
+@router.post("/jobs/{job_id}/gateway-key")
+async def job_gateway_key(job_id: str, body: GatewayKeyRequest, request: Request,
+                          agent: RemoteAgent = Depends(signed_agent),
+                          db: Session = Depends(get_db)):
+    """Hand this job's BeyondTrust Gateway deploy key to the agent, sealed.
+
+    The counterpart of :func:`job_secret`, scoped down the same way and for the same
+    reasons — read that one first. What differs is only *which* secret, and why it cannot
+    travel any other way:
+
+    A PRA deploy key is **neither single-use nor short-lived.** Every Gateway node
+    registered with it joins the same Gateway, which is what makes the cloud gateway
+    hosts a cluster — so unlike an enrolment code it cannot ride the lab platform's
+    metadata channel, where anyone with read access to the environment can see it. It
+    also cannot sit in job metadata, which lands in the database and in the signed
+    envelope. This route is the only way it reaches the broker VM.
+
+    ``statuses=("running",)`` rather than the ``WINDING_DOWN`` default: a cancelled job
+    may still heartbeat, log and complete so cooperative cancel stays reachable, but it
+    has no business being handed a fresh credential.
+    """
+    job = _owned(db, agent, job_id, statuses=("running",))
+    if job.job_type != "agent_gateway":
+        # Equality against the one type that has a deploy key, not a truthy test — the
+        # same rule job_secret follows.
+        raise HTTPException(
+            status_code=409,
+            detail="This job type does not use a Gateway deploy key.")
+
+    meta = job.metadata_dict or {}
+    if str(meta.get("gateway_action") or "install") == "remove":
+        # Removing a Gateway needs no credential, so answering would hand one over for a
+        # job that has no use for it.
+        raise HTTPException(
+            status_code=409,
+            detail="A Gateway removal needs no deploy key.")
+
+    # Checked BEFORE the key is read, matching job_secret: answering a request that could
+    # never be sealed is work done for nothing, and on the Password Safe path it burns a
+    # real checkout.
+    try:
+        agent_sealing.check_reply_key(body.reply_key)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+
+    from ..services import pov_gateway
+    try:
+        # Derived from the job row's environment, never from the request body.
+        deploy_key = pov_gateway.deploy_key_for_job(db, job)
+    except pov_gateway.GatewayInstallError as exc:
+        # 409 with the detail passed through: the agent puts this straight into the job's
+        # error_message, which is the only text a failed job renders.
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    try:
+        envelope = agent_sealing.seal(
+            body.reply_key, deploy_key, agent_id=agent.id,
+            audience=_resolve_audience(request), job_id=job.id,
+            ref=pov_gateway.SEAL_REF)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+
+    agent_service.audit(db, agent, "agent.gateway_deploy_key", ip=_client_ip(request),
+                        details={"job_id": job.id,
+                                 "environment_id": str(meta.get("environment_id") or "")})
+    return JSONResponse(
+        content={"sealed": envelope},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+
 class BundleRequest(BaseModel):
     """What the agent must say to be handed a run bundle.
 

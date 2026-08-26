@@ -476,7 +476,8 @@ def test_the_two_target_lists_are_parsed_by_one_function():
 
 def test_the_handler_is_registered_and_the_table_stays_closed():
     assert agent.HANDLERS["agent_ansible"] is agent.run_ansible
-    assert set(agent.HANDLERS) == {"agent_discover", "agent_hypervisor", "agent_ansible"}
+    assert set(agent.HANDLERS) == {"agent_discover", "agent_hypervisor", "agent_ansible",
+                                   "agent_gateway"}
 
 
 def test_the_version_reports_the_ansible_capable_build():

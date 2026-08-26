@@ -8,6 +8,8 @@
   POST   /api/pov/managed               — provision one from a template
   POST   /api/pov/managed/{id}/power    — running | suspended | stopped | halted
   POST   /api/pov/managed/{id}/broker   — install / re-enrol the in-environment agent
+  POST   /api/pov/managed/{id}/gateway  — configure and install the POV's BeyondTrust Gateway
+  GET    /api/pov/managed/{id}/gateway  — what PRA says about it, live
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
@@ -35,7 +37,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, job_service, lab_platforms, pov_broker,
-                        pov_env_service)
+                        pov_env_service, pov_gateway)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -126,6 +128,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     }
     if broker is not None:
         out.update(broker)
+    out.update(pov_gateway.describe(_db_of(env), env))
     if vms is not None:
         out["vms"] = [{
             "id": v.platform_vm_id,
@@ -136,6 +139,18 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
             "published_services": v.published_services_list,
         } for v in vms]
     return out
+
+
+def _db_of(env: PovEnvironment) -> Session:
+    """The session this row is attached to.
+
+    ``pov_gateway.describe`` needs one and ``_serialize`` is called from six places, not
+    all of which have it to hand. Taking it from the object rather than threading a
+    parameter through every caller keeps the signature honest: a detached row would be a
+    bug anywhere this is used.
+    """
+    from sqlalchemy import inspect as _inspect
+    return _inspect(env).session
 
 
 def _adapter(platform: str):
@@ -434,6 +449,78 @@ async def broker(env_id: str, db: Session = Depends(get_db),
         workgroup=env.workgroup,
         metadata={"environment_id": env.id})
     return {"job_id": job.id}
+
+
+class GatewayRequest(BaseModel):
+    """Configure and install this POV's Gateway.
+
+    ``name`` is the Gateway as it is named **in the customer's PRA appliance** — the
+    dashboard does not create it there. ``deploy_key`` is that Gateway's key; blank leaves
+    whatever is stored, so an operator can correct the name without re-pasting a secret
+    the form cannot show them.
+
+    ``install`` is what makes this one endpoint rather than two. Setting the name and
+    pasting the key is almost always immediately followed by installing, and a separate
+    save step is a state an operator can leave a POV in that looks configured and is not.
+    """
+    name: str = ""
+    deploy_key: str = ""
+    install: bool = True
+
+
+@router.get("/managed/{env_id}/gateway")
+async def gateway_status(env_id: str, db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """What PRA says about this POV's Gateway, live.
+
+    A read against the customer's appliance, so it is behind a button and not on the list
+    endpoint — one live call per row would make the POV page as slow as the slowest
+    customer's network.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    return {"gateway": await pov_gateway.status(db, env)}
+
+
+@router.post("/managed/{env_id}/gateway", status_code=202)
+async def gateway(env_id: str, payload: GatewayRequest,
+                  db: Session = Depends(get_db),
+                  current_user: User = Depends(get_current_user)):
+    """Set the Gateway's name and key, and queue its install on the broker agent.
+
+    202 even when only the configuration changed, because the install is the point and
+    the job is where its progress lives. A configuration-only call (``install: false``)
+    returns the row with no job id.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+
+    if payload.name.strip():
+        env.gateway_name = payload.name.strip()
+        db.commit()
+    # Blank keeps: the form cannot render what is stored, so treating blank as "clear"
+    # would wipe the key whenever someone corrected the name.
+    if payload.deploy_key.strip():
+        pov_gateway.set_deploy_key(env, payload.deploy_key)
+
+    if not payload.install:
+        return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+    try:
+        job = pov_gateway.queue(db, env, action="install",
+                                created_by=getattr(current_user, "username", None))
+    except pov_gateway.GatewayInstallError as exc:
+        # 409 with the remedy passed through. Every refusal this raises is something the
+        # operator does next — press Broker, pick a tenant, paste a key — so collapsing
+        # them into a 500 would lose the only useful part.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job_id": job.id,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
 @router.delete("/managed/{env_id}", status_code=202)

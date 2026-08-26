@@ -7,12 +7,13 @@ their VMs into that POV's PRA and Password Safe tenant.
 Available on a **POV instance only** — see [pov-instance.md](../pov-instance.md). On a demo
 instance the integration is masked off and Settings refuses to enable it.
 
-> **No PAM wiring yet.** The dashboard can create an environment from a template, power
-> it on and off, destroy it, and enrol an **agent inside it** — see
-> [The broker VM](#the-broker-vm) and the [template contract](#the-template-contract).
-> It does not yet install a Gateway or a Password Safe Resource Broker inside the
-> environment, or onboard its VMs — those arrive in later releases, and their columns
-> already exist on the row so they need no migration.
+> **Partial PAM wiring.** The dashboard can create an environment from a template, power
+> it on and off, destroy it, enrol an **agent inside it** — see
+> [The broker VM](#the-broker-vm) and the [template contract](#the-template-contract) —
+> and install a **BeyondTrust Gateway** on that broker, registered into the POV's own PRA
+> tenant ([the POV Gateway](../pov-instance.md#the-pov-gateway)). It does not yet install
+> a Password Safe Resource Broker or onboard the environment's VMs; those arrive in later
+> releases, and their columns already exist on the row so they need no migration.
 
 ---
 
@@ -73,6 +74,7 @@ exactly like a complete answer, so listings are walked to the end.
 | **Create** | Instantiate a template, set the idle timer, power on, wait for it to settle, read the VMs back, then enrol [the broker agent](#the-broker-vm) |
 | **Start / Suspend** | A runstate change, then a poll until it settles |
 | **Broker** | Re-issue the enrolment code and re-write the bootstrap. The remedy for every way the first attempt can fail |
+| **Gateway** | Start a BeyondTrust Gateway container on the broker VM, registered into this POV's PRA tenant |
 | **Destroy** | Revoke the broker agent, then delete the configuration and everything Skytap keeps inside it |
 
 Three orderings are load-bearing, and each is wrong in a way that leaves a resource nobody
@@ -123,7 +125,7 @@ That VM needs three things:
 
 | | |
 |---|---|
-| **Docker** | The agent is a container. Podman works if `docker` resolves to it |
+| **Docker** | The agent is a container, and so is the Gateway it later runs beside itself. Podman works if `docker` resolves to it |
 | **An automatic network** | Skytap's metadata service answers only on VMs attached to one. On a manual network the VM gets no metadata at all, which looks exactly like a missing runner |
 | **The metadata runner** | Below. Skytap hands `user_data` to the guest and **nothing executes it** |
 
@@ -144,6 +146,11 @@ starts the agent container. Two lines in it are load-bearing:
   cleared, and 401s forever. That reads as a revoked agent, not as a stale volume.
 - **The code file is written `umask 022`.** The container runs as uid 10001 and cannot read
   a root-owned `0600` file; the agent says so and exits rather than enrolling.
+- **The Docker socket is mounted**, which is root on the broker VM. The Agents page
+  deliberately does *not* emit that mount — an operator's own agent host is theirs, and
+  adding it there is a separate considered act. A POV broker is different: the dashboard
+  created that VM from a template for this POV, and running the Gateway beside itself is
+  the machine's only job.
 
 ### The ordering that matters
 
