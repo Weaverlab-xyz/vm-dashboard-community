@@ -147,34 +147,35 @@ async def verify_tenant(tenant_id: str, db: Session = Depends(get_db),
     sitting and waiting for, and a job row per credential check would bury the POV's real
     jobs. The result is stored either way — a failure an operator navigates away from is
     still a failure the row should show.
+
+    **A failed check is a 200 with ``ok: false``**, not an error status. The request
+    succeeded; the credential is what did not work, and that is an answer. It is also why
+    no message here is ever built from a caught exception: ``verify`` returns its outcome,
+    so there is no exception at this boundary to accidentally echo.
     """
     try:
         tenant = bt_tenant_service.resolve_by_id(db, tenant_id)
+        # Raises only for "this kind cannot be checked" and "there is no URL" — refusals
+        # about the request rather than outcomes, so they 409 and nothing is recorded
+        # against the row.
+        ok, detail = await bt_tenant_verify.verify(tenant)
     except bt_tenant_service.BTTenantError as exc:
         raise _refuse(exc) from exc
-
-    try:
-        message = await bt_tenant_verify.verify(tenant)
-    except bt_tenant_service.BTTenantError as exc:
-        # Recorded, not just returned. The next person to open this page needs to see
-        # that it was checked and failed, not an empty column.
-        row = bt_tenant_service.record_result(db, tenant_id, error=str(exc))
-        return {"ok": False, "detail": str(exc), "tenant": row}
     except Exception as exc:  # noqa: BLE001
-        # Deliberately does NOT echo the exception. A BTTenantError above is a refusal
-        # this codebase authored, with the remedy already in the text; anything reaching
-        # here is a bug, and a bug's `str()` is a message written for a developer reading
-        # a traceback — it can carry local paths, a resolved address, or a chained cause
-        # from somewhere unrelated. The traceback goes to the log, which is where a
-        # developer looks; the operator gets the type and a pointer to it.
+        # A bug, not a tenant problem, and deliberately not echoed: a bug's `str()` is
+        # written for a developer reading a traceback and can carry local paths, a
+        # resolved address, or a chained cause from somewhere unrelated. The traceback
+        # goes to the log; the operator gets the type and a pointer to it.
         logger.warning("tenant %s: verify raised unexpectedly", tenant_id, exc_info=True)
         detail = (f"the check failed unexpectedly ({type(exc).__name__}). This is a "
                   f"dashboard fault rather than a tenant one — see the dashboard log.")
         row = bt_tenant_service.record_result(db, tenant_id, error=detail)
         return {"ok": False, "detail": detail, "tenant": row}
 
-    return {"ok": True, "detail": message,
-            "tenant": bt_tenant_service.record_result(db, tenant_id)}
+    # Recorded either way. The next person to open this page needs to see that it was
+    # checked and failed, not an empty column.
+    row = bt_tenant_service.record_result(db, tenant_id, error="" if ok else detail)
+    return {"ok": ok, "detail": detail, "tenant": row}
 
 
 @router.delete("/{tenant_id}", status_code=204)
