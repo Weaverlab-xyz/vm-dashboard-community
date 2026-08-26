@@ -83,9 +83,14 @@ def _accessible_for(rbac: str, user: User):
 
 
 def _tile(value, *, secondary=None, by_region=None, as_of=None, stale=False, note="",
-          status="ok") -> dict:
+          status="ok", href=None) -> dict:
+    """``href`` overrides the tile's static link in dashboard.html for tiles whose
+    destination depends on the data — an OT cell count spans three clouds, so the one
+    hardcoded cloud page was wrong for anyone whose cells live elsewhere. None (the
+    default, and every other tile) leaves the static href alone."""
     return {"value": value, "secondary": secondary, "by_region": by_region,
-            "as_of": as_of, "stale": stale, "note": note, "status": status}
+            "as_of": as_of, "stale": stale, "note": note, "status": status,
+            "href": href}
 
 
 def _unavailable(note: str) -> dict:
@@ -254,6 +259,7 @@ def _db_tiles(db: Session, user: User) -> dict:
         if not readable:
             return _forbidden()
         accessible = _accessible_for("gcp", user)   # same workgroup rule on every cloud module
+        per_cloud = {}
         total = wired = 0
         for row in db.query(Job).filter(Job.job_type.in_(readable)).all():
             meta = row.metadata_dict
@@ -262,12 +268,25 @@ def _db_tiles(db: Session, user: User) -> dict:
             if accessible is not None and (row.workgroup or "").lower() not in accessible:
                 continue
             total += 1
+            cloud = ot_service.cell_cloud_for_job_type(row.job_type)
+            if cloud:
+                per_cloud[cloud] = per_cloud.get(cloud, 0) + 1
             checkout_pending = (not ot_service.ps_checkout_skip_reason(meta)
                                 and not meta.get("ot_ps_synced"))
             if (row.status == "completed" and meta.get("ot_web_jump_tf_state")
                     and meta.get("ot_tunnel_tf_state") and not checkout_pending):
                 wired += 1
-        return _tile(total, secondary=wired)
+        # The count spans three clouds but the tile is one link, so send the caller
+        # where their cells actually are: the cloud holding the most. With no cells
+        # (or none readable) fall back to a cloud this caller may READ — linking to
+        # /gcp unconditionally handed a GCP-less or GCP-forbidden operator a dead end.
+        busiest = max(per_cloud, key=lambda c: (per_cloud[c], c)) if per_cloud else ""
+        if not busiest:
+            readable_clouds = [c for c, jt in ot_service.CELL_CHILD_JOB_TYPE.items()
+                               if jt in readable]
+            busiest = "gcp" if "gcp" in readable_clouds else (
+                readable_clouds[0] if readable_clouds else "gcp")
+        return _tile(total, secondary=wired, href=f"/{busiest}#ot")
     _safe("ot_cells", _ot_cells)
 
     return out

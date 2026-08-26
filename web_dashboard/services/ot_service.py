@@ -519,6 +519,41 @@ async def _cell_gateway_size_problem(cloud: str, meta: dict) -> str:
     return await gateway_size_problem(meta["project_id"], meta.get("region") or "")
 
 
+async def aws_airgap_problem(region: str, subnet_id: str) -> str:
+    """Refuse an AWS cell whose subnet would hand it a public IP — "" when fine.
+
+    The cell's whole story is a plant network with no path in except PRA. GCE and
+    Azure let the deploy form pin the external IP off per instance, and the OT forms
+    do. EC2 has no such switch: MapPublicIpOnLaunch on the subnet decides, so a cell
+    dropped into the sandbox's public subnet silently comes up internet-addressable
+    and the demo asserts something untrue. Checked here, beside the gateway sizing
+    guard, because both are "refuse before launching anything" preflights.
+
+    An unreadable subnet is NOT a refusal: ``subnet_auto_assigns_public_ips`` returns
+    None when it cannot tell, and blocking a deploy on a failed describe call would
+    make a transient AWS error look like a misconfigured subnet.
+    """
+    from . import config_service
+    if not config_service.get_bool("ot_aws_require_private_subnet", True):
+        return ""
+    subnet_id = (subnet_id or "").strip()
+    if not subnet_id:
+        return ""
+    from . import aws_service
+    public = await aws_service.subnet_auto_assigns_public_ips(region, subnet_id)
+    if not public:
+        return ""
+    return (
+        f"Subnet {subnet_id} auto-assigns public IPs, so the cell VM would come up "
+        f"addressable from the internet — there would be no air gap for PRA to be the "
+        f"only way into. EC2 has no per-instance external-IP switch; the subnet "
+        f"decides (MapPublicIpOnLaunch). Redeploy the cell into the private sandbox "
+        f"subnet — the OT tab's default — or, if a public subnet is genuinely what you "
+        f"want, clear 'OT demo cell (AWS): refuse a subnet that auto-assigns public "
+        f"IPs' under Settings → Integrations → Privileged Remote Access. No instance "
+        f"was launched.")
+
+
 async def run_cell_deploy(job_id: str, meta: dict) -> None:
     """Run one ``ot_cell_deploy`` job (deploy mode or rewire mode).
 
@@ -572,6 +607,18 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
             job_service.update_progress(db, job_id, 5,
                                         "Checking the PRA gateway size (a Web Jump needs ≥2 GB)…")
             remedy = await _cell_gateway_size_problem(cloud, meta)
+            if remedy:
+                job_service.set_cancelled(db, child_id)
+                job_service.set_failed(db, job_id, remedy)
+                return
+
+        if cloud == "aws":
+            job_service.update_progress(
+                db, job_id, 8,
+                "Checking the cell's subnet is private (EC2 has no per-instance "
+                "external-IP switch)…")
+            remedy = await aws_airgap_problem(meta.get("region") or "",
+                                              child_meta.get("subnet_id") or "")
             if remedy:
                 job_service.set_cancelled(db, child_id)
                 job_service.set_failed(db, job_id, remedy)
@@ -675,6 +722,148 @@ _GATEWAY_DEPLOY_KEY_NAME = {"gcp": "gcp_cloud_run_docker_deploy_key",
                             "azure": "azure_aci_deploy_key"}
 
 
+# ── Purdue-zone firewalling ───────────────────────────────────────────────────
+# The GCP cell has always carried the `ot-sim` network tag, described in the docs as
+# "the forward hook for Purdue-zone firewalling" — nothing consumed it, so the cell's
+# isolation was really just the sandbox's posture: no NAT on the VM subnet, no public
+# IP. That posture is one settings toggle from evaporating. `gcp_vm_nat_enabled` adds
+# a priority-900 EGRESS ALLOW on the VM tag every cell also carries, so turning on
+# on-demand egress for ONE ordinary VM silently gives every plant cell in the sandbox
+# a route to the internet, with nothing in the UI saying so.
+#
+# These rules make the cell its own zone, independent of that toggle:
+#
+#   <cell>-ot-egress-deny   800  EGRESS  DENY  all → 0.0.0.0/0
+#   <cell>-ot-ingress-allow 800  INGRESS ALLOW tcp ← source_tags=[bt-jumpoint]
+#   <cell>-ot-ingress-deny  810  INGRESS DENY  all ← 0.0.0.0/0
+#
+# 800 is deliberate: it outranks the on-demand egress ALLOW at 900 and the sandbox's
+# standing VM-tag DENY at 1000, so the air gap holds whatever those are set to.
+#
+# The ingress pair uses source_tags, NOT the gateway's address. The shared Gateway is
+# ref-counted and recreated on demand; a pinned /32 would silently stop matching the
+# day it comes back with a new internal IP, and the symptom — a Web Jump that times
+# out — is the one the troubleshooting table already teaches operators to read as an
+# undersized gateway. A tag survives recreation.
+_PURDUE_EGRESS_PRIORITY = 800
+_PURDUE_INGRESS_ALLOW_PRIORITY = 800
+_PURDUE_INGRESS_DENY_PRIORITY = 810
+OT_CELL_NETWORK_TAG = "ot-sim"
+# The network tag the managed GCP Gateway VM carries (gcp_service._JUMPOINT_LABEL).
+GATEWAY_NETWORK_TAG = "bt-jumpoint"
+
+
+def purdue_firewall_enabled() -> bool:
+    from . import config_service
+    return config_service.get_bool("ot_purdue_firewall_enabled", False)
+
+
+def _purdue_rule_names(vm: str) -> dict:
+    return {"egress_deny":   f"{vm}-ot-egress-deny",
+            "ingress_allow": f"{vm}-ot-ingress-allow",
+            "ingress_deny":  f"{vm}-ot-ingress-deny"}
+
+
+def purdue_cell_ports(cmeta: dict) -> list:
+    """Every port the cell legitimately serves through the Gateway.
+
+    22 (Shell Jump) and the HMI are always there; the PLC port is whatever the deploy
+    chose. The remaining preset ports ride along because the baked image answers OPC UA
+    and EtherNet/IP too, and a standalone tunnel to this cell on one of them is a
+    supported demo — an allow-list that only knew about the cell's OWN tunnel would
+    make those quietly fail.
+    """
+    ports = {22, int(cmeta.get("ot_hmi_port") or 1881)}
+    ot_params = cmeta.get("ot_params") or {}
+    if ot_params.get("plc_port"):
+        ports.add(int(ot_params["plc_port"]))
+    for preset in OT_PORT_PRESETS.values():
+        ports.add(int(preset["port"]))
+    return sorted(ports)
+
+
+async def _wire_purdue_firewall(db, parent_id: str, child_id: str, cmeta: dict) -> str:
+    """Fence the GCP cell into its own zone. Returns a one-line note for the summary.
+
+    Best-effort by design: a cell that deployed and wired correctly must not be failed
+    over a hardening extra. Every rule that IS created is recorded on the child the
+    moment it exists, so destroy removes exactly what is there and a re-wire creates
+    only what is missing — the same contract as the Web Jump and tunnel above.
+    """
+    from . import config_service, gcp_service, job_service
+
+    vm = cmeta.get("instance_name") or cmeta.get("vm_name") or ""
+    project = cmeta.get("project_id") or _cfg("gcp_project_id")
+    network = (cmeta.get("network") or config_service.get("gcp_network")
+               or "default")
+    if not vm or not project:
+        return "Purdue rules skipped (no VM name or project on the cell)"
+
+    names = _purdue_rule_names(vm)
+    created = list(cmeta.get("ot_firewall_rules") or [])
+
+    def _record(rule_name):
+        if rule_name not in created:
+            created.append(rule_name)
+        job_service.update_metadata(db, child_id, {"ot_firewall_rules": created})
+        cmeta["ot_firewall_rules"] = created
+
+    job_service.update_progress(db, parent_id, 92,
+                                "Applying the cell's Purdue-zone firewall rules…")
+    try:
+        if names["egress_deny"] not in created:
+            await gcp_service.ensure_segmentation_rule(
+                project=project, name=names["egress_deny"], network=network,
+                direction="EGRESS", action="deny",
+                priority=_PURDUE_EGRESS_PRIORITY,
+                destination_ranges=["0.0.0.0/0"],
+                target_tags=[OT_CELL_NETWORK_TAG], protocol="all",
+                description="vm-dashboard OT cell: the plant network has no route out, "
+                            "whatever gcp_vm_nat_enabled is set to")
+            _record(names["egress_deny"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell %s: egress-deny rule failed: %s", vm, exc)
+        return f"Purdue rules incomplete: egress deny failed ({exc})"
+
+    # The ingress DENY is only ever created once its paired ALLOW exists. Reversing
+    # that order, or keeping the deny after a failed allow, leaves a cell nothing can
+    # reach — including the Gateway brokering the session meant to fix it.
+    try:
+        if names["ingress_allow"] not in created:
+            await gcp_service.ensure_segmentation_rule(
+                project=project, name=names["ingress_allow"], network=network,
+                direction="INGRESS", action="allow",
+                priority=_PURDUE_INGRESS_ALLOW_PRIORITY,
+                source_tags=[GATEWAY_NETWORK_TAG],
+                target_tags=[OT_CELL_NETWORK_TAG], protocol="tcp",
+                ports=purdue_cell_ports(cmeta),
+                description="vm-dashboard OT cell: only the PRA Gateway may reach the "
+                            "plant cell")
+            _record(names["ingress_allow"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell %s: gateway ingress-allow rule failed: %s", vm, exc)
+        return ("Purdue rules partial: no path out of the cell, but the "
+                f"Gateway allow-list was not applied ({exc}) — ingress is unchanged")
+
+    try:
+        if names["ingress_deny"] not in created:
+            await gcp_service.ensure_segmentation_rule(
+                project=project, name=names["ingress_deny"], network=network,
+                direction="INGRESS", action="deny",
+                priority=_PURDUE_INGRESS_DENY_PRIORITY,
+                source_ranges=["0.0.0.0/0"],
+                target_tags=[OT_CELL_NETWORK_TAG], protocol="all",
+                description="vm-dashboard OT cell: everything except the PRA Gateway "
+                            "is denied at the plant boundary")
+            _record(names["ingress_deny"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell %s: ingress-deny rule failed: %s", vm, exc)
+        return ("Purdue rules partial: no path out of the cell and the Gateway is "
+                f"allowed in, but the catch-all ingress deny failed ({exc})")
+
+    return f"Purdue rules applied ({len(created)} firewall rules)"
+
+
 async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
                      cloud: str = "gcp") -> dict:
     """Provision the OT access layer for a deployed cell VM, skipping any step whose
@@ -774,6 +963,14 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
                                           rewire_hint=rewire_hint,
                                           cloud=cloud)
 
+    # GCP only: AWS security groups and Azure NSGs would each need their own shape of
+    # this, and both clouds' cells are still awaiting their first live E2E — adding an
+    # untested network restriction to an untested deploy would make any failure
+    # tomorrow ambiguous. The tag hook and the rules are GCP's today.
+    firewall_note = ""
+    if cloud == "gcp" and purdue_firewall_enabled():
+        firewall_note = await _wire_purdue_firewall(db, parent_id, child_id, cmeta)
+
     return {
         "vm_job_id": child_id,
         "instance_name": vm,
@@ -788,6 +985,7 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
         "vault_account_id": cmeta.get("ot_vault_account_id") or "",
         "vault_account_name": cmeta.get("ot_vault_account_name") or "",
         "ps_checkout": ps_note,
+        "purdue_firewall": firewall_note,
     }
 
 
@@ -805,11 +1003,10 @@ def ps_checkout_skip_reason(cmeta: dict) -> str:
     return ""
 
 
-# The per-cloud "trigger a Change Password right after onboarding" flag, reused for
-# the post-link converge below — (key, default) exactly as ps_vm_hook.register reads
-# them, so the OT pair follows whatever rotation posture the operator set for that
-# cloud. AWS defaults False (SSM auto-management rotates on schedule); until that
-# first rotation the PRA Vault account holds the placeholder.
+# The per-cloud "trigger a Change Password right after onboarding" flag — (key,
+# default) exactly as ps_vm_hook.register reads them. Kept only to NAME the cloud's
+# rotation posture in logs and progress text; the post-link converge below no longer
+# reads it. See _wire_ps_checkout for why the two are different questions.
 _PS_CHANGE_FLAG = {
     "gcp": ("passwordsafe_gcp_change_password_on_register", True),
     "aws": ("passwordsafe_ssm_change_password_on_register", False),
@@ -937,10 +1134,19 @@ async def _wire_ps_checkout(db, parent_id: str, child_id: str, cmeta: dict, *,
         job_service.update_metadata(db, child_id, {"ot_ps_synced": True})
         cmeta["ot_ps_synced"] = True
         # Converge now rather than at the next scheduled rotation: the deploy-time
-        # initial mint ran before the link existed, so PRA still holds the
+        # initial mint ran BEFORE the link existed, so PRA still holds the
         # placeholder. Best-effort — the link guarantees the next change lands.
-        change_key, change_default = _PS_CHANGE_FLAG.get(cloud, _PS_CHANGE_FLAG["gcp"])
-        if config_service.get_bool(change_key, change_default):
+        #
+        # Deliberately NOT the cloud's change-on-register flag. That flag answers
+        # "rotate the credential when we first onboard it?"; this answers "a
+        # subscriber appeared after the mint, so push one change through it". They
+        # only looked alike on GCP/Azure, where the flag defaults on. On AWS
+        # (passwordsafe_ssm_change_password_on_register defaults OFF, because SSM
+        # auto-management rotates on its own schedule) reading it here left every
+        # fresh cell's Vault account holding the placeholder — a checkout that hands
+        # the rep a password which does not log in, until some later rotation. The
+        # change this triggers is the same one SSM's own schedule performs.
+        if config_service.get_bool("ot_ps_checkout_converge", True):
             try:
                 await ps_api_service.change_managed_account_password(
                     int(cmeta["ps_managed_account_id"]))
@@ -949,6 +1155,13 @@ async def _wire_ps_checkout(db, parent_id: str, child_id: str, cmeta: dict, *,
             except Exception as exc:  # noqa: BLE001
                 logger.warning("OT cell %s: post-link Change Password failed (the pair "
                                "converges at the next scheduled rotation): %s", vm, exc)
+        else:
+            change_key, change_default = _PS_CHANGE_FLAG.get(cloud, _PS_CHANGE_FLAG["gcp"])
+            logger.info("OT cell %s: ot_ps_checkout_converge is off — PRA holds the "
+                        "placeholder until the next rotation of %s (%s=%s)",
+                        vm, admin_user, change_key,
+                        config_service.get_bool(change_key, change_default))
 
     return (f"{vault_name} synced"
-            + (" (rotation triggered)" if cmeta.get("ot_ps_change_triggered") else ""))
+            + (" (rotation triggered)" if cmeta.get("ot_ps_change_triggered")
+               else " — PRA holds the placeholder until the next rotation"))

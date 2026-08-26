@@ -271,6 +271,44 @@ def test_containers_api_really_has_no_workgroup_scoping():
         "/endpoints now accepts workgroup — see the note above")
 
 
+def test_the_ot_tile_link_follows_the_data_not_one_hardcoded_cloud():
+    # OT cells run on GCP, AWS and Azure and the tile sums all three, but a tile is
+    # one link. It used to be a literal /gcp#ot, so an operator whose cells live on
+    # AWS clicked the count and landed on an empty GCP page — and one without GCP
+    # read permission landed somewhere they cannot load at all.
+    assert 'stats[tile.key]?.href || tile.href' in DASHBOARD, (
+        "the tile anchor must prefer the href the stats endpoint sends back")
+
+    api = _read("web_dashboard", "api", "dashboard.py")
+    fn = None
+    for node in ast.walk(ast.parse(api)):
+        if isinstance(node, ast.FunctionDef) and node.name == "_ot_cells":
+            fn = node
+    assert fn, "dashboard.py no longer defines the _ot_cells tile"
+    src = ast.get_source_segment(api, fn)
+    assert "href=" in src, "_ot_cells must send an href with its count"
+    assert "#ot" in src, "the href must deep-link to the cloud page's OT tab"
+    # The fallback must stay inside what the caller may read: the whole reason the
+    # static link was wrong is that it assumed GCP.
+    assert "readable_clouds" in src, (
+        "_ot_cells must fall back to a cloud this caller can read")
+
+
+def test_only_data_dependent_tiles_override_their_link():
+    # _tile's href defaults to None so every other tile keeps its static href; a
+    # default of "" or "/" would silently blank or hijack all of them.
+    api = _read("web_dashboard", "api", "dashboard.py")
+    fn = None
+    for node in ast.walk(ast.parse(api)):
+        if isinstance(node, ast.FunctionDef) and node.name == "_tile":
+            fn = node
+    assert fn, "dashboard.py no longer defines _tile"
+    kwonly = {a.arg: d for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults)}
+    assert "href" in kwonly, "_tile grew no href parameter"
+    assert isinstance(kwonly["href"], ast.Constant) and kwonly["href"].value is None, (
+        "_tile's href must default to None so untouched tiles keep their static link")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

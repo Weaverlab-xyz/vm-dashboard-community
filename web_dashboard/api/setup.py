@@ -675,6 +675,7 @@ class PasswordSafeFeatureConfig(BaseModel):
     # OT demo cell → PRA checkout: a synced PRA Vault account per cell (docs/cloud-ot.md).
     # Blank platform/FA fall back to the clouddb_ps_pravault_* pair below at read time.
     ot_ps_pra_checkout_enabled: bool = True
+    ot_ps_checkout_converge: bool = True   # one Change through the new link, so PRA holds a real credential now
     ot_ps_pravault_platform: str = ""
     ot_ps_pravault_functional_account: str = ""
     # Optional cloud-DATABASE Password Safe onboarding (AWS) — see config.py.
@@ -827,6 +828,10 @@ class PRAFeatureConfig(BaseModel):
     # Blank keeps the config.py default (Standard_B2s). Changing it never resizes a
     # live Gateway: delete the Gateway VM and the next deploy recreates it.
     azure_jumpoint_vm_size: str = ""
+    # OT demo cell on AWS: refuse a subnet that auto-assigns public IPs (see config.py).
+    ot_aws_require_private_subnet: bool = True
+    # OT demo cell on GCP: Purdue-zone firewall rules on the cell's tag (see config.py).
+    ot_purdue_firewall_enabled: bool = False
     # GCP-specific overrides (leave blank to fall back to the AWS values above)
     gcp_bt_jump_group_name: str = ""
     gcp_jumpoint_name: str = ""

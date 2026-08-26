@@ -1543,6 +1543,75 @@ async def ensure_firewall_rule(*, project: str, name: str, network: str,
         raise GCPError(f"Failed to ensure firewall rule '{name}': {e}") from e
 
 
+def _ensure_segmentation_rule_sync(project: str, name: str, network: str, *,
+                                   direction: str, action: str, priority: int,
+                                   source_ranges: list, source_tags: list,
+                                   destination_ranges: list, target_tags: list,
+                                   protocol: str, ports: list,
+                                   description: str) -> None:
+    """Idempotently create one zone-segmentation firewall rule.
+
+    Separate from ``ensure_firewall_rule`` above rather than an extension of it: that
+    one is ALLOW/INGRESS-only at the implied priority and stamps a fixed description
+    naming the Entitle DB forwarder. Segmenting a network needs the other half of the
+    vocabulary — DENY, EGRESS, an explicit priority to outrank standing rules, and
+    ``source_tags`` so a rule survives the source VM being recreated with a new IP.
+    """
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    client = compute_v1.FirewallsClient(credentials=_gcp_creds())
+    try:
+        client.get(project=project, firewall=name)
+        return  # already present — leave it alone
+    except NotFound:
+        pass
+    net = network if "/" in network else f"projects/{project}/global/networks/{network}"
+    rule = compute_v1.Firewall(
+        name=name, network=net, direction=direction, priority=int(priority),
+        target_tags=list(target_tags), description=description)
+    if direction == "EGRESS":
+        rule.destination_ranges = list(destination_ranges)
+    else:
+        if source_ranges:
+            rule.source_ranges = list(source_ranges)
+        if source_tags:
+            rule.source_tags = list(source_tags)
+    spec = {"I_p_protocol": protocol}
+    if ports and protocol != "all":
+        spec["ports"] = [str(port) for port in ports]
+    if action == "deny":
+        rule.denied = [compute_v1.Denied(**spec)]
+    else:
+        rule.allowed = [compute_v1.Allowed(**spec)]
+    client.insert(project=project, firewall_resource=rule).result(timeout=120)
+
+
+async def ensure_segmentation_rule(*, project: str, name: str, network: str,
+                                   direction: str = "INGRESS", action: str = "allow",
+                                   priority: int = 1000,
+                                   source_ranges: Optional[list] = None,
+                                   source_tags: Optional[list] = None,
+                                   destination_ranges: Optional[list] = None,
+                                   target_tags: Optional[list] = None,
+                                   protocol: str = "tcp",
+                                   ports: Optional[list] = None,
+                                   description: str = "") -> None:
+    """Async wrapper: idempotently ensure one segmentation firewall rule."""
+    try:
+        await _to_thread(_ensure_segmentation_rule_sync, project, name, network,
+                         direction=direction, action=action, priority=priority,
+                         source_ranges=source_ranges or [], source_tags=source_tags or [],
+                         destination_ranges=destination_ranges or [],
+                         target_tags=target_tags or [], protocol=protocol,
+                         ports=ports or [], description=description)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to ensure firewall rule '{name}': {e}") from e
+
+
 async def delete_firewall_rule(project: str, name: str) -> None:
     """Delete a firewall rule; quiet no-op if it doesn't exist."""
     def _sync():

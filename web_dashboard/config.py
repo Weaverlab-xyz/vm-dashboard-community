@@ -404,6 +404,11 @@ class Settings(BaseSettings):
     # Password" plugin, and links the pair with SyncedAccounts — so the credential can be
     # checked out / injected in PRA and every Password Safe rotation propagates into it.
     ot_ps_pra_checkout_enabled: bool = True
+    # Push one Change Password through the SyncedAccounts link right after it is made.
+    # The link is born after the deploy-time initial mint, so without this PRA holds the
+    # throwaway placeholder until some later rotation. NOT the cloud's
+    # change-on-register flag: that one governs onboarding, this one convergence.
+    ot_ps_checkout_converge: bool = True
     ot_ps_pravault_platform: str = ""            # mirror platform name; falls back to clouddb_ps_pravault_platform
     ot_ps_pravault_functional_account: str = ""  # FA on that platform; falls back to clouddb_ps_pravault_functional_account
     bt_api_host: str = ""        # PRA host, used by terraform_pra_service
@@ -700,6 +705,16 @@ class Settings(BaseSettings):
     # Web-Jump OOM constraint as gcp_jumpoint_machine_type: headless Chromium renders
     # ON the Gateway and needs ≥2 GB — Standard_B1ms minimum, Standard_B2s preferred.
     azure_jumpoint_vm_size: str = "Standard_B2s"
+    # OT demo cell on AWS: refuse to deploy into a subnet that auto-assigns public IPs.
+    # EC2 has no per-instance external-IP switch (GCE and Azure do, and the OT forms pin
+    # them off there) — MapPublicIpOnLaunch decides — so this is the only place the
+    # cell's air gap can be enforced rather than merely documented. Off = deploy anyway.
+    ot_aws_require_private_subnet: bool = True
+    # OT demo cell on GCP: fence the cell into its own Purdue zone with firewall rules
+    # on its `ot-sim` network tag — no route out (outranking the on-demand NAT allow),
+    # and inbound only from the PRA Gateway's `bt-jumpoint` tag. Default OFF: it changes
+    # the network posture of a running demo, so it is a deliberate choice, not a surprise.
+    ot_purdue_firewall_enabled: bool = False
     bt_ecs_host_instance_profile: str = "ecsInstanceRole"
     bt_ecs_host_name: str = "dashboard-sandbox-jumpoint-host"  # EC2 Name tag (find-or-create key)
     bt_ecs_execution_role_arn: str = ""  # Set to your ecsTaskExecutionRole ARN if required

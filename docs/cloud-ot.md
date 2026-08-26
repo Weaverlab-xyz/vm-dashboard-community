@@ -9,8 +9,9 @@ that the air-gapped subnet *is* the plant network, and every path in is PRA-brok
 - **Provisioning** *(stand it up)* — deploy a VM from the Packer-baked **`ot-sim`**
   image (`provisioners/ot/ot-sim-debian.sh`). Everything is baked at build time, so the
   running cell needs **zero outbound internet**: a PLC simulator whose holding registers
-  tick every second (:502), FUXA (:1881), Docker, and a systemd unit that starts the
-  stack at boot.
+  tick every second (:502), the same four process values over **OPC UA** (:4840) and
+  **EtherNet/IP** (:44818), FUXA (:1881) with its PLC connection pre-seeded, Docker, and
+  a systemd unit that starts the stack at boot.
 - **Layer 1 — PRA** *(reach it)* — three jump items per cell, all auto-provisioned:
   - **Web Jump** → `http://<vm>:1881` (the HMI, rendered and recorded on the gateway);
   - **Protocol Tunnel** (generic TCP) → the PLC port, with presets for
@@ -24,7 +25,8 @@ that the air-gapped subnet *is* the plant network, and every path in is PRA-brok
   `tenantId/subscriptionId/resourceGroup/vmName`, over Run Command). On top of that,
   the wiring makes the credential **usable in PRA**: a PRA Vault username/password
   account plus a Password Safe mirror on the "PRA Vault Username Password" plugin,
-  linked with SyncedAccounts — see
+  linked with SyncedAccounts, then rotated once so PRA holds a real credential from the
+  start — see
   [PRA checkout of the cell's admin credential](#pra-checkout-of-the-cells-admin-credential).
 - **Layer 3 — Entitle** *(grant time-boxed access)* — *optional.* SSH ephemeral
   accounts, inherited from the VM deploy path.
@@ -44,9 +46,10 @@ Secure third-party/vendor access into plant networks is the flagship OT PAM use 
 no VPN, no inbound firewall holes, recorded sessions, credentials injected rather than
 shared. The cell makes that concrete — the "plant" has **no public IP and no egress**,
 yet a rep reaches the HMI in a recorded browser session, reads live Modbus registers
-through a tunnel, and never learns a credential. The register values *change* every
-second (counter, temperature, flow), so a Modbus client through the tunnel visibly
-shows live process data, not a static mock.
+through a tunnel, and never learns a credential. The values *change* every second
+(counter, temperature, flow), so a client through the tunnel visibly shows live process
+data, not a static mock — and the same four values are served over **Modbus, OPC UA and
+EtherNet/IP**, so the story holds whichever protocol the customer's plant speaks.
 
 ## Deploying a cell
 
@@ -67,9 +70,11 @@ shows live process data, not a static mock.
    to the 4 GB shape everywhere (`e2-medium` / `t3.medium` / `Standard_B2s`) — a 2 GB
    cell proved too tight for Docker + the PLC sim + FUXA in live use. On GCP and Azure
    the cell never gets a public IP (the form pins it); the GCP cell also carries the
-   **`ot-sim`** network tag (the forward hook for Purdue-zone firewalling). **On AWS
-   there is no per-instance public-IP switch — the subnet decides — so keep the form's
-   default private sandbox subnet**, or the air-gap story quietly deflates.
+   **`ot-sim`** network tag, which
+   [Purdue-zone firewalling](#purdue-zone-firewalling-gcp) keys off. **On AWS there is no
+   per-instance public-IP switch — the subnet decides — so keep the form's default
+   private sandbox subnet**: the deploy now *refuses* a subnet that auto-assigns public
+   IPs (see [the air-gap guard](#the-aws-air-gap-guard)).
 3. The job page shows the parent `ot_cell_deploy` job driving one deploy child
    (`gce_deploy` / `ec2_deploy` / `azure_deploy`) — the child **is** the cell's
    inventory record.
@@ -112,6 +117,56 @@ Gateway picker overrides it with another Gateway, the Web Jump renders on a host
 this install cannot size, so the guard steps aside (noted in the job progress) — the
 ≥2 GB requirement then rests on whoever runs that Gateway.
 
+### The AWS air-gap guard
+
+GCE and Azure let a deploy pin the external IP off per instance, and the OT forms do.
+EC2 has no such switch — the subnet's `MapPublicIpOnLaunch` decides — so on AWS the
+air gap used to rest entirely on the operator picking the right subnet, and a cell that
+came up internet-addressable still looked like a successful deploy.
+
+The AWS cell deploy now reads the chosen subnet before launching anything and refuses
+one that auto-assigns public IPs, naming the subnet and the remedy in the job error. A
+subnet it cannot read (a transient `DescribeSubnets` failure) is **not** a refusal — an
+AWS blip must not look like a misconfigured subnet. Turn the check off with
+**`ot_aws_require_private_subnet`** (Settings → Integrations → Privileged Remote Access)
+if a public subnet is genuinely what you want.
+
+### Purdue-zone firewalling (GCP)
+
+*Optional, default off:* **`ot_purdue_firewall_enabled`**. The GCP cell has always carried
+the `ot-sim` network tag, but nothing consumed it — the cell's isolation was really the
+sandbox's posture (no NAT on the VM subnet, no public IP). That posture is one toggle
+away from evaporating: `gcp_vm_nat_enabled` adds a priority-900 EGRESS ALLOW on the VM
+tag *every* cell also carries, so switching on on-demand egress for one ordinary VM
+quietly gives every plant cell in the sandbox a route to the internet.
+
+Enabled, the wiring gives each cell three rules of its own, on its `ot-sim` tag:
+
+| Rule | Priority | Effect |
+|---|---|---|
+| `<cell>-ot-egress-deny` | 800 | EGRESS DENY all → `0.0.0.0/0` — no route out, whatever the NAT toggle says |
+| `<cell>-ot-ingress-allow` | 800 | INGRESS ALLOW tcp from **`source_tags=[bt-jumpoint]`** on 22, the HMI port and every preset protocol port |
+| `<cell>-ot-ingress-deny` | 810 | INGRESS DENY all from `0.0.0.0/0` — everything else stops at the plant boundary |
+
+800 is chosen to outrank both the on-demand egress ALLOW (900) and the sandbox's
+standing VM-tag DENY (1000), so the air gap holds regardless of how those are set.
+
+Two deliberate properties:
+
+- **The Gateway is matched by network tag, not address.** The shared Gateway is
+  ref-counted and recreated on demand; a pinned `/32` would stop matching the day it
+  came back with a new internal IP, and the symptom — a Web Jump that times out — is
+  exactly what the troubleshooting table teaches you to read as an undersized gateway.
+- **The catch-all ingress DENY is never created without its paired Gateway ALLOW.** If
+  the allow fails, the wiring stops there and says so: a cell fenced away from the
+  Gateway brokering the session you would use to fix it is the one failure worth
+  designing against.
+
+The rules are recorded on the child job as they are created, so a destroy removes
+exactly what exists and **Re-wire** adds them to a cell deployed before you turned the
+flag on. AWS security groups and Azure NSGs would each need their own shape of this and
+do not have it yet.
+
 ### Partial failures and re-wiring
 
 Wiring failures (Web Jump, tunnel or the PRA-checkout pair) fail the parent job with
@@ -140,12 +195,17 @@ checkbox is off, or via `ot_ps_pra_checkout_enabled=false`):
 3. a **SyncedAccounts link** making the mirror a subscriber of the cell's `adminuser`
    account, followed by one Change Password on the parent so PRA holds a real
    credential immediately (the deploy-time initial mint ran before the link existed).
-   This converge follows the cloud's own change-on-register flag
-   (`passwordsafe_gcp_change_password_on_register` /
-   `passwordsafe_azure_change_password_on_register`, both default **on**;
-   `passwordsafe_ssm_change_password_on_register` defaults **off** because SSM
-   auto-management rotates on schedule) — with the flag off, PRA holds the
-   placeholder until the parent's next rotation.
+
+That last rotation is governed by **`ot_ps_checkout_converge`** (default **on**), and
+deliberately *not* by the cloud's change-on-register flag. The two answer different
+questions: change-on-register asks "rotate the credential when we first onboard it?",
+the converge asks "a subscriber appeared *after* the mint — push one change through
+it?". They only looked alike on GCP and Azure, where the flag defaults on. On AWS
+`passwordsafe_ssm_change_password_on_register` defaults **off** (SSM auto-management
+rotates on its own schedule), so every fresh AWS cell's Vault account held the throwaway
+placeholder until some later rotation — a checkout that hands the rep a password which
+does not log in. With `ot_ps_checkout_converge` off, that is the behaviour you get back,
+on every cloud.
 
 From then on Password Safe owns the propagation: every `adminuser` rotation lands in
 the PRA Vault account, no credential passes through the dashboard, and in the PRA rep
@@ -176,16 +236,22 @@ Per-protocol, with a client to demo with:
 | Preset | Port | Client through `127.0.0.1:<port>` | Against the `ot-sim` cell |
 |---|---|---|---|
 | Modbus TCP | 502 | `mbpoll -a 1 -r 1 -c 4 127.0.0.1`, QModMaster, pymodbus | **Yes** — holding registers 0–3 tick every second |
-| OPC UA | 4840 | UaExpert, `opcua-client` (endpoint `opc.tcp://127.0.0.1:4840`) | No — standalone tunnel to real/lab gear |
+| OPC UA | 4840 | UaExpert, `opcua-client` (endpoint `opc.tcp://127.0.0.1:4840`) | **Yes** — `Objects/Plant` → Counter, Temperature, Flow, Running; anonymous, no security policy |
+| EtherNet/IP | 44818 | pylogix, cpppo (`Logix` driver at 127.0.0.1) | **Yes** — the same four values as `DINT` tags |
 | DNP3 | 20000 | OpenDNP3 master, Axon Test | No — standalone tunnel to real/lab gear |
 | Siemens S7comm | 102 | python-snap7, TIA Portal (PLC at 127.0.0.1) | No — standalone tunnel to real/lab gear |
-| EtherNet/IP | 44818 | pylogix, cpppo (`Logix` driver at 127.0.0.1) | No — standalone tunnel to real/lab gear |
 
 Notes that save demo time:
 
-- **The cell simulates Modbus only.** The other presets exist for the **standalone
-  tunnel** card — point one at your own PLC/lab gear (anything the chosen Gateway can
-  reach) and demo the same brokered-access story against a real protocol stack.
+- **The cell answers Modbus, OPC UA and EtherNet/IP; DNP3 and S7 it does not.** Both
+  of those need native libraries built from source, which the baked image's
+  everything-is-a-pinned-wheel contract cannot honour, so those two presets exist for
+  the **standalone tunnel** card — point one at your own PLC/lab gear (anything the
+  chosen Gateway can reach) and demo the same brokered-access story against a real
+  protocol stack. `OT_SIMS` at bake time picks which sims the image carries.
+- **The cell's own tunnel is one protocol** (chosen at deploy), but the other two ports
+  are open on the cell: create a **standalone tunnel** pointed at the cell's private IP
+  to demo a second protocol against the same cell.
 - **One protocol per tunnel jump.** A tunnel carries one `local;remote` port pair. A
   cell gets one PLC tunnel (chosen at deploy); to speak a second protocol to the same
   cell or host, create a standalone tunnel with a different **name** and (if both run
@@ -216,7 +282,9 @@ Notes that save demo time:
 - **Air-gap**: keep the on-demand egress flags **off** for the cell's cloud
   (`gcp_vm_nat_enabled` / `aws_nat_instance_enabled`; Azure VMs have no dashboard
   NAT toggle). Turning one on gives cell subnets egress and silently deflates the
-  "no path out of the plant" story. One deliberate AWS exception:
+  "no path out of the plant" story. On GCP,
+  [Purdue-zone firewalling](#purdue-zone-firewalling-gcp) removes that coupling
+  entirely — the cell's own egress deny outranks the NAT allow. One deliberate AWS exception:
   `aws_ssm_endpoints_enabled` adds **interface endpoints inside the VPC** for the
   Password Safe SSM onboarding — private AWS API access, not internet egress, so it
   doesn't break the story.
@@ -232,12 +300,19 @@ tunnels hold a reference in **that cloud's** gateway idle-teardown count, so an
 unrelated decommission cannot reap the gateway mid-session. Connection details and
 per-protocol clients: [Using the protocol tunnels](#using-the-protocol-tunnels).
 
-## First-time FUXA wiring
+## FUXA wiring
 
-The FUXA project is not pre-baked (its project format is version-coupled). Once per
-cell (~1 minute, inside the recorded Web Jump session): FUXA → Connections → add a
-**ModbusTCP** device at address `plc` port `502`, add tags for holding registers 0–3,
-drop them on a view. The project persists on the VM.
+The bake **pre-seeds the project** with a `ModbusTCP` device named `PLC` (address
+`plc`, port `502`) and four tags for holding registers 0–3, by asking the running FUXA
+for its own project, adding the device and posting it back. So inside the recorded Web
+Jump session the remaining step is just to **drop the tags on a view** — a FUXA view is
+SVG and its item format is the most version-coupled part of the project, so the bake
+does not generate one.
+
+If your bake log says `WARNING: FUXA project NOT seeded`, the pinned FUXA rejected the
+shape and the image is exactly as it was before seeding existed: add the connection by
+hand, once per cell (~1 minute) — FUXA → Connections → **ModbusTCP** at `plc`:`502`,
+then tags for holding registers 0–3. Either way the project persists on the VM.
 
 ## E2E verification checklist
 
@@ -251,11 +326,21 @@ for Password Safe over SSM, that `aws_ssm_endpoints_enabled` is on or the subnet
 otherwise reaches the SSM control plane. **As of 2026-08-25 the AWS and Azure slices
 have not been E2E-verified live** — this checklist is the script for that pass.
 
+The `ot-sim` image, the FUXA seed, the extra protocol sims and the Purdue rules have
+**not been exercised on a live bake or cell** either: they are covered by unit and
+structural tests, and the sims themselves were run and read against real clients
+outside the image. Step 2a and step 10 below are their first live pass.
+
 1. Settings: `pra_enabled` on; `bt_api_host` / `bt_client_id` / `bt_client_secret` /
    `bt_jump_group_name` / `bt_jumpoint_name` set; `gcp_jumpoint_machine_type=e2-medium`
    (delete an existing gateway VM so it recreates); `gcp_vm_nat_enabled` **off**;
    Password Safe registration on with the GCP functional account.
-2. Bake `ot-sim`; it appears in the OT tab's image picker.
+2. Bake `ot-sim`; it appears in the OT tab's image picker. Watch the bake log for
+   the four containers passing the smoke test and for either `FUXA project seeded` or
+   the `NOT seeded` warning.
+   - **2a.** On the deployed cell (Shell Jump): `docker ps` shows `ot-plc`, `ot-hmi`,
+     `ot-opcua`, `ot-enip`; the Web Jump opens FUXA on a project that already has the
+     `PLC` connection and its four tags.
 3. Deploy a cell **with the Jump Group + Gateway pickers set to the cell's region**;
    the parent job completes; the child holds Shell Jump id + private IP; the jump
    items land in the picked Jump Group (not the configured default).
@@ -278,6 +363,14 @@ have not been E2E-verified live** — this checklist is the script for that pass
    references it.
 9. Expiry: with the timer enabled, `expires_at` is stamped on the child row; a reaped
    cell cleans up identically to a destroyed one.
+10. **Purdue rules (GCP, optional)**: with `ot_purdue_firewall_enabled` on, deploy a
+    cell (or **Re-wire** an existing one) and check `gcloud compute firewall-rules list`
+    shows its three `<cell>-ot-*` rules. Then: Shell Jump, Web Jump and the tunnel all
+    still work; `curl` to the internet from the cell fails **even with
+    `gcp_vm_nat_enabled` on**; and a destroy removes all three rules.
+11. **Protocol tunnels beyond Modbus**: create a standalone tunnel to the cell's private
+    IP on 4840 and read `Objects/Plant` in UaExpert; another on 44818 and read the four
+    tags with pylogix. Both should show the same values ticking as Modbus.
 
 ## Troubleshooting
 
@@ -287,7 +380,11 @@ have not been E2E-verified live** — this checklist is the script for that pass
 | Web Jump session dies with "internal timeout starting session" | Gateway too small (if the guard was bypassed by resizing after deploy), or the gateway host is down — check the Gateways tab against reality |
 | Tunnel connects but the Modbus client times out | The cell VM isn't running the stack — Shell Jump in and check `systemctl status ot-sim` / `docker ps` |
 | Azure: Web Jump/Shell Jump work but the tunnel never establishes | The cell's Gateway resolves to an **ACI** gateway — ACI is serverless and cannot do protocol tunneling. Keep `azure_vm_jumpoint_mode=shared` and point `azure_jumpoint_name` / the form's Gateway picker at the shared **VM** gateway |
-| Registers read but never change | The PLC sim container restarted into a crash loop — `docker logs ot-plc` |
+| Registers read but never change | The PLC sim container restarted into a crash loop — `docker logs ot-plc` (OPC UA: `ot-opcua`; EtherNet/IP: `ot-enip`) |
+| OPC UA or EtherNet/IP tunnel connects but nothing answers | That sim was not baked — `OT_SIMS` at bake time selects them (default is all three). `docker ps` on the cell shows which are running |
+| FUXA opens with no PLC connection | The bake's project seed was skipped — search the bake log for `FUXA project NOT seeded`, and wire it by hand (`provisioners/ot/README.md`) |
+| AWS cell deploy fails immediately naming the subnet | Working as designed — that subnet auto-assigns public IPs; use the private sandbox subnet or clear `ot_aws_require_private_subnet` |
+| GCP cell unreachable right after enabling Purdue firewalling | The Gateway you are brokering through is not the managed one, so it does not carry the `bt-jumpoint` tag the ingress allow matches. Delete the cell's `*-ot-ingress-deny` rule, then either use the managed Gateway or add that tag to yours |
 | `ot-sim` bake fails at image pull | Docker Hub rate limit or a stale pin — see `provisioners/ot/README.md` (re-pin via `OT_FUXA_IMAGE`) |
 | AWS bake hangs at "Waiting for SSH" | The build resolved a Debian AMI but the SSH username isn't `admin` — use the Debian 12 preset (it sets both), or fix the username field |
 | AWS cell got a public IP | The chosen subnet auto-assigns them — EC2 has no per-instance switch; redeploy into the private sandbox subnet |
