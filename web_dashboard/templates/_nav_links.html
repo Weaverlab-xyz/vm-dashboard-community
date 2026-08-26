@@ -90,6 +90,10 @@
 <a href="/config-mgmt" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>
 {% endif %}
+{% if pov_environments_enabled %}
+<a href="/pov" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/pov') %}{{ nav_active }}{% endif %}">POV</a>
+{% endif %}
 <a href="/inventory" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/inventory') %}{{ nav_active }}{% endif %}">Inventory</a>
 <a href="/jobs" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}

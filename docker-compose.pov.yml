@@ -56,10 +56,12 @@ services:
       # endpoint it needs. Nothing else is listed, and the profile mask makes the demo
       # features unavailable regardless of what a stored config row says.
       - POV_ENVIRONMENTS_ENABLED=true
+      # The lab platform a POV runs on. Credentials go in Settings, not here.
+      - SKYTAP_ENABLED=true
       - PRA_ENABLED=true
       - PASSWORD_SAFE_ENABLED=true
       - REMOTE_AGENTS_ENABLED=true
-      # Config Management, for the playbooks that install a POV's Jumpoint and Resource
+      # Config Management, for the playbooks that install a POV's Gateway and Resource
       # Broker on its in-environment broker VM. Those run ON THE AGENT, which is why this
       # stack needs no docker.sock — see the volumes note below.
       - ANSIBLE_ENABLED=true
@@ -105,6 +107,8 @@ services:
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key_pov
       - INSTALL_PROFILE=pov
       - POV_ENVIRONMENTS_ENABLED=true
+      # The lab platform a POV runs on. Credentials go in Settings, not here.
+      - SKYTAP_ENABLED=true
       - PRA_ENABLED=true
       - PASSWORD_SAFE_ENABLED=true
       - REMOTE_AGENTS_ENABLED=true

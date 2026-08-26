@@ -50,6 +50,7 @@ Two properties worth knowing:
 | Cloud databases, Kubernetes, containers, cloud functions | yes | — |
 | Virtual desktops, EPM-L, cost reporting | yes | — |
 | POV environments | — | yes |
+| Lab platforms (Skytap) | — | yes |
 | PRA, Password Safe, Entitle | yes | yes |
 | Remote agents, Config Management | yes | yes |
 | Auto-delete timer, notifications, secret scanning, auth/SSO | yes | yes |
@@ -61,6 +62,12 @@ A demo-only integration on a POV instance is not merely toggled off — **Settin
 enable it**, with a 409 naming the profile. Accepting the write would store a flag that
 reads back as on while `enabled()` keeps returning `False`: a toggle that saves cleanly,
 shows on, and does nothing. Turning something *off* is always allowed.
+
+A POV instance also needs a **lab platform** — the thing a POV environment actually runs
+on. Skytap is the first one; see [integrations/skytap.md](integrations/skytap.md) for its
+prerequisites and the API token it needs. The platform registry lives in
+`services/lab_platforms.py`, and `GET /api/pov/platforms` reports what each one can do so
+the UI can degrade visibly rather than offering a button that fails.
 
 ---
 

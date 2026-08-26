@@ -30,6 +30,19 @@ class Settings(BaseSettings):
     install_profile: str = "demo"       # "demo" | "pov" -- see docs/pov-instance.md
     pov_environments_enabled: bool = False  # POV router + /pov page (pov profile only)
 
+    # ── Lab platforms — where a POV environment actually runs ────────────────
+    # A POV is a template instantiated whole on a lab platform. Skytap is the first
+    # adapter; see services/lab_platforms.py for the registry and the capability
+    # table. These are POV-profile-only and inert on a demo instance.
+    skytap_enabled: bool = False        # Skytap lab platform (pov profile only)
+    # Skytap authenticates with HTTP Basic: username + an API SECURITY TOKEN from the
+    # account page. NOT the account password — that is the single most common setup
+    # mistake, so the Settings panel and the 401 message both say so.
+    skytap_base_url: str = "https://cloud.skytap.com"
+    skytap_username: str = ""
+    skytap_api_token: str = ""          # secret; masked in Settings
+    skytap_project_id: str = ""         # OPTIONAL — scope new environments to a project
+
     vmware_enabled: bool = True         # VMs router + /vms page
     # The three BeyondTrust products the dashboard drives are gated independently —
     # customers routinely license one or two, not all three. They replaced a single
