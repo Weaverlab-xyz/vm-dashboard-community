@@ -137,6 +137,26 @@ def test_the_seal_ref_matches_the_agent_build():
     assert f'GATEWAY_CONTAINER = "{pov_gateway.CONTAINER_NAME}"' in agent_src
 
 
+def test_the_agent_build_is_new_enough_for_the_version_the_dashboard_demands():
+    """The dashboard refuses to QUEUE below MIN_GATEWAY_VERSION, so shipping an agent
+    below it would mean nobody could ever run this — the same pairing
+    test_agent_ansible_run pins for Config Management."""
+    agent_src = (pathlib.Path(_ROOT) / "runners" / "agent" / "agent.py").read_text(
+        encoding="utf-8")
+    version = agent_src.split('AGENT_VERSION = "', 1)[1].split('"', 1)[0]
+    major, minor = (int(p) for p in version.split(".")[:2])
+    assert (major, minor) >= agent_service.MIN_GATEWAY_VERSION, version
+
+
+def test_the_agent_registers_the_handler_in_its_closed_table():
+    """HANDLERS is a dict lookup precisely so a name off the wire cannot reach a function
+    nobody listed. A verb the dashboard queues and the agent has never heard of leases and
+    then fails on the far side."""
+    agent_src = (pathlib.Path(_ROOT) / "runners" / "agent" / "agent.py").read_text(
+        encoding="utf-8")
+    assert '"agent_gateway": run_gateway' in agent_src
+
+
 # ── preflight refusals ───────────────────────────────────────────────────────
 
 def test_a_pov_with_no_broker_is_refused_with_the_button_to_press():
