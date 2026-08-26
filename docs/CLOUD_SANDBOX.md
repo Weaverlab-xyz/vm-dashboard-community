@@ -406,7 +406,8 @@ same encrypted config DB the wizard writes to. Restarts are not needed — confi
 read per-request.
 
 For the sandbox specifically, you'll want to also paste the BeyondTrust
-deploy key in `/setup` Step 5 (or `/secrets` if you're using an external
+deploy key into the relevant cloud's step in `/setup` (under **Advanced**), or into
+`/secrets` if you're using an external
 secrets backend) — the setup scripts can't generate that for you because
 it's issued by your PRA tenant.
 

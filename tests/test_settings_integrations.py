@@ -144,7 +144,7 @@ def test_the_beyondtrust_family_is_three_independent_toggles():
 
 
 def test_the_wizard_and_the_settings_page_agree_on_labels():
-    """The wizard's Step 5 list and Settings → Integrations are two hand-maintained copies
+    """The wizard's Feature Flags list and Settings → Integrations are two hand-maintained copies
     of the same integration names. Splitting a panel in one and forgetting the other is
     the obvious failure: the wizard would keep offering a `beyondtrust_enabled` toggle
     nothing reads, and a first-run operator would never see the three real ones.

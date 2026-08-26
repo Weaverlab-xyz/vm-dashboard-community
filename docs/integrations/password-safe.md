@@ -74,8 +74,9 @@ grant.
 
 **Option A — Setup wizard (first run)**
 
-The wizard Step 5 lists optional integrations. Toggle **Password Safe** on and fill in
-the fields.
+The wizard's **Feature Flags** step lists the optional integrations. Toggle **Password
+Safe** on there — that step carries toggles only, so fill in the fields from **Settings →
+Integrations** once you have logged in.
 
 **Option B — Settings → Integrations (after first run)**
 

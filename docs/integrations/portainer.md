@@ -358,8 +358,9 @@ starts containers.
 
 ### Step 2 — Configure in the dashboard
 
-**Setup wizard (first run)** — toggle **Portainer** on in wizard Step 5 and fill in
-the fields. **After first run** — **Settings → Integrations → Portainer CE**:
+**Setup wizard (first run)** — toggle **Portainer** on the wizard's **Feature Flags**
+step. That step carries toggles only; fill in the fields afterwards, in the same place
+as **after first run** — **Settings → Integrations → Portainer CE**:
 
 | Field | Example |
 |---|---|

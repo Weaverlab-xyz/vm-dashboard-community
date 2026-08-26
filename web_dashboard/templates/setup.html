@@ -29,7 +29,7 @@
     <!-- Step progress -->
     <div class="px-8 py-5 border-b border-gray-100 bg-gray-50">
       <div class="flex items-center gap-2">
-        <template x-for="(label, i) in steps" :key="i">
+        <template x-for="(s, i) in steps" :key="s.key">
           <div class="flex items-center gap-2">
             <!-- dot -->
             <button
@@ -46,7 +46,7 @@
             <span
               class="text-xs font-medium hidden sm:block"
               :class="step === i + 1 ? 'text-blue-600' : (step > i + 1 ? 'text-green-600' : 'text-gray-400')"
-              x-text="label"
+              x-text="s.label"
             ></span>
             <!-- connector -->
             <div x-show="i < steps.length - 1" class="flex-1 h-px bg-gray-200 min-w-[24px]"></div>
@@ -60,8 +60,8 @@
       <p class="text-red-700 text-sm" x-text="error"></p>
     </div>
 
-    <!-- ── Step 1: Admin Account ── -->
-    <div x-show="step === 1" class="px-8 py-6 space-y-5">
+    <!-- ── Admin Account ── -->
+    <div x-show="stepKey === 'admin'" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">Admin Account</h2>
         <p class="text-gray-500 text-sm mt-1">
@@ -87,8 +87,8 @@
       </div>
     </div>
 
-    <!-- ── Step 2: AWS ── -->
-    <div x-show="step === 2" class="px-8 py-6 space-y-5">
+    <!-- ── AWS ── -->
+    <div x-show="stepKey === 'aws'" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">AWS Credentials</h2>
         <p class="text-gray-500 text-sm mt-1">
@@ -187,8 +187,8 @@
       <p class="text-xs text-gray-400">See <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html" target="_blank" class="underline">IAM access keys docs</a> for setup instructions.</p>
     </div>
 
-    <!-- ── Step 3: Azure ── -->
-    <div x-show="step === 3" class="px-8 py-6 space-y-5">
+    <!-- ── Azure ── -->
+    <div x-show="stepKey === 'azure'" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">Azure Credentials</h2>
         <p class="text-gray-500 text-sm mt-1">
@@ -429,8 +429,8 @@
       </div>
     </div>
 
-    <!-- ── Step 4: GCP ── -->
-    <div x-show="step === 4" class="px-8 py-6 space-y-5">
+    <!-- ── GCP ── -->
+    <div x-show="stepKey === 'gcp'" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">Google Cloud Credentials</h2>
         <p class="text-gray-500 text-sm mt-1">
@@ -567,8 +567,8 @@ gcloud iam service-accounts keys create sa-key.json \
       </div>
     </div>
 
-    <!-- ── Step 5: OCI ── -->
-    <div x-show="step === 5" class="px-8 py-6 space-y-5">
+    <!-- ── OCI ── -->
+    <div x-show="stepKey === 'oci'" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">Oracle Cloud (OCI) Credentials</h2>
         <p class="text-gray-500 text-sm mt-1">
@@ -654,8 +654,8 @@ gcloud iam service-accounts keys create sa-key.json \
       </div>
     </div>
 
-    <!-- ── Step 6: Feature Flags ── -->
-    <div x-show="step === 6" class="px-8 py-6 space-y-5">
+    <!-- ── Feature Flags ── -->
+    <div x-show="stepKey === 'features'" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">Feature Flags</h2>
         <p class="text-gray-500 text-sm mt-1">
@@ -685,8 +685,8 @@ gcloud iam service-accounts keys create sa-key.json \
       </div>
     </div>
 
-    <!-- ── Step 7: Done ── -->
-    <div x-show="step === 7" class="px-8 py-12 text-center space-y-4">
+    <!-- ── Done ── -->
+    <div x-show="stepKey === 'done'" class="px-8 py-12 text-center space-y-4">
       <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto">
         <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
@@ -695,9 +695,12 @@ gcloud iam service-accounts keys create sa-key.json \
       <h2 class="text-xl font-semibold text-gray-900" x-text="isReconfig ? 'Configuration updated' : 'Setup complete!'"></h2>
       <p class="text-gray-500 text-sm" x-text="isReconfig ? 'Your new credentials are active immediately — no restart needed.' : 'Your credentials are stored encrypted in the database. You can now log in.'"></p>
       <div class="pt-4">
-        <a href="/login"
+        <!-- On a reconfigure the operator is already signed in, so /login is the wrong place to
+             send them; they came from Settings and that is where the rest of the configuration
+             lives. -->
+        <a :href="isReconfig ? '/settings' : '/login'"
            class="inline-flex items-center gap-2 bg-blue-600 text-white px-6 py-2.5 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
-          Go to login
+          <span x-text="isReconfig ? 'Back to Settings' : 'Go to login'"></span>
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
           </svg>
@@ -706,7 +709,7 @@ gcloud iam service-accounts keys create sa-key.json \
     </div>
 
     <!-- Navigation -->
-    <div x-show="step < 7" class="px-8 py-5 border-t border-gray-100 flex items-center justify-between bg-gray-50">
+    <div x-show="stepKey !== 'done'" class="px-8 py-5 border-t border-gray-100 flex items-center justify-between bg-gray-50">
       <button
         @click="prev()"
         x-show="step > 1"
@@ -714,7 +717,8 @@ gcloud iam service-accounts keys create sa-key.json \
       >
         ← Back
       </button>
-      <div x-show="step === 1" class="text-xs text-gray-400">Step 1 of 6</div>
+      <div x-show="stepKey === 'admin'" class="text-xs text-gray-400"
+           x-text="'Step 1 of ' + steps.length"></div>
 
       <button
         @click="next()"
@@ -725,7 +729,7 @@ gcloud iam service-accounts keys create sa-key.json \
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
         </svg>
-        <span x-text="step === 6 ? (saving ? 'Saving…' : (isReconfig ? 'Save changes' : 'Complete setup')) : 'Next →'"></span>
+        <span x-text="isLastStep ? (saving ? 'Saving…' : (isReconfig ? 'Save changes' : 'Complete setup')) : 'Next →'"></span>
       </button>
     </div>
 
@@ -753,7 +757,24 @@ function wizard() {
     showGcpSandbox: false,
     authToken: localStorage.getItem('vm_cli_token') || '',
 
-    steps: ['Admin', 'AWS', 'Azure', 'GCP', 'OCI', 'Features'],
+    // Panels are addressed by step KEY, never by ordinal. When the OCI step was inserted,
+    // every `x-show="step === N"` below it shifted by one and `submit()` kept landing on the
+    // literal 6 -- which had become the Feature Flags panel instead of Done, so a successful
+    // setup silently bounced back to the toggles and never said it worked. Keying on the name
+    // makes inserting a step a one-line change to this array.
+    steps: [
+      { key: 'admin',    label: 'Admin'    },
+      { key: 'aws',      label: 'AWS'      },
+      { key: 'azure',    label: 'Azure'    },
+      { key: 'gcp',      label: 'GCP'      },
+      { key: 'oci',      label: 'OCI'      },
+      { key: 'features', label: 'Features' },
+    ],
+
+    // Past the last step means the Done panel, which is deliberately NOT in `steps`: it has
+    // no dot and is not somewhere you navigate to.
+    get stepKey()    { return (this.steps[this.step - 1] || {}).key || 'done'; },
+    get isLastStep() { return this.step === this.steps.length; },
 
     form: {
       admin:    { username: 'admin', password: '', confirm: '' },
@@ -1041,7 +1062,7 @@ function wizard() {
 
     validateStep() {
       this.error = '';
-      if (this.step === 1) {
+      if (this.stepKey === 'admin') {
         if (!this.form.admin.username.trim()) { this.error = 'Username is required.'; return false; }
         if (!this.isReconfig) {
           if (this.form.admin.password.length < 8) { this.error = 'Password must be at least 8 characters.'; return false; }
@@ -1053,7 +1074,7 @@ function wizard() {
 
     async next() {
       if (!this.validateStep()) return;
-      if (this.step < 6) { this.step++; return; }
+      if (!this.isLastStep) { this.step++; return; }
       // Final step → submit
       await this.submit();
     },
@@ -1092,7 +1113,7 @@ function wizard() {
           this.error = err.detail || `Error ${res.status} — please try again.`;
           return;
         }
-        this.step = 6;
+        this.step = this.steps.length + 1;   // the Done panel
       } catch (e) {
         this.error = 'Network error — is the server running?';
       } finally {

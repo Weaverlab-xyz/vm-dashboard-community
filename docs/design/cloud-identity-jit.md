@@ -552,7 +552,7 @@ audit logs. Documented in the runbook.
 
 ## 7. Setup wizard additions
 
-Wizard Step 5 ("Entitle") gains a sub-section **Machine identity gate**:
+The wizard's Entitle entry gains a sub-section **Machine identity gate**:
 
 | Field                              | Notes |
 |------------------------------------|-------|
