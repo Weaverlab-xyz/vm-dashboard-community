@@ -167,9 +167,18 @@ def test_region_fields_and_unknown_cloud():
         "vpc_id", "vpc_cidr", "private_route_table_id", "db_security_group_id",
         "db_parameter_group_name", "db_mysql_parameter_group_name",
         "nat_security_group_id", "ecs_subnet_id", "ecs_security_group_ids",
-        "ecs_cluster", "jumpoint_subnet_id", "jumpoint_security_group_id")
+        "ecs_cluster", "jumpoint_subnet_id", "jumpoint_security_group_id",
+        # Where a Cloud Function's ENIs attach. Purpose-specific rather than reusing
+        # default_subnet_id, so that "which subnet do functions use" stays a separate
+        # question from "in which region" — see _resolved_network.
+        "functions_subnet_ids", "functions_security_group_ids")
     assert "vnet_resource_group" in rc.region_fields("azure")
     assert "ecs_subnetwork" in rc.region_fields("gcp")
+    # Every cloud carries its own functions network fields; Azure had none until the
+    # adapter needed to land in a non-default region.
+    assert "functions_subnet_id" in rc.region_fields("azure")
+    for fld in ("functions_network", "functions_subnetwork"):
+        assert fld in rc.region_fields("gcp"), fld
     for bad in ("oci", "bogus", ""):
         try:
             rc.resolve_region(bad, "us-east-1")

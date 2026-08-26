@@ -590,7 +590,9 @@ $cfg = @(
     "gcp_region.${Region}.k8s_subnetwork=projects/$ProjectId/regions/$Region/subnetworks/$K8sSubnet",
     "gcp_region.${Region}.k8s_pods_range=gke-pods",
     "gcp_region.${Region}.k8s_services_range=gke-services",
-    "gcp_region.${Region}.k8s_node_tag=$NetTagK8s"
+    "gcp_region.${Region}.k8s_node_tag=$NetTagK8s",
+    "gcp_region.${Region}.functions_network=$Vpc",
+    "gcp_region.${Region}.functions_subnetwork=$VmSubnet"
 )
 Write-DashboardConfig 'GCP sandbox configuration' $cfg
 Export-ConfigJson -Cloud gcp -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1

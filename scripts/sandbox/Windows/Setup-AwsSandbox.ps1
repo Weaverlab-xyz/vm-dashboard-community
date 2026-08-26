@@ -1051,7 +1051,9 @@ $cfg = @(
     "aws_region.${Region}.ecs_security_group_ids=$JumpointSg",
     "aws_region.${Region}.ecs_cluster=$EcsCluster",
     "aws_region.${Region}.jumpoint_subnet_id=$PublicSubnetId",
-    "aws_region.${Region}.jumpoint_security_group_id=$JumpointSg"
+    "aws_region.${Region}.jumpoint_security_group_id=$JumpointSg",
+    "aws_region.${Region}.functions_subnet_ids=$PrivateSubnetId",
+    "aws_region.${Region}.functions_security_group_ids=$JumpointSg"
 )
 Write-DashboardConfig 'AWS sandbox configuration' $cfg
 Export-ConfigJson -Cloud aws -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1

@@ -569,6 +569,34 @@ attaches the function to your network.
 | GCP | Direct VPC egress (`direct_vpc_network_interface`) | **Region-locked** — the subnet must be in the function's region, or traffic to an internal IP silently drops. Cloud Run reserves IPs in /28 blocks and needs a /26 minimum subnet; sharing one subnet across functions is supported. Needs provider `>= 7.21`. |
 | GCP (legacy) | Serverless VPC Access connector | Only for cross-region reach from a region-pinned function. Reference an existing one; a connector costs ~$26/mo whether invoked or not |
 
+### Which subnet, in which region
+
+Every cloud has a **per-region** functions network field, and it is what makes a function
+land on its own region's network rather than the default region's:
+
+| Cloud | Per-region field(s) | Flat fallback |
+|---|---|---|
+| AWS | `functions_subnet_ids`, `functions_security_group_ids` | `aws_functions_subnet_ids`, `aws_functions_security_group_ids` |
+| Azure | `functions_subnet_id` | `azure_functions_subnet_id` |
+| GCP | `functions_network`, `functions_subnetwork` | `gcp_functions_network`, `gcp_functions_subnetwork` |
+
+Set them under **Settings → Multi-region** (the sandbox scripts emit both halves). A field
+a region leaves blank falls back to its flat key, so a single-region install needs none of
+this and behaves exactly as before.
+
+The fields are deliberately **purpose-specific** rather than reusing the generic
+`default_subnet_id`/`subnetwork`: a flat `*_functions_*` key answers two questions at once
+— *which subnet do functions use* and *in the default region* — and overriding it with a
+generic per-region subnet fixes the region by discarding the purpose, and only for
+non-default regions. That asymmetry (the same feature choosing a different-purpose subnet
+depending on whether the region happened to be the default) is the bug these fields exist
+to avoid.
+
+For a caller that supplies the region programmatically rather than from a picker — the
+cloud-DB adapter pairing uses the *database's* region — the deploy is **refused** when that
+region has no per-region config set at all, rather than quietly attaching to the default
+region's network.
+
 ## Troubleshooting
 
 **The deploy form says a cloud is blocked.** Its package store isn't configured —

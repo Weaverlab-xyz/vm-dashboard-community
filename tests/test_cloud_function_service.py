@@ -45,13 +45,24 @@ def _install_stubs():
     _mod("web_dashboard.services.terraform", apply=None, destroy=None)
     _mod("web_dashboard.services.terraform_provider_env", provider_env=lambda c: None)
     # Region-keyed, falling back to the cloud-wide entry so the pre-existing
-    # __region__<cloud> users keep working. __overrides__ is the narrower question
-    # region_overrides answers: what this region sets FOR ITSELF, no flat fallback.
-    _mod("web_dashboard.services.region_config",
-         resolve_region=lambda cloud, region: CONF.get(
-             f"__region__{cloud}:{region}", CONF.get(f"__region__{cloud}", {})),
-         region_overrides=lambda cloud, region: CONF.get(
-             f"__overrides__{cloud}:{region}", {}))
+    # __region__<cloud> users keep working. Mirrors the real semantics that matter
+    # here: a field the region does not set resolves to its FLAT key, which is why
+    # the default region and an unconfigured region must behave identically.
+    _flat = {"functions_subnet_ids": "aws_functions_subnet_ids",
+             "functions_security_group_ids": "aws_functions_security_group_ids",
+             "functions_subnet_id": "azure_functions_subnet_id",
+             "functions_network": "gcp_functions_network",
+             "functions_subnetwork": "gcp_functions_subnetwork"}
+
+    def _resolve(cloud, region):
+        entry = dict(CONF.get(f"__region__{cloud}:{region}",
+                              CONF.get(f"__region__{cloud}", {})))
+        for fld, flat in _flat.items():
+            if not entry.get(fld):
+                entry[fld] = CONF.get(flat, "")
+        return entry
+
+    _mod("web_dashboard.services.region_config", resolve_region=_resolve)
 
 
 try:
@@ -282,33 +293,70 @@ def test_aws_vpc_fallback_never_uses_the_db_subnet_group_name():
 # InvalidSubnetID.NotFound, and Azure on a cross-region VNet integration. This matters
 # most for the clouddb adapter, whose region is the database's and not a picked value.
 
-def test_aws_per_region_subnets_beat_the_flat_functions_key():
+def test_aws_per_region_functions_subnets_beat_the_flat_key():
     _reset()
     CONF["aws_functions_subnet_ids"] = "subnet-default-region"
     CONF["aws_functions_security_group_ids"] = "sg-default-region"
-    CONF["__overrides__aws:us-west-2"] = {"default_subnet_id": "subnet-usw2",
-                                          "db_security_group_id": "sg-usw2"}
+    CONF["__region__aws:us-west-2"] = {"functions_subnet_ids": "subnet-usw2",
+                                       "functions_security_group_ids": "sg-usw2"}
     got = svc._resolved_network("aws", "us-west-2", network_mode="vpc", subnet_ids=None,
                                 subnet_id="", vpc_connector="", security_group_ids=None)
     assert got == {"subnet_ids": ["subnet-usw2"],
                    "security_group_ids": ["sg-usw2"]}, got
 
 
-def test_gcp_per_region_subnetwork_beats_the_flat_functions_key():
+def test_gcp_per_region_functions_subnetwork_beats_the_flat_key():
     _reset()
     CONF["gcp_functions_network"] = "default-region-vpc"
     CONF["gcp_functions_subnetwork"] = "default-region-subnet"
-    CONF["__overrides__gcp:us-east1"] = {"network": "sandbox-vpc",
-                                         "subnetwork": "sandbox-use1-subnet"}
+    CONF["__region__gcp:us-east1"] = {"functions_network": "sandbox-vpc",
+                                      "functions_subnetwork": "sandbox-use1-subnet"}
     got = svc._resolved_network("gcp", "us-east1", network_mode="vpc", subnet_ids=None,
                                 subnet_id="", vpc_connector="", security_group_ids=None)
     assert got == {"vpc_network": "sandbox-vpc",
                    "vpc_subnetwork": "sandbox-use1-subnet"}, got
 
 
+def test_azure_per_region_functions_subnet_beats_the_flat_key():
+    """Azure had no per-region functions subnet at all, so a second region silently
+    got the default region's - and VNet integration requires a same-region subnet."""
+    _reset()
+    CONF["azure_functions_subnet_id"] = "/subs/x/eastus/fn"
+    CONF["__region__azure:westus2"] = {"functions_subnet_id": "/subs/x/westus2/fn"}
+    got = svc._resolved_network("azure", "westus2", network_mode="vpc", subnet_ids=None,
+                                subnet_id="", vpc_connector="", security_group_ids=None)
+    assert got == {"subnet_id": "/subs/x/westus2/fn"}, got
+
+
+def test_a_region_that_sets_no_functions_field_matches_the_default_region():
+    """The regression the first attempt at this shipped, and the reason the per-region
+    field is purpose-specific rather than generic.
+
+    Beating the flat key with a per-region GENERIC subnet fixes the region by
+    discarding the PURPOSE, and only for non-default regions - a region entry is empty
+    for the default one. The result was a feature that picked a different-purpose
+    subnet depending on whether the region happened to be the default. Every tier has
+    to be symmetric.
+    """
+    _reset()
+    CONF["gcp_run_network"] = "runner-vpc"
+    CONF["gcp_run_subnetwork"] = "runner-subnet"
+    # us-east1 configures its generic subnet but NOT its functions one.
+    CONF["__region__gcp:us-east1"] = {"network": "generic-vpc",
+                                      "subnetwork": "generic-subnet"}
+    default = svc._resolved_network("gcp", "us-central1", network_mode="vpc",
+                                    subnet_ids=None, subnet_id="", vpc_connector="",
+                                    security_group_ids=None)
+    other = svc._resolved_network("gcp", "us-east1", network_mode="vpc",
+                                  subnet_ids=None, subnet_id="", vpc_connector="",
+                                  security_group_ids=None)
+    assert default == other, (default, other)
+    assert other["vpc_subnetwork"] == "runner-subnet", other
+
+
 def test_the_default_region_still_resolves_to_the_flat_keys():
-    """region_overrides is empty for the default region by construction, so a
-    single-region install sees byte-identical behaviour."""
+    """A field the region does not set resolves to its flat key, so a single-region
+    install sees byte-identical behaviour."""
     _reset()
     CONF["aws_functions_subnet_ids"] = "subnet-a"
     CONF["aws_functions_security_group_ids"] = "sg-1"
@@ -328,8 +376,8 @@ def test_explicit_arguments_still_beat_a_per_region_entry():
     """A caller naming ids means them — the adapter path names none, so it gets the
     region's."""
     _reset()
-    CONF["__overrides__gcp:us-east1"] = {"network": "regional-vpc",
-                                         "subnetwork": "regional-subnet"}
+    CONF["__region__gcp:us-east1"] = {"functions_network": "regional-vpc",
+                                      "functions_subnetwork": "regional-subnet"}
     got = svc._resolved_network("gcp", "us-east1", network_mode="vpc", subnet_ids=None,
                                 subnet_id="", vpc_connector="", security_group_ids=None,
                                 vpc_network="explicit-vpc",
@@ -347,8 +395,8 @@ def test_a_cloud_with_no_per_region_dimension_still_resolves():
         raise ValueError("no per-region config for cloud 'oci'")
 
     import web_dashboard.services.cloud_function_service as mod
-    saved = (mod.resolve_region, mod.region_overrides)
-    mod.resolve_region, mod.region_overrides = _boom, _boom
+    saved = mod.resolve_region
+    mod.resolve_region = _boom
     try:
         CONF["gcp_functions_network"] = "vpc"
         CONF["gcp_functions_subnetwork"] = "subnet"
@@ -357,7 +405,7 @@ def test_a_cloud_with_no_per_region_dimension_still_resolves():
                                     security_group_ids=None)
         assert got == {"vpc_network": "vpc", "vpc_subnetwork": "subnet"}, got
     finally:
-        mod.resolve_region, mod.region_overrides = saved
+        mod.resolve_region = saved
 
 
 def test_explicit_arguments_beat_config():

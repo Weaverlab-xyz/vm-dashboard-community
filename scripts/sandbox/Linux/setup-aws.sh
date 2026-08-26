@@ -1085,6 +1085,8 @@ _cfg=(
   "aws_region.$REGION.ecs_cluster=$ECS_CLUSTER"
   "aws_region.$REGION.jumpoint_subnet_id=$PUBLIC_SUBNET_ID"
   "aws_region.$REGION.jumpoint_security_group_id=$JUMPOINT_SG"
+  "aws_region.$REGION.functions_subnet_ids=$PRIVATE_SUBNET_ID"
+  "aws_region.$REGION.functions_security_group_ids=$JUMPOINT_SG"
 )
 print_dashboard_config "AWS sandbox configuration" "${_cfg[@]}"
 write_config_json aws "${_cfg[@]}"   # machine-readable twin for onboard-sandbox.sh

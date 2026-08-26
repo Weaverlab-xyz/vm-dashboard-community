@@ -98,6 +98,7 @@ class AzureRegionConfig(BaseModel):
     gallery_name: str = ""
     gallery_resource_group: str = ""
     default_vm_size: str = ""
+    functions_subnet_id: str = ""
 
 
 class AwsRegionConfig(BaseModel):
@@ -122,6 +123,8 @@ class AwsRegionConfig(BaseModel):
     ecs_cluster: str = ""
     jumpoint_subnet_id: str = ""
     jumpoint_security_group_id: str = ""
+    functions_subnet_ids: str = ""
+    functions_security_group_ids: str = ""
 
 
 class GcpRegionConfig(BaseModel):
@@ -143,6 +146,8 @@ class GcpRegionConfig(BaseModel):
     k8s_pods_range: str = ""
     k8s_services_range: str = ""
     k8s_node_tag: str = ""
+    functions_network: str = ""
+    functions_subnetwork: str = ""
 
 
 # Cloud → per-region-config model. Drives the /import parser and the /regions/{cloud}
