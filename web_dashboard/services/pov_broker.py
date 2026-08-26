@@ -89,9 +89,33 @@ GUEST_STATE_VOLUME = "dashboard_agent_state"
 # the management ports the later wire-up slices actually use.
 BROKER_PORTS = (22, 443, 3389, 5985, 5986)
 
-# The one job type this slice needs. `agent_ansible` arrives with the wire-up slice that
-# uses it; granting it now would be granting something nothing runs.
-BROKER_JOB_TYPES = ("agent_discover",)
+# What a POV broker may be asked to do. Each entry is added by the slice that uses it —
+# granting one nothing runs is granting something for no reason.
+#
+#   agent_discover  the broker reads the POV's own VMs (slice 3)
+#   agent_gateway   the broker runs the POV's BeyondTrust Gateway (slice 5)
+#
+# `agent_ansible` is still absent: the per-VM wire-up is a later slice, and it needs its
+# own `ansible:` target list rather than this one.
+#
+# **A broker enrolled before a grant was added does not have it.** policy.yaml is written
+# once, at enrolment, and the agent reads it at start — so adding a type here changes
+# nothing on a running broker until it is re-brokered. `pov_gateway.preflight` refuses
+# with that remedy rather than letting the job lease and be refused on the far side.
+BROKER_JOB_TYPES = ("agent_discover", "agent_gateway")
+
+# The Gateway image a POV broker is allowed to run, and the flag that makes it work.
+#
+# On a customer-owned agent this comes from a file the customer wrote, and that is the
+# trust boundary. On a POV it does not: the dashboard generated the broker VM, the
+# bootstrap and this policy, so the boundary is somewhere else entirely. Keeping the same
+# SHAPE anyway is still worth it — one code path on the agent, one thing to reason about —
+# but nobody should read this block as the customer having agreed to it.
+#
+# `privileged` is not decoration. A Gateway needs NET_ADMIN, NET_RAW, IPC_LOCK and
+# /dev/net/tun to carry protocol tunnels; without them it registers online and every
+# tunnel times out, which reads as a firewall problem for days.
+GATEWAY_IMAGE = "beyondtrust/sra-jumpoint:latest"
 
 # How often the enrolment wait looks. Sixty seconds of margin below the code's TTL so the
 # last poll still has a code to redeem.
@@ -221,6 +245,13 @@ def render_policy(targets: list[str]) -> str:
     lines += [
         "limits:",
         f"  max_hosts: {max(len(targets), 1)}",
+        # The Gateway this POV's broker may run. See GATEWAY_IMAGE for why a generated
+        # policy still carries a block whose whole point elsewhere is that the customer
+        # wrote it.
+        "gateway:",
+        "  enabled: true",
+        f"  image: {GATEWAY_IMAGE}",
+        "  privileged: true",
         "",
     ]
     return "\n".join(lines)
@@ -238,6 +269,14 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
     10001, and a mode 0600 file owned by root is unreadable inside it; the agent says so
     and exits rather than enrolling. A single-use fifteen-minute secret readable on a
     machine inside the POV is the trade the Agents page already makes for the same reason.
+
+    **The Docker socket is mounted, and that is root on the broker VM.** The Agents page
+    deliberately does not emit that mount — applying it there is a separate, considered
+    act by the operator, because their agent host is theirs. A POV broker is not: the
+    dashboard created that VM from a template for this POV, and the Gateway it has to run
+    is a sibling container, so the socket is a prerequisite of the machine's only job. The
+    line is worth seeing rather than inferring, which is why it is here and commented
+    rather than folded into a shared flag block.
     """
     stamp = (now or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%SZ")
     # The name reaches a shell comment. `api/pov` already constrains it to a slug, but a
@@ -269,6 +308,7 @@ docker volume rm {GUEST_STATE_VOLUME} >/dev/null 2>&1 || true
 docker run -d --name dashboard-agent --restart unless-stopped \\
   --read-only --cap-drop ALL --security-opt no-new-privileges:true \\
   --user 10001:10001 --tmpfs /tmp \\
+  -v /var/run/docker.sock:/var/run/docker.sock \\
   -v {GUEST_STATE_VOLUME}:/var/lib/dashboard-agent \\
   -v "$STATE/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z" \\
   -v "$STATE/enroll-code:/etc/dashboard-agent/enroll-code:ro,Z" \\

@@ -63,7 +63,8 @@ AUDIENCE_CONFIG = "agent_base_url"
 # Job types a remote agent may execute. MUST stay disjoint from
 # jobs_worker.HANDLED_TYPES; the static test enforces it. These run on a network the
 # local worker cannot reach, so a type in both would be raced between two executors.
-AGENT_JOB_TYPES = ("agent_discover", "agent_hypervisor", "agent_ansible")
+AGENT_JOB_TYPES = ("agent_discover", "agent_hypervisor", "agent_ansible",
+                   "agent_gateway")
 
 # An agent is "online" if it polled within this many seconds. Three times the default
 # poll interval, so one dropped request does not flap the badge.
@@ -436,6 +437,10 @@ MIN_DASHBOARD_SECRET_VERSION = (2, 1)
 # runner. Below this the job type is not in HANDLERS at all.
 MIN_ANSIBLE_VERSION = (2, 3)
 
+# The agent build that first carried the `agent_gateway` handler — the POV Gateway. Below
+# this the job type is not in HANDLERS at all, so the agent refuses it by name.
+MIN_GATEWAY_VERSION = (2, 4)
+
 
 def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
     """Whether this agent's self-reported version is at least ``minimum``.
@@ -484,6 +489,35 @@ def ansible_upgrade_hint(agent: RemoteAgent) -> str:
             f"with its own `targets:` list, and the runner image for the kind of run "
             f"pulled — chrweav/ansible-winrm for VMs, chrweav/ansible-cloud for databases, "
             f"not the hypervisor sibling; see docs/remote-agents.md. Nothing was queued.")
+
+
+def supports_gateway(agent: RemoteAgent) -> bool:
+    """Whether this agent can start a BeyondTrust Gateway beside itself.
+
+    Read at ENQUEUE time, like every other version gate here. The refusal an older agent
+    produces is honest — ``agent_gateway`` is simply absent from its closed ``HANDLERS``
+    dict — but it lands in a job's Live Output, where "unknown job type" reads as a
+    dashboard bug rather than as "this container is a build behind".
+    """
+    return _version_at_least(agent, MIN_GATEWAY_VERSION)
+
+
+def gateway_upgrade_hint(agent: RemoteAgent) -> str:
+    """The refusal an operator sees when a POV's broker is too old to run a Gateway.
+
+    Two halves, because on a POV both are almost always true at once: the image has to be
+    newer, AND the broker's ``policy.yaml`` has to grant the new job type. On a POV that
+    second half is not a file the operator edits — the dashboard generates it — so the
+    remedy is the Broker button, not an editor. Saying so here is the difference between
+    a one-click fix and an SSH session into a customer's environment.
+    """
+    return (f"The broker agent '{agent.name}' reports version "
+            f"{agent.agent_version or 'unknown'} and installing a Gateway needs at least "
+            f"{'.'.join(str(p) for p in MIN_GATEWAY_VERSION)}. Its policy.yaml also has "
+            f"to grant `agent_gateway` and carry a `gateway:` block naming the image. On "
+            f"a POV both are fixed the same way: press **Broker** on the POV to re-issue "
+            f"the enrolment and rewrite the policy, having first pulled a newer "
+            f"chrweav/dashboard-agent onto the broker VM. Nothing was queued.")
 
 
 def supports_dashboard_secret(agent: RemoteAgent) -> bool:

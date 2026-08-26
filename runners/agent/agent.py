@@ -102,7 +102,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 #     any `ansible_*` extra var. A dashboard-supplied inventory could set
 #     `ansible_connection: local`, which would run the operator's playbook inside the runner
 #     container on this network instead of against the target it names.
-AGENT_VERSION = "2.3.1"
+AGENT_VERSION = "2.4.0"
 
 log = logging.getLogger("agent")
 
@@ -957,7 +957,7 @@ class Policy:
     def __init__(self, allow: list, deny: list, job_types: set, limits: dict,
                  digest: str, connection_verbs: dict = None, sibling: dict = None,
                  loopback_connections: set = None, ansible: dict = None,
-                 ansible_allow: list = None):
+                 ansible_allow: list = None, gateway: dict = None):
         self.allow = allow            # [(network, {ports} or None)]
         self.deny = deny              # [network]
         self.job_types = job_types
@@ -990,6 +990,28 @@ class Policy:
         # Empty means "nothing may be configured", which is the correct fail-closed reading
         # of an `ansible:` block with no targets — not "fall back to the discovery list".
         self.ansible_allow = ansible_allow or []
+        # The BeyondTrust Gateway, off unless the customer turns it on AND names an image.
+        #
+        # Its own block rather than a third `ansible.*_image`, because what it grants is
+        # different in kind: not "run a playbook and exit" but "run a LONG-LIVED container,
+        # privileged, that brokers sessions into this network". `privileged` is the whole
+        # reason it is spelled out here — a Gateway needs NET_ADMIN, NET_RAW, IPC_LOCK and
+        # /dev/net/tun for protocol tunnelling, and without them it registers online and
+        # then times out on tunnel data, which reads as a firewall problem for days.
+        #
+        # A JOB CANNOT ASK FOR ANY OF THIS. There is no image field, no privileged field
+        # and no network field in an agent_gateway envelope — the same property
+        # `_run_sibling` documents. The customer opts in here or it does not happen.
+        gateway = gateway or {}
+        self.gateway_enabled = bool(gateway.get("enabled"))
+        self.gateway_image_name = str(gateway.get("image") or "")
+        # Default FALSE. An operator who enables the block without reading has granted a
+        # container, not a privileged one, and gets a Gateway that registers and cannot
+        # tunnel — which the refusal below names, rather than leaving them to find it.
+        self.gateway_privileged = bool(gateway.get("privileged"))
+        self.gateway_network = str(gateway.get("network")
+                                   or (sibling or {}).get("network") or "bridge")
+
         # The sibling runner is off unless the customer turns it on AND names an image.
         # The image comes from here and never from a job, so a compromised dashboard
         # cannot choose what gets run on the host.
@@ -1056,6 +1078,32 @@ class Policy:
                 f"which is the image a {run_kind!r} run needs. Add it and pull it — the "
                 f"agent will not pull an image for you.")
         return image
+
+    def gateway_image(self) -> str:
+        """The Gateway image, or raise :class:`PolicyRefusal` naming what is missing.
+
+        Three separate refusals rather than one, because they have three different fixes
+        and the operator reading this is looking at Live Output on a dashboard that cannot
+        edit their file for them.
+        """
+        if not self.gateway_enabled:
+            raise PolicyRefusal(
+                "this agent's policy.yaml does not enable the BeyondTrust Gateway. Add a "
+                "`gateway:` block with `enabled: true`, the image, and "
+                "`privileged: true` — see docs/remote-agents.md#the-beyondtrust-gateway. "
+                "It needs the Docker socket, like the other runners.")
+        if not self.gateway_image_name:
+            raise PolicyRefusal(
+                "policy.yaml enables the Gateway but names no `gateway.image`. Add it and "
+                "pull it — the agent will not pull an image for you.")
+        if not self.gateway_privileged:
+            raise PolicyRefusal(
+                "policy.yaml enables the Gateway but does not set "
+                "`gateway.privileged: true`. A Gateway needs NET_ADMIN, NET_RAW, IPC_LOCK "
+                "and /dev/net/tun to carry protocol tunnels; without them it registers "
+                "online and every tunnel silently times out, which looks like a firewall "
+                "for a long time. This agent will not start one it knows cannot work.")
+        return self.gateway_image_name
 
     def check_ansible(self, ip: str, port: int) -> None:
         """Raise :class:`PolicyRefusal` unless a playbook may be run against this endpoint.
@@ -1212,9 +1260,10 @@ class Policy:
                     loopback.add(name)
         ansible = doc.get("ansible") if isinstance(doc.get("ansible"), dict) else {}
         ansible_allow = cls._parse_targets(ansible.get("targets"), "ansible.targets")
+        gateway = doc.get("gateway") if isinstance(doc.get("gateway"), dict) else {}
         return cls(allow, deny, job_types, limits,
                    hashlib.sha256(raw).hexdigest(), verbs, sibling, loopback,
-                   ansible, ansible_allow)
+                   ansible, ansible_allow, gateway)
 
     def check(self, ip: str, port: int) -> None:
         """Raise :class:`PolicyRefusal` unless this exact address:port is allowed."""
@@ -1539,6 +1588,42 @@ class Dashboard:
                 audience=self.identity.audience, job_id=job_id, ref=ref)
         except SealError as exc:
             raise PolicyRefusal(f"connection {ref!r}: {exc}") from exc
+        self.hold_secret(secret)
+        return secret
+
+    def gateway_deploy_key(self, job_id: str) -> str:
+        """Fetch this job's BeyondTrust Gateway deploy key from the dashboard, sealed.
+
+        The same shape as :meth:`job_secret` — read that one first. The body carries only
+        the ephemeral public key, because there is nothing here to select with: the
+        dashboard derives the key from the job row, so a stolen agent identity cannot ask
+        for another POV's Gateway.
+        """
+        private_b64, public_b64 = generate_reply_keypair()
+        resp = self._request("POST", f"/api/agent/jobs/{job_id}/gateway-key",
+                             {"reply_key": public_b64})
+        if resp.status_code != 200:
+            detail = ""
+            try:
+                detail = str((resp.json() or {}).get("detail") or "")
+            except Exception:  # noqa: BLE001
+                detail = (resp.text or "")[:400]
+            raise PolicyRefusal(
+                f"the dashboard refused to release this POV's Gateway deploy key "
+                f"({resp.status_code}): {detail} — this is a dashboard-side refusal, not "
+                f"a policy.yaml problem on this host.")
+        try:
+            envelope = (resp.json() or {}).get("sealed") or {}
+        except Exception as exc:  # noqa: BLE001
+            raise PolicyRefusal(
+                "the dashboard's Gateway deploy key response was not JSON") from exc
+        try:
+            secret = open_sealed(
+                private_b64, envelope, agent_id=self.identity.agent_id,
+                audience=self.identity.audience, job_id=job_id,
+                ref=GATEWAY_SEAL_REF)
+        except SealError as exc:
+            raise PolicyRefusal(f"the Gateway deploy key: {exc}") from exc
         self.hold_secret(secret)
         return secret
 
@@ -4147,9 +4232,175 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
+# The `ref` the dashboard seals this POV's deploy key under. Must match
+# `web_dashboard/services/pov_gateway.SEAL_REF` exactly: it is part of the sealed
+# envelope's AAD, so a mismatch fails as "did not authenticate" rather than as a typo.
+GATEWAY_SEAL_REF = "pov-gateway-deploy-key"
+
+# What the Gateway container is called on this host. GENERATED, never supplied — there is
+# no field in the agent_gateway protocol through which a dashboard string could name
+# something on this machine, which is the same rule the snapshot verb follows.
+GATEWAY_CONTAINER = "pov-gateway"
+
+
+def _gateway_container_id(name: str = GATEWAY_CONTAINER):
+    """The id of the Gateway container on this host, or None.
+
+    Matches on the exact name. Docker's filter is a substring match by default, so an
+    unanchored one would also find `pov-gateway-old` — and stopping the wrong container is
+    not a mistake this should be able to make.
+    """
+    status, body = _engine(
+        "GET", "/containers/json?all=1&filters="
+               + _quote(json.dumps({"name": [name]})))
+    if status != 200 or not isinstance(body, list):
+        return None
+    for row in body:
+        for raw in row.get("Names") or []:
+            if str(raw).lstrip("/") == name:
+                return row.get("Id")
+    return None
+
+
+def _remove_gateway(emit) -> bool:
+    """Stop and remove the Gateway container. True if there was one."""
+    container = _gateway_container_id()
+    if not container:
+        return False
+    _engine("POST", f"/containers/{container}/stop?t=10")
+    status, _ = _engine("DELETE", f"/containers/{container}?force=1")
+    if status not in (204, 404):
+        raise PolicyRefusal(
+            f"the Gateway container would not be removed ({status}). Remove it by hand on "
+            f"this host: docker rm -f {GATEWAY_CONTAINER}")
+    emit(f"removed the {GATEWAY_CONTAINER} container")
+    return True
+
+
+def run_gateway(payload: dict, policy: "Policy", emit, cancelled, job_id: str = "",
+                dashboard=None) -> dict:
+    """Start (or remove) the BeyondTrust Gateway container on this host.
+
+    The odd one out among these handlers, and worth saying why: every other job here is a
+    one-shot that finishes. This one leaves a **long-lived, privileged container running**,
+    because that is what a Gateway is. So the order below is the security model:
+
+    1. Read the two scalars the envelope carries. There is nothing else in it — no image,
+       no container name, no privileged flag, no network.
+    2. Ask policy for the image, which also asserts the customer opted into privileged. A
+       removal skips this: taking a container away must not need the grant that putting
+       one there does, or a POV whose policy was narrowed becomes un-teardownable.
+    3. Only then fetch the sealed deploy key — so a refused policy costs the dashboard
+       nothing and releases no credential.
+
+    The container is recreated rather than reused. A deploy key change is the whole reason
+    to run this again, and a running container holds the key it started with.
+    """
+    action = str(payload.get("gateway_action") or "install")
+    try:
+        timeout = float(payload.get("timeout_s") or 120)
+    except (TypeError, ValueError):
+        timeout = 120.0
+
+    if action == "remove":
+        if MODE == "audit":
+            emit("AUDIT MODE — would remove the Gateway container; nothing was changed")
+            return {"removed": False, "audit": True}
+        removed = _remove_gateway(emit)
+        return {"removed": removed,
+                "detail": "removed" if removed else "there was no Gateway container"}
+
+    # (2) Before the network and before the fetch.
+    image = policy.gateway_image()
+
+    if MODE == "audit":
+        # Audit mode promises this agent "logs every job it would run, in full, and
+        # executes nothing". Returning here means no deploy key is released either.
+        emit(f"AUDIT MODE — would start {image} as {GATEWAY_CONTAINER} (privileged); "
+             f"nothing was fetched and nothing was started")
+        return {"started": False, "audit": True}
+
+    if dashboard is None:
+        raise PolicyRefusal("no dashboard channel, so the deploy key cannot be fetched")
+    # (3) Registered for redaction inside this call, before anything below can emit.
+    deploy_key = dashboard.gateway_deploy_key(job_id)
+    if not deploy_key.strip():
+        raise PolicyRefusal(
+            "the dashboard sent an empty Gateway deploy key. Paste the key from the "
+            "Gateway you created in PRA onto the POV and try again.")
+
+    # Replace whatever is there. Not an optimisation to skip this: the reason to re-run is
+    # usually a new key, and a running container keeps the one it started with.
+    if _remove_gateway(emit):
+        emit("replaced the previous Gateway container")
+
+    if cancelled():
+        raise PolicyRefusal("cancelled before the Gateway was started")
+
+    spec = {
+        "Image": image,
+        # In Env rather than argv: argv shows in `ps` on the host.
+        "Env": [f"DEPLOY_KEY={deploy_key}"],
+        "HostConfig": {
+            # Every field here is a CONSTANT. Nothing in the job can reach any of them.
+            "RestartPolicy": {"Name": "unless-stopped"},
+            "Binds": [],
+            # The one privileged container this agent will ever start, and only because
+            # the customer wrote `privileged: true` in their own file. See
+            # Policy.gateway_image for what breaks without it.
+            "Privileged": True,
+            "NetworkMode": policy.gateway_network,
+            "SecurityOpt": [],
+        },
+    }
+    status, body = _engine("POST",
+                           f"/containers/create?name={_quote(GATEWAY_CONTAINER)}",
+                           spec)
+    if status == 404:
+        raise PolicyRefusal(
+            f"the Gateway image {image!r} is not present on this host. Pull it first: "
+            f"docker pull {image}")
+    if status not in (200, 201):
+        raise PolicyRefusal(f"could not create the Gateway container ({status}): "
+                            f"{str(body)[:200]}")
+    container = body.get("Id")
+
+    status, _ = _engine("POST", f"/containers/{container}/start")
+    if status not in (204, 304):
+        raise PolicyRefusal(f"the Gateway container would not start ({status})")
+    emit(f"started {image} as {GATEWAY_CONTAINER}")
+
+    # A short settle, then read the state back. Deliberately NOT a registration check:
+    # whether PRA accepted this node is a question only the dashboard can ask, against the
+    # tenant's own API, and an agent that guessed at it would report green for a Gateway
+    # with a bad key. All this proves is that the container did not exit immediately —
+    # which is the failure a wrong image or a missing /dev/net/tun produces.
+    deadline = time.monotonic() + min(timeout, 60.0)
+    state = {}
+    while time.monotonic() < deadline:
+        if cancelled():
+            raise PolicyRefusal("cancelled while the Gateway was starting")
+        status, info = _engine("GET", f"/containers/{container}/json")
+        state = (info or {}).get("State") or {} if status == 200 else {}
+        if not state.get("Running"):
+            break
+        time.sleep(3)
+
+    if not state.get("Running"):
+        raise PolicyRefusal(
+            f"the Gateway container exited (code {state.get('ExitCode')}). Check "
+            f"`docker logs {GATEWAY_CONTAINER}` on this host — a wrong image tag and a "
+            f"kernel without /dev/net/tun both look like this.")
+
+    emit("the Gateway container is running; the dashboard will confirm registration "
+         "against the PRA tenant")
+    return {"started": True, "container": GATEWAY_CONTAINER, "image": image}
+
+
 HANDLERS = {"agent_discover": run_discovery,
             "agent_hypervisor": run_hypervisor,
-            "agent_ansible": run_ansible}
+            "agent_ansible": run_ansible,
+            "agent_gateway": run_gateway}
 
 
 # ── Job execution ─────────────────────────────────────────────────────────────

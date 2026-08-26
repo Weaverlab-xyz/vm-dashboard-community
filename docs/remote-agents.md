@@ -473,6 +473,33 @@ registering one new one.
 The same information is available to a script at `GET /api/agent/audience`, and the reset at
 `DELETE /api/agent/audience`; both are admin-only.
 
+#### The BeyondTrust Gateway
+
+`agent_gateway` lets an agent run a **Gateway node on its own host** — long-lived, and
+`--privileged`. Read that second word before enabling it: a Gateway carries protocol
+tunnels, which needs `NET_ADMIN`, `NET_RAW`, `IPC_LOCK` and `/dev/net/tun`, and Docker has
+no granular way to grant that set. The agent refuses to start one without the flag rather
+than start one that cannot work — without those capabilities a Gateway registers **online**
+and every tunnel silently times out, which reads as a firewall problem for days.
+
+Four things must agree, the same shape Config Management uses:
+
+1. the dashboard grants this agent the `agent_gateway` job type;
+2. `agent_gateway` is in `job_types:` in your policy.yaml;
+3. a `gateway:` block naming the image and setting `privileged: true`;
+4. the deploy key, which the dashboard holds and the agent fetches per job, sealed.
+
+The image comes from your file and never from a job — a job says only *install* or
+*remove*. Pull it yourself; the agent will not. Pin a tag rather than tracking `latest`
+under a registered Gateway.
+
+It needs the Docker socket, which is root on the host — the same requirement and the same
+overlay as the other runners.
+
+The dashboard-side driver for this today is the POV feature, which generates the whole
+policy for a broker VM it created; see
+[pov-instance.md](pov-instance.md#the-pov-gateway).
+
 ### 4. Keep an eye on who is enrolled
 
 The agents table answers "is this one mine?" without leaving the page:

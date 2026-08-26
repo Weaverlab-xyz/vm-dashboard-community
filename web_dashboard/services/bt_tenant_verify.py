@@ -82,27 +82,21 @@ async def _verify_pra(tenant: Tenant) -> tuple[bool, str]:
             "this tenant has no OAuth client id and secret. PRA authenticates with an API "
             "account created under /login > Management > API Configuration, not with a "
             "user login.")
-    url = f"{tenant.api_base}/oauth2/token"
+    # The SAME token call the Gateway install makes, not a second copy of it. A verify
+    # that authenticates differently from the real work is a check that can pass while the
+    # work fails.
+    from . import pra_tenant_api
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
-            resp = await client.post(
-                url, auth=(tenant.client_id, tenant.secret),
-                data={"grant_type": "client_credentials"})
+            await pra_tenant_api.get_token(client, tenant)
+    except pra_tenant_api.PRATenantError as exc:
+        # Authored text, no exception interpolated — see the module docstring.
+        return False, str(exc)
     except Exception as exc:  # noqa: BLE001
         # Logged here, where the cause is still whole, and deliberately not carried out
         # of this function in any form.
         logger.warning("PRA verify against %s failed", tenant.api_base, exc_info=True)
         return False, f"PRA at {tenant.api_base}: {_http_reason(exc)}"
-
-    if resp.status_code in (400, 401, 403):
-        return False, (
-            f"PRA rejected these credentials ({resp.status_code}). The client id and "
-            f"secret come from an API account in PRA (Management > API Configuration) — "
-            f"a user login will always fail here.")
-    if resp.status_code != 200:
-        return False, f"PRA token request failed ({resp.status_code})."
-    if not (resp.json() or {}).get("access_token"):
-        return False, "PRA answered 200 with no access_token in the body."
     return True, f"PRA at {tenant.api_base} issued a token."
 
 

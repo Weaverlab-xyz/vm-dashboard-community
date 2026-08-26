@@ -20,7 +20,13 @@
   Settings: Settings holds the singletons a demo instance uses, and a second place to
   configure a tenant there is exactly the ambiguity install_profile removed.
 
-  PAM wire-up, share links and the expiry timer arrive in later slices.
+  The Gateway column is where a POV becomes reachable: it is the BeyondTrust Gateway
+  running INSIDE the environment, on the broker VM, registered into that POV's own PRA
+  tenant. Its status is deliberately behind a button — it is a live read against a
+  customer's appliance, and one per row would make this page as slow as the slowest
+  customer's network.
+
+  Per-VM PAM wire-up, share links and the expiry timer arrive in later slices.
 #}
 
 {% block content %}
@@ -160,6 +166,7 @@
             <th class="px-4 py-2 text-left font-medium">Status</th>
             <th class="px-4 py-2 text-left font-medium">Power</th>
             <th class="px-4 py-2 text-left font-medium">Broker</th>
+            <th class="px-4 py-2 text-left font-medium">Gateway</th>
             <th class="px-4 py-2 text-left font-medium">Tenants</th>
             <th class="px-4 py-2 text-left font-medium">Template</th>
             <th class="px-4 py-2 text-left font-medium">Created by</th>
@@ -195,6 +202,40 @@
                 <!-- The reason lives here rather than in error_message: a POV whose broker
                      did not come up is running, billing and reapable. -->
                 <p x-show="e.broker_error" class="text-xs text-amber-700 mt-0.5" x-text="e.broker_error"></p>
+              </td>
+              <td class="px-4 py-2">
+                <div x-show="editingGateway !== e.id" class="space-y-0.5">
+                  <p class="text-xs whitespace-nowrap"
+                     :class="e.gateway_name ? 'text-gray-600' : 'text-gray-300'"
+                     x-text="e.gateway_name || '—'"></p>
+                  <!-- Three states, not two. 'named but no key' is a POV somebody
+                       half-configured, and it fails at install rather than at save. -->
+                  <p x-show="e.gateway_name && !e.gateway_has_key"
+                     class="text-xs text-amber-700">no deploy key</p>
+                  <p x-show="gatewayCheck[e.id]" class="text-xs"
+                     :class="{'text-green-700': (gatewayCheck[e.id]||{}).state === 'connected',
+                              'text-red-600': ['missing','disconnected'].includes((gatewayCheck[e.id]||{}).state),
+                              'text-gray-400': ['unknown','none'].includes((gatewayCheck[e.id]||{}).state)}"
+                     x-text="(gatewayCheck[e.id]||{}).state"></p>
+                  <div class="flex gap-2">
+                    <button @click="startEditGateway(e)" :disabled="!actionable(e)"
+                            class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
+                    <button x-show="e.gateway_name" @click="checkGateway(e)"
+                            class="text-xs text-blue-600 underline">check</button>
+                  </div>
+                </div>
+                <div x-show="editingGateway === e.id" class="space-y-1">
+                  <input type="text" x-model="gatewayEdit.name" placeholder="Gateway name in PRA"
+                         class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                  <input type="password" x-model="gatewayEdit.deploy_key" autocomplete="new-password"
+                         :placeholder="gatewayEdit.has_key ? 'key stored — blank keeps it' : 'deploy key'"
+                         class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                  <div class="flex gap-1">
+                    <button @click="saveGateway(e, true)" class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white">Install</button>
+                    <button @click="saveGateway(e, false)" class="text-xs px-2 py-0.5 rounded border border-gray-300">Save only</button>
+                    <button @click="editingGateway = ''" class="text-xs px-2 py-0.5 text-gray-500">Cancel</button>
+                  </div>
+                </div>
               </td>
               <td class="px-4 py-2">
                 <div x-show="editingTenants !== e.id" class="space-y-0.5">
@@ -461,6 +502,12 @@ function povPage() {
     savingTenant: false,
     editingTenants: '',
     tenantEdit: {},
+    editingGateway: '',
+    gatewayEdit: { name: '', deploy_key: '', has_key: false },
+    // Keyed by environment id and NOT persisted across a load(): a live appliance read is
+    // true at the moment it was made, and showing yesterday's answer next to today's row
+    // is the "still reads connected three weeks later" problem this page avoids.
+    gatewayCheck: {},
     tenantForm: { kind: 'pra', name: '', base_url: '', client_id: '', secret: '',
                   secret_ref: '', options: {}, is_default: false },
     _poll: null,
@@ -734,6 +781,41 @@ function povPage() {
         this.editingTenants = '';
         await this.load();
       } catch (e) { this.error = e.message; }
+    },
+
+    startEditGateway(env) {
+      this.gatewayEdit = { name: env.gateway_name || '', deploy_key: '',
+                           has_key: !!env.gateway_has_key };
+      this.editingGateway = env.id;
+    },
+
+    async saveGateway(env, install) {
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/gateway`, {
+          name: this.gatewayEdit.name,
+          deploy_key: this.gatewayEdit.deploy_key,
+          install: !!install,
+        });
+        this.editingGateway = '';
+        this.notice = install
+          ? `${env.name}: installing the Gateway on the broker VM — watch job ${data.job_id}.`
+          : `${env.name}: Gateway settings saved.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async checkGateway(env) {
+      this.error = ''; this.notice = '';
+      try {
+        const res = await fetch(`/api/pov/managed/${env.id}/gateway`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { this.error = data.detail || `Could not check (${res.status}).`; return; }
+        // The detail carries the remedy, so it goes in front of the operator rather than
+        // being collapsed into the one-word badge.
+        this.gatewayCheck[env.id] = data.gateway || {};
+        this.notice = `${env.name}: ${(data.gateway || {}).detail || ''}`;
+      } catch (e) { this.error = 'Could not reach the dashboard API.'; }
     },
 
     async brokerRun(env) {

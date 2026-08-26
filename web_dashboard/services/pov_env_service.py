@@ -26,7 +26,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
-from . import job_service, lab_platforms, pov_broker
+from . import job_service, lab_platforms, pov_broker, pov_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -302,8 +302,8 @@ async def run_env_power(job_id: str, meta: dict) -> None:
 async def run_env_destroy(job_id: str, meta: dict) -> None:
     """Delete the environment from the platform and mark the row destroyed.
 
-    Reaps the broker agent and then the platform side; the PAM wiring's own teardown
-    steps slot in between as their slices land. The property they all rely on is kept
+    Reaps the POV's Gateway, then its broker agent, then the platform side; the per-VM
+    PAM wiring's teardown slots in ahead of the Gateway as its slice lands. The property they all rely on is kept
     here: **the platform delete is reached even when an earlier step fails**, because a
     half-torn-down POV that keeps billing is the worse outcome.
 
@@ -322,7 +322,23 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
 
         problems: list[str] = []
 
-        # The broker agent goes FIRST. It is an enrolled principal that can lease work;
+        # The Gateway before the broker that runs it, and both before the platform.
+        # Reversed, the removal job would be queued on an agent that has just been
+        # revoked and could never lease it.
+        try:
+            job_service.append_job_log(db, job_id, pov_gateway.teardown(db, env))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: gateway teardown failed", env.id, exc_info=True)
+            # Not a `problem`: the environment delete below takes the container with it,
+            # and the PRA-side node is a customer-appliance object this dashboard never
+            # created. Blocking the reaping of a billing environment on tidying somebody
+            # else's appliance is the wrong trade.
+            job_service.append_job_log(
+                db, job_id,
+                f"WARNING: the Gateway could not be removed cleanly ({exc}). The "
+                f"environment delete takes the container; retire the node in PRA by hand.")
+
+        # The broker agent goes next. It is an enrolled principal that can lease work;
         # deleting its VM out from under it leaves a row that keeps polling from a machine
         # that no longer exists, and whatever job it holds running nowhere.
         try:

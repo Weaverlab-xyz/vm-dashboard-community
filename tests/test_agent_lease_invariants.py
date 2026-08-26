@@ -208,8 +208,16 @@ def test_the_operator_half_is_admin_only():
     # a reply key checked before any credential is obtained) plus an AAD bound to the target
     # endpoint and a size cap. There is deliberately nothing in its request body to select
     # with. If a third route wants in, it needs that list, not this one.
+    #
+    # `job_gateway_key` is the third, and it is here because it clears `job_secret`'s bar
+    # item for item — a signature, `owned_job`, `statuses=("running",)`, a reply key
+    # checked before the secret is read, and the POV derived from the job row so the body
+    # has nothing to select with. It hands out LESS than either of the other two: one
+    # deploy key and no playbook. What is genuinely different is the secret's lifetime — a
+    # PRA deploy key is neither single-use nor short-lived — which is an argument for the
+    # sealed channel it uses, not against this route.
     agent_half = {"enroll_agent", "lease_job", "heartbeat", "push_logs", "complete",
-                  "job_secret", "job_ansible_bundle"}
+                  "job_secret", "job_ansible_bundle", "job_gateway_key"}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
