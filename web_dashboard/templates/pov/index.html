@@ -15,6 +15,11 @@
   "none" and "offline" are different failures with different fixes, so they are never
   collapsed into one "not working" badge.
 
+  The BeyondTrust tenants section is the third inventory, and the one that decides
+  WHOSE appliance a POV is wired into. It is deliberately on this page rather than in
+  Settings: Settings holds the singletons a demo instance uses, and a second place to
+  configure a tenant there is exactly the ambiguity install_profile removed.
+
   PAM wire-up, share links and the expiry timer arrive in later slices.
 #}
 
@@ -100,6 +105,21 @@
           Blank uses <span class="font-mono">broker</span>.
         </p>
       </div>
+      <template x-for="k in tenantKinds" :key="'pick-' + k.kind">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" x-text="k.label + ' tenant'"></label>
+          <select x-model="form[k.kind + '_field']"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <!-- Blank is a real choice, not a placeholder: a POV is stood up before its
+                 wire-up runs, and requiring all three here would gate a step that does
+                 not need them yet. -->
+            <option value="">Choose later</option>
+            <template x-for="t in tenantsOfKind(k.kind)" :key="t.id">
+              <option :value="t.id" x-text="t.name + (t.is_default ? ' (default)' : '')"></option>
+            </template>
+          </select>
+        </div>
+      </template>
       <div x-show="current.idle_suspend">
         <label class="block text-sm font-medium text-gray-700 mb-1">Suspend when idle</label>
         <select x-model.number="form.suspend_on_idle_seconds"
@@ -140,6 +160,7 @@
             <th class="px-4 py-2 text-left font-medium">Status</th>
             <th class="px-4 py-2 text-left font-medium">Power</th>
             <th class="px-4 py-2 text-left font-medium">Broker</th>
+            <th class="px-4 py-2 text-left font-medium">Tenants</th>
             <th class="px-4 py-2 text-left font-medium">Template</th>
             <th class="px-4 py-2 text-left font-medium">Created by</th>
             <th class="px-4 py-2 text-right font-medium">Actions</th>
@@ -175,6 +196,34 @@
                      did not come up is running, billing and reapable. -->
                 <p x-show="e.broker_error" class="text-xs text-amber-700 mt-0.5" x-text="e.broker_error"></p>
               </td>
+              <td class="px-4 py-2">
+                <div x-show="editingTenants !== e.id" class="space-y-0.5">
+                  <template x-for="k in tenantKinds" :key="e.id + '-' + k.kind">
+                    <p class="text-xs whitespace-nowrap"
+                       :class="tenantName(e, k.kind) ? 'text-gray-600' : 'text-gray-300'">
+                      <span class="text-gray-400" x-text="k.short + ':'"></span>
+                      <span x-text="tenantName(e, k.kind) || '—'"></span>
+                    </p>
+                  </template>
+                  <button @click="startEditTenants(e)" :disabled="!actionable(e)"
+                          class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
+                </div>
+                <div x-show="editingTenants === e.id" class="space-y-1">
+                  <template x-for="k in tenantKinds" :key="e.id + '-edit-' + k.kind">
+                    <select x-model="tenantEdit[k.kind + '_field']"
+                            class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs">
+                      <option value="" x-text="k.short + ': none'"></option>
+                      <template x-for="t in tenantsOfKind(k.kind)" :key="'e' + t.id">
+                        <option :value="t.id" x-text="k.short + ': ' + t.name"></option>
+                      </template>
+                    </select>
+                  </template>
+                  <div class="flex gap-1">
+                    <button @click="saveTenants(e)" class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white">Save</button>
+                    <button @click="editingTenants = ''" class="text-xs px-2 py-0.5 text-gray-500">Cancel</button>
+                  </div>
+                </div>
+              </td>
               <td class="px-4 py-2 text-gray-600" x-text="e.template_name || e.template_id || '—'"></td>
               <td class="px-4 py-2 text-gray-600" x-text="e.created_by || '—'"></td>
               <td class="px-4 py-2 text-right whitespace-nowrap">
@@ -196,6 +245,142 @@
           </template>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- BeyondTrust tenants -->
+  <div x-show="!loading" class="space-y-3">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-lg font-medium text-gray-900">BeyondTrust tenants</h2>
+      <button @click="showTenants = !showTenants" class="text-xs text-blue-600 underline"
+              x-text="showTenants ? 'hide' : 'show'"></button>
+    </div>
+    <p class="text-xs text-gray-400">
+      Which PRA appliance, Password Safe tenant and Entitle tenant a POV is wired into.
+      A demo instance uses the single set in Settings; this instance keeps a registry
+      because several POVs run at once and each belongs to a different customer.
+    </p>
+
+    <div x-show="showTenants" class="space-y-3">
+      <div x-show="tenants.length" class="overflow-hidden border border-gray-200 rounded-lg">
+        <table class="min-w-full divide-y divide-gray-200 text-sm">
+          <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+            <tr>
+              <th class="px-4 py-2 text-left font-medium">Product</th>
+              <th class="px-4 py-2 text-left font-medium">Name</th>
+              <th class="px-4 py-2 text-left font-medium">URL</th>
+              <th class="px-4 py-2 text-left font-medium">Credential</th>
+              <th class="px-4 py-2 text-left font-medium">In use</th>
+              <th class="px-4 py-2 text-right font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100 bg-white">
+            <template x-for="t in tenants" :key="t.id">
+              <tr :class="t.is_active ? '' : 'opacity-50'">
+                <td class="px-4 py-2 text-gray-600" x-text="t.label"></td>
+                <td class="px-4 py-2">
+                  <span class="font-medium text-gray-900" x-text="t.name"></span>
+                  <span x-show="t.is_default"
+                        class="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">default</span>
+                  <!-- Configured-but-unusable is its own state. Finding a missing Jump
+                       Group inside a provision job is finding it out too late. -->
+                  <p x-show="t.missing_options.length" class="text-xs text-amber-700 mt-0.5">
+                    missing: <span x-text="t.missing_options.join(', ')"></span>
+                  </p>
+                </td>
+                <td class="px-4 py-2 text-gray-600 font-mono text-xs" x-text="t.base_url"></td>
+                <td class="px-4 py-2">
+                  <!-- Never the secret, never its length. Stored / in a vault / absent
+                       are the three things an operator needs. -->
+                  <span x-show="t.secret_ref" class="text-xs text-gray-500 font-mono" x-text="t.secret_ref"></span>
+                  <span x-show="!t.secret_ref && t.has_secret" class="text-xs text-gray-500">stored</span>
+                  <span x-show="!t.secret_ref && !t.has_secret" class="text-xs text-red-600">none</span>
+                  <p class="text-xs mt-0.5"
+                     :class="t.last_error ? 'text-red-600' : (t.last_ok_at ? 'text-green-700' : 'text-gray-400')"
+                     x-text="tenantCheckLabel(t)"></p>
+                </td>
+                <td class="px-4 py-2 text-gray-600 text-xs" x-text="t.in_use_by || '—'"></td>
+                <td class="px-4 py-2 text-right whitespace-nowrap">
+                  <!-- Absent for Entitle, and the tooltip says why rather than the button
+                       simply not being there. -->
+                  <button x-show="t.verifiable" @click="verifyTenant(t)"
+                          class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">Verify</button>
+                  <span x-show="!t.verifiable" class="text-xs text-gray-300 px-2"
+                        title="This dashboard has no read against Entitle that would prove a credential without also doing something. Its first real use is the check.">not verifiable</span>
+                  <button x-show="!t.is_default" @click="tenantAction(t, 'default')"
+                          class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">Default</button>
+                  <button @click="toggleTenant(t)"
+                          class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50"
+                          x-text="t.is_active ? 'Disable' : 'Enable'"></button>
+                  <button @click="deleteTenant(t)"
+                          class="text-xs px-2 py-1 rounded border border-red-200 text-red-700 hover:bg-red-50">Delete</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <div x-show="!tenants.length" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
+        No tenants registered. Until one is, a POV falls back to the single set in Settings.
+      </div>
+
+      <div class="border border-gray-200 rounded-lg p-4 space-y-3 bg-gray-50">
+        <h3 class="text-sm font-medium text-gray-900">Register a tenant</h3>
+        <div class="grid grid-cols-4 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Product</label>
+            <select x-model="tenantForm.kind" @change="tenantForm.options = {}"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <template x-for="k in tenantKinds" :key="'new-' + k.kind">
+                <option :value="k.kind" x-text="k.label"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Name</label>
+            <input type="text" x-model="tenantForm.name" placeholder="poc-014-pra"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <p class="text-xs text-gray-400 mt-1">A label. Not a company name.</p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">URL / hostname</label>
+            <input type="text" x-model="tenantForm.base_url" placeholder="tenant.beyondtrustcloud.com"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          </div>
+          <div x-show="tenantForm.kind !== 'entitle'">
+            <label class="block text-xs font-medium text-gray-700 mb-1">OAuth client id</label>
+            <input type="text" x-model="tenantForm.client_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1"
+                   x-text="tenantForm.kind === 'entitle' ? 'API token' : 'Client secret'"></label>
+            <input type="password" x-model="tenantForm.secret" autocomplete="new-password"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">…or a vault reference</label>
+            <input type="text" x-model="tenantForm.secret_ref" placeholder="aws_sm://path"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <p class="text-xs text-gray-400 mt-1">One or the other, never both.</p>
+          </div>
+          <template x-for="key in optionKeysFor(tenantForm.kind)" :key="'opt-' + key">
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1" x-text="optionLabel(tenantForm.kind, key)"></label>
+              <input type="text" x-model="tenantForm.options[key]"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            </div>
+          </template>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="tenantForm.is_default"> Make this the default for its product
+        </label>
+        <button @click="createTenant()"
+                :disabled="!tenantForm.name || !tenantForm.base_url || savingTenant"
+                class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+          <span x-text="savingTenant ? 'Saving…' : 'Register'"></span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -264,11 +449,65 @@ function povPage() {
     managed: [],
     environments: [],
     templates: [],
-    form: { template_id: '', name: '', workgroup: '', broker_vm_name: '', suspend_on_idle_seconds: 3600 },
+    // `<kind>_field` rather than the API's `<kind>_tenant_id`, because the kinds come
+    // from the server and building the key from one of them keeps the picker loop
+    // generic — a fourth product is then a registry entry, not more markup.
+    form: { template_id: '', name: '', workgroup: '', broker_vm_name: '',
+            pra_field: '', password_safe_field: '', entitle_field: '',
+            suspend_on_idle_seconds: 3600 },
+    tenants: [],
+    tenantKinds: [],
+    showTenants: false,
+    savingTenant: false,
+    editingTenants: '',
+    tenantEdit: {},
+    tenantForm: { kind: 'pra', name: '', base_url: '', client_id: '', secret: '',
+                  secret_ref: '', options: {}, is_default: false },
     _poll: null,
 
     get current() {
       return this.platforms.find(p => p.name === this.platform) || {};
+    },
+
+    // The API column name for a kind. One place, because the picker, the row and the
+    // save all need it and three spellings of the same mapping is how one of them stops
+    // matching the server.
+    tenantField(kind) {
+      return (kind === 'password_safe' ? 'ps' : kind) + '_tenant_id';
+    },
+
+    tenantsOfKind(kind) {
+      return this.tenants.filter(t => t.kind === kind && t.is_active);
+    },
+
+    tenantName(env, kind) {
+      const id = env[this.tenantField(kind)];
+      if (!id) return '';
+      const found = this.tenants.find(t => t.id === id);
+      // A name we cannot resolve is still better than blank: blank reads as "none
+      // chosen", which is a different and much more comfortable thing than "chosen, and
+      // the row is gone".
+      return found ? found.name : '(unknown)';
+    },
+
+    optionKeysFor(kind) {
+      return (this.tenantKinds.find(k => k.kind === kind) || {}).option_keys || [];
+    },
+
+    // From the server, never derived from the key. `jumpoint_name` is a persisted
+    // identifier whose product name BeyondTrust changed to Gateway years ago, and a label
+    // built by de-underscoring the key is exactly how the retired term reappears in front
+    // of a user.
+    optionLabel(kind, key) {
+      const k = this.tenantKinds.find(x => x.kind === kind) || {};
+      return (k.option_labels || {})[key] || key.replace(/_/g, ' ');
+    },
+
+    // "never checked" is not "checked and fine". The three states stay distinct.
+    tenantCheckLabel(t) {
+      if (t.last_error) return 'last check failed';
+      if (t.last_ok_at) return 'checked ok';
+      return t.verifiable ? 'never checked' : '';
     },
 
     // Mirrors pov_env_service.may_act_on: an unrecognised status is NOT actionable, so a
@@ -296,6 +535,10 @@ function povPage() {
       this.loading = true;
       this.error = '';
       this.notConfigured = !(this.current.configured);
+      // Before the managed list, because that list renders tenant NAMES resolved out of
+      // this one — loading them the other way round paints '(unknown)' on every row for
+      // one frame.
+      await this.loadTenants();
       this.managed = await this.fetchList('/api/pov/managed', 'environments', true);
       if (this.notConfigured) { this.environments = []; this.templates = []; this.loading = false; return; }
       const [envs, tpls] = await Promise.all([
@@ -347,6 +590,8 @@ function povPage() {
         headers: { 'Content-Type': 'application/json' },
         body: body ? JSON.stringify(body) : undefined,
       });
+      // A 204 (DELETE) has no body at all, and .json() on one throws — caught here so a
+      // successful delete does not surface as a parse error.
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         // Carry the server's own words through — a 409 "already exists" and a 502
@@ -367,6 +612,9 @@ function povPage() {
           name: this.form.name,
           workgroup: this.form.workgroup,
           broker_vm_name: this.form.broker_vm_name,
+          pra_tenant_id: this.form.pra_field,
+          ps_tenant_id: this.form.password_safe_field,
+          entitle_tenant_id: this.form.entitle_field,
           suspend_on_idle_seconds: this.form.suspend_on_idle_seconds,
         });
         this.notice = `Creating ${this.form.name}. Watch its job for progress.`;
@@ -386,6 +634,104 @@ function povPage() {
       try {
         await this.post(`/api/pov/managed/${env.id}/power`, { runstate });
         this.notice = `${env.name}: requested ${runstate}.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async loadTenants() {
+      try {
+        const res = await fetch('/api/pov/tenants');
+        if (!res.ok) { this.tenants = []; return; }
+        const data = await res.json();
+        this.tenants = data.tenants || [];
+        this.tenantKinds = (data.kinds || []).map(k => ({
+          ...k,
+          // A short label for the per-row summary, where three full product names would
+          // not fit. Derived from the server's list so a new kind needs no markup.
+          short: { pra: 'PRA', password_safe: 'PS', entitle: 'Entitle' }[k.kind] || k.kind,
+        }));
+        if (!this.tenantForm.kind && this.tenantKinds.length) {
+          this.tenantForm.kind = this.tenantKinds[0].kind;
+        }
+      } catch (e) { this.tenants = []; }
+    },
+
+    async createTenant() {
+      this.savingTenant = true; this.error = ''; this.notice = '';
+      try {
+        await this.post('/api/pov/tenants', {
+          kind: this.tenantForm.kind,
+          name: this.tenantForm.name,
+          base_url: this.tenantForm.base_url,
+          client_id: this.tenantForm.client_id,
+          secret: this.tenantForm.secret,
+          secret_ref: this.tenantForm.secret_ref,
+          options: this.tenantForm.options,
+          is_default: this.tenantForm.is_default,
+        });
+        this.notice = `Registered ${this.tenantForm.name}.`;
+        this.tenantForm = { kind: this.tenantForm.kind, name: '', base_url: '',
+                            client_id: '', secret: '', secret_ref: '', options: {},
+                            is_default: false };
+        await this.loadTenants();
+      } catch (e) { this.error = e.message; }
+      finally { this.savingTenant = false; }
+    },
+
+    async tenantAction(t, action) {
+      this.error = ''; this.notice = '';
+      try {
+        await this.post(`/api/pov/tenants/${t.id}/${action}`, null);
+        await this.loadTenants();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async toggleTenant(t) {
+      this.error = ''; this.notice = '';
+      try {
+        await this.post(`/api/pov/tenants/${t.id}`, { is_active: !t.is_active }, 'PATCH');
+        await this.loadTenants();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async verifyTenant(t) {
+      this.error = ''; this.notice = `Checking ${t.name}…`;
+      try {
+        const data = await this.post(`/api/pov/tenants/${t.id}/verify`, null);
+        // The endpoint answers 200 either way and puts the outcome in the body: a
+        // credential that does not work is an answer, not a transport failure.
+        if (data.ok) { this.notice = `${t.name}: ${data.detail}`; }
+        else { this.notice = ''; this.error = `${t.name}: ${data.detail}`; }
+        await this.loadTenants();
+      } catch (e) { this.notice = ''; this.error = e.message; }
+    },
+
+    async deleteTenant(t) {
+      if (!confirm(`Delete the tenant ${t.name}? POVs already wired into it are not changed.`)) return;
+      this.error = ''; this.notice = '';
+      try {
+        await this.post(`/api/pov/tenants/${t.id}`, null, 'DELETE');
+        await this.loadTenants();
+      } catch (e) { this.error = e.message; }
+    },
+
+    startEditTenants(env) {
+      this.tenantEdit = {};
+      for (const k of this.tenantKinds) {
+        this.tenantEdit[k.kind + '_field'] = env[this.tenantField(k.kind)] || '';
+      }
+      this.editingTenants = env.id;
+    },
+
+    async saveTenants(env) {
+      this.error = ''; this.notice = '';
+      const body = {};
+      for (const k of this.tenantKinds) {
+        body[this.tenantField(k.kind)] = this.tenantEdit[k.kind + '_field'] || '';
+      }
+      try {
+        await this.post(`/api/pov/managed/${env.id}/tenants`, body);
+        this.editingTenants = '';
         await this.load();
       } catch (e) { this.error = e.message; }
     },
