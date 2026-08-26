@@ -72,6 +72,75 @@ def test_the_scrub_covers_this_resources_password():
     assert "ot-cell-01-adminuser" in scrubbed
 
 
+def _wire_ps_checkout_ast():
+    """The post-link converge lives inside a big async orchestration function whose
+    every dependency is a live service, so pin it structurally instead."""
+    import ast
+    src = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
+    tree = ast.parse(open(src, encoding="utf-8").read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_wire_ps_checkout":
+            return node
+    raise AssertionError("ot_service._wire_ps_checkout not found")
+
+
+def _converge_guard():
+    """The INNERMOST `if` whose body triggers the Change Password on the parent
+    account — the outer `if not ot_ps_synced:` block contains it too."""
+    import ast
+    found = []
+    for node in ast.walk(_wire_ps_checkout_ast()):
+        if not isinstance(node, ast.If):
+            continue
+        body = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+        if "change_managed_account_password" in body:
+            found.append((len(list(ast.walk(node))), node))
+    if not found:
+        raise AssertionError("no branch guards the post-link change_managed_account_password")
+    return min(found, key=lambda pair: pair[0])[1]
+
+
+def test_the_converge_does_not_read_the_change_on_register_flag():
+    # The defect this pins: the converge used to be gated on the CLOUD's
+    # change-on-register flag. On AWS that key defaults False (SSM auto-management
+    # rotates on its own schedule), so a freshly deployed cell's PRA Vault account
+    # kept the throwaway placeholder — a checkout handed the rep a password that does
+    # not log in. The two are different questions: change-on-register governs
+    # onboarding, the converge governs a subscriber linked AFTER the initial mint.
+    import ast
+    guard = ast.dump(_converge_guard().test)
+    assert "ot_ps_checkout_converge" in guard, (
+        "the post-link converge must be gated on its own key, not a cloud's posture")
+    for cloud_key in ("passwordsafe_ssm_change_password_on_register",
+                      "passwordsafe_gcp_change_password_on_register",
+                      "passwordsafe_azure_change_password_on_register"):
+        assert cloud_key not in guard, (
+            f"the converge is gated on {cloud_key} again — AWS cells will ship a "
+            f"placeholder credential to PRA")
+
+
+def test_the_converge_defaults_on():
+    import ast
+    call = _converge_guard().test
+    assert isinstance(call, ast.Call), "expected a config_service.get_bool(...) call"
+    assert len(call.args) == 2 and call.args[1].value is True, (
+        "ot_ps_checkout_converge must default True — a cell nobody configured is the "
+        "demo case, and it is the case that needs a real credential")
+
+
+def test_the_per_cloud_change_flags_still_name_all_three_clouds():
+    # Kept for logging/progress text after the converge stopped reading them. If a
+    # cloud goes missing here the operator loses the "why is it still a placeholder"
+    # explanation, so this stays pinned even though nothing branches on it now.
+    import importlib.util
+    src = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
+    spec = importlib.util.spec_from_file_location("ot_service_converge_under_test", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert set(mod._PS_CHANGE_FLAG) == {"gcp", "aws", "azure"}
+    assert mod._PS_CHANGE_FLAG["aws"] == ("passwordsafe_ssm_change_password_on_register", False)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

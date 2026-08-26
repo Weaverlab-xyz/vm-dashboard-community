@@ -546,6 +546,23 @@ async def _run_destroy(
         # the Destroy button AND the expiry reaper — cleans whatever subset exists.
         # Best-effort like the Shell Jump above: a PRA-side failure must not stop
         # the instance delete.
+        if deploy_meta.get("ot_firewall_rules"):
+            # The cell's Purdue-zone rules target its network tag, so a rule left
+            # behind would fence the NEXT cell that reuses this VM name — and the
+            # egress deny outranks the sandbox's on-demand NAT allow, so the damage
+            # would not be obvious. Removed here, before the instance, like the rest.
+            job_service.update_progress(db, job_id, 36,
+                                        "Removing the cell's Purdue-zone firewall rules…")
+            removed = []
+            for rule_name in deploy_meta["ot_firewall_rules"]:
+                try:
+                    await gcp_service.delete_firewall_rule(project_id, rule_name)
+                    removed.append(rule_name)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("OT firewall rule %s removal failed for %s: %s",
+                                 rule_name, instance_name, e)
+                    result["ot_error"] = f"Firewall rule {rule_name} removal failed: {e}"
+            result["ot_firewall_rules_removed"] = removed
         if deploy_meta.get("ot_web_jump_tf_state"):
             job_service.update_progress(db, job_id, 38, "Removing the OT HMI Web Jump…")
             try:

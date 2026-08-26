@@ -9,15 +9,28 @@ sandbox's air-gapped private subnet, which doubles as the "plant network" in dem
 
 | What | Where | Notes |
 |---|---|---|
-| Modbus TCP PLC simulator | `:502` | pymodbus, baked from `python:3.12-slim`; holding registers 0–3 tick every second (counter, temp ×10 °C, flow, run flag); coil 0 toggles |
-| FUXA web SCADA/HMI | `:1881` | `frangoteam/fuxa` (pinned tag); project data persists in the `fuxa_appdata` volume |
+| Modbus TCP PLC simulator | `:502` | pymodbus; holding registers 0–3 tick every second (counter, temp ×10 °C, flow, run flag); coil 0 toggles |
+| OPC UA server | `:4840` | asyncua; the same four values under `Objects/Plant` as typed nodes (temperature in real °C, a Double). Anonymous, no security policy |
+| EtherNet/IP tag server | `:44818` | cpppo; the same four values as `DINT` CIP tags, driven on the same one-second tick |
+| FUXA web SCADA/HMI | `:1881` | `frangoteam/fuxa` (pinned tag); project data persists in the `fuxa_appdata` volume, **pre-seeded** with the PLC connection and its four register tags |
 | Password Safe bootstrap account | `adminuser` | NOPASSWD sudo; the account `register_in_passwordsafe` onboards and rotates |
 | Autostart | systemd unit `ot-sim` | `docker compose up -d` on `/opt/ot-sim/docker-compose.yml` |
 
-The dashboard's **OT Demo Cell** action (GCP page → OT tab) deploys this image and
-wires the BeyondTrust access layer around it: Web Jump → `http://<vm>:1881`,
-Protocol Tunnel → `<vm>:502`, plus the Shell Jump and Password Safe onboarding the
-normal GCE deploy path already provides. See `docs/cloud-ot.md`.
+All three simulators share **one image and one `pip install`**, baked from
+`python:3.12-slim` — the cell carries a single copy of the base layer. `OT_SIMS`
+(default `modbus,opcua,enip`) picks which of them the compose stack runs; `modbus` is
+mandatory, because the deploy form's default tunnel preset and the seeded FUXA project
+both point at it.
+
+**Why only these three.** DNP3 (`opendnp3`) and Siemens S7 (`python-snap7`) both need
+native libraries built from source, which the "everything is a pinned wheel" contract
+above cannot honour. Those two tunnel presets stay pointed at real or lab gear.
+
+The dashboard's **OT Demo Cell** action (each cloud page → OT tab) deploys this image
+and wires the BeyondTrust access layer around it: Web Jump → `http://<vm>:1881`,
+Protocol Tunnel → the chosen PLC port, plus the Shell Jump and Password Safe
+onboarding the normal deploy path already provides. On GCP the cell can also be fenced
+into its own Purdue zone (`ot_purdue_firewall_enabled`). See `docs/cloud-ot.md`.
 
 ## Building the image
 
@@ -29,7 +42,8 @@ normal GCE deploy path already provides. See `docs/cloud-ot.md`.
 
 The Packer build VM runs in the project's `default` VPC and has egress — that is
 where the pulls happen. Build-time overrides (Packer env vars): `OT_ADMIN_USER`,
-`OT_FUXA_IMAGE`, `OT_PYMODBUS_VERSION`, `OT_SKIP_UPDATES=1`, `OT_SKIP_CLEANUP=1`.
+`OT_FUXA_IMAGE`, `OT_PYMODBUS_VERSION`, `OT_ASYNCUA_VERSION`, `OT_CPPPO_VERSION`,
+`OT_SIMS`, `OT_SKIP_UPDATES=1`, `OT_SKIP_CLEANUP=1`.
 
 ## Pins
 
@@ -37,18 +51,45 @@ where the pulls happen. Build-time overrides (Packer env vars): `OT_ADMIN_USER`,
 |---|---|---|
 | FUXA | `frangoteam/fuxa:1.3.4` | `OT_FUXA_IMAGE` env (never `:latest` — the bake refuses it) |
 | pymodbus | `3.6.8` | `OT_PYMODBUS_VERSION` env |
-| PLC sim base | `python:3.12-slim` | edit the script |
+| asyncua | `1.1.5` | `OT_ASYNCUA_VERSION` env |
+| cpppo | `5.2.5` | `OT_CPPPO_VERSION` env |
+| Sim base image | `python:3.12-slim` | edit the script |
 
-The bake smoke-tests both containers and **fails the build** if either is not
-running — better than an image that boots dead inside an air-gapped subnet.
+**cpppo must be 5.x.** The 4.x series rewrites code objects at import and dies on
+Python 3.11+ with `code() argument 13 must be str, not int` — on `python:3.12-slim`
+that is every bake, at the smoke test. `test_ot_provisioner.py` refuses a 4.x pin.
 
-## First-time FUXA wiring (once per cell, ~1 minute)
+The bake smoke-tests **every** container it assembled — the sims `OT_SIMS` selected
+plus FUXA — and fails the build if any is not running, rather than shipping an image
+that boots dead inside an air-gapped subnet.
 
-The FUXA project is not pre-baked (its project format is version-coupled). After
-opening the HMI through the Web Jump: FUXA → Connections → add a **ModbusTCP**
-device at address `plc` port `502`, then add tags for holding registers 0–3 and
-drop them on a view. The values tick once a second. The project persists on the
-VM for the life of the cell.
+## FUXA project seeding
+
+The bake asks the **running** FUXA for its own project, adds a `ModbusTCP` device
+named `PLC` (address `plc`, port `502`) carrying four tags for holding registers 0–3,
+posts it back and reads it back to confirm it took. Read-modify-write, so every part
+of the project this script does not understand survives untouched, and a FUXA whose
+API moved fails the round-trip check instead of writing a broken project.
+
+Addressing, per FUXA's Modbus driver: `memaddress` `400000` is the holding-register
+region and `address` is a **1-based** offset within it, so holding register 0 is
+address `"1"`. Tag type is `UInt16`.
+
+**The seed never fails the bake.** FUXA's project format is version-coupled — that is
+why a project file is not simply baked in — so if the pinned image rejects the shape,
+the bake logs
+
+```
+[ot-sim] WARNING: FUXA project NOT seeded (see the error above). ...
+```
+
+and finishes. The image is then exactly what it was before this step existed, and the
+connection is wired by hand, once per cell (~1 minute): FUXA → Connections → add a
+**ModbusTCP** device at address `plc` port `502`, add tags for holding registers 0–3.
+
+Either way the last step is yours: **drop the tags on a view**. A FUXA view is SVG,
+and its item format is the most version-coupled part of the project, so the bake does
+not generate one.
 
 ## Swapping in real OpenPLC (optional)
 

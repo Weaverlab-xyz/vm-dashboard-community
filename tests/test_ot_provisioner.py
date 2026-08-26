@@ -78,6 +78,87 @@ def test_the_zero_runtime_egress_contract_holds():
             "stack would only be discovered inside an air-gapped subnet")
 
 
+def _embedded_python(path):
+    """(filename, source) for every .py the script writes via a quoted heredoc."""
+    return re.findall(r"cat > \S*?/([\w.]+\.py) <<'EOF'\n(.*?)\nEOF\n",
+                      _read(path), re.S)
+
+
+def test_the_embedded_python_compiles():
+    # These sources are written by a shell heredoc, so nothing else type-checks or
+    # even parses them: a stray unescaped character ships an image whose container
+    # dies at boot, inside an air-gapped subnet, with the bake long finished.
+    for path in _SCRIPTS:
+        for name, src in _embedded_python(path):
+            try:
+                compile(src, name, "exec")
+            except SyntaxError as exc:
+                raise AssertionError(
+                    f"{os.path.basename(path)}: embedded {name} does not compile: {exc}")
+
+
+def test_every_baked_sim_is_smoke_tested():
+    # The bake's contract is "a container that will not start fails the BAKE".
+    # A sim added to the compose file but not to the smoke list breaks it quietly.
+    for path in _SCRIPTS:
+        src = _read(path)
+        if "OT_SMOKE_CONTAINERS" not in src:
+            continue
+        containers = set(re.findall(r"container_name:\s*(\S+)", src))
+        smoked = set()
+        for assignment in re.findall(r'OT_SMOKE_CONTAINERS="([^"]*)"', src):
+            smoked |= {w for w in assignment.split() if not w.startswith("$")}
+        missing = containers - smoked
+        assert not missing, (
+            f"{os.path.basename(path)}: {sorted(missing)} are in the compose stack but "
+            f"never smoke-tested — a dead one would only surface in an air-gapped subnet")
+
+
+def test_cpppo_is_not_pinned_to_the_broken_4x_series():
+    # cpppo < 5 rewrites code objects at import and raises
+    # "code() argument 13 must be str, not int" on Python 3.11+. The sim image is
+    # python:3.12-slim, so a 4.x pin fails every bake at the smoke test.
+    for path in _SCRIPTS:
+        src = _read(path)
+        for pin in re.findall(r"OT_CPPPO_VERSION:-(\d+)\.", src):
+            assert int(pin) >= 5, (
+                f"{os.path.basename(path)}: cpppo {pin}.x cannot run on Python 3.11+ "
+                f"— pin 5.x or newer")
+
+
+def test_the_new_pins_are_explicit_too():
+    for path in _SCRIPTS:
+        src = _read(path)
+        for name, var in (("asyncua", "OT_ASYNCUA_VERSION"),
+                          ("cpppo", "OT_CPPPO_VERSION")):
+            if name not in src:
+                continue
+            assert (re.search(rf"{name}==\d", src)
+                    or re.search(rf"{var}:-\d", src)), (
+                f"{os.path.basename(path)}: {name} must be ==-pinned (literally or via "
+                f"a digit-defaulted {var})")
+
+
+def test_the_fuxa_seed_never_fails_the_bake():
+    # The seed is a convenience: FUXA's project format is version-coupled, so a
+    # future image that rejects it must leave the operator with today's behaviour
+    # (wire it by hand), not a failed 15-minute bake.
+    for path in _SCRIPTS:
+        src = _read(path)
+        if "fuxa_seed.py" not in src:
+            continue
+        m = re.search(r"if docker run[^\n]*fuxa_seed[^\n]*\n(.*?)\nfi\n", src, re.S)
+        if m is None:
+            m = re.search(r"(if docker run.*?\nfi\n)", src, re.S)
+        assert m, f"{os.path.basename(path)}: the FUXA seed is not in an if/else guard"
+        assert "die " not in m.group(0), (
+            f"{os.path.basename(path)}: the FUXA seed calls die — a convenience must "
+            f"not fail the bake")
+        assert "WARNING" in m.group(0), (
+            f"{os.path.basename(path)}: a skipped FUXA seed must say so loudly, or the "
+            f"operator opens an empty HMI mid-demo with no idea why")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

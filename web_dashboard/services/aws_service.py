@@ -1243,6 +1243,32 @@ async def await_container_node(region: str, instance_id: str, purpose: str) -> d
     return last or {"instance_id": instance_id, "status": "UNKNOWN"}
 
 
+def _subnet_auto_assigns_public_ips_sync(region: str, subnet_id: str) -> Optional[bool]:
+    ec2 = _get_ec2(region)
+    subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []
+    if not subnets:
+        return None
+    return bool(subnets[0].get("MapPublicIpOnLaunch"))
+
+
+async def subnet_auto_assigns_public_ips(region: str, subnet_id: str) -> Optional[bool]:
+    """Whether ``subnet_id`` hands its instances a public IP at launch.
+
+    EC2 has no per-instance external-IP switch the way GCE and Azure do -- the
+    subnet's MapPublicIpOnLaunch decides -- so this is the only way to know, before
+    launching, whether an instance will come up addressable from the internet.
+
+    ``None`` means "could not tell" (no such subnet, or the read failed): callers
+    must treat that as unknown rather than as either answer, because both a false
+    refusal and a false all-clear are worse than saying so.
+    """
+    try:
+        return await _to_thread(_subnet_auto_assigns_public_ips_sync, region, subnet_id)
+    except (ClientError, BotoCoreError) as e:
+        logger.warning("could not read subnet %s in %s: %s", subnet_id, region, e)
+        return None
+
+
 def _subnet_availability_zone_sync(region: str, subnet_id: str) -> str:
     ec2 = _get_ec2(region)
     subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []

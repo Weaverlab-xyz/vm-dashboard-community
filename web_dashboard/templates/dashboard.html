@@ -99,7 +99,10 @@
       </div>
       <div :class="section.gridClass">
         <template x-for="tile in visibleTiles(section.tiles)" :key="tile.key">
-          <a :href="tile.href"
+          <!-- A tile whose destination depends on its data (OT cells span three
+               clouds) sends an href back with the stat; everything else uses the
+               static one declared below. -->
+          <a :href="stats[tile.key]?.href || tile.href"
              class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
             <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide" x-text="tile.title"></p>
             <p class="text-3xl font-bold mt-1"
@@ -307,6 +310,8 @@
             { key: 'k8s_clusters',    title: 'Kubernetes Clusters', href: '/k8s',       flag: 'k8s_management',  description: 'managed clusters' },
             // Counted from the cells' own VM-deploy job rows (DB-only, all three
             // clouds); gated on `pra` because the OT router itself is.
+            // href is the fallback only: /api/dashboard/stats sends back the cloud
+            // whose cells this caller can actually see (see _ot_cells).
             { key: 'ot_cells',        title: 'OT Demo Cells',       href: '/gcp#ot',    flag: 'pra',             secondaryLabel: 'wired' },
           ],
         },

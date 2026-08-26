@@ -117,6 +117,7 @@ k8s_ps_rotator_eks_principal_arn k8s_ps_rotator_eks_create_access_entry
 k8s_ps_rotator_bootstrap_namespace k8s_ps_rotator_bootstrap_sa
 pra_k8s_namespace pra_k8s_sa_name bt_vault_account_group_id
 ot_ps_pra_checkout_enabled ot_ps_pravault_platform ot_ps_pravault_functional_account
+ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
 """.split())
 
 # RETIRED, deliberately absent from LEGACY_KEYS above: the six `k8s_token_sync_*` keys
