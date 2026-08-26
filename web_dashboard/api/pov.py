@@ -10,6 +10,9 @@
   POST   /api/pov/managed/{id}/broker   — install / re-enrol the in-environment agent
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
+The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
+the same prefix and the same gate.
+
 The ``/environments`` reads are LIVE against the platform and include environments this
 dashboard never created — an SE's hand-built POVs are exactly what they want to see next to
 the managed ones. ``/managed`` is this dashboard's own inventory. Keeping them apart is
@@ -31,7 +34,8 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
-from ..services import job_service, lab_platforms, pov_broker, pov_env_service
+from ..services import (bt_tenant_service, job_service, lab_platforms, pov_broker,
+                        pov_env_service)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -60,6 +64,13 @@ class ProvisionRequest(BaseModel):
     # templates come from wherever the SE got them, and one account can hold two that name
     # it differently. Blank means pov_broker.DEFAULT_BROKER_VM_NAME.
     broker_vm_name: str = ""
+    # Which BeyondTrust tenants this POV is wired into. Blank means "not chosen yet",
+    # which is allowed: the wire-up slices are what consume these, and refusing to create
+    # a POV until all three are picked would make the registry a gate on a step that does
+    # not need it. What is NOT allowed is a wrong one — see bt_tenant_service.
+    pra_tenant_id: str = ""
+    ps_tenant_id: str = ""
+    entitle_tenant_id: str = ""
 
     @field_validator("name")
     @classmethod
@@ -109,6 +120,9 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         "provision_job_id": env.provision_job_id or "",
         "error_message": env.error_message or "",
         "broker_vm_name": pov_broker.broker_vm_name(env),
+        "pra_tenant_id": env.pra_tenant_id or "",
+        "ps_tenant_id": env.ps_tenant_id or "",
+        "entitle_tenant_id": env.entitle_tenant_id or "",
     }
     if broker is not None:
         out.update(broker)
@@ -275,6 +289,16 @@ async def provision(payload: ProvisionRequest,
     except Exception as exc:  # noqa: BLE001
         raise _platform_error(exc, f"listing {name} templates") from exc
 
+    # Resolve the tenants NOW, while a bad id is still a form error. Inside the provision
+    # job it would surface minutes later, against an environment that already exists — and
+    # correcting a dropdown would mean destroying it first.
+    try:
+        tenants = bt_tenant_service.validate_selection(
+            db, pra_tenant_id=payload.pra_tenant_id, ps_tenant_id=payload.ps_tenant_id,
+            entitle_tenant_id=payload.entitle_tenant_id)
+    except bt_tenant_service.BTTenantError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     env = PovEnvironment(
         platform=name,
         name=payload.name,
@@ -284,6 +308,7 @@ async def provision(payload: ProvisionRequest,
         workgroup=payload.workgroup or None,
         created_by=getattr(current_user, "username", None),
         status=pov_env_service.STATUS_PROVISIONING,
+        **tenants,
     )
     # On the row rather than in the job metadata: every later broker re-run reads it, and
     # a job's metadata is the record of one run, not of the environment.
@@ -324,6 +349,50 @@ async def power(env_id: str, payload: PowerRequest,
         workgroup=env.workgroup,
         metadata={"environment_id": env.id, "runstate": payload.runstate})
     return {"job_id": job.id, "runstate": payload.runstate}
+
+
+class TenantSelection(BaseModel):
+    """Re-point a POV at different BeyondTrust tenants. Absent fields are left alone."""
+    pra_tenant_id: str | None = None
+    ps_tenant_id: str | None = None
+    entitle_tenant_id: str | None = None
+
+
+@router.post("/managed/{env_id}/tenants")
+async def set_tenants(env_id: str, payload: TenantSelection,
+                      db: Session = Depends(get_db),
+                      current_user: User = Depends(get_current_user)):
+    """Choose, or change, the tenants this POV is wired into.
+
+    Exists because a POV is created before its wire-up runs: an SE stands the environment
+    up while the customer's PRA appliance is still being provisioned, then comes back and
+    points it at one. Blank clears a selection, which is how you undo a mistake made here.
+
+    Deliberately **not** blocked once a wire-up has run — that guard belongs with the code
+    that creates the artifacts, because only it knows what re-pointing would orphan. Doing
+    it here would be a rule enforced by the one layer that cannot honour it.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail="nothing to change")
+    merged = {
+        "pra_tenant_id": fields.get("pra_tenant_id", env.pra_tenant_id) or "",
+        "ps_tenant_id": fields.get("ps_tenant_id", env.ps_tenant_id) or "",
+        "entitle_tenant_id": fields.get("entitle_tenant_id", env.entitle_tenant_id) or "",
+    }
+    try:
+        chosen = bt_tenant_service.validate_selection(db, **merged)
+    except bt_tenant_service.BTTenantError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    for column, value in chosen.items():
+        setattr(env, column, value or None)
+    db.commit()
+    return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
 @router.post("/managed/{env_id}/broker", status_code=202)

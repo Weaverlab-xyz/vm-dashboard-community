@@ -67,7 +67,10 @@ A POV instance also needs a **lab platform** — the thing a POV environment act
 on. Skytap is the first one; see [integrations/skytap.md](integrations/skytap.md) for its
 prerequisites, the API token it needs, and the
 [template contract](integrations/skytap.md#the-template-contract) its broker VM has to
-satisfy. The platform registry lives in
+satisfy.
+
+And it needs somewhere to put the many tenants the first paragraph of this page is about.
+That is [the tenant registry](#the-tenant-registry) below. The platform registry lives in
 `services/lab_platforms.py`, and `GET /api/pov/platforms` reports what each one can do so
 the UI can degrade visibly rather than offering a button that fails.
 
@@ -127,6 +130,109 @@ you raise it.
 
 ---
 
+---
+
+## The tenant registry
+
+The reason this profile exists, made concrete. **POV page → BeyondTrust tenants.**
+
+A demo instance has one PRA appliance, one Password Safe tenant and one Entitle tenant,
+configured in Settings as `bt_api_host`, `pscli_api_url` and `entitle_api_url`. That is the
+right shape when there is exactly one of each. A POV instance runs several POVs at once,
+each for a different customer, each with its own appliance — so "which tenant?" stops
+having one answer and the singletons stop being able to express the question.
+
+The registry holds **one row per product, not per customer**, and a POV carries three
+independent references. That is not an accident of modelling: PRA and Password Safe are
+genuinely per-customer, while Entitle is multi-tenant behind one canonical API URL and is
+usually the same tenant for every POV. One row holding all three would force a duplicate
+Entitle credential per customer, and duplicated credentials rotate apart.
+
+| | |
+|---|---|
+| **Name** | A slug — lowercase letters, digits, hyphens. See [below](#about-customer-data) |
+| **URL / hostname** | `tenant.beyondtrustcloud.com` for PRA, the Password Safe URL, or the Entitle API base |
+| **OAuth client id** | PRA and Password Safe. Entitle authenticates with a bearer token and has no paired id |
+| **Client secret** | Encrypted with the same Fernet key as every other secret in this dashboard |
+| **…or a vault reference** | `aws_sm://`, `azure_kv://`, `gcp_sm://`, `bt_safe://` — for operators who want no credential in this database at all. One or the other, never both |
+| **Jump Group / Jumpoint** | PRA only. Names *inside that appliance*, which is why they belong on the tenant and not in global settings |
+| **Password Safe run-as user** | Required by the `passwordsafe` Terraform provider block |
+
+### How a POV picks one
+
+Choose them on the New POV form, or press **edit** in the Tenants column of an existing
+POV — a POV is often stood up while the customer's appliance is still being provisioned,
+so "choose later" is a real answer and not a placeholder.
+
+What the resolver does, in order:
+
+1. the **id the POV carries**. A missing, disabled or wrong-product id is an **error**,
+   never a fallback;
+2. the row marked **default** for that product;
+3. the only active row for that product, if there is exactly one;
+4. **the Settings singletons**, if the registry holds no row for that product at all;
+5. otherwise a refusal naming the fix.
+
+Step 1 not falling back is the whole point. Falling back would mean a POV whose tenant was
+deleted or disabled quietly resolving to *the default instead* — which is a POV onboarding
+into another customer's Password Safe with nothing going wrong on the way. Step 5 is the
+same rule seen from the other side: guessing between two customers' appliances is much
+worse than refusing.
+
+Step 4 is the compatibility contract. Every existing install, and every demo instance,
+keeps working without knowing this table exists.
+
+### Verify
+
+**Verify** performs the same authentication the real work does — PRA's OAuth token
+request, Password Safe's token plus `SignAppIn` — and stores the result on the row. Both
+halves of the Password Safe check matter: the token proves the OAuth client, while
+`SignAppIn` proves the BeyondInsight user it is linked to. An OAuth client with no linked
+user gets a perfectly good token and fails at the second step, so checking only the first
+would report green for a tenant that cannot do anything.
+
+**Entitle has no Verify, deliberately.** Everything this dashboard does with Entitle goes
+through the Terraform provider or POSTs an access request, and an access request is a side
+effect rather than a check. There is no read here that would prove a bearer token, and an
+invented one is how a Verify starts reporting green for a token that does not work. The
+row says "not verifiable" rather than hiding the distinction, because "we did not check"
+and "we checked and it was fine" must never look the same on a page you use to decide a
+POV is ready.
+
+A verify result is **cleared** when the URL, the client id or the secret changes. The
+tenant that passed is not the tenant you now have, and stale-green is worse than unknown.
+
+### Seeding, and the one-way door
+
+On first boot the dashboard copies whatever singletons the install already has into rows,
+once. After that **the rows are the truth and editing the Settings keys does nothing** —
+the same one-way promise the Connections page makes for hypervisors, and for the same
+reason: a second copy that keeps re-reading the singletons is how an operator edits a
+field and watches it have no effect, or worse, have an effect a week later.
+
+The seed is marked done rather than inferred from an empty table, so deleting a seeded row
+on purpose does not bring it back on the next restart.
+
+### Deleting one
+
+Refused while a live POV still references it. The database constraint is `SET NULL`, so
+deleting anyway would not error — it would blank that POV's tenant, and the next wire-up
+would resolve the *default* instead. **Disable** it if you want it out of the pickers
+without touching the POVs already wired into it.
+
+### About customer data
+
+This dashboard deliberately holds no customer field: `PovEnvironment` has none and adding
+one should be treated as a schema regression. This table is the one place that rule bends,
+and only exactly as far as it must. A PRA appliance is reached at a hostname like
+`acme.beyondtrustcloud.com`, so the connection target inherently identifies whose it is
+and there is no way to hold one without that.
+
+A connection target you cannot avoid. A free-text "customer" box you can — so the **name**
+is a constrained slug and not somewhere to type a company. Use a reference: `poc-014-pra`.
+
+---
+
 ## What this stack deliberately does not mount
 
 Unlike the demo stack, neither service gets `/var/run/docker.sock` or the `runner_work`
@@ -152,6 +258,23 @@ the profile. That integration belongs on the other instance.
 **I switched the profile and a feature did not come back.** The mask only subtracts, so
 switching to `demo` stops masking — but the feature's own `*_enabled` flag still has to be
 on. Check both.
+
+**A POV is refusing with "no … tenant is configured".** Nothing is registered for that
+product and the Settings singleton for it is blank or half-filled — a URL with no secret
+is not a tenant, because it fails at the first call. Register one, or fill in the
+singleton.
+
+**A POV refuses with "N tenants are configured and none is the default".** Step 5 of the
+resolver, working. Pick one on the POV itself, or mark a default.
+
+**I edited `bt_api_host` in Settings and the POV still uses the old appliance.** The seed
+is one-way: once a row exists it is the truth. Edit the tenant on the POV page.
+
+**Verify says the credentials are rejected and I am sure they are right.** For PRA, the
+client id and secret come from an API account in the appliance (Management → API
+Configuration) — a user login always fails there. For Password Safe, a token that succeeds
+and a `SignAppIn` that fails means the OAuth client is fine and its linked BeyondInsight
+user is missing, disabled, or has no Password Safe API access.
 
 **Everything is refused with "not enabled" on a fresh POV instance.** `pra_enabled` and
 `password_safe_enabled` default to `True` in code but the compose file sets them explicitly;

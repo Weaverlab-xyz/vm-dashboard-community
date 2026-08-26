@@ -936,6 +936,12 @@ try:
     from .api import pov as pov_api  # noqa: E402
     app.include_router(pov_api.router,
                        dependencies=[_feature_gate("pov_environments_enabled")])
+    # The BeyondTrust tenant registry. Same gate, and that is the point rather than
+    # tidiness: on a demo instance the global singletons ARE the tenant, so a second
+    # place to configure one would restore the ambiguity install_profile removed.
+    from .api import bt_tenants as bt_tenants_api  # noqa: E402
+    app.include_router(bt_tenants_api.router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
 except ImportError as exc:
     logger.warning("API router 'pov' not loaded: %s", exc)
 

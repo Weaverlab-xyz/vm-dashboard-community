@@ -35,8 +35,8 @@ from web_dashboard import database as d  # noqa: E402
 
 d.Base.metadata.create_all(bind=d.engine)
 
-from web_dashboard.services import (agent_service, config_service, job_service,  # noqa: E402
-                                    lab_platforms, pov_broker, pov_env_service)
+from web_dashboard.services import (agent_service, job_service, lab_platforms,  # noqa: E402
+                                    pov_broker, pov_env_service)
 
 _AGENT_URL = "https://agents.example.test"
 
@@ -132,14 +132,19 @@ def _reload(env_id):
 
 
 def _set_url(value=_AGENT_URL):
-    config_service.set(agent_service.AUDIENCE_CONFIG, value)
+    """Point the broker at an agent endpoint, WITHOUT writing config.
+
+    `agent_base_url` is the pinned signing audience: write-once in production and the
+    value every agent signature is checked against. A test that stores a fake one leaves
+    a developer's own dashboard unable to enrol a real agent, and a test suite has no
+    business being able to do that. Patching the one function that reads it gets the same
+    coverage and touches nothing.
+    """
+    pov_broker.dashboard_agent_url = lambda: value
 
 
 def _clear_url():
-    try:
-        config_service.delete(agent_service.AUDIENCE_CONFIG)
-    except Exception:  # noqa: BLE001
-        pass
+    pov_broker.dashboard_agent_url = lambda: ""
 
 
 # ── the generated files ──────────────────────────────────────────────────────
