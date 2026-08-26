@@ -5,7 +5,7 @@ neither ``import_image`` nor ``copy_image`` accepts a block-device override — 
 re-register that renames a promoted AMI is the ONLY point in the whole promote where
 that flag can be corrected. Left alone it strands an untagged root volume on every
 terminate of a promoted image, which is exactly where this account's orphaned volumes
-came from (docs/notes/aws-cost-guardrails.md).
+came from (docs/notes/cloud-cost-guardrails.md).
 
 The second half of the contract is the easy thing to get wrong: ``copy_image``
 preserved boot attributes implicitly, ``register_image`` sets only what it is given.
