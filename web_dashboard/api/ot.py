@@ -36,6 +36,7 @@ from ..models.ot import (
     OTCellDeployResponse,
     OTCellInfo,
     OTCellListResponse,
+    OTCellTunnel,
     OTPresetInfo,
     OTPresetsResponse,
     OTTunnelInfo,
@@ -82,6 +83,43 @@ def _require_cloud(user: User, cloud: str, level: str) -> str:
     return cloud
 
 
+def _validate_cell_protocols(payload) -> list:
+    """The protocols this cell will get tunnels for, validated.
+
+    Rejects a protocol the baked image does not serve: a tunnel to a port with
+    no listener fails the session in a way that looks exactly like a blocked
+    firewall, which is the most expensive kind of demo failure. Raises OTError,
+    which each endpoint turns into a 400."""
+    protocols = ot_service.resolve_cell_protocols({
+        "protocols": getattr(payload, "protocols", None) or [],
+        "protocol": getattr(payload, "protocol", "") or "",
+    })
+    if not protocols:
+        raise OTError("pick at least one PLC protocol for the cell")
+    servable = set(ot_service.cell_protocols())
+    single = len(protocols) == 1
+    for protocol in protocols:
+        # "custom" stays allowed, but only for a single-protocol cell: it is the
+        # escape hatch for a port the presets don't name, and plc_port describes
+        # exactly one tunnel.
+        if protocol == "custom":
+            if not single:
+                raise OTError("protocol 'custom' cannot be combined with others — "
+                              "deploy the cell with one protocol, or add the extra "
+                              "port as a standalone tunnel")
+        elif protocol not in servable:
+            label = (ot_service.OT_PORT_PRESETS.get(protocol) or {}).get("label", protocol)
+            raise OTError(
+                f"the ot-sim image does not simulate {label} — the cell can serve "
+                f"{', '.join(sorted(servable))}. Reach real {label} gear with a "
+                f"standalone OT tunnel instead.")
+        ot_service.resolve_ports(
+            protocol,
+            payload.plc_port if single else None,
+            payload.tunnel_local_port if single else None)
+    return protocols
+
+
 def _tunnel_region(cloud: str) -> str:
     """The region the shared gateway ensure/teardown should target for ``cloud``
     (each cloud's configured default — standalone tunnels have no placement of
@@ -105,7 +143,8 @@ async def list_presets(
     data, served to any authenticated user — the forms exist on every cloud page
     (same reasoning as /api/pra/pickers)."""
     return OTPresetsResponse(presets=[
-        OTPresetInfo(key=key, label=info["label"], port=info["port"])
+        OTPresetInfo(key=key, label=info["label"], port=info["port"],
+                     cell=bool(info.get("cell")))
         for key, info in ot_service.OT_PORT_PRESETS.items()
     ])
 
@@ -211,8 +250,7 @@ async def deploy_cell(
         raise HTTPException(status_code=400,
                             detail="GCP project ID not configured — run the setup wizard.")
     try:
-        ot_service.resolve_ports(payload.protocol, payload.plc_port,
-                                 payload.tunnel_local_port)
+        protocols = _validate_cell_protocols(payload)
     except OTError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -274,7 +312,8 @@ async def deploy_cell(
             "workgroup":       workgroup,
             "ot_cell":         True,
             "ot_params": {
-                "protocol":          payload.protocol,
+                "protocols":         protocols,
+                "protocol":          protocols[0],
                 "plc_port":          payload.plc_port,
                 "tunnel_local_port": payload.tunnel_local_port,
                 "hmi_port":          payload.hmi_port,
@@ -288,7 +327,7 @@ async def deploy_cell(
     job_service.log_audit(
         db, current_user.username, "ot_cell_deploy",
         details={"instance_name": payload.instance_name, "zone": zone, "cloud": "gcp",
-                 "protocol": payload.protocol, "workgroup": workgroup},
+                 "protocols": protocols, "workgroup": workgroup},
     )
 
     parent = job_service.create_job(
@@ -325,8 +364,7 @@ async def deploy_cell_aws(
     from .aws import (_resolve_region as _aws_resolve_region,
                       _validate_workgroup as _aws_validate_workgroup)
     try:
-        ot_service.resolve_ports(payload.protocol, payload.plc_port,
-                                 payload.tunnel_local_port)
+        protocols = _validate_cell_protocols(payload)
     except OTError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -368,7 +406,8 @@ async def deploy_cell_aws(
             "jumpoint_name":            payload.jumpoint_name,
             "ot_cell":                  True,
             "ot_params": {
-                "protocol":          payload.protocol,
+                "protocols":         protocols,
+                "protocol":          protocols[0],
                 "plc_port":          payload.plc_port,
                 "tunnel_local_port": payload.tunnel_local_port,
                 "hmi_port":          payload.hmi_port,
@@ -380,7 +419,7 @@ async def deploy_cell_aws(
     job_service.log_audit(
         db, current_user.username, "ot_cell_deploy",
         details={"instance_name": payload.instance_name, "region": region,
-                 "cloud": "aws", "protocol": payload.protocol, "workgroup": workgroup},
+                 "cloud": "aws", "protocols": protocols, "workgroup": workgroup},
     )
 
     parent = job_service.create_job(
@@ -417,8 +456,7 @@ async def deploy_cell_azure(
                         _validate_workgroup as _azure_validate_workgroup)
     from ..services import azure_service
     try:
-        ot_service.resolve_ports(payload.protocol, payload.plc_port,
-                                 payload.tunnel_local_port)
+        protocols = _validate_cell_protocols(payload)
     except OTError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -495,7 +533,8 @@ async def deploy_cell_azure(
             "workgroup":      workgroup,
             "ot_cell":        True,
             "ot_params": {
-                "protocol":          payload.protocol,
+                "protocols":         protocols,
+                "protocol":          protocols[0],
                 "plc_port":          payload.plc_port,
                 "tunnel_local_port": payload.tunnel_local_port,
                 "hmi_port":          payload.hmi_port,
@@ -509,7 +548,7 @@ async def deploy_cell_azure(
     job_service.log_audit(
         db, current_user.username, "ot_cell_deploy",
         details={"instance_name": payload.vm_name, "location": loc, "cloud": "azure",
-                 "protocol": payload.protocol, "workgroup": workgroup},
+                 "protocols": protocols, "workgroup": workgroup},
     )
 
     parent = job_service.create_job(
@@ -597,12 +636,13 @@ async def list_cells(
             continue
         if accessible is not None and (row.workgroup or "").lower() not in accessible:
             continue
-        # The PRA-checkout pair counts toward "wired" only when it applies to this
-        # cell (skip_reason "") — so a pre-feature cell with Password Safe onboarding
-        # shows "wiring incomplete" and its Re-wire button retrofits exactly the
-        # missing checkout pieces, while a cell without PS onboarding stays green.
-        checkout_pending = (not ot_service.ps_checkout_skip_reason(meta)
-                            and not meta.get("ot_ps_synced"))
+        # "Wired" is ot_service.cell_wiring_complete — one definition shared with
+        # the home-page tile, so the two cannot disagree about a cell that has
+        # several protocol tunnels (each carrying its own copy went green on the
+        # first tunnel). It also covers the PRA-checkout pair, so a pre-feature
+        # cell shows "wiring incomplete" and Re-wire retrofits exactly what's missing.
+        tunnels = ot_service.cell_tunnels(meta)
+        primary = tunnels[0] if tunnels else {}
         cells.append(OTCellInfo(
             vm_job_id=row.id,
             cloud=cloud,
@@ -615,18 +655,21 @@ async def list_cells(
             private_ip=meta.get("private_ip"),
             hmi_url=meta.get("ot_hmi_url") or "",
             web_jump_id=meta.get("ot_web_jump_id") or "",
-            tunnel_jump_id=meta.get("ot_tunnel_jump_id") or "",
-            tunnel_protocol=meta.get("ot_tunnel_protocol") or "",
-            tunnel_local_port=int(meta.get("ot_tunnel_local_port") or 0),
-            tunnel_remote_port=int(meta.get("ot_tunnel_remote_port") or 0),
+            tunnels=[OTCellTunnel(protocol=t.get("protocol") or "",
+                                  jump_id=str(t.get("jump_id") or ""),
+                                  local_port=int(t.get("local_port") or 0),
+                                  remote_port=int(t.get("remote_port") or 0))
+                     for t in tunnels],
+            tunnel_jump_id=str(primary.get("jump_id") or ""),
+            tunnel_protocol=primary.get("protocol") or "",
+            tunnel_local_port=int(primary.get("local_port") or 0),
+            tunnel_remote_port=int(primary.get("remote_port") or 0),
             shell_jump_id=str(meta.get("bt_shell_jump_id") or ""),
             vault_account_id=str(meta.get("ot_vault_account_id") or ""),
             vault_account_name=meta.get("ot_vault_account_name") or "",
             ps_checkout_synced=bool(meta.get("ot_ps_synced")),
             workgroup=row.workgroup or "",
             expires_at=row.expires_at.isoformat() if row.expires_at else None,
-            wiring_complete=bool(meta.get("ot_web_jump_tf_state")
-                                 and meta.get("ot_tunnel_tf_state")
-                                 and not checkout_pending),
+            wiring_complete=ot_service.cell_wiring_complete(meta),
         ))
     return OTCellListResponse(cells=cells)

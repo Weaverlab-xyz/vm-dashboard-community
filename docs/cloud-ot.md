@@ -1,7 +1,8 @@
 # OT Demo Cell
 
-The dashboard can stand up a simulated **OT/ICS plant cell** — a Modbus TCP PLC
-simulator plus the FUXA web SCADA/HMI — inside a cloud sandbox's **private,
+The dashboard can stand up a simulated **OT/ICS plant cell** — Modbus, Siemens
+S7comm, Rockwell EtherNet/IP and OPC UA PLC simulators plus the FUXA web SCADA/HMI —
+inside a cloud sandbox's **private,
 egress-less subnet**, then layer the BeyondTrust PAM stack on top. Same
 **provisioning + three layers** model as [Cloud VMs](cloud-vms.md); the OT twist is
 that the air-gapped subnet *is* the plant network, and every path in is PRA-brokered:
@@ -9,13 +10,15 @@ that the air-gapped subnet *is* the plant network, and every path in is PRA-brok
 - **Provisioning** *(stand it up)* — deploy a VM from the Packer-baked **`ot-sim`**
   image (`provisioners/ot/ot-sim-debian.sh`). Everything is baked at build time, so the
   running cell needs **zero outbound internet**: a PLC simulator whose holding registers
-  tick every second (:502), the same four process values over **OPC UA** (:4840) and
-  **EtherNet/IP** (:44818), FUXA (:1881) with its PLC connection pre-seeded, Docker, and
-  a systemd unit that starts the stack at boot.
-- **Layer 1 — PRA** *(reach it)* — three jump items per cell, all auto-provisioned:
+  tick every second (:502), the same four process values over **Siemens S7comm** (:102),
+  **Rockwell EtherNet/IP** (:44818) and **OPC UA** (:4840), FUXA (:1881) with its PLC
+  connection pre-seeded, Docker, and a systemd unit that starts the stack at boot.
+- **Layer 1 — PRA** *(reach it)* — auto-provisioned per cell:
   - **Web Jump** → `http://<vm>:1881` (the HMI, rendered and recorded on the gateway);
-  - **Protocol Tunnel** (generic TCP) → the PLC port, with presets for
-    **Modbus :502, OPC UA :4840, DNP3 :20000, Siemens S7 :102, EtherNet/IP :44818**;
+  - **one Protocol Tunnel per protocol you tick** (generic TCP), named
+    `ot-<cell>-<protocol>` — so a rep sees the Siemens PLC and the Rockwell PLC as
+    distinct targets and a Jump Group policy can grant them separately, rather than
+    one opaque item opening every port;
   - **Shell Jump** → SSH, inherited from the cloud's normal VM deploy path.
 - **Layer 2 — Password Safe** *(manage its secrets)* — *optional, default on.* The
   image's `adminuser` is onboarded via the cloud-native plugin the cloud's VM deploy
@@ -48,8 +51,10 @@ shared. The cell makes that concrete — the "plant" has **no public IP and no e
 yet a rep reaches the HMI in a recorded browser session, reads live Modbus registers
 through a tunnel, and never learns a credential. The values *change* every second
 (counter, temperature, flow), so a client through the tunnel visibly shows live process
-data, not a static mock — and the same four values are served over **Modbus, OPC UA and
-EtherNet/IP**, so the story holds whichever protocol the customer's plant speaks.
+data, not a static mock — and the same four values are served over **Modbus, Siemens
+S7comm, Rockwell EtherNet/IP and OPC UA**, so the story holds whichever protocol the
+customer's plant speaks. Ticking several protocols on one cell is what turns "we are a
+Siemens shop" and "we are a Rockwell shop" into the same demo.
 
 ## Deploying a cell
 
@@ -65,8 +70,10 @@ EtherNet/IP**, so the story holds whichever protocol the customer's plant speaks
      Linux builds always publish a **Compute Gallery image version** — Azure's
      managed-image export path is broken, gallery-version is the supported route.
 2. **The cloud page → OT Demo Cell tab**: pick the image (the picker pre-filters names
-   containing `ot-sim`), name the cell, pick the protocol preset, pick the **PRA Jump
-   Group + Gateway** that match the cell's region (see below), deploy. The VM defaults
+   containing `ot-sim`), name the cell, **tick the protocols to broker** — Modbus is
+   pre-checked and each ticked protocol becomes its own PRA tunnel — then pick the
+   **PRA Jump Group + Gateway** that match the cell's region (see below) and deploy.
+   The VM defaults
    to the 4 GB shape everywhere (`e2-medium` / `t3.medium` / `Standard_B2s`) — a 2 GB
    cell proved too tight for Docker + the PLC sim + FUXA in live use. On GCP and Azure
    the cell never gets a public IP (the form pins it); the GCP cell also carries the
@@ -89,7 +96,7 @@ resolves the same fallback chain its own Shell Jump uses: GCP
 `azure_jumpoint_name`, AWS straight to the shared `bt_jump_group_name` /
 `bt_jumpoint_name` — all falling back to the shared pair. The deploy form's
 **BeyondTrust PRA placement** pickers (fed by `GET /api/pra/pickers`, same as the VM
-deploy modal) override the defaults per cell: all three jump items land in the chosen
+deploy modal) override the defaults per cell: every jump item lands in the chosen
 Jump Group and ride the chosen Gateway, and the PRA Vault checkout account is
 associated to the same Jump Group. The standalone tunnel form has the same two
 pickers. Left at "(configured default)", behaviour is unchanged.
@@ -251,11 +258,11 @@ Notes that save demo time:
   stack. `OT_SIMS` at bake time picks which sims the image carries (default: all four).
   Siemens was in the same excluded bucket until python-snap7 3.0 reimplemented its S7
   server in pure Python; an image baked before that carries no `ot-s7` container.
-- **The cell's own tunnel is one protocol** (chosen at deploy), but the other three
-  ports are open on the cell: create a **standalone tunnel** pointed at the cell's
-  private IP to demo a second vendor against the same cell. Being able to show a
-  Siemens PLC *and* a Rockwell PLC on one air-gapped host, each brokered separately, is
-  usually the point of the exercise.
+- **A cell gets a tunnel per protocol you tick** — Modbus is pre-checked, and each
+  extra vendor becomes its own named jump item, so showing a Siemens PLC *and* a
+  Rockwell PLC on one air-gapped host, each brokered separately, needs no manual
+  wiring. To reach a protocol the image does not simulate (DNP3) or a different host,
+  the **standalone tunnel** card still points anywhere the Gateway can reach.
 - **One protocol per tunnel jump.** A tunnel carries one `local;remote` port pair. A
   cell gets one PLC tunnel (chosen at deploy); to speak a second protocol to the same
   cell or host, create a standalone tunnel with a different **name** and (if both run
@@ -275,7 +282,8 @@ Notes that save demo time:
   `DELETE /api/gcp/instances/{name}` / `DELETE /api/aws/instances/{instance-id}` /
   `DELETE /api/azure/vms/{name}`) and the **auto-delete timer** both run that cloud's
   same extended destroy (`gce_destroy` / `ec2_destroy` / `azure_destroy`): remove the
-  Web Jump and tunnel from their stored Terraform state, unlink the SyncedAccounts
+  Web Jump and **every** protocol tunnel from their stored Terraform state, unlink
+  the SyncedAccounts
   pair and off-board the PRA-checkout mirror, destroy the PRA Vault checkout account,
   then the Shell Jump, Password Safe and Entitle deregistrations, then the instance —
   and release the shared gateway reference last. There is no separate OT teardown
@@ -353,14 +361,17 @@ outside the image. Step 2a and step 10 below are their first live pass.
    (delete an existing gateway VM so it recreates); `gcp_vm_nat_enabled` **off**;
    Password Safe registration on with the GCP functional account.
 2. Bake `ot-sim`; it appears in the OT tab's image picker. Watch the bake log for
-   the four containers passing the smoke test and for either `FUXA project seeded` or
+   the five containers passing the smoke test and for either `FUXA project seeded` or
    the `NOT seeded` warning.
    - **2a.** On the deployed cell (Shell Jump): `docker ps` shows `ot-plc`, `ot-hmi`,
-     `ot-opcua`, `ot-enip`; the Web Jump opens FUXA on a project that already has the
-     `PLC` connection and its four tags.
-3. Deploy a cell **with the Jump Group + Gateway pickers set to the cell's region**;
-   the parent job completes; the child holds Shell Jump id + private IP; the jump
-   items land in the picked Jump Group (not the configured default).
+     `ot-opcua`, `ot-enip`, `ot-s7`; the Web Jump opens FUXA on a project that already
+     has the `PLC` connection and its four tags.
+3. Deploy a cell **with several protocols ticked** and the Jump Group + Gateway
+   pickers set to the cell's region; the parent job completes; the child holds Shell
+   Jump id + private IP; **one tunnel jump per ticked protocol** appears, each named
+   `ot-<cell>-<protocol>`, all in the picked Jump Group (not the configured default),
+   and each carrying an OT-cell comment rather than "k8s API tunnel". The cell shows
+   **wired** only once every one of them exists.
 4. PRA rep console: Shell Jump SSH works; Web Jump renders FUXA (recorded); a Modbus
    client (mbpoll / QModMaster) through the tunnel at `127.0.0.1:502` reads holding
    register 0 **incrementing every second**. Then deploy (or add a standalone tunnel
@@ -381,19 +392,28 @@ outside the image. Step 2a and step 10 below are their first live pass.
 7. Negative test: set the gateway to `e2-micro` → a new cell fails fast with the sizing
    remedy in the job error (not a mid-session OOM). With a Gateway override picked, the
    same deploy proceeds (guard skipped, noted in progress).
-8. Destroy the cell → jump items gone from PRA, the Vault checkout account gone, the
-   mirror + PS system off-boarded, VM deleted, gateway reaped only once nothing else
-   references it.
-9. Expiry: with the timer enabled, `expires_at` is stamped on the child row; a reaped
-   cell cleans up identically to a destroyed one.
-10. **Purdue rules (GCP, optional)**: with `ot_purdue_firewall_enabled` on, deploy a
+8. **Per-tunnel Re-wire**: delete one of the cell's tunnel jumps in PRA, press
+   **Re-wire**, and confirm only that protocol is recreated (the others are untouched
+   and not duplicated). Re-wire again with nothing missing and confirm it completes
+   without provisioning anything.
+9. Destroy the cell → **every** tunnel jump gone from PRA (check each protocol, not
+   just the first), the Web Jump gone, the Vault checkout account gone, the mirror + PS
+   system off-boarded, VM deleted, gateway reaped only once nothing else references it.
+10. **Back-compat**: destroy a cell deployed *before* this change — its metadata has the
+    singular `ot_tunnel_*` keys and no `ot_tunnels` list — and confirm its tunnel is
+    still torn down. (A cell in that state also Re-wires cleanly: the existing tunnel is
+    adopted into the list rather than provisioned a second time.)
+11. Expiry: with the timer enabled, `expires_at` is stamped on the child row; a reaped
+    cell cleans up identically to a destroyed one — including every tunnel.
+12. **Purdue rules (GCP, optional)**: with `ot_purdue_firewall_enabled` on, deploy a
     cell (or **Re-wire** an existing one) and check `gcloud compute firewall-rules list`
     shows its three `<cell>-ot-*` rules. Then: Shell Jump, Web Jump and the tunnel all
     still work; `curl` to the internet from the cell fails **even with
     `gcp_vm_nat_enabled` on**; and a destroy removes all three rules.
-11. **Protocol tunnels beyond Modbus**: create a standalone tunnel to the cell's private
-    IP on 4840 and read `Objects/Plant` in UaExpert; another on 44818 and read the four
-    tags with pylogix. Both should show the same values ticking as Modbus.
+13. **Standalone tunnels still work alongside**: the cell's own tunnels cover the
+    protocols it was deployed with, so use a standalone tunnel for what it was not —
+    e.g. DNP3 to real gear, or a second local port for a protocol already brokered.
+    Two tunnels cannot listen on the same local port on one rep machine at once.
 
 ## Troubleshooting
 
@@ -403,7 +423,7 @@ outside the image. Step 2a and step 10 below are their first live pass.
 | Web Jump session dies with "internal timeout starting session" | Gateway too small (if the guard was bypassed by resizing after deploy), or the gateway host is down — check the Gateways tab against reality |
 | Tunnel connects but the Modbus client times out | The cell VM isn't running the stack — Shell Jump in and check `systemctl status ot-sim` / `docker ps` |
 | Azure: Web Jump/Shell Jump work but the tunnel never establishes | The cell's Gateway resolves to an **ACI** gateway — ACI is serverless and cannot do protocol tunneling. Keep `azure_vm_jumpoint_mode=shared` and point `azure_jumpoint_name` / the form's Gateway picker at the shared **VM** gateway |
-| Registers read but never change | The PLC sim container restarted into a crash loop — `docker logs ot-plc` (OPC UA: `ot-opcua`; EtherNet/IP: `ot-enip`) |
+| Registers read but never change | The sim container restarted into a crash loop — `docker logs ot-plc` (S7: `ot-s7`; OPC UA: `ot-opcua`; EtherNet/IP: `ot-enip`) |
 | An S7 / OPC UA / EtherNet-IP tunnel connects but nothing answers | That sim was not baked — `OT_SIMS` at bake time selects them (default is all four), and an image baked before Siemens was added has no `ot-s7`. `docker ps` on the cell shows which are running |
 | FUXA opens with no PLC connection | The bake's project seed was skipped — search the bake log for `FUXA project NOT seeded`, and wire it by hand (`provisioners/ot/README.md`) |
 | AWS cell deploy fails immediately naming the subnet | Working as designed — that subnet auto-assigns public IPs; use the private sandbox subnet or clear `ot_aws_require_private_subnet` |

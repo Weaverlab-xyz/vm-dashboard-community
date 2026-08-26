@@ -7,6 +7,10 @@ class OTPresetInfo(BaseModel):
     key: str            # e.g. "modbus"
     label: str          # e.g. "Modbus TCP"
     port: int           # canonical TCP port, e.g. 502
+    # True when the baked ot-sim image actually simulates this protocol. The cell
+    # form offers only these; the standalone-tunnel form offers them all, since it
+    # points at real gear.
+    cell: bool = False
 
 
 class OTPresetsResponse(BaseModel):
@@ -64,7 +68,13 @@ class OTCellDeployRequest(BaseModel):
     disk_size_gb: int = 20
     network_tags: List[str] = []
     workgroup: str
+    # One PRA protocol tunnel is provisioned per protocol. `protocol` is the
+    # pre-multi-protocol singular field, still accepted as a one-element alias so
+    # older callers keep working; `protocols` wins when both are sent.
+    protocols: List[str] = []
     protocol: str = "modbus"          # tunnel preset for the PLC port
+    # Single-protocol overrides (the "custom" case) — ignored when the cell has
+    # more than one protocol, since one port cannot describe several tunnels.
     plc_port: Optional[int] = Field(default=None, ge=1, le=65535)          # override the preset port
     tunnel_local_port: Optional[int] = Field(default=None, ge=1, le=65535)  # rep-side listen port
     hmi_port: int = Field(default=1881, ge=1, le=65535)
@@ -89,7 +99,8 @@ class OTCellDeployRequestAWS(BaseModel):
     subnet_id: str
     security_group_ids: List[str]
     workgroup: str
-    protocol: str = "modbus"
+    protocols: List[str] = []         # one PRA tunnel each; see OTCellDeployRequest
+    protocol: str = "modbus"          # singular alias, kept for older callers
     plc_port: Optional[int] = Field(default=None, ge=1, le=65535)
     tunnel_local_port: Optional[int] = Field(default=None, ge=1, le=65535)
     hmi_port: int = Field(default=1881, ge=1, le=65535)
@@ -112,7 +123,8 @@ class OTCellDeployRequestAzure(BaseModel):
     subnet_id: str
     nsg_ids: List[str] = []
     workgroup: str
-    protocol: str = "modbus"
+    protocols: List[str] = []         # one PRA tunnel each; see OTCellDeployRequest
+    protocol: str = "modbus"          # singular alias, kept for older callers
     plc_port: Optional[int] = Field(default=None, ge=1, le=65535)
     tunnel_local_port: Optional[int] = Field(default=None, ge=1, le=65535)
     hmi_port: int = Field(default=1881, ge=1, le=65535)
@@ -120,6 +132,15 @@ class OTCellDeployRequestAzure(BaseModel):
     register_in_entitle: bool = False
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
+
+
+class OTCellTunnel(BaseModel):
+    """One PRA protocol tunnel on a cell (an entry of the child job's
+    ``ot_tunnels``)."""
+    protocol: str = ""
+    jump_id: str = ""
+    local_port: int = 0
+    remote_port: int = 0
 
 
 class OTCellDeployResponse(BaseModel):
@@ -141,6 +162,10 @@ class OTCellInfo(BaseModel):
     private_ip: Optional[str] = None
     hmi_url: str = ""
     web_jump_id: str = ""
+    # Every protocol tunnel this cell has. The singular tunnel_* fields below
+    # describe the FIRST one and are kept so older API consumers still read
+    # something sensible.
+    tunnels: List[OTCellTunnel] = []
     tunnel_jump_id: str = ""
     tunnel_protocol: str = ""
     tunnel_local_port: int = 0

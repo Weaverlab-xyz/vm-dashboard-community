@@ -723,9 +723,19 @@ async def remove_db_tunnel(tf_state_json: str) -> None:
 # tunnel_listen_address must be within 127.0.0.0/24 — both confirmed against a
 # live appliance jump. No Vault account, no credential injection.
 
+# What a rep sees on the jump item in the PRA console when a caller doesn't say.
+# Kept as the k8s wording because that is the caller this section was written for
+# and its jump items already carry it.
+_DEFAULT_TUNNEL_COMMENTS = (
+    "Auto-provisioned by Infrastructure Management Dashboard (k8s API tunnel)")
+
+_DEFAULT_WEB_JUMP_COMMENTS = (
+    "Auto-provisioned by Infrastructure Management Dashboard (Rancher management UI)")
+
+
 def _generate_api_tunnel_hcl(name: str, hostname: str, jump_group_name: str,
                              jumpoint_name: str, tunnel_definitions: str,
-                             tag: str = "Kubernetes") -> str:
+                             tag: str = "Kubernetes", comments: str = "") -> str:
     """HCL for one sra_protocol_tunnel_jump with tunnel_type="tcp". No url/
     ca_certificates (those are k8s-tunnel-only) and no Vault account — the
     kubeconfig carries its own (token-free, exec-plugin) auth."""
@@ -767,7 +777,7 @@ resource "sra_protocol_tunnel_jump" {json.dumps(safe_name)} {{
   tunnel_definitions    = {json.dumps(tunnel_definitions)}
   tunnel_listen_address = "127.0.0.1"
   tag                   = {json.dumps(tag)}
-  comments              = "Auto-provisioned by Infrastructure Management Dashboard (k8s API tunnel)"
+  comments              = {json.dumps(comments or _DEFAULT_TUNNEL_COMMENTS)}
 }}
 
 output "tunnel_jump_id" {{
@@ -777,14 +787,15 @@ output "tunnel_jump_id" {{
 
 
 def _provision_api_tunnel_sync(name, hostname, jump_group_name, jumpoint_name,
-                               tunnel_definitions, tag="Kubernetes", client_secret="") -> dict:
+                               tunnel_definitions, tag="Kubernetes", client_secret="",
+                               comments="") -> dict:
     # A per-cluster PRA credential overrides the configured bt_client_secret for
     # this apply only (the sensitive TF_VAR the provider block reads).
     _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
     with tempfile.TemporaryDirectory(prefix="pra_api_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(
             _generate_api_tunnel_hcl(name, hostname, jump_group_name, jumpoint_name,
-                                     tunnel_definitions, tag))
+                                     tunnel_definitions, tag, comments))
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
         if init.returncode != 0:
             raise TerraformPRAError(
@@ -824,15 +835,21 @@ async def provision_api_tunnel(
     remote_port: int = 443,
     tag: str = "Kubernetes",
     client_secret: str = "",
+    comments: str = "",
 ) -> dict:
     """Provision a generic tunnel_type="tcp" PRA protocol-tunnel jump to a k8s
     API server, with a pinned local listen port. The Jump Group + Jumpoint must
     already exist. Returns ``{tunnel_jump_id, jump_group_name, tf_state_json}``
-    (state SCRUBBED, safe to stash; drives ``remove_api_tunnel`` later)."""
+    (state SCRUBBED, safe to stash; drives ``remove_api_tunnel`` later).
+
+    ``comments`` is what a rep SEES on the jump item in the PRA console, so a
+    caller that is not the k8s tunnel should say what it actually is — the
+    default used to be hardcoded, which labelled every OT cell tunnel a "k8s
+    API tunnel" in front of the customer."""
     tunnel_definitions = f"{int(local_port)};{int(remote_port)}"
     return await asyncio.to_thread(
         _provision_api_tunnel_sync, name, hostname, jump_group_name, jumpoint_name,
-        tunnel_definitions, tag, client_secret)
+        tunnel_definitions, tag, client_secret, comments)
 
 
 async def remove_api_tunnel(tf_state_json: str) -> None:
@@ -857,7 +874,7 @@ def _generate_web_jump_hcl(name: str, url: str, jump_group_name: str,
                            jumpoint_name: str, tag: str = "rancher",
                            verify_certificate: bool = False, *,
                            vault_account_name: str = "", vault_username: str = "admin",
-                           vault_account_group_id=None) -> str:
+                           vault_account_group_id=None, comments: str = "") -> str:
     """HCL for one sra_web_jump (+ an optional sra_vault_username_password_account
     for credential injection). Required: name, url, jump_group_id, jumpoint_id (ids
     from the jump-group/jumpoint list data sources). verify_certificate defaults
@@ -930,7 +947,7 @@ resource "sra_web_jump" {json.dumps(safe_name)} {{
   jumpoint_id        = tonumber(data.sra_jumpoint_list.jp.items[0].id)
   verify_certificate = {str(bool(verify_certificate)).lower()}
   tag                = {json.dumps(tag)}
-  comments           = "Auto-provisioned by Infrastructure Management Dashboard (Rancher management UI)"
+  comments           = {json.dumps(comments or _DEFAULT_WEB_JUMP_COMMENTS)}
 }}
 
 output "web_jump_id" {{
@@ -942,7 +959,8 @@ output "web_jump_id" {{
 def _provision_web_jump_sync(name, url, jump_group_name, jumpoint_name,
                              tag="rancher", verify_certificate=False, client_secret="",
                              admin_password="", vault_account_name="",
-                             vault_username="admin", vault_account_group_id=None) -> dict:
+                             vault_username="admin", vault_account_group_id=None,
+                             comments="") -> dict:
     _cred_env = {}
     if client_secret:
         _cred_env["TF_VAR_bt_client_secret"] = client_secret
@@ -954,7 +972,8 @@ def _provision_web_jump_sync(name, url, jump_group_name, jumpoint_name,
             Path(work_dir, "main.tf").write_text(_generate_web_jump_hcl(
                 name, url, jump_group_name, jumpoint_name, tag, verify_certificate,
                 vault_account_name=vault_account_name if with_vault else "",
-                vault_username=vault_username, vault_account_group_id=vault_account_group_id))
+                vault_username=vault_username, vault_account_group_id=vault_account_group_id,
+                comments=comments))
         _write(want_vault)
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
         if init.returncode != 0:
@@ -1003,7 +1022,7 @@ async def provision_web_jump(
     *, name: str, url: str, jump_group_name: str, jumpoint_name: str,
     tag: str = "rancher", verify_certificate: bool = False, client_secret: str = "",
     admin_password: str = "", vault_account_name: str = "", vault_username: str = "admin",
-    vault_account_group_id=None,
+    vault_account_group_id=None, comments: str = "",
 ) -> dict:
     """Provision a PRA Web Jump to a web UI (the central Rancher). The Jump Group +
     Jumpoint must already exist. When ``admin_password`` + ``vault_account_name`` are
@@ -1013,7 +1032,8 @@ async def provision_web_jump(
     return await asyncio.to_thread(
         _provision_web_jump_sync, name, url, jump_group_name, jumpoint_name,
         tag, verify_certificate, client_secret,
-        admin_password, vault_account_name, vault_username, vault_account_group_id)
+        admin_password, vault_account_name, vault_username, vault_account_group_id,
+        comments)
 
 
 async def remove_web_jump(tf_state_json: str) -> None:

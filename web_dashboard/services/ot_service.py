@@ -45,14 +45,49 @@ class OTCellError(Exception):
 # ── Protocol presets ──────────────────────────────────────────────────────────
 # Canonical TCP ports for the OT protocols a PRA protocol tunnel is most often
 # demoed against. "custom" (any port) is accepted everywhere a preset key is.
+#
+# ``cell`` marks the protocols the baked ``ot-sim`` image actually SERVES
+# (provisioners/ot/ot-sim-debian.sh runs a simulator per marked protocol). The
+# rest are still offered for standalone tunnels to real lab gear — but a cell
+# form must not offer one, because a tunnel to a port with no listener is a
+# session failure indistinguishable from a firewall block. tests/test_ot_ports.py
+# holds this table and the image's compose services to each other.
 
 OT_PORT_PRESETS = {
-    "modbus":      {"port": 502,   "label": "Modbus TCP"},
-    "opcua":       {"port": 4840,  "label": "OPC UA"},
-    "dnp3":        {"port": 20000, "label": "DNP3"},
-    "s7":          {"port": 102,   "label": "Siemens S7comm"},
-    "ethernet-ip": {"port": 44818, "label": "EtherNet/IP"},
+    "modbus":      {"port": 502,   "label": "Modbus TCP",      "cell": True},
+    "opcua":       {"port": 4840,  "label": "OPC UA",          "cell": True},
+    "dnp3":        {"port": 20000, "label": "DNP3",            "cell": False},
+    "s7":          {"port": 102,   "label": "Siemens S7comm",  "cell": True},
+    "ethernet-ip": {"port": 44818, "label": "EtherNet/IP",     "cell": True},
 }
+
+# The default a cell deploys with when the form sends nothing.
+DEFAULT_CELL_PROTOCOLS = ("modbus",)
+
+
+def cell_protocols() -> list:
+    """Preset keys the baked cell image serves, in table order."""
+    return [k for k, v in OT_PORT_PRESETS.items() if v.get("cell")]
+
+
+def resolve_cell_protocols(ot_params: dict) -> list:
+    """The protocols a cell should have tunnels for, de-duplicated and ordered.
+
+    Reads ``protocols`` (multi-protocol cells) and falls back to the singular
+    ``protocol`` — which is what every cell deployed before multi-protocol
+    carries, so those keep re-wiring and tearing down unchanged."""
+    ot = ot_params or {}
+    raw = ot.get("protocols")
+    if not raw:
+        single = (ot.get("protocol") or "").strip().lower()
+        raw = [single] if single else list(DEFAULT_CELL_PROTOCOLS)
+    out = []
+    for name in raw:
+        key = (name or "").strip().lower()
+        if key and key not in out:
+            out.append(key)
+    return out
+
 
 # A Web Jump renders headless Chromium ON the PRA gateway host. Below ~2 GB the
 # renderer is OOM-killed and the session error is indistinguishable from a blocked
@@ -882,9 +917,11 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
 
     ot = cmeta.get("ot_params") or {}
     hmi_port = int(ot.get("hmi_port") or 1881)
-    protocol = (ot.get("protocol") or "modbus").lower()
-    local_port, remote_port = resolve_ports(protocol, ot.get("plc_port"),
-                                            ot.get("tunnel_local_port"))
+    protocols = resolve_cell_protocols(ot)
+    # plc_port / tunnel_local_port are single-protocol overrides (the "custom"
+    # case), so they only apply when the cell has exactly one protocol —
+    # applying one port to every tunnel would point them all at the same target.
+    single = len(protocols) == 1
     jump_group, jumpoint = resolve_jump_targets(ot.get("jump_group"),
                                                 ot.get("jumpoint_name"), cloud)
     client_secret = config_service.get("bt_client_secret")
@@ -923,7 +960,9 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
             res = await pra.provision_web_jump(
                 name=f"ot-{vm}-hmi", url=hmi_url, jump_group_name=jump_group,
                 jumpoint_name=jumpoint, tag="OT", verify_certificate=False,
-                client_secret=client_secret)
+                client_secret=client_secret,
+                comments=f"Auto-provisioned by Infrastructure Management Dashboard "
+                         f"(OT demo cell {vm}, FUXA HMI)")
         except Exception as exc:  # noqa: BLE001
             raise OTCellError(
                 f"The cell VM {vm} is deployed (Shell Jump / Password Safe as "
@@ -934,7 +973,23 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
         job_service.update_metadata(db, child_id, wired)
         cmeta.update(wired)
 
-    if not cmeta.get("ot_tunnel_tf_state"):
+    # One protocol tunnel per selected protocol. Each is appended to ot_tunnels
+    # the moment it exists, so a failure part-way leaves nothing untracked for
+    # the destroy path and a Re-wire retries exactly the missing ones.
+    #
+    # A cell deployed before multi-protocol carries the singular ot_tunnel_*
+    # keys instead. _cell_tunnels projects those into the list shape (same
+    # tf_state, so the existing jump item is adopted rather than duplicated),
+    # which is also how every destroy path keeps honouring them.
+    existing = _cell_tunnels(cmeta)
+    done = {t.get("protocol") for t in existing}
+    for protocol in protocols:
+        if protocol in done:
+            continue
+        local_port, remote_port = resolve_ports(
+            protocol,
+            ot.get("plc_port") if single else None,
+            ot.get("tunnel_local_port") if single else None)
         job_service.update_progress(
             db, parent_id, 92,
             f"Provisioning the PRA protocol tunnel ({protocol} → {ip}:{remote_port})…")
@@ -942,16 +997,32 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
             res = await pra.provision_api_tunnel(
                 name=f"ot-{vm}-{protocol}", hostname=ip, jump_group_name=jump_group,
                 jumpoint_name=jumpoint, local_port=local_port, remote_port=remote_port,
-                tag="OT", client_secret=client_secret)
+                tag="OT", client_secret=client_secret,
+                comments=f"Auto-provisioned by Infrastructure Management Dashboard "
+                         f"(OT demo cell {vm}, {protocol})")
         except Exception as exc:  # noqa: BLE001
             raise OTCellError(
                 f"The cell VM {vm} and its HMI Web Jump are in place, but the "
                 f"{protocol} protocol tunnel failed: {exc}. {rewire_hint}")
-        wired = {"ot_tunnel_jump_id": str(res.get("tunnel_jump_id") or ""),
-                 "ot_tunnel_tf_state": res.get("tf_state_json") or "",
-                 "ot_tunnel_protocol": protocol,
-                 "ot_tunnel_local_port": local_port,
-                 "ot_tunnel_remote_port": remote_port}
+        entry = {"protocol": protocol,
+                 "jump_id": str(res.get("tunnel_jump_id") or ""),
+                 "tf_state": res.get("tf_state_json") or "",
+                 "local_port": local_port,
+                 "remote_port": remote_port}
+        existing.append(entry)
+        done.add(protocol)
+        wired = {"ot_tunnels": existing}
+        # Mirror the FIRST tunnel into the singular keys, and only ever the first:
+        # they are what an older reader (and OTCellInfo's back-compat fields) looks
+        # at. Keyed on "this is the only tunnel so far" rather than on the loop
+        # index, so extending a legacy cell cannot repoint them at a later
+        # protocol while the original tunnel keeps living in the list.
+        if len(existing) == 1:
+            wired.update({"ot_tunnel_jump_id": entry["jump_id"],
+                          "ot_tunnel_tf_state": entry["tf_state"],
+                          "ot_tunnel_protocol": protocol,
+                          "ot_tunnel_local_port": local_port,
+                          "ot_tunnel_remote_port": remote_port})
         job_service.update_metadata(db, child_id, wired)
         cmeta.update(wired)
 
@@ -977,16 +1048,69 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
         "private_ip": ip,
         "hmi_url": cmeta.get("ot_hmi_url") or hmi_url,
         "web_jump_id": cmeta.get("ot_web_jump_id") or "",
+        # Read back off the cell rather than off the loop above: a Re-wire whose
+        # tunnels all already exist never enters that loop, and reporting from
+        # loop variables raised UnboundLocalError instead of summarising the cell.
+        "tunnels": [{"protocol": t.get("protocol") or "",
+                     "jump_id": t.get("jump_id") or "",
+                     "local_port": t.get("local_port") or 0,
+                     "remote_port": t.get("remote_port") or 0}
+                    for t in _cell_tunnels(cmeta)],
         "tunnel_jump_id": cmeta.get("ot_tunnel_jump_id") or "",
-        "tunnel_protocol": protocol,
-        "tunnel_local_port": local_port,
-        "tunnel_remote_port": remote_port,
+        "tunnel_protocol": cmeta.get("ot_tunnel_protocol") or "",
+        "tunnel_local_port": int(cmeta.get("ot_tunnel_local_port") or 0),
+        "tunnel_remote_port": int(cmeta.get("ot_tunnel_remote_port") or 0),
         "shell_jump_id": cmeta.get("bt_shell_jump_id") or "",
         "vault_account_id": cmeta.get("ot_vault_account_id") or "",
         "vault_account_name": cmeta.get("ot_vault_account_name") or "",
         "ps_checkout": ps_note,
         "purdue_firewall": firewall_note,
     }
+
+
+def _cell_tunnels(cmeta: dict) -> list:
+    """This cell's protocol tunnels as a list of dicts.
+
+    Reads ``ot_tunnels``; a cell deployed before multi-protocol has only the
+    singular ``ot_tunnel_*`` keys, which are projected into the same shape here
+    so every caller sees one representation. Returns a fresh list — callers
+    append to it and persist the whole thing."""
+    raw = (cmeta or {}).get("ot_tunnels")
+    if isinstance(raw, list) and raw:
+        return [dict(t) for t in raw if isinstance(t, dict)]
+    state = (cmeta or {}).get("ot_tunnel_tf_state")
+    if state:
+        return [{"protocol": (cmeta.get("ot_tunnel_protocol") or "").lower(),
+                 "jump_id": str(cmeta.get("ot_tunnel_jump_id") or ""),
+                 "tf_state": state,
+                 "local_port": int(cmeta.get("ot_tunnel_local_port") or 0),
+                 "remote_port": int(cmeta.get("ot_tunnel_remote_port") or 0)}]
+    return []
+
+
+def cell_tunnels(cmeta: dict) -> list:
+    """Public view of :func:`_cell_tunnels` for the API and destroy paths."""
+    return _cell_tunnels(cmeta)
+
+
+def cell_wiring_complete(cmeta: dict) -> bool:
+    """True when this cell has every artifact its own deploy asked for.
+
+    The single definition on purpose: the cells endpoint and the home-page tile
+    both render this, and when each carried its own copy they answered
+    differently the moment a cell had more than one protocol tunnel (both went
+    green on the first one). Same drift class as a cache warmer holding its own
+    copy of route logic."""
+    meta = cmeta or {}
+    if not meta.get("ot_web_jump_tf_state"):
+        return False
+    wanted = set(resolve_cell_protocols(meta.get("ot_params") or {}))
+    have = {t.get("protocol") for t in _cell_tunnels(meta) if t.get("tf_state")}
+    if wanted - have:
+        return False
+    checkout_pending = (not ps_checkout_skip_reason(meta)
+                        and not meta.get("ot_ps_synced"))
+    return not checkout_pending
 
 
 def ps_checkout_skip_reason(cmeta: dict) -> str:

@@ -271,10 +271,11 @@ def _db_tiles(db: Session, user: User) -> dict:
             cloud = ot_service.cell_cloud_for_job_type(row.job_type)
             if cloud:
                 per_cloud[cloud] = per_cloud.get(cloud, 0) + 1
-            checkout_pending = (not ot_service.ps_checkout_skip_reason(meta)
-                                and not meta.get("ot_ps_synced"))
-            if (row.status == "completed" and meta.get("ot_web_jump_tf_state")
-                    and meta.get("ot_tunnel_tf_state") and not checkout_pending):
+            # ot_service owns "is this cell fully wired" — this tile and
+            # GET /api/ot/cells used to carry a copy each, which disagreed the
+            # moment a cell had more than one protocol tunnel (both went green
+            # on the first of several).
+            if row.status == "completed" and ot_service.cell_wiring_complete(meta):
                 wired += 1
         # The count spans three clouds but the tile is one link, so send the caller
         # where their cells actually are: the cloud holding the most. With no cells

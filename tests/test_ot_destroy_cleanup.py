@@ -39,7 +39,7 @@ def test_every_cell_cloud_destroy_removes_the_ot_wiring():
     for cloud, path in _CELL_VM_SERVICES.items():
         src = _fn_src(path, "_run_destroy")
         for needle in ("ot_web_jump_tf_state", "remove_web_jump",
-                       "ot_tunnel_tf_state", "remove_api_tunnel",
+                       "cell_tunnels", "remove_api_tunnel",
                        "ot_ps_mirror_tf_state", "unlink_synced_account",
                        "ot_vault_tf_state", "remove_vault_account"):
             assert needle in src, (
@@ -60,6 +60,32 @@ def test_the_gce_destroy_removes_the_ot_wiring():
     it; the per-cloud sweep above is the real rule now."""
     src = _fn_src(_GCP_VM, "_run_destroy")
     assert "ot_web_jump_tf_state" in src
+
+
+def test_every_cell_cloud_destroys_every_tunnel_not_just_one():
+    """A multi-protocol cell has one tunnel per protocol. Removing a single
+    tf_state would leave the rest as orphaned jump items in PRA, and the destroy
+    would still report success."""
+    for cloud, path in _CELL_VM_SERVICES.items():
+        src = _fn_src(path, "_run_destroy")
+        tunnels_at = src.index("cell_tunnels")
+        removal_at = src.index("remove_api_tunnel")
+        assert tunnels_at < removal_at, (
+            f"{cloud}: the tunnel list is read after the removal call")
+        assert "for _t in" in src, (
+            f"{cloud}: _run_destroy removes a single tunnel rather than iterating "
+            "the cell's tunnel list — a second protocol's jump item would leak")
+
+
+def test_the_tunnel_list_absorbs_the_pre_multi_protocol_keys():
+    """Cells deployed before multi-protocol carry the singular ot_tunnel_* keys and
+    no list. ot_service.cell_tunnels is the ONE place that projects them into the
+    list shape — every destroy path goes through it, so if this projection is lost
+    those live cells silently stop tearing their tunnel down."""
+    src = _fn_src(_OT, "_cell_tunnels")
+    for needle in ("ot_tunnels", "ot_tunnel_tf_state", "ot_tunnel_protocol",
+                   "ot_tunnel_jump_id"):
+        assert needle in src, f"_cell_tunnels no longer reads {needle!r}"
 
 
 def test_the_orchestrator_covers_exactly_the_swept_clouds():
@@ -110,6 +136,25 @@ def test_standalone_tunnels_hold_a_gateway_reference():
         assert "_active_ot_tunnel_count" in src, (
             f"{fn} lost its OT tunnel term — a cloud-database decommission could "
             "reap the gateway from under a live OT tunnel")
+
+
+def test_the_wired_predicate_has_exactly_one_definition():
+    """"Is this cell fully wired" is rendered in two places — GET /api/ot/cells and
+    the home-page tile. They each carried a copy of the test, and the copies agreed
+    only while a cell had exactly one protocol tunnel: both went green on the first
+    one. Both must call ot_service.cell_wiring_complete, and neither may rebuild it
+    out of the raw metadata keys."""
+    api = open(os.path.join(_ROOT, "web_dashboard", "api", "ot.py"),
+               encoding="utf-8").read()
+    tile = open(os.path.join(_ROOT, "web_dashboard", "api", "dashboard.py"),
+                encoding="utf-8").read()
+    for name, src in (("api/ot.py", api), ("api/dashboard.py", tile)):
+        assert "cell_wiring_complete" in src, (
+            f"{name} no longer asks ot_service whether a cell is wired")
+        assert "ot_web_jump_tf_state" not in src, (
+            f"{name} rebuilds the wired test from raw metadata keys instead of "
+            "calling ot_service.cell_wiring_complete — that is the drift this "
+            "helper exists to prevent")
 
 
 def test_the_cell_parent_is_a_first_class_worker_type():

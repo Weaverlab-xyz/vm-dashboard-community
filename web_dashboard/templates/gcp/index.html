@@ -1011,19 +1011,23 @@
 
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">PLC Protocol (tunnel)</label>
-            <select x-model="otForm.protocol"
-                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <template x-for="p in otPresets" :key="p.key">
-                <option :value="p.key" x-text="p.label + ' (:' + p.port + ')'"></option>
+            <label class="block text-sm font-medium text-gray-700 mb-1">PLC Protocols (one tunnel each)</label>
+            <div class="border border-gray-300 rounded-lg p-2 space-y-1">
+              <template x-for="p in cellPresets()" :key="p.key">
+                <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                  <input type="checkbox" :value="p.key"
+                         @change="toggleOTProtocol($event, p.key)"
+                         :checked="otForm.protocols.includes(p.key)"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  <span class="text-xs text-gray-700" x-text="p.label + ' (:' + p.port + ')'"></span>
+                </label>
               </template>
-              <option value="custom">Custom port…</option>
-            </select>
-          </div>
-          <div x-show="otForm.protocol === 'custom'" x-cloak>
-            <label class="block text-sm font-medium text-gray-700 mb-1">PLC Port</label>
-            <input type="number" min="1" max="65535" x-model.number="otForm.plc_port"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <p class="text-xs text-gray-400 mt-1">
+              The cell simulates all of these at once — each gets its own PRA protocol
+              tunnel, so access can be granted per vendor. Protocols the image does not
+              simulate (e.g. DNP3) stay available on the standalone tunnel card below.
+            </p>
           </div>
         </div>
 
@@ -1082,7 +1086,7 @@
              class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700" x-text="otError"></div>
 
         <button @click="submitOTCell()"
-                :disabled="otSubmitting || !otForm.image_self_link || !otForm.instance_name || !otForm.workgroup"
+                :disabled="otSubmitting || !otForm.image_self_link || !otForm.instance_name || !otForm.workgroup || !otForm.protocols.length"
                 class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
           <span x-show="!otSubmitting">Deploy OT Cell</span>
           <span x-show="otSubmitting" x-cloak>Queuing…</span>
@@ -1123,8 +1127,10 @@
                   <div x-show="c.web_jump_id"><span class="text-gray-400">HMI Web Jump:</span>
                     <span class="font-mono" x-text="c.web_jump_id"></span>
                     <span class="text-gray-400" x-text="' (' + c.hmi_url + ')'"></span></div>
-                  <div x-show="c.tunnel_jump_id"><span class="text-gray-400">Tunnel:</span>
-                    <span class="font-mono" x-text="c.tunnel_protocol + ' 127.0.0.1:' + c.tunnel_local_port + ' → :' + c.tunnel_remote_port"></span></div>
+                  <template x-for="t in (c.tunnels || [])" :key="t.jump_id || t.protocol">
+                    <div><span class="text-gray-400">Tunnel:</span>
+                      <span class="font-mono" x-text="t.protocol + ' 127.0.0.1:' + t.local_port + ' → :' + t.remote_port"></span></div>
+                  </template>
                   <div x-show="c.shell_jump_id"><span class="text-gray-400">Shell Jump:</span>
                     <span class="font-mono" x-text="c.shell_jump_id"></span></div>
                   <div x-show="c.vault_account_name"><span class="text-gray-400">PRA checkout:</span>
@@ -1347,7 +1353,7 @@ function gcpDashboard() {
     otForm: {
       image_self_link: '', instance_name: '', machine_type: 'e2-medium',
       zone: '', subnetwork: '', workgroup: '',
-      protocol: 'modbus', plc_port: null, hmi_port: 1881,
+      protocols: ['modbus'], plc_port: null, hmi_port: 1881,
       jump_group: '', jumpoint_name: '',
       register_in_passwordsafe: true, register_in_entitle: false,
     },
@@ -1419,6 +1425,20 @@ function gcpDashboard() {
       return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-sim'));
     },
 
+    // Only the protocols the baked image actually simulates. The standalone
+    // tunnel card keeps offering every preset, since it points at real gear.
+    cellPresets() {
+      return (this.otPresets || []).filter(p => p.cell);
+    },
+
+    toggleOTProtocol(event, key) {
+      if (event.target.checked) {
+        this.otForm.protocols = [...this.otForm.protocols, key];
+      } else {
+        this.otForm.protocols = this.otForm.protocols.filter(p => p !== key);
+      }
+    },
+
     async loadOTCells() {
       try {
         const r = await API.get('/api/ot/cells');
@@ -1449,8 +1469,8 @@ function gcpDashboard() {
           zone: f.zone,
           subnetwork: f.subnetwork,
           workgroup: f.workgroup,
-          protocol: f.protocol,
-          plc_port: f.protocol === 'custom' ? f.plc_port : null,
+          protocols: f.protocols,
+          plc_port: f.protocols.length === 1 && f.protocols[0] === 'custom' ? f.plc_port : null,
           hmi_port: f.hmi_port,
           jump_group: f.jump_group || null,
           jumpoint_name: f.jumpoint_name || null,
