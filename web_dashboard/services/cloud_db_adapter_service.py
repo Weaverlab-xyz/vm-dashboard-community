@@ -57,7 +57,16 @@ _SQLSERVER_FLAVOR = {"aws": "rds", "azure": "azure_sql", "gcp": "cloudsql"}
 # the function as a value — each cloud resolves a reference.
 _SECRET_BACKEND = {"aws": "aws_sm", "azure": "azure_kv", "gcp": "gcp_sm"}
 
-_ADAPTER_WORKLOAD = "db_grant"
+# The Cloud Functions workload that IS the adapter. Public: the Databases page needs
+# it to find a row's existing adapter, and a second spelling of "db_grant" is how the
+# lookup and the deploy drift apart.
+ADAPTER_WORKLOAD = "db_grant"
+
+
+def _entitle_registration_enabled() -> bool:
+    """Whether the Entitle integration is switched on. Read at run time, not import
+    time, because config_service is backed by the app_config table."""
+    return config_service.get_bool("entitle_registration_enabled", False)
 
 
 def adapter_required(engine: str) -> Optional[str]:
@@ -75,6 +84,52 @@ def flavor_for(engine: str, cloud: str) -> str:
             f"no SQL Server flavor known for cloud {cloud!r} — the adapter would "
             "emit statements for the wrong dialect")
     return flavor
+
+
+def adapter_ineligible_reason(row: CloudDatabase) -> Optional[str]:
+    """Why this database cannot be paired with a ``db_grant`` adapter, or None.
+
+    Single source of truth for all three consumers — the row button (via
+    ``cloud_database_service._serialize``'s ``adapter_viable``), the API pre-flight, and
+    :func:`start_pairing` — so the button can never offer what the endpoint refuses and
+    neither can queue a job the pairing would fail.
+
+    STRUCTURAL blockers only: facts about the row that no amount of configuration
+    changes. Whether Cloud Functions is switched on, and whether the row's region has a
+    per-region config set to place the function in, are configuration-time questions the
+    API answers separately (409). ``status`` is likewise left out — the buttons test it
+    in their own x-show, as the Password Safe and Entitle ones do.
+
+    One deliberate strictness: the ``db_name`` check reads the COLUMN, while
+    :func:`_database_name` prefers the provisioning job's tf_variables and only falls
+    back to the column. In practice they agree — every ``_build_tf_variables`` branch
+    emits ``db_name``, and ``provision`` stamps exactly that onto the row, so the
+    ``database_name``/``initial_catalog`` spellings _database_name also accepts are
+    defensive rather than reachable. The gap is legacy rows provisioned before the
+    column existed, which ``backfill_provisioned_db_names`` is there to close; until it
+    runs, such a row is refused here rather than offered. That is the safe direction —
+    never offer a button that may refuse.
+    """
+    if not adapter_required(row.engine):
+        return (f"{row.engine or 'this engine'} keeps Entitle's native database "
+                "connector, which does just-in-time accounts on its own. An adapter "
+                "would replace a working integration with a new moving part.")
+    if (row.source or "provisioned") == "registered":
+        return ("no admin credential for this database — it cannot be paired with an "
+                "adapter (a registered, rather than provisioned, database has none)")
+    if row.cloud not in _SECRET_BACKEND:
+        return (f"no secret backend for cloud {row.cloud!r} — the adapter reads its "
+                "admin credential from the cloud's own secret store")
+    try:
+        flavor_for(row.engine, row.cloud)
+    except AdapterPairingError as exc:
+        return str(exc)
+    if not row.private_host:
+        return "database has no endpoint yet — wait for provisioning to finish"
+    if not row.db_name:
+        return (f"cannot determine the database name for this {row.engine} instance "
+                "— the adapter would have nothing to scope grants to")
+    return None
 
 
 def adapter_name(row: CloudDatabase) -> str:
@@ -195,10 +250,9 @@ def start_pairing(db: Session, *, row: CloudDatabase, created_by: str = "",
                   dry_run: bool = True) -> dict:
     """Queue a ``clouddb_adapter_pair`` job. Validates before queuing so an
     impossible pairing fails at the click, not three minutes into a job."""
-    if not row.private_host:
-        raise AdapterPairingError(
-            "database has no endpoint yet — wait for provisioning to finish")
-    flavor_for(row.engine, row.cloud)          # raises on an unknown combination
+    reason = adapter_ineligible_reason(row)
+    if reason:
+        raise AdapterPairingError(reason)
     job = job_service.create_job(
         db, job_type="clouddb_adapter_pair", created_by=created_by,
         metadata={"db_id": row.id, "engine": row.engine, "cloud": row.cloud,
@@ -233,7 +287,7 @@ async def run_pairing(db: Session, *, db_id: str, job_id: str,
         job_service.update_progress(db, job_id, 30, "Deploying the adapter function…")
         deployed = cloud_function_service.deploy(
             db, cloud=row.cloud, region=row.region, name=adapter_name(row),
-            workload=_ADAPTER_WORKLOAD, created_by="clouddb-pairing",
+            workload=ADAPTER_WORKLOAD, created_by="clouddb-pairing",
             # vpc, always: the whole point is reaching a database that has no public
             # endpoint. A public adapter would deploy fine and fail every grant.
             network_mode="vpc",
@@ -251,23 +305,41 @@ async def run_pairing(db: Session, *, db_id: str, job_id: str,
                 f"{getattr(fn_row, 'status', 'missing')}) — see its job for the "
                 "terraform output")
 
-        job_service.update_progress(db, job_id, 75, "Registering the adapter in Entitle…")
-        register = cloud_function_service.start_entitle_register(
-            db, fn_id, action="register", created_by="clouddb-pairing")
-        await cloud_function_service.run_entitle_register(
-            db, fn_id=fn_id, job_id=register["job_id"], action="register")
+        # The Entitle leg is skippable, and only this leg: an adapter that is deployed,
+        # VPC-attached and pointed at its database is useful on its own, and refusing to
+        # deploy one because the Entitle integration happens to be switched off would
+        # make the row button dead weight on exactly the installs still being set up.
+        # The provision-time caller is unaffected — _pair_adapter only fires when
+        # registration is already enabled.
+        entitle_skipped = not _entitle_registration_enabled()
+        if entitle_skipped:
+            job_service.update_progress(
+                db, job_id, 90,
+                "Adapter deployed. Entitle registration is disabled — register it from "
+                "the Cloud Functions page once entitle_registration_enabled is set.")
+        else:
+            job_service.update_progress(db, job_id, 75,
+                                        "Registering the adapter in Entitle…")
+            register = cloud_function_service.start_entitle_register(
+                db, fn_id, action="register", created_by="clouddb-pairing")
+            await cloud_function_service.run_entitle_register(
+                db, fn_id=fn_id, job_id=register["job_id"], action="register")
 
-        db.refresh(fn_row)
-        row.entitle_integration_id = fn_row.entitle_integration_id
-        db.commit()
+            db.refresh(fn_row)
+            # Only stamped when the integration really exists — the column is shared
+            # with the native-connector path and a placeholder would read as registered.
+            row.entitle_integration_id = fn_row.entitle_integration_id
+            db.commit()
 
         job_service.set_completed(db, job_id, {
             "db_id": db_id, "fn_id": fn_id,
             "entitle_integration_id": fn_row.entitle_integration_id,
+            "entitle_skipped": entitle_skipped,
             "dry_run": bool(dry_run),
         })
-        logger.info("clouddb adapter paired db_id=%s fn_id=%s integration=%s dry_run=%s",
-                    db_id, fn_id, fn_row.entitle_integration_id, dry_run)
+        logger.info("clouddb adapter paired db_id=%s fn_id=%s integration=%s dry_run=%s "
+                    "entitle_skipped=%s", db_id, fn_id, fn_row.entitle_integration_id,
+                    dry_run, entitle_skipped)
     except Exception as exc:
         logger.error("clouddb adapter pairing failed db_id=%s: %s", db_id, exc)
         job_service.set_failed(db, job_id, str(exc))

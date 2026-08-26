@@ -44,8 +44,14 @@ def _install_stubs():
          set_completed=None, set_failed=None, cancel_check=None)
     _mod("web_dashboard.services.terraform", apply=None, destroy=None)
     _mod("web_dashboard.services.terraform_provider_env", provider_env=lambda c: None)
+    # Region-keyed, falling back to the cloud-wide entry so the pre-existing
+    # __region__<cloud> users keep working. __overrides__ is the narrower question
+    # region_overrides answers: what this region sets FOR ITSELF, no flat fallback.
     _mod("web_dashboard.services.region_config",
-         resolve_region=lambda cloud, region: CONF.get(f"__region__{cloud}", {}))
+         resolve_region=lambda cloud, region: CONF.get(
+             f"__region__{cloud}:{region}", CONF.get(f"__region__{cloud}", {})),
+         region_overrides=lambda cloud, region: CONF.get(
+             f"__overrides__{cloud}:{region}", {}))
 
 
 try:
@@ -267,6 +273,91 @@ def test_aws_vpc_fallback_never_uses_the_db_subnet_group_name():
                                subnet_id="", vpc_connector="", security_group_ids=None)
     assert got["subnet_ids"] == ["subnet-private"], got
     assert "dashboard-sandbox-db" not in got["subnet_ids"]
+
+
+# ── Region correctness: the function must land on ITS OWN region's network ────
+# A flat *_functions_* key is the single-region install's answer. Left outranking a
+# per-region one it pins every function to the DEFAULT region's network while the row,
+# the job and the operator all say otherwise — AWS then dies at apply on
+# InvalidSubnetID.NotFound, and Azure on a cross-region VNet integration. This matters
+# most for the clouddb adapter, whose region is the database's and not a picked value.
+
+def test_aws_per_region_subnets_beat_the_flat_functions_key():
+    _reset()
+    CONF["aws_functions_subnet_ids"] = "subnet-default-region"
+    CONF["aws_functions_security_group_ids"] = "sg-default-region"
+    CONF["__overrides__aws:us-west-2"] = {"default_subnet_id": "subnet-usw2",
+                                          "db_security_group_id": "sg-usw2"}
+    got = svc._resolved_network("aws", "us-west-2", network_mode="vpc", subnet_ids=None,
+                                subnet_id="", vpc_connector="", security_group_ids=None)
+    assert got == {"subnet_ids": ["subnet-usw2"],
+                   "security_group_ids": ["sg-usw2"]}, got
+
+
+def test_gcp_per_region_subnetwork_beats_the_flat_functions_key():
+    _reset()
+    CONF["gcp_functions_network"] = "default-region-vpc"
+    CONF["gcp_functions_subnetwork"] = "default-region-subnet"
+    CONF["__overrides__gcp:us-east1"] = {"network": "sandbox-vpc",
+                                         "subnetwork": "sandbox-use1-subnet"}
+    got = svc._resolved_network("gcp", "us-east1", network_mode="vpc", subnet_ids=None,
+                                subnet_id="", vpc_connector="", security_group_ids=None)
+    assert got == {"vpc_network": "sandbox-vpc",
+                   "vpc_subnetwork": "sandbox-use1-subnet"}, got
+
+
+def test_the_default_region_still_resolves_to_the_flat_keys():
+    """region_overrides is empty for the default region by construction, so a
+    single-region install sees byte-identical behaviour."""
+    _reset()
+    CONF["aws_functions_subnet_ids"] = "subnet-a"
+    CONF["aws_functions_security_group_ids"] = "sg-1"
+    CONF["gcp_functions_network"] = "vpc"
+    CONF["gcp_functions_subnetwork"] = "subnet"
+    assert svc._resolved_network("aws", "us-east-1", network_mode="vpc", subnet_ids=None,
+                                 subnet_id="", vpc_connector="",
+                                 security_group_ids=None) == {
+        "subnet_ids": ["subnet-a"], "security_group_ids": ["sg-1"]}
+    assert svc._resolved_network("gcp", "us-central1", network_mode="vpc",
+                                 subnet_ids=None, subnet_id="", vpc_connector="",
+                                 security_group_ids=None) == {
+        "vpc_network": "vpc", "vpc_subnetwork": "subnet"}
+
+
+def test_explicit_arguments_still_beat_a_per_region_entry():
+    """A caller naming ids means them — the adapter path names none, so it gets the
+    region's."""
+    _reset()
+    CONF["__overrides__gcp:us-east1"] = {"network": "regional-vpc",
+                                         "subnetwork": "regional-subnet"}
+    got = svc._resolved_network("gcp", "us-east1", network_mode="vpc", subnet_ids=None,
+                                subnet_id="", vpc_connector="", security_group_ids=None,
+                                vpc_network="explicit-vpc",
+                                vpc_subnetwork="explicit-subnet")
+    assert got == {"vpc_network": "explicit-vpc",
+                   "vpc_subnetwork": "explicit-subnet"}, got
+
+
+def test_a_cloud_with_no_per_region_dimension_still_resolves():
+    """region_config raises ValueError for oci/local. Swallowing only THAT is the
+    point: anything else is a bug and must not become a wrong-region deploy."""
+    _reset()
+
+    def _boom(cloud, region):
+        raise ValueError("no per-region config for cloud 'oci'")
+
+    import web_dashboard.services.cloud_function_service as mod
+    saved = (mod.resolve_region, mod.region_overrides)
+    mod.resolve_region, mod.region_overrides = _boom, _boom
+    try:
+        CONF["gcp_functions_network"] = "vpc"
+        CONF["gcp_functions_subnetwork"] = "subnet"
+        got = svc._resolved_network("gcp", "us-east1", network_mode="vpc",
+                                    subnet_ids=None, subnet_id="", vpc_connector="",
+                                    security_group_ids=None)
+        assert got == {"vpc_network": "vpc", "vpc_subnetwork": "subnet"}, got
+    finally:
+        mod.resolve_region, mod.region_overrides = saved
 
 
 def test_explicit_arguments_beat_config():

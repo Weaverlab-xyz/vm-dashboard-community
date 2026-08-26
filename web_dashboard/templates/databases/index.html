@@ -164,6 +164,22 @@
                         x-show="entitleRegEnabled && d.entitle_integration_id"
                         title="Remove this database's Entitle integration"
                         class="text-xs px-2 py-1 text-fuchsia-700 hover:underline">Deregister</button>
+                {% if cloud_functions_enabled %}
+                <!-- The db_grant adapter: a Cloud Function deployed BESIDE this database,
+                     in its own cloud and region, VPC-attached. Cloud Run / Lambda /
+                     Function App are regional, so matching the region is the whole of
+                     "beside it" — there is no zone. adapter_viable is the structural half
+                     of the gate and comes from the same function the API rejects with;
+                     adapter_fn_id is filled in by list_databases from one batched lookup,
+                     because deploying a second function of the same name collides. -->
+                <button @click="pairAdapter(d)"
+                        x-show="d.status === 'available' && d.adapter_viable && !d.adapter_fn_id"
+                        title="Deploy the db_grant Cloud Function adapter for this database — same cloud and region, VPC-attached, target and admin credential wired in — so Entitle can mint just-in-time accounts on an engine whose native connector cannot. Functions are regional; there is no zone to match."
+                        class="text-xs px-2 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded font-medium">Function (DB grant)</button>
+                <span x-show="d.adapter_fn_id" x-cloak
+                      :title="'db_grant adapter function ' + d.adapter_fn_id + ' (' + d.adapter_status + ') — see the Cloud Functions page'"
+                      class="text-xs px-2 py-1 text-sky-700 font-medium">DB grant ✓</span>
+                {% endif %}
                 <!-- Verb follows source, the same branch decommission() takes: a registered
                      row is deregistered, not destroyed. -->
                 <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
@@ -1252,6 +1268,29 @@ function databasesPage() {
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Entitle deregistration failed.', 'error');
+      }
+    },
+
+    // Deploys the db_grant adapter into this database's own cloud and region, ready to
+    // act rather than in dry run. The confirm says what that does and does NOT mean: the
+    // adapter never initiates anything: it is an HTTP endpoint behind a fail-closed
+    // bearer gate that only Entitle holds, and ENTITLE owns the approval. Dry run would
+    // not make it safer, it would make an approved request silently do nothing.
+    async pairAdapter(d) {
+      const target = d.db_name || d.connect_db_name || d.engine;
+      if (!confirm(`Deploy the db_grant adapter for "${target}" into ${d.cloud} / ${d.region}?\n\n`
+        + `A Cloud Function is deployed beside the database, VPC-attached, reachable only `
+        + `by Entitle with its bearer token. The admin credential stays in ${d.cloud}'s own `
+        + `secret store.\n\n`
+        + `The adapter creates no accounts by itself — Entitle owns that. An account is `
+        + `created only when a request is approved, and dropped when the access ends.\n\n`
+        + `Track progress in Jobs.`)) return;
+      try {
+        await API.post(`/api/databases/${d.id}/adapter-pair`, {});
+        this.flash('Deploying the db_grant adapter — track progress in Jobs.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Adapter deployment failed.', 'error');
       }
     },
 

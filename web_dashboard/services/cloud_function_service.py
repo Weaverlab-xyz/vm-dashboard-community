@@ -35,7 +35,7 @@ from ..config import settings
 from ..database import CloudFunction, Job
 from . import (cloud_function_package, config_service, job_service, region_catalog,
                terraform, terraform_provider_env)
-from .region_config import resolve_region
+from .region_config import region_overrides, resolve_region
 
 logger = logging.getLogger(__name__)
 
@@ -259,10 +259,11 @@ def _check_required_env(workload: str, environment: Optional[dict]) -> None:
                if not any(alt in present for alt in req.split("|"))]
     if not missing:
         return
-    hint = ("To have this done for you, provision a MySQL or SQL Server database with "
-            "'Register in Entitle' checked — that pairing deploys and configures its own "
-            "adapter. It cannot finish one started by hand: it names its function after "
-            "the database."
+    hint = ("To have this done for you, use the 'Function (DB grant)' action on the "
+            "database's row on the Databases page (or provision a MySQL / SQL Server "
+            "database with 'Register in Entitle' checked). That pairing deploys and "
+            "configures its own adapter, in the database's own region. It cannot finish "
+            "one started by hand: it names its function after the database."
             if workload == "db_grant" else
             "Deploy echo_diag instead if you only want to test the endpoint.")
     raise CloudFunctionError(
@@ -291,21 +292,37 @@ def _resolved_network(cloud: str, region: str, *, network_mode: str,
             f"unknown network_mode {network_mode!r} "
             f"(expected one of {', '.join(VALID_NETWORK_MODES)})")
 
-    regional = {}
+    # Two different questions, and the difference is the whole of region-correctness:
+    #   overrides — what the operator configured for THIS region, and nothing else.
+    #   regional  — that, or the flat key, i.e. "what applies here".
+    # A flat aws_functions_subnet_ids / gcp_functions_subnetwork is the SINGLE-REGION
+    # install's answer, so it must not outrank a per-region one: it would pin every
+    # function to the default region's network while the row, the job and the operator
+    # all say otherwise (AWS then dies at apply on InvalidSubnetID.NotFound). Explicit
+    # arguments still win over both — a caller naming ids means them.
+    # ValueError only: _spec rejects oci/local, which is expected. Anything else is a bug
+    # and should not be swallowed into a wrong-region deploy.
+    regional: dict = {}
+    overrides: dict = {}
     try:
         regional = resolve_region(cloud, region) or {}
-    except Exception:
+        overrides = region_overrides(cloud, region) or {}
+    except ValueError:
         regional = {}
+        overrides = {}
 
     if cloud == "aws":
         # NB: the last resort is default_subnet_id, NOT db_subnet_group_name — that is
         # an RDS subnet-GROUP NAME, and handing it to Terraform as a subnet id passes
         # validation here and then dies at apply on InvalidSubnetID.NotFound.
-        subnets = [s for s in (subnet_ids or []) if s] or _csv(
-            _cfg("aws_functions_subnet_ids")) or _csv(regional.get("default_subnet_id", ""))
-        groups = [g for g in (security_group_ids or []) if g] or _csv(
-            _cfg("aws_functions_security_group_ids")) or _csv(
-                regional.get("db_security_group_id", ""))
+        subnets = ([s for s in (subnet_ids or []) if s]
+                   or _csv(overrides.get("default_subnet_id", ""))
+                   or _csv(_cfg("aws_functions_subnet_ids"))
+                   or _csv(regional.get("default_subnet_id", "")))
+        groups = ([g for g in (security_group_ids or []) if g]
+                  or _csv(overrides.get("db_security_group_id", ""))
+                  or _csv(_cfg("aws_functions_security_group_ids"))
+                  or _csv(regional.get("db_security_group_id", "")))
         if not subnets:
             raise CloudFunctionError(
                 "network_mode=vpc needs subnet ids on AWS — pass subnet_ids or set "
@@ -317,6 +334,12 @@ def _resolved_network(cloud: str, region: str, *, network_mode: str,
         return {"subnet_ids": subnets, "security_group_ids": groups}
 
     if cloud == "azure":
+        # No per-region equivalent to reach for: region_config's azure spec carries the
+        # DB/desktop/jumpoint subnets but no functions one, so there is nothing to
+        # override with. VNet integration requires a SAME-REGION subnet, so a
+        # multi-region Azure adapter needs a per-region functions_subnet_id field added
+        # to that spec first; until then the caller's region pre-flight is what keeps
+        # this honest.
         chosen = (subnet_id or "").strip() or _cfg("azure_functions_subnet_id")
         if not chosen:
             raise CloudFunctionError(
@@ -332,11 +355,15 @@ def _resolved_network(cloud: str, region: str, *, network_mode: str,
     #
     # Deliberately a BARE subnet name, not a regional self-link: direct egress is
     # region-locked, and the sandbox gives every region an identically-named subnet,
-    # so one bare name resolves correctly wherever the function lands.
-    net = ((vpc_network or "").strip() or _cfg("gcp_functions_network")
-           or _cfg("gcp_run_network") or _cfg("gcp_network"))
-    subnet = ((vpc_subnetwork or "").strip() or _cfg("gcp_functions_subnetwork")
-              or _cfg("gcp_run_subnetwork") or _cfg("gcp_jumpoint_subnetwork"))
+    # so one bare name resolves correctly wherever the function lands. Where a region
+    # DOES name its own subnet, that name wins over the flat keys — the convention is a
+    # convenience, not a guarantee, and a region configured by hand may not follow it.
+    net = ((vpc_network or "").strip() or overrides.get("network")
+           or _cfg("gcp_functions_network") or _cfg("gcp_run_network")
+           or regional.get("network") or _cfg("gcp_network"))
+    subnet = ((vpc_subnetwork or "").strip() or overrides.get("subnetwork")
+              or _cfg("gcp_functions_subnetwork") or _cfg("gcp_run_subnetwork")
+              or regional.get("subnetwork") or _cfg("gcp_jumpoint_subnetwork"))
     if net or subnet:
         return {"vpc_network": net, "vpc_subnetwork": subnet}
 
@@ -614,6 +641,33 @@ def list_functions(db: Session) -> list:
             .filter(CloudFunction.status != "deleted")
             .order_by(CloudFunction.created_at.desc()).all())
     return [_serialize(row) for row in rows]
+
+
+def find_by_names(db: Session, names, *, workload: str = "") -> dict:
+    """``{name: CloudFunction}`` for the live functions among ``names``.
+
+    The lookup deploy() does NOT do: it inserts unconditionally, with no existence
+    check on the name, and every deploy gets a fresh (empty) Terraform directory. So a
+    second deploy of a deterministically-named function leaves a duplicate row wedged in
+    ``deploying`` and an "already exists" apply failure — callers that own such a name
+    have to ask first. ``name`` is indexed and this is one query for the whole page.
+
+    ``deleted`` rows are excluded: that name is free again.
+    """
+    wanted = sorted({str(n) for n in (names or []) if n})
+    if not wanted:
+        return {}
+    query = (db.query(CloudFunction)
+             .filter(CloudFunction.name.in_(wanted),
+                     CloudFunction.status != "deleted")
+             # Oldest first, so the newest wins the collapse below. A name CAN be
+             # duplicated today — nothing has stopped it until now — and reporting the
+             # latest attempt is what makes the caller's "already exists" message match
+             # what the operator sees on the Functions page.
+             .order_by(CloudFunction.created_at.asc()))
+    if workload:
+        query = query.filter(CloudFunction.workload == workload)
+    return {row.name: row for row in query.all()}
 
 
 def get_function(db: Session, fn_id: str) -> Optional[CloudFunction]:

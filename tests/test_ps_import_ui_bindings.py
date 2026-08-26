@@ -152,16 +152,31 @@ def test_partial_failure_keeps_the_modal_open():
 
 # ── gating ─────────────────────────────────────────────────────────────────────
 
+def _jinja_if_stack(pos):
+    """The ``{% if %}`` conditions enclosing ``pos``, outermost first.
+
+    A real stack rather than a count of opens-minus-endifs: the page carries other
+    gates too (cloud_functions_enabled, for the DB-grant adapter button), and counting
+    EVERY endif against only the password_safe opens made any unrelated sibling block
+    look like an unclosed gate.
+    """
+    stack = []
+    for m in re.finditer(r"\{%-?\s*(if|endif)\b([^%]*?)-?%\}", HTML):
+        if m.start() >= pos:
+            break
+        if m.group(1) == "if":
+            stack.append(m.group(2).strip())
+        elif stack:
+            stack.pop()
+    return stack
+
+
 def test_the_button_and_modal_sit_inside_the_beyondtrust_gate():
-    gates = [m.start() for m in re.finditer(r"\{% if password_safe_enabled %\}", HTML)]
-    ends = [m.start() for m in re.finditer(r"\{% endif %\}", HTML)]
-    button = HTML.index('@click="openImport()"')
-    modal = HTML.index('x-show="showImport"')
-    for pos, what in ((button, "the toolbar button"), (modal, "the modal")):
-        opened = [g for g in gates if g < pos]
-        closed = [e for e in ends if e < pos]
-        assert opened and len(opened) > len(closed), \
-            f"{what} is not inside a password_safe_enabled block"
+    for needle, what in (('@click="openImport()"', "the toolbar button"),
+                         ('x-show="showImport"', "the modal")):
+        stack = _jinja_if_stack(HTML.index(needle))
+        assert "password_safe_enabled" in stack, \
+            f"{what} is not inside a password_safe_enabled block (gates: {stack})"
 
 
 def test_the_page_still_defines_the_helpers_other_tests_pin():

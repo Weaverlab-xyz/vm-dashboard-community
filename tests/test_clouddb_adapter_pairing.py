@@ -66,6 +66,11 @@ class _Row:
         self.private_host = "db.internal"
         self.port = 3306
         self.entitle_integration_id = None
+        # Read by adapter_ineligible_reason: a pairable row is provisioned, available
+        # and has a recorded catalog to scope grants to.
+        self.source = "provisioned"
+        self.status = "available"
+        self.db_name = "appdb"
         for key, value in kw.items():
             setattr(self, key, value)
 
@@ -237,6 +242,114 @@ def test_the_pairing_passes_the_row_to_the_resolver():
     assert "_database_name(tf_variables, row.engine, row)" in source
 
 
+# ── The one structural gate ──────────────────────────────────────────────────
+# adapter_ineligible_reason is the single source of truth for the row button, the API
+# pre-flight and start_pairing. Each blocker below used to be discovered three minutes
+# into a job (or not at all, by a button offering what the endpoint refuses).
+
+def test_a_provisioned_mysql_on_a_real_cloud_is_pairable():
+    for cloud in ("aws", "azure", "gcp"):
+        assert pairing.adapter_ineligible_reason(_Row(cloud=cloud)) is None, cloud
+    assert pairing.adapter_ineligible_reason(
+        _Row(engine="sqlserver", cloud="gcp")) is None
+
+
+def test_the_native_connector_engines_are_refused_and_told_where_to_go():
+    for engine in ("postgres", "oracle", ""):
+        reason = pairing.adapter_ineligible_reason(_Row(engine=engine))
+        assert reason and "native" in reason, (engine, reason)
+
+
+def test_a_registered_database_is_refused_at_the_click_not_in_the_job():
+    """_admin_credentials raises this same sentence, but only after the job is
+    queued, running and past its first progress update."""
+    reason = pairing.adapter_ineligible_reason(_Row(source="registered"))
+    assert reason and "registered" in reason
+
+
+def test_a_cloud_with_no_secret_store_is_refused():
+    """'local' has no backend in _SECRET_BACKEND, so the credential could never be
+    staged where the function can read it."""
+    for cloud in ("local", "oci", ""):
+        reason = pairing.adapter_ineligible_reason(_Row(cloud=cloud))
+        assert reason, cloud
+
+
+def test_a_database_with_no_recorded_catalog_is_refused():
+    """RDS SQL Server creates no user database, and master is the system catalog —
+    substituting it would scope grants at the whole instance."""
+    for value in (None, ""):
+        reason = pairing.adapter_ineligible_reason(_Row(db_name=value))
+        assert reason and "scope grants" in reason, (value, reason)
+
+
+def test_a_database_with_no_endpoint_yet_is_refused():
+    reason = pairing.adapter_ineligible_reason(_Row(private_host=""))
+    assert reason and "endpoint" in reason
+
+
+def test_the_gate_ignores_status_because_the_button_and_api_own_it():
+    """Status is transient, so it is checked where it can be re-checked — the same
+    split _ps_ineligible_reason makes."""
+    assert pairing.adapter_ineligible_reason(_Row(status="provisioning")) is None
+
+
+def test_start_pairing_refuses_through_the_same_gate():
+    """The job path cannot disagree with the button about what is pairable."""
+    source = open(pairing.__file__, encoding="utf-8").read()
+    start = source.split("def start_pairing(")[1].split("async def ")[0]
+    assert "adapter_ineligible_reason(row)" in start
+
+
+def test_the_api_preflight_uses_that_same_function():
+    source = open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                     "web_dashboard", "api", "cloud_databases.py"),
+        encoding="utf-8").read()
+    assert "cloud_db_adapter_service.adapter_ineligible_reason(row)" in source
+
+
+def test_the_row_projection_offers_the_button_from_that_same_function():
+    source = open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                     "web_dashboard", "services", "cloud_database_service.py"),
+        encoding="utf-8").read()
+    assert "cloud_db_adapter_service.adapter_ineligible_reason(r) is None" in source
+
+
+# ── The Entitle leg is skippable; the deploy is not ───────────────────────────
+
+def test_the_entitle_leg_is_conditional_on_the_integration_being_enabled():
+    """run_entitle_register RAISES when the flag is off, and it runs AFTER the
+    function is deployed — so without this branch the button would leave a deployed,
+    billable adapter behind and fail the job."""
+    source = open(pairing.__file__, encoding="utf-8").read()
+    run = source.split("async def run_pairing(")[1]
+    assert "_entitle_registration_enabled()" in run
+    assert "entitle_skipped" in run
+
+
+def test_the_integration_id_is_only_stamped_when_one_really_exists():
+    """The column is shared with the native-connector path, so a placeholder would
+    read as registered on the Databases page."""
+    source = open(pairing.__file__, encoding="utf-8").read()
+    run = source.split("async def run_pairing(")[1]
+    stamp = "row.entitle_integration_id = fn_row.entitle_integration_id"
+    assert stamp in run
+    # The stamp must sit inside the else-branch, i.e. after the flag is checked.
+    assert run.index("_entitle_registration_enabled()") < run.index(stamp)
+
+
+def test_the_button_path_deploys_an_armed_adapter():
+    """A button that silently deploys a no-op adapter is the worse surprise; the
+    provision-time path keeps its observe-first default."""
+    source = open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                     "web_dashboard", "api", "cloud_databases.py"),
+        encoding="utf-8").read()
+    assert "dry_run=False" in source
+
+
 # ── Wiring ───────────────────────────────────────────────────────────────────
 
 def test_the_provision_path_routes_by_adapter_required():
@@ -252,7 +365,7 @@ def test_the_provision_path_routes_by_adapter_required():
 
 def test_the_adapter_workload_exists():
     from web_dashboard.services import cloud_function_package
-    assert pairing._ADAPTER_WORKLOAD in cloud_function_package.available_workloads()
+    assert pairing.ADAPTER_WORKLOAD in cloud_function_package.available_workloads()
 
 
 def test_pairing_is_always_vpc_attached():

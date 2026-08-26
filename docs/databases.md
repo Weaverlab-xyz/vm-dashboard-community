@@ -843,7 +843,9 @@ there are no client-image or key-material keys here):
 integration, so users request **just-in-time** access to it instead of holding a standing
 credential. Gated by `entitle_registration_enabled` plus a per-provision
 **"Register in Entitle"** toggle, and there is a post-provision **Register in Entitle**
-button (job `clouddb_entitle_register`) for a database provisioned earlier. This layer
+button (job `clouddb_entitle_register`) for a database provisioned earlier — plus, for
+MySQL and SQL Server, a **Function (DB grant)** button that deploys the adapter those two
+engines need (see [below](#mysql-and-sql-server-the-db_grant-adapter)). This layer
 needs the provisioning job's admin credential, so a
 [registered](#registering-an-existing-database) database is not offerable — the button is
 hidden and the API refuses it with a 400. Teardown
@@ -874,6 +876,36 @@ relays to is only reachable from there.
 > Entitle governs *who gets in and for how long*; Password Safe governs *the credential's
 > lifecycle*.
 
+### MySQL and SQL Server: the db_grant adapter
+
+Two of the three engines above cannot do just-in-time accounts through Entitle's *native*
+connector at all — MySQL's assigns persistent roles and never mints one, and managed SQL
+Server never grants the sysadmin/CONTROL SERVER its connector needs. For those, the
+dashboard deploys a **`db_grant` Cloud Function adapter** beside the database, which
+implements Entitle's Remote Adapter contract and runs the SQL itself from inside the
+VPC/VNet.
+
+The row's **Function (DB grant)** action deploys one (job `clouddb_adapter_pair`, gated by
+`cloud_functions_enabled` plus the `cloud_function:write` permission). Everything is
+derived from the database row — its cloud, its region, a name from its id, its
+host/port/catalog, and its admin credential staged as a *reference* into the cloud's own
+secret store. **The function lands in the database's own region**, which it must: it
+reaches a private endpoint over the VPC, and subnets are regional. Functions are regional
+resources, so there is no zone to match; a region with no per-region config set is refused
+rather than deployed onto the default region's network.
+
+Unlike the provision-time pairing, the row action deploys the adapter ready to act
+(`FN_DB_DRY_RUN=0`). **That does not mean the adapter creates accounts** — it initiates
+nothing. It is an HTTP endpoint behind a fail-closed bearer gate that only the Entitle
+integration holds, it schedules nothing, and it only ever touches accounts it minted
+itself. **Entitle owns the lifecycle:** an account is created when a request is approved
+and dropped when the access ends. Dry run is therefore not the safer setting for a working
+integration — it makes an *approved* request silently do nothing. Once one exists the action becomes a **DB grant ✓** badge; delete the
+function on the Cloud Functions page to redeploy. The action is hidden for a database that
+cannot take an adapter: Postgres and Oracle (the native connector works), a *registered*
+database (no stored admin credential), an on-premises one (no cloud secret store), and one
+with no recorded catalog to scope grants to. Full detail in
+[Cloud Functions](integrations/cloud-functions.md).
 ---
 
 ## Lifecycle (provision, register, decommission)
