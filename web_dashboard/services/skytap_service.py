@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 # Re-exported so callers can catch one error type without importing the client too.
 __all__ = ["SkytapError", "VALID_RUNSTATES", "configured", "credentials",
            "list_templates", "list_environments", "get_environment",
-           "create_environment", "set_runstate", "delete_environment"]
+           "create_environment", "set_runstate", "delete_environment",
+           "inject_bootstrap"]
 
 # Runstates a caller may ASK for. Skytap also reports "busy" while a transition is in
 # flight, which is a state you observe and never request — asking for it would be asking
@@ -284,6 +285,47 @@ async def wait_for_runstate(env_id: str, target: str, *, timeout_s: float = 1800
     raise SkytapError(
         f"environment {env_id} did not reach {target!r} within {int(timeout_s)}s "
         f"(last seen {last.get('runstate') or 'unknown'!r})")
+
+
+async def inject_bootstrap(env_id: str, vm_id: str, payload: str) -> None:
+    """Write a VM's ``user_data`` — the ``bootstrap_injection: "metadata"`` mechanism.
+
+    Skytap hands the payload to the guest and **nothing executes it**. There is no
+    cloud-init datasource here: the guest fetches it from the metadata service itself, so
+    a template with no runner reads this and does nothing at all, silently. See the
+    template contract in docs/integrations/skytap.md — that contract is the other half of
+    this function, and neither half works alone.
+
+    Two consequences the caller must know rather than discover:
+
+    * The metadata service answers **only on VMs attached to an automatic network.** A VM
+      on a manual network gets no metadata at all, which looks exactly like a runner that
+      is not installed.
+    * ``user_data`` is readable by anyone who can read the environment in Skytap. What
+      goes in it is therefore single-use and short-lived by construction — an enrolment
+      code, never a durable credential — and ``pov_broker`` clears it once redeemed.
+
+    An empty ``payload`` clears the field, which is how that clearing is done.
+    """
+    env_id = str(env_id or "").strip()
+    vm_id = str(vm_id or "").strip()
+    if not env_id or not vm_id:
+        raise SkytapError("an environment id and a VM id are required to inject bootstrap "
+                          "data")
+    # The documented v2 path. A 404 here means this account's API does not expose per-VM
+    # user_data, which is a platform-capability problem and not a bad id -- so it is worth
+    # saying so rather than letting the generic message blame the VM.
+    path = f"/v2/configurations/{env_id}/vms/{vm_id}/user_data.json"
+    try:
+        await _client().request("PUT", path, json={"contents": payload or ""})
+    except SkytapError as exc:
+        if "(404)" in str(exc):
+            raise SkytapError(
+                f"Skytap has no user_data endpoint for VM {vm_id} in environment "
+                f"{env_id} (404). The VM id may be stale, or this account's API does not "
+                f"expose per-VM user_data — re-read the environment and try again."
+            ) from exc
+        raise
 
 
 async def delete_environment(env_id: str) -> None:

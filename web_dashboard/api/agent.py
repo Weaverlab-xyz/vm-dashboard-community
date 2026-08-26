@@ -59,7 +59,9 @@ from .auth import require_admin
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
-_AUDIENCE_CONFIG = "agent_base_url"
+# Defined in agent_service so pov_broker can read the same key without importing a
+# router. Aliased rather than re-spelled: two literals is how they drift apart.
+_AUDIENCE_CONFIG = agent_service.AUDIENCE_CONFIG
 
 
 # ── Audience ──────────────────────────────────────────────────────────────────
