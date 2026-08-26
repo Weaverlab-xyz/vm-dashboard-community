@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block title %}POV Environments{% endblock %}
+
+{#
+  Read-only for now. This page lists what is already on the lab platform — including
+  environments the dashboard did not create, which is deliberate: an SE's existing
+  hand-built POVs are exactly what they want to see next to the managed ones.
+
+  Provisioning, PAM wire-up and expiry land in later slices. Nothing here can create,
+  change or delete anything.
+#}
+
+{% block content %}
+<div x-data="povPage()" x-init="init()" class="space-y-6">
+
+  <div class="flex items-start justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold text-gray-900">POV Environments</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        Customer proof-of-value environments on a lab platform.
+        <span class="text-gray-400">Read-only — provisioning arrives in a later release.</span>
+      </p>
+    </div>
+    <div x-show="platforms.length > 1">
+      <select x-model="platform" @change="load()"
+              class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        <template x-for="p in platforms" :key="p.name">
+          <option :value="p.name" x-text="p.label"></option>
+        </template>
+      </select>
+    </div>
+  </div>
+
+  <!-- Not configured: say where to fix it, rather than showing an empty table that
+       looks like "you have no environments". -->
+  <div x-show="!loading && notConfigured"
+       class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+    <p class="text-sm text-amber-800 font-medium" x-text="(current.label || 'This platform') + ' is not configured yet.'"></p>
+    <p class="text-sm text-amber-700 mt-1">
+      Add its API URL, username and API security token in
+      <a href="/settings" class="underline font-medium">Settings → Integrations</a>.
+      Skytap uses an API token from your account page, not your account password.
+    </p>
+  </div>
+
+  <div x-show="error" class="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+    <p class="text-sm text-red-700" x-text="error"></p>
+  </div>
+
+  <div x-show="loading" class="text-sm text-gray-400">Loading…</div>
+
+  <!-- Environments -->
+  <div x-show="!loading && !notConfigured" class="space-y-3">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-lg font-medium text-gray-900">Environments</h2>
+      <span class="text-xs text-gray-400" x-text="environments.length + ' found'"></span>
+    </div>
+
+    <div x-show="environments.length === 0" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
+      No environments on this platform yet.
+    </div>
+
+    <div x-show="environments.length" class="overflow-hidden border border-gray-200 rounded-lg">
+      <table class="min-w-full divide-y divide-gray-200 text-sm">
+        <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+          <tr>
+            <th class="px-4 py-2 text-left font-medium">Name</th>
+            <th class="px-4 py-2 text-left font-medium">State</th>
+            <th class="px-4 py-2 text-left font-medium">VMs</th>
+            <th class="px-4 py-2 text-left font-medium">Region</th>
+            <th class="px-4 py-2 text-left font-medium">Idle suspend</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100 bg-white">
+          <template x-for="env in environments" :key="env.id">
+            <tr>
+              <td class="px-4 py-2">
+                <span class="font-medium text-gray-900" x-text="env.name || env.id"></span>
+                <span x-show="env.rate_limited"
+                      class="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800"
+                      title="Skytap is throttling this environment; operations will be slow">rate-limited</span>
+              </td>
+              <td class="px-4 py-2">
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="env.runstate === 'running' ? 'bg-green-100 text-green-700'
+                              : (env.runstate === 'suspended' ? 'bg-blue-100 text-blue-700'
+                              : 'bg-gray-100 text-gray-600')"
+                      x-text="env.runstate || 'unknown'"></span>
+              </td>
+              <!-- Absent, never zero: a collection read may omit the vms array entirely,
+                   and "0 VMs" for an environment that has eight is worse than blank. -->
+              <td class="px-4 py-2 text-gray-600" x-text="env.vm_count === null ? '—' : env.vm_count"></td>
+              <td class="px-4 py-2 text-gray-600" x-text="env.region || '—'"></td>
+              <td class="px-4 py-2 text-gray-600"
+                  x-text="env.suspend_on_idle ? (Math.round(env.suspend_on_idle / 60) + ' min') : '—'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Templates -->
+  <div x-show="!loading && !notConfigured" class="space-y-3">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-lg font-medium text-gray-900">Templates</h2>
+      <span class="text-xs text-gray-400" x-text="templates.length + ' available'"></span>
+    </div>
+    <div x-show="templates.length === 0" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
+      No templates visible to this account.
+    </div>
+    <div x-show="templates.length" class="overflow-hidden border border-gray-200 rounded-lg">
+      <table class="min-w-full divide-y divide-gray-200 text-sm">
+        <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+          <tr>
+            <th class="px-4 py-2 text-left font-medium">Name</th>
+            <th class="px-4 py-2 text-left font-medium">VMs</th>
+            <th class="px-4 py-2 text-left font-medium">Region</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100 bg-white">
+          <template x-for="t in templates" :key="t.id">
+            <tr>
+              <td class="px-4 py-2">
+                <span class="font-medium text-gray-900" x-text="t.name || t.id"></span>
+                <p x-show="t.description" class="text-xs text-gray-400 mt-0.5" x-text="t.description"></p>
+              </td>
+              <td class="px-4 py-2 text-gray-600" x-text="t.vm_count === null ? '—' : t.vm_count"></td>
+              <td class="px-4 py-2 text-gray-600" x-text="t.region || '—'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function povPage() {
+  return {
+    loading: true,
+    error: '',
+    notConfigured: false,
+    platform: '',
+    platforms: [],
+    environments: [],
+    templates: [],
+
+    get current() {
+      return this.platforms.find(p => p.name === this.platform) || {};
+    },
+
+    async init() {
+      try {
+        const res = await fetch('/api/pov/platforms');
+        if (!res.ok) { this.error = 'Could not read the lab platform registry.'; this.loading = false; return; }
+        const data = await res.json();
+        this.platforms = data.platforms || [];
+        this.platform = data.default || (this.platforms[0] || {}).name || '';
+      } catch (e) {
+        this.error = 'Could not reach the dashboard API.';
+        this.loading = false;
+        return;
+      }
+      await this.load();
+    },
+
+    async load() {
+      this.loading = true;
+      this.error = '';
+      this.notConfigured = !(this.current.configured);
+      this.environments = [];
+      this.templates = [];
+      if (this.notConfigured) { this.loading = false; return; }
+
+      // Both reads are independent: a template listing that fails should not blank the
+      // environments the operator can actually see.
+      const [envs, tpls] = await Promise.all([
+        this.fetchList('/api/pov/environments', 'environments'),
+        this.fetchList('/api/pov/templates', 'templates'),
+      ]);
+      this.environments = envs;
+      this.templates = tpls;
+      this.loading = false;
+    },
+
+    async fetchList(url, key) {
+      try {
+        const res = await fetch(`${url}?platform=${encodeURIComponent(this.platform)}`);
+        if (res.status === 409) { this.notConfigured = true; return []; }
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          // Carry the platform's own words through: a rate-limit and a bad token are both
+          // "it didn't work" without them.
+          this.error = body.detail || `Could not load ${key} (${res.status}).`;
+          return [];
+        }
+        return (await res.json())[key] || [];
+      } catch (e) {
+        this.error = `Could not load ${key}.`;
+        return [];
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

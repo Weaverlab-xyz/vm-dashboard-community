@@ -930,6 +930,16 @@ except ImportError as exc:
     logger.warning("API router 'ot' not loaded: %s", exc)
 
 try:
+    # POV environments on a lab platform. Gated on pov_environments_enabled, which
+    # feature_flags._POV_ONLY masks off entirely on a demo instance — so on the demo
+    # dashboard these routes 404 naming the profile rather than half-working.
+    from .api import pov as pov_api  # noqa: E402
+    app.include_router(pov_api.router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
+except ImportError as exc:
+    logger.warning("API router 'pov' not loaded: %s", exc)
+
+try:
     # Virtual desktop management (Azure pools + PRA brokering). Gated on vdesktops_enabled.
     from .api import desktops  # noqa: E402
     app.include_router(desktops.router, dependencies=[_feature_gate("vdesktops_enabled")])
@@ -1260,6 +1270,13 @@ async def agents_page(request: Request):
     """Remote on-prem agents. Nav-gated on remote_agents_enabled (+ admin); the
     /api/agent router is feature-gated and its operator half is admin-only."""
     return templates.TemplateResponse("agents/index.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/pov", response_class=HTMLResponse, include_in_schema=False)
+async def pov_page(request: Request):
+    """POV environments. Nav- and router-gated on pov_environments_enabled, which is
+    available on a POV instance only — see docs/pov-instance.md."""
+    return templates.TemplateResponse("pov/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)

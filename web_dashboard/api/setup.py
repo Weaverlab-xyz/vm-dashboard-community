@@ -1122,6 +1122,20 @@ class ProxmoxFeatureConfig(BaseModel):
     proxmox_password: str = ""          # encrypted at rest
     proxmox_verify_ssl: bool = False
 
+class SkytapFeatureConfig(BaseModel):
+    """Skytap — the first POV lab platform. See services/lab_platforms.py.
+
+    `skytap_api_token` is an API SECURITY TOKEN from the Skytap account page, not the
+    account password. Getting that wrong is the most common setup mistake, which is why
+    both this label and the client's 401 message name it explicitly.
+    """
+    enabled: bool = False
+    skytap_base_url: str = "https://cloud.skytap.com"
+    skytap_username: str = ""
+    skytap_api_token: str = ""          # encrypted at rest
+    skytap_project_id: str = ""
+
+
 class VSphereFeatureConfig(BaseModel):
     enabled: bool = False
     vsphere_host: str = ""
@@ -1534,6 +1548,10 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
 
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
+    # Lab platform for POV environments. Masked off on a demo instance by
+    # feature_flags._POV_ONLY, so the panel there refuses to enable rather than
+    # storing a flag nothing reads.
+    "skytap":       SkytapFeatureConfig,
     # Keyed "remote_agents" so _feature_to_cfg_key derives the EXISTING flag name
     # `remote_agents_enabled` with no special-casing. Renaming this key would silently
     # start writing a different config key and the toggle would stop doing anything.
@@ -1585,6 +1603,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "portainer_pat", "portainer_admin_password",
     "entitle_api_token", "entitle_api_key", "entitle_rest_secret",
     "proxmox_token_secret", "proxmox_password",
+    "skytap_api_token",
     "vsphere_password",
     "hyperv_password",
     "nutanix_password",

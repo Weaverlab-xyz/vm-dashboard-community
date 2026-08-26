@@ -56,6 +56,10 @@ _DEMO_ONLY = (
 # all of them, so they are neutral rather than POV-owned.
 _POV_ONLY = (
     "pov_environments_enabled",
+    # Lab platforms. A demo instance has no use for one, and letting it hold Skytap
+    # credentials would put customer-lab access on the instance that is deliberately
+    # not the one doing customer work.
+    "skytap_enabled",
 )
 
 _PROFILE_OF = {f: "demo" for f in _DEMO_ONLY}
@@ -124,6 +128,7 @@ def flags() -> dict:
         "remote_agents_enabled": enabled("remote_agents_enabled", settings.remote_agents_enabled),
         # POV environments. Masked off entirely on a demo instance — see _POV_ONLY.
         "pov_environments_enabled": enabled("pov_environments_enabled", settings.pov_environments_enabled),
+        "skytap_enabled": enabled("skytap_enabled", settings.skytap_enabled),
         "admission_control_enabled": enabled("admission_control_enabled", settings.admission_control_enabled),
         # Auto-delete timer — gates the Expires column on /inventory and the dashboard's
         # "expiring soon" warning. Deletion has its own second gate
@@ -191,6 +196,7 @@ def feature_map() -> dict:
         # demo-only integration is unavailable rather than showing a dead toggle.
         "install_profile": install_profile(),
         "pov_environments": raw["pov_environments_enabled"],
+        "skytap":          raw["skytap_enabled"],
         "vmware":       raw["vmware_enabled"],
         # Named to match the Settings panel keys, so settings.html's flag map needs no
         # translation layer. There is deliberately no combined "beyondtrust" key: an
