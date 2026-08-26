@@ -126,11 +126,26 @@ def test_cpppo_is_not_pinned_to_the_broken_4x_series():
                 f"— pin 5.x or newer")
 
 
+def test_snap7_is_not_pinned_below_the_pure_python_server():
+    # python-snap7's S7 SERVER was a ctypes binding to libsnap7 until 3.0, and Debian
+    # does not package that library — which is exactly why Siemens was absent from
+    # this image. From 3.0 the server is pure Python, so it installs as a wheel like
+    # the others. A 2.x pin silently reintroduces the native dependency and the bake
+    # dies at the smoke test with an import error nobody expects.
+    for path in _SCRIPTS:
+        src = _read(path)
+        for pin in re.findall(r"OT_SNAP7_VERSION:-(\d+)\.", src):
+            assert int(pin) >= 3, (
+                f"{os.path.basename(path)}: python-snap7 {pin}.x binds libsnap7 — "
+                f"pin 3.x or newer, where the S7 server is pure Python")
+
+
 def test_the_new_pins_are_explicit_too():
     for path in _SCRIPTS:
         src = _read(path)
         for name, var in (("asyncua", "OT_ASYNCUA_VERSION"),
-                          ("cpppo", "OT_CPPPO_VERSION")):
+                          ("cpppo", "OT_CPPPO_VERSION"),
+                          ("python-snap7", "OT_SNAP7_VERSION")):
             if name not in src:
                 continue
             assert (re.search(rf"{name}==\d", src)

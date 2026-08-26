@@ -238,20 +238,24 @@ Per-protocol, with a client to demo with:
 | Modbus TCP | 502 | `mbpoll -a 1 -r 1 -c 4 127.0.0.1`, QModMaster, pymodbus | **Yes** — holding registers 0–3 tick every second |
 | OPC UA | 4840 | UaExpert, `opcua-client` (endpoint `opc.tcp://127.0.0.1:4840`) | **Yes** — `Objects/Plant` → Counter, Temperature, Flow, Running; anonymous, no security policy |
 | EtherNet/IP | 44818 | pylogix, cpppo (`Logix` driver at 127.0.0.1) | **Yes** — the same four values as `DINT` tags |
+| Siemens S7comm | 102 | python-snap7 (`db_read(1, 0, 8)`), TIA Portal (PLC at 127.0.0.1) | **Yes** — the same four values as big-endian DB1 words at offsets 0/2/4/6 |
 | DNP3 | 20000 | OpenDNP3 master, Axon Test | No — standalone tunnel to real/lab gear |
-| Siemens S7comm | 102 | python-snap7, TIA Portal (PLC at 127.0.0.1) | No — standalone tunnel to real/lab gear |
 
 Notes that save demo time:
 
-- **The cell answers Modbus, OPC UA and EtherNet/IP; DNP3 and S7 it does not.** Both
-  of those need native libraries built from source, which the baked image's
-  everything-is-a-pinned-wheel contract cannot honour, so those two presets exist for
-  the **standalone tunnel** card — point one at your own PLC/lab gear (anything the
-  chosen Gateway can reach) and demo the same brokered-access story against a real
-  protocol stack. `OT_SIMS` at bake time picks which sims the image carries.
-- **The cell's own tunnel is one protocol** (chosen at deploy), but the other two ports
-  are open on the cell: create a **standalone tunnel** pointed at the cell's private IP
-  to demo a second protocol against the same cell.
+- **The cell answers Modbus, Siemens S7comm, EtherNet/IP and OPC UA — DNP3 it does
+  not.** `opendnp3` needs a native library built from source, which the baked image's
+  everything-is-a-pinned-wheel contract cannot honour, so that one preset exists for
+  the **standalone tunnel** card — point it at your own PLC/RTU (anything the chosen
+  Gateway can reach) and demo the same brokered-access story against a real protocol
+  stack. `OT_SIMS` at bake time picks which sims the image carries (default: all four).
+  Siemens was in the same excluded bucket until python-snap7 3.0 reimplemented its S7
+  server in pure Python; an image baked before that carries no `ot-s7` container.
+- **The cell's own tunnel is one protocol** (chosen at deploy), but the other three
+  ports are open on the cell: create a **standalone tunnel** pointed at the cell's
+  private IP to demo a second vendor against the same cell. Being able to show a
+  Siemens PLC *and* a Rockwell PLC on one air-gapped host, each brokered separately, is
+  usually the point of the exercise.
 - **One protocol per tunnel jump.** A tunnel carries one `local;remote` port pair. A
   cell gets one PLC tunnel (chosen at deploy); to speak a second protocol to the same
   cell or host, create a standalone tunnel with a different **name** and (if both run
@@ -314,6 +318,19 @@ shape and the image is exactly as it was before seeding existed: add the connect
 hand, once per cell (~1 minute) — FUXA → Connections → **ModbusTCP** at `plc`:`502`,
 then tags for holding registers 0–3. Either way the project persists on the VM.
 
+Only the Modbus device is seeded, but FUXA also speaks the other three, and every
+simulator is reachable from it by compose service name — so adding a second vendor to
+the same view is a one-minute job:
+
+| Device type | Address | Port | Tags |
+|---|---|---|---|
+| S7 | `s7` | 102 | DB1 words at offsets 0, 2, 4, 6 |
+| EthernetIP | `enip` | 44818 | `COUNTER`, `TEMPERATURE`, `FLOW`, `RUNNING` |
+| OPC UA | `opcua` (`opc.tcp://opcua:4840/ot-sim/server/`) | 4840 | `Plant/Counter`, `…/Temperature`, `…/Flow`, `…/Running` |
+
+A single recorded HMI session showing a **Siemens and a Rockwell** device side by side,
+on a host with no route to the internet, is the demo this cell exists for.
+
 ## E2E verification checklist
 
 Written for GCP (the first cloud); on AWS/Azure substitute that cloud's deploy child
@@ -346,7 +363,13 @@ outside the image. Step 2a and step 10 below are their first live pass.
    items land in the picked Jump Group (not the configured default).
 4. PRA rep console: Shell Jump SSH works; Web Jump renders FUXA (recorded); a Modbus
    client (mbpoll / QModMaster) through the tunnel at `127.0.0.1:502` reads holding
-   register 0 **incrementing every second**.
+   register 0 **incrementing every second**. Then deploy (or add a standalone tunnel
+   for) each other vendor and confirm the same four values move:
+   - Siemens — python-snap7 `db_read(1, 0, 8)` against `127.0.0.1:102`. The
+     pure-Python server logs a COTP framing warning on some handshakes; the read is
+     what matters, not that line;
+   - Rockwell — `pylogix` `Read("COUNTER")` against `127.0.0.1:44818`;
+   - OPC UA — UaExpert against `opc.tcp://127.0.0.1:4840`, browse `Objects/Plant`.
 5. Password Safe: managed system `projectId/zone/instanceName` exists; the mirror
    system `<cell>-pravault` exists with account `<cell>-adminuser`; the pair shows
    under `adminuser`'s **Synced Accounts**; rotate `adminuser` and watch the change
@@ -381,7 +404,7 @@ outside the image. Step 2a and step 10 below are their first live pass.
 | Tunnel connects but the Modbus client times out | The cell VM isn't running the stack — Shell Jump in and check `systemctl status ot-sim` / `docker ps` |
 | Azure: Web Jump/Shell Jump work but the tunnel never establishes | The cell's Gateway resolves to an **ACI** gateway — ACI is serverless and cannot do protocol tunneling. Keep `azure_vm_jumpoint_mode=shared` and point `azure_jumpoint_name` / the form's Gateway picker at the shared **VM** gateway |
 | Registers read but never change | The PLC sim container restarted into a crash loop — `docker logs ot-plc` (OPC UA: `ot-opcua`; EtherNet/IP: `ot-enip`) |
-| OPC UA or EtherNet/IP tunnel connects but nothing answers | That sim was not baked — `OT_SIMS` at bake time selects them (default is all three). `docker ps` on the cell shows which are running |
+| An S7 / OPC UA / EtherNet-IP tunnel connects but nothing answers | That sim was not baked — `OT_SIMS` at bake time selects them (default is all four), and an image baked before Siemens was added has no `ot-s7`. `docker ps` on the cell shows which are running |
 | FUXA opens with no PLC connection | The bake's project seed was skipped — search the bake log for `FUXA project NOT seeded`, and wire it by hand (`provisioners/ot/README.md`) |
 | AWS cell deploy fails immediately naming the subnet | Working as designed — that subnet auto-assigns public IPs; use the private sandbox subnet or clear `ot_aws_require_private_subnet` |
 | GCP cell unreachable right after enabling Purdue firewalling | The Gateway you are brokering through is not the managed one, so it does not carry the `bt-jumpoint` tag the ingress allow matches. Delete the cell's `*-ot-ingress-deny` rule, then either use the managed Gateway or add that tag to yours |

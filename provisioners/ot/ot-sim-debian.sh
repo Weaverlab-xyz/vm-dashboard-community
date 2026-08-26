@@ -13,9 +13,9 @@
 #           reached via a PRA Web Jump. Its project data persists in a named volume,
 #           pre-seeded at bake time with the PLC connection and its register tags.
 #
-# The three sims share ONE image and one pip install; OT_SIMS picks which run. DNP3
-# and Siemens S7 are deliberately absent: both need native libraries built from
-# source, so those tunnel presets stay real-gear-only (see README.md).
+# The four sims share ONE image and one pip install; OT_SIMS picks which run. Only
+# DNP3 is absent: opendnp3 needs a native library built from source, so that preset
+# stays real-gear-only (see README.md).
 #
 # Everything is pulled/built AT BAKE TIME (the Packer build VM has egress); the
 # deployed VM needs ZERO outbound internet, so the cell runs in the sandbox's
@@ -122,12 +122,16 @@ OT_ASYNCUA_VERSION="${OT_ASYNCUA_VERSION:-1.1.5}"
 # Python 3.11+ with "code() argument 13 must be str", which on python:3.12-slim is
 # every bake.
 OT_CPPPO_VERSION="${OT_CPPPO_VERSION:-5.2.5}"
+# 3.x, not 2.x: python-snap7 implemented its S7 SERVER in pure Python from 3.0, so
+# the S7 sim needs no libsnap7. Below that the server is a ctypes binding to a
+# native library Debian does not package, which is what kept Siemens off this image.
+OT_SNAP7_VERSION="${OT_SNAP7_VERSION:-3.1.2}"
 # Which protocol servers the cell answers. The PRA tunnel presets cover five
-# protocols; these are the three that simulate honestly from a pure-python,
-# no-egress-at-runtime base. DNP3 (opendnp3) and S7 (snap7) both need native
-# libraries built from source, so those presets stay real-gear-only — see
+# protocols; these are the four that simulate honestly from a pure-python,
+# no-egress-at-runtime base. Only DNP3 (opendnp3) still needs a native library
+# built from source, so that preset stays real-gear-only — see
 # provisioners/ot/README.md.
-OT_SIMS="${OT_SIMS:-modbus,opcua,enip}"
+OT_SIMS="${OT_SIMS:-modbus,opcua,enip,s7}"
 case "$OT_FUXA_IMAGE" in
   *:latest) die "OT_FUXA_IMAGE must be pinned to a version tag, not :latest" ;;
   *:*) ;;
@@ -143,8 +147,8 @@ sim_enabled() {
 }
 for _s in $(echo "$OT_SIMS" | tr ',' ' '); do
   case "$_s" in
-    modbus|opcua|enip) ;;
-    *) die "OT_SIMS names an unknown simulator '$_s' (known: modbus, opcua, enip)" ;;
+    modbus|opcua|enip|s7) ;;
+    *) die "OT_SIMS names an unknown simulator '$_s' (known: modbus, opcua, enip, s7)" ;;
   esac
 done
 sim_enabled modbus || die "OT_SIMS must include modbus — the cell's Modbus PLC is what \
@@ -336,20 +340,81 @@ if __name__ == "__main__":
     main()
 EOF
 
+cat > /opt/ot-sim/plc-sim/s7_sim.py <<'EOF'
+"""Tiny Siemens S7comm "PLC" for OT demos — DB1 words tick so reads show life.
+
+DB1, big-endian words. Read with python-snap7 (``db_read(1, 0, 8)``), or in FUXA
+add an S7 device at address `s7` port 102:
+  offset 0  counter      increments every second, wraps at 65535
+  offset 2  temperature  ~400 +/- 25, i.e. degrees C x10 (sine wave)
+  offset 4  flow         ~120 +/- 30 (sine wave)
+  offset 6  running      always 1
+
+Deliberately the SAME four values as the Modbus / OPC UA / EtherNet-IP sims, so one
+demo script reads the same "plant" through any vendor's protocol.
+
+python-snap7 >= 3.0 implements the S7 server in PURE PYTHON — no libsnap7 — and
+``register_area`` keeps a reference to the bytearray below rather than copying it,
+so the updater thread mutating it in place is exactly what an S7 client reads back.
+``start()`` binds :102 on its own daemon thread and returns, so main() must park.
+"""
+import math
+import struct
+import threading
+import time
+
+import snap7
+from snap7.server import Server
+
+DB_NUMBER = 1
+DB_SIZE = 8
+
+_db = bytearray(DB_SIZE)
+
+
+def _updater():
+    t = 0
+    while True:
+        t += 1
+        struct.pack_into(
+            ">HHHH", _db, 0,
+            t % 65536,
+            int(400 + 25 * math.sin(t / 15.0)),
+            int(120 + 30 * math.sin(t / 7.0)),
+            1,
+        )
+        time.sleep(1)
+
+
+def main():
+    server = Server()
+    server.register_area(snap7.SrvArea.DB, DB_NUMBER, _db)
+    threading.Thread(target=_updater, daemon=True).start()
+    server.start(tcp_port=102)
+    while True:
+        time.sleep(3600)
+
+
+if __name__ == "__main__":
+    main()
+EOF
+
 cat > /opt/ot-sim/plc-sim/Dockerfile <<EOF
 FROM python:3.12-slim
 RUN pip install --no-cache-dir \\
       pymodbus==$OT_PYMODBUS_VERSION \\
       asyncua==$OT_ASYNCUA_VERSION \\
-      cpppo==$OT_CPPPO_VERSION
+      cpppo==$OT_CPPPO_VERSION \\
+      python-snap7==$OT_SNAP7_VERSION
 COPY plc_sim.py /app/plc_sim.py
 COPY opcua_sim.py /app/opcua_sim.py
 COPY enip_sim.py /app/enip_sim.py
-EXPOSE 502 4840 44818
+COPY s7_sim.py /app/s7_sim.py
+EXPOSE 502 4840 44818 102
 CMD ["python", "/app/plc_sim.py"]
 EOF
 
-# One image, three entrypoints: the sims share a base layer and a single pip
+# One image, four entrypoints: the sims share a base layer and a single pip
 # install, so a bake pulls python:3.12-slim once and the cell carries one copy.
 cat > /opt/ot-sim/docker-compose.yml <<EOF
 # OT demo cell -- baked by provisioners/ot/ot-sim-debian.sh. Real compose on the
@@ -401,6 +466,22 @@ if sim_enabled enip; then
       - "44818:44818"
 EOF
   OT_SMOKE_CONTAINERS="$OT_SMOKE_CONTAINERS ot-enip"
+fi
+
+if sim_enabled s7; then
+  # :102 is privileged, which is fine inside the container (it runs as root). The
+  # pure-python server logs a COTP framing warning on some client handshakes; reads
+  # are unaffected, so it must not be mistaken for a failure.
+  cat >> /opt/ot-sim/docker-compose.yml <<'EOF'
+  s7:
+    image: ot-plc-sim:baked
+    container_name: ot-s7
+    restart: unless-stopped
+    command: ["python", "/app/s7_sim.py"]
+    ports:
+      - "102:102"
+EOF
+  OT_SMOKE_CONTAINERS="$OT_SMOKE_CONTAINERS ot-s7"
 fi
 
 cat >> /opt/ot-sim/docker-compose.yml <<'EOF'
