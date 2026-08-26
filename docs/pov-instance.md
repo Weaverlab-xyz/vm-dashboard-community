@@ -65,7 +65,9 @@ shows on, and does nothing. Turning something *off* is always allowed.
 
 A POV instance also needs a **lab platform** — the thing a POV environment actually runs
 on. Skytap is the first one; see [integrations/skytap.md](integrations/skytap.md) for its
-prerequisites and the API token it needs. The platform registry lives in
+prerequisites, the API token it needs, and the
+[template contract](integrations/skytap.md#the-template-contract) its broker VM has to
+satisfy. The platform registry lives in
 `services/lab_platforms.py`, and `GET /api/pov/platforms` reports what each one can do so
 the UI can degrade visibly rather than offering a button that fails.
 
@@ -104,8 +106,12 @@ advisory lock. Two cold instances started together can wedge on it. Start this s
 finish, then start the other.
 
 **Its agent endpoint must be reachable from inside your POV environments.** POV wiring works
-by running an agent on a broker VM *inside* the customer environment, which polls outward.
+by running an agent on a broker VM *inside* the customer environment, which polls outward —
+see [the broker VM](integrations/skytap.md#the-broker-vm) for what that VM must carry.
 That means `/api/agent` on this instance has to be reachable over public HTTPS from there.
+The provision refuses the broker step outright when this instance does not know its own
+public URL, or when that URL is plaintext: the agent will not sign over `http://`, so a
+broker installed against one would never enrol.
 When you host it beyond your LAN, use the gateway-sidecar split in
 [cloud-hosting.md](cloud-hosting.md) so the agent endpoint is separate from the UI, and keep
 the UI behind its own allowlist. A UI 404 that returns in microseconds is the allowlist

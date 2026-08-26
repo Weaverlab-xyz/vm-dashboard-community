@@ -11,6 +11,10 @@
   Collapsing the two would mean either offering a Destroy button for someone else's
   hand-built environment, or hiding it. Neither is right.
 
+  The Broker column is the third thing on this page, and the one worth reading twice:
+  "none" and "offline" are different failures with different fixes, so they are never
+  collapsed into one "not working" badge.
+
   PAM wire-up, share links and the expiry timer arrive in later slices.
 #}
 
@@ -85,6 +89,17 @@
         <input type="text" x-model="form.workgroup" placeholder="optional"
                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
       </div>
+      <div x-show="current.bootstrap_injection">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Broker VM name</label>
+        <input type="text" x-model="form.broker_vm_name" placeholder="broker"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <p class="text-xs text-gray-400 mt-1">
+          The VM in the template that runs the agent. It needs Docker and the
+          <a href="/docs/integrations/skytap#the-template-contract" target="_blank"
+             class="underline">metadata runner</a> — nothing executes the payload for you.
+          Blank uses <span class="font-mono">broker</span>.
+        </p>
+      </div>
       <div x-show="current.idle_suspend">
         <label class="block text-sm font-medium text-gray-700 mb-1">Suspend when idle</label>
         <select x-model.number="form.suspend_on_idle_seconds"
@@ -124,6 +139,7 @@
             <th class="px-4 py-2 text-left font-medium">Name</th>
             <th class="px-4 py-2 text-left font-medium">Status</th>
             <th class="px-4 py-2 text-left font-medium">Power</th>
+            <th class="px-4 py-2 text-left font-medium">Broker</th>
             <th class="px-4 py-2 text-left font-medium">Template</th>
             <th class="px-4 py-2 text-left font-medium">Created by</th>
             <th class="px-4 py-2 text-right font-medium">Actions</th>
@@ -147,6 +163,18 @@
                    class="ml-2 text-xs text-blue-600 underline">job</a>
               </td>
               <td class="px-4 py-2 text-gray-600" x-text="e.runstate || '—'"></td>
+              <td class="px-4 py-2">
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="{'bg-green-100 text-green-700': e.broker_status === 'online',
+                               'bg-amber-100 text-amber-800': ['offline','enrolling'].includes(e.broker_status),
+                               'bg-red-100 text-red-700': e.broker_status === 'revoked',
+                               'bg-gray-100 text-gray-500': e.broker_status === 'none'}"
+                      :title="e.broker_agent_name || ('expected VM: ' + (e.broker_vm_name || 'broker'))"
+                      x-text="e.broker_status || 'none'"></span>
+                <!-- The reason lives here rather than in error_message: a POV whose broker
+                     did not come up is running, billing and reapable. -->
+                <p x-show="e.broker_error" class="text-xs text-amber-700 mt-0.5" x-text="e.broker_error"></p>
+              </td>
               <td class="px-4 py-2 text-gray-600" x-text="e.template_name || e.template_id || '—'"></td>
               <td class="px-4 py-2 text-gray-600" x-text="e.created_by || '—'"></td>
               <td class="px-4 py-2 text-right whitespace-nowrap">
@@ -156,6 +184,11 @@
                 <button x-show="e.runstate === 'running'" @click="power(e, 'suspended')"
                         :disabled="!actionable(e)"
                         class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Suspend</button>
+                <button x-show="current.bootstrap_injection" @click="brokerRun(e)"
+                        :disabled="!actionable(e) || !e.platform_environment_id"
+                        :title="e.broker_status === 'none' ? 'Install the agent inside this environment' : 'Re-issue the enrolment code and re-write the bootstrap'"
+                        class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                        x-text="e.broker_status === 'online' ? 'Re-broker' : 'Broker'"></button>
                 <button @click="destroy(e)" :disabled="!actionable(e)"
                         class="text-xs px-2 py-1 rounded border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed">Destroy</button>
               </td>
@@ -231,7 +264,7 @@ function povPage() {
     managed: [],
     environments: [],
     templates: [],
-    form: { template_id: '', name: '', workgroup: '', suspend_on_idle_seconds: 3600 },
+    form: { template_id: '', name: '', workgroup: '', broker_vm_name: '', suspend_on_idle_seconds: 3600 },
     _poll: null,
 
     get current() {
@@ -280,7 +313,10 @@ function povPage() {
     // we would rather not generate.
     schedulePoll() {
       if (this._poll) { clearTimeout(this._poll); this._poll = null; }
-      const busy = this.managed.some(e => ['provisioning', 'destroying'].includes(e.status));
+      // `enrolling` is a busy state too: the badge flips when the agent redeems its
+      // code, which happens without this row's status ever changing.
+      const busy = this.managed.some(e => ['provisioning', 'destroying'].includes(e.status)
+                                          || e.broker_status === 'enrolling');
       if (!busy) return;
       this._poll = setTimeout(async () => {
         this.managed = await this.fetchList('/api/pov/managed', 'environments', true);
@@ -330,6 +366,7 @@ function povPage() {
           template_id: this.form.template_id,
           name: this.form.name,
           workgroup: this.form.workgroup,
+          broker_vm_name: this.form.broker_vm_name,
           suspend_on_idle_seconds: this.form.suspend_on_idle_seconds,
         });
         this.notice = `Creating ${this.form.name}. Watch its job for progress.`;
@@ -349,6 +386,18 @@ function povPage() {
       try {
         await this.post(`/api/pov/managed/${env.id}/power`, { runstate });
         this.notice = `${env.name}: requested ${runstate}.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async brokerRun(env) {
+      this.error = ''; this.notice = '';
+      try {
+        await this.post(`/api/pov/managed/${env.id}/broker`, null);
+        // No duration here: the wait is derived server-side from the enrolment code's
+        // TTL, and a number typed into the UI is one that drifts the moment that changes.
+        this.notice = `${env.name}: installing the broker agent. It waits for the agent ` +
+                      `to enrol — watch the job for progress.`;
         await this.load();
       } catch (e) { this.error = e.message; }
     },

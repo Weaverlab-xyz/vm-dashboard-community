@@ -7,6 +7,7 @@
   GET    /api/pov/managed               — the POVs this dashboard provisioned
   POST   /api/pov/managed               — provision one from a template
   POST   /api/pov/managed/{id}/power    — running | suspended | stopped | halted
+  POST   /api/pov/managed/{id}/broker   — install / re-enrol the in-environment agent
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The ``/environments`` reads are LIVE against the platform and include environments this
@@ -30,7 +31,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
-from ..services import job_service, lab_platforms, pov_env_service
+from ..services import job_service, lab_platforms, pov_broker, pov_env_service
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,10 @@ class ProvisionRequest(BaseModel):
     # 0 disables it. Defaulted by the caller rather than here so the value that reaches
     # the platform is always one somebody chose.
     suspend_on_idle_seconds: int = 0
+    # Which VM in the template runs the agent. Per-POV rather than a global setting:
+    # templates come from wherever the SE got them, and one account can hold two that name
+    # it differently. Blank means pov_broker.DEFAULT_BROKER_VM_NAME.
+    broker_vm_name: str = ""
 
     @field_validator("name")
     @classmethod
@@ -80,7 +85,14 @@ class PowerRequest(BaseModel):
         return v
 
 
-def _serialize(env: PovEnvironment, vms: list | None = None) -> dict:
+def _serialize(env: PovEnvironment, vms: list | None = None,
+               broker: dict | None = None) -> dict:
+    """The row as the POV page reads it.
+
+    ``broker`` is passed in rather than derived here because describing it needs a session
+    and a query per row — the list endpoint does that once per row deliberately, and a
+    caller that does not care (the 202 responses) should not pay for it.
+    """
     out = {
         "id": env.id,
         "platform": env.platform,
@@ -96,7 +108,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None) -> dict:
         "created_at": env.created_at.isoformat() if env.created_at else None,
         "provision_job_id": env.provision_job_id or "",
         "error_message": env.error_message or "",
+        "broker_vm_name": pov_broker.broker_vm_name(env),
     }
+    if broker is not None:
+        out.update(broker)
     if vms is not None:
         out["vms"] = [{
             "id": v.platform_vm_id,
@@ -209,7 +224,8 @@ async def list_managed(db: Session = Depends(get_db),
     rows = (db.query(PovEnvironment)
               .filter(PovEnvironment.status != pov_env_service.STATUS_DESTROYED)
               .order_by(PovEnvironment.created_at.desc()).all())
-    return {"environments": [_serialize(e) for e in rows]}
+    return {"environments": [_serialize(e, broker=pov_broker.describe(db, e))
+                             for e in rows]}
 
 
 @router.get("/managed/{env_id}")
@@ -220,7 +236,7 @@ async def get_managed(env_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="No such POV environment")
     vms = (db.query(PovEnvironmentVM)
              .filter(PovEnvironmentVM.environment_id == env.id).all())
-    return {"environment": _serialize(env, vms)}
+    return {"environment": _serialize(env, vms, broker=pov_broker.describe(db, env))}
 
 
 @router.post("/managed", status_code=202)
@@ -269,6 +285,10 @@ async def provision(payload: ProvisionRequest,
         created_by=getattr(current_user, "username", None),
         status=pov_env_service.STATUS_PROVISIONING,
     )
+    # On the row rather than in the job metadata: every later broker re-run reads it, and
+    # a job's metadata is the record of one run, not of the environment.
+    if payload.broker_vm_name.strip():
+        env.metadata_dict = {"broker_vm_name": payload.broker_vm_name.strip()}
     db.add(env)
     db.commit()
 
@@ -304,6 +324,47 @@ async def power(env_id: str, payload: PowerRequest,
         workgroup=env.workgroup,
         metadata={"environment_id": env.id, "runstate": payload.runstate})
     return {"job_id": job.id, "runstate": payload.runstate}
+
+
+@router.post("/managed/{env_id}/broker", status_code=202)
+async def broker(env_id: str, db: Session = Depends(get_db),
+                 current_user: User = Depends(get_current_user)):
+    """Install, or re-enrol, the agent inside this POV.
+
+    The provision runs this once and treats a failure as a warning, because a POV with no
+    broker is incomplete rather than broken. This is the re-run: it re-issues the
+    enrolment code and re-writes the bootstrap, which is the remedy for every reason the
+    first attempt can fail — a template with no metadata runner, a VM that was still
+    booting, an expired code.
+
+    Refused on a platform that cannot deliver bootstrap data at all, with 409 naming the
+    mechanism. That refusal is the point of the capability table: the alternative is a
+    button that always 502s.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    if not env.platform_environment_id:
+        raise HTTPException(
+            status_code=409,
+            detail="this environment was never created on the platform, so there is no "
+                   "VM to install a broker on.")
+    if lab_platforms.capabilities(env.platform).get("bootstrap_injection") != "metadata":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{lab_platforms.capabilities(env.platform)['label']} does not deliver "
+                   f"bootstrap data the way this broker install expects; it needs its own "
+                   f"broker path.")
+
+    job = job_service.create_job(
+        db, job_type="pov_env_broker",
+        created_by=getattr(current_user, "username", None),
+        workgroup=env.workgroup,
+        metadata={"environment_id": env.id})
+    return {"job_id": job.id}
 
 
 @router.delete("/managed/{env_id}", status_code=202)

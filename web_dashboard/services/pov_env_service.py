@@ -4,9 +4,14 @@ Platform-agnostic. Everything platform-specific goes through the adapter resolve
 ``lab_platforms``; this module never imports ``skytap_service`` directly, which is what
 makes the second platform an adapter module rather than a second orchestrator.
 
-Slice 2 covers a *running environment with no PAM wiring*. The broker VM, the Gateway and
-Resource Broker installs, and the per-VM Password Safe / PRA wire-up land in later slices —
-their columns already exist on the row so they need no migration.
+Slice 3 covers a *running environment with a broker agent inside it and no PAM wiring
+yet*. The Gateway and Resource Broker installs and the per-VM Password Safe / PRA wire-up
+land in later slices — their columns already exist on the row so they need no migration.
+
+The broker step is the first one that is **best-effort inside the provision**: an
+environment that is up and reachable but has no agent in it is still a POV, still billing
+and still reapable, so failing the whole provision over it would trade a fixable gap for a
+destroyed environment. It records why on the row and the POV page offers a re-run.
 
 The ordering rule that matters most is in :func:`run_env_provision` step 2: **the row is
 persisted with the platform's id before anything else can fail.** An environment that
@@ -21,7 +26,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
-from . import job_service, lab_platforms
+from . import job_service, lab_platforms, pov_broker
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +80,11 @@ async def run_env_provision(job_id: str, meta: dict) -> None:
       3. name it and set the idle timer
       4. power on, and wait for it to settle
       5. read back the VMs
+      6. install and enrol the broker agent — best-effort, and only ever AFTER 4
+
+    Step 6 cannot move earlier. It hands the guest a fifteen-minute enrolment code, and a
+    first boot is not bounded; injecting before the power-on gives the VM a code that
+    expired while it was starting.
     """
     db = SessionLocal()
     try:
@@ -165,6 +175,12 @@ async def run_env_provision(job_id: str, meta: dict) -> None:
         env.error_message = None
         db.commit()
 
+        # 6. The broker agent. Deliberately after the status flip: everything above this
+        # point decides whether the environment is usable, and this step decides only
+        # whether the dashboard can reach into it. A broker failure must not put a
+        # running environment in front of an operator as `failed`.
+        await _install_broker(db, env, job_id)
+
         count = db.query(PovEnvironmentVM).filter(
             PovEnvironmentVM.environment_id == env.id).count()
         job_service.set_completed(db, job_id, {
@@ -172,9 +188,30 @@ async def run_env_provision(job_id: str, meta: dict) -> None:
             "platform_environment_id": env.platform_environment_id,
             "runstate": env.runstate,
             "vm_count": count,
+            "broker_agent_id": env.broker_agent_id or "",
         })
     finally:
         db.close()
+
+
+async def _install_broker(db: Session, env: PovEnvironment, job_id: str) -> None:
+    """Step 6, with the failure swallowed on purpose.
+
+    A POV with no broker is incomplete, not broken. The reason goes on the row — where the
+    POV page renders it next to a Broker button that re-runs exactly this — and into the
+    job log, because a warning that only exists in a container log is a warning nobody
+    reads.
+    """
+    job_service.update_progress(db, job_id, 90, "Installing the POV broker agent…")
+    try:
+        summary = await pov_broker.ensure_broker(db, env, job_id=job_id)
+        job_service.append_job_log(db, job_id, summary)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("POV %s: broker install failed", env.id, exc_info=True)
+        pov_broker.record_broker_error(db, env, str(exc))
+        job_service.append_job_log(
+            db, job_id,
+            f"WARNING: the environment is up but its broker agent is not: {exc}")
 
 
 async def refresh_vms(db: Session, env: PovEnvironment) -> int:
@@ -265,10 +302,10 @@ async def run_env_power(job_id: str, meta: dict) -> None:
 async def run_env_destroy(job_id: str, meta: dict) -> None:
     """Delete the environment from the platform and mark the row destroyed.
 
-    Slice 2 reaps the platform side only — there is no PAM wiring yet. The later slices
-    add their teardown steps ahead of the platform delete, and this function keeps the
-    property they will rely on: **the platform delete is reached even when an earlier
-    step fails**, because a half-torn-down POV that keeps billing is the worse outcome.
+    Reaps the broker agent and then the platform side; the PAM wiring's own teardown
+    steps slot in between as their slices land. The property they all rely on is kept
+    here: **the platform delete is reached even when an earlier step fails**, because a
+    half-torn-down POV that keeps billing is the worse outcome.
 
     The row is marked ``destroyed`` rather than deleted. It is the inventory record of
     something that existed, and the job row alongside it is never pruned by age.
@@ -284,6 +321,15 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
         db.commit()
 
         problems: list[str] = []
+
+        # The broker agent goes FIRST. It is an enrolled principal that can lease work;
+        # deleting its VM out from under it leaves a row that keeps polling from a machine
+        # that no longer exists, and whatever job it holds running nowhere.
+        try:
+            job_service.append_job_log(db, job_id, pov_broker.teardown(db, env))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: broker teardown failed", env.id, exc_info=True)
+            problems.append(f"broker agent teardown failed: {exc}")
 
         if env.platform_environment_id:
             job_service.update_progress(db, job_id, 50,

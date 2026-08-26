@@ -53,6 +53,13 @@ logger = logging.getLogger(__name__)
 ENROLL_CODE_PREFIX = "agte_"
 ENROLL_TTL_MINUTES = 15
 
+# The config key holding the pinned signing audience. Owned here rather than in
+# ``api/agent.py`` because two modules now read it — the router that pins it and
+# ``pov_broker``, which has to tell an agent inside a customer's network which URL to
+# dial. A second literal in a second file is how one of them keeps reading the old key
+# after a rename, and the symptom is an agent that never enrols.
+AUDIENCE_CONFIG = "agent_base_url"
+
 # Job types a remote agent may execute. MUST stay disjoint from
 # jobs_worker.HANDLED_TYPES; the static test enforces it. These run on a network the
 # local worker cannot reach, so a type in both would be raced between two executors.
