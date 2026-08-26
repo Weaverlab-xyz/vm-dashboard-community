@@ -26,8 +26,17 @@ from .skytap_client import DEFAULT_BASE_URL, SkytapClient, SkytapCreds, SkytapEr
 logger = logging.getLogger(__name__)
 
 # Re-exported so callers can catch one error type without importing the client too.
-__all__ = ["SkytapError", "configured", "credentials", "list_templates",
-           "list_environments", "get_environment"]
+__all__ = ["SkytapError", "VALID_RUNSTATES", "configured", "credentials",
+           "list_templates", "list_environments", "get_environment",
+           "create_environment", "set_runstate", "delete_environment"]
+
+# Runstates a caller may ASK for. Skytap also reports "busy" while a transition is in
+# flight, which is a state you observe and never request — asking for it would be asking
+# the platform to be mid-something.
+VALID_RUNSTATES = ("running", "suspended", "stopped", "halted")
+
+# Terminal states a poll can stop on. "busy" is deliberately absent.
+_SETTLED = frozenset(("running", "suspended", "stopped", "halted"))
 
 
 def _cfg(key: str) -> str:
@@ -52,6 +61,11 @@ def credentials() -> SkytapCreds:
 
 def configured() -> bool:
     return credentials().valid()
+
+
+def _now() -> float:
+    import time
+    return time.monotonic()
 
 
 def _client() -> SkytapClient:
@@ -173,6 +187,121 @@ async def list_environments() -> list[dict]:
     """
     raw = await _client().list("/v2/configurations")
     return [_environment(e) for e in raw if isinstance(e, dict)]
+
+
+async def create_environment(template_id: str, name: str = "",
+                             project_id: str = "") -> dict:
+    """Instantiate a template as a new environment.
+
+    Returns as soon as Skytap has created it — the VMs will still be stopped and the
+    environment may report ``busy``. Powering it on is a separate call, because the
+    caller must persist the new id BEFORE anything else can fail: an environment that
+    exists on the platform and not in our database is the one failure mode nothing can
+    clean up automatically.
+    """
+    template_id = str(template_id or "").strip()
+    if not template_id:
+        raise SkytapError("a template id is required to create an environment")
+
+    body: dict = {"template_id": template_id}
+    if project_id:
+        body["project_id"] = str(project_id)
+
+    raw = await _client().request("POST", "/v2/configurations", json=body)
+    if not isinstance(raw, dict) or not raw.get("id"):
+        raise SkytapError(
+            f"Skytap accepted the create for template {template_id} but returned no "
+            f"environment id; check the account for an orphan before retrying")
+
+    env = _environment(raw)
+    # Naming is a separate PUT: the create call takes a template, not a name.
+    if name:
+        try:
+            env = await update_environment(env["id"], {"name": name})
+        except SkytapError:
+            # Non-fatal on purpose. The environment exists and its id is what we key on;
+            # a wrong display name is cosmetic, and failing here would strand it.
+            logger.warning("Skytap: created environment %s but could not name it %r",
+                           env["id"], name, exc_info=True)
+    return env
+
+
+async def update_environment(env_id: str, changes: dict) -> dict:
+    """PUT a partial update — name, suspend_on_idle, and friends.
+
+    Skytap accepts only ONE of suspend_on_idle / suspend_at_time / shutdown_on_idle /
+    shutdown_at_time: setting any of them nulls the other three server-side. So callers
+    must send at most one, and this does not try to merge them.
+    """
+    env_id = str(env_id or "").strip()
+    if not env_id:
+        raise SkytapError("an environment id is required")
+    raw = await _client().request("PUT", f"/v2/configurations/{env_id}", json=changes)
+    return _environment(raw) if isinstance(raw, dict) else await get_environment(env_id)
+
+
+async def set_runstate(env_id: str, runstate: str) -> dict:
+    """Ask the environment to change state. Does NOT wait — see ``wait_for_runstate``."""
+    env_id = str(env_id or "").strip()
+    runstate = (runstate or "").strip().lower()
+    if runstate not in VALID_RUNSTATES:
+        raise SkytapError(
+            f"unsupported runstate {runstate!r}; expected one of "
+            f"{', '.join(VALID_RUNSTATES)}")
+    raw = await _client().request("PUT", f"/v2/configurations/{env_id}",
+                                  json={"runstate": runstate})
+    return _environment(raw) if isinstance(raw, dict) else await get_environment(env_id)
+
+
+async def wait_for_runstate(env_id: str, target: str, *, timeout_s: float = 1800.0,
+                            interval_s: float = 10.0, sleep=None) -> dict:
+    """Poll until the environment settles on ``target``.
+
+    Skytap transitions are asynchronous and there is no operation handle to wait on, so
+    polling the resource IS the mechanism — which is why the client's ``keep_idle``
+    guarantee matters here more than anywhere: this loop would otherwise hold the
+    environment awake and defeat the idle timer it was just given.
+
+    Settling on the WRONG terminal state is an error rather than a silent success. A
+    request to run that ends up ``stopped`` means the platform refused, and returning it
+    as though it worked is how a POV gets wired against VMs that are not on.
+    """
+    import asyncio as _asyncio
+    sleep = sleep or _asyncio.sleep
+    target = (target or "").strip().lower()
+    deadline = _now() + timeout_s
+    last = {}
+    while _now() < deadline:
+        last = await get_environment(env_id)
+        state = (last.get("runstate") or "").lower()
+        if state == target:
+            return last
+        if state in _SETTLED:
+            raise SkytapError(
+                f"environment {env_id} settled on {state!r} while waiting for "
+                f"{target!r}; the platform refused the transition")
+        await sleep(interval_s)
+    raise SkytapError(
+        f"environment {env_id} did not reach {target!r} within {int(timeout_s)}s "
+        f"(last seen {last.get('runstate') or 'unknown'!r})")
+
+
+async def delete_environment(env_id: str) -> None:
+    """Delete the environment and everything Skytap keeps inside it.
+
+    Idempotent by design: a 404 means somebody already deleted it, and a teardown that
+    fails on "it is already gone" leaves a row nobody can ever clean up.
+    """
+    env_id = str(env_id or "").strip()
+    if not env_id:
+        raise SkytapError("an environment id is required")
+    try:
+        await _client().request("DELETE", f"/v2/configurations/{env_id}")
+    except SkytapError as exc:
+        if "(404)" in str(exc):
+            logger.info("Skytap: environment %s was already gone", env_id)
+            return
+        raise
 
 
 async def get_environment(env_id: str) -> dict:
