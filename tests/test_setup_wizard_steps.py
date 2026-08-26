@@ -36,13 +36,36 @@ def _html():
         return fh.read()
 
 
-def _step_keys(html):
-    """The `key:` values from the `steps: [...]` array, in order."""
-    block = re.search(r"\n\s*steps:\s*\[(.*?)\n\s*\],", html, re.S)
-    assert block, "could not find setup.html's `steps: [...]` array — teach this test its shape"
-    keys = re.findall(r"key:\s*'([^']+)'", block.group(1))
-    assert keys, "parsed the steps array but found no `key:` entries"
-    return keys
+def _step_entries(html):
+    """The `allSteps` entries, in order, as (key, profiles-or-None) pairs.
+
+    `profiles` limits a step to certain install profiles; absent means every profile.
+    """
+    block = re.search(r"\n\s*allSteps:\s*\[(.*?)\n\s*\],", html, re.S)
+    assert block, "could not find setup.html's `allSteps: [...]` array — teach this test its shape"
+    out = []
+    for line in block.group(1).splitlines():
+        m = re.search(r"key:\s*'([^']+)'", line)
+        if not m:
+            continue
+        prof = re.search(r"profiles:\s*\[([^\]]*)\]", line)
+        out.append((m.group(1),
+                    re.findall(r"'([^']+)'", prof.group(1)) if prof else None))
+    assert out, "parsed allSteps but found no `key:` entries"
+    return out
+
+
+def _step_keys(html, profile=None):
+    """Step keys, optionally filtered to one install profile the way the getter does."""
+    return [k for k, profs in _step_entries(html)
+            if profile is None or profs is None or profile in profs]
+
+
+def _profiles(html):
+    """Every profile named anywhere in allSteps, plus the wizard's own option list."""
+    named = {p for _, profs in _step_entries(html) if profs for p in profs}
+    opts = set(re.findall(r"value:\s*'([^']+)'", html))
+    return named | (opts & {"demo", "pov"})
 
 
 def _shown_panel_keys(html):
@@ -55,6 +78,40 @@ def test_the_steps_array_parses_and_is_ordered():
     assert keys[0] == "admin", f"the first step must be the admin account, got {keys[0]!r}"
     assert keys[-1] == "features", f"the last step must be the feature flags, got {keys[-1]!r}"
     assert len(keys) == len(set(keys)), f"duplicate step keys: {keys}"
+
+
+def test_the_profile_step_comes_second():
+    """It has to be asked before anything it filters, and after the admin account —
+    which is the only step every profile needs and the only one that validates."""
+    keys = _step_keys(_html())
+    assert keys[1] == "profile", f"expected the profile step second, got {keys[1]!r}"
+
+
+def test_every_profile_yields_a_usable_wizard():
+    """The filtered list must still start at admin and end at the feature flags, or
+    `isLastStep` lands somewhere that is not the submit step."""
+    html = _html()
+    profiles = _profiles(html)
+    assert profiles, "no install profiles found — teach this test their shape"
+    for profile in sorted(profiles):
+        keys = _step_keys(html, profile)
+        assert keys[0] == "admin", f"{profile}: first step is {keys[0]!r}"
+        assert keys[1] == "profile", f"{profile}: profile step is not second"
+        assert keys[-1] == "features", f"{profile}: last step is {keys[-1]!r}"
+
+
+def test_the_pov_profile_skips_every_cloud_step():
+    """A POV instance never asks for credentials it will not use."""
+    keys = _step_keys(_html(), "pov")
+    leaked = sorted({"aws", "azure", "gcp", "oci"} & set(keys))
+    assert not leaked, f"the pov profile still shows cloud steps: {leaked}"
+
+
+def test_the_demo_profile_keeps_every_cloud_step():
+    """The default path must be unchanged."""
+    keys = _step_keys(_html(), "demo")
+    missing = sorted({"aws", "azure", "gcp", "oci"} - set(keys))
+    assert not missing, f"the demo profile lost cloud steps: {missing}"
 
 
 def test_every_panel_is_a_named_step():

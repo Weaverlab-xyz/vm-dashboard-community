@@ -20,6 +20,16 @@ class Settings(BaseSettings):
     # prod repo (which has the backing infra configured) works without
     # explicit opt-in. The community edition's .env.example ships all of
     # these set to false; users turn on what they have infra for.
+    # Which kind of instance this is. The two are MUTUALLY EXCLUSIVE, and the reason is
+    # tenancy, not taste: a demo instance's BeyondTrust tenant is the global singleton
+    # (bt_api_host / pscli_api_url / entitle_api_key), while a POV instance holds a
+    # registry of many named tenants and each POV references rows in it. An instance
+    # claiming both would have two answers to "which tenant?" at every call site, and the
+    # wrong answer is silent -- an OT cell onboarding into a customer's Password Safe, or a
+    # POV onboarding into the demo tenant. See services/feature_flags.enabled().
+    install_profile: str = "demo"       # "demo" | "pov" -- see docs/pov-instance.md
+    pov_environments_enabled: bool = False  # POV router + /pov page (pov profile only)
+
     vmware_enabled: bool = True         # VMs router + /vms page
     # The three BeyondTrust products the dashboard drives are gated independently —
     # customers routinely license one or two, not all three. They replaced a single

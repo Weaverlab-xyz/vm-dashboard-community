@@ -226,8 +226,32 @@ class FeaturesSetup(BaseModel):
     remote_agents_enabled: bool = False
 
 
+class ProfileSetup(BaseModel):
+    """Which kind of instance this is. See services/feature_flags.enabled()."""
+    install_profile: str = "demo"
+
+    @field_validator("install_profile")
+    @classmethod
+    def _known_profile(cls, v: str) -> str:
+        # Imported here, not at module scope: several test files stub
+        # `web_dashboard.services` in sys.modules, and a top-level sibling import turns
+        # those suites into a SKIP rather than a failure. _apply_config does the same.
+        from ..services import feature_flags
+        v = (v or "demo").strip().lower()
+        if v not in feature_flags.VALID_PROFILES:
+            raise ValueError(
+                f"install_profile must be one of {', '.join(feature_flags.VALID_PROFILES)}")
+        return v
+
+
 class SetupPayload(BaseModel):
     admin: AdminSetup
+    # `None`, not a default ProfileSetup(): absent must mean "leave the profile alone",
+    # never "demo". A reconfigure from any client that omits this block -- an older UI, a
+    # script -- would otherwise reset a POV instance to demo and unmask every demo
+    # feature, which is exactly the silent cross-tenant hazard the profile exists to
+    # prevent. _apply_config only writes the key when a value was actually sent.
+    profile: ProfileSetup | None = None
     aws: AWSSetup
     azure: AzureSetup
     gcp: GCPSetup = GCPSetup()
@@ -308,30 +332,31 @@ def _apply_config(payload: SetupPayload) -> None:
     from ..services import config_service
 
     pairs: dict = {}
+    if payload.profile is not None:
+        pairs["install_profile"] = payload.profile.install_profile
 
-    for field, value in payload.aws.model_dump().items():
-        # Skip empty secret fields on reconfigure so existing DB values aren't blanked.
-        if field in _WIZARD_SECRET_FIELDS and not value:
-            continue
-        pairs[field] = value
-
-    # Azure
-    for field, value in payload.azure.model_dump().items():
-        if field in _WIZARD_SECRET_FIELDS and not value:
-            continue
-        pairs[field] = value
-
-    # GCP
-    for field, value in payload.gcp.model_dump().items():
-        if field in _WIZARD_SECRET_FIELDS and not value:
-            continue
-        pairs[field] = value
-
-    # OCI
-    for field, value in payload.oci.model_dump().items():
-        if field in _WIZARD_SECRET_FIELDS and not value:
-            continue
-        pairs[field] = value
+    # A POV instance skips the cloud steps, and must therefore skip the cloud WRITES —
+    # not merely the screens. The loops below persist every NON-secret field whether or
+    # not it was filled in, so "clicked past it" would still land aws_region="us-east-2",
+    # azure_resource_group="dashboard-rg", gcp_region="us-central1" and friends. Since
+    # "is this cloud usable?" is inferred from credential presence
+    # (feature_flags.cloud_configured) rather than from a flag, those defaults are not
+    # harmless noise: they are the difference between a cloud that reads as deliberately
+    # unconfigured and one that reads as half-configured.
+    # The effective profile: what was just sent, else what is already stored. A
+    # reconfigure that omits the block must still honour the instance's real profile
+    # rather than defaulting to demo and writing cloud values into a POV instance.
+    from ..services import feature_flags
+    profile = (payload.profile.install_profile if payload.profile is not None
+               else feature_flags.install_profile())
+    if profile == "demo":
+        for cloud in (payload.aws, payload.azure, payload.gcp, payload.oci):
+            for field, value in cloud.model_dump().items():
+                # Skip empty secret fields on reconfigure so existing DB values aren't
+                # blanked.
+                if field in _WIZARD_SECRET_FIELDS and not value:
+                    continue
+                pairs[field] = value
 
     # Feature flags — always store (explicit true/false is meaningful)
     pairs.update({
@@ -1732,6 +1757,20 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
     # blanking out credential fields that weren't included in the payload.
     validated = model_cls(**raw).model_dump()
     filtered = {k: v for k, v in validated.items() if k in raw}
+    # An integration this instance's profile masks cannot be turned on, so refuse the
+    # write rather than accept it. The write itself would succeed and the flag would read
+    # back as set, but feature_flags.enabled() would keep returning False -- so the
+    # operator would get a toggle that saves cleanly, shows on, and does nothing. Saying
+    # no, with the reason, is the only honest option. Turning one OFF is always allowed.
+    from ..services import feature_flags
+    if filtered.get("enabled") and feature_flags.profile_masks(
+            _feature_to_cfg_key(feature_name)):
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{feature_name}' is not available on an "
+                   f"'{feature_flags.install_profile()}' instance, so it cannot be "
+                   f"enabled here. Run a separate instance for it.",
+        )
     _write_feature(feature_name, filtered, touched=touched)
     logger.info("Feature '%s' configuration updated.", feature_name)
     return {"ok": True}

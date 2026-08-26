@@ -721,9 +721,23 @@ from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
 def _feature_gate(flag: str):
-    """FastAPI dependency: 404 if the named feature flag is disabled."""
+    """FastAPI dependency: 404 if the named feature flag is unavailable.
+
+    Resolution goes through ``feature_flags.enabled`` rather than ``config_service``
+    directly, because that is also what builds the nav links and the Settings toggles.
+    Two readers of the same flag drift, and the drift is user-visible in both directions:
+    a nav link to a router that 404s, or a router serving a page with no way to reach it.
+    It is also where the install-profile mask lives, so a demo-only integration is
+    unreachable on a POV instance without every router having to know that.
+    """
     def _check():
-        if not config_service.get_bool(flag):
+        if not feature_flags.enabled(flag):
+            if feature_flags.profile_masks(flag):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"This integration is not available on an "
+                           f"'{feature_flags.install_profile()}' instance.",
+                )
             raise HTTPException(
                 status_code=404,
                 detail=f"This integration is not enabled. "

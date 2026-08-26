@@ -87,6 +87,47 @@
       </div>
     </div>
 
+    <!-- ── Purpose ── -->
+    <div x-show="stepKey === 'profile'" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">What is this instance for?</h2>
+        <p class="text-gray-500 text-sm mt-1">
+          This decides which features the instance offers. The two are mutually exclusive,
+          because they disagree about where BeyondTrust tenant configuration lives.
+        </p>
+      </div>
+
+      <div class="space-y-3">
+        <template x-for="opt in profileOptions" :key="opt.value">
+          <div @click="form.profile.install_profile = opt.value"
+               class="flex items-start gap-4 p-4 rounded-xl border cursor-pointer transition-colors"
+               :class="form.profile.install_profile === opt.value
+                         ? 'border-blue-300 bg-blue-50' : 'border-gray-200 bg-white hover:border-gray-300'">
+            <span class="mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center"
+                  :class="form.profile.install_profile === opt.value ? 'border-blue-600' : 'border-gray-300'">
+              <span x-show="form.profile.install_profile === opt.value"
+                    class="w-2 h-2 rounded-full bg-blue-600"></span>
+            </span>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-gray-900" x-text="opt.label"></p>
+              <p class="text-xs text-gray-500 mt-0.5" x-text="opt.desc"></p>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="form.profile.install_profile === 'pov'"
+           class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1">
+        <p class="text-xs text-amber-800 font-medium">A POV instance is deliberately narrow.</p>
+        <p class="text-xs text-amber-700">
+          The cloud credential steps are skipped and nothing is written for them. Demo
+          features — on-premises hypervisors, cloud databases, Kubernetes, containers,
+          virtual desktops, cost reporting — stay unavailable on this instance whatever
+          their toggles say. Run a second instance, with its own database, for those.
+        </p>
+      </div>
+    </div>
+
     <!-- ── AWS ── -->
     <div x-show="stepKey === 'aws'" class="px-8 py-6 space-y-5">
       <div>
@@ -762,14 +803,25 @@ function wizard() {
     // literal 6 -- which had become the Feature Flags panel instead of Done, so a successful
     // setup silently bounced back to the toggles and never said it worked. Keying on the name
     // makes inserting a step a one-line change to this array.
-    steps: [
+    // `profiles` limits a step to certain install profiles; absent means "always".
+    allSteps: [
       { key: 'admin',    label: 'Admin'    },
-      { key: 'aws',      label: 'AWS'      },
-      { key: 'azure',    label: 'Azure'    },
-      { key: 'gcp',      label: 'GCP'      },
-      { key: 'oci',      label: 'OCI'      },
+      { key: 'profile',  label: 'Purpose'  },
+      { key: 'aws',      label: 'AWS',   profiles: ['demo'] },
+      { key: 'azure',    label: 'Azure', profiles: ['demo'] },
+      { key: 'gcp',      label: 'GCP',   profiles: ['demo'] },
+      { key: 'oci',      label: 'OCI',   profiles: ['demo'] },
       { key: 'features', label: 'Features' },
     ],
+
+    // The steps this instance actually shows. A POV instance never asks for cloud
+    // credentials it will not use -- and, more importantly, never WRITES them: see
+    // _apply_config, which skips the cloud blocks entirely rather than saving their
+    // defaults for a cloud nobody configured.
+    get steps() {
+      const p = this.form.profile.install_profile;
+      return this.allSteps.filter(s => !s.profiles || s.profiles.includes(p));
+    },
 
     // Past the last step means the Done panel, which is deliberately NOT in `steps`: it has
     // no dot and is not somewhere you navigate to.
@@ -778,6 +830,7 @@ function wizard() {
 
     form: {
       admin:    { username: 'admin', password: '', confirm: '' },
+      profile:  { install_profile: 'demo' },
       aws:      { aws_access_key_id: '', aws_secret_access_key: '', aws_region: 'us-east-2',
                   ec2_ssh_key_secret: '', ec2_ssm_instance_profile: '',
                   aws_ecs_docker_deploy_key: '' },
@@ -866,6 +919,18 @@ function wizard() {
       { value: 'asia-south1',             label: 'Asia (Mumbai)' },
       { value: 'asia-southeast1',         label: 'Asia (Singapore)' },
       { value: 'australia-southeast1',    label: 'Australia (Sydney)' },
+    ],
+
+    profileOptions: [
+      { value: 'demo',
+        label: 'Demo infrastructure',
+        desc:  'Manage your own demo estate across AWS, Azure, GCP, OCI and on-premises '
+             + 'hypervisors, against one BeyondTrust tenant. This is the usual choice.' },
+      { value: 'pov',
+        label: 'Customer POV / POC environments',
+        desc:  'Stand up customer proof-of-value environments on a lab platform, each '
+             + 'against its own PRA and Password Safe tenant. No cloud credentials, and '
+             + 'the demo features are switched off.' },
     ],
 
     featureFlags: [
@@ -986,6 +1051,12 @@ function wizard() {
           });
           if (cfgRes.ok) {
             const cfg = await cfgRes.json();
+            // The profile FIRST: it drives which steps exist, and leaving it at the
+            // 'demo' default on a POV instance would show four cloud steps that instance
+            // does not use -- and submit 'demo', flipping it back and unmasking every
+            // demo feature. Reconfiguring must never change what kind of instance this is
+            // unless the operator says so on the Purpose step.
+            if (cfg.install_profile) this.form.profile.install_profile = cfg.install_profile;
             // Pre-populate non-secret fields
             if (cfg.aws_region)                this.form.aws.aws_region                = cfg.aws_region;
             if (cfg.aws_access_key_id)         this.form.aws.aws_access_key_id         = cfg.aws_access_key_id;
@@ -1093,6 +1164,7 @@ function wizard() {
             username: this.form.admin.username,
             password: this.form.admin.password,
           },
+          profile:  this.form.profile,
           aws:      this.form.aws,
           azure:    this.form.azure,
           gcp:      this.form.gcp,
