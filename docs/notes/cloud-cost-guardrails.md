@@ -1,14 +1,34 @@
-# AWS cost guardrails
+# Cloud cost guardrails
 
-Rules and failure modes for keeping a small AWS account's bill honest. Written after an
-audit on 2026-08-26 that found roughly 60% of a personal lab account's spend was waste,
-and that the two things the previous version of this doc blamed were both wrong.
+Rules and failure modes for keeping small AWS and Azure lab accounts honest. Written
+after audits on 2026-08-26 that found **roughly 60% of AWS spend and 43% of Azure spend
+was waste** — and that in both clouds the things previously blamed for it were wrong.
 
 Cost allocation tag: **`managed-by`** (values `vm-dashboard`, `dashboard-sandbox`).
-No account IDs or resource IDs here on purpose — this repo is public. Re-run the
-[verification commands](#verification-commands) against your own account instead.
+No account IDs, subscription IDs, or resource IDs here on purpose — this repo is public.
+Re-run the verification commands ([AWS](#aws-verification-commands),
+[Azure](#azure-verification-commands)) against your own accounts instead.
+
+## The same three shapes in both clouds
+
+Every item found in either audit was one of these. Look for these first:
+
+| Shape | AWS | Azure |
+|---|---|---|
+| An expensive **network object serving nothing** | Secrets Manager interface VPC endpoint, ~$7.30/mo, in a VPC whose only ENI was its own | NAT gateway + its static IP, ~$36/mo, on a delegated subnet with zero IP configurations |
+| **Storage outliving its compute** | Orphaned EBS root volumes from AMIs shipping `DeleteOnTermination: false` | Unattached managed disk (13 months); VM backups still `Protected` after the VMs were deleted |
+| **Unassociated IPs** | Unattached Elastic IPs | Standard static public IPs with no `ipConfiguration` |
+
+And one inverted trade worth knowing before you start:
+
+> **AWS charges you to query cost. Azure refuses to let you.**
+> Cost Explorer bills ~$0.01/request and became the single largest line item in the AWS
+> account. Azure's Cost Management API is free but throttles so aggressively that it is
+> effectively unusable for an audit. Neither meters cleanly.
 
 ---
+
+# AWS
 
 ## Three traps that a naive "unattributed spend" hunt gets wrong
 
@@ -115,7 +135,7 @@ deploy recreates it.
 
 ---
 
-## Rules for new infrastructure
+## AWS rules for new infrastructure
 
 1. **Tag everything** with `managed-by`, and tag **volumes** explicitly — instance tags
    do not propagate. Cost allocation tags are **not retroactive**: a resource tagged
@@ -136,7 +156,7 @@ deploy recreates it.
 
 ---
 
-## Verification commands
+## AWS verification commands
 
 > **The `--query` path for a grouped result is `Metrics.UnblendedCost.Amount`, not
 > `Total.UnblendedCost.Amount`.** `Total` exists only at the `ResultsByTime` level. Using
@@ -180,6 +200,135 @@ aws elbv2 describe-load-balancers --query 'LoadBalancers[].[LoadBalancerName,Typ
 
 Run the volume and endpoint checks in **every region you have ever touched**, not just
 your default one.
+
+---
+
+# Azure
+
+Azure's provisioning paths in this repo are **already correct** — the waste found in the
+audit was hand-built lab infrastructure, not anything the code creates. That makes the
+Azure half of this document mostly *detective*: what to look for, and why the obvious
+tooling won't show it to you.
+
+## Four tooling traps, in the order they bite
+
+1. **The Cost Management query API is unusable for an audit.**
+   `POST .../Microsoft.CostManagement/query` returns `429 Too many requests` relentlessly
+   — at subscription *and* resource-group scope, often on the very first call of the day.
+   Don't build a retry loop around it. Use the Consumption API instead:
+   `GET .../Microsoft.Consumption/usageDetails?api-version=2023-05-01&metric=ActualCost`.
+   Different throttle bucket, free, and it returns **per-resource** cost, which the query
+   API does not.
+2. **`az consumption usage list` silently returns nothing useful.** It maps a modern
+   usage record onto the legacy schema, so `pretaxCost`, `usageQuantity`, and
+   `instanceName` all come back `None` while the call reports success. Go straight to the
+   REST endpoint with a bearer token.
+3. **The `nextLink` Azure hands back contains raw spaces** in its `$filter`, which
+   Python's `http.client` rejects outright as control characters. Re-encode only the
+   spaces (`url.replace(" ", "%20")`) — re-quoting the whole URL double-encodes the
+   skiptoken and the next page comes back empty.
+4. **MFA enforcement blocks writes but not reads.** With a non-MFA token every `list`
+   and `show` succeeds, so an audit looks completely healthy — and then every delete
+   fails with `RequestDisallowedByAzure`. Re-authenticate interactively *before*
+   concluding a cleanup worked.
+
+> A corollary worth its own line: **check exit codes, don't chain on a pipe.**
+> `az ... 2>&1 | head -3 && echo "deleted"` prints `deleted` when `head` succeeds, not
+> when `az` does. That reports a clean sweep while nothing was removed.
+
+## Cost traps
+
+- **Deleting a VM does not stop its backup.** A Recovery Services vault keeps charging
+  the protected-instance fee plus recovery-point storage indefinitely. The tell is a
+  container whose `healthStatus` is `Deleted` while its item's `protectionState` is still
+  `Protected` — Azure knows the VM is gone and bills anyway. Stopping it deletes the
+  restore points, so it is irreversible:
+  `az backup protection disable --delete-backup-data true`.
+- **A NAT gateway cannot be deleted while a subnet still references it**
+  (`CannotDeleteNatGatewayAssociatedToSubnet`). Remove the reference first with
+  `az network vnet subnet update --remove natGateway`. A NAT gateway plus its static IP
+  is ~$36/mo, and a *delegated but empty* subnet keeps it alive with nothing behind it.
+- **Standard static public IPs bill while unassociated** — the Elastic IP equivalent.
+- **A deallocated VM still pays full price for its OS disk.** Stopping a VM saves only
+  compute. An AVD session host's 128 GiB Premium P10 is ~$19/mo whether it runs or not;
+  `StandardSSD_LRS` is roughly half. Downgrade only if you accept slower boot and login —
+  AVD is latency-sensitive on the OS disk, and the change is reversible.
+
+## What the repo already guarantees (don't "fix" these)
+
+Unlike the AWS side, Azure never had the orphaned-disk defect, because every launch path
+sets the mapping explicitly:
+
+| Path | OS disk | Public IP |
+|---|---|---|
+| `terraform/azure_vm/main.tf` | `disk_delete_option = "Delete"` | `count = create_public_ip ? 1 : 0`, same state as the VM |
+| `azure_service._deploy_vm_sync` | `delete_option="Delete"` | `_best_effort_cleanup` deletes the PIP explicitly |
+| `azure_service._run_vm_jumpoint_sync` | `delete_option="Delete"` | — |
+| `azure_service._run_vm_container_node_sync` | OS `Delete`, data disk `Detach` | — |
+
+`tests/test_node_azure.py` asserts that asymmetry. There is **no** `azurerm_nat_gateway`
+and **no** Recovery Services resource anywhere in this repo — AKS moved to an outbound
+load balancer, and nothing here has ever created a VM backup. If you find either in a
+subscription, it was built by hand.
+
+`rollback.sh --cloud azure` deletes the sandbox resource group only. Anything you create
+outside it has no sweep at all, which is exactly how the audited waste survived.
+
+## Azure verification commands
+
+Set `SUB` to the subscription you are auditing.
+
+```bash
+# Per-resource cost, month to date. BOTH usageStart AND usageEnd are required — with
+# only a start date the API returns 400 "Invalid Date Range, End Date is missing".
+SUB=$(az account show --query id -o tsv)
+TOKEN=$(az account get-access-token --subscription "$SUB" --query accessToken -o tsv)
+curl -sG "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.Consumption/usageDetails" \
+  -H "Authorization: Bearer $TOKEN" \
+  --data-urlencode 'api-version=2023-05-01' \
+  --data-urlencode 'metric=ActualCost' \
+  --data-urlencode "\$filter=properties/usageStart ge '$(date -u +%Y-%m-01)' and properties/usageEnd le '$(date -u +%Y-%m-%d)'" \
+  | python3 -c 'import json,sys;d=json.load(sys.stdin);[print(f"{p["cost"]:9.2f}  {p.get("resourceName")}  [{p.get("resourceGroup")}]") for p in (r["properties"] for r in d["value"]) if p["cost"]>=0.01]'
+```
+
+That prints the **first page only**. A real audit has to follow `nextLink` and sum across
+pages — remembering trap 3 above, or page two dies on a control-character error.
+
+```bash
+# Backups still billing for VMs that no longer exist.
+# Filter on the ITEM's protectionState, not the container's healthStatus: a container
+# keeps healthStatus=Deleted forever after cleanup, so a healthStatus check reports
+# vaults you already fixed. Cross-check each virtualMachineId against `az vm list`.
+az backup vault list --query '[].[name,resourceGroup]' -o tsv | while read -r V G; do
+  az backup item list --vault-name "$V" -g "$G" --backup-management-type AzureIaasVM \
+    --query "[?properties.protectionState=='Protected'].[properties.friendlyName,properties.virtualMachineId]" -o tsv
+done
+```
+
+```bash
+# Unattached disks. `az disk list` REQUIRES -g (no subscription-wide form as of CLI
+# 2.88), so iterate resource groups or the command just errors.
+az group list --query '[].name' -o tsv | while read -r G; do
+  az disk list -g "$G" --query "[?diskState=='Unattached'].[name,resourceGroup,sku.name,timeCreated]" -o tsv
+done
+```
+
+```bash
+# Idle resources that bill for nothing
+az network public-ip list --query "[?ipConfiguration==null && natGateway==null].[name,resourceGroup,sku.name]" -o tsv
+az network nat gateway list --query '[].[name,resourceGroup,length(subnets || `[]`)]' -o tsv
+az vm list -d --query "[?powerState!='VM running'].[name,resourceGroup,powerState]" -o tsv
+```
+
+A deallocated VM in that last list is not free: its OS disk bills at full price.
+
+A NAT gateway reporting `0` subnets, or one whose subnet has no IP configurations, is
+billing for nothing:
+
+```bash
+az network vnet subnet show -g <rg> --vnet-name <vnet> -n <subnet> \
+  --query '{ipConfigs: length(ipConfigurations || `[]`), delegations: delegations[].serviceName}'
+```
 
 ---
 
