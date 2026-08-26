@@ -16,7 +16,10 @@ dashboard manages them by reference count, exactly like ``nat_instance_service``
                                     in the sandbox private subnet.
   * reclaim_ssm_endpoints(db, …)  — called on EC2 destroy / AWS cloud-DB decommission.
                                     Deletes the endpoints + their SG only when no
-                                    EC2 instance and no AWS cloud database is left.
+                                    EC2 instance and no AWS cloud database is left,
+                                    plus the setup script's ``secretsmanager`` endpoint
+                                    (RECLAIM_ONLY_SERVICES) when no vpc-mode Lambda
+                                    still needs it.
 
 Gated behind ``aws_ssm_endpoints_enabled`` (default off; set true by
 scripts/sandbox/Linux/setup-aws.sh). Best-effort from the caller's perspective —
@@ -30,6 +33,15 @@ logger = logging.getLogger(__name__)
 
 # The three SSM control-plane services the agent needs on a private-subnet target.
 SSM_SERVICES = ("ssm", "ssmmessages", "ec2messages")
+
+# Swept on reclaim but never created by ensure_ssm_endpoints. scripts/sandbox/Linux/
+# setup-aws.sh stands `secretsmanager` up for vpc-mode Cloud Functions, and only a full
+# rollback.sh (which sweeps by vpc-id) ever removed it — so a sandbox torn down any
+# other way left it billing ~$7/mo forever, invisible to an "unattributed spend" hunt
+# because the script tags it `managed-by=dashboard-sandbox`. Reclaim-only on purpose:
+# putting it in SSM_SERVICES would make every EC2 deploy create a $7/mo endpoint that
+# nothing on the SSM path needs.
+RECLAIM_ONLY_SERVICES = ("secretsmanager",)
 
 # Find-or-create key for the endpoint SG (matches the sandbox script's name).
 _VPCE_SG_NAME = "dashboard-sandbox-ssm-vpce-sg"
@@ -110,7 +122,21 @@ async def reclaim_ssm_endpoints(db, region: str) -> None:
         if not net:
             return
         vpc_id, _subnet_id, _cidr = net
-        service_names = [f"com.amazonaws.{region}.{s}" for s in SSM_SERVICES]
+        sweep = list(SSM_SERVICES)
+        # A vpc-mode Lambda reaches Secrets Manager ONLY through this endpoint (private
+        # subnet, no NAT), and it isn't counted by _active_ec2_count/_active_db_count —
+        # so ask AWS directly. On error, leave the endpoint alone: paying $7/mo beats
+        # breaking secret reads at runtime.
+        try:
+            if await aws_service.count_vpc_lambdas(region, vpc_id=vpc_id) == 0:
+                sweep += list(RECLAIM_ONLY_SERVICES)
+            else:
+                logger.info("ssm-endpoints: keeping the secretsmanager endpoint "
+                            "(vpc-mode Lambda still attached to %s)", vpc_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ssm-endpoints: could not count vpc Lambdas (%s) — leaving "
+                           "the secretsmanager endpoint in place", exc)
+        service_names = [f"com.amazonaws.{region}.{s}" for s in sweep]
         found = await aws_service.find_ssm_endpoints(
             region, vpc_id=vpc_id, service_names=service_names)
         ep_ids = [v["endpoint_id"] for v in found.values()]

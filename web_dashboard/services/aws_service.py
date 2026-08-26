@@ -558,11 +558,13 @@ def _launch_instance_sync(
         SecurityGroupIds=security_group_ids,
         MinCount=1,
         MaxCount=1,
+        BlockDeviceMappings=_root_bdm_sync(region, ami_id),
         TagSpecifications=[
             {
                 "ResourceType": "instance",
                 "Tags": tags,
-            }
+            },
+            _volume_tag_spec(tags),
         ],
     )
     if public_key:
@@ -753,6 +755,12 @@ def _run_container_instance_sync(
     security_group_ids: list, instance_profile: str, user_data: str, name_tag: str,
 ) -> dict:
     ec2 = _get_ec2(region)
+    tags = [
+        {"Key": "Name", "Value": name_tag},
+        # managed-by matches dashboard EC2 instances so the sandbox VPC
+        # sweep / rollback cleans the host up too.
+        {"Key": "managed-by", "Value": "vm-dashboard"},
+    ]
     resp = ec2.run_instances(
         ImageId=ami_id,
         InstanceType=instance_type,
@@ -768,15 +776,9 @@ def _run_container_instance_sync(
         }],
         IamInstanceProfile={"Name": instance_profile},
         UserData=user_data,  # boto3 base64-encodes for run_instances
-        TagSpecifications=[{
-            "ResourceType": "instance",
-            "Tags": [
-                {"Key": "Name", "Value": name_tag},
-                # managed-by matches dashboard EC2 instances so the sandbox VPC
-                # sweep / rollback cleans the host up too.
-                {"Key": "managed-by", "Value": "vm-dashboard"},
-            ],
-        }],
+        BlockDeviceMappings=_root_bdm_sync(region, ami_id),
+        TagSpecifications=[{"ResourceType": "instance", "Tags": tags},
+                           _volume_tag_spec(tags)],
     )
     inst = resp["Instances"][0]
     return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
@@ -957,6 +959,12 @@ def _run_nat_instance_sync(
     security_group_ids: list, user_data: str, name_tag: str,
 ) -> dict:
     ec2 = _get_ec2(region)
+    tags = [
+        {"Key": "Name", "Value": name_tag},
+        # managed-by matches dashboard EC2 instances so the sandbox VPC
+        # sweep / rollback cleans the NAT up too.
+        {"Key": "managed-by", "Value": "vm-dashboard"},
+    ]
     resp = ec2.run_instances(
         ImageId=ami_id,
         InstanceType=instance_type,
@@ -972,15 +980,9 @@ def _run_nat_instance_sync(
             "AssociatePublicIpAddress": True,
         }],
         UserData=user_data,  # boto3 base64-encodes for run_instances
-        TagSpecifications=[{
-            "ResourceType": "instance",
-            "Tags": [
-                {"Key": "Name", "Value": name_tag},
-                # managed-by matches dashboard EC2 instances so the sandbox VPC
-                # sweep / rollback cleans the NAT up too.
-                {"Key": "managed-by", "Value": "vm-dashboard"},
-            ],
-        }],
+        BlockDeviceMappings=_root_bdm_sync(region, ami_id),
+        TagSpecifications=[{"ResourceType": "instance", "Tags": tags},
+                           _volume_tag_spec(tags)],
     )
     inst = resp["Instances"][0]
     return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
@@ -1101,13 +1103,49 @@ def _root_device_name_sync(region: str, ami_id: str) -> str:
     return (images[0].get("RootDeviceName") if images else "") or "/dev/xvda"
 
 
+def _root_bdm_sync(region: str, ami_id: str, *, size_gb: int = 0) -> list:
+    """Root block-device mapping that pins the disk to die with the instance, on gp3.
+
+    Custom Packer AMIs routinely ship ``DeleteOnTermination: false`` on the root device
+    — of this account's seven self-owned AMIs, ``rocky9-pws-ready`` and ``ot-sim`` both
+    do — so any launch that passes no mapping of its own inherits that flag and strands
+    an untagged 21 GB "available" volume at ~$2.10/mo on every terminate.
+    ``terraform/ec2_instance`` has overridden this since 0c08347; the boto3 launch paths
+    did not, which is where the orphans in this account actually came from.
+
+    gp3 rather than the AMI's gp2 for the same reason the cost doc prefers it: ~20%
+    cheaper at equal baseline performance. Size is left to the snapshot unless a caller
+    asks for more — a VolumeSize smaller than the snapshot is rejected by EC2.
+    """
+    ebs: dict = {"DeleteOnTermination": True, "VolumeType": "gp3"}
+    if size_gb:
+        ebs["VolumeSize"] = int(size_gb)
+    return [{"DeviceName": _root_device_name_sync(region, ami_id), "Ebs": ebs}]
+
+
+def _volume_tag_spec(tags: list) -> dict:
+    """Tag spec so the root volume carries the same tags as its instance.
+
+    ``ResourceType: instance`` does NOT propagate to volumes. Without this an orphan is
+    invisible to cost allocation — it lands in the "unattributed" bucket with no owner,
+    which is exactly what made the two dead volumes in this account untraceable."""
+    return {"ResourceType": "volume", "Tags": tags}
+
+
 def _run_ec2_container_node_sync(
     region: str, ami_id: str, instance_type: str, subnet_id: str,
     security_group_ids: list, user_data: str, name_tag: str, purpose: str,
     root_disk_gb: int,
 ) -> dict:
     ec2 = _get_ec2(region)
-    root_dev = _root_device_name_sync(region, ami_id)
+    node_tags = [
+        {"Key": "Name", "Value": name_tag},
+        {"Key": "managed-by", "Value": _NODE_MANAGED_TAG},
+        # `purpose` is how the node is found again, mirroring the GCE label of
+        # the same name. Without it a node is indistinguishable from any other
+        # dashboard EC2 instance.
+        {"Key": "purpose", "Value": purpose},
+    ]
     kwargs = {
         "ImageId": ami_id,
         "InstanceType": instance_type,
@@ -1123,24 +1161,13 @@ def _run_ec2_container_node_sync(
             "AssociatePublicIpAddress": True,
         }],
         "UserData": user_data,  # boto3 base64-encodes for run_instances
-        "TagSpecifications": [{
-            "ResourceType": "instance",
-            "Tags": [
-                {"Key": "Name", "Value": name_tag},
-                {"Key": "managed-by", "Value": _NODE_MANAGED_TAG},
-                # `purpose` is how the node is found again, mirroring the GCE label of
-                # the same name. Without it a node is indistinguishable from any other
-                # dashboard EC2 instance.
-                {"Key": "purpose", "Value": purpose},
-            ],
-        }],
+        # Unconditional, not `if root_disk_gb`: the mapping is what pins
+        # DeleteOnTermination, so gating it on a resize meant a default-sized node
+        # inherited the AMI's flag and stranded its root volume on terminate.
+        "BlockDeviceMappings": _root_bdm_sync(region, ami_id, size_gb=root_disk_gb),
+        "TagSpecifications": [{"ResourceType": "instance", "Tags": node_tags},
+                              _volume_tag_spec(node_tags)],
     }
-    if root_disk_gb:
-        kwargs["BlockDeviceMappings"] = [{
-            "DeviceName": root_dev,
-            "Ebs": {"VolumeSize": int(root_disk_gb), "VolumeType": "gp3",
-                    "DeleteOnTermination": True},
-        }]
     inst = ec2.run_instances(**kwargs)["Instances"][0]
     return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
 
@@ -1781,6 +1808,33 @@ async def find_ssm_endpoints(region: str, *, vpc_id: str, service_names: list) -
         return await _to_thread(_find_ssm_endpoints_sync, region, vpc_id, service_names)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list VPC endpoints: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _count_vpc_lambdas_sync(region: str, vpc_id: str) -> int:
+    _require_boto3()
+    lam = boto3.client("lambda", **_aws_kwargs(region))
+    n = 0
+    for page in lam.get_paginator("list_functions").paginate():
+        for fn in page.get("Functions", []):
+            if ((fn.get("VpcConfig") or {}).get("VpcId") or "") == vpc_id:
+                n += 1
+    return n
+
+
+async def count_vpc_lambdas(region: str, *, vpc_id: str) -> int:
+    """How many Lambda functions are attached to this VPC.
+
+    Gates the ``secretsmanager`` endpoint sweep. A vpc-mode Lambda in a private subnet
+    has no route to the public Secrets Manager API, so deleting the endpoint under it
+    fails its secret reads at RUNTIME with a timeout, not at deploy time — the exact
+    silent breakage the cost doc warns about. Asked of AWS rather than the dashboard DB
+    because the sandbox script creates these functions, so no local row would exist."""
+    try:
+        return await _to_thread(_count_vpc_lambdas_sync, region, vpc_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to list Lambda functions: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
 
