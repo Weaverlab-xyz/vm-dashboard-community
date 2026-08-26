@@ -558,11 +558,13 @@ def _launch_instance_sync(
         SecurityGroupIds=security_group_ids,
         MinCount=1,
         MaxCount=1,
+        BlockDeviceMappings=_root_bdm_sync(region, ami_id),
         TagSpecifications=[
             {
                 "ResourceType": "instance",
                 "Tags": tags,
-            }
+            },
+            _volume_tag_spec(tags),
         ],
     )
     if public_key:
@@ -753,6 +755,12 @@ def _run_container_instance_sync(
     security_group_ids: list, instance_profile: str, user_data: str, name_tag: str,
 ) -> dict:
     ec2 = _get_ec2(region)
+    tags = [
+        {"Key": "Name", "Value": name_tag},
+        # managed-by matches dashboard EC2 instances so the sandbox VPC
+        # sweep / rollback cleans the host up too.
+        {"Key": "managed-by", "Value": "vm-dashboard"},
+    ]
     resp = ec2.run_instances(
         ImageId=ami_id,
         InstanceType=instance_type,
@@ -768,15 +776,9 @@ def _run_container_instance_sync(
         }],
         IamInstanceProfile={"Name": instance_profile},
         UserData=user_data,  # boto3 base64-encodes for run_instances
-        TagSpecifications=[{
-            "ResourceType": "instance",
-            "Tags": [
-                {"Key": "Name", "Value": name_tag},
-                # managed-by matches dashboard EC2 instances so the sandbox VPC
-                # sweep / rollback cleans the host up too.
-                {"Key": "managed-by", "Value": "vm-dashboard"},
-            ],
-        }],
+        BlockDeviceMappings=_root_bdm_sync(region, ami_id),
+        TagSpecifications=[{"ResourceType": "instance", "Tags": tags},
+                           _volume_tag_spec(tags)],
     )
     inst = resp["Instances"][0]
     return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
@@ -957,6 +959,12 @@ def _run_nat_instance_sync(
     security_group_ids: list, user_data: str, name_tag: str,
 ) -> dict:
     ec2 = _get_ec2(region)
+    tags = [
+        {"Key": "Name", "Value": name_tag},
+        # managed-by matches dashboard EC2 instances so the sandbox VPC
+        # sweep / rollback cleans the NAT up too.
+        {"Key": "managed-by", "Value": "vm-dashboard"},
+    ]
     resp = ec2.run_instances(
         ImageId=ami_id,
         InstanceType=instance_type,
@@ -972,15 +980,9 @@ def _run_nat_instance_sync(
             "AssociatePublicIpAddress": True,
         }],
         UserData=user_data,  # boto3 base64-encodes for run_instances
-        TagSpecifications=[{
-            "ResourceType": "instance",
-            "Tags": [
-                {"Key": "Name", "Value": name_tag},
-                # managed-by matches dashboard EC2 instances so the sandbox VPC
-                # sweep / rollback cleans the NAT up too.
-                {"Key": "managed-by", "Value": "vm-dashboard"},
-            ],
-        }],
+        BlockDeviceMappings=_root_bdm_sync(region, ami_id),
+        TagSpecifications=[{"ResourceType": "instance", "Tags": tags},
+                           _volume_tag_spec(tags)],
     )
     inst = resp["Instances"][0]
     return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
@@ -1101,13 +1103,49 @@ def _root_device_name_sync(region: str, ami_id: str) -> str:
     return (images[0].get("RootDeviceName") if images else "") or "/dev/xvda"
 
 
+def _root_bdm_sync(region: str, ami_id: str, *, size_gb: int = 0) -> list:
+    """Root block-device mapping that pins the disk to die with the instance, on gp3.
+
+    Custom Packer AMIs routinely ship ``DeleteOnTermination: false`` on the root device
+    — of this account's seven self-owned AMIs, ``rocky9-pws-ready`` and ``ot-sim`` both
+    do — so any launch that passes no mapping of its own inherits that flag and strands
+    an untagged 21 GB "available" volume at ~$2.10/mo on every terminate.
+    ``terraform/ec2_instance`` has overridden this since 0c08347; the boto3 launch paths
+    did not, which is where the orphans in this account actually came from.
+
+    gp3 rather than the AMI's gp2 for the same reason the cost doc prefers it: ~20%
+    cheaper at equal baseline performance. Size is left to the snapshot unless a caller
+    asks for more — a VolumeSize smaller than the snapshot is rejected by EC2.
+    """
+    ebs: dict = {"DeleteOnTermination": True, "VolumeType": "gp3"}
+    if size_gb:
+        ebs["VolumeSize"] = int(size_gb)
+    return [{"DeviceName": _root_device_name_sync(region, ami_id), "Ebs": ebs}]
+
+
+def _volume_tag_spec(tags: list) -> dict:
+    """Tag spec so the root volume carries the same tags as its instance.
+
+    ``ResourceType: instance`` does NOT propagate to volumes. Without this an orphan is
+    invisible to cost allocation — it lands in the "unattributed" bucket with no owner,
+    which is exactly what made the two dead volumes in this account untraceable."""
+    return {"ResourceType": "volume", "Tags": tags}
+
+
 def _run_ec2_container_node_sync(
     region: str, ami_id: str, instance_type: str, subnet_id: str,
     security_group_ids: list, user_data: str, name_tag: str, purpose: str,
     root_disk_gb: int,
 ) -> dict:
     ec2 = _get_ec2(region)
-    root_dev = _root_device_name_sync(region, ami_id)
+    node_tags = [
+        {"Key": "Name", "Value": name_tag},
+        {"Key": "managed-by", "Value": _NODE_MANAGED_TAG},
+        # `purpose` is how the node is found again, mirroring the GCE label of
+        # the same name. Without it a node is indistinguishable from any other
+        # dashboard EC2 instance.
+        {"Key": "purpose", "Value": purpose},
+    ]
     kwargs = {
         "ImageId": ami_id,
         "InstanceType": instance_type,
@@ -1123,24 +1161,13 @@ def _run_ec2_container_node_sync(
             "AssociatePublicIpAddress": True,
         }],
         "UserData": user_data,  # boto3 base64-encodes for run_instances
-        "TagSpecifications": [{
-            "ResourceType": "instance",
-            "Tags": [
-                {"Key": "Name", "Value": name_tag},
-                {"Key": "managed-by", "Value": _NODE_MANAGED_TAG},
-                # `purpose` is how the node is found again, mirroring the GCE label of
-                # the same name. Without it a node is indistinguishable from any other
-                # dashboard EC2 instance.
-                {"Key": "purpose", "Value": purpose},
-            ],
-        }],
+        # Unconditional, not `if root_disk_gb`: the mapping is what pins
+        # DeleteOnTermination, so gating it on a resize meant a default-sized node
+        # inherited the AMI's flag and stranded its root volume on terminate.
+        "BlockDeviceMappings": _root_bdm_sync(region, ami_id, size_gb=root_disk_gb),
+        "TagSpecifications": [{"ResourceType": "instance", "Tags": node_tags},
+                              _volume_tag_spec(node_tags)],
     }
-    if root_disk_gb:
-        kwargs["BlockDeviceMappings"] = [{
-            "DeviceName": root_dev,
-            "Ebs": {"VolumeSize": int(root_disk_gb), "VolumeType": "gp3",
-                    "DeleteOnTermination": True},
-        }]
     inst = ec2.run_instances(**kwargs)["Instances"][0]
     return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
 
@@ -1781,6 +1808,33 @@ async def find_ssm_endpoints(region: str, *, vpc_id: str, service_names: list) -
         return await _to_thread(_find_ssm_endpoints_sync, region, vpc_id, service_names)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list VPC endpoints: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _count_vpc_lambdas_sync(region: str, vpc_id: str) -> int:
+    _require_boto3()
+    lam = boto3.client("lambda", **_aws_kwargs(region))
+    n = 0
+    for page in lam.get_paginator("list_functions").paginate():
+        for fn in page.get("Functions", []):
+            if ((fn.get("VpcConfig") or {}).get("VpcId") or "") == vpc_id:
+                n += 1
+    return n
+
+
+async def count_vpc_lambdas(region: str, *, vpc_id: str) -> int:
+    """How many Lambda functions are attached to this VPC.
+
+    Gates the ``secretsmanager`` endpoint sweep. A vpc-mode Lambda in a private subnet
+    has no route to the public Secrets Manager API, so deleting the endpoint under it
+    fails its secret reads at RUNTIME with a timeout, not at deploy time — the exact
+    silent breakage the cost doc warns about. Asked of AWS rather than the dashboard DB
+    because the sandbox script creates these functions, so no local row would exist."""
+    try:
+        return await _to_thread(_count_vpc_lambdas_sync, region, vpc_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to list Lambda functions: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
 
@@ -3033,9 +3087,16 @@ async def describe_instance_detail(region: str, instance_id: str) -> dict:
         raise AWSError("AWS credentials not configured.")
 
 
-def _deregister_ami_sync(region: str, ami_id: str) -> list[str]:
-    """Deregister an AMI and delete its backing snapshots. Returns list of deleted snapshot IDs."""
+def _deregister_ami_sync(region: str, ami_id: str,
+                         keep_snapshot_ids: Optional[list] = None) -> list[str]:
+    """Deregister an AMI and delete its backing snapshots. Returns list of deleted snapshot IDs.
+
+    ``keep_snapshot_ids`` holds back snapshots another AMI still references. EC2 would
+    refuse the delete anyway, but that arrives as a swallowed ClientError below — an
+    intent that important should not be expressed as a silently ignored failure.
+    """
     ec2 = _get_ec2(region)
+    keep = set(keep_snapshot_ids or ())
 
     # Collect snapshot IDs before deregistering
     resp = ec2.describe_images(ImageIds=[ami_id], Owners=["self"])
@@ -3047,6 +3108,7 @@ def _deregister_ami_sync(region: str, ami_id: str) -> list[str]:
         mapping["Ebs"]["SnapshotId"]
         for mapping in images[0].get("BlockDeviceMappings", [])
         if "Ebs" in mapping and "SnapshotId" in mapping["Ebs"]
+        and mapping["Ebs"]["SnapshotId"] not in keep
     ]
 
     ec2.deregister_image(ImageId=ami_id)
@@ -3074,7 +3136,68 @@ async def deregister_ami(region: str, ami_id: str) -> list[str]:
         raise AWSError("AWS credentials not configured.")
 
 
-# ── Enable ENA on an AMI ──────────────────────────────────────────────────────
+# ── Re-registering an AMI (rename, ENA, block-device fixes) ───────────────────
+#
+# register_image is the ONLY point at which an AMI's block-device mapping can be
+# set: import_image auto-generates one and copy_image has no mapping parameter at
+# all. Anything that has to correct a mapping therefore has to re-register.
+
+# Attributes describe_images reports that register_image can carry forward. Omitting
+# one silently downgrades the image rather than failing: a UEFI image re-registered
+# without BootMode comes back legacy-BIOS (and may not boot), and dropping
+# EnaSupport/SriovNetSupport quietly costs the network capability the source
+# advertised. copy_image preserved all of this implicitly; register_image sets only
+# what it is given, so the list has to be explicit.
+_AMI_CARRY_FORWARD = ("Architecture", "VirtualizationType", "EnaSupport",
+                      "SriovNetSupport", "BootMode", "TpmSupport", "ImdsSupport",
+                      "KernelId", "RamdiskId")
+
+
+def _ami_bdms_for_register(img: dict, *, pin_delete_on_termination: bool = False) -> list:
+    """Project an AMI's block-device mappings into register_image's accepted shape.
+
+    ``pin_delete_on_termination`` forces the ROOT device to die with its instance.
+    ImportImage and many Packer builders emit ``DeleteOnTermination: false``, which
+    strands an untagged root volume on every terminate — see ``_root_bdm_sync`` for
+    the launch-side half of the same defect. Only the root device is pinned: a data
+    disk in the mapping may be meant to outlive its instance, and this is not the
+    place to decide that.
+    """
+    root_dev = img.get("RootDeviceName", "")
+    bdms = []
+    for bdm in img.get("BlockDeviceMappings", []):
+        new_bdm: dict = {"DeviceName": bdm["DeviceName"]}
+        if "Ebs" in bdm:
+            ebs = bdm["Ebs"]
+            new_ebs: dict = {k: ebs[k] for k in
+                             ("SnapshotId", "VolumeSize", "VolumeType",
+                              "DeleteOnTermination") if k in ebs}
+            if ebs.get("Encrypted"):
+                new_ebs["Encrypted"] = True
+            if pin_delete_on_termination and bdm["DeviceName"] == root_dev:
+                new_ebs["DeleteOnTermination"] = True
+            new_bdm["Ebs"] = new_ebs
+        elif "VirtualName" in bdm:
+            new_bdm["VirtualName"] = bdm["VirtualName"]
+        bdms.append(new_bdm)
+    return bdms
+
+
+def _ami_register_kwargs(img: dict, *, name: str, description: str, bdms: list) -> dict:
+    """register_image kwargs that preserve everything describe_images reported."""
+    kwargs: dict = {
+        "Name": name,
+        "RootDeviceName": img.get("RootDeviceName", "/dev/sda1"),
+        "BlockDeviceMappings": bdms,
+    }
+    if description:
+        kwargs["Description"] = description
+    for key in _AMI_CARRY_FORWARD:
+        val = img.get(key)
+        if val:
+            kwargs[key] = val
+    return kwargs
+
 
 def _register_with_ena_sync(region: str, ami_id: str) -> str:
     """Re-register an AMI from the same backing snapshot(s) with EnaSupport=True.
@@ -3090,45 +3213,18 @@ def _register_with_ena_sync(region: str, ami_id: str) -> str:
     if img.get("EnaSupport"):
         raise AWSError(f"AMI {ami_id} already has ENA enabled.")
 
-    # Build block device mappings — keep only fields accepted by register_image
-    bdms = []
-    for bdm in img.get("BlockDeviceMappings", []):
-        new_bdm: dict = {"DeviceName": bdm["DeviceName"]}
-        if "Ebs" in bdm:
-            ebs = bdm["Ebs"]
-            new_ebs: dict = {}
-            if "SnapshotId" in ebs:
-                new_ebs["SnapshotId"] = ebs["SnapshotId"]
-            if "VolumeSize" in ebs:
-                new_ebs["VolumeSize"] = ebs["VolumeSize"]
-            if "VolumeType" in ebs:
-                new_ebs["VolumeType"] = ebs["VolumeType"]
-            if "DeleteOnTermination" in ebs:
-                new_ebs["DeleteOnTermination"] = ebs["DeleteOnTermination"]
-            if ebs.get("Encrypted"):
-                new_ebs["Encrypted"] = True
-            new_bdm["Ebs"] = new_ebs
-        elif "VirtualName" in bdm:
-            new_bdm["VirtualName"] = bdm["VirtualName"]
-        bdms.append(new_bdm)
+    # Pin the root disk while we're re-registering anyway: an ENA copy of an AMI
+    # that leaked its root volume would otherwise inherit the leak.
+    bdms = _ami_bdms_for_register(img, pin_delete_on_termination=True)
 
     old_name = img.get("Name", ami_id)
     new_name = (old_name[:124] + "-ena") if len(old_name) > 124 else (old_name + "-ena")
 
-    kwargs: dict = {
-        "Name": new_name,
-        "Architecture": img.get("Architecture", "x86_64"),
-        "RootDeviceName": img.get("RootDeviceName", "/dev/sda1"),
-        "BlockDeviceMappings": bdms,
-        "VirtualizationType": img.get("VirtualizationType", "hvm"),
-        "EnaSupport": True,
-    }
-    if img.get("Description"):
-        kwargs["Description"] = img["Description"] + " (ENA enabled)"
-    if img.get("KernelId"):
-        kwargs["KernelId"] = img["KernelId"]
-    if img.get("RamdiskId"):
-        kwargs["RamdiskId"] = img["RamdiskId"]
+    desc = img.get("Description")
+    kwargs = _ami_register_kwargs(
+        img, name=new_name, description=(desc + " (ENA enabled)") if desc else "",
+        bdms=bdms)
+    kwargs["EnaSupport"] = True
 
     new_ami_id = ec2.register_image(**kwargs)["ImageId"]
 
@@ -3314,26 +3410,49 @@ def _copy_and_rename_ami_sync(
     timeout: int,
     progress_cb,
 ) -> str:
-    """Copy `source_ami_id` to a new AMI named `name`, wait for it to become
-    available, then deregister the source AMI + delete its snapshots. Returns
-    the new AMI id.
+    """Re-register `source_ami_id` as a new AMI named `name`, wait for it to become
+    available, then deregister the source AMI. Returns the new AMI id.
 
     ec2:ImportImage can't name the AMI it creates — it auto-generates
     ``import-ami-…`` — and an AMI's Name is immutable. To give a promoted AMI
-    the same ``{name}-{version}`` identity the Azure/GCP promotes produce, we
-    copy the freshly-imported AMI with the desired Name and drop the temporary
-    one. copy_image makes its own snapshot, so deleting the source's is safe.
+    the same ``{name}-{version}`` identity the Azure/GCP promotes produce, the
+    freshly-imported AMI is re-registered under the desired Name and the temporary
+    one dropped.
+
+    register_image, NOT copy_image, for two reasons:
+
+      * ImportImage emits ``DeleteOnTermination: false`` on the root device, and
+        neither import_image nor copy_image accepts a block-device override — this
+        re-register is the only point in the whole promote where that flag can be
+        corrected. Left alone it strands an untagged root volume on every terminate
+        of a promoted image, which is where this account's orphaned volumes came
+        from.
+      * copy_image duplicates the snapshot; register_image reuses the imported one,
+        so the rename is near-instant instead of a second full snapshot copy, and
+        stops paying to store the same bits twice.
+
+    The trade is that register_image sets only what it is given, so
+    ``_ami_register_kwargs`` has to carry the boot/capability attributes forward
+    explicitly. The new AMI SHARES the source's snapshot — hence the source is
+    deregistered with that snapshot held back rather than deleted.
     """
     import time
     if progress_cb:
-        progress_cb(f"Renaming imported AMI {source_ami_id} -> '{name}' via copy_image")
-    resp = ec2.copy_image(
-        Name=name,
-        Description=description or f"Promoted AMI (renamed from {source_ami_id})",
-        SourceImageId=source_ami_id,
-        SourceRegion=region,
-    )
-    new_ami_id = resp["ImageId"]
+        progress_cb(f"Renaming imported AMI {source_ami_id} -> '{name}' via register_image")
+
+    imgs = ec2.describe_images(ImageIds=[source_ami_id], Owners=["self"]).get("Images", [])
+    if not imgs:
+        raise AWSError(f"Imported AMI {source_ami_id} not found or not owned by this account.")
+    src = imgs[0]
+
+    bdms = _ami_bdms_for_register(src, pin_delete_on_termination=True)
+    shared_snapshot_ids = [m["Ebs"]["SnapshotId"] for m in bdms
+                           if "Ebs" in m and "SnapshotId" in m["Ebs"]]
+    new_ami_id = ec2.register_image(**_ami_register_kwargs(
+        src, name=name,
+        description=description or f"Promoted AMI (renamed from {source_ami_id})",
+        bdms=bdms,
+    ))["ImageId"]
     ec2.create_tags(
         Resources=[new_ami_id],
         Tags=[
@@ -3343,7 +3462,7 @@ def _copy_and_rename_ami_sync(
         ],
     )
     if progress_cb:
-        progress_cb(f"Copy started: {new_ami_id}; waiting for it to become available")
+        progress_cb(f"Registered {new_ami_id}; waiting for it to become available")
 
     started = time.time()
     while True:
@@ -3354,22 +3473,24 @@ def _copy_and_rename_ami_sync(
         if state in ("failed", "error", "invalid", "deregistered"):
             reason = (imgs[0].get("StateReason", {}) or {}).get("Message", "") if imgs else ""
             raise AWSError(
-                f"Copy of {source_ami_id} to '{name}' ended in state '{state}': {reason}"
+                f"Re-register of {source_ami_id} as '{name}' ended in state '{state}': {reason}"
             )
         if time.time() - started > timeout:
             raise AWSError(
-                f"Copy {new_ami_id} (rename of {source_ami_id}) timed out after {timeout}s "
-                f"(last state: {state or 'unknown'})"
+                f"Re-register {new_ami_id} (rename of {source_ami_id}) timed out after "
+                f"{timeout}s (last state: {state or 'unknown'})"
             )
         time.sleep(poll_interval)
 
     if progress_cb:
         progress_cb(f"Renamed AMI available: {new_ami_id}; removing temporary {source_ami_id}")
-    # Drop the temporary import-ami-… AMI + its now-orphaned snapshot(s). The
-    # rename already succeeded, so a leftover temp AMI is non-fatal — log via
+    # Drop the temporary import-ami-… AMI, but KEEP the snapshot: the AMI we just
+    # registered is backed by it. Deleting it would leave the promoted image
+    # unlaunchable — an error that surfaces only when someone tries to boot it.
+    # The rename already succeeded, so a leftover temp AMI is non-fatal — log via
     # the callback and keep the promote green rather than failing on cleanup.
     try:
-        _deregister_ami_sync(region, source_ami_id)
+        _deregister_ami_sync(region, source_ami_id, keep_snapshot_ids=shared_snapshot_ids)
     except Exception as e:
         if progress_cb:
             progress_cb(f"WARNING: could not clean up temporary AMI {source_ami_id}: {e}")

@@ -56,7 +56,11 @@ class Settings(BaseSettings):
     # Durable cost cache (services/cost_cache.py). Env/config.py only — deliberately not
     # on the Setup panel: they are throttle-safety knobs, not features, and a panel field
     # that isn't bound both ways is discarded on save without an error.
-    cost_cache_ttl_seconds: int = 21600           # 6 h — how old a good figure may get
+    # 24 h, not 6 h, because Cost Explorer bills ~$0.01 per request and the warmer is
+    # the account's single largest untaggable line item: at a 6 h TTL the warm loop alone
+    # ran ~$7.90/mo against a ~$21/mo bill. CE figures only settle a few times a day, so
+    # a shorter TTL buys freshness the upstream data does not actually have.
+    cost_cache_ttl_seconds: int = 86400           # 24 h — how old a good figure may get
     cost_refresh_min_interval_seconds: int = 300  # floor between two forced requeries
     cost_query_lease_seconds: int = 120           # single-flight claim expiry
     cost_query_gap_seconds: int = 2               # min spacing between queries to ONE cloud
