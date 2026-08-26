@@ -415,7 +415,11 @@ def test_the_verifiable_kinds_match_what_the_verifier_implements():
 
 def test_an_unverifiable_kind_refuses_rather_than_reporting_success():
     """'we did not check' and 'we checked and it was fine' must never be one answer on a
-    page an operator uses to decide a POV is ready."""
+    page an operator uses to decide a POV is ready.
+
+    Raised rather than returned as `(False, …)` on purpose: a refusal about the REQUEST
+    is not a check outcome, and recording it against the row would make an Entitle tenant
+    read as broken when nothing was ever checked."""
     import asyncio
     tenant = t.Tenant(id="x", kind="entitle", name="e", base_url="https://api.entitle.io/v1",
                       client_id="", secret="tok")
@@ -424,6 +428,31 @@ def test_an_unverifiable_kind_refuses_rather_than_reporting_success():
         raise AssertionError("an unverifiable kind reported success")
     except t.BTTenantError as exc:
         assert "cannot be verified" in str(exc)
+
+
+def test_a_failed_check_is_a_return_value_not_an_exception():
+    """The shape CodeQL kept flagging. "These credentials do not work" is the EXPECTED
+    outcome of a credential check; modelling it as an exception meant the endpoint caught
+    one and put its `str()` — transport text, local paths, a chained cause — into an HTTP
+    response body."""
+    import asyncio
+    # No client id or secret: a refusal the verifier can reach without any network.
+    tenant = t.Tenant(id="x", kind="pra", name="p", base_url="acme.beyondtrustcloud.com",
+                      client_id="", secret="")
+    ok, message = asyncio.run(bt_tenant_verify.verify(tenant))
+    assert ok is False
+    assert "API account" in message, "the remedy must survive the shape change"
+
+
+def test_the_verify_endpoint_builds_no_message_from_a_caught_exception():
+    """Static, and the counterpart to the branch check below. `verify` returns its
+    outcome, so there is no exception at that boundary to echo — this pins that nothing
+    reintroduces one."""
+    src = (pathlib.Path(_ROOT) / "web_dashboard" / "api" / "bt_tenants.py").read_text(
+        encoding="utf-8")
+    handler = src.split("async def verify_tenant", 1)[1].split("@router", 1)[0]
+    assert "str(exc)" not in handler, (
+        "verify_tenant builds a response message from a caught exception again")
 
 
 def test_a_transport_failure_never_carries_the_exception_text():
