@@ -1583,6 +1583,144 @@ def get_db() -> Session:
         db.close()
 
 
+class PovEnvironment(Base):
+    """A customer POV environment on a lab platform.
+
+    An OT demo cell can get away with using its child deploy job row as its record —
+    it is one VM. A POV is N VMs the dashboard did not individually create, it lives
+    for weeks, and later slices hang per-VM PAM artifacts off it, so it gets a real
+    table like CloudDatabase and K8sCluster do.
+
+    **There is deliberately no customer field.** A POV is identified by ``workgroup``
+    (which RBAC, the inventory filters and the expiry exempt list already key off),
+    ``created_by``, and an operator-chosen ``name`` slug. Adding a customer column
+    later should be treated as a schema regression: a free-text "customer" box is
+    where a company name eventually gets typed, and this database is not approved to
+    hold it. See docs/pov-instance.md.
+
+    Every platform call is keyed on ``platform_environment_id``, **never on name**, so
+    an SE may rename an environment on the platform to whatever their approvals allow
+    and nothing here notices.
+    """
+    __tablename__ = "pov_environments"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    platform = Column(String(32), nullable=False)          # lab_platforms.VALID_PLATFORMS
+    name = Column(String(255), nullable=False)             # operator-chosen slug
+    # The platform's own id. A string on purpose: Skytap returns ids numeric in some
+    # payloads and string in others, and 42 != "42" is a lookup that finds nothing.
+    platform_environment_id = Column(String(64), nullable=True, index=True)
+    template_id = Column(String(64), nullable=True)
+    template_name = Column(String(255), nullable=True)
+    region = Column(String(64), nullable=True)
+    project_id = Column(String(64), nullable=True)
+
+    # Dashboard-side lifecycle, distinct from the platform's runstate below.
+    #   provisioning -> active -> destroying -> destroyed   (or failed at any point)
+    status = Column(String(32), nullable=False, default="provisioning", index=True)
+    # The platform's view: running | suspended | stopped | halted | busy | ""
+    runstate = Column(String(32), nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # The provision job, so the UI can link to its Live Output.
+    provision_job_id = Column(String(36), nullable=True, index=True)
+    # A failed job surfaces only its error_message, so this carries the remedy too.
+    error_message = Column(Text, nullable=True)
+
+    # Slice 3+ fills these: the in-environment broker VM, its enrolled agent, the
+    # Gateway and Password Safe Resource Broker installed on it per POV.
+    broker_vm_id = Column(String(64), nullable=True)
+    broker_agent_id = Column(String(36), nullable=True)
+    gateway_name = Column(String(255), nullable=True)
+    ps_application_host_id = Column(Integer, nullable=True)
+
+    # Slice 4 replaces these with FKs into the BeyondTrust tenant registry. Named now
+    # so the provision path can carry them without a migration later.
+    pra_tenant_id = Column(String(36), nullable=True)
+    ps_tenant_id = Column(String(36), nullable=True)
+    entitle_tenant_id = Column(String(36), nullable=True)
+
+    # Slice 7: the customer-facing share link.
+    share_url = Column(Text, nullable=True)
+    share_id = Column(String(64), nullable=True)
+
+    # Slice 8: the auto-delete timer. NULL = never, exactly as elsewhere — so enabling
+    # expiry on an existing estate selects zero rows.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
+    # The warning LADDER's latch. `expiry_warned_at` alone is warn-once, so with five
+    # stages the first warning would burn it and the other four would never fire.
+    # Holds the tightest stage already warned, in minutes; NULL = none yet.
+    warned_stage_minutes = Column(Integer, nullable=True)
+
+    extra_data = Column(Text, nullable=True)   # JSON string, like Job.extra_data
+
+    @property
+    def metadata_dict(self) -> dict:
+        if not self.extra_data:
+            return {}
+        try:
+            return json.loads(self.extra_data)
+        except Exception:
+            return {}
+
+    @metadata_dict.setter
+    def metadata_dict(self, value: dict):
+        self.extra_data = json.dumps(value)
+
+
+class PovEnvironmentVM(Base):
+    """One VM inside a POV environment.
+
+    Written from the platform read at provision time, and refreshed on demand. The
+    PAM artifact columns are filled by the wire-up slice, each persisted the moment
+    the artifact exists so teardown is exact rather than re-derived — a re-derived id
+    is how you delete the wrong thing.
+    """
+    __tablename__ = "pov_environment_vms"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    environment_id = Column(String(36), index=True, nullable=False)
+    platform_vm_id = Column(String(64), nullable=False)
+    name = Column(String(255), nullable=True)
+    # "linux" | "windows" | "" — blank rather than a wrong guess, because a confident
+    # wrong answer sends a Windows VM down the Password-Safe-over-SSH path.
+    os_family = Column(String(16), nullable=True)
+    runstate = Column(String(32), nullable=True)
+    private_ip = Column(String(64), nullable=True)
+    published_services = Column(Text, nullable=True)   # JSON list
+
+    @property
+    def published_services_list(self) -> list:
+        if not self.published_services:
+            return []
+        try:
+            return json.loads(self.published_services)
+        except Exception:
+            return []
+
+    @published_services_list.setter
+    def published_services_list(self, value: list):
+        self.published_services = json.dumps(value or [])
+
+    # Slice 6 (PAM wire-up). One column per artifact, plus its terraform state.
+    pra_jump_id = Column(String(64), nullable=True)
+    pra_jump_tf_state = Column(Text, nullable=True)
+    vault_account_id = Column(String(64), nullable=True)
+    vault_tf_state = Column(Text, nullable=True)
+    ps_managed_system_id = Column(String(64), nullable=True)
+    ps_managed_account_id = Column(String(64), nullable=True)
+    ps_registration_tf_state = Column(Text, nullable=True)
+    entitle_integration_id = Column(String(64), nullable=True)
+    entitle_tf_state = Column(Text, nullable=True)
+    wiring_error = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 def init_db():
     """Initialize database — create all tables and run lightweight migrations.
 

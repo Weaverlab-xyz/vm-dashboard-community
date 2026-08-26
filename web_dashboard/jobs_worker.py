@@ -58,6 +58,7 @@ HANDLED_TYPES = (
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
+    "pov_env_provision", "pov_env_destroy", "pov_env_power",
     "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
@@ -138,6 +139,11 @@ MEDIUM_TYPES = (
     # Drives one queued gce_deploy child (cloud SDK + the same short PRA terraforms
     # a gce_deploy runs), then two more short terraforms for the Web Jump + tunnel.
     "ot_cell_deploy",
+    # Lab-platform API + a long poll today; from the wire-up slice these also run one
+    # short terraform per VM for the PRA jump and the Password Safe managed system --
+    # exactly ot_cell_deploy's shape. Tiered as MEDIUM now so the move does not need a
+    # tier change on a live deployment.
+    "pov_env_provision", "pov_env_destroy",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     # Polls a CLOUD runner, but its cloud="local" branch shells out to `docker run` and
     # reads the container's output line by line. MEDIUM is the tier that admits a local
@@ -159,6 +165,9 @@ LIGHT_TYPES = (
     "gateway_deploy", "gateway_teardown",              # pure cloud SDK (jumpoint_host_service)
     "epml_sync",                                       # HTTP download + storage upload
     "expiry_sweep",                                    # pure DB, sub-second
+    # A runstate PUT and a poll loop. No local process, no streamed output, and the
+    # waiting is almost all of it -- the definition of this tier.
+    "pov_env_power",
 )
 
 # At most ONE in flight per type, whatever the tier allows. These write DEPLOYMENT-global
@@ -375,6 +384,14 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "portainer_import":
             from .services import portainer_import_service
             await portainer_import_service.run_import(db, job_id=job_id, meta=meta)
+        elif job_type in ("pov_env_provision", "pov_env_destroy", "pov_env_power"):
+            from .services import pov_env_service
+            handler = {
+                "pov_env_provision": pov_env_service.run_env_provision,
+                "pov_env_destroy": pov_env_service.run_env_destroy,
+                "pov_env_power": pov_env_service.run_env_power,
+            }[job_type]
+            await handler(job_id, meta)
         elif job_type == "clouddb_provision":
             await cloud_database_service.run_provision_apply(
                 db, db_id=meta["db_id"], job_id=job_id,

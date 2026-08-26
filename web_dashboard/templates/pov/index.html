@@ -2,12 +2,16 @@
 {% block title %}POV Environments{% endblock %}
 
 {#
-  Read-only for now. This page lists what is already on the lab platform — including
-  environments the dashboard did not create, which is deliberate: an SE's existing
-  hand-built POVs are exactly what they want to see next to the managed ones.
+  Two inventories, deliberately kept apart:
 
-  Provisioning, PAM wire-up and expiry land in later slices. Nothing here can create,
-  change or delete anything.
+    "Your POV environments" — what THIS dashboard provisioned. It has actions.
+    "All environments on the platform" — a live read, including ones the dashboard
+      never created. Read-only, because it does not own them.
+
+  Collapsing the two would mean either offering a Destroy button for someone else's
+  hand-built environment, or hiding it. Neither is right.
+
+  PAM wire-up, share links and the expiry timer arrive in later slices.
 #}
 
 {% block content %}
@@ -18,21 +22,22 @@
       <h1 class="text-2xl font-semibold text-gray-900">POV Environments</h1>
       <p class="text-sm text-gray-500 mt-1">
         Customer proof-of-value environments on a lab platform.
-        <span class="text-gray-400">Read-only — provisioning arrives in a later release.</span>
       </p>
     </div>
-    <div x-show="platforms.length > 1">
-      <select x-model="platform" @change="load()"
+    <div class="flex items-center gap-2">
+      <select x-show="platforms.length > 1" x-model="platform" @change="load()"
               class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
         <template x-for="p in platforms" :key="p.name">
           <option :value="p.name" x-text="p.label"></option>
         </template>
       </select>
+      <button @click="showCreate = !showCreate" :disabled="notConfigured"
+              class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+        New POV
+      </button>
     </div>
   </div>
 
-  <!-- Not configured: say where to fix it, rather than showing an empty table that
-       looks like "you have no environments". -->
   <div x-show="!loading && notConfigured"
        class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
     <p class="text-sm text-amber-800 font-medium" x-text="(current.label || 'This platform') + ' is not configured yet.'"></p>
@@ -46,20 +51,130 @@
   <div x-show="error" class="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
     <p class="text-sm text-red-700" x-text="error"></p>
   </div>
+  <div x-show="notice" class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
+    <p class="text-sm text-blue-800" x-text="notice"></p>
+  </div>
+
+  <!-- Create -->
+  <div x-show="showCreate && !notConfigured" x-transition
+       class="border border-gray-200 rounded-lg p-4 space-y-4 bg-gray-50">
+    <h2 class="text-lg font-medium text-gray-900">New POV environment</h2>
+    <div class="grid grid-cols-2 gap-3">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Template</label>
+        <select x-model="form.template_id"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">Choose a template…</option>
+          <template x-for="t in templates" :key="t.id">
+            <option :value="t.id" x-text="t.name + (t.vm_count === null ? '' : ' (' + t.vm_count + ' VMs)')"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+        <input type="text" x-model="form.name" placeholder="poc-014"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <!-- The constraint is also the point: this is where a customer name would
+             otherwise get typed, and this database does not hold customer data. -->
+        <p class="text-xs text-gray-400 mt-1">
+          Lowercase letters, digits and hyphens. Use a reference, not a customer name.
+        </p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
+        <input type="text" x-model="form.workgroup" placeholder="optional"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+      </div>
+      <div x-show="current.idle_suspend">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Suspend when idle</label>
+        <select x-model.number="form.suspend_on_idle_seconds"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option :value="0">Never</option>
+          <option :value="1800">After 30 minutes</option>
+          <option :value="3600">After 1 hour</option>
+          <option :value="7200">After 2 hours</option>
+        </select>
+        <p class="text-xs text-gray-400 mt-1">The biggest lever on lab spend. Suspending is not destroying.</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="create()" :disabled="!form.template_id || !form.name || creating"
+              class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+        <span x-text="creating ? 'Creating…' : 'Create'"></span>
+      </button>
+      <button @click="showCreate = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900">Cancel</button>
+    </div>
+  </div>
 
   <div x-show="loading" class="text-sm text-gray-400">Loading…</div>
 
-  <!-- Environments -->
+  <!-- Managed -->
+  <div x-show="!loading" class="space-y-3">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-lg font-medium text-gray-900">Your POV environments</h2>
+      <span class="text-xs text-gray-400" x-text="managed.length + ' managed'"></span>
+    </div>
+    <div x-show="managed.length === 0" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
+      None yet. <span x-show="!notConfigured">Use <span class="font-medium">New POV</span> to create one from a template.</span>
+    </div>
+    <div x-show="managed.length" class="overflow-hidden border border-gray-200 rounded-lg">
+      <table class="min-w-full divide-y divide-gray-200 text-sm">
+        <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+          <tr>
+            <th class="px-4 py-2 text-left font-medium">Name</th>
+            <th class="px-4 py-2 text-left font-medium">Status</th>
+            <th class="px-4 py-2 text-left font-medium">Power</th>
+            <th class="px-4 py-2 text-left font-medium">Template</th>
+            <th class="px-4 py-2 text-left font-medium">Created by</th>
+            <th class="px-4 py-2 text-right font-medium">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100 bg-white">
+          <template x-for="e in managed" :key="e.id">
+            <tr>
+              <td class="px-4 py-2">
+                <span class="font-medium text-gray-900" x-text="e.name"></span>
+                <p x-show="e.error_message" class="text-xs text-red-600 mt-0.5" x-text="e.error_message"></p>
+              </td>
+              <td class="px-4 py-2">
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="{'bg-green-100 text-green-700': e.status === 'active',
+                               'bg-blue-100 text-blue-700': e.status === 'provisioning',
+                               'bg-red-100 text-red-700': e.status === 'failed',
+                               'bg-gray-100 text-gray-600': ['destroying','destroyed'].includes(e.status)}"
+                      x-text="e.status"></span>
+                <a x-show="e.provision_job_id" :href="'/jobs/' + e.provision_job_id"
+                   class="ml-2 text-xs text-blue-600 underline">job</a>
+              </td>
+              <td class="px-4 py-2 text-gray-600" x-text="e.runstate || '—'"></td>
+              <td class="px-4 py-2 text-gray-600" x-text="e.template_name || e.template_id || '—'"></td>
+              <td class="px-4 py-2 text-gray-600" x-text="e.created_by || '—'"></td>
+              <td class="px-4 py-2 text-right whitespace-nowrap">
+                <button x-show="e.runstate !== 'running'" @click="power(e, 'running')"
+                        :disabled="!actionable(e)"
+                        class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Start</button>
+                <button x-show="e.runstate === 'running'" @click="power(e, 'suspended')"
+                        :disabled="!actionable(e)"
+                        class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Suspend</button>
+                <button @click="destroy(e)" :disabled="!actionable(e)"
+                        class="text-xs px-2 py-1 rounded border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed">Destroy</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Live platform read -->
   <div x-show="!loading && !notConfigured" class="space-y-3">
     <div class="flex items-baseline justify-between">
-      <h2 class="text-lg font-medium text-gray-900">Environments</h2>
+      <h2 class="text-lg font-medium text-gray-900">All environments on the platform</h2>
       <span class="text-xs text-gray-400" x-text="environments.length + ' found'"></span>
     </div>
-
-    <div x-show="environments.length === 0" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
-      No environments on this platform yet.
-    </div>
-
+    <p class="text-xs text-gray-400">
+      Includes environments this dashboard did not create. Read-only — it does not own them.
+    </p>
     <div x-show="environments.length" class="overflow-hidden border border-gray-200 rounded-lg">
       <table class="min-w-full divide-y divide-gray-200 text-sm">
         <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
@@ -78,7 +193,7 @@
                 <span class="font-medium text-gray-900" x-text="env.name || env.id"></span>
                 <span x-show="env.rate_limited"
                       class="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800"
-                      title="Skytap is throttling this environment; operations will be slow">rate-limited</span>
+                      title="The platform is throttling this environment; operations will be slow">rate-limited</span>
               </td>
               <td class="px-4 py-2">
                 <span class="text-xs px-2 py-0.5 rounded-full"
@@ -87,46 +202,12 @@
                               : 'bg-gray-100 text-gray-600')"
                       x-text="env.runstate || 'unknown'"></span>
               </td>
-              <!-- Absent, never zero: a collection read may omit the vms array entirely,
-                   and "0 VMs" for an environment that has eight is worse than blank. -->
+              <!-- Absent, never zero: a collection read may omit the vms array, and
+                   "0 VMs" for an environment with eight is worse than blank. -->
               <td class="px-4 py-2 text-gray-600" x-text="env.vm_count === null ? '—' : env.vm_count"></td>
               <td class="px-4 py-2 text-gray-600" x-text="env.region || '—'"></td>
               <td class="px-4 py-2 text-gray-600"
                   x-text="env.suspend_on_idle ? (Math.round(env.suspend_on_idle / 60) + ' min') : '—'"></td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Templates -->
-  <div x-show="!loading && !notConfigured" class="space-y-3">
-    <div class="flex items-baseline justify-between">
-      <h2 class="text-lg font-medium text-gray-900">Templates</h2>
-      <span class="text-xs text-gray-400" x-text="templates.length + ' available'"></span>
-    </div>
-    <div x-show="templates.length === 0" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
-      No templates visible to this account.
-    </div>
-    <div x-show="templates.length" class="overflow-hidden border border-gray-200 rounded-lg">
-      <table class="min-w-full divide-y divide-gray-200 text-sm">
-        <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
-          <tr>
-            <th class="px-4 py-2 text-left font-medium">Name</th>
-            <th class="px-4 py-2 text-left font-medium">VMs</th>
-            <th class="px-4 py-2 text-left font-medium">Region</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100 bg-white">
-          <template x-for="t in templates" :key="t.id">
-            <tr>
-              <td class="px-4 py-2">
-                <span class="font-medium text-gray-900" x-text="t.name || t.id"></span>
-                <p x-show="t.description" class="text-xs text-gray-400 mt-0.5" x-text="t.description"></p>
-              </td>
-              <td class="px-4 py-2 text-gray-600" x-text="t.vm_count === null ? '—' : t.vm_count"></td>
-              <td class="px-4 py-2 text-gray-600" x-text="t.region || '—'"></td>
             </tr>
           </template>
         </tbody>
@@ -140,15 +221,27 @@
 function povPage() {
   return {
     loading: true,
+    creating: false,
+    showCreate: false,
     error: '',
+    notice: '',
     notConfigured: false,
     platform: '',
     platforms: [],
+    managed: [],
     environments: [],
     templates: [],
+    form: { template_id: '', name: '', workgroup: '', suspend_on_idle_seconds: 3600 },
+    _poll: null,
 
     get current() {
       return this.platforms.find(p => p.name === this.platform) || {};
+    },
+
+    // Mirrors pov_env_service.may_act_on: an unrecognised status is NOT actionable, so a
+    // state added server-side can only ever make the UI offer less.
+    actionable(e) {
+      return e.status === 'active' || e.status === 'failed';
     },
 
     async init() {
@@ -170,12 +263,8 @@ function povPage() {
       this.loading = true;
       this.error = '';
       this.notConfigured = !(this.current.configured);
-      this.environments = [];
-      this.templates = [];
-      if (this.notConfigured) { this.loading = false; return; }
-
-      // Both reads are independent: a template listing that fails should not blank the
-      // environments the operator can actually see.
+      this.managed = await this.fetchList('/api/pov/managed', 'environments', true);
+      if (this.notConfigured) { this.environments = []; this.templates = []; this.loading = false; return; }
       const [envs, tpls] = await Promise.all([
         this.fetchList('/api/pov/environments', 'environments'),
         this.fetchList('/api/pov/templates', 'templates'),
@@ -183,24 +272,95 @@ function povPage() {
       this.environments = envs;
       this.templates = tpls;
       this.loading = false;
+      this.schedulePoll();
     },
 
-    async fetchList(url, key) {
+    // Only poll while something is mid-flight. A POV lives for weeks; polling a settled
+    // list forever would be pure noise — and on a platform with an idle timer, traffic
+    // we would rather not generate.
+    schedulePoll() {
+      if (this._poll) { clearTimeout(this._poll); this._poll = null; }
+      const busy = this.managed.some(e => ['provisioning', 'destroying'].includes(e.status));
+      if (!busy) return;
+      this._poll = setTimeout(async () => {
+        this.managed = await this.fetchList('/api/pov/managed', 'environments', true);
+        this.schedulePoll();
+      }, 5000);
+    },
+
+    async fetchList(url, key, quiet) {
       try {
-        const res = await fetch(`${url}?platform=${encodeURIComponent(this.platform)}`);
-        if (res.status === 409) { this.notConfigured = true; return []; }
+        const q = url.includes('/managed') ? '' : `?platform=${encodeURIComponent(this.platform)}`;
+        const res = await fetch(url + q);
+        if (res.status === 409) { if (!quiet) this.notConfigured = true; return []; }
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
-          // Carry the platform's own words through: a rate-limit and a bad token are both
-          // "it didn't work" without them.
-          this.error = body.detail || `Could not load ${key} (${res.status}).`;
+          if (!quiet) this.error = body.detail || `Could not load ${key} (${res.status}).`;
           return [];
         }
         return (await res.json())[key] || [];
       } catch (e) {
-        this.error = `Could not load ${key}.`;
+        if (!quiet) this.error = `Could not load ${key}.`;
         return [];
       }
+    },
+
+    async post(url, body, method) {
+      const res = await fetch(url, {
+        method: method || 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // Carry the server's own words through — a 409 "already exists" and a 502
+        // "platform is rate-limited" are both "it didn't work" without them.
+        throw new Error(data.detail || `${res.status}`);
+      }
+      return data;
+    },
+
+    async create() {
+      this.creating = true;
+      this.error = '';
+      this.notice = '';
+      try {
+        const data = await this.post('/api/pov/managed', {
+          platform: this.platform,
+          template_id: this.form.template_id,
+          name: this.form.name,
+          workgroup: this.form.workgroup,
+          suspend_on_idle_seconds: this.form.suspend_on_idle_seconds,
+        });
+        this.notice = `Creating ${this.form.name}. Watch its job for progress.`;
+        this.showCreate = false;
+        this.form.template_id = '';
+        this.form.name = '';
+        await this.load();
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.creating = false;
+      }
+    },
+
+    async power(env, runstate) {
+      this.error = ''; this.notice = '';
+      try {
+        await this.post(`/api/pov/managed/${env.id}/power`, { runstate });
+        this.notice = `${env.name}: requested ${runstate}.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async destroy(env) {
+      if (!confirm(`Destroy ${env.name}? This deletes the environment and everything in it on the platform. It cannot be undone.`)) return;
+      this.error = ''; this.notice = '';
+      try {
+        await this.post(`/api/pov/managed/${env.id}`, null, 'DELETE');
+        this.notice = `${env.name}: destroying.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
     },
   };
 }

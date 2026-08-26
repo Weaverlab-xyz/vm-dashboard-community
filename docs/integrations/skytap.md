@@ -7,10 +7,10 @@ their VMs into that POV's PRA and Password Safe tenant.
 Available on a **POV instance only** — see [pov-instance.md](../pov-instance.md). On a demo
 instance the integration is masked off and Settings refuses to enable it.
 
-> **Read-only today.** This release lists templates and environments and reads one
-> environment's VMs. Nothing here creates, changes or deletes anything in Skytap. That is
-> deliberate: it proves auth, the retry behaviour and the idle-timer guarantee against a
-> real account before any code path can leave a resource behind.
+> **No PAM wiring yet.** The dashboard can create an environment from a template, power
+> it on and off, and destroy it. It does not yet install a Gateway or a Password Safe
+> Resource Broker inside the environment, or onboard its VMs — those arrive in later
+> releases, and their columns already exist on the row so they need no migration.
 
 ---
 
@@ -63,6 +63,37 @@ symptom would be the invoice, which is exactly why it is not left to the caller.
 
 **Collections paginate by count/offset.** A single GET returns a first page that looks
 exactly like a complete answer, so listings are walked to the end.
+
+## The lifecycle
+
+| Action | What happens |
+|---|---|
+| **Create** | Instantiate a template, set the idle timer, power on, wait for it to settle, read the VMs back |
+| **Start / Suspend** | A runstate change, then a poll until it settles |
+| **Destroy** | Delete the configuration, and everything Skytap keeps inside it |
+
+Three orderings are load-bearing, and each is wrong in a way that leaves a resource nobody
+can reclaim:
+
+**The platform id is persisted before anything else can fail.** An environment that exists
+in Skytap and not in this database is the one failure mode nothing can clean up
+automatically. So the create call is followed immediately by a commit, and every later step
+is written to be re-runnable around it.
+
+**A failure after creation keeps the id.** If the power-on fails, the row stays `failed`
+*with* its Skytap id and a message telling you to press Destroy. Failing without the id is
+how an orphan is made.
+
+**A failed destroy does not mark the row destroyed.** Marking it would hide an environment
+that is still running and still billing. The row stays visible, keeps its id, and Destroy
+can be re-run once the cause is cleared.
+
+Two smaller rules worth knowing:
+
+- **Destroy is allowed from `failed`,** not only from `active`. A POV that broke halfway
+  through provisioning is exactly the one that most needs reaping.
+- **An empty VM read never prunes.** A transient error returning zero VMs would otherwise
+  delete every VM row — later taking the PAM artifact columns with it — and record success.
 
 ## What is deliberately not used
 
