@@ -35,7 +35,7 @@ from ..config import settings
 from ..database import CloudFunction, Job
 from . import (cloud_function_package, config_service, job_service, region_catalog,
                terraform, terraform_provider_env)
-from .region_config import region_overrides, resolve_region
+from .region_config import resolve_region
 
 logger = logging.getLogger(__name__)
 
@@ -292,35 +292,38 @@ def _resolved_network(cloud: str, region: str, *, network_mode: str,
             f"unknown network_mode {network_mode!r} "
             f"(expected one of {', '.join(VALID_NETWORK_MODES)})")
 
-    # Two different questions, and the difference is the whole of region-correctness:
-    #   overrides — what the operator configured for THIS region, and nothing else.
-    #   regional  — that, or the flat key, i.e. "what applies here".
-    # A flat aws_functions_subnet_ids / gcp_functions_subnetwork is the SINGLE-REGION
-    # install's answer, so it must not outrank a per-region one: it would pin every
-    # function to the default region's network while the row, the job and the operator
-    # all say otherwise (AWS then dies at apply on InvalidSubnetID.NotFound). Explicit
-    # arguments still win over both — a caller naming ids means them.
+    # Region-correctness lives entirely in these `functions_*` fields, and the shape of
+    # the fix is worth stating because the obvious version is wrong. A flat
+    # aws_functions_subnet_ids / gcp_functions_subnetwork answers TWO questions at once:
+    # "which subnet do FUNCTIONS use" (purpose) and "in the default region" (place).
+    # Beating it with a per-region GENERIC subnet — the first attempt here — fixes place
+    # by discarding purpose, and only for non-default regions, since a region entry is
+    # empty for the default one. The result was a feature that picked a different-purpose
+    # subnet depending on whether the region happened to be the default.
+    #
+    # So the per-region field is purpose-specific too, and resolve_region falls it back
+    # to exactly the flat key it replaces. Every tier below is therefore symmetric: the
+    # default region resolves to the flat keys as it always did, and any other region
+    # resolves to its own value where one is set and the same flat key where it is not.
+    #
     # ValueError only: _spec rejects oci/local, which is expected. Anything else is a bug
     # and should not be swallowed into a wrong-region deploy.
     regional: dict = {}
-    overrides: dict = {}
     try:
         regional = resolve_region(cloud, region) or {}
-        overrides = region_overrides(cloud, region) or {}
     except ValueError:
         regional = {}
-        overrides = {}
 
     if cloud == "aws":
         # NB: the last resort is default_subnet_id, NOT db_subnet_group_name — that is
         # an RDS subnet-GROUP NAME, and handing it to Terraform as a subnet id passes
         # validation here and then dies at apply on InvalidSubnetID.NotFound.
         subnets = ([s for s in (subnet_ids or []) if s]
-                   or _csv(overrides.get("default_subnet_id", ""))
+                   or _csv(regional.get("functions_subnet_ids", ""))
                    or _csv(_cfg("aws_functions_subnet_ids"))
                    or _csv(regional.get("default_subnet_id", "")))
         groups = ([g for g in (security_group_ids or []) if g]
-                  or _csv(overrides.get("db_security_group_id", ""))
+                  or _csv(regional.get("functions_security_group_ids", ""))
                   or _csv(_cfg("aws_functions_security_group_ids"))
                   or _csv(regional.get("db_security_group_id", "")))
         if not subnets:
@@ -334,13 +337,12 @@ def _resolved_network(cloud: str, region: str, *, network_mode: str,
         return {"subnet_ids": subnets, "security_group_ids": groups}
 
     if cloud == "azure":
-        # No per-region equivalent to reach for: region_config's azure spec carries the
-        # DB/desktop/jumpoint subnets but no functions one, so there is nothing to
-        # override with. VNet integration requires a SAME-REGION subnet, so a
-        # multi-region Azure adapter needs a per-region functions_subnet_id field added
-        # to that spec first; until then the caller's region pre-flight is what keeps
-        # this honest.
-        chosen = (subnet_id or "").strip() or _cfg("azure_functions_subnet_id")
+        # VNet integration requires a SAME-REGION subnet delegated to
+        # Microsoft.Web/serverFarms — a different subnet from the database one, which is
+        # delegated to the DB service. Hence its own per-region field rather than reusing
+        # db_subnet_id.
+        chosen = ((subnet_id or "").strip() or regional.get("functions_subnet_id")
+                  or _cfg("azure_functions_subnet_id"))
         if not chosen:
             raise CloudFunctionError(
                 "network_mode=vpc needs a subnet on Azure — set azure_functions_subnet_id. "
@@ -355,15 +357,22 @@ def _resolved_network(cloud: str, region: str, *, network_mode: str,
     #
     # Deliberately a BARE subnet name, not a regional self-link: direct egress is
     # region-locked, and the sandbox gives every region an identically-named subnet,
-    # so one bare name resolves correctly wherever the function lands. Where a region
-    # DOES name its own subnet, that name wins over the flat keys — the convention is a
-    # convenience, not a guarantee, and a region configured by hand may not follow it.
-    net = ((vpc_network or "").strip() or overrides.get("network")
+    # so one bare name resolves correctly wherever the function lands. That convention
+    # is a convenience, not a guarantee — a region configured by hand need not follow it
+    # — so a region that names its own functions subnet wins, and the tier order below
+    # is otherwise exactly what it always was.
+    # The bare _cfg tiers are unreachable while resolve_region works — it already falls
+    # each functions_* field back to exactly that key — and are kept deliberately, as on
+    # AWS and Azure above, so the `except ValueError` branch (a cloud with no region
+    # dimension) still honours the purpose-specific setting instead of skipping to the
+    # runner's subnet.
+    net = ((vpc_network or "").strip() or regional.get("functions_network")
            or _cfg("gcp_functions_network") or _cfg("gcp_run_network")
            or regional.get("network") or _cfg("gcp_network"))
-    subnet = ((vpc_subnetwork or "").strip() or overrides.get("subnetwork")
+    subnet = ((vpc_subnetwork or "").strip() or regional.get("functions_subnetwork")
               or _cfg("gcp_functions_subnetwork") or _cfg("gcp_run_subnetwork")
-              or regional.get("subnetwork") or _cfg("gcp_jumpoint_subnetwork"))
+              or regional.get("jumpoint_subnetwork")
+              or _cfg("gcp_jumpoint_subnetwork"))
     if net or subnet:
         return {"vpc_network": net, "vpc_subnetwork": subnet}
 

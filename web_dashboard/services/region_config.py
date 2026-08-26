@@ -81,6 +81,11 @@ _SPECS: dict[str, _Spec] = {
             "gallery_name":           "azure_shared_image_gallery",
             "gallery_resource_group": "azure_gallery_resource_group",
             "default_vm_size":        "azure_desktops_vm_size",
+            # VNet integration requires a SAME-REGION subnet delegated to
+            # Microsoft.Web/serverFarms, and it is a different subnet from the database
+            # one (delegated to the DB service). Azure was the only cloud with no
+            # per-region functions subnet, so a second region had nothing to resolve.
+            "functions_subnet_id":    "azure_functions_subnet_id",
         },
         # Historical: a blank vnet RG inherits the resource group.
         secondary_fallbacks={"vnet_resource_group": "azure_resource_group"},
@@ -110,6 +115,13 @@ _SPECS: dict[str, _Spec] = {
             "ecs_cluster":                "bt_ecs_cluster",
             "jumpoint_subnet_id":         "bt_ecs_jumpoint_subnet_id",
             "jumpoint_security_group_id": "bt_ecs_jumpoint_security_group_id",
+            # A Lambda's ENIs are placed in a SUBNET, which is region-scoped, so the
+            # functions network ids are per-region like every other subnet here. Kept
+            # distinct from default_subnet_id/db_security_group_id because "where a
+            # function attaches" is a different question from "where a VM attaches" —
+            # collapsing them is what made the flat key outrank the regional one.
+            "functions_subnet_ids":         "aws_functions_subnet_ids",
+            "functions_security_group_ids": "aws_functions_security_group_ids",
         },
         # The Jumpoint host and the ECS runners share the sandbox's public subnet
         # unless split explicitly.
@@ -141,6 +153,11 @@ _SPECS: dict[str, _Spec] = {
             "k8s_pods_range":       "gcp_k8s_pods_range_name",
             "k8s_services_range":   "gcp_k8s_services_range_name",
             "k8s_node_tag":         "gcp_k8s_node_tag",
+            # Direct VPC egress is REGION-LOCKED, so the subnet a Cloud Run function
+            # attaches to is per-region like the rest. Still a bare name, not a
+            # self-link — see cloud_function_service._resolved_network.
+            "functions_network":    "gcp_functions_network",
+            "functions_subnetwork": "gcp_functions_subnetwork",
         },
         # Historical: jumpoint subnet inherits the VM subnet; DB network the network.
         secondary_fallbacks={
@@ -280,10 +297,14 @@ def region_overrides(cloud: str, region: Optional[str]) -> dict:
     per-region config at all. Never raises, so a caller can ask about ``oci``/``local``.
 
     The counterpart to :func:`resolve_region`, which answers "what applies here"
-    (overrides *plus* flat fallbacks). This one answers the narrower question a caller
-    needs when it has its own flat default to weigh: "did the operator configure this
-    field for THIS region?" — see ``cloud_function_service._resolved_network``, where a
-    flat key is the single-region install's answer and must not outrank a per-region one.
+    (overrides *plus* flat fallbacks) and is built on this. Split out so the
+    default-region rule has exactly one implementation, and available for the narrower
+    question — "did the operator configure this field for THIS region?" — though callers
+    weighing it against a flat default of their own should think twice: a
+    purpose-specific per-region FIELD is almost always the better answer than a generic
+    override, because a flat key encodes both a purpose and a place, and beating it with
+    a generic per-region value silently discards the purpose (and only for non-default
+    regions). ``cloud_function_service._resolved_network`` learned that the hard way.
     """
     from . import config_service
     from ..config import settings

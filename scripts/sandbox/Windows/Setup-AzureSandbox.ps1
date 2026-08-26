@@ -628,6 +628,7 @@ $cfg = @(
     "azure_region.${Location}.db_sqlserver_subnet_id=$DbSqlServerSubnetId",
     "azure_region.${Location}.db_sqlserver_private_dns_zone_id=$DbSqlServerDnsZoneId",
     "azure_region.${Location}.jumpoint_subnet_id=$JpSubnetId",
+    "azure_region.${Location}.functions_subnet_id=$FnSubnetId",
     '',
     '# Image-registry hub + automated cross-cloud promote:',
     "storage_azure_account=$SaName                          # Image hub + promote staging",

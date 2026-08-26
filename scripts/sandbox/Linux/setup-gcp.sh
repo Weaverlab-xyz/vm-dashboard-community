@@ -658,6 +658,8 @@ _cfg=(
   "gcp_region.$REGION.k8s_pods_range=gke-pods"
   "gcp_region.$REGION.k8s_services_range=gke-services"
   "gcp_region.$REGION.k8s_node_tag=$NETWORK_TAG_K8S"
+  "gcp_region.$REGION.functions_network=$VPC"
+  "gcp_region.$REGION.functions_subnetwork=$VM_SUBNET"
   ""
   "# BeyondTrust deploy key — set in /setup or /secrets:"
   "gcp_cloud_run_docker_deploy_key=…"
