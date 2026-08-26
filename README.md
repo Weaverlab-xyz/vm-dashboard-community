@@ -125,8 +125,9 @@ go deeper on each axis once you're up and running.
 
 ## What's optional (feature-flagged, off by default)
 
-Enable these in the **setup wizard → Step 5** or **Settings → Integrations**
-after first login — only if you have the backing infrastructure:
+Enable these on the **setup wizard's Feature Flags step** or in **Settings →
+Integrations** after first login — only if you have the backing infrastructure.
+The wizard turns a flag on; the per-integration fields live in Settings:
 
 - **VMware Workstation** — VM management (Windows host only; requires the
   Windows Compose override — see [docs/ONBOARDING.md](docs/ONBOARDING.md) Appendix A)

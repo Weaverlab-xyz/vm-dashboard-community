@@ -537,11 +537,15 @@ first visit because no credentials are stored yet.
 
 | Step | What to fill in |
 |------|-----------------|
-| **1 — Admin account** | Username and password you'll use to log in |
-| **2 — AWS** | Access Key ID, Secret Access Key, and default region from Part A |
-| **3 — Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft** to add Entra OAuth (see Appendix B) |
-| **4 — GCP** | Project ID, region/zone, and service account JSON key from Part C. Expand **Advanced** to set the SSH key secret name |
-| **5 — Feature flags** | Enable optional integrations — all default off (see Appendices A–F for on-prem hypervisors; Appendix J for MCP) |
+| **Admin account** | Username and password you'll use to log in |
+| **AWS** | Access Key ID, Secret Access Key, and default region from Part A |
+| **Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft** to add Entra OAuth (see Appendix B) |
+| **GCP** | Project ID, region/zone, and service account JSON key from Part C. Expand **Advanced** to set the SSH key secret name |
+| **OCI** | Tenancy/user OCID, key fingerprint, private key and region. Every field may be left blank to skip OCI |
+| **Feature flags** | Enable optional integrations — all default off (see Appendices A–F for on-prem hypervisors; Appendix J for MCP). Toggles only; the per-integration fields live in **Settings → Integrations** |
+
+Steps are listed by name rather than number on purpose: the wizard's step list is data, and
+citing an ordinal is how this table came to omit OCI and call Feature flags "step 5".
 
 Click **Complete setup**. Credentials are encrypted with AES-256 and
 stored in the application database — not in any file on disk.
