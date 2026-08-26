@@ -38,14 +38,24 @@ def _http_reason(exc: Exception) -> str:
 
     "connection failed" against a customer's appliance is the message an SE will read
     three times before checking DNS, so the common cases say which is which.
+
+    **The exception's own text is never interpolated**, only its type. A caught
+    exception's ``str()`` is not written for an operator: it can carry local paths, the
+    resolved address behind a hostname, or a chained cause from somewhere else entirely,
+    and all of it would land in an HTTP response body. The type name is the part that is
+    diagnostic; the rest belongs in the log, which is where ``verify_tenant`` puts it.
     """
     if isinstance(exc, httpx.ConnectTimeout):
         return "the host did not answer in time — check the hostname and any firewall"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "the host accepted the connection but did not answer — check the URL path"
     if isinstance(exc, httpx.ConnectError):
         return "the host could not be reached — check the hostname and DNS"
+    if isinstance(exc, httpx.InvalidURL):
+        return "that URL is not one this dashboard can dial — check it for typos"
     if isinstance(exc, httpx.HTTPError):
-        return f"the request failed: {exc}"
-    return str(exc)
+        return f"the request failed ({type(exc).__name__}) — see the dashboard log"
+    return f"the check failed unexpectedly ({type(exc).__name__}) — see the dashboard log"
 
 
 async def _verify_pra(tenant: Tenant) -> str:
@@ -67,6 +77,7 @@ async def _verify_pra(tenant: Tenant) -> str:
                 url, auth=(tenant.client_id, tenant.secret),
                 data={"grant_type": "client_credentials"})
     except Exception as exc:  # noqa: BLE001
+        logger.warning("PRA verify against %s failed", tenant.api_base, exc_info=True)
         raise BTTenantError(f"PRA at {tenant.api_base}: {_http_reason(exc)}") from exc
 
     if resp.status_code in (400, 401, 403):
@@ -137,6 +148,7 @@ async def _verify_password_safe(tenant: Tenant) -> str:
     except BTTenantError:
         raise
     except Exception as exc:  # noqa: BLE001
+        logger.warning("Password Safe verify against %s failed", base, exc_info=True)
         raise BTTenantError(f"Password Safe at {base}: {_http_reason(exc)}") from exc
 
     return f"Password Safe at {base} issued a token and signed in."
@@ -156,9 +168,11 @@ async def verify(tenant: Tenant) -> str:
     operator uses to decide a POV is ready.
     """
     if tenant.kind not in VERIFIABLE_KINDS:
+        # Plural, to dodge the a/an problem: the label is data, and "a Entitle tenant"
+        # is what picking an article for it in advance gets you.
         raise BTTenantError(
-            f"a {tenant.label} tenant cannot be verified: this dashboard has no read "
-            f"against it that would prove a credential without also doing something. "
+            f"{tenant.label} tenants cannot be verified: this dashboard has no read "
+            f"against one that would prove a credential without also doing something. "
             f"Its first real use is the check.")
     if not tenant.api_base:
         raise BTTenantError("this tenant has no URL to check")

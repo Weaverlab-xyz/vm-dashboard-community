@@ -59,8 +59,13 @@ LABELS = {
 # blob on a row that holds a credential, and "anything goes" is how a password ends up in
 # one by accident.
 OPTION_KEYS = {
-    # The Jump Group and Jumpoint a POV's jump items are created in. Per-tenant because
+    # The Jump Group and Gateway a POV's jump items are created in. Per-tenant because
     # they are names inside that appliance and mean nothing in another one.
+    #
+    # The KEY is still `jumpoint_name`, matching the `bt_jumpoint_name` setting it seeds
+    # from. BeyondTrust renamed Jumpoint to Gateway and this codebase's prose follows,
+    # but a persisted key is an identifier: renaming it reads a row nobody wrote, and the
+    # symptom is a blank setting rather than an error. See tests/test_gateway_terminology.
     "pra": ("jump_group_name", "jumpoint_name"),
     # The Password Safe run-as user. Required by the passwordsafe Terraform provider
     # block, so a tenant without it is configured-but-unusable and the UI says so.
@@ -81,6 +86,16 @@ OPTION_KEYS = {
 # says why, which is the same "degrade visibly" rule ``lab_platforms.CAPABILITIES``
 # follows. ``tests/test_bt_tenants.py`` pins this against what the verifier implements.
 VERIFIABLE_KINDS = ("pra", "password_safe")
+
+# What each option is CALLED, for the form. Without this the UI would render a field
+# name from the key itself, which is the one place the Jumpoint/Gateway asymmetry above
+# would leak back into prose — generated labels are still labels.
+OPTION_LABELS = {
+    "jump_group_name": "Jump Group name",
+    "jumpoint_name": "Gateway name",
+    "api_account_name": "Run-as user",
+    "machine_identity_email": "Machine identity email",
+}
 
 # Options whose absence makes a tenant unusable rather than merely incomplete. Reported
 # by `serialize` so the gap is visible on the row instead of surfacing inside a job.

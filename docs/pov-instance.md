@@ -155,7 +155,7 @@ Entitle credential per customer, and duplicated credentials rotate apart.
 | **OAuth client id** | PRA and Password Safe. Entitle authenticates with a bearer token and has no paired id |
 | **Client secret** | Encrypted with the same Fernet key as every other secret in this dashboard |
 | **…or a vault reference** | `aws_sm://`, `azure_kv://`, `gcp_sm://`, `bt_safe://` — for operators who want no credential in this database at all. One or the other, never both |
-| **Jump Group / Jumpoint** | PRA only. Names *inside that appliance*, which is why they belong on the tenant and not in global settings |
+| **Jump Group / Gateway** | PRA only. Names *inside that appliance*, which is why they belong on the tenant and not in global settings. The stored option key is still `jumpoint_name`, matching the `bt_jumpoint_name` setting it seeds from — see [why the key looks wrong](#why-the-gateway-option-key-looks-wrong) |
 | **Password Safe run-as user** | Required by the `passwordsafe` Terraform provider block |
 
 ### How a POV picks one
@@ -219,6 +219,18 @@ Refused while a live POV still references it. The database constraint is `SET NU
 deleting anyway would not error — it would blank that POV's tenant, and the next wire-up
 would resolve the *default* instead. **Disable** it if you want it out of the pickers
 without touching the POVs already wired into it.
+
+### Why the Gateway option key looks wrong
+
+BeyondTrust renamed this component to **Gateway**, and this dashboard's prose follows
+that everywhere. Identifiers deliberately do not: `bt_jumpoint_name` is a row in
+`app_config` and a line in operators' `.env` files, and `/api/config/v1/jumpoint` is the
+vendor's own Config API path. Renaming either reads a key that was never written, or
+calls a path that 404s — and the first failure is a blank setting rather than an error.
+
+So a tenant's option key is `jumpoint_name` while the field is labelled **Gateway name**.
+That asymmetry is the rule, not an oversight; `tests/test_gateway_terminology.py` pins
+both halves of it.
 
 ### About customer data
 

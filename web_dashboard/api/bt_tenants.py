@@ -91,6 +91,8 @@ async def list_tenants(kind: str = "", db: Session = Depends(get_db),
             {"kind": k,
              "label": bt_tenant_service.LABELS[k],
              "option_keys": list(bt_tenant_service.OPTION_KEYS.get(k, ())),
+             "option_labels": {key: bt_tenant_service.OPTION_LABELS.get(key, key)
+                               for key in bt_tenant_service.OPTION_KEYS.get(k, ())},
              "required_options": list(bt_tenant_service.REQUIRED_OPTIONS.get(k, ())),
              "verifiable": k in bt_tenant_service.VERIFIABLE_KINDS}
             for k in bt_tenant_service.VALID_KINDS
@@ -159,9 +161,17 @@ async def verify_tenant(tenant_id: str, db: Session = Depends(get_db),
         row = bt_tenant_service.record_result(db, tenant_id, error=str(exc))
         return {"ok": False, "detail": str(exc), "tenant": row}
     except Exception as exc:  # noqa: BLE001
+        # Deliberately does NOT echo the exception. A BTTenantError above is a refusal
+        # this codebase authored, with the remedy already in the text; anything reaching
+        # here is a bug, and a bug's `str()` is a message written for a developer reading
+        # a traceback — it can carry local paths, a resolved address, or a chained cause
+        # from somewhere unrelated. The traceback goes to the log, which is where a
+        # developer looks; the operator gets the type and a pointer to it.
         logger.warning("tenant %s: verify raised unexpectedly", tenant_id, exc_info=True)
-        row = bt_tenant_service.record_result(db, tenant_id, error=str(exc))
-        return {"ok": False, "detail": str(exc), "tenant": row}
+        detail = (f"the check failed unexpectedly ({type(exc).__name__}). This is a "
+                  f"dashboard fault rather than a tenant one — see the dashboard log.")
+        row = bt_tenant_service.record_result(db, tenant_id, error=detail)
+        return {"ok": False, "detail": detail, "tenant": row}
 
     return {"ok": True, "detail": message,
             "tenant": bt_tenant_service.record_result(db, tenant_id)}

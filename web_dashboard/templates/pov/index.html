@@ -366,7 +366,7 @@
           </div>
           <template x-for="key in optionKeysFor(tenantForm.kind)" :key="'opt-' + key">
             <div>
-              <label class="block text-xs font-medium text-gray-700 mb-1" x-text="key.replace(/_/g, ' ')"></label>
+              <label class="block text-xs font-medium text-gray-700 mb-1" x-text="optionLabel(tenantForm.kind, key)"></label>
               <input type="text" x-model="tenantForm.options[key]"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
             </div>
@@ -492,6 +492,15 @@ function povPage() {
 
     optionKeysFor(kind) {
       return (this.tenantKinds.find(k => k.kind === kind) || {}).option_keys || [];
+    },
+
+    // From the server, never derived from the key. `jumpoint_name` is a persisted
+    // identifier whose product name BeyondTrust changed to Gateway years ago, and a label
+    // built by de-underscoring the key is exactly how the retired term reappears in front
+    // of a user.
+    optionLabel(kind, key) {
+      const k = this.tenantKinds.find(x => x.kind === kind) || {};
+      return (k.option_labels || {})[key] || key.replace(/_/g, ' ');
     },
 
     // "never checked" is not "checked and fine". The three states stay distinct.

@@ -24,6 +24,7 @@ Runs under pytest, or standalone:
     python tests/test_bt_tenants.py
 """
 import os
+import pathlib
 import sys
 import uuid
 
@@ -423,6 +424,44 @@ def test_an_unverifiable_kind_refuses_rather_than_reporting_success():
         raise AssertionError("an unverifiable kind reported success")
     except t.BTTenantError as exc:
         assert "cannot be verified" in str(exc)
+
+
+def test_a_transport_failure_never_carries_the_exception_text():
+    """A caught exception's `str()` is written for a developer reading a traceback, not
+    for an HTTP response body: it can carry local paths, the resolved address behind a
+    hostname, or a chained cause from somewhere unrelated. CodeQL flagged exactly this
+    flow, and it was right to."""
+    import httpx
+
+    leaky = httpx.ConnectError(
+        "[Errno -2] Name or service not known while connecting to "
+        "/home/runner/work/secret-path — resolved 10.1.2.3")
+    reason = bt_tenant_verify._http_reason(leaky)
+    assert "secret-path" not in reason and "10.1.2.3" not in reason
+    assert "DNS" in reason, "the useful part of the diagnosis must survive"
+
+    # The fallback is the one that used to be a bare str(exc).
+    class Weird(Exception):
+        pass
+    fallback = bt_tenant_verify._http_reason(Weird("/var/lib/dashboard/token=abc123"))
+    assert "abc123" not in fallback
+    assert "Weird" in fallback, "the exception TYPE is the diagnostic part, and is safe"
+
+
+def test_the_verify_endpoint_does_not_echo_an_unexpected_exception():
+    """Static, deliberately. The property is about one branch of one handler, and the
+    alternative — standing up FastAPI to force an unexpected exception through it —
+    tests the mock more than the code. A BTTenantError above it is an authored refusal
+    and DOES carry its message; that is the distinction being pinned."""
+    src = (pathlib.Path(_ROOT) / "web_dashboard" / "api" / "bt_tenants.py").read_text(
+        encoding="utf-8")
+    marker = "except Exception as exc:"
+    assert marker in src, "the unexpected-exception branch moved"
+    # From that except to the end of the handler, which the next decorator starts.
+    branch = src.split(marker, 1)[1].split("@router", 1)[0]
+    assert "str(exc)" not in branch, (
+        "the unexpected-exception branch echoes the exception into the response")
+    assert "type(exc).__name__" in branch, "the type is what should reach the operator"
 
 
 # ── url normalisation ────────────────────────────────────────────────────────
