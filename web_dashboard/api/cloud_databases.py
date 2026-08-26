@@ -8,6 +8,7 @@ Database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
   GET    /api/databases/{id}/connection — connection info (the PRA jump is Phase 2)
   DELETE /api/databases/{id}            — decommission, or deregister if registered
   POST   /api/databases/{id}/ps-register — onboard into Password Safe (or remove that)
+  POST   /api/databases/{id}/adapter-pair — deploy the db_grant Entitle adapter beside it
 
 Provisioning is cloud-only because it needs a Terraform module; registering needs
 only somewhere to reach, so it also covers on-premises (``cloud='local'``).
@@ -28,10 +29,11 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import CloudDatabase, User, get_db
-from ..services import (aws_service, cache_service, cloud_database_service, config_service,
+from ..services import (aws_service, cache_service, cloud_database_service,
+                        cloud_db_adapter_service, cloud_function_service, config_service,
                         job_service, ps_api_service, ps_database_catalog, region_catalog)
 from ..services.aws_service import AWSError
-from ..services.region_config import resolve_region
+from ..services.region_config import deployable_regions, resolve_region
 from .auth import require_permission
 
 logger = logging.getLogger(__name__)
@@ -322,6 +324,26 @@ _DASHBOARD_PLATFORM_KEYS = (
 
 _PS_GENERIC_ERROR = ("Password Safe lookup failed — check the BeyondTrust "
                      "configuration and server logs.")
+
+
+def _require_function_write(user: User) -> None:
+    """Deploying the db_grant adapter is the ``cloud_function:write`` grant.
+
+    The pairing writes a ``cloud_functions`` row and runs a real Terraform apply — the
+    same thing ``POST /api/functions`` does, and that route requires this scope. Without
+    this check a holder of ``cloud_database:write`` alone would have a way around it.
+
+    Same shape and same reasoning as :func:`_require_secrets_use` below: admin and
+    unrestricted (NULL-permission) users pass.
+    """
+    if getattr(user, "is_effective_admin", False):
+        return
+    perms = user.effective_permissions_dict   # {} / NULL → unrestricted (legacy)
+    if perms and "write" not in perms.get("cloud_function", []):
+        raise HTTPException(
+            status_code=403,
+            detail="The 'cloud_function:write' permission is required — the adapter is "
+                   "a Cloud Function.")
 
 
 def _require_secrets_use(user: User) -> None:
@@ -827,3 +849,99 @@ async def register_database_in_password_safe(
     return {"ok": True,
             "status": "registering" if payload.action == "register" else "deregistering",
             "db_id": db_id, "action": payload.action, "job_id": job.id}
+
+
+@router.post("/{db_id}/adapter-pair", status_code=202)
+async def pair_database_with_adapter(
+    db_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
+):
+    """Deploy the ``db_grant`` Entitle Remote Adapter beside this database — a Cloud
+    Function in the database's OWN cloud and region, VPC-attached, holding the target in
+    its environment and the admin credential as a reference into the cloud's secret
+    store. Registers it in Entitle too when that integration is enabled.
+
+    This is what makes just-in-time database accounts possible on MySQL and SQL Server,
+    whose native Entitle connectors cannot mint one (persistent roles only, and
+    sysadmin/CONTROL SERVER respectively). Postgres keeps its native connector and is
+    refused here.
+
+    The supported way to get a db_grant function: it is named after the database and
+    reads its target from its own environment, so a hand-deploy from the Cloud Functions
+    form cannot be finished afterwards. Async — enqueues a ``clouddb_adapter_pair`` job;
+    open the job for status/error. Mirrors the ``ps-register`` endpoint above.
+
+    The adapter is deployed ARMED (``FN_DB_DRY_RUN=0``): an Entitle grant against it
+    creates and drops real accounts. That is the point of the button, and a silently
+    no-op adapter is the worse surprise.
+    """
+    _require_enabled()
+    _require_function_write(current_user)
+    # Two features, two flags. _require_enabled covers the Databases page; this endpoint
+    # also deploys a Cloud Function, and the functions router is gated separately.
+    if not config_service.get_bool("cloud_functions_enabled", settings.cloud_functions_enabled):
+        raise HTTPException(
+            status_code=409,
+            detail="Cloud Functions is disabled — the db_grant adapter is a Cloud "
+                   "Function (set cloud_functions_enabled)")
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"database {db_id} not found")
+    # Same gates the job checks, from the same functions, so a queued-then-failed job is
+    # never how an operator finds out the answer — and the message that hides the button
+    # is the message the API refuses with.
+    reason = cloud_db_adapter_service.adapter_ineligible_reason(row)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+    if row.status != "available":
+        raise HTTPException(
+            status_code=409,
+            detail=f"database is {row.status!r} — pairing an adapter needs a database "
+                   f"that has finished provisioning")
+    # Refuse rather than redeploy. cloud_function_service.deploy does not look the name
+    # up and every deploy starts from an empty Terraform directory, so a second pairing
+    # leaves a duplicate row wedged in 'deploying' and an "already exists" apply failure.
+    name = cloud_db_adapter_service.adapter_name(row)
+    existing = cloud_function_service.find_by_names(
+        db, [name], workload=cloud_db_adapter_service.ADAPTER_WORKLOAD).get(name)
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"this database already has the adapter function {name!r} "
+                   f"({existing.status}) — delete it on the Cloud Functions page before "
+                   f"deploying another")
+    # The adapter has to sit in the DATABASE's region: it reaches a private endpoint over
+    # the VPC/VNet, and subnets are regional. Without a per-region config set for that
+    # region, resolve_region falls every network field back to the flat keys and the
+    # function would come up on the DEFAULT region's network while the row, the job and
+    # the operator all say otherwise. Same restriction the deploy form's picker applies.
+    if region_catalog.normalize(row.cloud, row.region) not in deployable_regions(row.cloud):
+        raise HTTPException(
+            status_code=409,
+            detail=f"no per-region configuration for {row.region!r} on {row.cloud} — the "
+                   f"adapter must sit in the database's own region to reach it over the "
+                   f"VPC, and without one it would deploy onto the default region's "
+                   f"network. Add a config set for {row.region} under Settings → "
+                   f"Multi-region.")
+    # Both of these fail the pairing job within seconds of it starting, and the second
+    # one names the setting to fix. The same 503 shape POST /api/functions returns.
+    if not cloud_function_service.terraform_available():
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "terraform_unavailable",
+                    "message": "terraform is not installed in this image"})
+    try:
+        # Pure and I/O-free by contract — a probe for "is the package bucket set?",
+        # so the arguments are placeholders and the result is discarded.
+        cloud_function_service.package_location(row.cloud, "preflight", "0" * 64)
+    except cloud_function_service.CloudFunctionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        # Armed, not dry run: see the docstring.
+        result = cloud_db_adapter_service.start_pairing(
+            db, row=row, created_by=current_user.username, dry_run=False)
+    except cloud_db_adapter_service.AdapterPairingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "status": "pairing", "db_id": db_id,
+            "adapter_name": name, "job_id": result["job_id"]}

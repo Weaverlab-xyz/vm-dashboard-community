@@ -272,6 +272,36 @@ def _flat(cloud: str, fld: str) -> str:
     return val
 
 
+def region_overrides(cloud: str, region: Optional[str]) -> dict:
+    """The fields ``region`` sets FOR ITSELF on ``cloud`` — never a flat-key fallback.
+
+    ``{}`` when the region is the configured default (no region entry may shadow the
+    historical defaults), when it has no entry of its own, or when the cloud carries no
+    per-region config at all. Never raises, so a caller can ask about ``oci``/``local``.
+
+    The counterpart to :func:`resolve_region`, which answers "what applies here"
+    (overrides *plus* flat fallbacks). This one answers the narrower question a caller
+    needs when it has its own flat default to weigh: "did the operator configure this
+    field for THIS region?" — see ``cloud_function_service._resolved_network``, where a
+    flat key is the single-region install's answer and must not outrank a per-region one.
+    """
+    from . import config_service
+    from ..config import settings
+    try:
+        spec = _spec(cloud)
+    except ValueError:
+        return {}
+
+    nloc = _norm(cloud, region)
+    default_loc = _norm(cloud, config_service.get(spec.default_region_key)
+                        or getattr(settings, spec.default_region_key, ""))
+    if not nloc or nloc == default_loc:
+        return {}
+    entry = load_region_configs(cloud).get(nloc, {})
+    return {f: str(v).strip() for f, v in entry.items()
+            if f in spec.field_fallbacks and v is not None and str(v).strip()}
+
+
 def resolve_region(cloud: str, region: Optional[str]) -> dict:
     """Return the effective config set for ``region`` on ``cloud``.
 
@@ -284,19 +314,8 @@ def resolve_region(cloud: str, region: Optional[str]) -> dict:
     The returned dict always carries every field key (blank string when nothing
     resolves), so callers can index ``resolve_region(cloud, r)[field]`` directly.
     """
-    from . import config_service
-    from ..config import settings
     spec = _spec(cloud)
-
-    nloc = _norm(cloud, region)
-    default_loc = _norm(cloud, config_service.get(spec.default_region_key)
-                        or getattr(settings, spec.default_region_key, ""))
-
-    # The default region (or an unconfigured/blank lookup) maps straight to the flat
-    # keys — no region entry can shadow the historical defaults.
-    entry: dict = {}
-    if nloc and nloc != default_loc:
-        entry = load_region_configs(cloud).get(nloc, {})
+    entry = region_overrides(cloud, region)
 
     resolved: dict[str, str] = {}
     for fld in spec.field_fallbacks:

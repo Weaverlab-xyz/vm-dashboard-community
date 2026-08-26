@@ -39,7 +39,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import CloudDatabase, Job
-from . import config_service, job_service, terraform, terraform_provider_env
+from . import (cloud_db_adapter_service, config_service, job_service, terraform,
+               terraform_provider_env)
 from .region_config import resolve_region
 
 logger = logging.getLogger(__name__)
@@ -2775,7 +2776,36 @@ def list_databases(db: Session) -> list[dict]:
     rows = (db.query(CloudDatabase)
               .filter(CloudDatabase.status != "decommissioned")
               .order_by(CloudDatabase.created_at.desc()).all())
-    return [_serialize(r) for r in rows]
+    out = [_serialize(r) for r in rows]
+    _fill_adapter_state(db, rows, out)
+    return out
+
+
+def _fill_adapter_state(db: Session, rows: list, serialized: list[dict]) -> None:
+    """Stamp each row's existing db_grant adapter, if it has one, onto its projection.
+
+    ONE query for the whole page (the adapter name is derived from the database id, and
+    cloud_functions.name is indexed), which is why this is here rather than in the pure
+    per-row :func:`_serialize`. Non-fatal: the adapter badge is not worth 500ing the
+    Databases page over, and a blank adapter_fn_id merely re-offers a button the API
+    would then refuse with a 409 naming the function.
+    """
+    from . import cloud_function_service
+    pairs = [(r, s) for r, s in zip(rows, serialized) if s.get("adapter_viable")]
+    if not pairs:
+        return
+    try:
+        names = {r.id: cloud_db_adapter_service.adapter_name(r) for r, _ in pairs}
+        found = cloud_function_service.find_by_names(
+            db, names.values(), workload=cloud_db_adapter_service.ADAPTER_WORKLOAD)
+    except Exception as exc:                                   # pragma: no cover
+        logger.warning("clouddb: adapter lookup failed (non-fatal): %s", exc)
+        return
+    for row, payload in pairs:
+        fn = found.get(names[row.id])
+        if fn is not None:
+            payload["adapter_fn_id"] = fn.id
+            payload["adapter_status"] = fn.status or ""
 
 
 def backfill_provisioned_db_names(db: Session) -> int:
@@ -3083,6 +3113,15 @@ def _serialize(r: CloudDatabase) -> dict:
         "ps_managed_account_id": r.ps_managed_account_id or "",
         "ps_onboarded": bool(r.ps_managed_system_id),
         "ps_viable": _ps_ineligible_reason(r) is None,
+        # The db_grant Entitle adapter (a Cloud Function deployed beside the database).
+        # adapter_viable is the structural half of the row button's gate, from the same
+        # function the API rejects with; adapter_fn_id is DECLARED here and filled in by
+        # list_databases, because answering "does one already exist?" needs a Session and
+        # this projection is pure by contract (see connection_db_name). A key the row
+        # template reads must exist here either way.
+        "adapter_viable": cloud_db_adapter_service.adapter_ineligible_reason(r) is None,
+        "adapter_fn_id": "",
+        "adapter_status": "",
         "created_by": r.created_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         # Which remote agent brokers Config-Management runs against this database, or None

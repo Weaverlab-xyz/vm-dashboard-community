@@ -64,10 +64,17 @@ def test_the_warning_does_not_promise_a_later_job_will_fill_these_in():
 
 def test_the_warning_still_points_at_the_automatic_path():
     """Deleting the misleading clause must not delete the real alternative: the
-    operator who wants this done for them should skip the form, not fight it."""
+    operator who wants this done for them should skip the form, not fight it.
+
+    The path named is the Databases row action rather than the provision-time
+    checkbox: it is the one that works for a database that already exists, which is
+    the situation anyone reading this form is in.
+    """
     warning = _modal()
-    assert "Register in Entitle" in warning, (
+    assert "Function (DB grant)" in warning, (
         "the warning no longer names the automatic pairing path")
+    assert "Databases page" in warning, (
+        "the warning does not say WHERE that action is")
     assert "own adapter" in warning, (
         "the warning does not say the pairing deploys its OWN adapter — the reason "
         "it cannot finish one started here")
