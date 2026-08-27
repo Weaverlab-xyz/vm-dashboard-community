@@ -574,6 +574,57 @@ def test_a_functional_account_reports_its_account_name():
     assert out["platform_name"] == "Kubernetes Service Account Token"
 
 
+# ── creating a functional account twice ─────────────────────────────────────────
+
+_FA_CREATE = dict(platform_id=1008, account_name="EC2:dbadmin",
+                  display_name="clouddb-abc-ssm-fa", password="k:s:p")
+
+
+class RejectingPostClient(FakeClient):
+    """FakeClient that rejects the POST to ``FunctionalAccounts`` while leaving the GET
+    of the same collection readable — the duplicate case is a rejected create over a
+    collection the resolver can still list, which the shared per-path ``status`` map
+    (one code for every verb) cannot express."""
+
+    async def post(self, path, json=None, data=None, headers=None):
+        if path == "FunctionalAccounts":
+            self.calls.append(("POST", path))
+            self.posts.append((path, json))
+            return FakeResponse(400, {"error": "duplicate"})
+        return await super().post(path, json=json, data=data, headers=headers)
+
+
+def test_a_duplicate_functional_account_create_resolves_to_the_existing_one():
+    """The cloud-DB onboarding mints the functional account and THEN creates the
+    managed system, which has failed live more than once. The operator's remedy re-runs
+    the whole block, so this POST comes back a duplicate — and a raise there would make
+    the remedy permanently unusable, while a blind retry would leave a second
+    functional account per attempt. It resolves to the account already there instead,
+    matched on the create API's own uniqueness tuple."""
+    client = _install(RejectingPostClient(
+        flat={"FunctionalAccounts": [
+            {"FunctionalAccountID": 7, "PlatformID": 1008,
+             "AccountName": "EC2:dbadmin", "DisplayName": "some-other-database-fa"},
+            {"FunctionalAccountID": 109, "PlatformID": 1008,
+             "AccountName": "EC2:dbadmin", "DisplayName": "clouddb-abc-ssm-fa"}]}))
+    assert _run(ps.create_functional_account_on_platform(**_FA_CREATE)) == 109
+    # Same account name on the same platform is NOT enough — display_name is what
+    # carries per-database uniqueness, so id 7 must not win.
+    assert ("POST", "FunctionalAccounts") in client.calls
+
+
+def test_a_rejection_that_is_not_a_duplicate_still_raises():
+    # Fail loudly: nothing matching the tuple exists, so the 400 was about something
+    # else and swallowing it would hand the caller an id it never created.
+    _install(RejectingPostClient(flat={"FunctionalAccounts": []}))
+    try:
+        _run(ps.create_functional_account_on_platform(**_FA_CREATE))
+    except ps.PSApiError as exc:
+        assert "POST FunctionalAccounts failed (400)" in str(exc)
+    else:
+        raise AssertionError("a non-duplicate rejection must raise")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

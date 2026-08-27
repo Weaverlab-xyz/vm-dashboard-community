@@ -261,16 +261,16 @@ def test_gcpvm_register_rejects_non_three_part_address():
 # ── Cloud-DB onboarding shapes (dbssm = "{engine} SSM Custom Plugin"; pravault =
 # "PRA Vault Username Password") — password-managed (no SSH key, dss flag off). The
 # dbssm address is PER-ENGINE (5 fields mssql / 6 psql / 7 mysql), its assumeRole
-# segment must be ≥ 12 characters (the plugin Substring(0,12)'s it), and unlike every
-# other plugin shape its ip is the packed address AGAIN — the platform refuses a create
-# with no IPAddress at all, while the plugin parses every populated host field as the
-# packed address and crashes on a bare IP, so the identical string is the only value
-# both sides take. ────────────────────────────────────────────────────────────────
+# segment must be ≥ 12 characters (the plugin Substring(0,12)'s it), and it rides
+# DnsName ONLY: the ip is the same 127.0.0.1 placeholder every other plugin shape uses,
+# because Password Safe validates IPAddress as a literal IP (live "Bad IP value")
+# while refusing a create with none at all (live "The field 'IPAddress' is
+# required."). ────────────────────────────────────────────────────────────────────
 
 _DB_DNS = ("i-0eaa6a10886717ed;us-east-1;db.abc.us-east-1.rds.amazonaws.com;appdb;"
            "C:\\Utils\\public_ssm.pem;NoAssumeRole")
 _DBSSM = dict(name="clouddb-pg", host_name="db.abc.us-east-1.rds.amazonaws.com",
-              ip_address=_DB_DNS, port=5432, functional_account_id=42, platform_id=20,
+              ip_address="127.0.0.1", port=5432, functional_account_id=42, platform_id=20,
               entity_type_id=1, workgroup_id="55", managed_account_name="psafe_ab12cd34ef56",
               ssh_key_enforcement_mode=2, method="dbssm", dns_name=_DB_DNS,
               emit_private_key=False, dss_auto_management=False)
@@ -283,26 +283,26 @@ _PRAVAULT = dict(name="clouddb-pg-pravault", host_name="https://pra.example.com"
                  emit_private_key=False, dss_auto_management=False)
 
 
-def test_dbssm_system_block_uses_the_packed_address_for_both_host_fields():
+def test_dbssm_system_block_carries_the_packed_address_in_dns_name_only():
     hcl = ps._generate_managed_system_hcl(**_DBSSM)
     assert ps._line("dns_name", json.dumps(_DB_DNS)) in hcl
-    # The ip is the packed address AGAIN, not the 127.0.0.1 placeholder the other
-    # shapes use: the platform refuses a create with no IPAddress at all, and the
-    # plugins parse every populated host field as the packed address, so the identical
-    # string is the one value that satisfies both.
-    assert ps._line("ip_address", json.dumps(_DB_DNS)) in hcl
+    # The packed address goes in DnsName, which has no validation; the ip is the same
+    # 127.0.0.1 placeholder every other plugin shape uses, because Password Safe
+    # validates IPAddress as a literal IP.
+    assert ps._line("ip_address", '"127.0.0.1"') in hcl
     assert ps._line("platform_id", 20) in hcl
     assert ps._line("port", 5432) in hcl
     assert "remote_client_type" not in hcl
     assert "ssh_key_enforcement_mode" not in hcl
 
 
-def test_dbssm_registration_defaults_the_ip_to_the_packed_address():
-    """Live regression (2026-08-25): registering with NO ip at all — the previous
-    reading of the vendor guidance — is rejected by the platform with "The field
-    'IPAddress' is required.", after a 7-minute RDS apply and inside a branch the
-    caller then reported as a green job. An empty ip_address must therefore default
-    to the packed address, the value the plugin parses and the API accepts."""
+def test_dbssm_registration_defaults_the_ip_to_the_placeholder():
+    """Two live regressions, one field. Registering with NO ip is rejected with "The
+    field 'IPAddress' is required." (2026-08-25); registering with the packed address
+    as the ip — the fix for that one — is rejected with "Bad IP value: '<address>' in
+    'IPAddress' field" (2026-08-27), each time after a multi-minute RDS apply. Password
+    Safe validates IPAddress as a literal IP, so the packed address cannot live there
+    and an empty ip must default to the 127.0.0.1 placeholder."""
     import asyncio
     captured = {}
 
@@ -318,7 +318,8 @@ def test_dbssm_registration_defaults_the_ip_to_the_packed_address():
             workgroup_id="wg", method="dbssm", dns_name=_DB_DNS))
     finally:
         ps._apply_hcl_sync = real
-    assert ps._line("ip_address", json.dumps(_DB_DNS)) in captured["hcl"]
+    assert ps._line("ip_address", '"127.0.0.1"') in captured["hcl"]
+    assert ps._line("dns_name", json.dumps(_DB_DNS)) in captured["hcl"]
 
 
 def test_dbssm_account_is_password_managed_no_key_no_dss():
@@ -381,19 +382,20 @@ def test_dbssm_accepts_each_engines_layout():
         ps._validate_dbssm_dns_name(addr)          # must not raise
 
 
-def test_dbssm_register_refuses_a_bare_ip_host_candidate():
-    # The plugin tries EVERY populated host field as the packed address, so the
-    # 127.0.0.1 placeholder every other plugin shape uses crashes each action here;
-    # registration must refuse it before Terraform ever runs.
+def test_dbssm_register_refuses_an_ip_field_that_is_not_an_ip():
+    # Password Safe validates IPAddress as a literal IP and fails the whole apply with
+    # "Bad IP value: '<value>' in 'IPAddress' field" — after the database is already
+    # built. Caught here, before Terraform runs, and specifically for the packed
+    # address: that was the shape this field carried live on 2026-08-27.
     import asyncio
-    try:
-        asyncio.run(ps.register_managed_system(
-            name="pg", host_name="pg", functional_account_id=1, platform_id=20,
-            workgroup_id="wg", method="dbssm", dns_name=_DB_DNS,
-            ip_address="127.0.0.1"))
-        raise AssertionError("expected PSResourceError for ip_address=127.0.0.1")
-    except ps.PSResourceError as exc:
-        assert "127.0.0.1" in str(exc)
+    for bad_ip in (_DB_DNS, "db.abc.us-east-1.rds.amazonaws.com"):
+        try:
+            asyncio.run(ps.register_managed_system(
+                name="pg", host_name="pg", functional_account_id=1, platform_id=20,
+                workgroup_id="wg", method="dbssm", dns_name=_DB_DNS, ip_address=bad_ip))
+            raise AssertionError("expected PSResourceError for ip_address=%r" % bad_ip)
+        except ps.PSResourceError as exc:
+            assert "Bad IP value" in str(exc)
 
 
 def test_a_realistic_mysql_ssm_address_still_fits():

@@ -736,12 +736,12 @@ def test_aws_a_colon_in_fa_material_is_refused():
 
 def test_aws_registration_defers_the_ip_to_the_resource_service():
     # The register call picks no ip at all: register_managed_system owns the per-plugin
-    # fill -- the packed address itself for dbssm (its platform refuses a create with no
-    # IPAddress, "The field 'IPAddress' is required.", while its plugins crash parsing a
-    # bare one) and the 127.0.0.1 placeholder for dbazure/dbgcp, whose plugins skip
-    # non-parsing candidates. test_ps_resource pins the fills themselves; this pins that
-    # the caller leaves the choice there instead of re-encoding it per cloud -- the two
-    # copies of that rule are how the live "IPAddress is required" rejection happened.
+    # fill -- the 127.0.0.1 placeholder for every DB plugin, since Password Safe refuses
+    # a create with no IPAddress ("The field 'IPAddress' is required.") and equally
+    # refuses one that is not an IP ("Bad IP value"). test_ps_resource pins the fills
+    # themselves; this pins that the caller leaves the choice there instead of
+    # re-encoding it per cloud -- the two copies of that rule are how the live
+    # "IPAddress is required" rejection happened.
     _onboard()
     assert "ip_address" not in LAST_REGISTER, LAST_REGISTER
     _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL")

@@ -442,11 +442,13 @@ psql  (6):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole
 mysql (7):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole;sslTRUE|sslFALSE
 ```
 
-The managed system's **IP Address field carries the packed address again** — the same
-string as its DNS Name. Neither alternative survives both sides: the platform refuses a
-create with no IP at all (`The field 'IPAddress' is required.`), and these plugins try
-every populated host field as the packed address, so a bare IP — the `127.0.0.1`
-placeholder every other onboarding shape uses — always fails the parse.
+The packed address rides the **DNS Name field only**. The managed system's **IP
+Address field is the `127.0.0.1` placeholder** every other onboarding shape uses:
+Password Safe refuses a create with no IP at all (`The field 'IPAddress' is required.`)
+and equally refuses one that is not a literal IP (`Bad IP value: '<address>' in
+'IPAddress' field`) — both seen live, each after a full RDS apply — so a value that is
+both a packed address and an IP does not exist. Registration refuses a non-IP
+`ip_address` up front rather than spending a database to learn it again.
 
 ---
 
@@ -545,7 +547,9 @@ whose only trace was a `Password Safe onboarding skipped (non-fatal)` log line.)
 | Rotation fails, decrypt error, provisioning was clean | *Plugin Private Key* was blank → no key material on the jump host. Both clouds log this now; grep the job for `NOT staging plugin key material` |
 | AWS rotation fails to decrypt but Azure works | the two clouds use separate key pairs — check the AWS `clouddb_ps_ssm_*` fields, not the Azure ones |
 | `jump-host plugin prep failed` | the SSM key drop itself failed — a bad *Key Directory*, or the Gateway host is not reachable over SSM |
-| (AWS) `Index was outside the bounds of the array` in the plugin log | a packed field has too few segments for the plugin's fixed-position parse: an address with the wrong per-engine count (5 mssql / 6 psql / 7 mysql), a functional-account username without its `:`, a password without both `:`s, or a bare IP/hostname host candidate. Systems onboarded before the per-engine formats carry the old six-field address and a `127.0.0.1` IP — use the row's **Register in Password Safe** action to rebuild them |
+| (AWS) `Index was outside the bounds of the array` in the plugin log | a packed field has too few segments for the plugin's fixed-position parse: an address with the wrong per-engine count (5 mssql / 6 psql / 7 mysql), a functional-account username without its `:`, or a password without both `:`s. Systems onboarded before the per-engine formats carry the old six-field address — use the row's **Register in Password Safe** action to rebuild them |
+| `role "psafe_…" already exists` / `CREATE USER` fails on **Register in Password Safe** | a previous attempt created the managed database user before failing later. Onboarding is create-or-reset on every engine, so this is fixed — a build from before 2026-08-27 needs the user dropped by hand, or the newer image |
+| `Bad IP value: '<packed address>' in 'IPAddress' field` | a managed system registered by a build between 2026-08-25 and 2026-08-27, which put the packed address in the IP field. Re-register from the row's **Register in Password Safe** action |
 | (AWS) `Index and length must refer to a location within the string` | the address's assumeRole segment is under 12 characters — the pre-fix `local` default; re-register, or fix the address in BeyondInsight (`NoAssumeRole` or a full role ARN) |
 | (AWS) rotation fails and the functional account's name has no `:` (a bare `EC2`, or an IAM username) | a pre-fix `create`-mode account — the plugin parses `EC2:<dbAdmin>` / `IAM:<dbAdmin>` over a three-part password; delete it and re-register |
 | (AWS) `Caught exception when trying to Send Command` | the parse succeeded — the failure is AWS-side: credentials (EC2 mode on an off-EC2 broker, §1.4), instance id, region, or SSM permissions |

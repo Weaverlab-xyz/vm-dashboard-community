@@ -1301,8 +1301,8 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
         raise CloudDatabaseError(
             f"managed-user creation on the jump host failed "
             f"(status={result.get('status')}, rc={result.get('response_code')}): {detail}")
-    logger.info("clouddb: managed DB user %r created via SSM on %s db_id=%s",
-                managed_user, host_id, row.id)
+    logger.info("clouddb: managed DB user %r created (or reset to this run's password) "
+                "via SSM on %s db_id=%s", managed_user, host_id, row.id)
     return {"managed_user": managed_user, "managed_pw": managed_pw, "jump_host_id": host_id,
             "region": region, "db_name": db_name, "admin_username": admin_username,
             "client_image": image, "port": port}
@@ -1928,10 +1928,10 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     reg = await ps_resource_service.register_managed_system(
         name=f"{name}-db", host_name=row.private_host,
         # ip_address is deliberately NOT passed: register_managed_system owns the
-        # per-plugin fill. dbssm gets the packed address itself — its platform refuses
-        # a create with no ip ("The field 'IPAddress' is required.") while its plugins
-        # crash parsing a bare one — and the other clouds' plugins skip non-parsing
-        # host candidates, so they keep the 127.0.0.1 placeholder.
+        # per-plugin fill, which is the 127.0.0.1 placeholder for every DB plugin.
+        # Password Safe refuses a create with no ip ("The field 'IPAddress' is
+        # required.") and equally refuses one that is not an IP ("Bad IP value"), so
+        # the packed address rides DnsName alone.
         port=ctx["port"], functional_account_id=db_fa_id, platform_id=db_platform_id,
         workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
         method=db_method, dns_name=dns_name,

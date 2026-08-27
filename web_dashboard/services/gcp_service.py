@@ -4798,8 +4798,12 @@ def _create_cloudsql_user_sync(
     This is what replaces the AWS SSM / Azure Run Command jump-host hop for GCP.
 
     ``iam_service_account=True`` registers an IAM principal (no password); otherwise a
-    built-in user with ``password``. An existing user of the same name is treated as
-    success, so a retried job is a no-op. Synchronous; callers wrap in ``_to_thread``."""
+    built-in user with ``password``. An existing user of the same name is never a
+    failure, so a retried job converges rather than dying: an IAM principal is left
+    alone (it carries no credential), and a password user is UPDATED to ``password``.
+    Updating matters — the caller mints a fresh password per run and hands it to
+    Password Safe as the seed, so leaving the old one in place would seed a credential
+    that authenticates to nothing. Synchronous; callers wrap in ``_to_thread``."""
     s = _authed_session()
     url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{instance}/users"
     body: dict = {"name": name}
@@ -4811,7 +4815,20 @@ def _create_cloudsql_user_sync(
         body["password"] = password
     r = s.post(url, json=body)
     if r.status_code == 409 or (not r.ok and "already exists" in (r.text or "").lower()):
-        logger.info("gcp sql user %s already exists on %s -- leaving it", name, instance)
+        if iam_service_account or not password:
+            logger.info("gcp sql user %s already exists on %s -- leaving it", name, instance)
+            return
+        params = {"name": name}
+        if host:
+            params["host"] = host
+        u = s.put(url, params=params, json=body)
+        if not u.ok:
+            raise GCPError(f"user {name!r} already exists on {instance} and resetting its "
+                           f"password failed: HTTP {u.status_code} {(u.text or '')[:300]}")
+        _sql_wait_operation(s, project, (u.json() or {}).get("name"),
+                            timeout_s=timeout_s, what=f"update user {name!r} on {instance}")
+        logger.info("gcp sql user %s already exists on %s -- reset its password to this "
+                    "run's credential", name, instance)
         return
     if not r.ok:
         raise GCPError(f"create user {name!r} on {instance} failed: "
