@@ -71,6 +71,13 @@ RUN_META_KEYS = (
     "managed_become",
     # The NAME of the var an EPM-L installation token is bound to, never the token.
     "epml_token_var",
+    # A POV environment and one of its VMs, for a run whose login comes from the LAB
+    # PLATFORM rather than from this database — the Resource Broker install (slice 5b).
+    # Both are ids, so the rule this tuple exists to enforce is untouched: no resolved
+    # credential is ever written here. The bundle assembler reads the platform's stored
+    # credential at fetch time, which is why nothing has to be stored for it.
+    "pov_environment_id",
+    "pov_vm_id",
 )
 
 # The subset that crosses to the agent in the signed envelope. Scalars, enums and a network
@@ -101,6 +108,8 @@ _DEFAULTS = {
     "managed_account": None,
     "managed_become": None,
     "epml_token_var": "",
+    "pov_environment_id": "",
+    "pov_vm_id": "",
 }
 
 # Every RUN_META_KEYS entry that normalize() coerces with str(). Listed rather than derived
@@ -108,6 +117,7 @@ _DEFAULTS = {
 _STRING_KEYS = (
     "connection_id", "target_id", "target_label", "asset", "asset_backend",
     "login_user", "secret_become_source", "secret_ssh_key_source", "epml_token_var",
+    "pov_environment_id", "pov_vm_id",
 )
 
 # Default port per transport, used when a caller supplies none. WinRM over HTTP (5985) is
@@ -272,7 +282,14 @@ def check(meta: dict) -> str:
     if not meta["target_port"]:
         return f"transport {meta['transport']!r} needs an explicit target_port."
     if meta["run_kind"] == "vm" and not meta["connection_id"]:
-        return "A VM run must name the agent-bound connection its target was synced from."
+        # A POV run is the one VM run with no hypervisor connection behind it: its target
+        # came from the LAB PLATFORM's VM read, not from an agent-brokered sync, and its
+        # login comes from the platform too. So it names an environment and a VM instead —
+        # which is the same thing this clause is really asking for, namely that the
+        # address was resolved by the dashboard rather than supplied by a caller.
+        if not (meta["pov_environment_id"] and meta["pov_vm_id"]):
+            return ("A VM run must name the agent-bound connection its target was synced "
+                    "from, or the POV environment and VM it belongs to.")
     if meta["run_kind"] == "database" and not meta["target_id"]:
         return "A database run must name the database it targets."
     return ""

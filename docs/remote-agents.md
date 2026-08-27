@@ -498,7 +498,10 @@ overlay as the other runners.
 
 The dashboard-side driver for this today is the POV feature, which generates the whole
 policy for a broker VM it created; see
-[pov-instance.md](pov-instance.md#the-pov-gateway).
+[pov-instance.md](pov-instance.md#the-pov-gateway). The same feature uses `agent_ansible`
+to install a [Password Safe Resource Broker](pov-instance.md#the-resource-broker) on a
+Windows VM beside it — a `.exe` asset, which the Config-Management runner now installs with
+`win_package`.
 
 ### 4. Keep an eye on who is enrolled
 

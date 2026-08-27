@@ -73,7 +73,7 @@ async def upload_asset(
     req: UploadAssetRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Upload a playbook (.yml/.yaml), shell script (.sh), or package (.rpm/.deb) to storage."""
+    """Upload a playbook (.yml/.yaml), script (.sh/.ps1), or package (.rpm/.deb/.exe/.msi)."""
     import base64
     try:
         data = base64.b64decode(req.content_b64)
@@ -549,7 +549,7 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
     from ..services import agent_ansible_bundle, agent_ansible_meta
 
     if ansible_local_service.asset_type(payload.asset) not in (
-            "playbook", "script", "powershell", "rpm", "deb"):
+            "playbook", "script", "powershell", "rpm", "deb", "winpkg"):
         raise HTTPException(status_code=400, detail=f"Unsupported asset {payload.asset!r}.")
 
     # Refused here as well as on the agent so an operator who typed one gets a clean 400 now

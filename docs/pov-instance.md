@@ -337,6 +337,95 @@ customer's credential in this database after their POV is gone is the part that 
 
 ---
 
+---
+
+## The Resource Broker
+
+The Password Safe half, and the second Windows machine in a POV. **POV page → the Resource
+Broker column → edit.**
+
+A Password Safe Resource Broker gives the tenant reach into the POV's private network, the
+way [the Gateway](#the-pov-gateway) does for PRA. It is a **Windows** program — Server 2019
+or 2022 x64 — so it does not live on the broker VM, which is a Linux Docker host. A POV
+therefore has two special VMs: the Linux broker running the agent and the Gateway, and a
+Windows host running the Resource Broker.
+
+**The dashboard cannot download the installer.** The package is generated per Password Safe
+tenant and comes from that tenant, so there is no image to name and no URL to fetch. The
+customer stages it:
+
+1. Download the installer from the Password Safe tenant, along with its **installer key**.
+2. Upload it on **Config Management → assets**. It is a `.exe`.
+3. On the POV, name the Windows VM, pick the staged installer, and set the **resource
+   zone** and the installer key.
+4. Press **Install**.
+
+### Two parameters, not one
+
+This is the part that catches people. A silent install needs **`INSTALLKEY` and `ZONE`**,
+and without the zone the installer **prompts** — which in an unattended run is not an error
+but a process that sits there until the run's timeout kills it, with an install log that
+ends mid-dialog. So the dashboard refuses to queue a run with either missing, and says
+which.
+
+The key is a credential and the zone is not, so they travel differently: the key is stored
+encrypted and resolved when the agent fetches its sealed bundle, while the zone is a plain
+value on the POV. Neither reaches the command line of the runner process — `argv` is
+readable by every process on that host.
+
+`RESTART` is deliberately never set. During a silent install it restarts the machine
+automatically, which would drop the WinRM session mid-play and make Ansible report the
+failure of a step that had in fact succeeded — the worst kind of wrong answer, because
+retrying reinstalls a working broker.
+
+### There is no login field, on purpose
+
+The Windows credential comes from the **lab platform's own stored credentials** — Skytap
+records a login against each VM, and the dashboard reads it per run. So no Windows password
+for a customer's environment is stored here at all, and a template whose password changed
+is picked up on the next run with nothing to update.
+
+Skytap stores that as **free text** — whatever somebody typed in the box — so the dashboard
+parses it, and **refuses rather than guesses**. `administrator / Passw0rd`,
+`administrator:Passw0rd` and `username: … password: …` are understood; a sentence, a
+multi-line note, or two usable credentials on one VM are all refused, naming the VM. A bare
+space is not treated as a separator, because a password containing one would split in the
+wrong place.
+
+If a template's credential box cannot be parsed, fix the box — a wrong username comes back
+from WinRM as an authentication failure, which reads as a bad password and sends you to
+reset one that was fine.
+
+### What it grants, and why the scope is narrow
+
+Installing the broker runs a **playbook, as root, on a host in the customer's
+environment**. That is a much larger grant than the discovery sweep the broker already has,
+so it gets its own target list in the generated `policy.yaml` — scoped to the named
+Resource Broker host alone, or to the POV's Windows guests before one has been named, on
+5985/5986 and nothing else. The Linux broker's own address is deliberately not in it.
+
+A POV brokered before this release has no `agent_ansible` grant at all. Press **Broker** to
+rewrite its policy; the install refuses with that remedy rather than queueing a job the
+broker would decline.
+
+### How long it takes
+
+Longer than it looks. The bootstrapper is a bundle: it installs the VC++ 2010 and 2015-2019
+redistributables, .NET Framework 4.7.2 and the .NET Core hosting bundle before the broker
+itself. Minutes, and often a fresh download on a clean template.
+
+### Teardown
+
+Destroying a POV clears the stored installer key and forgets the broker id. It does **not**
+uninstall anything — the environment delete takes the VM with it, and an uninstall run would
+need the very WinRM session the teardown is about to make unreachable.
+
+The broker's registration in the Password Safe tenant is a customer-side object this
+dashboard never created, so the job log says it is still listed there rather than pretending
+to have reaped it.
+
+---
+
 ## What this stack deliberately does not mount
 
 Unlike the demo stack, neither service gets `/var/run/docker.sock` or the `runner_work`
@@ -381,6 +470,15 @@ press **Broker** — see [upgrading](#upgrading-a-pov-that-predates-this).
 **The Gateway registers online and every tunnel times out.** `privileged` is missing from
 the broker's `gateway:` block, so the container has no `NET_ADMIN`/`/dev/net/tun`. A
 re-broker rewrites the policy with it.
+
+**The Resource Broker install hangs and the job times out.** Almost always a missing
+`ZONE` — the installer prompts for it and nothing can answer. The dashboard refuses to
+queue without one, so this means the zone was set to something the installer did not
+accept; check the install log on the target.
+
+**"no stored credential this dashboard can use".** The lab platform's credential box for
+that VM is empty, or holds something the parser will not guess at. See
+[there is no login field](#there-is-no-login-field-on-purpose).
 
 **The Gateway check says `disconnected` but the container is running.** Look at the node
 count. A rebuilt broker VM adds a node and PRA keeps the dead one; the Gateway is a
