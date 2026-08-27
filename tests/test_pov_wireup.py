@@ -22,6 +22,9 @@ somewhere this dashboard can no longer reach:
   * **Entitle needs an agent this dashboard does not install**, so a tenant that names no
     agent token is refused with that reason rather than registered against the install's
     own tenant — and never at the cost of the halves that worked.
+  * **An Entitle state is scrubbed before it is stored.** Terraform records sensitive
+    attributes as plaintext and this one holds an SSH private key INSIDE its
+    `connection_json` blob — the agent-token mint is the one deliberate exception.
 
 Uses a real SQLite database and a fake terraform layer. No network, no FastAPI.
 
@@ -30,6 +33,7 @@ Runs under pytest, or standalone:
 """
 import asyncio
 import os
+import pathlib
 import sys
 import uuid
 
@@ -1059,6 +1063,54 @@ def test_the_entitle_context_reaches_both_the_env_and_the_hcl():
     assert ers._provider_endpoint(ctx) == "https://tenant.example"
     attrs = ers._common_attrs_hcl(True, ctx=ctx)
     assert "o" in attrs and "wf" in attrs and "a" in attrs
+
+
+def test_the_entitle_state_is_scrubbed_before_it_is_stored():
+    """Terraform records sensitive attributes as PLAINTEXT, and this state is stashed in
+    the database for the life of the POV. The SSH private key lives INSIDE the
+    `connection_json` blob, so redacting attribute names alone would reach nothing —
+    which is what CodeQL caught.
+    """
+    import json as _json
+    from web_dashboard.services import entitle_registration_service as ers
+    state = _json.dumps({"resources": [{"type": "entitle_integration", "instances": [
+        {"attributes": {
+            "name": "poc-web01",
+            "connection_json": _json.dumps({
+                "host": "10.9.0.10", "user": "ec2-user",
+                "key": "-----BEGIN OPENSSH PRIVATE KEY-----abc123"}),
+        }}]}]})
+    out = ers._scrub_state(state)
+    assert "BEGIN OPENSSH" not in out and "abc123" not in out
+    # Everything that is not a secret survives, because a destroy reads the resource ids
+    # out of this and an operator reads the rest.
+    assert "10.9.0.10" in out and "ec2-user" in out and "poc-web01" in out
+
+
+def test_the_scrubber_fails_closed():
+    """Dropping the state costs an automated teardown; keeping an unscrubbable one costs
+    a plaintext key at rest. The first is the better failure."""
+    from web_dashboard.services import entitle_registration_service as ers
+    assert ers._scrub_state("not json at all") is None
+    assert ers._scrub_state("") is None
+
+
+def test_an_unknown_connector_blob_is_left_alone_rather_than_mangled():
+    import json as _json
+    from web_dashboard.services import entitle_registration_service as ers
+    state = _json.dumps({"resources": [{"type": "entitle_integration", "instances": [
+        {"attributes": {"connection_json": "a plain string, not an object"}}]}]})
+    assert "a plain string, not an object" in ers._scrub_state(state)
+
+
+def test_the_agent_token_mint_is_deliberately_not_scrubbed():
+    """Entitle returns an agent token's value only at creation, and
+    `_agent_token_from_state` recovers it when the stored ref resolves empty. Redacting it
+    would turn a recoverable mint into a hard `400 Resource already exists`."""
+    src = (pathlib.Path(_ROOT) / "web_dashboard" / "services"
+           / "entitle_registration_service.py").read_text(encoding="utf-8")
+    mint = src.split("_agent_token_hcl(name)", 1)[1][:200]
+    assert "False" in mint, "the agent-token mint no longer opts out of scrubbing"
 
 
 # ── the job type ─────────────────────────────────────────────────────────────

@@ -486,7 +486,82 @@ def _run_tf(args: list, work_dir: str, env: dict, timeout: int = 120) -> subproc
     return _go()
 
 
-def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional[dict] = None) -> dict:
+_REDACTED = "**REDACTED-BY-DASHBOARD**"
+
+# Attribute names whose value is a secret, and the keys inside a `connection_json` blob
+# that are. The second list is what makes this different from the Password Safe and PRA
+# scrubbers: an Entitle integration keeps its credential INSIDE a JSON-encoded string
+# attribute, so redacting attribute names alone reaches nothing.
+#
+# `key` is the SSH private key ("the private key is `key`, NOT `privateKey`" — see
+# _generate_ssh_hcl); the rest are the database, REST and Kubernetes connectors' own
+# spellings. Redacting a name no connector uses costs nothing, so this list errs wide.
+_SECRET_ATTRS = ("password", "private_key", "passphrase", "token", "secret")
+_SECRET_JSON_KEYS = ("key", "privateKey", "private_key", "password", "token",
+                     "secret", "clientSecret", "apiKey")
+
+
+def _scrub_state(tf_state_json: Optional[str]) -> Optional[str]:
+    """Redact secret values from a Terraform state before it is stored.
+
+    Terraform records sensitive attributes in state as **plaintext**, and this module's
+    states are stashed in the database — `pov_environment_vms.entitle_tf_state`, a
+    cloud-database job row, an `app_config` key. So an SSH integration's state would
+    otherwise hold the private key it was created with, at rest, for the life of the POV.
+
+    Destroy is by **id** against a provider-only config (see :func:`_destroy_sync`), so
+    the values are not needed to tear the integration down — the same argument
+    ``ps_resource_service._scrub_state`` and ``terraform_pra_service._scrub_tf_state``
+    make.
+
+    Fails **closed**: on any parse error the state is dropped rather than stored with a
+    plaintext secret in it. That costs an automated teardown and leaves an integration to
+    remove by hand, which is the better of the two failures.
+
+    Deliberately NOT applied to the agent-token mint — see :func:`_agent_token_from_state`,
+    which depends on that one state staying intact.
+    """
+    if not tf_state_json:
+        return None
+    try:
+        state = json.loads(tf_state_json)
+        for res in state.get("resources") or []:
+            for inst in res.get("instances") or []:
+                attrs = inst.get("attributes") or {}
+                for name in _SECRET_ATTRS:
+                    if attrs.get(name):
+                        attrs[name] = _REDACTED
+                blob = attrs.get("connection_json")
+                if isinstance(blob, str) and blob.strip():
+                    attrs["connection_json"] = _scrub_connection_json(blob)
+        return json.dumps(state)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("entitle: failed to scrub Terraform state — dropping it; the "
+                     "integration may need removing by hand at teardown: %s", exc)
+        return None
+
+
+def _scrub_connection_json(blob: str) -> str:
+    """Redact the secret-bearing keys inside a ``connection_json`` string.
+
+    Returns the blob unchanged when it is not a JSON object — a connector this build does
+    not know about should not have its configuration mangled, and the outer scrub has
+    already redacted anything at attribute level.
+    """
+    try:
+        conn = json.loads(blob)
+    except (json.JSONDecodeError, TypeError):
+        return blob
+    if not isinstance(conn, dict):
+        return blob
+    for name in _SECRET_JSON_KEYS:
+        if conn.get(name):
+            conn[name] = _REDACTED
+    return json.dumps(conn)
+
+
+def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional[dict] = None,
+                    scrub: bool = True) -> dict:
     """Write HCL, init+apply, return ``{integration_id, outputs, tf_state_json}``.
 
     ``outputs`` is the full ``terraform output`` map (values unwrapped); ``integration_id``
@@ -515,6 +590,8 @@ def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional[dict] = None) -> dict
 
         state_path = Path(work_dir, "terraform.tfstate")
         tf_state_json = state_path.read_text() if state_path.exists() else None
+        if scrub:
+            tf_state_json = _scrub_state(tf_state_json)
         integration_id = str(outputs.get("integration_id") or "") or None
         return {"integration_id": integration_id, "outputs": outputs, "tf_state_json": tf_state_json}
 
@@ -884,7 +961,12 @@ async def mint_agent_token(name: str) -> dict:
         raise EntitleRegistrationError(
             "entitle_api_key (or entitle_api_token) is not configured — cannot mint an agent token")
     try:
-        res = await asyncio.to_thread(_apply_hcl_sync, _agent_token_hcl(name), {})
+        # `scrub=False` is load-bearing rather than an oversight: Entitle returns an agent
+        # token's value only at creation, and `_agent_token_from_state` recovers it from
+        # this state when the stored ref resolves empty. Redacting it here would turn a
+        # recoverable mint into a hard `400 Resource already exists` on the next attempt.
+        res = await asyncio.to_thread(_apply_hcl_sync, _agent_token_hcl(name), {},
+                                      None, False)
     except EntitleRegistrationError as exc:
         # Entitle rejects a duplicate agent-token NAME. We always apply into an empty
         # workdir, so this means the tenant already holds that name while we hold no
