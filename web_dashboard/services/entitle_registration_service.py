@@ -541,6 +541,15 @@ def _scrub_state(tf_state_json: Optional[str]) -> Optional[str]:
         return None
 
 
+def _chmod_600(path: Path) -> None:
+    """Best-effort owner-only permissions. A no-op on Windows, where the mode bits do not
+    mean what they do on POSIX and the failure to set them is not worth an exception."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # pragma: no cover - platform dependent
+        logger.debug("entitle: could not chmod %s", path)
+
+
 def _scrub_connection_json(blob: str) -> str:
     """Redact the secret-bearing keys inside a ``connection_json`` string.
 
@@ -601,16 +610,39 @@ def _destroy_sync(tf_state_json: str, ctx: Optional[dict] = None) -> None:
 
     A resource present in state but absent from configuration is destroyed by
     ``terraform destroy``, so only the provider block is needed here — no need to
-    reconstruct the full resource (and its now-rotated secrets) from state."""
+    reconstruct the full resource (and its now-rotated secrets) from state.
+
+    **The state is scrubbed again on the way in**, and that is not belt-and-braces. Two
+    real cases reach here with secrets intact: a row written before :func:`_scrub_state`
+    existed, and any caller handing over a state this module did not produce. Since the
+    destroy works from resource **ids**, redacting first means no credential is written to
+    disk at all — which is the whole of what the sink below could otherwise leak.
+    """
     try:
         json.loads(tf_state_json)
     except json.JSONDecodeError as e:
         raise EntitleRegistrationError(f"tf_state_json is not valid JSON: {e}") from e
 
+    safe_state = _scrub_state(tf_state_json)
+    if not safe_state:
+        # _scrub_state only returns None on a parse failure, which the check above has
+        # already ruled out — so this is unreachable in practice and refusing is still
+        # right: writing the unscrubbed original as a fallback is exactly the behaviour
+        # this function is avoiding.
+        raise EntitleRegistrationError(
+            "the stored Entitle state could not be prepared for destroy; remove the "
+            "integration in Entitle by hand.")
+
     env = _tf_env(None, ctx)
     with tempfile.TemporaryDirectory(prefix="entitle_tf_destroy_") as work_dir:
         Path(work_dir, "main.tf").write_text(_provider_header("", ctx))
-        Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
+        state_file = Path(work_dir, "terraform.tfstate")
+        state_file.write_text(safe_state)
+        # 0600 as well as the 0700 TemporaryDirectory around it. Terraform rewrites this
+        # file as it works and does not preserve the mode, so this is about the window
+        # before it does rather than a lasting guarantee — cheap, and the file is a
+        # state document on a host that may have other tenants.
+        _chmod_600(state_file)
         init = _run_tf(["init", "-upgrade=false"], work_dir, env, timeout=60)
         if init.returncode != 0:
             raise EntitleRegistrationError(

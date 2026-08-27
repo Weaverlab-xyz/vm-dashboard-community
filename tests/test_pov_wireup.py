@@ -1103,6 +1103,42 @@ def test_an_unknown_connector_blob_is_left_alone_rather_than_mangled():
     assert "a plain string, not an object" in ers._scrub_state(state)
 
 
+def test_the_destroy_path_scrubs_before_writing_the_state_to_disk():
+    """Two real cases reach a destroy with secrets intact: a row written before the
+    scrubber existed, and a state this module did not produce. The destroy works from
+    resource ids, so redacting first means no credential is written to disk at all."""
+    import json as _json
+    from web_dashboard.services import entitle_registration_service as ers
+
+    written = {}
+
+    class _FakePath:
+        def __init__(self, *parts):
+            self.name = parts[-1]
+
+        def write_text(self, text):
+            written[self.name] = text
+
+    original_path, original_run = ers.Path, ers._run_tf
+    ers.Path = _FakePath
+    ers._chmod_600 = lambda p: None
+
+    class _Done:
+        returncode = 0
+        stderr = stdout = ""
+    ers._run_tf = lambda *a, **k: _Done()
+    try:
+        ers._destroy_sync(_json.dumps({"resources": [{"type": "entitle_integration",
+            "instances": [{"attributes": {"connection_json": _json.dumps(
+                {"host": "10.9.0.10", "key": "-----BEGIN KEY-----leaky"})}}]}]}))
+    finally:
+        ers.Path, ers._run_tf = original_path, original_run
+
+    state = written["terraform.tfstate"]
+    assert "leaky" not in state and "BEGIN KEY" not in state
+    assert "10.9.0.10" in state, "the destroy still needs the resource to be identifiable"
+
+
 def test_the_agent_token_mint_is_deliberately_not_scrubbed():
     """Entitle returns an agent token's value only at creation, and
     `_agent_token_from_state` recovers it when the stored ref resolves empty. Redacting it
