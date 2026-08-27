@@ -53,12 +53,36 @@ def _cfg(key: str) -> str:
     return getattr(settings, key, "") or ""
 
 
-def _tf_env() -> dict:
+# A per-call override of the three PRA credentials, for callers that must not use the
+# install's singletons. Threaded through as an ordinary dict rather than a
+# `bt_tenant_service.Tenant` so this module keeps its property of importing nothing from
+# the POV feature — it is the oldest service here and the most widely called.
+#
+# The keys are the CONFIG names, not the TF_VAR names, so a caller building one reads the
+# same three words it would have set in Settings.
+TENANT_KEYS = ("bt_api_host", "bt_client_id", "bt_client_secret")
+
+
+def tenant_env(host: str, client_id: str, client_secret: str) -> dict:
+    """The override dict :func:`_tf_env` accepts. A convenience, and a single spelling."""
+    return {"bt_api_host": host, "bt_client_id": client_id,
+            "bt_client_secret": client_secret}
+
+
+def _tf_env(tenant: Optional[dict] = None) -> dict:
     """Build the environment for Terraform subprocess calls.
 
     BT credentials are passed as TF_VAR_* so the HCL template never contains
     secrets in plain text. TF_PLUGIN_CACHE_DIR points at the pre-cached
     provider directory baked into the Docker image.
+
+    ``tenant`` overrides those three credentials for one call. It exists for the POV
+    feature, where "which PRA appliance?" has as many answers as there are customers and
+    the singleton is the wrong one by default — see ``services/bt_tenant_service``. A
+    partial override is deliberately NOT merged with the singleton: a jump item created
+    against one customer's host with another's client id is the silent cross-tenant
+    mistake the whole registry exists to prevent, so all three must be present or none
+    are used.
     """
     env = dict(os.environ)
     env["TF_PLUGIN_CACHE_DIR"] = _PLUGIN_CACHE_DIR
@@ -67,13 +91,24 @@ def _tf_env() -> dict:
     env["TF_INPUT"] = "0"
     env["TF_CLI_ARGS"] = "-no-color"
 
+    override = {}
+    if tenant and all(str(tenant.get(k) or "").strip() for k in TENANT_KEYS):
+        override = {k: str(tenant[k]).strip() for k in TENANT_KEYS}
+    elif tenant:
+        # Loud, because the alternative is silently falling back to the singleton — which
+        # on a POV instance means creating a customer's jump item in the demo tenant.
+        raise TerraformPRAError(
+            "a PRA tenant override was supplied with only part of its credentials "
+            "(host, client id and client secret are all required). Refusing rather than "
+            "falling back to the configured appliance.")
+
     # Pass BT credentials as TF_VAR_* so they never appear in HCL files
     for cfg_key, tf_var in (
         ("bt_api_host",      "TF_VAR_bt_host"),
         ("bt_client_id",     "TF_VAR_bt_client_id"),
         ("bt_client_secret", "TF_VAR_bt_client_secret"),
     ):
-        val = _cfg(cfg_key)
+        val = override.get(cfg_key) if override else _cfg(cfg_key)
         if val:
             env[tf_var] = val
 
@@ -143,7 +178,8 @@ output "shell_jump_id" {{
 
 
 def _run_tf(args: list, work_dir: str, timeout: int = 120,
-            extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
+            extra_env: Optional[dict] = None,
+            tenant: Optional[dict] = None) -> subprocess.CompletedProcess:
     """Run one terraform subcommand in ``work_dir``.
 
     ``init`` is serialized on the shared plugin cache. Every caller here works in
@@ -157,7 +193,11 @@ def _run_tf(args: list, work_dir: str, timeout: int = 120,
     nine call sites so a new one cannot forget it; apply/destroy/output don't touch
     the cache and stay parallel. Imported lazily to keep this module's import graph
     flat."""
-    env = _tf_env()
+    # `tenant` goes through _tf_env rather than extra_env so EVERY subcommand sees the
+    # same credentials. `init` and `output` do not call the provider today, but a caller
+    # who has to remember which ones do is a caller who will eventually get it wrong — and
+    # here "wrong" means a destroy that authenticates against the wrong customer.
+    env = _tf_env(tenant)
     if extra_env:
         env.update(extra_env)
 
@@ -186,6 +226,7 @@ def _provision_sync(
     port: int,
     tag: str,
     client_secret: str = "",
+    tenant: Optional[dict] = None,
 ) -> dict:
     """Synchronous worker — run in asyncio.to_thread."""
     # A per-deploy PRA credential overrides the configured bt_client_secret for
@@ -198,21 +239,22 @@ def _provision_sync(
         )
 
         # terraform init (uses pre-cached provider — should be fast)
-        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60, tenant=tenant)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}"
             )
 
         # terraform apply
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120,
+                        extra_env=extra_env, tenant=tenant)
         if apply.returncode != 0:
             raise TerraformPRAError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}"
             )
 
         # Parse shell_jump_id from outputs
-        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        out = _run_tf(["output", "-json"], work_dir, timeout=30, tenant=tenant)
         shell_jump_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
             try:
@@ -235,7 +277,7 @@ def _provision_sync(
         }
 
 
-def _remove_sync(tf_state_json: str) -> None:
+def _remove_sync(tf_state_json: str, tenant: Optional[dict] = None) -> None:
     """Synchronous worker — run in asyncio.to_thread."""
     try:
         state = json.loads(tf_state_json)
@@ -302,6 +344,7 @@ async def provision_jump(
     port: int = 22,
     tag: str = "AWS",
     client_secret: str = "",
+    tenant: Optional[dict] = None,
 ) -> dict:
     """Provision a BeyondTrust PRA Shell Jump via Terraform.
 
@@ -314,16 +357,19 @@ async def provision_jump(
       tf_state_json  - full Terraform state JSON (store in job extra_data for destroy)
     """
     return await asyncio.to_thread(
-        _provision_sync, vm_name, hostname, jump_group_name, jumpoint_name, port, tag, client_secret
+        _provision_sync, vm_name, hostname, jump_group_name, jumpoint_name, port, tag,
+        client_secret, tenant
     )
 
 
-async def remove_jump(tf_state_json: str) -> None:
+async def remove_jump(tf_state_json: str, tenant: Optional[dict] = None) -> None:
     """Destroy a previously provisioned Shell Jump using the stored Terraform state.
 
     Pass the tf_state_json value returned by provision_jump (stored in job extra_data).
+    ``tenant`` must be the SAME one the jump was created against — a destroy pointed at
+    another appliance authenticates fine and deletes nothing, reporting success.
     """
-    await asyncio.to_thread(_remove_sync, tf_state_json)
+    await asyncio.to_thread(_remove_sync, tf_state_json, tenant)
 
 
 # ── Database protocol-tunnel jumps (managed-database feature) ─────────────────
@@ -603,18 +649,19 @@ provider "sra" {
 """
 
 
-def _destroy_state_only_sync(tf_state_json: str) -> None:
+def _destroy_state_only_sync(tf_state_json: str, tenant: Optional[dict] = None) -> None:
     """Destroy every resource in a stored state with a provider-only config."""
     with tempfile.TemporaryDirectory(prefix="pra_db_tf_destroy_") as work_dir:
         Path(work_dir, "main.tf").write_text(_PROVIDER_PREAMBLE_HCL)
         Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
-        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60, tenant=tenant)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}")
         # -refresh=false: the provider errors on refresh when an item already
         # 404s (e.g. deleted in the console), which would block teardown.
-        destroy = _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
+        destroy = _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir,
+                          timeout=120, tenant=tenant)
         if destroy.returncode != 0:
             raise TerraformPRAError(
                 f"terraform destroy failed: {destroy.stderr.strip() or destroy.stdout.strip()}")
@@ -1208,7 +1255,7 @@ output "rdp_jump_id" {{
 def _provision_rdp_jump_sync(
     name, hostname, jump_group_name, jumpoint_name, rdp_username, tag,
     admin_password="", vault_account_name="", vault_account_group_id=None,
-    client_secret="",
+    client_secret="", tenant=None,
 ) -> dict:
     want_vault = bool(vault_account_name and admin_password)
     _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
@@ -1219,7 +1266,7 @@ def _provision_rdp_jump_sync(
                               vault_account_name=vault_account_name if want_vault else "",
                               vault_account_group_id=vault_account_group_id)
         )
-        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60, tenant=tenant)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
@@ -1227,7 +1274,7 @@ def _provision_rdp_jump_sync(
         extra_env = dict(_cred_env)
         if want_vault:
             extra_env["TF_VAR_rdp_password"] = admin_password
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env or None)
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env or None, tenant=tenant)
         if apply.returncode != 0 and want_vault:
             # The vault account must not cost a seat its working jump item: retry
             # jump-only. The provider errors (rather than removing from state) on a
@@ -1240,21 +1287,21 @@ def _provision_rdp_jump_sync(
                 "account-management permission): %s", first_err)
             want_vault = False
             _run_tf(["state", "rm", "sra_vault_username_password_account.rdp_admin"],
-                    work_dir, timeout=30)
+                    work_dir, timeout=30, tenant=tenant)
             Path(work_dir, "main.tf").write_text(
                 _generate_rdp_hcl(name, hostname, jump_group_name, jumpoint_name,
                                   rdp_username, tag)
             )
             apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir,
-                            timeout=120, extra_env=_cred_env or None)
+                            timeout=120, extra_env=_cred_env or None, tenant=tenant)
         if apply.returncode != 0:
             # Total failure: leave nothing behind in PRA (config on disk is
             # jump-only at this point, so no extra env is needed).
-            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120, tenant=tenant)
             raise TerraformPRAError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
 
-        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        out = _run_tf(["output", "-json"], work_dir, timeout=30, tenant=tenant)
         rdp_jump_id: Optional[str] = None
         vault_account_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
@@ -1287,6 +1334,7 @@ async def provision_rdp_jump(
     vault_account_name: str = "",
     vault_account_group_id: Optional[int] = None,
     client_secret: str = "",
+    tenant: Optional[dict] = None,
 ) -> dict:
     """Provision a BeyondTrust PRA Remote RDP jump item for a VDI desktop seat.
 
@@ -1305,15 +1353,17 @@ async def provision_rdp_jump(
     return await asyncio.to_thread(
         _provision_rdp_jump_sync, name, hostname, jump_group_name, jumpoint_name,
         rdp_username, tag, admin_password, vault_account_name,
-        vault_account_group_id, client_secret,
+        vault_account_group_id, client_secret, tenant,
     )
 
 
-async def remove_rdp_jump(tf_state_json: str) -> None:
+async def remove_rdp_jump(tf_state_json: str, tenant: Optional[dict] = None) -> None:
     """Destroy a previously provisioned RDP jump (and its vault account, if any)
     using its stored state — state-driven, so it removes whatever sra resources
-    the state holds with a provider-only config."""
-    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+    the state holds with a provider-only config.
+
+    ``tenant`` must be the SAME one it was created against; see :func:`remove_jump`."""
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json, tenant)
 
 
 # ── Kubernetes protocol-tunnel jump (K8s management feature) ──────────────────

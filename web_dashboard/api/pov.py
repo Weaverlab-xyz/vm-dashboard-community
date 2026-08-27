@@ -12,6 +12,7 @@
   GET    /api/pov/managed/{id}/gateway  — what PRA says about it, live
   POST   /api/pov/managed/{id}/resource-broker
                                         — configure and install the Password Safe Resource Broker
+  POST   /api/pov/managed/{id}/wireup   — create a PRA jump item for every VM
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
@@ -39,7 +40,8 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, job_service, lab_platforms, pov_broker,
-                        pov_env_service, pov_gateway, pov_resource_broker)
+                        pov_env_service, pov_gateway, pov_resource_broker,
+                        pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -132,6 +134,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
     out.update(pov_resource_broker.describe(_db_of(env), env))
+    out.update(pov_wireup.describe(_db_of(env), env))
     if vms is not None:
         out["vms"] = [{
             "id": v.platform_vm_id,
@@ -140,6 +143,12 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
             "runstate": v.runstate or "",
             "private_ip": v.private_ip or "",
             "published_services": v.published_services_list,
+            # The wire-up's per-VM half. `pra_jump_tf_state` is deliberately NOT here:
+            # it is a terraform state document, it is large, and it is the thing a
+            # teardown needs rather than anything a browser does.
+            "pra_jump_id": v.pra_jump_id or "",
+            "vault_account_id": v.vault_account_id or "",
+            "wiring_error": v.wiring_error or "",
         } for v in vms]
     return out
 
@@ -581,6 +590,40 @@ async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job.id,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+@router.post("/managed/{env_id}/wireup", status_code=202)
+async def wireup(env_id: str, db: Session = Depends(get_db),
+                 current_user: User = Depends(get_current_user)):
+    """Create a PRA jump item for every VM in this POV.
+
+    Refused up front when the POV has no Gateway or no resolvable tenant, because neither
+    is something the second VM will do better at — and thirty identical failures in a job
+    log hide the one line that matters.
+
+    Re-runnable: a VM that already has a jump item is skipped rather than given a second
+    one, so this is also the remedy for a run that half-finished.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+
+    try:
+        pov_wireup.tenant_override(db, env)
+        pov_wireup.gateway_name(env)
+    except (pov_wireup.WireupError, pov_gateway.GatewayInstallError,
+            bt_tenant_service.BTTenantError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    job = job_service.create_job(
+        db, job_type="pov_env_wireup",
+        created_by=getattr(current_user, "username", None),
+        workgroup=env.workgroup,
+        metadata={"environment_id": env.id})
+    return {"job_id": job.id}
 
 
 @router.delete("/managed/{env_id}", status_code=202)
