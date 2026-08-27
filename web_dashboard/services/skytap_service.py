@@ -359,6 +359,116 @@ async def stored_credentials(env_id: str, vm_id: str) -> list[dict]:
     return out
 
 
+# ── the share link ───────────────────────────────────────────────────────────
+#
+# Skytap calls this a **publish set**: a URL an unauthenticated visitor opens to reach the
+# environment's desktops. It is the one part of a POV a customer touches directly, and the
+# one place where a mistake is visible to somebody outside the account.
+#
+# UNVERIFIED against a live Skytap account: the `vm_ref` below is built as
+# `{base_url}/vms/{vm_id}`, which is the absolute-reference form the publish_sets API
+# documents. If a live create returns 422 on `vms`, this is the field to look at first.
+
+# What a share-link visitor may do. `run_and_use` is the POV answer — a customer who can
+# see a desktop but not power it on has been handed a screenshot.
+SHARE_ACCESS = "run_and_use"
+
+
+def _vm_ref(vm_id: str) -> str:
+    """The absolute VM reference a publish set wants, rather than a bare id."""
+    return f"{credentials().base_url.rstrip('/')}/vms/{str(vm_id).strip()}"
+
+
+def _share(raw: dict) -> dict:
+    """Normalise a publish set to the ``{url, id}`` shape ``lab_platforms`` declared.
+
+    ``desktops_url`` is the customer-facing one. ``url`` is the API's own self-reference —
+    it is an api.skytap.com address that answers 401 to a browser, so handing it to a
+    customer looks exactly like a broken link. Prefer the first and never fall back to the
+    second.
+    """
+    url = str(raw.get("desktops_url") or "").strip()
+    return {
+        "url": url,
+        "id": str(raw.get("id") or "").strip(),
+        "expires_at": str(raw.get("expiration_date") or "").strip(),
+    }
+
+
+async def create_share(env_id: str, password: str = "",
+                       expires_at: str = "", *, name: str = "") -> dict:
+    """Publish the environment's desktops at one customer-facing URL.
+
+    Returns ``{url, id, expires_at}``. ``expires_at`` is an ISO-8601 string or blank.
+
+    Every VM in the environment is published, because the caller's unit is the POV and a
+    per-VM selection here would be a second, quieter place to get the scope wrong.
+
+    The password is **required** by this adapter even though Skytap's API treats it as
+    optional. An unauthenticated URL into a running lab holding Password Safe, PRA and
+    Entitle components is not a default anyone should reach by leaving a field blank — see
+    ``services/pov_share``, which generates one rather than asking.
+    """
+    env_id = str(env_id or "").strip()
+    if not env_id:
+        raise SkytapError("an environment id is required to create a share link")
+    if not str(password or "").strip():
+        raise SkytapError(
+            "a share link password is required; Skytap will happily publish an "
+            "unauthenticated URL and this adapter will not")
+
+    env = await get_environment(env_id)
+    vms = [v for v in (env.get("vms") or []) if v.get("id")]
+    if not vms:
+        raise SkytapError(
+            f"environment {env_id} has no VMs to publish; refresh it and try again")
+
+    body: dict = {
+        "name": (name or env.get("name") or f"POV {env_id}")[:255],
+        "publish_set_type": "single_url",
+        "password": str(password),
+        "vms": [{"vm_ref": _vm_ref(v["id"]), "access": SHARE_ACCESS} for v in vms],
+    }
+    if expires_at:
+        body["expiration_date"] = expires_at
+
+    raw = await _client().request("POST", f"/v2/configurations/{env_id}/publish_sets",
+                                  json=body)
+    if not isinstance(raw, dict) or not raw.get("id"):
+        raise SkytapError(
+            f"Skytap accepted the share for environment {env_id} but returned no publish "
+            f"set id; check the environment in Skytap for an orphaned sharing portal "
+            f"before retrying")
+    out = _share(raw)
+    if not out["url"]:
+        raise SkytapError(
+            f"Skytap created publish set {out['id']} for environment {env_id} but "
+            f"returned no desktops URL. The set exists and must be removed by hand.")
+    return out
+
+
+async def delete_share(env_id: str, share_id: str) -> None:
+    """Revoke a share link.
+
+    Idempotent for the same reason ``delete_environment`` is: a 404 means it is already
+    gone, and a revoke that fails on "it was already revoked" leaves a row whose stored
+    ``share_id`` can never be cleared.
+    """
+    env_id = str(env_id or "").strip()
+    share_id = str(share_id or "").strip()
+    if not env_id or not share_id:
+        raise SkytapError("an environment id and a share id are required to revoke a link")
+    try:
+        await _client().request(
+            "DELETE", f"/v2/configurations/{env_id}/publish_sets/{share_id}")
+    except SkytapError as exc:
+        if "(404)" in str(exc):
+            logger.info("Skytap: publish set %s on environment %s was already gone",
+                        share_id, env_id)
+            return
+        raise
+
+
 async def delete_environment(env_id: str) -> None:
     """Delete the environment and everything Skytap keeps inside it.
 

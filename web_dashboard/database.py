@@ -1743,9 +1743,15 @@ class PovEnvironment(Base):
                                ForeignKey("beyondtrust_tenants.id", ondelete="SET NULL"),
                                index=True, nullable=True)
 
-    # Slice 7: the customer-facing share link.
+    # Slice 7: the customer-facing share link. The platform's own publish set is the
+    # source of truth for whether the URL still works; these three record what THIS
+    # dashboard published, so it can revoke exactly that one later.
     share_url = Column(Text, nullable=True)
     share_id = Column(String(64), nullable=True)
+    # When the link dies. Stored rather than re-read from the platform because the POV
+    # list renders it per row, and a share link with no expiry is the failure this slice
+    # exists to prevent — see services/pov_share. NULL = no link published.
+    share_expires_at = Column(DateTime, nullable=True)
 
     # Slice 8: the auto-delete timer. NULL = never, exactly as elsewhere — so enabling
     # expiry on an existing estate selects zero rows.
@@ -1975,6 +1981,11 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN pra_vault_account_id VARCHAR(64)",
             "CREATE INDEX ix_k8s_clusters_ps_token_account_id "
             "ON k8s_clusters(ps_token_account_id)",
+            # POV slice 7: when the published share link expires. The first ALTER any
+            # pov_* table has needed — slices 1-6 all shipped their columns in the
+            # original create_all, so an install from before this one has the table but
+            # not this column. Backfills to NULL, which reads as "no link published".
+            "ALTER TABLE pov_environments ADD COLUMN share_expires_at TIMESTAMP",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.

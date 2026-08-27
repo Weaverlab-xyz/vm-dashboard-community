@@ -16,6 +16,10 @@
                                           Entitle integration per VM
   POST   /api/pov/managed/{id}/entitle-key
                                         — the SSH key Entitle's connector authenticates with
+  POST   /api/pov/managed/{id}/share    — publish a customer-facing link
+  DELETE /api/pov/managed/{id}/share    — revoke it
+  POST   /api/pov/managed/{id}/share/reveal
+                                        — show the link's password, once, audited
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
@@ -43,7 +47,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, job_service, lab_platforms, pov_broker,
-                        pov_env_service, pov_gateway, pov_resource_broker,
+                        pov_env_service, pov_gateway, pov_resource_broker, pov_share,
                         pov_wireup)
 from .auth import get_current_user
 
@@ -138,6 +142,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     out.update(pov_gateway.describe(_db_of(env), env))
     out.update(pov_resource_broker.describe(_db_of(env), env))
     out.update(pov_wireup.describe(_db_of(env), env))
+    out.update(pov_share.describe(_db_of(env), env))
     if vms is not None:
         out["vms"] = [{
             "id": v.platform_vm_id,
@@ -658,6 +663,109 @@ async def entitle_key(env_id: str, payload: EntitleKeyRequest,
         raise HTTPException(status_code=404, detail="No such POV environment")
     pov_wireup.set_entitle_key(env, payload.private_key)
     return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class ShareRequest(BaseModel):
+    """How long the customer-facing link should last.
+
+    ``days`` omitted means "decide for me" — the POV's own auto-delete date if it has one,
+    otherwise ``pov_share.DEFAULT_DAYS``. There is deliberately no "never" and no password
+    field: see ``services/pov_share`` for why both would be footguns rather than options.
+    """
+    days: int | None = None
+
+
+def _share_or_400(exc: pov_share.ShareError) -> HTTPException:
+    """A share refusal is about the REQUEST, so 400 rather than 502.
+
+    Kept apart from ``_platform_error`` on purpose: "this platform has no share links" and
+    "Skytap returned 500" are different problems with different fixes, and one status code
+    for both is how an SE spends an afternoon on the wrong one.
+    """
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/managed/{env_id}/share")
+async def share(env_id: str, payload: ShareRequest,
+                db: Session = Depends(get_db),
+                current_user: User = Depends(get_current_user)):
+    """Publish this POV at one customer-facing URL, password-protected and time-limited.
+
+    Synchronous rather than a job: it is a single platform call, the SE is looking at the
+    result, and the generated password is returned exactly once in this response. A job
+    would have to persist that password somewhere a job row could show it, which is the
+    opposite of what this slice is for.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    try:
+        result = await pov_share.create(db, env, days=payload.days)
+    except pov_share.ShareError as exc:
+        raise _share_or_400(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _platform_error(exc, "publishing the share link") from exc
+
+    job_service.log_audit(
+        db, getattr(current_user, "username", "") or "", "pov_share_created",
+        target_vm=env.name,
+        details={"environment_id": env.id, "share_id": result.get("share_id", ""),
+                 "expires_at": result.get("share_expires_at", "")})
+    return {"share": result,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+@router.delete("/managed/{env_id}/share")
+async def unshare(env_id: str, db: Session = Depends(get_db),
+                  current_user: User = Depends(get_current_user)):
+    """Revoke the link without touching the environment."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    share_id = env.share_id or ""
+    try:
+        await pov_share.revoke(db, env)
+    except pov_share.ShareError as exc:
+        raise _share_or_400(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _platform_error(exc, "revoking the share link") from exc
+
+    if share_id:
+        job_service.log_audit(
+            db, getattr(current_user, "username", "") or "", "pov_share_revoked",
+            target_vm=env.name,
+            details={"environment_id": env.id, "share_id": share_id})
+    return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+@router.post("/managed/{env_id}/share/reveal")
+async def reveal_share_password(env_id: str, db: Session = Depends(get_db),
+                                current_user: User = Depends(get_current_user)):
+    """Show the share link's password.
+
+    POST rather than GET, and audited, because this is the one endpoint in the router that
+    hands back a live credential. A GET would be logged in referrers and browser history
+    and prefetchable; an unaudited one would mean nobody could answer "who has this link's
+    password" after the fact, which is the first question asked when a POV URL turns up
+    somewhere it should not have.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    password = pov_share.reveal_password(env)
+    if not password:
+        raise HTTPException(
+            status_code=404,
+            detail="this POV has no stored share password — re-share it to get a new "
+                   "link and password")
+    job_service.log_audit(
+        db, getattr(current_user, "username", "") or "", "pov_share_password_revealed",
+        target_vm=env.name,
+        details={"environment_id": env.id, "share_id": env.share_id or ""})
+    return {"password": password}
 
 
 @router.delete("/managed/{env_id}", status_code=202)

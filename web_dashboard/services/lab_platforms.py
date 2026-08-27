@@ -55,7 +55,8 @@ WRITE_CONTRACT = (
     "create_environment",   # (template_id, name, **opts) -> env dict
     "set_runstate",         # (env_id, runstate) -> env dict
     "inject_bootstrap",     # (env_id, vm_id, payload) -> None
-    "create_share",         # (env_id, password, expires_at) -> {url, id}
+    "create_share",         # (env_id, password, expires_at) -> {url, id, expires_at}
+    "delete_share",         # (env_id, share_id) -> None
     "stored_credentials",   # (env_id, vm_id) -> [{text, notes}]
     "delete_environment",   # (env_id) -> None
 )
