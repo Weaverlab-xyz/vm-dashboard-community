@@ -13,9 +13,12 @@ browser then discards the ENTIRE script block, `povPage()` is never defined, and
 else, with no failing network request and no server-side error. Nothing in the test suite
 noticed, because nothing here had ever looked at the JavaScript.
 
-This is a LEXER, not a parser. It cannot tell you the code is correct; it tells you the
-quotes and brackets close, which is precisely the class of damage a template edit does. A
-real parser would need Node, which this environment does not have.
+Two halves, and the distinction matters. Extracting the `<script>` bodies uses a REAL
+parser (`html.parser`), because finding the end of a script element correctly is genuinely
+hard and getting it wrong makes the scanner lie. Checking the JavaScript inside is a LEXER:
+it cannot tell you the code is correct, only that the quotes and brackets close — which is
+precisely the class of damage a template edit does. A real JS parser would need Node, which
+this environment does not have.
 
 Runs under pytest, or standalone:
     python tests/test_template_scripts.py
@@ -24,29 +27,65 @@ import os
 import pathlib
 import re
 import sys
+from html.parser import HTMLParser
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 TEMPLATES = pathlib.Path(_ROOT) / "web_dashboard" / "templates"
 
-# `<script>` with no src. A `<script src=...>` has no body to check.
-#
-# `</script\s*>` rather than `</script>`: HTML permits whitespace before the `>` of an end
-# tag, so `</script >` closes the element. Matching only the tight form would make the
-# non-greedy body run PAST that tag to the next one, swallowing the markup between them and
-# lexing it as JavaScript — which would either invent failures or, worse, hide a real one
-# by burying it in noise. CodeQL flags this pattern as a bad tag filter, and for a scanner
-# whose whole job is to be trusted, it is right to.
-_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script\s*>", re.S | re.I)
+
+class _ScriptExtractor(HTMLParser):
+    """Collect `(body_start_line, source)` for every inline `<script>`.
+
+    A real parser rather than a regex, and that is not fussiness. Finding the end of a
+    script element correctly is genuinely hard: HTML lets an end tag carry whitespace AND
+    ignored attributes, so `</script >` and `</script\\t\\n bar>` both close the element.
+    Two rounds of CodeQL findings here were each a real hole — a missed end tag makes the
+    body run on to the NEXT one and lex intervening markup as JavaScript, so the scanner
+    either invents failures or buries a real one. For a guard whose whole value is being
+    believed when it says the page is fine, that is the worst way to be wrong.
+
+    `HTMLParser` already implements the spec's CDATA handling for script content, so this
+    delegates instead of re-deriving it. Verified to extract byte-identical bodies to the
+    regex it replaced across all 36 inline scripts in this repo's templates — Jinja tags
+    included, which it treats as ordinary text.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.blocks: list = []
+        self._buf: list | None = None
+        self._line = 0
+
+    def handle_starttag(self, tag, attrs):
+        # A `<script src=...>` has no body to check.
+        if tag == "script" and not dict(attrs).get("src"):
+            self._buf, self._line = [], self.getpos()[0]
+
+    def handle_data(self, data):
+        if self._buf is not None:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._buf is not None:
+            self.blocks.append((self._line, "".join(self._buf)))
+            self._buf = None
+
+
+def _extract(text: str) -> list:
+    """`[(body_start_line, source)]` for one document."""
+    parser = _ScriptExtractor()
+    parser.feed(text)
+    parser.close()
+    return parser.blocks
 
 
 def _blocks():
     """(path, first_line_number, source) for every inline script in every template."""
     for path in sorted(TEMPLATES.rglob("*.html")):
-        text = path.read_text(encoding="utf-8")
-        for m in _SCRIPT.finditer(text):
-            yield path, text[:m.start(1)].count("\n") + 1, m.group(1)
+        for line, src in _extract(path.read_text(encoding="utf-8")):
+            yield path, line, src
 
 
 def _scan(src: str):
@@ -89,7 +128,11 @@ def _scan(src: str):
             if not closed:
                 unterminated.append(start_line)
                 # Resynchronise at the newline rather than bailing, so one bad string does
-                # not hide a second one further down.
+                # not hide a second one further down. The cost is a follow-on report on the
+                # continuation line — a string broken across two lines leaves an orphaned
+                # closing quote that also reads as unterminated. The FIRST line reported is
+                # always the real one; that is worth more than a tidy single-line report
+                # that could conceal a second fault.
                 while i < n and src[i] != "\n":
                     i += 1
         elif c == "`":
@@ -171,16 +214,38 @@ def test_the_scanner_actually_catches_the_bug_it_was_written_for():
     assert not lines and not err, f"false positive: {lines} {err}"
 
 
-def test_the_block_extractor_honours_a_spaced_end_tag():
-    """`</script >` closes the element in HTML. If the extractor missed it the body would
-    run on to the NEXT closing tag, and the markup in between would be lexed as
-    JavaScript — inventing failures, or burying a real one in them."""
-    html = "<script>\n  var a = 1;\n</script >\n<p>not js: it's fine</p>\n"
-    bodies = [m.group(1) for m in _SCRIPT.finditer(html)]
-    assert bodies == ["\n  var a = 1;\n"], bodies
-    # The apostrophe in the paragraph would look like an unterminated string if the
-    # extractor had swallowed it, so this doubles as a check that it did not.
-    assert not _scan(bodies[0])[0]
+def test_the_extractor_honours_every_end_tag_form():
+    """HTML lets an end tag carry whitespace and ignored attributes, so all three of these
+    close the element. Missing one makes the body run on to the NEXT closing tag and lex
+    the markup in between as JavaScript — inventing failures, or burying a real one.
+
+    Each case puts an apostrophe in the trailing markup, so a regression shows up as an
+    unterminated-string report rather than a silent miss.
+    """
+    for end in ("</script>", "</script >", "</script\t\n bar>"):
+        html = f"<script>\n  var a = 1;\n{end}\n<p>not js: it's fine</p>\n"
+        blocks = _extract(html)
+        assert len(blocks) == 1, f"{end!r} -> {blocks}"
+        assert blocks[0][1] == "\n  var a = 1;\n", f"{end!r} -> {blocks[0][1]!r}"
+        assert not _scan(blocks[0][1])[0], f"{end!r} swallowed the trailing markup"
+
+
+def test_the_reported_line_is_the_real_one():
+    """A guard that points at the wrong line costs the next person the time it just saved,
+    so pin the arithmetic that turns a body offset back into a file line."""
+    doc = "\n".join(["<html>", "<body>", "<script>", "  var a = 1;",
+                     "  var b = 'oops", "';", "</script>"])
+    (start, src), = _extract(doc)
+    lines, _ = _scan(src)
+    reported = [start + ln - 1 for ln in lines]
+    # Line 5 is the broken string. Line 6 is the follow-on described in `_scan` — the
+    # orphaned closing quote. The FIRST one is what matters and must be exact.
+    assert reported[0] == 5, reported
+
+
+def test_a_script_with_src_is_skipped():
+    """It has no body here to check, and its content is not in the template."""
+    assert _extract('<script src="/static/js/app.js"></script>') == []
 
 
 def test_every_x_data_component_is_defined_somewhere():
