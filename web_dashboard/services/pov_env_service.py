@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
 from . import (job_service, lab_platforms, pov_broker, pov_gateway,
-               pov_resource_broker, pov_wireup)
+               pov_resource_broker, pov_share, pov_wireup)
 
 logger = logging.getLogger(__name__)
 
@@ -303,10 +303,12 @@ async def run_env_power(job_id: str, meta: dict) -> None:
 async def run_env_destroy(job_id: str, meta: dict) -> None:
     """Delete the environment from the platform and mark the row destroyed.
 
-    Reaps the POV's PRA jump items, then its Resource Broker state, then its Gateway,
-    then its broker agent, then the platform side. The jump items go first because they
-    are the only ones in a CUSTOMER'S appliance, and every later step removes something
-    they were resolved through. The property they all rely on is kept
+    Reaps the POV's share link, then its PRA jump items, then its Resource Broker state,
+    then its Gateway, then its broker agent, then the platform side. The share link goes
+    first because it is the only artifact somebody outside the account can be holding;
+    the jump items next because they are the only ones in a CUSTOMER'S appliance, and
+    every later step removes something they were resolved through. The property they all
+    rely on is kept
     here: **the platform delete is reached even when an earlier step fails**, because a
     half-torn-down POV that keeps billing is the worse outcome.
 
@@ -325,7 +327,14 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
 
         problems: list[str] = []
 
-        # The PRA jump items first, and they are the only teardown step that reaches a
+        # The share link first, ahead of everything. It is the only artifact a person
+        # OUTSIDE the account can be holding, so the window where it still works is the
+        # one worth making shortest — and unlike every step below it, revoking is
+        # instant and cannot fail in a way that matters (see pov_share.teardown, which
+        # never raises).
+        job_service.append_job_log(db, job_id, await pov_share.teardown(db, env))
+
+        # The PRA jump items next, and they are the only teardown step that reaches a
         # CUSTOMER'S appliance — so it runs while the tenant is still resolvable and
         # before anything else has been cleared out from under it.
         try:

@@ -18,8 +18,10 @@ instance the integration is masked off and Settings refuses to enable it.
 > onboard each VM into **Password Safe** through that Resource Broker, and register the
 > Linux guests in **Entitle**
 > ([wiring the VMs](../pov-instance.md#wiring-the-vms-into-pra-password-safe-and-entitle)).
-> The customer-facing share link and the auto-delete timer arrive in later releases; their
-> columns already exist on the row so they need no migration.
+> and publish a **customer-facing share link** for the whole environment
+> ([the share link](../pov-instance.md#the-customer-facing-share-link)) — Skytap calls it a
+> publish set, and the dashboard always gives it a generated password and an expiry.
+> The auto-delete timer arrives in a later release.
 
 ---
 

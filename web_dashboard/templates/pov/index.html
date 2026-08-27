@@ -182,6 +182,7 @@
             <th class="px-4 py-2 text-left font-medium">Wired</th>
             <th class="px-4 py-2 text-left font-medium">Resource Broker</th>
             <th class="px-4 py-2 text-left font-medium">Tenants</th>
+            <th class="px-4 py-2 text-left font-medium">Share</th>
             <th class="px-4 py-2 text-left font-medium">Template</th>
             <th class="px-4 py-2 text-left font-medium">Created by</th>
             <th class="px-4 py-2 text-right font-medium">Actions</th>
@@ -344,6 +345,40 @@
                     <button @click="editingTenants = ''" class="text-xs px-2 py-0.5 text-gray-500">Cancel</button>
                   </div>
                 </div>
+              </td>
+              <td class="px-4 py-2">
+                <!-- A platform with no share links says so rather than offering a button
+                     that 400s: lab_platforms.supports is asked here, not discovered by
+                     clicking. -->
+                <p x-show="!e.shareable" class="text-xs text-gray-300">not supported</p>
+                <template x-if="e.shareable">
+                  <div class="space-y-0.5">
+                    <!-- The URL is deliberately NOT a hyperlink. It is a customer-facing
+                         address and an accidental middle-click from this page is an SE
+                         opening a session as the customer; copying is the gesture that
+                         is always wanted. -->
+                    <p x-show="e.share_url && !e.share_expired"
+                       class="text-xs text-green-700 whitespace-nowrap">shared</p>
+                    <p x-show="e.share_expired" class="text-xs text-amber-700">expired</p>
+                    <p x-show="e.share_expires_at" class="text-[11px] text-gray-400 whitespace-nowrap"
+                       x-text="'until ' + (e.share_expires_at || '').slice(0, 10)"></p>
+                    <div x-show="e.share_url" class="flex gap-1">
+                      <button @click="copyShare(e)"
+                              class="text-xs text-blue-600 underline">copy</button>
+                      <button x-show="e.has_share_password" @click="revealShare(e)"
+                              class="text-xs text-blue-600 underline">password</button>
+                      <button @click="unshare(e)" :disabled="!actionable(e)"
+                              class="text-xs text-red-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">revoke</button>
+                    </div>
+                    <button @click="share(e)"
+                            :disabled="!actionable(e) || !e.platform_environment_id"
+                            :title="e.share_url
+                                    ? 'Publish a NEW link and password; the current one stops working'
+                                    : 'Publish a password-protected, time-limited link for the customer'"
+                            class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+                            x-text="e.share_url ? 're-share' : 'share'"></button>
+                  </div>
+                </template>
               </td>
               <td class="px-4 py-2 text-gray-600" x-text="e.template_name || e.template_id || '—'"></td>
               <td class="px-4 py-2 text-gray-600" x-text="e.created_by || '—'"></td>
@@ -958,6 +993,62 @@ function povPage() {
           : `${env.name}: Entitle SSH key cleared.`;
         await this.load();
       } catch (e) { this.error = e.message; }
+    },
+
+    async share(env) {
+      if (env.share_url &&
+          !confirm(`${env.name} already has a live link. Re-sharing publishes a NEW URL ` +
+                   `and password and stops the current one working. Continue?`)) return;
+      // Blank means "decide for me" — the POV's own auto-delete date if it has one,
+      // otherwise the server default. There is no "never", by design.
+      const answer = window.prompt(
+        'How many days should the link last? (blank = default)', '');
+      if (answer === null) return;
+      const days = answer.trim() ? Number(answer.trim()) : null;
+      if (days !== null && !Number.isInteger(days)) {
+        this.error = 'Days must be a whole number.';
+        return;
+      }
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/share`, { days });
+        // The password is returned exactly once, here. Shown rather than stored in the
+        // page state so it does not survive the next re-render — and it is re-readable
+        // from the reveal button afterwards, so nothing is lost by that.
+        this.notice = `${env.name}: shared until ` +
+                      `${(data.share.share_expires_at || '').slice(0, 10)}. ` +
+                      `Password: ${data.share.password}`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async unshare(env) {
+      if (!confirm(`Revoke the share link for ${env.name}? The customer's URL stops working immediately.`)) return;
+      this.error = ''; this.notice = '';
+      try {
+        await this.post(`/api/pov/managed/${env.id}/share`, null, 'DELETE');
+        this.notice = `${env.name}: share link revoked.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async revealShare(env) {
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/share/reveal`, null);
+        this.notice = `${env.name} share password: ${data.password}`;
+      } catch (e) { this.error = e.message; }
+    },
+
+    async copyShare(env) {
+      try {
+        await navigator.clipboard.writeText(env.share_url);
+        this.notice = `${env.name}: link copied.`;
+      } catch (e) {
+        // The clipboard API needs a secure context, and a dashboard reached over plain
+        // http has none. Showing the URL beats a silent no-op.
+        this.notice = `${env.name}: ${env.share_url}`;
+      }
     },
 
     async wireup(env) {
