@@ -40,7 +40,18 @@ _EXT_TYPE: dict[str, str] = {
     ".yml": "playbook", ".yaml": "playbook",
     ".sh": "script", ".ps1": "powershell",
     ".rpm": "rpm", ".deb": "deb",
+    # Windows installers. Anything NOT in this map falls through to "playbook" and is
+    # handed to ansible as YAML, which fails with "did not contain a list of plays" — a
+    # message that reads as a broken playbook rather than as a file that never was one.
+    # A `.exe` that lands here rather than in that hole is the whole point of these two.
+    ".exe": "winpkg", ".msi": "winpkg",
 }
+
+# Arguments the generated Windows-installer play passes through. The play itself names no
+# argument: it renders whatever the caller put in `installer_arguments`, which is play
+# DATA rather than connection configuration and so is allowed where an `ansible_*` var is
+# not. Kept as a named var so the wrapper is the same shape for every installer.
+WINPKG_ARGS_VAR = "installer_arguments"
 
 
 def _cfg(key: str) -> str:
@@ -95,6 +106,29 @@ def generate_playbook_yaml(asset_name: str) -> str:
     - name: Run {base}
       ansible.windows.win_script:
         cmd: {container_path}
+"""
+
+    if atype == "winpkg":
+        # `win_package` rather than win_command: it handles the exit codes an MSI-backed
+        # installer returns (0, 3010 "reboot required", 1641) instead of reading 3010 as a
+        # failure, which is exactly what a bundle that wants a restart produces.
+        #
+        # `arguments` comes from a variable with a default of "", so a run that passes none
+        # still renders valid YAML. A BeyondTrust Resource Broker install puts its /quiet,
+        # INSTALLKEY and ZONE there — see docs/design/pov-resource-broker.md.
+        return f"""\
+- hosts: all
+  tasks:
+    - name: Install {base}
+      ansible.windows.win_package:
+        path: {container_path}
+        arguments: "{{{{ {WINPKG_ARGS_VAR} | default('') }}}}"
+        state: present
+      register: winpkg_result
+
+    - name: Report {base} result
+      ansible.builtin.debug:
+        msg: "rc={{{{ winpkg_result.rc | default('n/a') }}}} reboot_required={{{{ winpkg_result.reboot_required | default(false) }}}}"
 """
 
     if atype == "rpm":

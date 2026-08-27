@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["SkytapError", "VALID_RUNSTATES", "configured", "credentials",
            "list_templates", "list_environments", "get_environment",
            "create_environment", "set_runstate", "delete_environment",
-           "inject_bootstrap"]
+           "inject_bootstrap", "stored_credentials"]
 
 # Runstates a caller may ASK for. Skytap also reports "busy" while a transition is in
 # flight, which is a state you observe and never request — asking for it would be asking
@@ -326,6 +326,37 @@ async def inject_bootstrap(env_id: str, vm_id: str, payload: str) -> None:
                 f"expose per-VM user_data — re-read the environment and try again."
             ) from exc
         raise
+
+
+async def stored_credentials(env_id: str, vm_id: str) -> list[dict]:
+    """The credentials Skytap holds for one VM.
+
+    Normalised to ``[{"text": ..., "notes": ...}]`` — the shape ``lab_platforms``
+    declared for this capability in slice 1 and nothing has filled until now.
+
+    **``text`` is free text, and that is the platform's model rather than a shortcoming
+    here.** Skytap stores what somebody typed into a box on the VM's settings page, so it
+    may be ``administrator / Passw0rd``, ``administrator:Passw0rd``, or a sentence with
+    the pair somewhere inside. Parsing it belongs to the caller — see
+    ``services/pov_credentials`` — because the right response to an unparseable one is a
+    refusal naming the VM, and that is a decision this transport layer should not make.
+
+    Deliberately returns the raw list rather than a parsed pair: a mapper that guessed
+    here would be a second parser, in the module least able to explain itself.
+    """
+    env_id = str(env_id or "").strip()
+    vm_id = str(vm_id or "").strip()
+    if not env_id or not vm_id:
+        raise SkytapError("an environment id and a VM id are required to read credentials")
+    raw = await _client().list(f"/v2/configurations/{env_id}/vms/{vm_id}/credentials")
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if text:
+            out.append({"text": text, "notes": str(item.get("notes") or "").strip()})
+    return out
 
 
 async def delete_environment(env_id: str) -> None:

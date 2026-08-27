@@ -94,15 +94,18 @@ BROKER_PORTS = (22, 443, 3389, 5985, 5986)
 #
 #   agent_discover  the broker reads the POV's own VMs (slice 3)
 #   agent_gateway   the broker runs the POV's BeyondTrust Gateway (slice 5)
+#   agent_ansible   the broker installs the Password Safe Resource Broker (slice 5b)
 #
-# `agent_ansible` is still absent: the per-VM wire-up is a later slice, and it needs its
-# own `ansible:` target list rather than this one.
+# `agent_ansible` is the largest of the three by a distance, and the policy example says
+# why in as many words: `targets:` grants a port PROBE, this grants a playbook running as
+# root on the hosts you name. So it comes with its own `ansible.targets` list, which
+# `render_policy` scopes to the POV's WINDOWS guests rather than reusing the discovery one.
 #
 # **A broker enrolled before a grant was added does not have it.** policy.yaml is written
 # once, at enrolment, and the agent reads it at start — so adding a type here changes
 # nothing on a running broker until it is re-brokered. `pov_gateway.preflight` refuses
 # with that remedy rather than letting the job lease and be refused on the far side.
-BROKER_JOB_TYPES = ("agent_discover", "agent_gateway")
+BROKER_JOB_TYPES = ("agent_discover", "agent_gateway", "agent_ansible")
 
 # The Gateway image a POV broker is allowed to run, and the flag that makes it work.
 #
@@ -116,6 +119,15 @@ BROKER_JOB_TYPES = ("agent_discover", "agent_gateway")
 # /dev/net/tun to carry protocol tunnels; without them it registers online and every
 # tunnel times out, which reads as a firewall problem for days.
 GATEWAY_IMAGE = "beyondtrust/sra-jumpoint:latest"
+
+# The Config-Management runner a POV broker may launch. `run_kind="vm"` selects it, and the
+# Resource Broker install is a WinRM run — which is exactly what this image is for.
+ANSIBLE_VM_IMAGE = "chrweav/ansible-winrm:latest"
+
+# The ports an RB install needs on its target. 5985 is WinRM over HTTP and 5986 over HTTPS;
+# both are named because which one a template's guest has enabled is the template's
+# choice, and a run refused for the port would read as a firewall.
+ANSIBLE_PORTS = (5985, 5986)
 
 # How often the enrolment wait looks. Sixty seconds of margin below the code's TTL so the
 # last poll still has a code to redeem.
@@ -213,7 +225,7 @@ def _broker_targets(db: Session, env: PovEnvironment) -> list[str]:
 
 # ── rendering ────────────────────────────────────────────────────────────────
 
-def render_policy(targets: list[str]) -> str:
+def render_policy(targets: list[str], ansible_targets: list[str] | None = None) -> str:
     """The agent's ``policy.yaml``, generated from this POV's addresses.
 
     Generated files here are held to a higher bar than usual because **this file fails
@@ -223,6 +235,7 @@ def render_policy(targets: list[str]) -> str:
     decisions, no user-supplied text anywhere in it.
     """
     ports = ", ".join(str(p) for p in BROKER_PORTS)
+    ansible_targets = [t for t in (ansible_targets or []) if t]
     # ASCII only, deliberately. This file is written by a shell heredoc on a guest whose
     # locale nobody chose and parsed by an agent that already has to be told about UTF-16
     # and BOMs; a non-ASCII byte in a comment is a needless way to find that out.
@@ -252,8 +265,33 @@ def render_policy(targets: list[str]) -> str:
         "  enabled: true",
         f"  image: {GATEWAY_IMAGE}",
         "  privileged: true",
-        "",
     ]
+
+    # Config Management, for the Resource Broker install. Its own target list, NOT the
+    # discovery one above — widening a port probe must never widen what may have a
+    # playbook applied to it as root. An empty list means "nothing may be configured",
+    # which is the correct fail-closed reading and what the agent does with it.
+    lines.append("ansible:")
+    if ansible_targets:
+        ansible_ports = ", ".join(str(p) for p in ANSIBLE_PORTS)
+        lines += [
+            "  enabled: true",
+            f"  vm_image: {ANSIBLE_VM_IMAGE}",
+            "  targets:",
+        ]
+        for ip in ansible_targets:
+            lines.append(f"    - cidr: {ip}/32")
+            lines.append(f"      ports: [{ansible_ports}]")
+    else:
+        # Rendered disabled rather than omitted, so an operator reading the file on the
+        # broker VM sees that the feature exists and that this POV has no Windows guest
+        # for it — rather than wondering whether the dashboard forgot.
+        lines += [
+            "  enabled: false",
+            "  # No Windows VM in this POV, so nothing may have a playbook applied to it.",
+        ]
+
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -468,9 +506,14 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     _progress(35, f"Minting an enrolment code for {agent_name(env)}…")
     agent, code = _mint_code(db, env)
 
+    # The Config-Management grant is scoped to this POV's Windows guests — or to the one
+    # named Resource Broker host, once somebody has named it. Computed here rather than
+    # inside render_policy so that function stays pure and testable.
+    from . import pov_resource_broker
     payload = render_bootstrap(
         env_name=env.name, dashboard_url=dashboard_url, enroll_code=code,
-        policy_yaml=render_policy(targets))
+        policy_yaml=render_policy(targets,
+                                  pov_resource_broker.windows_targets(db, env)))
 
     _progress(50, f"Injecting the bootstrap onto {vm.name or vm.platform_vm_id}…")
     mod = lab_platforms.adapter(env.platform)

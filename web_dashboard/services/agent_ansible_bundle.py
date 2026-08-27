@@ -14,6 +14,12 @@ that one fetch. Two things follow from that split, and both are the point:
   :mod:`ansible_credentials` resolver the dashboard-local runner uses. There is no second
   credential path to drift out of step with the first.
 
+One credential here does not begin life as a ref, and it is worth knowing why. A POV
+Resource Broker run takes its Windows login from the **lab platform's** stored credentials
+(``services/pov_credentials``), read at this moment rather than stored — so the job row
+names an environment and a VM instead of a source, and there is no per-POV Windows
+password in this database at all.
+
 **What this deliberately does NOT send: an inventory, or any ``ansible_*`` variable.**
 That is not tidiness, it is the security boundary. An inventory is a place to say
 ``ansible_connection: local`` — which turns "configure that VM over SSH" into "execute this
@@ -191,6 +197,23 @@ async def build(db, *, job, agent) -> tuple:
         if not _RESERVED_VAR.match(str(name)):
             extra_vars[name] = value
 
+    # A POV run's login comes from the LAB PLATFORM, not from this database. Fetched here,
+    # at the moment the agent asks, so nothing has to be stored for it — and so a POV whose
+    # template password changed picks the new one up on the next run with nothing to
+    # update. The job row names an environment and a VM; neither is a credential.
+    login_user = meta.get("login_user") or creds.managed_plain_vars.get("ansible_user") or ""
+    login_password = creds.managed_cred_vars.get("ansible_password") or ""
+    pov_env_id = str(meta.get("pov_environment_id") or "")
+    pov_vm_id = str(meta.get("pov_vm_id") or "")
+    if pov_env_id and pov_vm_id:
+        from . import pov_resource_broker
+        try:
+            login_user, login_password = await pov_resource_broker.platform_login(
+                db, pov_env_id, pov_vm_id)
+        except pov_resource_broker.ResourceBrokerError as exc:
+            raise BundleError(str(exc)) from None
+        scrub.append(login_password)
+
     bundle = {
         "run_kind": run_kind,
         "transport": transport,
@@ -201,8 +224,8 @@ async def build(db, *, job, agent) -> tuple:
         "extra_vars": extra_vars,
         # Typed connection material. One key per meaning; the agent maps these into host
         # vars itself so no variable name ever crosses the wire.
-        "login_user": meta.get("login_user") or creds.managed_plain_vars.get("ansible_user") or "",
-        "login_password": creds.managed_cred_vars.get("ansible_password") or "",
+        "login_user": login_user,
+        "login_password": login_password,
         "become_password": creds.extra_vars.get("ansible_become_password") or "",
         "ssh_private_key": creds.ssh_pem or "",
         "winrm": _winrm_options(transport, meta["target_port"]),

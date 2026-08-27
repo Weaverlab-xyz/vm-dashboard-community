@@ -26,6 +26,11 @@
   customer's appliance, and one per row would make this page as slow as the slowest
   customer's network.
 
+  The Resource Broker column is the Windows half. Its installer comes from the customer's
+  own Password Safe tenant, so the dashboard cannot fetch it — the customer uploads it on
+  the Config Management page and names it here. Note there is no login field: that comes
+  from the lab platform's own stored credentials, read per run.
+
   Per-VM PAM wire-up, share links and the expiry timer arrive in later slices.
 #}
 
@@ -167,6 +172,7 @@
             <th class="px-4 py-2 text-left font-medium">Power</th>
             <th class="px-4 py-2 text-left font-medium">Broker</th>
             <th class="px-4 py-2 text-left font-medium">Gateway</th>
+            <th class="px-4 py-2 text-left font-medium">Resource Broker</th>
             <th class="px-4 py-2 text-left font-medium">Tenants</th>
             <th class="px-4 py-2 text-left font-medium">Template</th>
             <th class="px-4 py-2 text-left font-medium">Created by</th>
@@ -235,6 +241,47 @@
                     <button @click="saveGateway(e, false)" class="text-xs px-2 py-0.5 rounded border border-gray-300">Save only</button>
                     <button @click="editingGateway = ''" class="text-xs px-2 py-0.5 text-gray-500">Cancel</button>
                   </div>
+                </div>
+              </td>
+              <td class="px-4 py-2">
+                <div x-show="editingRb !== e.id" class="space-y-0.5">
+                  <p class="text-xs whitespace-nowrap"
+                     :class="e.rb_ready ? 'text-gray-600' : 'text-gray-300'"
+                     x-text="e.rb_asset || '—'"></p>
+                  <!-- Each gap named separately: they have different fixes, and 'not
+                       configured' would send an SE looking in three places. -->
+                  <p x-show="e.rb_asset && !e.rb_has_key" class="text-xs text-amber-700">no installer key</p>
+                  <p x-show="e.rb_asset && !e.rb_zone" class="text-xs text-amber-700">no zone</p>
+                  <p x-show="e.ps_application_host_id" class="text-xs text-green-700"
+                     x-text="'broker ' + e.ps_application_host_id"></p>
+                  <button @click="startEditRb(e)" :disabled="!actionable(e)"
+                          class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
+                </div>
+                <div x-show="editingRb === e.id" class="space-y-1">
+                  <input type="text" x-model="rbEdit.vm_name" placeholder="Windows VM name (rb)"
+                         class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                  <select x-model="rbEdit.asset"
+                          class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs">
+                    <option value="">Choose the staged installer…</option>
+                    <template x-for="a in winAssets" :key="a">
+                      <option :value="a" x-text="a"></option>
+                    </template>
+                  </select>
+                  <input type="text" x-model="rbEdit.zone" placeholder="resource zone"
+                         class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                  <input type="password" x-model="rbEdit.installer_key" autocomplete="new-password"
+                         :placeholder="rbEdit.has_key ? 'key stored — blank keeps it' : 'installer key'"
+                         class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                  <div class="flex gap-1">
+                    <button @click="saveRb(e, true)" class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white">Install</button>
+                    <button @click="saveRb(e, false)" class="text-xs px-2 py-0.5 rounded border border-gray-300">Save only</button>
+                    <button @click="editingRb = ''" class="text-xs px-2 py-0.5 text-gray-500">Cancel</button>
+                  </div>
+                  <p class="text-[11px] text-gray-400">
+                    Upload the installer on
+                    <a href="/config-management" class="underline">Config Management</a> first.
+                    The Windows login comes from the lab platform, not from here.
+                  </p>
                 </div>
               </td>
               <td class="px-4 py-2">
@@ -504,6 +551,12 @@ function povPage() {
     tenantEdit: {},
     editingGateway: '',
     gatewayEdit: { name: '', deploy_key: '', has_key: false },
+    editingRb: '',
+    rbEdit: { vm_name: '', asset: '', zone: '', installer_key: '', has_key: false },
+    // Only the Windows installers. The asset list carries every uploaded playbook and
+    // script too, and offering a .yml here would let someone stage a file the preflight
+    // then refuses — better not to offer it.
+    winAssets: [],
     // Keyed by environment id and NOT persisted across a load(): a live appliance read is
     // true at the moment it was made, and showing yesterday's answer next to today's row
     // is the "still reads connected three weeks later" problem this page avoids.
@@ -816,6 +869,45 @@ function povPage() {
         this.gatewayCheck[env.id] = data.gateway || {};
         this.notice = `${env.name}: ${(data.gateway || {}).detail || ''}`;
       } catch (e) { this.error = 'Could not reach the dashboard API.'; }
+    },
+
+    async loadWinAssets() {
+      try {
+        const res = await fetch('/api/config-mgmt/assets');
+        if (!res.ok) { this.winAssets = []; return; }
+        const data = await res.json();
+        const rows = data.assets || data || [];
+        this.winAssets = rows
+          .map(a => (typeof a === 'string' ? a : (a.name || a.key || '')))
+          .filter(n => /\.(exe|msi)$/i.test(n));
+      } catch (e) { this.winAssets = []; }
+    },
+
+    startEditRb(env) {
+      this.rbEdit = { vm_name: env.rb_vm_name || '', asset: env.rb_asset || '',
+                      zone: env.rb_zone || '', installer_key: '',
+                      has_key: !!env.rb_has_key };
+      this.editingRb = env.id;
+      this.loadWinAssets();
+    },
+
+    async saveRb(env, install) {
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/resource-broker`, {
+          vm_name: this.rbEdit.vm_name,
+          asset: this.rbEdit.asset,
+          zone: this.rbEdit.zone,
+          installer_key: this.rbEdit.installer_key,
+          install: !!install,
+        });
+        this.editingRb = '';
+        this.notice = install
+          ? `${env.name}: installing the Resource Broker — watch job ${data.job_id}. ` +
+            `The bundle installs .NET and the VC++ runtimes first, so this takes minutes.`
+          : `${env.name}: Resource Broker settings saved.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
     },
 
     async brokerRun(env) {

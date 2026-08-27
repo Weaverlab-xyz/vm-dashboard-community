@@ -10,10 +10,12 @@ instance the integration is masked off and Settings refuses to enable it.
 > **Partial PAM wiring.** The dashboard can create an environment from a template, power
 > it on and off, destroy it, enrol an **agent inside it** — see
 > [The broker VM](#the-broker-vm) and the [template contract](#the-template-contract) —
-> and install a **BeyondTrust Gateway** on that broker, registered into the POV's own PRA
-> tenant ([the POV Gateway](../pov-instance.md#the-pov-gateway)). It does not yet install
-> a Password Safe Resource Broker or onboard the environment's VMs; those arrive in later
-> releases, and their columns already exist on the row so they need no migration.
+> install a **BeyondTrust Gateway** on that broker, registered into the POV's own PRA
+> tenant ([the POV Gateway](../pov-instance.md#the-pov-gateway)), and install a **Password
+> Safe Resource Broker** on a Windows VM beside it
+> ([the Resource Broker](../pov-instance.md#the-resource-broker)). It does not yet onboard
+> the environment's own VMs; that arrives in a later release, and the columns already exist
+> on the row so they need no migration.
 
 ---
 
@@ -75,6 +77,7 @@ exactly like a complete answer, so listings are walked to the end.
 | **Start / Suspend** | A runstate change, then a poll until it settles |
 | **Broker** | Re-issue the enrolment code and re-write the bootstrap. The remedy for every way the first attempt can fail |
 | **Gateway** | Start a BeyondTrust Gateway container on the broker VM, registered into this POV's PRA tenant |
+| **Resource Broker** | Run the staged Password Safe installer on a Windows VM, over WinRM from the broker |
 | **Destroy** | Revoke the broker agent, then delete the configuration and everything Skytap keeps inside it |
 
 Three orderings are load-bearing, and each is wrong in a way that leaves a resource nobody
@@ -120,6 +123,11 @@ deliberately not fuzzy: "contains broker" also matches a customer VM called
 `password-broker`, and the cost of that mistake is an agent installed on a machine nobody
 expected. If no VM matches, the POV still comes up and the Broker column reads `none` with
 the names it *did* find.
+
+A POV that also runs a Resource Broker needs a **second** special VM — a Windows Server
+2019 or 2022 x64 guest with WinRM enabled, on the same automatic network. See
+[the Resource Broker](../pov-instance.md#the-resource-broker); the rest of this section is
+about the Linux broker.
 
 That VM needs three things:
 
@@ -241,7 +249,7 @@ a platform lacks degrades visibly instead of failing late:
 | Idle suspend | yes — `suspend_on_idle`, per environment, in seconds |
 | Bootstrap injection | **metadata** — per-VM `user_data`, read by the guest at `http://169.254.169.254/skytap`. Used by [the broker VM](#the-broker-vm) |
 | Share link | yes — publish sets, with a password and an expiry |
-| Stored credentials | yes — `…/vms/{id}/credentials` |
+| Stored credentials | yes — `…/vms/{id}/credentials`. Used by [the Resource Broker install](../pov-instance.md#there-is-no-login-field-on-purpose), which is why the dashboard stores no Windows password for a POV |
 
 `bootstrap_injection` is one intent with more than one mechanism. Skytap hands data to the
 guest and the guest fetches it; another platform might run a script on the guest instead.

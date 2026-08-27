@@ -10,6 +10,8 @@
   POST   /api/pov/managed/{id}/broker   — install / re-enrol the in-environment agent
   POST   /api/pov/managed/{id}/gateway  — configure and install the POV's BeyondTrust Gateway
   GET    /api/pov/managed/{id}/gateway  — what PRA says about it, live
+  POST   /api/pov/managed/{id}/resource-broker
+                                        — configure and install the Password Safe Resource Broker
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
@@ -37,7 +39,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, job_service, lab_platforms, pov_broker,
-                        pov_env_service, pov_gateway)
+                        pov_env_service, pov_gateway, pov_resource_broker)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -129,6 +131,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     if broker is not None:
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
+    out.update(pov_resource_broker.describe(_db_of(env), env))
     if vms is not None:
         out["vms"] = [{
             "id": v.platform_vm_id,
@@ -518,6 +521,63 @@ async def gateway(env_id: str, payload: GatewayRequest,
         # 409 with the remedy passed through. Every refusal this raises is something the
         # operator does next — press Broker, pick a tenant, paste a key — so collapsing
         # them into a 500 would lose the only useful part.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job_id": job.id,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class ResourceBrokerRequest(BaseModel):
+    """Configure and install this POV's Password Safe Resource Broker.
+
+    ``asset`` is the installer's storage key — the customer downloads
+    ``BeyondTrust.Agents.Bootstrapper.exe`` from their own Password Safe tenant and uploads
+    it on the Config Management page; the dashboard cannot fetch it, because it is
+    generated per tenant.
+
+    ``zone`` is the resource zone, and it matters more than its plainness suggests: a
+    silent install needs it as well as the key, and without it the installer **prompts** —
+    which in an unattended run is not an error but a process that hangs until the timeout.
+
+    ``installer_key`` blank keeps whatever is stored; the form cannot render it.
+    """
+    vm_name: str | None = None
+    zone: str | None = None
+    asset: str | None = None
+    installer_key: str = ""
+    install: bool = True
+
+
+@router.post("/managed/{env_id}/resource-broker", status_code=202)
+async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
+                          db: Session = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    """Set the Resource Broker's staging and queue its install on the broker agent.
+
+    The Windows login is **not** a field here, and that is the point: it comes from the lab
+    platform's own stored credentials, read per run. See
+    docs/design/pov-resource-broker.md §5.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+
+    pov_resource_broker.configure(db, env, zone_name=payload.zone,
+                                  asset_key=payload.asset, vm_name=payload.vm_name)
+    if payload.installer_key.strip():
+        pov_resource_broker.set_installer_key(env, payload.installer_key)
+
+    if not payload.install:
+        return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+    try:
+        job = pov_resource_broker.queue(
+            db, env, created_by=getattr(current_user, "username", None))
+    except pov_resource_broker.ResourceBrokerError as exc:
+        # 409 with the remedy passed through — every refusal this raises is something the
+        # operator does next: stage an installer, name a zone, press Broker.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job.id,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}

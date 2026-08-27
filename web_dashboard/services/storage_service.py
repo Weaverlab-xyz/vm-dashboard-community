@@ -34,7 +34,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_ASSET_EXTENSIONS = {".yml", ".yaml", ".sh", ".ps1", ".rpm", ".deb"}
+# What a LISTING will show. Separate from _TYPE_MAP below and easy to miss: an
+# extension typed there and not here uploads fine, stores fine, and then never
+# appears in any asset picker — which reads as a failed upload.
+_ASSET_EXTENSIONS = {".yml", ".yaml", ".sh", ".ps1", ".rpm", ".deb", ".exe", ".msi"}
+# Must agree with ansible_local_service._EXT_TYPE. Two maps rather than one import
+# because this module has no dependency on the runner and should keep none — the cost is
+# that a type added there has to be added here, which tests/test_pov_resource_broker.py
+# pins so the drift is a failure rather than a listing that quietly says "playbook".
 _TYPE_MAP = {
     ".yml":  "playbook",
     ".yaml": "playbook",
@@ -42,6 +49,8 @@ _TYPE_MAP = {
     ".ps1":  "powershell",
     ".rpm":  "rpm",
     ".deb":  "deb",
+    ".exe":  "winpkg",
+    ".msi":  "winpkg",
 }
 
 BACKENDS = ("s3", "azure_blob", "gcs", "oci_object_storage", "local")
