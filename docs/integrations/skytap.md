@@ -13,9 +13,11 @@ instance the integration is masked off and Settings refuses to enable it.
 > install a **BeyondTrust Gateway** on that broker, registered into the POV's own PRA
 > tenant ([the POV Gateway](../pov-instance.md#the-pov-gateway)), and install a **Password
 > Safe Resource Broker** on a Windows VM beside it
-> ([the Resource Broker](../pov-instance.md#the-resource-broker)). It does not yet onboard
-> the environment's own VMs; that arrives in a later release, and the columns already exist
-> on the row so they need no migration.
+> ([the Resource Broker](../pov-instance.md#the-resource-broker)), and create **one PRA
+> jump item per VM** through that Gateway
+> ([wiring the VMs](../pov-instance.md#wiring-the-vms-into-pra)). Password Safe onboarding
+> of the individual VMs arrives in a later release; the columns already exist on the row so
+> they need no migration.
 
 ---
 
@@ -78,6 +80,7 @@ exactly like a complete answer, so listings are walked to the end.
 | **Broker** | Re-issue the enrolment code and re-write the bootstrap. The remedy for every way the first attempt can fail |
 | **Gateway** | Start a BeyondTrust Gateway container on the broker VM, registered into this POV's PRA tenant |
 | **Resource Broker** | Run the staged Password Safe installer on a Windows VM, over WinRM from the broker |
+| **Wire** | Create one PRA jump item per VM, routed through this POV's own Gateway |
 | **Destroy** | Revoke the broker agent, then delete the configuration and everything Skytap keeps inside it |
 
 Three orderings are load-bearing, and each is wrong in a way that leaves a resource nobody

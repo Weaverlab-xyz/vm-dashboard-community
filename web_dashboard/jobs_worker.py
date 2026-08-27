@@ -59,6 +59,7 @@ HANDLED_TYPES = (
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "pov_env_provision", "pov_env_destroy", "pov_env_power", "pov_env_broker",
+    "pov_env_wireup",
     "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
@@ -144,6 +145,10 @@ MEDIUM_TYPES = (
     # exactly ot_cell_deploy's shape. Tiered as MEDIUM now so the move does not need a
     # tier change on a live deployment.
     "pov_env_provision", "pov_env_destroy",
+    # One short terraform per VM against the customer's PRA appliance — exactly
+    # ot_cell_deploy's shape, and the tier that admits a local terraform process without
+    # granting it light-tier concurrency.
+    "pov_env_wireup",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     # Polls a CLOUD runner, but its cloud="local" branch shells out to `docker run` and
     # reads the container's output line by line. MEDIUM is the tier that admits a local
@@ -389,13 +394,14 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import portainer_import_service
             await portainer_import_service.run_import(db, job_id=job_id, meta=meta)
         elif job_type in ("pov_env_provision", "pov_env_destroy", "pov_env_power",
-                          "pov_env_broker"):
-            from .services import pov_broker, pov_env_service
+                          "pov_env_broker", "pov_env_wireup"):
+            from .services import pov_broker, pov_env_service, pov_wireup
             handler = {
                 "pov_env_provision": pov_env_service.run_env_provision,
                 "pov_env_destroy": pov_env_service.run_env_destroy,
                 "pov_env_power": pov_env_service.run_env_power,
                 "pov_env_broker": pov_broker.run_env_broker,
+                "pov_env_wireup": pov_wireup.run_env_wireup,
             }[job_type]
             await handler(job_id, meta)
         elif job_type == "clouddb_provision":

@@ -426,6 +426,68 @@ to have reaped it.
 
 ---
 
+---
+
+## Wiring the VMs into PRA
+
+The point at which a POV becomes usable by a *person*. **POV page → the Wired column →
+wire.**
+
+One jump item per VM, created in the customer's own PRA appliance, tagged `POV`. Linux
+guests get a **Shell Jump** on 22; Windows guests get a **Remote RDP jump** on 3389, with a
+Vault account for credential injection when the lab platform has a login for that VM.
+
+### Which Gateway they route through
+
+Every jump item routes through **this POV's own Gateway** — the one
+[installed inside the environment](#the-pov-gateway) — and never through the tenant's
+appliance-wide default. That is not a preference. The default one lives on the customer's
+side of the world and has no route into the POV's private network, so an item pointed at
+it is created successfully, looks correct in the appliance, and times out at session
+launch. That is the most expensive failure in this feature to diagnose, because
+nothing reports it until somebody clicks.
+
+So a POV with no Gateway is refused, up front, before any VM is touched.
+
+### The tenant, not the singleton
+
+The jump items are created against the PRA tenant [this POV is wired
+into](#the-tenant-registry) — resolved with the POV's explicit id, so a POV whose tenant
+was deleted or disabled is an error rather than a quiet fall back to the default. A
+*partial* credential override is refused rather than merged with the configured appliance:
+authenticating to one customer's host with another's client id is precisely the silent
+cross-tenant mistake the registry exists to prevent.
+
+### What is skipped, and why
+
+| The VM | What happens |
+|---|---|
+| No private address | Skipped. The platform reports one once it is running |
+| No OS reported | **Skipped, not guessed.** An SSH jump to a Windows box fails at session launch, in front of whoever clicked it |
+| Already has a jump item | Skipped. PRA will happily create a second item with the same name pointing at the same host, and the second one is invisible here |
+
+Each VM's outcome is written to its row the moment it exists, so a run that crashes halfway
+leaves nothing in the appliance this dashboard cannot find again. One VM's failure does not
+stop the others — a POV where seven of eight VMs are reachable is worth more than one that
+rolled back to zero because the eighth had no address yet. A run where **nothing** worked
+does fail the job, though: a green job with zero artifacts is the one nobody goes back and
+reads.
+
+Re-running is the remedy for a half-finished run, and it is safe by the "already wired"
+rule above.
+
+### Teardown
+
+Destroying a POV removes the jump items **first**, before anything else. They are the only
+artifacts in a *customer's* appliance, and every later teardown step removes something they
+were resolved through — the tenant, the Gateway, the environment.
+
+A row whose destroy failed keeps its terraform state, so a re-run can finish it; clearing
+it optimistically is how an item becomes unreachable. If the tenant cannot be resolved at
+all, the job log says how many were left and where.
+
+---
+
 ## What this stack deliberately does not mount
 
 Unlike the demo stack, neither service gets `/var/run/docker.sock` or the `runner_work`
@@ -470,6 +532,18 @@ press **Broker** — see [upgrading](#upgrading-a-pov-that-predates-this).
 **The Gateway registers online and every tunnel times out.** `privileged` is missing from
 the broker's `gateway:` block, so the container has no `NET_ADMIN`/`/dev/net/tun`. A
 re-broker rewrites the policy with it.
+
+**A jump item was created but the session times out.** Almost always the Gateway it
+routes through: check the item names this POV's own one and not the tenant's
+appliance-wide default. The dashboard always uses the POV's, so a hand-edited item is the
+usual cause.
+
+**Wiring is refused with "this POV has no Gateway".** Working as intended — see
+[which Gateway they route through](#which-gateway-they-route-through). Install one first.
+
+**A VM shows as skipped with "did not report an OS".** The lab platform reported a blank
+`os_family`, and guessing would build the wrong kind of jump item. Power it on and refresh
+the POV so the platform re-reads it.
 
 **The Resource Broker install hangs and the job times out.** Almost always a missing
 `ZONE` — the installer prompts for it and nothing can answer. The dashboard refuses to

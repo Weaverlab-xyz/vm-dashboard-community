@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
 from . import (job_service, lab_platforms, pov_broker, pov_gateway,
-               pov_resource_broker)
+               pov_resource_broker, pov_wireup)
 
 logger = logging.getLogger(__name__)
 
@@ -303,9 +303,10 @@ async def run_env_power(job_id: str, meta: dict) -> None:
 async def run_env_destroy(job_id: str, meta: dict) -> None:
     """Delete the environment from the platform and mark the row destroyed.
 
-    Reaps the POV's Resource Broker state, then its Gateway, then its broker agent, then
-    the platform side; the per-VM PAM wiring's teardown slots in at the front as its slice
-    lands. The property they all rely on is kept
+    Reaps the POV's PRA jump items, then its Resource Broker state, then its Gateway,
+    then its broker agent, then the platform side. The jump items go first because they
+    are the only ones in a CUSTOMER'S appliance, and every later step removes something
+    they were resolved through. The property they all rely on is kept
     here: **the platform delete is reached even when an earlier step fails**, because a
     half-torn-down POV that keeps billing is the worse outcome.
 
@@ -324,7 +325,19 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
 
         problems: list[str] = []
 
-        # The Resource Broker first: it is purely local state (a stored installer key and
+        # The PRA jump items first, and they are the only teardown step that reaches a
+        # CUSTOMER'S appliance — so it runs while the tenant is still resolvable and
+        # before anything else has been cleared out from under it.
+        try:
+            job_service.append_job_log(db, job_id, await pov_wireup.teardown(db, env))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: PRA wire-up teardown failed", env.id, exc_info=True)
+            job_service.append_job_log(
+                db, job_id,
+                f"WARNING: the PRA jump items could not be removed ({exc}). They are in "
+                f"the customer's appliance — remove them by hand.")
+
+        # The Resource Broker next: it is purely local state (a stored installer key and
         # an id), so it cannot fail in a way worth stopping for, and clearing a customer's
         # key is the part that matters most.
         try:
