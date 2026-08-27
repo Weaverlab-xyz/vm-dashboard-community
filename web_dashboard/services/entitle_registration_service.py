@@ -63,7 +63,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -129,53 +129,73 @@ def _api_key() -> str:
 CTX_KEYS = ("api_key", "endpoint", "owner_id", "workflow_id", "agent_token_name",
             "ssh_sudo_user")
 
+# The non-secret half: the tenant's DESTINATION. Every one of these is legitimately
+# rendered into `main.tf`.
+HCL_KEYS = ("endpoint", "owner_id", "workflow_id", "agent_token_name", "ssh_sudo_user")
+
+
+class EntitleTenantCtx(NamedTuple):
+    """A tenant context, with the credential and the destination as **separate objects.**
+
+    Not one dict with an ``api_key`` entry. The generators below turn their input into a
+    file on disk, and the key must only ever reach ``TF_VAR_entitle_api_key`` — that is
+    the whole point of the ``variable`` block. While both halves lived in one dict, "can
+    this value reach a file?" was a question about *which key a lookup happened to use*,
+    answerable only by reading every call site and re-reading them after every edit. As
+    two attributes the answer is structural instead: :attr:`hcl` is an object the key was
+    never in, so a generator handed it cannot render a secret it was never given.
+
+    (CodeQL reached the same conclusion the hard way — it kept flagging the ``main.tf``
+    writes through a by-key narrowing function, and it was right to. A dict lookup is not
+    a security boundary.)
+    """
+
+    api_key: str
+    hcl: dict
+
 
 def tenant_ctx(*, api_key: str, endpoint: str = "", owner_id: str = "",
                workflow_id: str = "", agent_token_name: str = "",
-               ssh_sudo_user: str = "") -> dict:
+               ssh_sudo_user: str = "") -> EntitleTenantCtx:
     """Build the per-tenant context the functions below accept. One spelling."""
-    return {"api_key": api_key, "endpoint": endpoint, "owner_id": owner_id,
-            "workflow_id": workflow_id, "agent_token_name": agent_token_name,
-            "ssh_sudo_user": ssh_sudo_user}
+    return EntitleTenantCtx(
+        api_key=api_key,
+        hcl={"endpoint": endpoint, "owner_id": owner_id, "workflow_id": workflow_id,
+             "agent_token_name": agent_token_name, "ssh_sudo_user": ssh_sudo_user})
 
 
-def _hcl_fields(ctx: Optional[dict]) -> dict:
-    """The tenant fields the HCL generators need — and **never the API key.**
+def _hcl_fields(ctx: Optional[EntitleTenantCtx]) -> dict:
+    """The tenant fields the HCL generators need.
 
-    The generators below turn these into a file on disk. The key does not belong in that
-    file (it rides ``TF_VAR_entitle_api_key``, which is the whole point of the
-    ``variable`` block), and handing a credential-bearing dict to a function whose job is
-    to write text is how it ends up in one by a later edit. So the split is structural
-    rather than a convention: a generator cannot render a secret it was never given.
+    The API key is not among them and **cannot be**: it lives on a different attribute of
+    the context, and this function does not read that attribute.
+
+    ``None`` → an empty mapping rather than the configured values, because each generator
+    already falls back to its own ``_cfg`` key field by field. The keyless-context refusal
+    lives in :func:`_api_key_of` instead, which every apply and destroy path reaches
+    through :func:`_tf_env` before it writes anything.
     """
-    return {"endpoint": _ctx(ctx, "endpoint"),
-            "owner_id": _ctx(ctx, "owner_id"),
-            "workflow_id": _ctx(ctx, "workflow_id"),
-            "agent_token_name": _ctx(ctx, "agent_token_name")}
+    return dict(ctx.hcl) if ctx is not None else {}
 
 
-def _ctx(ctx: Optional[dict], key: str) -> str:
-    """One field, from the tenant context when there is one.
+def _api_key_of(ctx: Optional[EntitleTenantCtx]) -> str:
+    """The API key, and the refusal that guards it.
 
     A context with **no api key** is refused rather than falling back: registering a
     customer's host into the install's own Entitle tenant is the silent cross-tenant
     mistake the registry exists to prevent, and it would look like success.
     """
-    if ctx is not None:
-        if not str(ctx.get("api_key") or "").strip():
-            raise EntitleRegistrationError(
-                "an Entitle tenant context was supplied with no API key. Refusing rather "
-                "than falling back to the configured tenant.")
-        return str(ctx.get(key) or "").strip()
-    if key == "api_key":
+    if ctx is None:
         return _api_key()
-    return _cfg({"endpoint": "entitle_endpoint", "owner_id": "entitle_owner_id",
-                 "workflow_id": "entitle_workflow_id",
-                 "agent_token_name": "entitle_agent_token_name",
-                 "ssh_sudo_user": "entitle_ssh_sudo_user"}[key])
+    key = str(ctx.api_key or "").strip()
+    if not key:
+        raise EntitleRegistrationError(
+            "an Entitle tenant context was supplied with no API key. Refusing rather "
+            "than falling back to the configured tenant.")
+    return key
 
 
-def _tf_env(extra_vars: Optional[dict] = None, ctx: Optional[dict] = None) -> dict:
+def _tf_env(extra_vars: Optional[dict] = None, ctx: Optional["EntitleTenantCtx"] = None) -> dict:
     """Environment for Terraform calls. Secrets are passed as TF_VAR_* so the
     HCL template never contains them in plain text."""
     env = dict(os.environ)
@@ -184,7 +204,7 @@ def _tf_env(extra_vars: Optional[dict] = None, ctx: Optional[dict] = None) -> di
     env["TF_INPUT"] = "0"
     env["TF_CLI_ARGS"] = "-no-color"
 
-    key = _ctx(ctx, "api_key")
+    key = _api_key_of(ctx)
     if key:
         env["TF_VAR_entitle_api_key"] = key
     for var, val in (extra_vars or {}).items():
@@ -585,7 +605,7 @@ def _scrub_connection_json(blob: str) -> str:
     return json.dumps(conn)
 
 
-def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional[dict] = None,
+def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional["EntitleTenantCtx"] = None,
                     scrub: bool = True) -> dict:
     """Write HCL, init+apply, return ``{integration_id, outputs, tf_state_json}``.
 
@@ -621,7 +641,7 @@ def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional[dict] = None,
         return {"integration_id": integration_id, "outputs": outputs, "tf_state_json": tf_state_json}
 
 
-def _destroy_sync(tf_state_json: str, ctx: Optional[dict] = None) -> None:
+def _destroy_sync(tf_state_json: str, ctx: Optional["EntitleTenantCtx"] = None) -> None:
     """Restore stored state and ``terraform destroy`` the integration.
 
     A resource present in state but absent from configuration is destroyed by
@@ -674,7 +694,7 @@ def _destroy_sync(tf_state_json: str, ctx: Optional[dict] = None) -> None:
 async def register_ssh_host(
     *, name: str, hostname: str, sudo_user: str, private_key: str,
     port: int = 22, private: bool = True, tag: str = "vm-dashboard",
-    ctx: Optional[dict] = None,
+    ctx: Optional["EntitleTenantCtx"] = None,
 ) -> dict:
     """Register a Linux VM as an Entitle SSH ephemeral-accounts integration.
 
@@ -1118,7 +1138,7 @@ async def destroy_agent_token() -> str:
     return name or "unknown"
 
 
-async def deregister(tf_state_json: str, ctx: Optional[dict] = None) -> None:
+async def deregister(tf_state_json: str, ctx: Optional["EntitleTenantCtx"] = None) -> None:
     """Destroy a previously registered Entitle integration using its stored state.
 
     ``ctx`` must be the SAME tenant it was registered against — a destroy pointed at

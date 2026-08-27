@@ -911,8 +911,8 @@ def test_the_integration_is_always_private_and_carries_the_tenant_context():
         _restore_ent(original)
     call = fake.calls[0]
     assert call["private"] is True, "a POV VM is on a private network by construction"
-    assert call["ctx"]["api_key"] == "ent-key"
-    assert call["ctx"]["agent_token_name"] == "pov-agent"
+    assert call["ctx"].api_key == "ent-key"
+    assert call["ctx"].hcl["agent_token_name"] == "pov-agent"
     assert call["sudo_user"] == "ec2-user"
     db.refresh(vm)
     assert vm.entitle_integration_id == "int-1"
@@ -1046,27 +1046,47 @@ def test_an_entitle_context_with_no_api_key_is_refused_by_the_service():
     """The same partial-override rule the PRA and Password Safe services follow."""
     from web_dashboard.services import entitle_registration_service as ers
     try:
-        ers._tf_env(None, {"endpoint": "https://api.entitle.io"})
+        ers._tf_env(None, ers.tenant_ctx(api_key="", endpoint="https://api.entitle.io"))
         raise AssertionError("a context with no api key was accepted")
     except ers.EntitleRegistrationError as exc:
         assert "no API key" in str(exc)
 
 
+def test_the_keyless_refusal_fires_before_anything_is_written():
+    """The refusal moved off the HCL narrowing and onto the key accessor, so this pins
+    the property that actually matters: every apply and destroy path reaches `_tf_env`
+    before it writes a file, so a cross-tenant context is refused with nothing on disk."""
+    from web_dashboard.services import entitle_registration_service as ers
+    for fn, args in ((ers._apply_hcl_sync, ("# hcl", {})),
+                     (ers._destroy_sync, ('{"resources": []}',))):
+        try:
+            fn(*args, ers.tenant_ctx(api_key=" "))
+            raise AssertionError(f"{fn.__name__} accepted a keyless context")
+        except ers.EntitleRegistrationError as exc:
+            assert "no API key" in str(exc)
+
+
 def test_the_hcl_generators_are_never_handed_the_api_key():
     """The generators turn their input into a file on disk. The key rides
-    `TF_VAR_entitle_api_key` — that is what the `variable` block is for — so a
-    credential-bearing dict has no business reaching one, and the split is structural
-    rather than a convention: a generator cannot render a secret it was never given."""
+    `TF_VAR_entitle_api_key` — that is what the `variable` block is for — so it lives
+    on a SEPARATE attribute of the context rather than another key of the same dict. That
+    is the point: `hcl` is an object the key was never in, so this is a property of the
+    shape rather than of which lookups the current code happens to perform."""
     from web_dashboard.services import entitle_registration_service as ers
     ctx = ers.tenant_ctx(api_key="SUPERSECRET", endpoint="https://t.example",
                          owner_id="o", workflow_id="wf", agent_token_name="a")
+    assert "SUPERSECRET" not in str(ctx.hcl)
     fields = ers._hcl_fields(ctx)
     assert "SUPERSECRET" not in str(fields)
     hcl = ers._generate_ssh_hcl(name="n", hostname="h", sudo_user="u", port=22,
                                 private=True, fields=fields)
     assert "SUPERSECRET" not in hcl
-    # …and everything the HCL legitimately needs still arrives.
-    assert "https://t.example" in hcl and '"a"' in hcl and '"o"' in hcl
+    # …and everything the HCL legitimately needs still arrives. Asserted on the
+    # rendered attribute rather than the bare URL: a substring test for a URL anywhere in
+    # a blob is the shape of a sanitization check, which is both a weaker assertion and
+    # one CodeQL flags on sight.
+    assert 'endpoint = "https://t.example"' in hcl
+    assert '"a"' in hcl and '"o"' in hcl
 
 
 def test_the_entitle_context_reaches_both_the_env_and_the_hcl():
@@ -1078,6 +1098,7 @@ def test_the_entitle_context_reaches_both_the_env_and_the_hcl():
                          owner_id="o", workflow_id="wf", agent_token_name="a")
     assert ers._tf_env(None, ctx)["TF_VAR_entitle_api_key"] == "k"
     fields = ers._hcl_fields(ctx)
+    assert "k" not in fields.values(), "the key does not travel with the destination"
     assert ers._provider_endpoint(fields) == "https://tenant.example"
     attrs = ers._common_attrs_hcl(True, fields=fields)
     assert "o" in attrs and "wf" in attrs and "a" in attrs
