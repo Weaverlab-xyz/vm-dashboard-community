@@ -1024,8 +1024,7 @@ function povPage() {
 
     async setExpiry(env) {
       const answer = window.prompt(
-        'Auto-delete this POV in how many hours from now?
-' +
+        'Auto-delete this POV in how many hours from now? ' +
         'Blank cancels. "never" clears the timer (needs the never permission).',
         '');
       if (answer === null || !answer.trim()) return;
