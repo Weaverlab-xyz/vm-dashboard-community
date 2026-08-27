@@ -306,7 +306,7 @@ def test_dbssm_registration_defaults_the_ip_to_the_packed_address():
     import asyncio
     captured = {}
 
-    def _capture(hcl, tf_vars):
+    def _capture(hcl, tf_vars, tenant=None):
         captured["hcl"] = hcl
         return {"managed_system_id": "1", "managed_account_id": "2", "tf_state_json": None}
 
@@ -426,7 +426,7 @@ def test_pravault_register_defaults_dns_name_to_the_appliance_url():
     import asyncio
     captured = {}
 
-    def _fake_apply(hcl, tf_vars):
+    def _fake_apply(hcl, tf_vars, tenant=None):
         captured["hcl"] = hcl
         return {"tf_state_json": "{}", "managed_system_id": "1", "managed_account_id": "2"}
 

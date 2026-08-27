@@ -228,7 +228,7 @@ def _capture_register(**kw):
     import asyncio
     captured = {}
 
-    def _fake_apply(hcl, tf_vars):
+    def _fake_apply(hcl, tf_vars, tenant=None):
         captured["hcl"] = hcl
         captured["tf_vars"] = tf_vars
         return {"managed_system_id": "1", "managed_account_id": "2", "tf_state_json": "{}"}
@@ -295,7 +295,7 @@ def test_register_refuses_a_malformed_address_before_touching_terraform():
     import asyncio
     called = {"n": 0}
 
-    def _fake_apply(hcl, tf_vars):
+    def _fake_apply(hcl, tf_vars, tenant=None):
         called["n"] += 1
         return {}
 

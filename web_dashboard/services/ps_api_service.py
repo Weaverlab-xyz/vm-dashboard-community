@@ -51,10 +51,44 @@ def configured() -> bool:
     return all(_cfg(k) for k in ("pscli_api_url", "pscli_client_id", "pscli_client_secret"))
 
 
-def _base_url() -> str:
+# A per-call override of the Password Safe credentials, for callers that must not use the
+# install's singletons. Keyed by the CONFIG names so a caller building one reads the same
+# words it would have set in Settings — the same shape
+# ``terraform_pra_service.TENANT_KEYS`` uses for PRA.
+#
+# It exists for the POV feature, where "which Password Safe tenant?" has as many answers as
+# there are customers and the singleton is the wrong one by default.
+TENANT_KEYS = ("pscli_api_url", "pscli_client_id", "pscli_client_secret")
+
+
+def tenant_creds(api_url: str, client_id: str, client_secret: str) -> dict:
+    """The override dict the functions below accept. A convenience, and one spelling."""
+    return {"pscli_api_url": api_url, "pscli_client_id": client_id,
+            "pscli_client_secret": client_secret}
+
+
+def _tcfg(key: str, tenant=None) -> str:
+    """One config read, from the tenant override when there is one.
+
+    A **partial** override is refused rather than merged with the singleton: reading one
+    customer's URL with another's client id is the silent cross-tenant mistake the whole
+    registry exists to prevent, and it would present as an authentication error nobody can
+    place.
+    """
+    if tenant:
+        if not all(str(tenant.get(k) or "").strip() for k in TENANT_KEYS):
+            raise PSApiError(
+                "a Password Safe tenant override was supplied with only part of its "
+                "credentials (URL, client id and client secret are all required). "
+                "Refusing rather than falling back to the configured tenant.")
+        return str(tenant.get(key) or "").strip()
+    return _cfg(key)
+
+
+def _base_url(tenant=None) -> str:
     """Normalize pscli_api_url to the public-API base. ps-cli configs store
     either the bare host or the full /BeyondTrust/api/public/v3 path — accept both."""
-    host = _cfg("pscli_api_url").rstrip("/")
+    host = _tcfg("pscli_api_url", tenant).rstrip("/")
     if not host:
         raise PSApiError("pscli_api_url is not configured")
     if not host.lower().startswith("http"):
@@ -64,24 +98,24 @@ def _base_url() -> str:
     return host
 
 
-def _client() -> httpx.AsyncClient:
+def _client(tenant=None) -> httpx.AsyncClient:
     # Trailing slash so relative paths join under .../public/v3/.
     return httpx.AsyncClient(
-        base_url=f"{_base_url()}/",
+        base_url=f"{_base_url(tenant)}/",
         headers={"Accept": "application/json"},
         timeout=30.0,
     )
 
 
-async def _sign_in(client: httpx.AsyncClient) -> None:
+async def _sign_in(client: httpx.AsyncClient, tenant=None) -> None:
     """OAuth2 client credentials → Bearer token, then SignAppIn to establish
     the API session (cookie retained by the client)."""
     token_resp = await client.post(
         "Auth/Connect/Token",
         data={
             "grant_type": "client_credentials",
-            "client_id": _cfg("pscli_client_id"),
-            "client_secret": _cfg("pscli_client_secret"),
+            "client_id": _tcfg("pscli_client_id", tenant),
+            "client_secret": _tcfg("pscli_client_secret", tenant),
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
@@ -359,7 +393,7 @@ async def _platform_name(client: httpx.AsyncClient, platform_id: int) -> str:
     return ""
 
 
-async def get_functional_account(name: str) -> dict:
+async def get_functional_account(name: str, tenant=None) -> dict:
     """Resolve an EXISTING functional account by name →
     ``{id, platform_id, platform_name, account_name}``.
 
@@ -378,8 +412,8 @@ async def get_functional_account(name: str) -> dict:
     target = (name or "").strip()
     if not target:
         raise PSApiError("functional account name is empty")
-    async with _client() as client:
-        await _sign_in(client)
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
         try:
             resp = await client.get("FunctionalAccounts")
             if resp.status_code != 200:
@@ -401,7 +435,7 @@ async def get_functional_account(name: str) -> dict:
             await _sign_out(client)
 
 
-async def get_workgroup_id(name_or_id: str) -> str:
+async def get_workgroup_id(name_or_id: str, tenant=None) -> str:
     """Resolve a workgroup name → id (string). A numeric value is passed through
     unchanged (the managed_system_by_workgroup resource takes workgroup_id as a
     string)."""
@@ -410,8 +444,8 @@ async def get_workgroup_id(name_or_id: str) -> str:
         raise PSApiError("workgroup is not configured")
     if val.isdigit():
         return val
-    async with _client() as client:
-        await _sign_in(client)
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
         try:
             return await _workgroup_id(client, val)
         finally:

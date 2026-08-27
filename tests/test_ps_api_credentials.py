@@ -158,9 +158,13 @@ class FakeClient:
 
 
 def _install(client):
-    """Point both client factories at ``client`` and clear the read-shape cache."""
-    ps._client = lambda: client
-    ps._list_client = lambda: client
+    """Point both client factories at ``client`` and clear the read-shape cache.
+
+    ``*_`` swallows the optional ``tenant`` override the POV feature passes; every other
+    caller passes nothing, and this stub does not care which.
+    """
+    ps._client = lambda *_a, **_k: client
+    ps._list_client = lambda *_a, **_k: client
     ps._ACCOUNT_READ_SHAPE = ""
     return client
 

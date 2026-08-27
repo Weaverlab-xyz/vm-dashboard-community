@@ -14,6 +14,11 @@ somewhere this dashboard can no longer reach:
   * **Each artifact is persisted the moment it exists**, and a VM that already has a jump
     item is never given a second one.
   * **One VM's failure is not the run's failure** — but a run where nothing worked is.
+  * **The Password Safe half is independent of the PRA half.** A half-configured tenant
+    skips it with a message; it never costs the jump items that already worked.
+  * **The managed system names the Resource Broker as its application host** — the field
+    that tells Password Safe to reach the VM THROUGH the broker rather than from the
+    cloud tenant, which would fail on every rotation days later.
 
 Uses a real SQLite database and a fake terraform layer. No network, no FastAPI.
 
@@ -486,6 +491,305 @@ def test_teardown_is_a_no_op_when_nothing_was_wired():
     _vm(db, env)
     assert "No PRA jump items" in asyncio.run(w.teardown(db, env))
     db.close()
+
+
+# ── the Password Safe half ───────────────────────────────────────────────────
+
+def _ps_tenant(db, **opts):
+    options = {"api_account_name": "svc", "workgroup": "POV",
+               "linux_functional_account": "fa-linux",
+               "windows_functional_account": "fa-windows"}
+    options.update(opts)
+    return bt_tenant_service.create(
+        db, kind="password_safe", name=_name("ps"),
+        base_url="acme.ps.beyondtrustcloud.com", client_id="cid", secret="sekrit",
+        created_by="t", options=options)
+
+
+class _FakePS:
+    """Stands in for the two Password Safe services."""
+
+    def __init__(self, **behaviour):
+        self.b = behaviour
+        self.registered = []
+
+    async def get_workgroup_id(self, name, tenant=None):
+        return "77"
+
+    async def get_functional_account(self, name, tenant=None):
+        return {"id": 5 if "linux" in name else 6,
+                "platform_id": 11 if "linux" in name else 12,
+                "platform_name": name, "account_name": name}
+
+    async def register_managed_system(self, **kw):
+        self.registered.append(kw)
+        if self.b.get("raises"):
+            raise RuntimeError(self.b["raises"])
+        return {"managed_system_id": "900", "managed_account_id": "901",
+                "tf_state_json": self.b.get("state", '{"resources":[]}'),
+                "initial_password_seeded": True}
+
+    async def deregister(self, state, tenant=None):
+        self.registered.append(("deregister", tenant))
+        if self.b.get("remove_raises"):
+            raise RuntimeError(self.b["remove_raises"])
+
+
+def _install_ps(fake):
+    original = {
+        "api_wg": w.ps_api_service.get_workgroup_id,
+        "api_fa": w.ps_api_service.get_functional_account,
+        "reg": w.ps_resource_service.register_managed_system,
+        "dereg": w.ps_resource_service.deregister,
+    }
+    w.ps_api_service.get_workgroup_id = fake.get_workgroup_id
+    w.ps_api_service.get_functional_account = fake.get_functional_account
+    w.ps_resource_service.register_managed_system = fake.register_managed_system
+    w.ps_resource_service.deregister = fake.deregister
+    return original
+
+
+def _restore_ps(original):
+    w.ps_api_service.get_workgroup_id = original["api_wg"]
+    w.ps_api_service.get_functional_account = original["api_fa"]
+    w.ps_resource_service.register_managed_system = original["reg"]
+    w.ps_resource_service.deregister = original["dereg"]
+
+
+def _ps_env(db, **opts):
+    tenant = _tenant(db)
+    ps = _ps_tenant(db, **opts)
+    env = _env(db, tenant=tenant)
+    env.ps_tenant_id = ps["id"]
+    env.ps_application_host_id = 4242
+    db.commit()
+    return env
+
+
+def test_a_pov_with_no_password_safe_tenant_is_not_an_error():
+    """The two halves are independent — a POV wired into PRA alone is a good POV."""
+    db = d.SessionLocal()
+    env = _env(db, tenant=_tenant(db))
+    assert asyncio.run(w.ps_context(db, env)) == {}
+    db.close()
+
+
+def test_no_resource_broker_is_refused_with_the_reason():
+    """Without it the platform reaches a private address from the cloud tenant and fails
+    on every rotation — days later, on a schedule, rather than here."""
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    env.ps_application_host_id = None
+    db.commit()
+    try:
+        asyncio.run(w.ps_context(db, env))
+        raise AssertionError("a POV with no Resource Broker was accepted")
+    except w.WireupError as exc:
+        assert "Resource Broker" in str(exc) and "route" in str(exc)
+    finally:
+        db.close()
+
+
+def test_a_tenant_with_no_workgroup_is_refused():
+    db = d.SessionLocal()
+    env = _ps_env(db, workgroup="")
+    try:
+        asyncio.run(w.ps_context(db, env))
+        raise AssertionError("a tenant with no workgroup was accepted")
+    except w.WireupError as exc:
+        assert "workgroup" in str(exc)
+    finally:
+        db.close()
+
+
+def test_the_managed_system_names_the_resource_broker_as_its_application_host():
+    """The field that tells Password Safe to manage the host THROUGH the broker."""
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    vm = _vm(db, env)
+    fake = _FakePS()
+    original = _install_ps(fake)
+    try:
+        ps = asyncio.run(w.ps_context(db, env))
+        asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
+    finally:
+        _restore_ps(original)
+    assert fake.registered[0]["application_host_id"] == 4242
+    db.refresh(vm)
+    assert vm.ps_managed_system_id == "900" and vm.ps_managed_account_id == "901"
+    db.close()
+
+
+def test_the_platform_id_comes_from_the_functional_account_not_from_here():
+    """Password Safe derives the managed system's platform from the functional account,
+    which is why the accounts are split by guest OS."""
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    linux = _vm(db, env, name="web01", os_family="linux")
+    win = _vm(db, env, name="dc01", os_family="windows", ip="10.9.0.11")
+    fake = _FakePS()
+    original = _install_ps(fake)
+    try:
+        ps = asyncio.run(w.ps_context(db, env))
+        asyncio.run(w.onboard_vm(db, env, linux, ps=ps))
+        asyncio.run(w.onboard_vm(db, env, win, ps=ps))
+    finally:
+        _restore_ps(original)
+        db.close()
+    assert fake.registered[0]["platform_id"] == 11
+    assert fake.registered[0]["port"] == w.SSH_PORT
+    assert fake.registered[1]["platform_id"] == 12
+    assert fake.registered[1]["port"] == w.RDP_PORT
+
+
+def test_a_guest_with_no_functional_account_is_skipped_not_failed():
+    """A POV with only Linux guests has no use for a Windows functional account."""
+    db = d.SessionLocal()
+    env = _ps_env(db, windows_functional_account="")
+    vm = _vm(db, env, name="dc01", os_family="windows")
+    fake = _FakePS()
+    original = _install_ps(fake)
+    try:
+        ps = asyncio.run(w.ps_context(db, env))
+        line = asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
+    finally:
+        _restore_ps(original)
+    assert "skipped" in line and fake.registered == []
+    db.close()
+
+
+def test_a_vm_already_onboarded_is_not_onboarded_twice():
+    """Password Safe accepts a second managed system on the same address, and the second
+    is invisible in this database."""
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    vm = _vm(db, env)
+    vm.ps_managed_system_id = "555"
+    db.commit()
+    fake = _FakePS()
+    original = _install_ps(fake)
+    try:
+        ps = asyncio.run(w.ps_context(db, env))
+        line = asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
+    finally:
+        _restore_ps(original)
+    assert "already in Password Safe" in line and fake.registered == []
+    db.close()
+
+
+def test_a_password_safe_failure_does_not_touch_the_jump_item():
+    """The two halves are independent, so one failing must not undo the other."""
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    vm = _vm(db, env)
+    vm.pra_jump_id = "101"
+    db.commit()
+    original = _install_ps(_FakePS(raises="workgroup 77 not found"))
+    try:
+        ps = asyncio.run(w.ps_context(db, env))
+        line = asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
+    finally:
+        _restore_ps(original)
+    assert "FAILED" in line
+    db.refresh(vm)
+    assert vm.pra_jump_id == "101", "the jump item was cleared by a Password Safe failure"
+    assert "Password Safe" in vm.wiring_error
+    db.close()
+
+
+def test_a_half_configured_password_safe_tenant_does_not_fail_the_run():
+    """The PRA half is independently useful — a POV whose tenant is half-configured
+    should get its jump items rather than nothing."""
+    db = d.SessionLocal()
+    env = _ps_env(db, workgroup="")
+    _vm(db, env, name="web01")
+    eid = env.id
+    db.close()
+    jid = _job(eid)
+    original = _install(_FakeTF())
+    ps_original = _install_ps(_FakePS())
+    try:
+        asyncio.run(w.run_env_wireup(jid, {"environment_id": eid}))
+    finally:
+        _restore(original)
+        _restore_ps(ps_original)
+    status, _ = _job_status(jid)
+    assert status == "completed"
+    db = d.SessionLocal()
+    row = db.query(d.PovEnvironmentVM).filter(
+        d.PovEnvironmentVM.environment_id == eid).first()
+    assert row.pra_jump_id, "the PRA half was skipped because Password Safe was misconfigured"
+    db.close()
+
+
+def test_teardown_offboards_the_managed_systems_too():
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    vm = _vm(db, env)
+    vm.pra_jump_tf_state = '{"resources":[]}'
+    vm.ps_registration_tf_state = '{"resources":[]}'
+    vm.ps_managed_system_id = "900"
+    db.commit()
+    original = _install(_FakeTF())
+    ps_original = _install_ps(_FakePS())
+    try:
+        line = asyncio.run(w.teardown(db, env))
+    finally:
+        _restore(original)
+        _restore_ps(ps_original)
+    assert "Off-boarded 1" in line and "Removed 1 PRA jump item" in line
+    db.refresh(vm)
+    assert vm.ps_registration_tf_state is None and vm.pra_jump_tf_state is None
+    db.close()
+
+
+def test_a_password_safe_offboard_failure_does_not_stop_the_jump_item_removal():
+    """A managed system left behind is untidy; stopping the jump-item removal over it
+    leaves something worse."""
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    vm = _vm(db, env)
+    vm.pra_jump_tf_state = '{"resources":[]}'
+    vm.ps_registration_tf_state = '{"resources":[]}'
+    db.commit()
+    original = _install(_FakeTF())
+    ps_original = _install_ps(_FakePS(remove_raises="403"))
+    try:
+        line = asyncio.run(w.teardown(db, env))
+    finally:
+        _restore(original)
+        _restore_ps(ps_original)
+    assert "could not be" in line
+    assert "Removed 1 PRA jump item" in line
+    db.refresh(vm)
+    assert vm.ps_registration_tf_state, "the state was cleared despite the failure"
+    assert vm.pra_jump_tf_state is None
+    db.close()
+
+
+# ── the two tenant overrides ─────────────────────────────────────────────────
+
+def test_a_partial_password_safe_override_is_refused_in_both_services():
+    """Same rule as PRA, in both places a Password Safe credential is read."""
+    from web_dashboard.services import ps_api_service, ps_resource_service
+    try:
+        ps_resource_service._tf_env(None, {"pscli_api_url": "x"})
+        raise AssertionError("ps_resource_service accepted a partial override")
+    except ps_resource_service.PSResourceError as exc:
+        assert "all" in str(exc)
+    try:
+        ps_api_service._tcfg("pscli_api_url", {"pscli_api_url": "x"})
+        raise AssertionError("ps_api_service accepted a partial override")
+    except ps_api_service.PSApiError as exc:
+        assert "all" in str(exc)
+
+
+def test_a_full_password_safe_override_replaces_the_singletons():
+    from web_dashboard.services import ps_resource_service
+    env = ps_resource_service._tf_env(
+        None, ps_resource_service.tenant_creds("https://t.example", "cid", "sec", "svc"))
+    assert env["TF_VAR_ps_url"] == "https://t.example"
+    assert env["TF_VAR_ps_api_account_name"] == "svc"
 
 
 # ── the job type ─────────────────────────────────────────────────────────────

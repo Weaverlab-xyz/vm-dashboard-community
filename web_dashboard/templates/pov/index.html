@@ -31,9 +31,10 @@
   the Config Management page and names it here. Note there is no login field: that comes
   from the lab platform's own stored credentials, read per run.
 
-  The Wired column is the per-VM PAM half: one PRA jump item per VM, in the customer's
-  own appliance, routed through THIS POV's own Gateway rather than the tenant's
-  appliance-wide default — the default has no route into the environment.
+  The Wired column is the per-VM PAM half: one PRA jump item per VM routed through THIS
+  POV's own Gateway (the tenant's appliance-wide default has no route into the
+  environment), and one Password Safe managed system reached THROUGH the Resource Broker.
+  The two are independent — a POV with no Password Safe tenant still wires into PRA.
 
   Share links and the expiry timer arrive in later slices.
 #}
@@ -252,6 +253,9 @@
                 <p class="text-xs whitespace-nowrap"
                    :class="e.wired_count ? 'text-gray-600' : 'text-gray-300'"
                    x-text="(e.wired_count || 0) + ' / ' + (e.vm_count || 0)"></p>
+                <p x-show="e.ps_onboard_ready" class="text-xs whitespace-nowrap"
+                   :class="e.onboarded_count ? 'text-gray-600' : 'text-gray-300'"
+                   x-text="'PS ' + (e.onboarded_count || 0) + ' / ' + (e.vm_count || 0)"></p>
                 <p x-show="e.wiring_error_count" class="text-xs text-amber-700"
                    x-text="e.wiring_error_count + ' with errors'"></p>
                 <button @click="wireup(e)"
@@ -933,8 +937,9 @@ function povPage() {
       this.error = ''; this.notice = '';
       try {
         const data = await this.post(`/api/pov/managed/${env.id}/wireup`, null);
-        this.notice = `${env.name}: wiring ${env.vm_count || 0} VM(s) into PRA — ` +
-                      `watch job ${data.job_id}. A VM already wired is skipped, not doubled.`;
+        this.notice = `${env.name}: wiring ${env.vm_count || 0} VM(s) into PRA` +
+                      (env.ps_onboard_ready ? ' and Password Safe' : '') +
+                      ` — watch job ${data.job_id}. A VM already wired is skipped, not doubled.`;
         await this.load();
       } catch (e) { this.error = e.message; }
     },

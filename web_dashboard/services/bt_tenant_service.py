@@ -67,9 +67,15 @@ OPTION_KEYS = {
     # but a persisted key is an identifier: renaming it reads a row nobody wrote, and the
     # symptom is a blank setting rather than an error. See tests/test_gateway_terminology.
     "pra": ("jump_group_name", "jumpoint_name"),
-    # The Password Safe run-as user. Required by the passwordsafe Terraform provider
-    # block, so a tenant without it is configured-but-unusable and the UI says so.
-    "password_safe": ("api_account_name",),
+    # The Password Safe run-as user, plus what a POV VM needs to be onboarded as a
+    # managed system. All three of the latter are names inside THAT tenant and mean
+    # nothing in another one, which is why they belong here rather than in Settings.
+    #
+    # The functional account is split by guest OS because Password Safe derives the
+    # managed system's PLATFORM from it (`fa["platform_id"]`, the rule ps_vm_hook
+    # already follows) — one account cannot serve both a Linux and a Windows target.
+    "password_safe": ("api_account_name", "workgroup",
+                      "linux_functional_account", "windows_functional_account"),
     # The synthetic machine user Entitle's behalfOf policy needs.
     "entitle": ("machine_identity_email",),
 }
@@ -94,6 +100,9 @@ OPTION_LABELS = {
     "jump_group_name": "Jump Group name",
     "jumpoint_name": "Gateway name",
     "api_account_name": "Run-as user",
+    "workgroup": "Workgroup",
+    "linux_functional_account": "Functional account (Linux)",
+    "windows_functional_account": "Functional account (Windows)",
     "machine_identity_email": "Machine identity email",
 }
 
@@ -101,6 +110,9 @@ OPTION_LABELS = {
 # by `serialize` so the gap is visible on the row instead of surfacing inside a job.
 REQUIRED_OPTIONS = {
     "pra": ("jump_group_name", "jumpoint_name"),
+    # `workgroup` and the functional accounts are NOT required: a POV can carry a
+    # Password Safe tenant for the Resource Broker's sake without ever onboarding its VMs,
+    # and the per-VM path refuses with its own message when one is missing.
     "password_safe": ("api_account_name",),
     "entitle": (),
 }
