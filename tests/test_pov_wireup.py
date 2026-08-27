@@ -1120,6 +1120,7 @@ def test_the_destroy_path_scrubs_before_writing_the_state_to_disk():
             written[self.name] = text
 
     original_path, original_run = ers.Path, ers._run_tf
+    original_chmod = ers._chmod_600
     ers.Path = _FakePath
     ers._chmod_600 = lambda p: None
 
@@ -1133,6 +1134,7 @@ def test_the_destroy_path_scrubs_before_writing_the_state_to_disk():
                 {"host": "10.9.0.10", "key": "-----BEGIN KEY-----leaky"})}}]}]}))
     finally:
         ers.Path, ers._run_tf = original_path, original_run
+        ers._chmod_600 = original_chmod
 
     state = written["terraform.tfstate"]
     assert "leaky" not in state and "BEGIN KEY" not in state

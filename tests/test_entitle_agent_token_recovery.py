@@ -208,7 +208,9 @@ def test_conflict_message_carries_the_remedies():
     error_message and nothing else."""
     _reset()
 
-    def _conflict(hcl, tf_vars):
+    # `ctx` and `scrub` are the tenant override and the state-scrub opt-out; the
+    # agent-token mint passes (None, False) and this stub ignores both.
+    def _conflict(hcl, tf_vars, ctx=None, scrub=True):
         raise ers.EntitleRegistrationError(
             "terraform apply failed: Error: API Response Error\n\nFailed to create the Agent "
             "Token, status code: 400, getting error from entitle API error message: "
@@ -232,7 +234,7 @@ def test_conflict_message_carries_the_remedies():
 def test_unrelated_apply_failure_is_not_rewritten():
     _reset()
 
-    def _boom(hcl, tf_vars):
+    def _boom(hcl, tf_vars, ctx=None, scrub=True):
         raise ers.EntitleRegistrationError("terraform apply failed: connection refused")
 
     orig, ers._apply_hcl_sync = ers._apply_hcl_sync, _boom
