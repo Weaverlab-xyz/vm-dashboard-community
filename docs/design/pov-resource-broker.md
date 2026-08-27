@@ -43,6 +43,8 @@ agent_ansible job on the POV's broker agent      ← already ships in agent 2.3
         │  asset      = the uploaded installer
         │  run_kind   = "vm", transport = "winrm"
         │  secret_vars = { <installer-key-var>: pov/<env>/rb_installer_key }
+        │  extra_vars  = { zone: <resource zone> }
+        │  login       = Skytap stored_credentials for that VM  ← §5
         ▼
 ansible-winrm sibling on the LINUX broker VM
         │
@@ -73,6 +75,7 @@ that do not.
 | `ansible_local_service.asset_type` | Classifies `.ps1` as `powershell`, which the generator installs with `win_script` over WinRM. **`.exe` and `.msi` are not recognised** — see §1 |
 | `ansible_local_service.generate_playbook_yaml` | Already generates a Windows play for a `.ps1`. The `.exe`/`.msi` wrapper does not exist yet |
 | `chrweav/ansible-winrm` | The `run_kind="vm"` runner image, which handles both SSH and WinRM. Its name is not a coincidence — this is what it is for |
+| `stored_credentials` | Declared in both `WRITE_CONTRACT` and the Skytap capability table since slice 1, and never implemented. §5 makes it real |
 | `agent_ansible` | Ships in agent **2.3**, so unlike slice 5 this needs no agent rebuild |
 | `agent_ansible_bundle` | Fetches the asset, wraps it, seals it to a per-fetch key, and hands it to the agent. The sibling has no bind mounts, so the bytes travel *in* the bundle |
 | `RUN_META_KEYS.secret_vars` | Maps a **var name to a source ref**. The ref is what lands in the job row; the value is resolved at fetch time and never written down |
@@ -219,24 +222,51 @@ And, as with slice 5: **a POV brokered before 5b has none of this**, so the same
 re-broker remedy applies and the preflight should say so by name rather than letting the
 job lease and be refused.
 
-## 5. The unsolved piece: a credential for the Windows RB host
+## 5. The credential comes from the platform: `stored_credentials`
 
-Everything above is assembly. This is the part that needs a decision.
+**Decided.** A WinRM run needs a Windows login, and it comes from Skytap's own stored
+credentials — `lab_platforms.CAPABILITIES["skytap"]["stored_credentials"]` is already
+declared `True`, `stored_credentials` is already in `WRITE_CONTRACT` as
+`(env_id, vm_id) -> [{text, notes}]`, and it has never been implemented. Slice 5b makes it
+real.
 
-A WinRM run needs a Windows login. Three candidates:
+It is the right source for three reasons. It **adds no new secret to this database** — the
+value is read from the platform per run and never stored. It is **per-environment by
+construction**, so two POVs from the same template do not share a credential row. And a
+template's Windows VM already has a baked-in local administrator recorded there, because
+that is what the field is for.
+
+The two alternatives, and why not:
 
 | | |
 |---|---|
-| **Skytap stored credentials** | `lab_platforms.CAPABILITIES["skytap"]["stored_credentials"]` is already declared `True` and `stored_credentials` is in `WRITE_CONTRACT` — read at `…/vms/{id}/credentials`. **Never implemented.** This is the grounded option: the template's own baked-in login, read from the platform per run |
-| **A per-POV credential the operator supplies** | Same storage shape as the deploy key. Simple, and one more thing to paste per POV |
-| **Password Safe itself** | `managed_account` already exists in `RUN_META_KEYS` and checks a credential out just-in-time, rotating it on check-in. Elegant, and circular here: the RB is what gives Password Safe reach into this network in the first place, so it cannot be the source of the credential that installs it |
+| **A per-POV credential the operator supplies** | Works, and is the fallback for a platform whose capability table says `stored_credentials: False`. As the primary path it is one more secret in this database and one more thing to paste per POV, for a value the platform already holds |
+| **Password Safe itself** | `managed_account` already exists in `RUN_META_KEYS` and checks a credential out just-in-time, rotating it on check-in. Elegant, and **circular**: the RB is what gives Password Safe reach into this network, so it cannot be the source of the credential that installs it |
 
-**Recommendation: implement `stored_credentials` on the Skytap adapter.** It adds no new
-secret to this database, it makes a declared-but-unimplemented capability real, and it is
-per-environment by construction — a template's Windows VM has a baked-in local
-administrator, and that is precisely what the platform stores. The fallback for a platform
-lacking the capability is the second row, which the capability table already makes
-expressible.
+### The wrinkle: it is free text, not a username and a password
+
+This is the part to get right, because the contract's shape gives it away —
+`[{text, notes}]`, not `[{username, password}]`. Skytap stores what somebody typed into a
+box. In practice that is `administrator / Password123`, or `administrator:Password123`, or
+a sentence with the pair somewhere inside it.
+
+So the adapter has to **parse**, and parsing is where this goes wrong quietly. Three rules:
+
+* **Refuse rather than guess.** A `text` the parser cannot split into exactly one pair is
+  an error naming the VM, not a best effort. A wrong username sends a WinRM auth failure
+  back, which reads as a bad password and sends an SE to reset one.
+* **Refuse on ambiguity too.** More than one entry, or one entry yielding more than one
+  plausible pair, is a refusal — the fallback in the table above is what an operator
+  reaches for when their template's credential box does not parse.
+* **Never log the `text`.** It contains the password by definition. The parsed username is
+  fine to name in a job log; nothing else from that field is.
+
+The parsed pair maps onto the run as `login_user` plus a resolved password. Note the
+password must reach `ansible_credentials` as a *value* at bundle-assembly time rather than
+a ref — it is fetched from the platform, not stored — so this is the one credential in the
+Config-Management path that does not begin life as a `secret_vars` source. Worth a look
+during implementation: it may be cleanest to mint it into the per-POV config space just
+long enough for the fetch, or to widen the resolver by one typed field.
 
 WinRM also has to be *reachable and enabled* on that guest, which is a template-contract
 question rather than a dashboard one — see §7.
@@ -306,7 +336,9 @@ In:
 * per-POV **resource zone**, plain (not a secret), refused at preflight when absent (§1)
 * an operator-chosen **RB host VM name** on the POV, matched exactly, refused unless that
   VM's `os_family` is `windows` (§3)
-* `stored_credentials` on the Skytap adapter (§5)
+* `stored_credentials` on the Skytap adapter, with a parser that refuses rather than
+  guesses, plus the operator-supplied fallback for a platform that lacks the capability
+  (§5)
 * `agent_ansible` + an `ansible:` block in the generated broker policy, scoped to the RB
   host's `/32` on 5985/5986 (§4)
 * a `POST /api/pov/managed/{id}/resource-broker` that preflights and queues the run
@@ -332,6 +364,17 @@ this repo, which is the whole reason this note exists:
   options and the auto-update behaviour
 * [Resource Broker](https://beyondtrust.atlassian.net/wiki/spaces/DOCS/pages/2477588518/Draft+Resource+Broker)
   — the supported Windows Server versions and the services a bundle installs
+
+## Decisions taken
+
+Recorded so a reader does not re-open them:
+
+| | |
+|---|---|
+| The RB host is a **separate Windows VM**, not the broker | The installer is a Windows program; the Gateway stays on the Linux broker |
+| The credential comes from **Skytap `stored_credentials`** | §5. No new secret in this database, per-environment by construction |
+| The installer key rides **`secret_vars`**, the zone rides `extra_vars` | §1, §2. One is a credential, one is not |
+| Delivery is **`agent_ansible`**, not a new agent verb | It already ships in agent 2.3, so no image-rebuild gate |
 
 ## Prerequisite
 
