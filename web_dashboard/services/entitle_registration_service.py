@@ -139,6 +139,21 @@ def tenant_ctx(*, api_key: str, endpoint: str = "", owner_id: str = "",
             "ssh_sudo_user": ssh_sudo_user}
 
 
+def _hcl_fields(ctx: Optional[dict]) -> dict:
+    """The tenant fields the HCL generators need — and **never the API key.**
+
+    The generators below turn these into a file on disk. The key does not belong in that
+    file (it rides ``TF_VAR_entitle_api_key``, which is the whole point of the
+    ``variable`` block), and handing a credential-bearing dict to a function whose job is
+    to write text is how it ends up in one by a later edit. So the split is structural
+    rather than a convention: a generator cannot render a secret it was never given.
+    """
+    return {"endpoint": _ctx(ctx, "endpoint"),
+            "owner_id": _ctx(ctx, "owner_id"),
+            "workflow_id": _ctx(ctx, "workflow_id"),
+            "agent_token_name": _ctx(ctx, "agent_token_name")}
+
+
 def _ctx(ctx: Optional[dict], key: str) -> str:
     """One field, from the tenant context when there is one.
 
@@ -191,7 +206,7 @@ def _durations_hcl() -> str:
 
 def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True,
                       allow_changing_account_permissions: Optional[bool] = None,
-                      ctx: Optional[dict] = None) -> str:
+                      fields: Optional[dict] = None) -> str:
     """The required owner/workflow blocks + allowed_durations, plus the
     ``agent_token`` block **only for private targets**.
 
@@ -212,15 +227,16 @@ def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True,
     ``true`` — e.g. the Kubernetes connector, live-validated with it unset. The
     **SSH Ephemeral Accounts** app rejects that default (API 400 "This application
     restricts changing accounts permissions"), so the SSH path passes ``False``."""
-    owner_id = _ctx(ctx, "owner_id")
-    workflow_id = _ctx(ctx, "workflow_id")
+    fields = fields or {}
+    owner_id = fields.get("owner_id") or _cfg("entitle_owner_id")
+    workflow_id = fields.get("workflow_id") or _cfg("entitle_workflow_id")
     if not owner_id:
         raise EntitleRegistrationError("entitle_owner_id is not configured")
     if not workflow_id:
         raise EntitleRegistrationError("entitle_workflow_id is not configured")
     agent_block = ""
     if private:
-        agent = _ctx(ctx, "agent_token_name")
+        agent = fields.get("agent_token_name") or _cfg("entitle_agent_token_name")
         if not agent:
             raise EntitleRegistrationError(
                 "private target requires entitle_agent_token_name — provision the "
@@ -250,12 +266,12 @@ def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True,
 # sensitive TF_VARs (ssh_private_key / db_password) interpolate without ever
 # being written to the HCL file on disk.
 
-def _provider_endpoint(ctx: Optional[dict] = None) -> str:
+def _provider_endpoint(fields: Optional[dict] = None) -> str:
     """Endpoint for the entitleio/entitle provider. Prefer an explicit ``entitle_endpoint``;
     otherwise derive it from the shared ``entitle_api_url`` normalized to scheme+host (the
     provider appends its own version paths, so a ``/v1`` base would double-version). Blank →
     the provider's built-in default (https://api.entitle.io)."""
-    ep = _ctx(ctx, "endpoint")
+    ep = (fields or {}).get("endpoint") or _cfg("entitle_endpoint")
     if ep:
         return ep.rstrip("/")
     api_url = _cfg("entitle_api_url")
@@ -267,8 +283,8 @@ def _provider_endpoint(ctx: Optional[dict] = None) -> str:
     return ""
 
 
-def _provider_header(extra_vars: str = "", ctx: Optional[dict] = None) -> str:
-    endpoint = _provider_endpoint(ctx)
+def _provider_header(extra_vars: str = "", fields: Optional[dict] = None) -> str:
+    endpoint = _provider_endpoint(fields)
     endpoint_line = f'  endpoint = {json.dumps(endpoint)}\n' if endpoint else ""
     return f"""\
 terraform {{
@@ -289,9 +305,9 @@ provider "entitle" {{
 
 
 def _generate_ssh_hcl(*, name: str, hostname: str, sudo_user: str, port: int, private: bool,
-                      ctx: Optional[dict] = None) -> str:
+                      fields: Optional[dict] = None) -> str:
     label = _safe_name(name)
-    header = _provider_header('variable "ssh_private_key" { sensitive = true }\n', ctx)
+    header = _provider_header('variable "ssh_private_key" { sensitive = true }\n', fields)
     # connection_json for the "SSH Ephemeral Accounts" connector is host/key/user
     # (see docs.beyondtrust.com/entitle/docs/entitle-integration-ssh_ephemeral_accounts);
     # the private key is `key`, NOT `privateKey`, and there is no `port` field.
@@ -305,7 +321,7 @@ resource "entitle_integration" {json.dumps(label)} {{
     user = {json.dumps(sudo_user)}
     key  = var.ssh_private_key
   }})
-{_common_attrs_hcl(private, allow_changing_account_permissions=False, ctx=ctx)}}}
+{_common_attrs_hcl(private, allow_changing_account_permissions=False, fields=fields)}}}
 
 output "integration_id" {{
   value = entitle_integration.{label}.id
@@ -635,7 +651,7 @@ def _destroy_sync(tf_state_json: str, ctx: Optional[dict] = None) -> None:
 
     env = _tf_env(None, ctx)
     with tempfile.TemporaryDirectory(prefix="entitle_tf_destroy_") as work_dir:
-        Path(work_dir, "main.tf").write_text(_provider_header("", ctx))
+        Path(work_dir, "main.tf").write_text(_provider_header("", _hcl_fields(ctx)))
         state_file = Path(work_dir, "terraform.tfstate")
         state_file.write_text(safe_state)
         # 0600 as well as the 0700 TemporaryDirectory around it. Terraform rewrites this
@@ -675,7 +691,7 @@ async def register_ssh_host(
     if not private_key:
         raise EntitleRegistrationError("entitle_ssh_private_key_ref resolved empty")
     hcl = _generate_ssh_hcl(name=name, hostname=hostname, sudo_user=sudo_user,
-                            port=port, private=private, ctx=ctx)
+                            port=port, private=private, fields=_hcl_fields(ctx))
     return await asyncio.to_thread(_apply_hcl_sync, hcl,
                                    {"ssh_private_key": private_key}, ctx)
 

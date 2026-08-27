@@ -1052,6 +1052,23 @@ def test_an_entitle_context_with_no_api_key_is_refused_by_the_service():
         assert "no API key" in str(exc)
 
 
+def test_the_hcl_generators_are_never_handed_the_api_key():
+    """The generators turn their input into a file on disk. The key rides
+    `TF_VAR_entitle_api_key` — that is what the `variable` block is for — so a
+    credential-bearing dict has no business reaching one, and the split is structural
+    rather than a convention: a generator cannot render a secret it was never given."""
+    from web_dashboard.services import entitle_registration_service as ers
+    ctx = ers.tenant_ctx(api_key="SUPERSECRET", endpoint="https://t.example",
+                         owner_id="o", workflow_id="wf", agent_token_name="a")
+    fields = ers._hcl_fields(ctx)
+    assert "SUPERSECRET" not in str(fields)
+    hcl = ers._generate_ssh_hcl(name="n", hostname="h", sudo_user="u", port=22,
+                                private=True, fields=fields)
+    assert "SUPERSECRET" not in hcl
+    # …and everything the HCL legitimately needs still arrives.
+    assert "https://t.example" in hcl and '"a"' in hcl and '"o"' in hcl
+
+
 def test_the_entitle_context_reaches_both_the_env_and_the_hcl():
     """Unlike PRA and Password Safe, an Entitle registration's DESTINATION is written into
     the HCL rather than the environment — so a credential-only override would have left it
@@ -1060,8 +1077,9 @@ def test_the_entitle_context_reaches_both_the_env_and_the_hcl():
     ctx = ers.tenant_ctx(api_key="k", endpoint="https://tenant.example",
                          owner_id="o", workflow_id="wf", agent_token_name="a")
     assert ers._tf_env(None, ctx)["TF_VAR_entitle_api_key"] == "k"
-    assert ers._provider_endpoint(ctx) == "https://tenant.example"
-    attrs = ers._common_attrs_hcl(True, ctx=ctx)
+    fields = ers._hcl_fields(ctx)
+    assert ers._provider_endpoint(fields) == "https://tenant.example"
+    attrs = ers._common_attrs_hcl(True, fields=fields)
     assert "o" in attrs and "wf" in attrs and "a" in attrs
 
 
