@@ -20,7 +20,8 @@ from typing import Optional, Set
 from sqlalchemy.orm import Session
 
 from ..database import (CloudDatabase, HypervisorConnection,
-                        HypervisorVMCache, Job, K8sCluster, VirtualDesktop)
+                        HypervisorVMCache, Job, K8sCluster, PovEnvironment,
+                        VirtualDesktop)
 from . import expiry_policy, hypervisor_view_service
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,34 @@ def _k8s_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
         "detail_href": "/k8s",
+    }
+
+
+def _pov_item(row) -> dict:
+    """A POV environment as one inventory row.
+
+    `cloud` carries the lab platform (`skytap`), which is the honest answer to "where does
+    this live" and keeps the reaper's per-cloud grouping working without a special case.
+    `source` is always "provisioned": a POV row exists only because this dashboard created
+    the environment, so there is no registered/discovered variant to distinguish.
+
+    `vm_count` is not queried here. This runs on every /inventory render, a count per POV
+    would be a query per row, and nothing on the page or in the reaper reads it.
+    """
+    return {
+        "id": f"pov:{row.id}",
+        "cloud": row.platform,
+        "kind": "pov",
+        "source": "provisioned",
+        "name": row.name,
+        "region": row.region or "",
+        "state": row.status,
+        "workgroup": row.workgroup,
+        "deployed_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
+        "job_id": row.provision_job_id,
+        "detail_href": "/pov",
     }
 
 
@@ -402,6 +431,14 @@ def collect(db: Session) -> list:
     for row in (db.query(VirtualDesktop)
                 .filter(VirtualDesktop.status.notin_(("deprovisioning", "deleted"))).all()):
         items.append(_desktop_item(row))
+
+    # Queried unconditionally rather than behind `pov_environments_enabled`. Turning the
+    # POV feature off hides its page; it does not delete the environments, and one left
+    # running keeps billing on the lab platform — so an expiry timer already stamped must
+    # still be honoured. The demo instance simply has no rows here.
+    for row in (db.query(PovEnvironment)
+                .filter(PovEnvironment.status.notin_(("destroyed", "destroying"))).all()):
+        items.append(_pov_item(row))
 
     items.extend(_hypervisor_items(db, claimed))
 

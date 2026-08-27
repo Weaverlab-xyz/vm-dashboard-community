@@ -46,7 +46,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..database import CloudDatabase, Job, JobLog, K8sCluster
+from ..database import CloudDatabase, Job, JobLog, K8sCluster, PovEnvironment
 from . import expiry_policy, job_service
 
 logger = logging.getLogger(__name__)
@@ -404,8 +404,17 @@ def _notify(db: Session, event_type: str, *, title: str, body: str, target: dict
         return 0
 
 
+def _remaining_label(seconds: float) -> str:
+    """"about 3 days" / "about 4h". A POV ladder starts a week out, and "about 168h" is a
+    number nobody converts in their head."""
+    if seconds >= 36 * 3600:
+        days = max(1, int(round(seconds / 86400)))
+        return "about %d day%s" % (days, "s" if days != 1 else "")
+    return "about %dh" % max(1, int(seconds // 3600))
+
+
 def _warn_expiring(db: Session, items: list, *, now_ts: float) -> int:
-    """Warn once about each resource heading into its auto-delete window.
+    """Warn about each resource heading into its auto-delete window.
 
     This is what the ``expiry_warned_at`` column was added for — its own docstring in
     database.py reserves it for "the server-side warning channels" — and until now
@@ -418,6 +427,13 @@ def _warn_expiring(db: Session, items: list, *, now_ts: float) -> int:
     configured, storm-suppressed — leaves the resource still eligible to warn later.
     ``set_expiry`` clears the latch on an extend, which correctly re-warns against the
     new deadline.
+
+    **A POV warns on a ladder instead of once.** One mail a day before a customer's lab
+    disappears is a mail that gets read afterwards — the evaluation has been running for
+    weeks and whoever created it has moved on. So a row carrying ``warned_stage_minutes``
+    is driven by :func:`expiry_policy.next_warn_stage`, and the latch records the tightest
+    rung already sent rather than a bare "warned". ``expiry_warned_at`` is stamped
+    alongside it, so the two never disagree about whether anything was sent at all.
     """
     warn_seconds = expiry_policy.warn_hours() * 3600
     warned = 0
@@ -430,7 +446,7 @@ def _warn_expiring(db: Session, items: list, *, now_ts: float) -> int:
         remaining = expires_ts - now_ts
         # Already past expiry is the reaper's business, not the warner's — a "expires
         # soon" message about something being destroyed right now is just noise.
-        if remaining <= 0 or remaining > warn_seconds:
+        if remaining <= 0:
             continue
         capable, _ = expiry_policy.ttl_capable(item)
         if not capable:
@@ -440,17 +456,32 @@ def _warn_expiring(db: Session, items: list, *, now_ts: float) -> int:
         if resolved is None:
             continue
         row = resolved[0]
-        if getattr(row, "expiry_warned_at", None) is not None:
-            continue
 
-        hours = max(1, int(remaining // 3600))
+        # Which discipline a row follows is a property of the ROW, not of its kind: the
+        # ladder needs somewhere to record the rung, and only a row with the latch column
+        # has one. So a kind that grows the column later gets the ladder for free, and one
+        # without it keeps warn-once — with no list of kinds here to fall out of step with
+        # the schema.
+        laddered = hasattr(row, "warned_stage_minutes")
+        if laddered:
+            stage = expiry_policy.next_warn_stage(
+                remaining, getattr(row, "warned_stage_minutes", None))
+            if stage is None:
+                continue
+        else:
+            if remaining > warn_seconds:
+                continue
+            if getattr(row, "expiry_warned_at", None) is not None:
+                continue
+            stage = None
+
         queued = _notify(
             db, "resource.expiring",
-            title=f"{item['name']} auto-deletes in about {hours}h",
+            title=f"{item['name']} auto-deletes in {_remaining_label(remaining)}",
             body=("Its auto-delete timer expires soon. Extend it from the dashboard if "
                   "you still need it — otherwise it will be destroyed automatically."),
             target=item,
-            url="/inventory",
+            url=item.get("detail_href") or "/inventory",
             fields={"Expires": item.get("expires_at"), "State": item.get("state")})
         if not queued:
             continue
@@ -459,6 +490,8 @@ def _warn_expiring(db: Session, items: list, *, now_ts: float) -> int:
             fresh = _resolve_row(db, item["id"])
             if fresh is not None:
                 fresh[0].expiry_warned_at = _utcnow()
+                if stage is not None:
+                    fresh[0].warned_stage_minutes = stage
                 db.commit()
                 warned += 1
         except Exception:
@@ -519,11 +552,14 @@ def _reap_vm(db: Session, target: dict) -> str:
 
 
 def _reap_row(db: Session, target: dict) -> str:
-    """Start the teardown for one expired database or cluster, returning the job id.
+    """Start the teardown for one expired database, cluster or POV, returning the job id.
 
     Goes through the same ``start_decommission`` the DELETE endpoints call, which already
     refuses to start a second teardown while one is in flight and flips the row's status
-    out of the reapable set — so idempotency here is doubled rather than assumed.
+    out of the reapable set — so idempotency here is doubled rather than assumed. For a
+    POV it enqueues the same ``pov_env_destroy`` job that endpoint creates, and the
+    ``expires_at`` clear below is what makes it at-most-once (the row also leaves the
+    reapable state set the moment the job starts).
     """
     kind = target["kind"]
     rid = (target["id"].split(":", 1) + [""])[1]
@@ -538,6 +574,19 @@ def _reap_row(db: Session, target: dict) -> str:
         from . import k8s_service
         out = k8s_service.start_decommission(db, rid, created_by=REAPER_ACTOR)
         model, jid = K8sCluster, out.get("job_id")
+    elif kind == "pov":
+        # The identical job row DELETE /api/pov/managed/{id} creates. Going through the
+        # queue rather than calling the teardown directly is what makes the share link,
+        # the Entitle integrations, the Password Safe managed systems, the PRA jump items,
+        # the Gateway and the broker agent all get reaped exactly as they do when a human
+        # presses Destroy — this module never learns that ordering, and cannot get it wrong.
+        env = db.query(PovEnvironment).filter(PovEnvironment.id == rid).first()
+        if env is None:
+            raise ReapRefused("the POV environment row is gone")
+        job = job_service.create_job(
+            db, job_type="pov_env_destroy", created_by=REAPER_ACTOR,
+            workgroup=env.workgroup, metadata={"environment_id": env.id})
+        model, jid = PovEnvironment, job.id
     else:                                              # pragma: no cover - guarded upstream
         raise ReapRefused(f"{kind} has no queued teardown")
 
@@ -843,6 +892,8 @@ def _resolve_row(db: Session, inv_id: str):
         row = db.query(CloudDatabase).filter(CloudDatabase.id == rid).first()
     elif prefix == "k8s":
         row = db.query(K8sCluster).filter(K8sCluster.id == rid).first()
+    elif prefix == "pov":
+        row = db.query(PovEnvironment).filter(PovEnvironment.id == rid).first()
     else:
         return None
     if row is None:
@@ -877,8 +928,12 @@ def set_expiry(db: Session, items: list, *, extend_hours=None, absolute=None,
             previous = row.expires_at
             row.expires_at = new_expiry
             # A moved expiry earns a fresh warning: the old one described a deadline
-            # that no longer exists.
+            # that no longer exists. The ladder latch goes with it, or an extend would
+            # leave every rung tighter than the one already sent permanently silenced —
+            # which is the whole reason `warned_stage_minutes` is a rung and not a bool.
             row.expiry_warned_at = None
+            if hasattr(row, "warned_stage_minutes"):
+                row.warned_stage_minutes = None
             db.commit()
         except ExpiryError as exc:
             db.rollback()

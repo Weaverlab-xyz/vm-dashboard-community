@@ -55,7 +55,13 @@ _DESTROY_FOR = {
 # seat's teardown is `vdesktop_pool_teardown(seat_ids)`, so expiring one seat would
 # silently shrink a live pool. Gateways aren't in the inventory at all, and the shared
 # one is reference-counted.
-REAPABLE_KINDS = ("vm", "database", "k8s")
+#
+# "pov" is a whole lab environment on a third-party platform, and it is the kind this
+# feature was most obviously missing: a POV bills for every VM in it, sits on
+# `suspend_on_idle` after the evaluation ends, and nothing else in the codebase ever
+# notices it is finished. Its teardown is the same `pov_env_destroy` job the DELETE
+# endpoint creates, which is what makes it reapable at all.
+REAPABLE_KINDS = ("vm", "database", "k8s", "pov")
 
 # Clouds whose VM teardown is a claimable job (the keys of _DESTROY_FOR, as inventory
 # `cloud` values).
@@ -82,6 +88,17 @@ _REAPABLE_STATES = {
     # k8s_service lands a finished provision on "registered", and the management-plane
     # path also produces "managed" / "awaiting_agent".
     "k8s":      frozenset({"registered", "managed", "awaiting_agent"}),
+    # Exactly `pov_env_service._ACTIONABLE` — the set that module already uses to decide
+    # whether a POV may be destroyed at all. Written out here rather than imported because
+    # this module must stay loadable by file path with nothing but stdlib and the config
+    # layer (see tests/test_expiry_wiring.py::test_the_policy_module_stays_pure), which is
+    # also why every other entry above is a literal. The copy is pinned to the original by
+    # tests/test_pov_expiry.py, so it cannot drift silently.
+    #
+    # `failed` belongs here for the reason pov_env_service gives: a POV that failed halfway
+    # through provisioning is the one that most needs reaping, because whatever it did
+    # create is still billing.
+    "pov":      frozenset({"active", "failed"}),
 }
 
 
@@ -111,6 +128,10 @@ _DEFAULT_MAX_PER_PASS = 10
 _DEFAULT_MAX_TOTAL_HOURS = 720
 _DEFAULT_EXTEND_HOURS = 24
 _DEFAULT_WARN_HOURS = 24
+# 0, exactly like `resource_expiry_default_hours`, and for the same reason: flipping only
+# the master switch must still change nothing. An operator opts a POV estate in by setting
+# a number — see pov_default_hours for why it is a separate number.
+_DEFAULT_POV_HOURS = 0
 _DEFAULT_SWEEP_RETENTION_DAYS = 7
 
 
@@ -176,6 +197,23 @@ def allow_never() -> bool:
 def default_hours() -> int:
     """Lifetime stamped on new deployments. 0 = don't stamp (the feature is inert)."""
     return max(0, _int("resource_expiry_default_hours", 0))
+
+
+def pov_default_hours() -> int:
+    """The default lifetime for a new POV environment. 0 = do not stamp one.
+
+    Its own knob rather than `default_hours` because the two describe different things. A
+    cloud VM's default is a working-day sort of number; a POV is an *evaluation* that runs
+    for weeks with a customer inside it. Sharing one number would force an operator to
+    choose which of the two gets a wrong default, and reaping a customer's lab on a
+    setting meant for scratch VMs is much the worse half of that trade.
+
+    Falls back to `resource_expiry_default_hours` only when it is ALSO unset — that is,
+    never silently: the fallback is 0 either way, so an operator who has set a VM default
+    and not a POV one gets no POV timers rather than VM-length ones.
+    """
+    hours = _int("pov_expiry_default_hours", _DEFAULT_POV_HOURS)
+    return hours if hours > 0 else 0
 
 
 def extend_hours() -> int:
@@ -422,7 +460,12 @@ def default_expiry_for_kind(kind: str, *, source: str = "provisioned",
         return None
     if not enabled():
         return None
-    hours = default_hours()
+    # A POV is an evaluation, not a scratch VM: weeks rather than a working day. Read
+    # AFTER the master switch above, not before — a default that outran `enabled()` would
+    # stamp timers on an instance where the feature is off, and the whole "NULL means
+    # never, so turning it on acts on nothing that already exists" property depends on
+    # nothing being stamped while it is off.
+    hours = pov_default_hours() if kind == "pov" else default_hours()
     if hours <= 0:
         return None
     return expiry_from_now(clamp_hours(hours), now=now)
@@ -486,6 +529,58 @@ def build_destroy_metadata(deploy_job_type: str, deploy_meta: dict, deploy_job_i
     return destroy_type, out
 
 
+# ── The warning ladder ───────────────────────────────────────────────────────
+#
+# Everything else in this feature warns ONCE, `warn_hours` before expiry, and that is the
+# right shape for a VM: one message, one owner, one decision.
+#
+# A POV is not that. It has been running for weeks, the person who created it has moved
+# on to the next evaluation, and a single mail a day before a customer's lab disappears is
+# a mail that gets read afterwards. So a POV warns on a LADDER, tightening as the deadline
+# approaches, and each rung fires at most once.
+#
+# Descending, in minutes before expiry. The last rung is deliberately close enough that
+# somebody at a keyboard can still act on it.
+WARN_LADDER_MINUTES = (7 * 24 * 60,   # a week
+                       3 * 24 * 60,   # three days
+                       24 * 60,       # a day
+                       4 * 60,        # four hours
+                       60)            # an hour
+
+
+def next_warn_stage(remaining_s: float, warned_stage_minutes) -> Optional[int]:
+    """The ladder rung to warn about now, or None.
+
+    ``warned_stage_minutes`` is the TIGHTEST rung already warned (the latch on the row);
+    None means none yet. Returns the tightest rung the remaining time has crossed that is
+    still looser than — or equal to — nothing already sent.
+
+    Two properties this shape buys, both of which a plain "warn when remaining < X" gets
+    wrong:
+
+      * **A missed rung does not fire late.** A sweep runs every 30 minutes and a POV
+        created inside the window may cross two rungs between passes. Returning the
+        TIGHTEST crossed rung means it sends "expires in 4 hours", not a stale "expires in
+        3 days" followed by four more mails in quick succession.
+      * **An extend re-opens the whole ladder**, because the caller clears the latch — see
+        ``expiry_reaper.set_expiry``. The new deadline gets its own full set of warnings
+        rather than being permanently silenced by a rung crossed against the old one.
+
+    Past expiry returns None: something already overdue is the reaper's business, and
+    "expires soon" about a resource being destroyed right now is noise.
+    """
+    if remaining_s <= 0:
+        return None
+    remaining_min = remaining_s / 60.0
+    crossed = [m for m in WARN_LADDER_MINUTES if remaining_min <= m]
+    if not crossed:
+        return None
+    stage = min(crossed)                               # the tightest rung crossed
+    if warned_stage_minutes is not None and stage >= int(warned_stage_minutes):
+        return None                                    # this rung, or a tighter one, is sent
+    return stage
+
+
 # ── Eligibility, as the UI and the server both see it ────────────────────────
 
 def ttl_capable(item: dict) -> tuple:
@@ -514,6 +609,13 @@ def ttl_capable(item: dict) -> tuple:
     if kind not in REAPABLE_KINDS:
         return False, (f"{kind!r} resources have no auto-delete timer — a virtual-desktop "
                        f"seat is torn down with its pool, not individually.")
+    # A POV is always dashboard-provisioned (the row only exists because this dashboard
+    # created the environment) and its `cloud` is a lab platform rather than one of the
+    # four VM clouds, so it must skip both tests below. Checked here rather than by
+    # widening them, because "registered" and "which cloud can I destroy in" are questions
+    # that simply do not apply to it.
+    if kind == "pov":
+        return True, ""
     if source != "provisioned":
         return False, ("registered resources are never auto-deleted — the dashboard didn't "
                        "provision this one, and deleting it here would only drop the "

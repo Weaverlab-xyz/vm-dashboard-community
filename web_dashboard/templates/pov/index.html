@@ -183,6 +183,7 @@
             <th class="px-4 py-2 text-left font-medium">Resource Broker</th>
             <th class="px-4 py-2 text-left font-medium">Tenants</th>
             <th class="px-4 py-2 text-left font-medium">Share</th>
+            <th class="px-4 py-2 text-left font-medium">Expires</th>
             <th class="px-4 py-2 text-left font-medium">Template</th>
             <th class="px-4 py-2 text-left font-medium">Created by</th>
             <th class="px-4 py-2 text-right font-medium">Actions</th>
@@ -377,6 +378,23 @@
                                     : 'Publish a password-protected, time-limited link for the customer'"
                             class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
                             x-text="e.share_url ? 're-share' : 'share'"></button>
+                  </div>
+                </template>
+              </td>
+              <td class="px-4 py-2">
+                <!-- Off for the instance is different from "no timer on this row": the
+                     first is a setting, the second is a decision about this POV. -->
+                <p x-show="!e.expiry_enabled" class="text-xs text-gray-300">off</p>
+                <template x-if="e.expiry_enabled">
+                  <div class="space-y-0.5">
+                    <p class="text-xs whitespace-nowrap"
+                       :class="expiryClass(e)"
+                       x-text="e.expires_at ? e.expires_at.slice(0, 10) : 'never'"></p>
+                    <button @click="setExpiry(e)" :disabled="!actionable(e)"
+                            :title="e.expires_at
+                                    ? 'Extend, move or clear this auto-delete timer'
+                                    : 'This POV will never be auto-deleted'"
+                            class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
                   </div>
                 </template>
               </td>
@@ -991,6 +1009,43 @@ function povPage() {
         this.notice = pem.trim()
           ? `${env.name}: Entitle SSH key stored.`
           : `${env.name}: Entitle SSH key cleared.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    expiryClass(env) {
+      if (!env.expires_at) return 'text-gray-300';
+      // Inside the ladder's last day is the point at which someone should look. Derived
+      // here rather than sent by the server so it stays right between polls.
+      const left = new Date(env.expires_at + 'Z') - Date.now();
+      if (left <= 0) return 'text-red-700';
+      return left < 86400000 ? 'text-amber-700' : 'text-gray-600';
+    },
+
+    async setExpiry(env) {
+      const answer = window.prompt(
+        'Auto-delete this POV in how many hours from now?
+' +
+        'Blank cancels. "never" clears the timer (needs the never permission).',
+        '');
+      if (answer === null || !answer.trim()) return;
+      const raw = answer.trim();
+      const body = raw.toLowerCase() === 'never'
+        ? { never: true }
+        : { extend_hours: Number(raw) };
+      if (!body.never && !Number.isInteger(body.extend_hours)) {
+        this.error = 'Hours must be a whole number, or "never".';
+        return;
+      }
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/expiry`, body);
+        const exp = data.expiry && data.expiry.expires_at;
+        // A clamp is reported rather than hidden: the server may have shortened this
+        // against max_total_hours, and finding that out later is worse.
+        this.notice = `${env.name}: ` +
+          (exp ? `auto-deletes ${exp.slice(0, 16).replace('T', ' ')}` : 'timer cleared') +
+          (data.expiry && data.expiry.clamped ? ' (clamped by policy)' : '');
         await this.load();
       } catch (e) { this.error = e.message; }
     },
