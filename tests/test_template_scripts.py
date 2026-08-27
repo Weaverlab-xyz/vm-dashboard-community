@@ -31,7 +31,14 @@ sys.path.insert(0, _ROOT)
 TEMPLATES = pathlib.Path(_ROOT) / "web_dashboard" / "templates"
 
 # `<script>` with no src. A `<script src=...>` has no body to check.
-_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.S | re.I)
+#
+# `</script\s*>` rather than `</script>`: HTML permits whitespace before the `>` of an end
+# tag, so `</script >` closes the element. Matching only the tight form would make the
+# non-greedy body run PAST that tag to the next one, swallowing the markup between them and
+# lexing it as JavaScript — which would either invent failures or, worse, hide a real one
+# by burying it in noise. CodeQL flags this pattern as a bad tag filter, and for a scanner
+# whose whole job is to be trusted, it is right to.
+_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script\s*>", re.S | re.I)
 
 
 def _blocks():
@@ -162,6 +169,18 @@ def test_the_scanner_actually_catches_the_bug_it_was_written_for():
 """
     lines, err = _scan(fine)
     assert not lines and not err, f"false positive: {lines} {err}"
+
+
+def test_the_block_extractor_honours_a_spaced_end_tag():
+    """`</script >` closes the element in HTML. If the extractor missed it the body would
+    run on to the NEXT closing tag, and the markup in between would be lexed as
+    JavaScript — inventing failures, or burying a real one in them."""
+    html = "<script>\n  var a = 1;\n</script >\n<p>not js: it's fine</p>\n"
+    bodies = [m.group(1) for m in _SCRIPT.finditer(html)]
+    assert bodies == ["\n  var a = 1;\n"], bodies
+    # The apostrophe in the paragraph would look like an unterminated string if the
+    # extractor had swallowed it, so this doubles as a check that it did not.
+    assert not _scan(bodies[0])[0]
 
 
 def test_every_x_data_component_is_defined_somewhere():
