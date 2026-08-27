@@ -1125,8 +1125,9 @@ class Settings(BaseSettings):
     # OFF is not the only brake, because this feature deletes infrastructure:
     #   * a resource with expires_at NULL is never touched, and every resource that
     #     predates the feature is NULL — so enabling it acts on nothing;
-    #   * resource_expiry_default_hours=0 means new deploys aren't stamped either, so
-    #     flipping only the master switch still changes nothing;
+    #   * resource_expiry_default_hours=0 (and pov_expiry_default_hours=0) means new
+    #     deploys aren't stamped either, so flipping only the master switch still
+    #     changes nothing;
     #   * resource_expiry_dry_run=True means even a stamped, overdue fleet is only
     #     REPORTED;
     #   * resource_expiry_enforce=False is a second, separate gate on deletion.
@@ -1136,6 +1137,12 @@ class Settings(BaseSettings):
     resource_expiry_enforce: bool = False          # deletion gate; on-but-inert until set
     resource_expiry_dry_run: bool = True           # report only, enqueue nothing
     resource_expiry_default_hours: int = 0         # 0 = don't stamp new deployments
+    # A POV environment's own default, because it describes something different: an
+    # evaluation that runs for WEEKS with a customer inside it, not a scratch VM. 0 means
+    # don't stamp, same as above, so this changes nothing until an operator sets it.
+    # Note resource_expiry_max_total_hours (30d) still caps the total lifetime — raise it
+    # if your evaluations run longer than that.
+    pov_expiry_default_hours: int = 0              # 0 = don't stamp new POVs
     resource_expiry_extend_hours: int = 24         # what one Extend click adds
     resource_expiry_max_total_hours: int = 720     # 30d ceiling, counted from created_at
     resource_expiry_warn_hours: int = 24           # "expiring soon" window

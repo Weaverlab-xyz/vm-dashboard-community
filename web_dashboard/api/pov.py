@@ -20,6 +20,7 @@
   DELETE /api/pov/managed/{id}/share    — revoke it
   POST   /api/pov/managed/{id}/share/reveal
                                         — show the link's password, once, audited
+  POST   /api/pov/managed/{id}/expiry   — extend, set or clear the auto-delete timer
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
@@ -46,9 +47,9 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
-from ..services import (bt_tenant_service, job_service, lab_platforms, pov_broker,
-                        pov_env_service, pov_gateway, pov_resource_broker, pov_share,
-                        pov_wireup)
+from ..services import (bt_tenant_service, expiry_policy, expiry_reaper, job_service,
+                        lab_platforms, pov_broker, pov_env_service, pov_gateway,
+                        pov_resource_broker, pov_share, pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,9 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         "created_by": env.created_by or "",
         "created_at": env.created_at.isoformat() if env.created_at else None,
         "provision_job_id": env.provision_job_id or "",
+        # The auto-delete timer. Empty means never — the same reading as everywhere else.
+        "expires_at": env.expires_at.isoformat() if env.expires_at else "",
+        "expiry_enabled": expiry_policy.enabled(),
         "error_message": env.error_message or "",
         "broker_vm_name": pov_broker.broker_vm_name(env),
         "pra_tenant_id": env.pra_tenant_id or "",
@@ -352,6 +356,11 @@ async def provision(payload: ProvisionRequest,
     # a job's metadata is the record of one run, not of the environment.
     if payload.broker_vm_name.strip():
         env.metadata_dict = {"broker_vm_name": payload.broker_vm_name.strip()}
+    # The auto-delete timer, stamped at creation like every other kind. NULL when the
+    # feature is off, which is what makes enabling it later act on nothing that already
+    # exists. A POV gets its own much longer default than a cloud VM — see
+    # expiry_policy.pov_default_hours.
+    env.expires_at = expiry_policy.default_expiry_for_kind("pov")
     db.add(env)
     db.commit()
 
@@ -766,6 +775,60 @@ async def reveal_share_password(env_id: str, db: Session = Depends(get_db),
         target_vm=env.name,
         details={"environment_id": env.id, "share_id": env.share_id or ""})
     return {"password": password}
+
+
+class ExpiryRequest(BaseModel):
+    """Move a POV's auto-delete timer.
+
+    Exactly the three shapes ``/api/inventory``'s Extend control offers, and handled by
+    the same service call, so a POV can never end up with looser rules than a cloud VM:
+    ``extend_hours`` adds to the current deadline, ``absolute`` sets one, ``never`` clears
+    it — and ``never`` is refused unless the operator has ``resource_expiry_allow_never``.
+    """
+    extend_hours: int | None = None
+    absolute: str = ""
+    never: bool = False
+
+
+@router.post("/managed/{env_id}/expiry")
+async def set_expiry(env_id: str, payload: ExpiryRequest,
+                     db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
+    """Extend, set or clear this POV's auto-delete timer.
+
+    Routed through ``expiry_reaper.set_expiry`` rather than writing ``expires_at`` here.
+    That function owns the clamping (``max_total_hours``, the one-hour floor), the
+    ``never`` permission, the audit entry and — the part that matters most for a POV —
+    clearing BOTH warning latches, so the new deadline gets its own full ladder instead of
+    being silenced by a rung crossed against the old one.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    if not expiry_policy.enabled():
+        raise HTTPException(
+            status_code=409,
+            detail="the auto-delete timer is turned off for this instance "
+                   "(resource_expiry_enabled).")
+
+    # The same inventory dict the sweep and the /inventory page work from, built by the
+    # one function that knows the shape. Constructing a dict by hand here is how a POV
+    # would end up eligible under a rule the reaper does not actually apply.
+    from ..services import inventory_service
+    item = inventory_service._pov_item(env)
+
+    result = expiry_reaper.set_expiry(
+        db, [item],
+        extend_hours=payload.extend_hours,
+        absolute=payload.absolute or None,
+        never=payload.never,
+        is_admin=bool(getattr(current_user, "is_admin", False)),
+        actor=getattr(current_user, "username", "") or "")
+    if result["failed"]:
+        raise HTTPException(status_code=400, detail=result["failed"][0]["error"])
+    db.refresh(env)
+    return {"expiry": result["updated"][0] if result["updated"] else None,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
 @router.delete("/managed/{env_id}", status_code=202)

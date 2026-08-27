@@ -1377,6 +1377,7 @@ class ResourceExpiryFeatureConfig(BaseModel):
     resource_expiry_enforce: bool = False
     resource_expiry_dry_run: bool = True
     resource_expiry_default_hours: int = 0
+    pov_expiry_default_hours: int = 0
     resource_expiry_extend_hours: int = 24
     resource_expiry_max_total_hours: int = 720
     resource_expiry_warn_hours: int = 24

@@ -20,8 +20,10 @@ instance the integration is masked off and Settings refuses to enable it.
 > ([wiring the VMs](../pov-instance.md#wiring-the-vms-into-pra-password-safe-and-entitle)).
 > and publish a **customer-facing share link** for the whole environment
 > ([the share link](../pov-instance.md#the-customer-facing-share-link)) — Skytap calls it a
-> publish set, and the dashboard always gives it a generated password and an expiry.
-> The auto-delete timer arrives in a later release.
+> publish set, and the dashboard always gives it a generated password and an expiry — and
+> reap the whole environment on an **auto-delete timer**
+> ([the auto-delete timer](../pov-instance.md#the-auto-delete-timer)), which warns on a
+> ladder rather than once because an evaluation outlives whoever set it up.
 
 ---
 
