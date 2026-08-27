@@ -54,7 +54,7 @@ def test_postgres_onboard_creates_only_managed_role():
     cmds = sql.onboard_commands("postgres", **_COMMON)
     assert len(cmds) == 1
     c = cmds[0]
-    assert 'CREATE ROLE "psafe_ab12cd34" WITH LOGIN PASSWORD \'Managed-Pw_9\';' in c
+    assert 'CREATE ROLE "psafe_ab12cd34" WITH LOGIN PASSWORD \'\'Managed-Pw_9\'\';' in c
     assert "PGPASSWORD='Admin-Pw_123'" in c
     assert "sslmode=disable" in c and " psql " in c
     # No functional login / grants — the managed account self-rotates.
@@ -62,10 +62,37 @@ def test_postgres_onboard_creates_only_managed_role():
     assert c.count("CREATE ROLE") == 1
 
 
+def test_onboard_is_create_or_reset_so_the_retry_action_can_run():
+    """Live regression (2026-08-27): the Password Safe half of an AWS provision failed
+    AFTER the managed user existed, and the documented remedy — the Databases row's
+    "Register in Password Safe" — then failed forever with `role "psafe_…" already
+    exists`, because onboarding was a bare CREATE. Every engine must converge an
+    existing user onto this run's password instead."""
+    pg = sql.onboard_commands("postgres", **_COMMON)[0]
+    # No CREATE ROLE IF NOT EXISTS in Postgres, so the branch is a DO block — and its
+    # body must NOT be $$-quoted: the statement is interpolated into a double-quoted
+    # shell word, where $$ becomes the shell's PID.
+    assert "IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ''psafe_ab12cd34'')" in pg
+    assert 'ALTER ROLE "psafe_ab12cd34" WITH LOGIN PASSWORD \'\'Managed-Pw_9\'\';' in pg
+    assert "$$" not in pg
+    # Balanced shell double quotes: an odd count means the argument is unterminated.
+    assert pg.count('"') % 2 == 0
+
+    my = sql.onboard_commands("mysql", **{**_COMMON, "port": 3306})[0]
+    assert "CREATE USER IF NOT EXISTS 'psafe_ab12cd34'@'%'" in my
+    assert "ALTER USER 'psafe_ab12cd34'@'%' IDENTIFIED BY 'Managed-Pw_9';" in my
+
+    ms = sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0]
+    assert ("IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE "
+            "name = 'psafe_ab12cd34') CREATE LOGIN [psafe_ab12cd34]") in ms
+    # ALTER LOGIN alone in its own batch — the form valid whatever options it carries.
+    assert "\nGO\nALTER LOGIN [psafe_ab12cd34] WITH PASSWORD = 'Managed-Pw_9';\nGO\n" in ms
+
+
 def test_mysql_onboard_uses_ssl_disabled_and_caching_sha2_default():
     cmds = sql.onboard_commands("mysql", **{**_COMMON, "port": 3306})
     c = cmds[0]
-    assert "CREATE USER 'psafe_ab12cd34'@'%' IDENTIFIED BY 'Managed-Pw_9';" in c
+    assert "CREATE USER IF NOT EXISTS 'psafe_ab12cd34'@'%' IDENTIFIED BY 'Managed-Pw_9';" in c
     assert "MYSQL_PWD='Admin-Pw_123'" in c
     assert "--ssl-mode=DISABLED" in c
     # 8.4 default auth (caching_sha2) — must NOT force the tunnel-incompatible plugin.

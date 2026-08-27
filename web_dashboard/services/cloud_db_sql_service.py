@@ -93,18 +93,46 @@ def _value(val: str) -> str:
 
 # ── Per-engine SQL statement builders (pure) ──────────────────────────────────
 
+# Onboarding is CREATE-OR-RESET, never a bare CREATE. The managed user's name is
+# derived from the database row and owned by the dashboard, and the caller mints a
+# fresh password on every run — so the only correct outcome is "this user exists with
+# THIS password", whether or not a previous attempt got that far. A bare CREATE made
+# the documented remedy unusable: the Password Safe onboarding that failed after the
+# user was created (live 2026-08-27, `Bad IP value` on the managed-system create) left
+# the row's "Register in Password Safe" action failing forever with
+# `role "psafe_950fc41dbd7e" already exists`, with no way to make progress from the UI.
+# Resetting is not a second remote resource — it is the SAME user, converged onto the
+# credential this run is about to hand Password Safe.
+
+
 def _pg_onboard_sql(managed: str, managed_pw: str) -> list:
-    return [f'CREATE ROLE "{managed}" WITH LOGIN PASSWORD \'{managed_pw}\';']
+    # Postgres has no CREATE ROLE IF NOT EXISTS, so the branch goes in a DO block. Its
+    # body is a single-quoted string literal with the inner quotes doubled rather than
+    # a $$-quoted one: the statement is interpolated into a double-quoted shell word,
+    # where $$ would expand to the shell's PID before psql ever sees it.
+    return [
+        "DO 'BEGIN "
+        f"IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ''{managed}'') THEN "
+        f"ALTER ROLE \"{managed}\" WITH LOGIN PASSWORD ''{managed_pw}''; ELSE "
+        f"CREATE ROLE \"{managed}\" WITH LOGIN PASSWORD ''{managed_pw}''; END IF; END';"
+    ]
 
 
 def _mysql_onboard_sql(managed: str, managed_pw: str) -> list:
     # 8.4 defaults new users to caching_sha2_password (which the PRA tunnel
-    # requires — no mysql_native_password).
-    return [f"CREATE USER '{managed}'@'%' IDENTIFIED BY '{managed_pw}';"]
+    # requires — no mysql_native_password). The ALTER is unconditional so a user left
+    # by an earlier attempt ends on this run's password; on a fresh create it is a
+    # no-op that re-sets what CREATE USER just set.
+    return [f"CREATE USER IF NOT EXISTS '{managed}'@'%' IDENTIFIED BY '{managed_pw}';",
+            f"ALTER USER '{managed}'@'%' IDENTIFIED BY '{managed_pw}';"]
 
 
 def _mssql_onboard_sql(managed: str, managed_pw: str) -> list:
-    return [f"CREATE LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';"]
+    # Two statements, so the caller's "\nGO\n" join puts ALTER LOGIN alone in its own
+    # batch — the form that is valid whatever options it carries.
+    return [f"IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = '{managed}') "
+            f"CREATE LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';",
+            f"ALTER LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';"]
 
 
 def _pg_teardown_sql(managed: str) -> list:

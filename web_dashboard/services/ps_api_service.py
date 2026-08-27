@@ -928,6 +928,28 @@ async def create_functional_account(
             await _sign_out(client)
 
 
+async def _find_functional_account(client, *, platform_id: int, account_name: str,
+                                   display_name: str):
+    """The id of the functional account matching the create API's uniqueness tuple, or
+    None. Signed-in ``client`` is the caller's — this runs inside its session."""
+    try:
+        resp = await client.get("FunctionalAccounts")
+        if resp.status_code != 200:
+            return None
+        for fa in resp.json():
+            if (int(fa.get("PlatformID") or fa.get("PlatformId") or 0) == int(platform_id)
+                    and str(fa.get("AccountName") or "").strip().lower()
+                        == (account_name or "").strip().lower()
+                    and str(fa.get("DisplayName") or "").strip().lower()
+                        == (display_name or "").strip().lower()):
+                fa_id = fa.get("FunctionalAccountID") or fa.get("ID") or fa.get("Id")
+                return int(fa_id) if fa_id is not None else None
+    except Exception as exc:                      # noqa: BLE001 — advisory lookup only
+        logger.warning("Password Safe: could not list functional accounts to resolve a "
+                       "duplicate create: %s", exc)
+    return None
+
+
 async def create_functional_account_on_platform(
     *, platform_id: int, account_name: str, display_name: str,
     password: str, description: str = "",
@@ -939,7 +961,15 @@ async def create_functional_account_on_platform(
     password bundle the AWS + DB-login credentials, and the "PRA Vault Username
     Password" account holding the PRA OAuth client id/secret). The (platform,
     domain, account name, display name) tuple must be unique tenant-side — the
-    caller carries per-database uniqueness in display_name."""
+    caller carries per-database uniqueness in display_name.
+
+    That uniqueness is also what makes a RETRY safe: when onboarding fails after this
+    call (the managed-system create is the next step and has failed live more than
+    once), the operator's remedy re-runs the whole block, and this POST comes back a
+    duplicate. Rather than fail the remedy forever — or mint a second account for the
+    same database — the duplicate is resolved back to the account already there, by the
+    same unique tuple. If no such account can be found the original error is raised: a
+    rejection that is NOT a duplicate must not be swallowed."""
     async with _client() as client:
         await _sign_in(client)
         try:
@@ -951,6 +981,15 @@ async def create_functional_account_on_platform(
                 "Description": description[:1000],
             })
             if resp.status_code not in (200, 201):
+                existing = await _find_functional_account(
+                    client, platform_id=int(platform_id), account_name=account_name,
+                    display_name=display_name)
+                if existing is not None:
+                    logger.info(
+                        "Password Safe functional account %r (%r) already exists on "
+                        "platform %s — reusing id %s instead of creating a second one",
+                        display_name, account_name, platform_id, existing)
+                    return existing
                 raise PSApiError(
                     f"POST FunctionalAccounts failed ({resp.status_code}): {resp.text[:400]}")
             body = resp.json()

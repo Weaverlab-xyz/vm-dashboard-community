@@ -574,11 +574,12 @@ mysql (7):  instanceId;region;dbEndpoint;databaseName;certPath;assumeRole;sslTRU
   action with *"Index and length must refer to a location within the string"*. The
   placeholder is `NoAssumeRole`; a full role ARN switches EC2 mode to STS AssumeRole. A
   configured value under 12 characters is coerced to the placeholder on read.
-- The managed system's **IP Address field carries the packed address again**, identical
-  to the DNS Name. The platform refuses a create with no IP at all (*"The field
-  'IPAddress' is required."*), and the plugin tries every populated host field as the
-  packed address — so a bare IP (the `127.0.0.1` placeholder the other clouds keep)
-  always fails the parse with *"Index was outside the bounds of the array"*.
+- The packed address rides the **DNS Name field only**. The IP Address field is the
+  same `127.0.0.1` placeholder every other plugin shape uses: Password Safe refuses a
+  create with no IP at all (*"The field 'IPAddress' is required."*) **and** refuses one
+  that is not a literal IP (*"Bad IP value: '…' in 'IPAddress' field"*), so an address
+  that doubles as an IP cannot exist. Both wordings were live rejections, each after a
+  full RDS apply; registration now rejects a non-IP `ip_address` before Terraform runs.
 
 In `create` mode the **functional account packs the AWS transport credential *and* the
 DB admin credential**: username `EC2:<dbAdmin>` or `IAM:<dbAdmin>`, password always the

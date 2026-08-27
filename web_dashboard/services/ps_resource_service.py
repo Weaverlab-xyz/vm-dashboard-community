@@ -51,6 +51,7 @@ Provider/resource schema confirmed against BeyondTrust/passwordsafe v1.3.0:
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -322,6 +323,29 @@ def _validate_dbssm_dns_name(dns_name: str) -> None:
             f"{fields[6]!r} — the plugin enables TLS only on the literal 'sslTRUE' and "
             f"silently disables it for anything else, so only the canonical spellings "
             f"are accepted")
+
+
+def _validate_ip_field(ip_address: str, method: str) -> None:
+    """Raise PSResourceError unless ``ip_address`` is empty or a literal IP.
+
+    Password Safe validates the managed system's IPAddress as an *address*, not as free
+    text: anything else is rejected on create with ``Bad IP value: '<value>' in
+    'IPAddress' field`` and takes the whole apply down with it (live 2026-08-27, after a
+    six-minute RDS apply). A plugin's ';'-packed address therefore cannot live in this
+    field however convenient it would be — it belongs in DnsName, which has no such
+    validation. Checked before Terraform runs so the mistake costs a validation error
+    rather than a provisioned database with no onboarding."""
+    if not ip_address:
+        return
+    try:
+        ipaddress.ip_address(ip_address.strip())
+    except ValueError:
+        raise PSResourceError(
+            f"{method} onboarding cannot use {ip_address!r} as the managed system's ip: "
+            f"Password Safe validates IPAddress as a literal IP and rejects anything else "
+            f"with \"Bad IP value: '<value>' in 'IPAddress' field\". The plugin's packed "
+            f"address goes in dns_name; leave ip_address empty to get the placeholder."
+        ) from None
 
 
 # ── GCP Cloud SQL address grammar ─────────────────────────────────────────────
@@ -761,12 +785,11 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     for mssql (5 fields, NO database segment), plus a ``databaseName`` fourth field for psql
     (6), plus a trailing ``sslTRUE|sslFALSE`` for mysql (7); ``port`` is the real DB port
     (never appended to the address), ``managed_account_name`` is the dedicated DB user, and
-    the account is password-managed (no SSH DSS key). Unlike every other plugin method,
-    ``ip_address`` defaults to the packed address itself, not ``127.0.0.1``: the platform
-    refuses a create with no ip at all ("The field 'IPAddress' is required." — seen live
-    2026-08-25), while the plugins parse every populated host field at fixed positions, so
-    the usual placeholder crashes each action with "Index was outside the bounds of the
-    array". The packed address is the one value both sides accept.
+    the account is password-managed (no SSH DSS key). The packed address rides ``dns_name``
+    alone; ``ip_address`` defaults to the same ``127.0.0.1`` placeholder as every other
+    plugin method, and a non-IP value is refused up front — Password Safe rejects a create
+    with no ip ("The field 'IPAddress' is required.") and equally rejects one that is not a
+    literal IP ("Bad IP value: '<address>' in 'IPAddress' field"), both seen live.
 
     ``method="dbazure"`` uses the cloud-DB "{engine} Azure Run Command Plugin": ``dns_name``
     must be ``vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;sslTRUE|sslFALSE``
@@ -858,24 +881,21 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
         # private RDS instance by running the DB client on a jump host over SSM.
         # dns_name is the ';'-packed per-engine address (see the grammar above), the
         # real DB port applies, and the account is PASSWORD-managed (no SSH key).
-        # Unlike the other custom-plugin methods the ip is the packed address AGAIN,
-        # not a placeholder: the create API refuses these platforms with no IPAddress
-        # at all ("The field 'IPAddress' is required." — seen live 2026-08-25, a green
-        # apply's worth of RDS with zero Password Safe artifacts), and the plugins try
-        # EVERY populated host field as the packed address and crash on one that does
-        # not parse — so neither empty nor 127.0.0.1 survives both sides.
+        # The ip is the same 127.0.0.1 placeholder every other plugin method uses.
+        # Two live 400s close off both alternatives: registering with NO ip is "The
+        # field 'IPAddress' is required." (2026-08-25), and putting the packed address
+        # in the ip field is "Bad IP value: '<address>' in 'IPAddress' field"
+        # (2026-08-27) — Password Safe validates IPAddress as a literal IP, so a value
+        # that is both an address the plugin parses and an IP cannot exist. The plugin
+        # reads the packed address off DnsName, which has no such validation; the
+        # earlier "a bare IP crashes the parse" reading came from systems whose DnsName
+        # ALSO carried the old pre-per-engine six-field address, which explains the
+        # crash on its own.
         _validate_dbssm_dns_name(dns_name)
         _check_address_length(dns_name, "dbssm")
-        if ip_address and ip_address != dns_name:
-            raise PSResourceError(
-                f"DB SSM onboarding must not set ip_address to {ip_address!r}: the "
-                f"{{engine}} SSM plugins parse every populated host field as the "
-                f"';'-packed address, and a bare IP always fails with 'Index was "
-                f"outside the bounds of the array'. Leave it empty (the platform "
-                f"requires SOME ip, so it defaults to the packed address) or set it "
-                f"to the same packed address as dns_name.")
+        _validate_ip_field(ip_address, "DB SSM")
         hcl = _generate_managed_system_hcl(
-            name=name, host_name=host_name, ip_address=ip_address or dns_name, port=port,
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
             functional_account_id=functional_account_id, platform_id=platform_id,
             entity_type_id=entity_type_id, workgroup_id=workgroup_id,
             managed_account_name=managed_account_name,
