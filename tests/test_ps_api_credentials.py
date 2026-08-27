@@ -178,6 +178,14 @@ def _acct(aid, *, platform_id=1008, last="2026-08-09T14:03:22.123Z", name="pra-a
             "PlatformID": platform_id, "LastChangeDate": last}
 
 
+def _acct_by_id(aid, *, system_id=77, last="2026-08-09T14:03:22.123Z",
+                name="pra-access/pra-access"):
+    """A ``ManagedAccounts/{id}`` object as a LIVE tenant returns it: ManagedSystemID
+    but no PlatformID. ``_acct`` above is the collection row, which has both."""
+    return {"ManagedAccountID": aid, "AccountName": name,
+            "ManagedSystemID": system_id, "LastChangeDate": last}
+
+
 # ── the poll is one session, not one per account ────────────────────────────────
 
 def test_the_state_poll_signs_in_once_for_many_accounts():
@@ -445,6 +453,63 @@ def test_a_missing_subscriber_account_is_named():
         assert "does not exist" in str(exc)
     else:
         raise AssertionError("a deleted subscriber account must raise")
+
+
+def test_the_platform_is_resolved_through_the_system_when_the_account_row_omits_it():
+    """The OT cell deploy's 97% failure, verbatim: "managed account 211 is on platform
+    '(unknown)'".
+
+    A real tenant's ``ManagedAccounts/{id}`` object carries ManagedSystemID and NO
+    PlatformID — Password Safe hangs the platform off the managed SYSTEM, and only the
+    request-scoped collection row denormalises it back onto the account. Reading
+    ``platform_id`` off a by-id row therefore yields "" for EVERY account, so a guard
+    that stopped there refused every link on every tenant with the by-id route: the
+    mirror was on the right platform, freshly created on it moments earlier."""
+    client = _install(FakeClient(
+        objects={"ManagedAccounts/7": _acct_by_id(7),
+                 "ManagedAccounts/1": _acct_by_id(1),
+                 "ManagedSystems/77": {"ManagedSystemID": 77, "PlatformID": 1010}},
+        flat={"Platforms": [{"PlatformID": 1010, "Name": "PRA Vault Token"}],
+              "ManagedAccounts/1/SyncedAccounts": [_acct(7)]}))
+    out = _run(ps.link_synced_account(parent_account_id=1, synced_account_id=7,
+                                      expect_subscriber_platform="PRA Vault Token"))
+    assert out["confirmed"] is True
+    assert ("POST", "ManagedAccounts/1/SyncedAccounts/7") in client.calls
+
+
+def test_the_system_platform_falls_back_to_the_paged_scan():
+    # Same two read shapes as the account read: some builds have no by-id route.
+    client = _install(FakeClient(
+        objects={"ManagedAccounts/7": _acct_by_id(7),
+                 "ManagedAccounts/1": _acct_by_id(1)},
+        status={"ManagedSystems/77": 404},
+        pages={"ManagedSystems": [[{"ManagedSystemID": 77, "PlatformID": 1010}]]},
+        flat={"Platforms": [{"PlatformID": 1010, "Name": "PRA Vault Token"}],
+              "ManagedAccounts/1/SyncedAccounts": [_acct(7)]}))
+    out = _run(ps.link_synced_account(parent_account_id=1, synced_account_id=7,
+                                      expect_subscriber_platform="PRA Vault Token"))
+    assert out["confirmed"] is True
+
+
+def test_an_unreadable_platform_is_refused_as_unresolved_not_as_a_mismatch():
+    """Still fails closed — but the two causes have different remedies, and reporting
+    an unreadable system as a wrong platform sends the operator to re-check a platform
+    that was right all along."""
+    client = _install(FakeClient(
+        objects={"ManagedAccounts/7": _acct_by_id(7)},
+        status={"ManagedSystems/77": 500},
+        pages={"ManagedSystems": [[]]},
+        flat={"Platforms": [{"PlatformID": 1010, "Name": "PRA Vault Token"}]}))
+    try:
+        _run(ps.link_synced_account(parent_account_id=1, synced_account_id=7,
+                                    expect_subscriber_platform="PRA Vault Token"))
+    except ps.PSApiError as exc:
+        msg = str(exc)
+        assert "could not read the platform" in msg and "77" in msg
+        assert "not a" not in msg, "an unresolved platform must not read as a mismatch"
+    else:
+        raise AssertionError("an unresolvable platform must fail closed")
+    assert all("SyncedAccounts" not in p for p, _ in client.posts)
 
 
 def test_platform_matching_tolerates_a_rename_but_not_a_different_plugin():

@@ -520,7 +520,15 @@ def _account_state(item: dict) -> dict:
     ``last_change_date`` is kept as the VERBATIM string. Callers compare it as an
     opaque value and must not parse it: tenants return both ``…123Z`` and
     ``…+00:00``, and a parse that fails either never fires (nothing ever syncs) or
-    fires every pass (a checkout and a PRA write every interval, forever)."""
+    fires every pass (a checkout and a PRA write every interval, forever).
+
+    ``platform_id`` is present in the request-scoped ``ManagedAccounts`` COLLECTION
+    row and absent from the ``ManagedAccounts/{id}`` object — Password Safe hangs the
+    PlatformID off the managed SYSTEM, and only the collection denormalises it back
+    onto the account. So it is "" on a by-id read of a real tenant, and a caller that
+    needs the platform must resolve it through ``system_id`` (see
+    ``_platform_id_for_account``). Left in place rather than dropped because the scan
+    shape does return it, and one fewer round trip is worth having."""
     return {
         "account_id": _row_key(item, ("ManagedAccountID", "ManagedAccountId",
                                       "AccountId", "AccountID", "ID")),
@@ -570,6 +578,56 @@ async def _managed_account(client: httpx.AsyncClient, account_id: int) -> dict:
         if state["account_id"] and int(state["account_id"]) == aid:
             return state
     return {}
+
+
+async def _system_platform_id(client: httpx.AsyncClient, system_id: int) -> int:
+    """The ``PlatformID`` of one managed SYSTEM, or 0 when it cannot be read.
+
+    Two read shapes again, and for the same reason as ``_managed_account``: by id
+    where the route exists, else the paged collection this repo has already proven
+    against a live tenant (``read_database_inventory`` joins accounts to systems
+    exactly this way, and reads the platform off the SYSTEM row).
+
+    Returns 0 rather than raising — the one caller fails closed on 0 with a message
+    that names this read, which is more useful than a transport error surfacing as an
+    apparent platform mismatch."""
+    sid = int(system_id or 0)
+    if not sid:
+        return 0
+    try:
+        resp = await client.get(f"ManagedSystems/{sid}")
+        if resp.status_code == 200:
+            body = resp.json()
+            if isinstance(body, dict):
+                return int(_row_key(body, ("PlatformID", "PlatformId")) or 0)
+        rows = await _get_paged(
+            client, "ManagedSystems",
+            id_keys=("ManagedSystemID", "ManagedSystemId", "SystemId", "SystemID"))
+        for item in rows:
+            key = _row_key(item, ("ManagedSystemID", "ManagedSystemId",
+                                  "SystemId", "SystemID"))
+            if key is not None and str(key) == str(sid):
+                return int(_row_key(item, ("PlatformID", "PlatformId")) or 0)
+    except Exception as exc:  # noqa: BLE001 — advisory lookup; 0 fails the guard closed
+        logger.warning("Password Safe: could not read the platform of managed system "
+                       "%s: %s", sid, exc)
+    return 0
+
+
+async def _platform_id_for_account(client: httpx.AsyncClient, state: dict) -> int:
+    """The PlatformID behind one ``_account_state``, or 0.
+
+    The account row carries it only in the collection shape (see ``_account_state``),
+    so fall back to the owning managed system. Without this fallback a platform guard
+    on a by-id tenant reads "" for EVERY account and refuses every link — which is
+    exactly how the OT cell deploy failed at 97% with "platform '(unknown)'"."""
+    try:
+        pid = int(state.get("platform_id") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid:
+        return pid
+    return await _system_platform_id(client, int(state.get("system_id") or 0))
 
 
 async def _system_id_for(client: httpx.AsyncClient, account_id: int) -> int:
@@ -796,9 +854,11 @@ async def link_synced_account(*, parent_account_id: int, synced_account_id: int,
     ``-ma-id`` and ``-sa-id``.
 
     ``expect_subscriber_platform`` fails the call CLOSED when the subordinate is not on
-    that platform — linking a Kubernetes bearer token to an account managed by some other
-    plugin is the one failure here that puts a secret somewhere it does not belong, so an
-    ambiguous target is refused rather than guessed at.
+    that platform — linking the parent's credential (a Kubernetes bearer token here, a
+    cell's admin password on the OT path) to an account managed by some other plugin is
+    the one failure that puts a secret somewhere it does not belong, so an ambiguous
+    target is refused rather than guessed at. The subordinate's platform costs a second
+    read: it lives on the managed SYSTEM, not on a by-id account row.
 
     Returns ``{"linked": True, "confirmed": bool}``. The confirm is a re-read of the
     subscriber list in the same session: a 200 on a POST that did not actually take is
@@ -819,12 +879,22 @@ async def link_synced_account(*, parent_account_id: int, synced_account_id: int,
                     raise PSApiError(
                         f"Password Safe managed account {sub} (the PRA Vault Token account) "
                         f"does not exist — re-register the cluster or clear the binding.")
-                pname = await _platform_name(client, int(target["platform_id"] or 0))
+                pid = await _platform_id_for_account(client, target)
+                pname = await _platform_name(client, pid) if pid else ""
+                if not pname:
+                    # UNRESOLVED, not mismatched. Still fails closed, but says so:
+                    # the two have different remedies and reporting the first as the
+                    # second sends the operator to re-check a platform that is right.
+                    raise PSApiError(
+                        f"could not read the platform of managed account {sub} "
+                        f"(managed system {target.get('system_id') or '?'}) — the API "
+                        f"identity needs Read on that managed system. Refusing the sync "
+                        f"rather than guess at an unknown plugin.")
                 if not _platform_matches(pname, expect_subscriber_platform):
                     raise PSApiError(
-                        f"managed account {sub} is on platform {pname or '(unknown)'!r}, not a "
-                        f"{expect_subscriber_platform!r} platform — refusing to sync a "
-                        f"Kubernetes ServiceAccount token to it.")
+                        f"managed account {sub} is on platform {pname!r}, not a "
+                        f"{expect_subscriber_platform!r} platform — refusing to sync "
+                        f"the parent's credential to it.")
 
             resp = await client.post(
                 f"ManagedAccounts/{parent}/SyncedAccounts/{sub}")
