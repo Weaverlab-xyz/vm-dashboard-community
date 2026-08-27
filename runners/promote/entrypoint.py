@@ -49,6 +49,75 @@ def download(url: str, dest: str) -> None:
     log(f"download done ({size_mb:.1f} MiB)")
 
 
+# libguestfs builds a supermin appliance (kernel + initrd + root fs, ~1 GiB) in
+# its cache dir on every cold start, and virt-customize needs scratch space in
+# its tmpdir on top. Both land on the SAME volume as the multi-GB disk we just
+# downloaded, so a runner sized for "the source plus a bit" runs out of room
+# exactly here — and libguestfs reports it as "/usr/bin/supermin exited with
+# error status 1", which reads like a corrupt image rather than a full disk.
+# 2 GiB is the floor that made a 17 GiB VHD promote work on a 20 GiB volume's
+# worth of free space.
+_LIBGUESTFS_MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def _libguestfs_scratch_dirs() -> list:
+    """The dirs libguestfs writes to, in its own precedence order: the appliance
+    cache dir and virt-customize's tmpdir. Deduplicated (they're normally the
+    same filesystem, and always are in this container)."""
+    cache = os.environ.get("LIBGUESTFS_CACHEDIR") or os.environ.get("TMPDIR") or "/var/tmp"
+    tmp = os.environ.get("LIBGUESTFS_TMPDIR") or os.environ.get("TMPDIR") or "/var/tmp"
+    return list(dict.fromkeys([cache, tmp]))
+
+
+def free_bytes(path: str) -> int:
+    """Free bytes on the filesystem holding `path`, or -1 if it can't be read."""
+    try:
+        st = os.statvfs(path)
+        return st.f_bavail * st.f_frsize
+    except OSError:
+        return -1
+
+
+def log_disk_free(label: str, *paths: str) -> None:
+    parts = []
+    for pth in paths:
+        free = free_bytes(pth)
+        parts.append(f"{pth}={'unknown' if free < 0 else f'{free / (1024 ** 3):.1f} GiB free'}")
+    log(f"disk {label}: " + ", ".join(parts))
+
+
+def run_virt_customize(cmd: list, what: str) -> None:
+    """Run a virt-customize argv, with the disk-space failure mode made legible.
+
+    Preflights the appliance's scratch space so an under-provisioned runner fails
+    with an actionable message instead of supermin's opaque exit 1, and annotates
+    any other failure with the free space at the time so the next reader doesn't
+    have to guess."""
+    scratch = _libguestfs_scratch_dirs()
+    log_disk_free(f"before {what}", *scratch)
+    for d in scratch:
+        free = free_bytes(d)
+        if 0 <= free < _LIBGUESTFS_MIN_FREE_BYTES:
+            raise RuntimeError(
+                f"only {free / (1024 ** 3):.1f} GiB free on {d}, but libguestfs needs at least "
+                f"{_LIBGUESTFS_MIN_FREE_BYTES / (1024 ** 3):.0f} GiB there to build its appliance "
+                f"for the {what} step. The runner's disk must hold the whole source image PLUS that "
+                "headroom — raise the promote runner's disk size (AWS: Settings → Remote Worker → "
+                "Image-promote runner → AWS → Disk (GiB), which sets the Fargate task's ephemeral "
+                "storage; its implicit default is only 20 GiB)."
+            )
+    try:
+        subprocess.check_call(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    except subprocess.CalledProcessError:
+        log_disk_free(f"after failed {what}", *scratch)
+        log(
+            f"ERROR: virt-customize failed during {what}. If the error above mentions supermin or "
+            "the appliance, this is almost always the runner running out of disk — see the free "
+            "space logged above and raise the runner's disk size."
+        )
+        raise
+
+
 def convert(src: str, dst: str, target_format: str) -> None:
     log(f"convert {src} -> {dst} ({target_format})")
     subprocess.check_call(
@@ -176,7 +245,7 @@ def install_linux_agent(disk_path: str, source_format: str) -> None:
         # Fix SELinux labels touched by the edits (no-op on non-SELinux guests).
         "--selinux-relabel",
     ]
-    subprocess.check_call(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    run_virt_customize(cmd, "waagent injection")
     log("waagent injection done")
 
 
@@ -228,7 +297,7 @@ def install_gcp_guest_agent(disk_path: str, source_format: str) -> None:
         # Fix SELinux labels on the files we added (no-op on non-SELinux guests).
         "--selinux-relabel",
     ]
-    subprocess.check_call(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    run_virt_customize(cmd, "google-guest-agent injection")
     log("google-guest-agent injection done")
 
 
@@ -309,7 +378,7 @@ def install_aws_guest_env(disk_path: str, source_format: str) -> None:
         # Fix SELinux labels on everything we touched (no-op on non-SELinux guests).
         "--selinux-relabel",
     ]
-    subprocess.check_call(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    run_virt_customize(cmd, "aws guest-env injection")
     log("aws guest-env injection done")
 
 
@@ -515,6 +584,10 @@ def main() -> int:
 
     try:
         download(args.source_url, src_path)
+        # Always on the record: every remaining step (convert, offline edit, tar
+        # wrap) writes to this same volume, so the free space here is the first
+        # thing worth knowing when one of them fails.
+        log_disk_free("after download", "/tmp", *_libguestfs_scratch_dirs())
         # Azure is handled specially below (it always needs a fixed-format VHD,
         # normalised straight from the source), so skip the generic convert here.
         if src_ext != dst_ext and args.target != "azure":

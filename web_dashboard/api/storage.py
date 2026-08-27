@@ -131,6 +131,7 @@ async def get_config(current_user: User = Depends(require_permission("admin", "r
         "promote_runner_ecs_task_family",
         "promote_runner_ecs_cpu",
         "promote_runner_ecs_memory",
+        "promote_runner_ecs_ephemeral_storage_gib",
         "promote_runner_ecs_subnet_id",
         "promote_runner_ecs_security_group_ids",
         "promote_runner_ecs_execution_role_arn",
@@ -198,6 +199,7 @@ class StorageConfigPatch(BaseModel):
     promote_runner_ecs_task_family:        str | None = None
     promote_runner_ecs_cpu:                str | None = None
     promote_runner_ecs_memory:             str | None = None
+    promote_runner_ecs_ephemeral_storage_gib: str | None = None
     promote_runner_ecs_subnet_id:          str | None = None
     promote_runner_ecs_security_group_ids: str | None = None
     promote_runner_ecs_execution_role_arn: str | None = None

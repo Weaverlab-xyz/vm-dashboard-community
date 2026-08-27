@@ -3621,6 +3621,7 @@ def _run_promote_runner_ecs_sync(
     image: str,
     cpu: str,
     memory: str,
+    ephemeral_storage_gib: int,
     subnet_id: str,
     security_group_ids: list,
     execution_role_arn: str,
@@ -3659,6 +3660,14 @@ def _run_promote_runner_ecs_sync(
         requiresCompatibilities=["FARGATE"],
         cpu=str(cpu),
         memory=str(memory),
+        # Without this, Fargate gives the task its implicit 20 GiB ephemeral
+        # volume — shared with the runner image's own layers. The runner writes
+        # the whole source disk to /tmp, so a 17 GiB VHD left libguestfs no room
+        # to build its supermin appliance and virt-customize died with
+        # "supermin exited with error status 1" (which looks like a corrupt image,
+        # not a full disk). Sizing it explicitly is the fix; the caller validates
+        # the 21-200 GiB Fargate range.
+        ephemeralStorage={"sizeInGiB": int(ephemeral_storage_gib)},
         containerDefinitions=[{
             "name": "promote-runner",
             "image": image,
@@ -3748,6 +3757,7 @@ async def run_promote_runner_ecs(
     image: str,
     cpu: str,
     memory: str,
+    ephemeral_storage_gib: int,
     subnet_id: str,
     security_group_ids: list,
     execution_role_arn: str,
@@ -3761,6 +3771,7 @@ async def run_promote_runner_ecs(
         return await _to_thread(
             _run_promote_runner_ecs_sync,
             region, cluster, task_family, image, cpu, memory,
+            ephemeral_storage_gib,
             subnet_id, security_group_ids, execution_role_arn,
             task_role_arn, runner_args, job_id, poll_seconds_max,
         )

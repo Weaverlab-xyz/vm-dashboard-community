@@ -1001,6 +1001,14 @@ class Settings(BaseSettings):
     promote_runner_ecs_task_family: str = "promote-runner"
     promote_runner_ecs_cpu: str = "1024"                 # qemu-img wants headroom
     promote_runner_ecs_memory: str = "4096"              # ~4 GiB for multi-GB VHDs
+    # Fargate's DEFAULT ephemeral volume is 20 GiB, shared with the runner image's
+    # own layers — and the task writes the whole source disk to /tmp (a 17 GiB VHD
+    # leaves well under a GiB free). libguestfs then can't build its supermin
+    # appliance and virt-customize dies with "supermin exited with error status 1",
+    # which reads like a broken image rather than a full disk. Ask for room:
+    # 21-200 GiB is the Fargate range, and the extra GiB-hours are pennies on a
+    # task that lives for minutes.
+    promote_runner_ecs_ephemeral_storage_gib: str = "100"
     promote_runner_ecs_subnet_id: str = ""               # fallback: ansible_ecs_subnet_id
     promote_runner_ecs_security_group_ids: str = ""      # fallback: ansible_ecs_security_group_ids
     promote_runner_ecs_execution_role_arn: str = ""      # required (image pull + log write)
