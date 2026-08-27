@@ -41,7 +41,15 @@ schedule, rather than at onboarding.
 The Password Safe half is **optional and independent**. A POV wired into PRA is already
 useful, and a tenant that has not been given a workgroup or a functional account is a
 reason to skip that half with a message, never a reason to fail the jump item that
-already worked.
+already worked. The Entitle half is optional on the same terms.
+
+**Entitle needs something the dashboard does not install.** Its SSH ephemeral-accounts
+integration reaches a *private* target through an Entitle agent — a Kubernetes deployment
+inside the customer's network, named by ``agent_token_name`` on the tenant. This dashboard
+installs a Gateway (slice 5) and a Resource Broker (slice 5b) but not that, so a POV whose
+Entitle tenant names no agent is skipped with the reason rather than registered against
+the install's own tenant. The service raises the same refusal from its own side; this just
+gets there first, with a message an SE can act on.
 """
 from __future__ import annotations
 
@@ -50,8 +58,9 @@ import logging
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM
-from . import (bt_tenant_service, job_service, pov_gateway, ps_api_service,
-               ps_resource_service, terraform_pra_service)
+from . import (bt_tenant_service, config_service, entitle_registration_service,
+               job_service, pov_gateway, ps_api_service, ps_resource_service,
+               terraform_pra_service)
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +203,88 @@ async def ps_context(db: Session, env: PovEnvironment) -> dict:
             "label": tenant.name}
 
 
+# ── the Entitle tenant ───────────────────────────────────────────────────────
+
+# Where a POV's Entitle SSH key lives. Per-POV rather than per-tenant because it is the
+# key baked into THAT template's guests — the same storage shape the Gateway deploy key
+# and the Resource Broker installer key use.
+_ENTITLE_KEY_FMT = "pov/{env_id}/entitle_ssh_key"
+
+
+def entitle_key_config_key(env_id: str) -> str:
+    return _ENTITLE_KEY_FMT.format(env_id=env_id)
+
+
+def set_entitle_key(env: PovEnvironment, pem: str) -> None:
+    """Store a POV's Entitle SSH private key, encrypted. Blank clears it."""
+    config_service.set(entitle_key_config_key(env.id), (pem or "").strip())
+
+
+def has_entitle_key(env: PovEnvironment) -> bool:
+    return bool(config_service.get(entitle_key_config_key(env.id)))
+
+
+def clear_entitle_key(env: PovEnvironment) -> None:
+    try:
+        config_service.delete(entitle_key_config_key(env.id))
+    except Exception:  # noqa: BLE001 — teardown must survive a key already gone
+        logger.debug("POV %s: no Entitle SSH key to clear", env.id)
+
+
+async def entitle_context(db: Session, env: PovEnvironment) -> dict:
+    """Everything the Entitle half needs, or a refusal naming what is missing.
+
+    ``{}`` — not an error — when the POV has no Entitle tenant. The three halves of this
+    wire-up are independent, and a POV without Entitle is a perfectly good POV.
+    """
+    if not env.entitle_tenant_id:
+        return {}
+    try:
+        tenant = bt_tenant_service.resolve(db, "entitle", env.entitle_tenant_id)
+    except bt_tenant_service.BTTenantError as exc:
+        raise WireupError(
+            f"this POV's Entitle tenant could not be resolved: {exc}") from None
+
+    missing = [label for label, value in (
+        ("an owner id", tenant.option("owner_id")),
+        ("a workflow id", tenant.option("workflow_id")),
+        ("an SSH sudo user", tenant.option("ssh_sudo_user")),
+    ) if not value]
+    if missing:
+        raise WireupError(
+            f"the Entitle tenant {tenant.name!r} names {' and '.join(missing)}, which an "
+            f"integration cannot be created without. Set them on the tenant.")
+
+    agent = tenant.option("agent_token_name")
+    if not agent:
+        # The one prerequisite this dashboard cannot satisfy. Said here, in front of the
+        # operator, rather than letting the terraform apply fail with the provider's
+        # version of it half a minute later.
+        raise WireupError(
+            f"the Entitle tenant {tenant.name!r} names no agent token. A POV's VMs are on "
+            f"a private network, and Entitle reaches a private target through an agent "
+            f"running inside it — which this dashboard does not install. Deploy the "
+            f"Entitle agent in the POV and name its token on the tenant.")
+
+    pem = config_service.get(entitle_key_config_key(env.id))
+    if not pem:
+        raise WireupError(
+            "this POV has no Entitle SSH key. Entitle's ephemeral-accounts integration "
+            "authenticates with a key, not a password — add the private half of the key "
+            "baked into this template's guests.")
+
+    return {
+        "ctx": entitle_registration_service.tenant_ctx(
+            api_key=tenant.secret, endpoint=tenant.base_url,
+            owner_id=tenant.option("owner_id"),
+            workflow_id=tenant.option("workflow_id"),
+            agent_token_name=agent, ssh_sudo_user=tenant.option("ssh_sudo_user")),
+        "sudo_user": tenant.option("ssh_sudo_user"),
+        "private_key": pem,
+        "label": tenant.name,
+    }
+
+
 # ── per-VM ───────────────────────────────────────────────────────────────────
 
 def wireable(vm: PovEnvironmentVM) -> str:
@@ -213,7 +304,8 @@ def wireable(vm: PovEnvironmentVM) -> str:
 
 def _record(db: Session, vm: PovEnvironmentVM, *, jump_id: str = "", state: str = "",
             vault_id: str = "", error: str = "", ps_system_id: str = "",
-            ps_account_id: str = "", ps_state: str = "") -> None:
+            ps_account_id: str = "", ps_state: str = "",
+            entitle_id: str = "", entitle_state: str = "") -> None:
     """Persist one VM's outcome immediately.
 
     The moment the artifact exists, not at the end of the run. A re-derived id is how you
@@ -232,6 +324,10 @@ def _record(db: Session, vm: PovEnvironmentVM, *, jump_id: str = "", state: str 
         vm.ps_managed_account_id = ps_account_id
     if ps_state:
         vm.ps_registration_tf_state = ps_state
+    if entitle_id:
+        vm.entitle_integration_id = entitle_id
+    if entitle_state:
+        vm.entitle_tf_state = entitle_state
     vm.wiring_error = error or None
     db.commit()
 
@@ -387,6 +483,52 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
     return f"{vm.name}: Password Safe system {system_id}, account {account_id}{seeded}."
 
 
+async def register_vm_entitle(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
+                              ent: dict) -> str:
+    """Register one VM as an Entitle SSH ephemeral-accounts integration.
+
+    Linux only, and that is the app rather than a limitation of this code: the SSH
+    ephemeral-accounts connector mints a short-lived account over SSH, which a Windows
+    guest does not answer. A Windows VM is skipped with that reason rather than registered
+    into an integration that could never grant anything.
+    """
+    if vm.entitle_integration_id:
+        return f"{vm.name}: already in Entitle ({vm.entitle_integration_id})."
+
+    if (vm.os_family or "").strip().lower() != "linux":
+        return (f"{vm.name}: skipped Entitle — the SSH ephemeral-accounts app mints "
+                f"accounts over SSH, which this guest does not answer.")
+
+    label = f"{env.name}-{vm.name}"
+    try:
+        result = await entitle_registration_service.register_ssh_host(
+            name=label, hostname=vm.private_ip, sudo_user=ent["sudo_user"],
+            private_key=ent["private_key"], port=SSH_PORT,
+            # A POV's VMs are on a private network by construction, so the integration is
+            # always private and always needs the agent — which `entitle_context` has
+            # already proven the tenant names.
+            private=True, ctx=ent["ctx"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("POV %s: registering %s in Entitle failed", env.id, vm.name,
+                       exc_info=True)
+        _record(db, vm, error=f"Entitle: {exc}"[:2000])
+        return f"{vm.name}: Entitle FAILED — {exc}"
+
+    integration_id = str(result.get("integration_id") or "")
+    state = result.get("tf_state_json") or ""
+    if not state:
+        logger.error("POV %s: %s was registered in Entitle but terraform returned no "
+                     "state", env.id, vm.name)
+        _record(db, vm, entitle_id=integration_id,
+                error="the Entitle integration was created but terraform returned no "
+                      "state, so this dashboard cannot remove it — delete it in Entitle "
+                      "by hand at teardown")
+        return f"{vm.name}: Entitle {integration_id} but NO STATE — see the row."
+
+    _record(db, vm, entitle_id=integration_id, entitle_state=state)
+    return f"{vm.name}: Entitle integration {integration_id}."
+
+
 # ── the job ──────────────────────────────────────────────────────────────────
 
 async def run_env_wireup(job_id: str, meta: dict) -> None:
@@ -423,6 +565,14 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
         except (WireupError, bt_tenant_service.BTTenantError) as exc:
             ps_note = str(exc)
 
+        # And the Entitle half, on exactly the same terms.
+        ent = {}
+        ent_note = ""
+        try:
+            ent = await entitle_context(db, env)
+        except (WireupError, bt_tenant_service.BTTenantError) as exc:
+            ent_note = str(exc)
+
         vms = (db.query(PovEnvironmentVM)
                  .filter(PovEnvironmentVM.environment_id == env.id)
                  .order_by(PovEnvironmentVM.name).all())
@@ -448,10 +598,18 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
         else:
             job_service.append_job_log(
                 db, job_id,
-                "This POV names no Password Safe tenant, so only PRA jump items are "
+                "This POV names no Password Safe tenant, so no managed systems are "
                 "created.")
 
-        wired = skipped = failed = onboarded = 0
+        if ent:
+            job_service.append_job_log(
+                db, job_id,
+                f"Registering the Linux guests in Entitle tenant {ent['label']}.")
+        elif ent_note:
+            job_service.append_job_log(
+                db, job_id, f"Skipping the Entitle half: {ent_note}")
+
+        wired = skipped = failed = onboarded = registered = 0
         for index, vm in enumerate(vms):
             job_service.update_progress(
                 db, job_id, int(5 + 90 * index / max(len(vms), 1)),
@@ -473,8 +631,14 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
                 if "FAILED" not in ps_line and "skipped" not in ps_line:
                     onboarded += 1
 
+            if ent and not wireable(vm):
+                ent_line = await register_vm_entitle(db, env, vm, ent=ent)
+                job_service.append_job_log(db, job_id, ent_line)
+                if "FAILED" not in ent_line and "skipped" not in ent_line:
+                    registered += 1
+
         summary = {"environment_id": env.id, "wired": wired, "skipped": skipped,
-                   "failed": failed, "onboarded": onboarded}
+                   "failed": failed, "onboarded": onboarded, "registered": registered}
         if failed and not wired:
             # Nothing worked, so this is a failure rather than a partial success — the
             # distinction matters because a green job with zero artifacts is the one an
@@ -503,7 +667,12 @@ async def teardown(db: Session, env: PovEnvironment) -> str:
     """
     rows = (db.query(PovEnvironmentVM)
               .filter(PovEnvironmentVM.environment_id == env.id).all())
-    lines = [await _teardown_password_safe(db, env, rows)]
+    lines = [await _teardown_entitle(db, env, rows),
+             await _teardown_password_safe(db, env, rows)]
+
+    if has_entitle_key(env):
+        clear_entitle_key(env)
+        lines.append("Cleared the stored Entitle SSH key.")
 
     wired = [r for r in rows if r.pra_jump_tf_state]
     if not wired:
@@ -548,6 +717,47 @@ async def teardown(db: Session, env: PovEnvironment) -> str:
     else:
         lines.append(f"Removed {removed} PRA jump item(s) from tenant {tenant['label']}.")
     return " ".join(l for l in lines if l)
+
+
+async def _teardown_entitle(db: Session, env: PovEnvironment, rows: list) -> str:
+    """Remove every Entitle integration this POV created. Returns a line, never raises.
+
+    First of the three, and for the same reason the jump items come before the platform
+    delete: an integration is standing *access*, so it is the artifact whose lingering
+    matters most.
+    """
+    registered = [r for r in rows if r.entitle_tf_state]
+    if not registered:
+        return ""
+    try:
+        ent = await entitle_context(db, env)
+    except (WireupError, bt_tenant_service.BTTenantError) as exc:
+        return (f"Could not resolve this POV's Entitle tenant ({exc}), so "
+                f"{len(registered)} integration(s) were left in place — delete them by "
+                f"hand.")
+    if not ent:
+        return (f"This POV names no Entitle tenant, so {len(registered)} integration(s) "
+                f"could not be removed — delete them by hand.")
+
+    removed = problems = 0
+    for vm in registered:
+        try:
+            await entitle_registration_service.deregister(vm.entitle_tf_state,
+                                                          ctx=ent["ctx"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: removing %s from Entitle failed", env.id, vm.name,
+                           exc_info=True)
+            problems += 1
+            continue
+        vm.entitle_integration_id = None
+        vm.entitle_tf_state = None
+        removed += 1
+    db.commit()
+
+    if problems:
+        return (f"Removed {removed} Entitle integration(s); {problems} could not be and "
+                f"are still in tenant {ent['label']} — delete them by hand.")
+    return f"Removed {removed} Entitle integration(s) from tenant {ent['label']}."
 
 
 async def _teardown_password_safe(db: Session, env: PovEnvironment, rows: list) -> str:
@@ -606,9 +816,15 @@ def describe(db: Session, env: PovEnvironment) -> dict:
         "vm_count": len(rows),
         "wired_count": sum(1 for r in rows if r.pra_jump_id),
         "onboarded_count": sum(1 for r in rows if r.ps_managed_system_id),
+        "entitle_count": sum(1 for r in rows if r.entitle_integration_id),
         "wiring_error_count": sum(1 for r in rows if r.wiring_error),
         "wireup_ready": bool(env.gateway_name and env.pra_tenant_id and rows),
         # Reported separately from `wireup_ready` because the two halves are independent:
         # a POV with no Password Safe tenant still wires into PRA.
         "ps_onboard_ready": bool(env.ps_tenant_id and env.ps_application_host_id and rows),
+        # The Entitle half needs a key this dashboard cannot derive, so "ready" here means
+        # the operator supplied one — the agent-token check belongs to the tenant and is
+        # reported by the run rather than guessed at per row.
+        "entitle_ready": bool(env.entitle_tenant_id and has_entitle_key(env) and rows),
+        "entitle_has_key": has_entitle_key(env),
     }

@@ -12,7 +12,10 @@
   GET    /api/pov/managed/{id}/gateway  — what PRA says about it, live
   POST   /api/pov/managed/{id}/resource-broker
                                         — configure and install the Password Safe Resource Broker
-  POST   /api/pov/managed/{id}/wireup   — PRA jump item + Password Safe managed system per VM
+  POST   /api/pov/managed/{id}/wireup   — PRA jump item, Password Safe managed system and
+                                          Entitle integration per VM
+  POST   /api/pov/managed/{id}/entitle-key
+                                        — the SSH key Entitle's connector authenticates with
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
@@ -150,6 +153,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
             "vault_account_id": v.vault_account_id or "",
             "ps_managed_system_id": v.ps_managed_system_id or "",
             "ps_managed_account_id": v.ps_managed_account_id or "",
+            "entitle_integration_id": v.entitle_integration_id or "",
             "wiring_error": v.wiring_error or "",
         } for v in vms]
     return out
@@ -597,16 +601,17 @@ async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
 @router.post("/managed/{env_id}/wireup", status_code=202)
 async def wireup(env_id: str, db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
-    """Wire every VM in this POV into PRA, and into Password Safe when it has a tenant.
+    """Wire every VM in this POV into PRA, and into Password Safe and Entitle when it has
+    a tenant for them.
 
     Refused up front when the POV has no Gateway or no resolvable PRA tenant, because
     neither is something the second VM will do better at — and thirty identical failures
     in a job log hide the one line that matters.
 
-    The **Password Safe half is not preflighted here**, deliberately. It is independent
-    and optional: a POV with no Password Safe tenant, or one whose tenant is half
-    configured, should still get its jump items. The job says which half it skipped and
-    why, in its own log.
+    The **Password Safe and Entitle halves are not preflighted here**, deliberately. Both
+    are independent and optional: a POV with no tenant for one of them, or one whose
+    tenant is half configured, should still get everything else. The job says which half
+    it skipped and why, in its own log.
 
     Re-runnable: a VM that already has an artifact is skipped rather than given a second
     one, so this is also the remedy for a run that half-finished.
@@ -631,6 +636,28 @@ async def wireup(env_id: str, db: Session = Depends(get_db),
         workgroup=env.workgroup,
         metadata={"environment_id": env.id})
     return {"job_id": job.id}
+
+
+class EntitleKeyRequest(BaseModel):
+    """The private half of the SSH key baked into this POV template's Linux guests.
+
+    Entitle's ephemeral-accounts connector authenticates with a key, not the password the
+    lab platform holds — so this is the one credential the POV wire-up cannot derive from
+    anything it already has. Blank clears it.
+    """
+    private_key: str = ""
+
+
+@router.post("/managed/{env_id}/entitle-key")
+async def entitle_key(env_id: str, payload: EntitleKeyRequest,
+                      db: Session = Depends(get_db),
+                      current_user: User = Depends(get_current_user)):
+    """Store (or clear) this POV's Entitle SSH key. Never returns it."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    pov_wireup.set_entitle_key(env, payload.private_key)
+    return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
 @router.delete("/managed/{env_id}", status_code=202)

@@ -34,7 +34,9 @@
   The Wired column is the per-VM PAM half: one PRA jump item per VM routed through THIS
   POV's own Gateway (the tenant's appliance-wide default has no route into the
   environment), and one Password Safe managed system reached THROUGH the Resource Broker.
-  The two are independent — a POV with no Password Safe tenant still wires into PRA.
+  The three are independent — a POV with no Password Safe or Entitle tenant still wires
+  into PRA. Entitle additionally needs an agent running inside the POV, which this
+  dashboard does NOT install, and an SSH key from the template.
 
   Share links and the expiry timer arrive in later slices.
 #}
@@ -256,8 +258,16 @@
                 <p x-show="e.ps_onboard_ready" class="text-xs whitespace-nowrap"
                    :class="e.onboarded_count ? 'text-gray-600' : 'text-gray-300'"
                    x-text="'PS ' + (e.onboarded_count || 0) + ' / ' + (e.vm_count || 0)"></p>
+                <p x-show="e.entitle_ready" class="text-xs whitespace-nowrap"
+                   :class="e.entitle_count ? 'text-gray-600' : 'text-gray-300'"
+                   x-text="'Entitle ' + (e.entitle_count || 0) + ' / ' + (e.vm_count || 0)"></p>
                 <p x-show="e.wiring_error_count" class="text-xs text-amber-700"
                    x-text="e.wiring_error_count + ' with errors'"></p>
+                <button x-show="e.entitle_tenant_id" @click="setEntitleKey(e)"
+                        :disabled="!actionable(e)"
+                        :title="e.entitle_has_key ? 'Replace the stored Entitle SSH key' : 'Entitle authenticates with a key, not a password'"
+                        class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+                        x-text="e.entitle_has_key ? 'ssh key ✓' : 'ssh key'"></button>
                 <button @click="wireup(e)"
                         :disabled="!actionable(e) || !e.wireup_ready"
                         :title="e.wireup_ready
@@ -933,12 +943,31 @@ function povPage() {
       } catch (e) { this.error = e.message; }
     },
 
+    async setEntitleKey(env) {
+      // A PEM is multi-line, so a prompt() is the wrong shape — but it is also the only
+      // thing that does not need a modal, and this is a per-POV one-off. Paste-friendly:
+      // the value is sent verbatim.
+      const pem = window.prompt(
+        'Paste the PRIVATE key Entitle should authenticate with (blank clears it):', '');
+      if (pem === null) return;
+      this.error = ''; this.notice = '';
+      try {
+        await this.post(`/api/pov/managed/${env.id}/entitle-key`, { private_key: pem });
+        this.notice = pem.trim()
+          ? `${env.name}: Entitle SSH key stored.`
+          : `${env.name}: Entitle SSH key cleared.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
     async wireup(env) {
       this.error = ''; this.notice = '';
       try {
         const data = await this.post(`/api/pov/managed/${env.id}/wireup`, null);
+        const also = [env.ps_onboard_ready ? 'Password Safe' : '',
+                      env.entitle_ready ? 'Entitle' : ''].filter(Boolean);
         this.notice = `${env.name}: wiring ${env.vm_count || 0} VM(s) into PRA` +
-                      (env.ps_onboard_ready ? ' and Password Safe' : '') +
+                      (also.length ? ' and ' + also.join(' and ') : '') +
                       ` — watch job ${data.job_id}. A VM already wired is skipped, not doubled.`;
         await this.load();
       } catch (e) { this.error = e.message; }
