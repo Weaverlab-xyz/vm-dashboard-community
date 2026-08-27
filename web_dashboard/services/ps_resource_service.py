@@ -273,6 +273,21 @@ _DBSSM_MIN_ASSUME_ROLE_LEN = 12
 _DBSSM_SSL_FLAGS = frozenset({"sslTRUE", "sslFALSE"})
 _DBSSM_INSTANCE_ID = re.compile(r"^i-[0-9a-f]{8,17}$")
 
+# The managed system's ``timeout`` in MILLISECONDS, not seconds. Every SSM DB action
+# fires SendCommand, sleeps 1s, reads GetCommandInvocation once, and then — only if the
+# status is still "InProgress" — does `Thread.Sleep(timeout)` and reads it a second time,
+# where `timeout` is the managed system's own Timeout field. Password Safe defaults that
+# field to 30, so an unset value buys the command 30 MILLISECONDS to finish; the second
+# read still says "InProgress", which the action treats as neither Failed nor Success and
+# falls through to report SUCCESS. That is worse than a timeout: Password Safe stores the
+# new password it never confirmed. A shell round-trip to a jump host plus a psql ALTER
+# USER against RDS is a few seconds, so 30s is the smallest value that reliably lands in
+# the Success branch. This is the vendor article's "timeout in milliseconds is used to
+# give more time for Systems Manager to provide status" note, made structural — a
+# constant rather than a config key, because there is one right answer and a per-install
+# knob here is a way to get the 30ms behaviour back by accident.
+_DBSSM_PLUGIN_TIMEOUT_MS = 30000
+
 
 def _validate_dbssm_dns_name(dns_name: str) -> None:
     """Raise PSResourceError unless ``dns_name`` is an address the plugin will parse.
@@ -567,7 +582,8 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
                                  application_host_id: int = 0, method: str = "ssh",
                                  dns_name: str = "", emit_private_key: bool = True,
                                  dss_auto_management: bool = True,
-                                 use_own_credentials: bool = False) -> str:
+                                 use_own_credentials: bool = False,
+                                 timeout_ms: int = 0) -> str:
     """HCL onboarding a VM as a managed system + its account. Two shapes via ``method``:
 
     * ``ssh`` (default) — traditional managed system keyed by host_name/ip on an SSH
@@ -607,6 +623,10 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
         _line("functional_account_id", int(functional_account_id)),
         _line("auto_management_flag", "true"),
     ]
+    if timeout_ms and int(timeout_ms) > 0:
+        # Read by the plugin as a Thread.Sleep in milliseconds, not by Password Safe as
+        # a socket timeout — a custom-plugin platform never opens the connection itself.
+        sys_lines.append(_line("timeout", int(timeout_ms)))
     if method not in _PLUGIN_METHODS:
         sys_lines.append(_line("remote_client_type", '"ssh"'))
         sys_lines.append(_line("ssh_key_enforcement_mode", int(ssh_key_enforcement_mode)))
@@ -902,7 +922,8 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="dbssm", dns_name=dns_name, emit_private_key=False,
-            dss_auto_management=False, use_own_credentials=use_own_credentials)
+            dss_auto_management=False, use_own_credentials=use_own_credentials,
+            timeout_ms=_DBSSM_PLUGIN_TIMEOUT_MS)
     elif method == "dbazure":
         # Cloud-DB via the "{engine} Azure Run Command Plugin": Password Safe reaches
         # the private Azure DB by running the DB client on a jump VM over Azure VM Run
