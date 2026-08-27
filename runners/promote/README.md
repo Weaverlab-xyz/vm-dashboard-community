@@ -194,6 +194,7 @@ needs the staging bucket and — on AWS — the task role.
 | `promote_runner_ecs_task_family` | `promote-runner` | Task definition family. Auto-registered on first promote. |
 | `promote_runner_ecs_cpu` | `1024` | Fargate vCPU units. qemu-img headroom. |
 | `promote_runner_ecs_memory` | `4096` | Fargate memory (MiB) — enough for multi-GB VHDs. |
+| `promote_runner_ecs_ephemeral_storage_gib` | `100` | Fargate ephemeral disk (GiB, 21–200). Must hold the whole source image plus ~2 GiB for the offline `virt-customize` edit. Fargate's implicit default is only 20 GiB — shared with the runner image's layers — which is why this is set explicitly. |
 | `promote_runner_ecs_subnet_id` | `ansible_ecs_subnet_id` | Subnet the task uses. Needs egress to the presigned source URL. |
 | `promote_runner_ecs_security_group_ids` | `ansible_ecs_security_group_ids` | Comma-separated SG list. |
 | `promote_runner_ecs_execution_role_arn` | `ansible_ecs_execution_role_arn` | ECS execution role (image pull + logs). |
@@ -363,8 +364,8 @@ container never sees source-side credentials.
 |------|--------------------------------------------------------|
 | 0    | Success — destination object exists at the target URL  |
 | 2    | Invalid args (missing target-specific flags)           |
-| 3    | qemu-img conversion failed                             |
-| 4    | Any other failure (network, upload, etc.)              |
+| 3    | qemu-img conversion, or an offline `virt-customize` edit, failed |
+| 4    | Any other failure (network, upload, not enough disk, etc.) |
 | 5    | Source distro can't provision on Azure (e.g. Amazon Linux) — promote rejected before injection |
 
 The orchestrator reads stdout/stderr from CloudWatch (AWS) / Log Analytics
@@ -372,6 +373,33 @@ The orchestrator reads stdout/stderr from CloudWatch (AWS) / Log Analytics
 Job detail page. For OCI (Container Instances), container stdout goes to OCI
 Logging when a log group is configured on the compartment; the exit code drives
 success/failure regardless.
+
+## Disk sizing
+
+Every step after the download — format conversion, the offline
+`virt-customize` guest edits, the GCP `tar.gz` wrap — writes to the same
+volume the source image was downloaded to. The offline edits need ~2 GiB of
+their own on top: libguestfs builds a supermin appliance (kernel + initrd +
+root fs) in its cache dir on every cold start.
+
+When that volume is too small, libguestfs reports it as
+
+```
+virt-customize: error: libguestfs error: /usr/bin/supermin exited with error status 1
+```
+
+which reads like a corrupt source image rather than a full disk. The runner
+now logs free space after the download and before each edit, and refuses to
+start an edit it can't finish, naming the disk instead. Size the runner's
+volume at **source image + 2 GiB minimum** (double the source if the target
+needs a format conversion):
+
+- **AWS** — `promote_runner_ecs_ephemeral_storage_gib` (Fargate's implicit
+  default is 20 GiB, *shared with this image's own layers*).
+- **Azure/OCI** — the container host's disk; ACI/Container Instances give
+  tens of GiB by default.
+- **GCP** — Cloud Run's `/tmp` is memory-backed, so
+  `promote_runner_gcp_memory` (default 16Gi) is the real disk limit there.
 
 ## What this image deliberately doesn't do
 

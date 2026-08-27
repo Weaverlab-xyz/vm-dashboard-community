@@ -1041,6 +1041,7 @@ class AnsibleFeatureConfig(BaseModel):
     promote_runner_ecs_task_role_arn: str = ""
     promote_runner_ecs_cpu: str = "1024"
     promote_runner_ecs_memory: str = "4096"
+    promote_runner_ecs_ephemeral_storage_gib: str = "100"
     promote_runner_aws_staging_bucket: str = ""
     promote_runner_aws_staging_prefix: str = "promote-staging"
     # Azure target (ACI container group).

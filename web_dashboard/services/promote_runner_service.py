@@ -51,6 +51,24 @@ def _resolve_aws_runner_config() -> dict:
     image = _cfg("promote_runner_image") or "chrweav/dashboard-promote-runner:latest"
     cpu = _cfg("promote_runner_ecs_cpu") or "1024"
     memory = _cfg("promote_runner_ecs_memory") or "4096"
+    # Fargate's implicit 20 GiB ephemeral volume also holds the runner image's
+    # layers, and the task writes the entire source disk to /tmp — a 17 GiB VHD
+    # left too little free for libguestfs to build its supermin appliance, so
+    # virt-customize failed with the opaque "supermin exited with error status 1".
+    # Always size the volume explicitly.
+    ephemeral_gib_raw = (_cfg("promote_runner_ecs_ephemeral_storage_gib") or "100").strip()
+    try:
+        ephemeral_gib = int(float(ephemeral_gib_raw))
+    except ValueError:
+        raise PromoteRunnerError(
+            f"promote_runner_ecs_ephemeral_storage_gib must be a number, got {ephemeral_gib_raw!r}."
+        )
+    # Fargate accepts 21-200 GiB (20 GiB is the un-overridable implicit default).
+    if not 21 <= ephemeral_gib <= 200:
+        raise PromoteRunnerError(
+            f"promote_runner_ecs_ephemeral_storage_gib is {ephemeral_gib} GiB; Fargate only "
+            "accepts 21-200 GiB. Leave it blank for the 100 GiB default."
+        )
     subnet_id = _cfg("promote_runner_ecs_subnet_id") or _cfg("ansible_ecs_subnet_id")
     sg_csv = _cfg("promote_runner_ecs_security_group_ids") or _cfg("ansible_ecs_security_group_ids")
     sg_ids = [s.strip() for s in sg_csv.split(",") if s.strip()]
@@ -76,6 +94,7 @@ def _resolve_aws_runner_config() -> dict:
         "image": image,
         "cpu": cpu,
         "memory": memory,
+        "ephemeral_storage_gib": ephemeral_gib,
         "subnet_id": subnet_id,
         "security_group_ids": sg_ids,
         "execution_role_arn": execution_role_arn,
@@ -156,6 +175,7 @@ async def run_for_aws_target(
         image=cfg["image"],
         cpu=cfg["cpu"],
         memory=cfg["memory"],
+        ephemeral_storage_gib=cfg["ephemeral_storage_gib"],
         subnet_id=cfg["subnet_id"],
         security_group_ids=cfg["security_group_ids"],
         execution_role_arn=cfg["execution_role_arn"],
