@@ -12,7 +12,7 @@
   GET    /api/pov/managed/{id}/gateway  — what PRA says about it, live
   POST   /api/pov/managed/{id}/resource-broker
                                         — configure and install the Password Safe Resource Broker
-  POST   /api/pov/managed/{id}/wireup   — create a PRA jump item for every VM
+  POST   /api/pov/managed/{id}/wireup   — PRA jump item + Password Safe managed system per VM
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
@@ -148,6 +148,8 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
             # teardown needs rather than anything a browser does.
             "pra_jump_id": v.pra_jump_id or "",
             "vault_account_id": v.vault_account_id or "",
+            "ps_managed_system_id": v.ps_managed_system_id or "",
+            "ps_managed_account_id": v.ps_managed_account_id or "",
             "wiring_error": v.wiring_error or "",
         } for v in vms]
     return out
@@ -595,13 +597,18 @@ async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
 @router.post("/managed/{env_id}/wireup", status_code=202)
 async def wireup(env_id: str, db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
-    """Create a PRA jump item for every VM in this POV.
+    """Wire every VM in this POV into PRA, and into Password Safe when it has a tenant.
 
-    Refused up front when the POV has no Gateway or no resolvable tenant, because neither
-    is something the second VM will do better at — and thirty identical failures in a job
-    log hide the one line that matters.
+    Refused up front when the POV has no Gateway or no resolvable PRA tenant, because
+    neither is something the second VM will do better at — and thirty identical failures
+    in a job log hide the one line that matters.
 
-    Re-runnable: a VM that already has a jump item is skipped rather than given a second
+    The **Password Safe half is not preflighted here**, deliberately. It is independent
+    and optional: a POV with no Password Safe tenant, or one whose tenant is half
+    configured, should still get its jump items. The job says which half it skipped and
+    why, in its own log.
+
+    Re-runnable: a VM that already has an artifact is skipped rather than given a second
     one, so this is also the remedy for a run that half-finished.
     """
     env = pov_env_service.get(db, env_id)

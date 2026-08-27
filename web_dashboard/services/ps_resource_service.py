@@ -458,21 +458,49 @@ def _ssm_account_name(name: str, suffix: str) -> str:
     return f"{name or 'adminuser'};{suffix or 'local'}"
 
 
-def _tf_env(extra_vars: Optional[dict] = None) -> dict:
+# A per-call override of the Password Safe credentials, for the POV feature. Four keys
+# rather than three: the run-as user is part of the tenant's identity here, because the
+# passwordsafe provider block requires it and it differs per tenant.
+TENANT_KEYS = ("pscli_api_url", "pscli_client_id", "pscli_client_secret",
+               "pscli_api_account_name")
+
+
+def tenant_creds(api_url: str, client_id: str, client_secret: str,
+                 api_account_name: str) -> dict:
+    """The override dict :func:`_tf_env` accepts. A convenience, and one spelling."""
+    return {"pscli_api_url": api_url, "pscli_client_id": client_id,
+            "pscli_client_secret": client_secret,
+            "pscli_api_account_name": api_account_name}
+
+
+def _tf_env(extra_vars: Optional[dict] = None, tenant: Optional[dict] = None) -> dict:
     """Environment for Terraform calls. The provider OAuth credentials + the run-as
-    user ride TF_VAR_* (the destroy path needs them too), as do per-apply secrets."""
+    user ride TF_VAR_* (the destroy path needs them too), as do per-apply secrets.
+
+    ``tenant`` overrides those four for one call. A **partial** override is refused
+    rather than merged: a managed system created against one customer's tenant with
+    another's client id is the silent cross-tenant mistake the registry exists to prevent.
+    """
     env = dict(os.environ)
     env["TF_PLUGIN_CACHE_DIR"] = _PLUGIN_CACHE_DIR
     env["TF_IN_AUTOMATION"] = "1"
     env["TF_INPUT"] = "0"
     env["TF_CLI_ARGS"] = "-no-color"
+    override = {}
+    if tenant and all(str(tenant.get(k) or "").strip() for k in TENANT_KEYS):
+        override = {k: str(tenant[k]).strip() for k in TENANT_KEYS}
+    elif tenant:
+        raise PSResourceError(
+            "a Password Safe tenant override was supplied with only part of its "
+            "credentials (URL, client id, client secret and run-as account are all "
+            "required). Refusing rather than falling back to the configured tenant.")
     for cfg_key, tf_var in (
         ("pscli_api_url",          "TF_VAR_ps_url"),
         ("pscli_client_id",        "TF_VAR_ps_client_id"),
         ("pscli_client_secret",    "TF_VAR_ps_client_secret"),
         ("pscli_api_account_name", "TF_VAR_ps_api_account_name"),
     ):
-        val = _cfg(cfg_key)
+        val = override.get(cfg_key) if override else _cfg(cfg_key)
         if val:
             env[tf_var] = val
     for var, val in (extra_vars or {}).items():
@@ -648,8 +676,8 @@ def _scrub_state(tf_state_json: Optional[str]) -> Optional[str]:
         return None
 
 
-def _apply_hcl_sync(hcl: str, tf_vars: dict) -> dict:
-    env = _tf_env(tf_vars)
+def _apply_hcl_sync(hcl: str, tf_vars: dict, tenant: Optional[dict] = None) -> dict:
+    env = _tf_env(tf_vars, tenant)
     with tempfile.TemporaryDirectory(prefix="ps_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(hcl)
         init = _run_tf(["init", "-upgrade=false"], work_dir, env, timeout=60)
@@ -676,14 +704,14 @@ def _apply_hcl_sync(hcl: str, tf_vars: dict) -> dict:
         }
 
 
-def _destroy_sync(tf_state_json: str) -> None:
+def _destroy_sync(tf_state_json: str, tenant: Optional[dict] = None) -> None:
     """Off-board: restore stored state + provider-only config and destroy (the
     managed account, then the managed system)."""
     try:
         json.loads(tf_state_json)
     except json.JSONDecodeError as e:
         raise PSResourceError(f"tf_state_json is not valid JSON: {e}") from e
-    env = _tf_env()
+    env = _tf_env(None, tenant)
     with tempfile.TemporaryDirectory(prefix="ps_tf_destroy_") as work_dir:
         Path(work_dir, "main.tf").write_text(_provider_header())
         Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
@@ -707,7 +735,8 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
                                    application_host_id: int = 0, method: str = "ssh",
                                    dns_name: str = "", account_suffix: str = "",
                                    initial_password: str = "",
-                                   use_own_credentials: bool = False) -> dict:
+                                   use_own_credentials: bool = False,
+                                   tenant: Optional[dict] = None) -> dict:
     """Onboard a VM as a Password Safe managed system + managed account.
     Returns ``{managed_system_id, managed_account_id, tf_state_json,
     initial_password_seeded}``.
@@ -947,11 +976,14 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id, method="ssh", emit_private_key=True)
         tf_vars["ps_account_private_key"] = private_key
-    out = await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars)
+    out = await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars, tenant)
     out["initial_password_seeded"] = seeded
     return out
 
 
-async def deregister(tf_state_json: str) -> None:
-    """Off-board a managed system + account previously registered (best-effort)."""
-    await asyncio.to_thread(_destroy_sync, tf_state_json)
+async def deregister(tf_state_json: str, tenant: Optional[dict] = None) -> None:
+    """Off-board a managed system + account previously registered (best-effort).
+
+    ``tenant`` must be the SAME one it was registered against — a destroy pointed at
+    another tenant authenticates fine, removes nothing, and reports success."""
+    await asyncio.to_thread(_destroy_sync, tf_state_json, tenant)

@@ -1,6 +1,7 @@
-"""Wiring a POV's VMs into its PRA tenant: one jump item per VM.
+"""Wiring a POV's VMs into PRA and Password Safe: one jump item and one managed system
+per VM.
 
-Slice 6a. Everything before this made a POV *reachable* — an environment (slice 2), an
+Slices 6a and 6b. Everything before this made a POV *reachable* — an environment (slice 2), an
 agent inside it (slice 3), a tenant to belong to (slice 4), a Gateway to route through
 (slice 5). This is the first slice that puts something in front of a **user**: a jump item
 per VM, in the customer's own appliance, through that POV's own Gateway.
@@ -28,6 +29,19 @@ at session launch in front of whoever clicked it.
 exists, and a VM that could not be wired records its reason in ``wiring_error`` and the run
 continues. A POV where seven of eight VMs are reachable is worth more than one that rolled
 back to zero because the eighth had no address yet.
+
+**Password Safe reaches the VM through the Resource Broker, not directly.** Slice 5b
+installed one inside the environment and recorded it as
+``PovEnvironment.ps_application_host_id``; every managed system this creates names it as
+its ``application_host_id``, which is the field that tells Password Safe to manage the
+host *via* that broker. Without it the platform would try to reach a private address from
+the cloud tenant and fail on every rotation — a failure that surfaces days later, on a
+schedule, rather than at onboarding.
+
+The Password Safe half is **optional and independent**. A POV wired into PRA is already
+useful, and a tenant that has not been given a workgroup or a functional account is a
+reason to skip that half with a message, never a reason to fail the jump item that
+already worked.
 """
 from __future__ import annotations
 
@@ -36,8 +50,8 @@ import logging
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM
-from . import (bt_tenant_service, job_service, pov_gateway,
-               terraform_pra_service)
+from . import (bt_tenant_service, job_service, pov_gateway, ps_api_service,
+               ps_resource_service, terraform_pra_service)
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +119,81 @@ def gateway_name(env: PovEnvironment) -> str:
     return name
 
 
+# ── the Password Safe tenant ─────────────────────────────────────────────────
+
+async def ps_context(db: Session, env: PovEnvironment) -> dict:
+    """Everything the Password Safe half needs, or a refusal naming what is missing.
+
+    Resolved once per run rather than per VM: a missing workgroup is not something the
+    second VM will do better at, and the functional-account lookups are two REST round
+    trips to a customer's tenant that should not be repeated eight times.
+
+    Returns ``{}`` — not an error — when the POV has no Password Safe tenant at all. The
+    two halves of this wire-up are independent, and a POV wired into PRA alone is a
+    perfectly good POV.
+    """
+    if not env.ps_tenant_id:
+        return {}
+    try:
+        tenant = bt_tenant_service.resolve(db, "password_safe", env.ps_tenant_id)
+    except bt_tenant_service.BTTenantError as exc:
+        raise WireupError(
+            f"this POV's Password Safe tenant could not be resolved: {exc}") from None
+
+    run_as = tenant.option("api_account_name")
+    workgroup = tenant.option("workgroup")
+    if not run_as:
+        raise WireupError(
+            f"the Password Safe tenant {tenant.name!r} names no run-as user, which the "
+            f"passwordsafe Terraform provider requires. Set it on the tenant.")
+    if not workgroup:
+        raise WireupError(
+            f"the Password Safe tenant {tenant.name!r} names no workgroup, so there is "
+            f"nowhere for a managed system to land. Set it on the tenant.")
+    if not env.ps_application_host_id:
+        # The Resource Broker IS how Password Safe reaches a private address. Without it
+        # the platform tries from the cloud tenant and fails on every rotation — days
+        # later, on a schedule, rather than here.
+        raise WireupError(
+            "this POV has no Password Safe Resource Broker, so the platform would have no "
+            "route to these VMs. Install one from the Resource Broker column first.")
+
+    api = ps_api_service.tenant_creds(tenant.base_url, tenant.client_id, tenant.secret)
+    tf = ps_resource_service.tenant_creds(
+        tenant.base_url, tenant.client_id, tenant.secret, run_as)
+    try:
+        workgroup_id = await ps_api_service.get_workgroup_id(workgroup, api)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("POV %s: resolving the Password Safe workgroup failed", env.id,
+                       exc_info=True)
+        raise WireupError(
+            f"could not resolve workgroup {workgroup!r} in Password Safe tenant "
+            f"{tenant.name!r} ({type(exc).__name__}) — check the name and the API "
+            f"account's permissions.") from None
+
+    # Both are optional here and refused per VM instead: a POV with only Linux guests has
+    # no use for a Windows functional account, and demanding one would block a wire-up
+    # that could have completed.
+    accounts = {}
+    for family, option in (("linux", "linux_functional_account"),
+                           ("windows", "windows_functional_account")):
+        name = tenant.option(option)
+        if not name:
+            continue
+        try:
+            accounts[family] = await ps_api_service.get_functional_account(name, api)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: functional account %r lookup failed", env.id, name,
+                           exc_info=True)
+            raise WireupError(
+                f"could not resolve the {family} functional account {name!r} in Password "
+                f"Safe tenant {tenant.name!r} ({type(exc).__name__}).") from None
+
+    return {"tf": tf, "workgroup_id": workgroup_id, "accounts": accounts,
+            "application_host_id": int(env.ps_application_host_id),
+            "label": tenant.name}
+
+
 # ── per-VM ───────────────────────────────────────────────────────────────────
 
 def wireable(vm: PovEnvironmentVM) -> str:
@@ -123,7 +212,8 @@ def wireable(vm: PovEnvironmentVM) -> str:
 
 
 def _record(db: Session, vm: PovEnvironmentVM, *, jump_id: str = "", state: str = "",
-            vault_id: str = "", error: str = "") -> None:
+            vault_id: str = "", error: str = "", ps_system_id: str = "",
+            ps_account_id: str = "", ps_state: str = "") -> None:
     """Persist one VM's outcome immediately.
 
     The moment the artifact exists, not at the end of the run. A re-derived id is how you
@@ -136,6 +226,12 @@ def _record(db: Session, vm: PovEnvironmentVM, *, jump_id: str = "", state: str 
         vm.pra_jump_tf_state = state
     if vault_id:
         vm.vault_account_id = vault_id
+    if ps_system_id:
+        vm.ps_managed_system_id = ps_system_id
+    if ps_account_id:
+        vm.ps_managed_account_id = ps_account_id
+    if ps_state:
+        vm.ps_registration_tf_state = ps_state
     vm.wiring_error = error or None
     db.commit()
 
@@ -217,6 +313,80 @@ async def wire_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
     return f"{vm.name}: {kind} jump {jump_id} created{extra}."
 
 
+async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
+                     ps: dict) -> str:
+    """Onboard one VM as a Password Safe managed system + account. Returns a log line.
+
+    Independent of the jump item: a VM whose jump failed can still be onboarded, and a
+    Password Safe tenant that is half-configured skips this half without touching the
+    other. Same idempotence rule — a VM already onboarded is not onboarded twice, because
+    Password Safe will accept a second managed system on the same address and the second
+    is invisible here.
+    """
+    if vm.ps_managed_system_id:
+        return f"{vm.name}: already in Password Safe (system {vm.ps_managed_system_id})."
+
+    family = (vm.os_family or "").strip().lower()
+    account = (ps.get("accounts") or {}).get(family)
+    if account is None:
+        return (f"{vm.name}: skipped Password Safe — the tenant names no {family} "
+                f"functional account, and the managed system's platform is derived from "
+                f"one.")
+
+    # The platform login, when the lab platform has one. Seeding it means the first
+    # rotation replaces a password somebody knows rather than one nobody does; without it
+    # the account is onboarded and the first rotation mints the credential.
+    username, password = "", ""
+    try:
+        from . import pov_resource_broker
+        username, password = await pov_resource_broker.platform_login(
+            db, env.id, vm.platform_vm_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("POV %s: no seedable credential for %s (%s)", env.id, vm.name,
+                    type(exc).__name__)
+
+    label = f"{env.name}-{vm.name}"
+    try:
+        result = await ps_resource_service.register_managed_system(
+            name=label,
+            host_name=vm.private_ip,
+            ip_address=vm.private_ip,
+            port=RDP_PORT if family == "windows" else SSH_PORT,
+            functional_account_id=account["id"],
+            # From the functional account, never chosen here — the rule ps_vm_hook
+            # already follows, and the reason the accounts are split by guest OS.
+            platform_id=account["platform_id"],
+            workgroup_id=ps["workgroup_id"],
+            managed_account_name=username or "adminuser",
+            initial_password=password,
+            # The Resource Broker. This is the field that tells Password Safe to manage
+            # the host THROUGH it rather than reaching a private address from the cloud.
+            application_host_id=ps["application_host_id"],
+            method="ssh",
+            tenant=ps["tf"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("POV %s: onboarding %s to Password Safe failed", env.id, vm.name,
+                       exc_info=True)
+        _record(db, vm, error=f"Password Safe: {exc}"[:2000])
+        return f"{vm.name}: Password Safe FAILED — {exc}"
+
+    system_id = str(result.get("managed_system_id") or "")
+    account_id = str(result.get("managed_account_id") or "")
+    state = result.get("tf_state_json") or ""
+    if not state:
+        logger.error("POV %s: %s was onboarded but terraform returned no state",
+                     env.id, vm.name)
+        _record(db, vm, ps_system_id=system_id, ps_account_id=account_id,
+                error="the managed system was created but terraform returned no state, so "
+                      "this dashboard cannot off-board it — remove it in Password Safe by "
+                      "hand at teardown")
+        return f"{vm.name}: onboarded (system {system_id}) but NO STATE — see the row."
+
+    _record(db, vm, ps_system_id=system_id, ps_account_id=account_id, ps_state=state)
+    seeded = " (credential seeded)" if result.get("initial_password_seeded") else ""
+    return f"{vm.name}: Password Safe system {system_id}, account {account_id}{seeded}."
+
+
 # ── the job ──────────────────────────────────────────────────────────────────
 
 async def run_env_wireup(job_id: str, meta: dict) -> None:
@@ -243,6 +413,16 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
             job_service.set_failed(db, job_id, str(exc))
             return
 
+        # The Password Safe half is optional and resolved once. A refusal here does NOT
+        # fail the run: the PRA half is independently useful, and a POV whose tenant is
+        # half-configured should get its jump items rather than nothing.
+        ps = {}
+        ps_note = ""
+        try:
+            ps = await ps_context(db, env)
+        except (WireupError, bt_tenant_service.BTTenantError) as exc:
+            ps_note = str(exc)
+
         vms = (db.query(PovEnvironmentVM)
                  .filter(PovEnvironmentVM.environment_id == env.id)
                  .order_by(PovEnvironmentVM.name).all())
@@ -257,8 +437,21 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
             db, job_id,
             f"Wiring {len(vms)} VM(s) into PRA tenant {tenant['label']} through Gateway "
             f"{gateway}.")
+        if ps:
+            job_service.append_job_log(
+                db, job_id,
+                f"Onboarding them into Password Safe tenant {ps['label']} through "
+                f"Resource Broker {ps['application_host_id']}.")
+        elif ps_note:
+            job_service.append_job_log(
+                db, job_id, f"Skipping the Password Safe half: {ps_note}")
+        else:
+            job_service.append_job_log(
+                db, job_id,
+                "This POV names no Password Safe tenant, so only PRA jump items are "
+                "created.")
 
-        wired = skipped = failed = 0
+        wired = skipped = failed = onboarded = 0
         for index, vm in enumerate(vms):
             job_service.update_progress(
                 db, job_id, int(5 + 90 * index / max(len(vms), 1)),
@@ -272,8 +465,16 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
             else:
                 wired += 1
 
+            # Independent of the jump item's outcome, and only when the VM is reachable
+            # at all — `wireable` is the same precondition both halves need.
+            if ps and not wireable(vm):
+                ps_line = await onboard_vm(db, env, vm, ps=ps)
+                job_service.append_job_log(db, job_id, ps_line)
+                if "FAILED" not in ps_line and "skipped" not in ps_line:
+                    onboarded += 1
+
         summary = {"environment_id": env.id, "wired": wired, "skipped": skipped,
-                   "failed": failed}
+                   "failed": failed, "onboarded": onboarded}
         if failed and not wired:
             # Nothing worked, so this is a failure rather than a partial success — the
             # distinction matters because a green job with zero artifacts is the one an
@@ -302,16 +503,20 @@ async def teardown(db: Session, env: PovEnvironment) -> str:
     """
     rows = (db.query(PovEnvironmentVM)
               .filter(PovEnvironmentVM.environment_id == env.id).all())
+    lines = [await _teardown_password_safe(db, env, rows)]
+
     wired = [r for r in rows if r.pra_jump_tf_state]
     if not wired:
-        return "No PRA jump items to remove."
+        lines.append("No PRA jump items to remove.")
+        return " ".join(l for l in lines if l)
 
     try:
         tenant = tenant_override(db, env)
     except (WireupError, pov_gateway.GatewayInstallError,
             bt_tenant_service.BTTenantError) as exc:
-        return (f"Could not resolve this POV's PRA tenant ({exc}), so {len(wired)} jump "
-                f"item(s) were left in place — remove them by hand.")
+        lines.append(f"Could not resolve this POV's PRA tenant ({exc}), so {len(wired)} "
+                     f"jump item(s) were left in place — remove them by hand.")
+        return " ".join(l for l in lines if l)
 
     removed = problems = 0
     for vm in wired:
@@ -337,9 +542,54 @@ async def teardown(db: Session, env: PovEnvironment) -> str:
     db.commit()
 
     if problems:
-        return (f"Removed {removed} PRA jump item(s); {problems} could not be destroyed "
-                f"and are still in tenant {tenant['label']} — remove them by hand.")
-    return f"Removed {removed} PRA jump item(s) from tenant {tenant['label']}."
+        lines.append(f"Removed {removed} PRA jump item(s); {problems} could not be "
+                     f"destroyed and are still in tenant {tenant['label']} — remove them "
+                     f"by hand.")
+    else:
+        lines.append(f"Removed {removed} PRA jump item(s) from tenant {tenant['label']}.")
+    return " ".join(l for l in lines if l)
+
+
+async def _teardown_password_safe(db: Session, env: PovEnvironment, rows: list) -> str:
+    """Off-board every managed system this POV created. Returns a line, never raises.
+
+    Runs before the PRA half and inside the same teardown, but its failures are reported
+    rather than propagated: a managed system left in a customer's tenant is untidy, and
+    stopping the jump-item removal over it would leave something worse behind.
+    """
+    onboarded = [r for r in rows if r.ps_registration_tf_state]
+    if not onboarded:
+        return ""
+    try:
+        ps = await ps_context(db, env)
+    except (WireupError, bt_tenant_service.BTTenantError) as exc:
+        return (f"Could not resolve this POV's Password Safe tenant ({exc}), so "
+                f"{len(onboarded)} managed system(s) were left in place — remove them by "
+                f"hand.")
+    if not ps:
+        return (f"This POV names no Password Safe tenant, so {len(onboarded)} managed "
+                f"system(s) could not be off-boarded — remove them by hand.")
+
+    removed = problems = 0
+    for vm in onboarded:
+        try:
+            await ps_resource_service.deregister(vm.ps_registration_tf_state,
+                                                 tenant=ps["tf"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: off-boarding %s from Password Safe failed", env.id,
+                           vm.name, exc_info=True)
+            problems += 1
+            continue
+        vm.ps_managed_system_id = None
+        vm.ps_managed_account_id = None
+        vm.ps_registration_tf_state = None
+        removed += 1
+    db.commit()
+
+    if problems:
+        return (f"Off-boarded {removed} managed system(s); {problems} could not be and "
+                f"are still in tenant {ps['label']} — remove them by hand.")
+    return f"Off-boarded {removed} managed system(s) from tenant {ps['label']}."
 
 
 # ── what the UI shows ────────────────────────────────────────────────────────
@@ -355,6 +605,10 @@ def describe(db: Session, env: PovEnvironment) -> dict:
     return {
         "vm_count": len(rows),
         "wired_count": sum(1 for r in rows if r.pra_jump_id),
+        "onboarded_count": sum(1 for r in rows if r.ps_managed_system_id),
         "wiring_error_count": sum(1 for r in rows if r.wiring_error),
         "wireup_ready": bool(env.gateway_name and env.pra_tenant_id and rows),
+        # Reported separately from `wireup_ready` because the two halves are independent:
+        # a POV with no Password Safe tenant still wires into PRA.
+        "ps_onboard_ready": bool(env.ps_tenant_id and env.ps_application_host_id and rows),
     }

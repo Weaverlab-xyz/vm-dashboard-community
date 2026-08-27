@@ -428,14 +428,23 @@ to have reaped it.
 
 ---
 
-## Wiring the VMs into PRA
+## Wiring the VMs into PRA and Password Safe
 
 The point at which a POV becomes usable by a *person*. **POV page → the Wired column →
 wire.**
 
-One jump item per VM, created in the customer's own PRA appliance, tagged `POV`. Linux
-guests get a **Shell Jump** on 22; Windows guests get a **Remote RDP jump** on 3389, with a
-Vault account for credential injection when the lab platform has a login for that VM.
+Two artifacts per VM, and they are **independent**:
+
+* a **PRA jump item** in the customer's own appliance, tagged `POV`. Linux guests get a
+  Shell Jump on 22; Windows guests a Remote RDP jump on 3389, with a Vault account for
+  credential injection when the lab platform has a login for that VM;
+* a **Password Safe managed system + managed account**, reached *through* the Resource
+  Broker.
+
+A POV with no Password Safe tenant gets the first and skips the second with a line in the
+job log. That is not a degraded outcome — a POV wired into PRA is already useful, and
+failing the jump items over a half-configured Password Safe tenant would be the wrong
+trade.
 
 ### Which Gateway they route through
 
@@ -476,9 +485,36 @@ reads.
 Re-running is the remedy for a half-finished run, and it is safe by the "already wired"
 rule above.
 
+### Password Safe reaches the VM through the Resource Broker
+
+Every managed system names the POV's Resource Broker as its **application host**. That is
+the field that tells Password Safe to manage the host *via* the broker rather than
+reaching a private address from the cloud tenant — which would fail on every rotation,
+days later and on a schedule, rather than at onboarding. So a POV with no Resource Broker
+skips this half and says so.
+
+Two things come from the tenant rather than from Settings, because they are names inside
+*that* tenant and mean nothing in another one:
+
+| | |
+|---|---|
+| **Workgroup** | Where the managed system lands |
+| **Functional account (Linux / Windows)** | Split by guest OS because Password Safe derives the managed system's **platform** from the functional account. One account cannot serve both |
+
+A guest whose OS has no functional account configured is skipped with that reason — a POV
+of only Linux VMs has no use for a Windows one, and demanding it would block a wire-up
+that could have completed.
+
+When the lab platform has a login for the VM, it is seeded as the managed account's
+initial credential, so the first rotation replaces a password somebody knows rather than
+one nobody does.
+
 ### Teardown
 
-Destroying a POV removes the jump items **first**, before anything else. They are the only
+Destroying a POV off-boards the managed systems and removes the jump items **first**,
+before anything else. A Password Safe off-board that fails does not stop the jump-item
+removal: a managed system left in the tenant is untidy, and stopping the removal over it
+leaves something worse behind. They are the only
 artifacts in a *customer's* appliance, and every later teardown step removes something they
 were resolved through — the tenant, the Gateway, the environment.
 
@@ -540,6 +576,14 @@ usual cause.
 
 **Wiring is refused with "this POV has no Gateway".** Working as intended — see
 [which Gateway they route through](#which-gateway-they-route-through). Install one first.
+
+**Wiring skips the Password Safe half with "no Resource Broker".** Working as intended:
+without one the platform has no route to a private address. Install one from the Resource
+Broker column, then re-wire.
+
+**A VM shows as skipped with "the tenant names no <os> functional account".** Password
+Safe derives the managed system's platform from the functional account, so one is needed
+per guest OS. Set it on the Password Safe tenant.
 
 **A VM shows as skipped with "did not report an OS".** The lab platform reported a blank
 `os_family`, and guessing would build the wrong kind of jump item. Power it on and refresh
