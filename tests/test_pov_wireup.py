@@ -19,6 +19,9 @@ somewhere this dashboard can no longer reach:
   * **The managed system names the Resource Broker as its application host** — the field
     that tells Password Safe to reach the VM THROUGH the broker rather than from the
     cloud tenant, which would fail on every rotation days later.
+  * **Entitle needs an agent this dashboard does not install**, so a tenant that names no
+    agent token is refused with that reason rather than registered against the install's
+    own tenant — and never at the cost of the halves that worked.
 
 Uses a real SQLite database and a fake terraform layer. No network, no FastAPI.
 
@@ -790,6 +793,272 @@ def test_a_full_password_safe_override_replaces_the_singletons():
         None, ps_resource_service.tenant_creds("https://t.example", "cid", "sec", "svc"))
     assert env["TF_VAR_ps_url"] == "https://t.example"
     assert env["TF_VAR_ps_api_account_name"] == "svc"
+
+
+# ── the Entitle half ─────────────────────────────────────────────────────────
+
+def _ent_tenant(db, **opts):
+    options = {"owner_id": "own-1", "workflow_id": "wf-1",
+               "agent_token_name": "pov-agent", "ssh_sudo_user": "ec2-user"}
+    options.update(opts)
+    return bt_tenant_service.create(
+        db, kind="entitle", name=_name("ent"), base_url="https://api.entitle.io",
+        client_id="", secret="ent-key", created_by="t", options=options)
+
+
+class _FakeEntitle:
+    def __init__(self, **behaviour):
+        self.b = behaviour
+        self.calls = []
+
+    async def register_ssh_host(self, **kw):
+        self.calls.append(kw)
+        if self.b.get("raises"):
+            raise RuntimeError(self.b["raises"])
+        return {"integration_id": "int-1",
+                "tf_state_json": self.b.get("state", '{"resources":[]}')}
+
+    async def deregister(self, state, ctx=None):
+        self.calls.append(("deregister", ctx))
+        if self.b.get("remove_raises"):
+            raise RuntimeError(self.b["remove_raises"])
+
+
+def _install_ent(fake):
+    original = {"reg": w.entitle_registration_service.register_ssh_host,
+                "dereg": w.entitle_registration_service.deregister}
+    w.entitle_registration_service.register_ssh_host = fake.register_ssh_host
+    w.entitle_registration_service.deregister = fake.deregister
+    return original
+
+
+def _restore_ent(original):
+    w.entitle_registration_service.register_ssh_host = original["reg"]
+    w.entitle_registration_service.deregister = original["dereg"]
+
+
+def _ent_env(db, *, key="-----BEGIN KEY-----", **opts):
+    env = _env(db, tenant=_tenant(db))
+    ent = _ent_tenant(db, **opts)
+    env.entitle_tenant_id = ent["id"]
+    db.commit()
+    if key:
+        w.set_entitle_key(env, key)
+    return env
+
+
+def test_a_pov_with_no_entitle_tenant_is_not_an_error():
+    """Three independent halves — a POV without Entitle is a perfectly good POV."""
+    db = d.SessionLocal()
+    env = _env(db, tenant=_tenant(db))
+    assert asyncio.run(w.entitle_context(db, env)) == {}
+    db.close()
+
+
+def test_a_tenant_with_no_agent_token_is_refused_naming_what_is_missing():
+    """The one prerequisite this dashboard does not install — an Entitle agent inside the
+    POV's network. Said in front of the operator rather than left to the provider."""
+    db = d.SessionLocal()
+    env = _ent_env(db, agent_token_name="")
+    try:
+        asyncio.run(w.entitle_context(db, env))
+        raise AssertionError("a tenant with no agent token was accepted")
+    except w.WireupError as exc:
+        assert "agent" in str(exc) and "does not install" in str(exc)
+    finally:
+        db.close()
+
+
+def test_a_tenant_missing_owner_or_workflow_is_refused():
+    db = d.SessionLocal()
+    env = _ent_env(db, owner_id="")
+    try:
+        asyncio.run(w.entitle_context(db, env))
+        raise AssertionError("a tenant with no owner id was accepted")
+    except w.WireupError as exc:
+        assert "owner id" in str(exc)
+    finally:
+        db.close()
+
+
+def test_a_pov_with_no_ssh_key_is_refused_with_the_reason():
+    """Entitle authenticates with a key, not the password the platform holds."""
+    db = d.SessionLocal()
+    env = _ent_env(db, key="")
+    try:
+        asyncio.run(w.entitle_context(db, env))
+        raise AssertionError("a POV with no key was accepted")
+    except w.WireupError as exc:
+        assert "key, not a password" in str(exc)
+    finally:
+        db.close()
+
+
+def test_the_integration_is_always_private_and_carries_the_tenant_context():
+    db = d.SessionLocal()
+    env = _ent_env(db)
+    vm = _vm(db, env)
+    fake = _FakeEntitle()
+    original = _install_ent(fake)
+    try:
+        ent = asyncio.run(w.entitle_context(db, env))
+        asyncio.run(w.register_vm_entitle(db, env, vm, ent=ent))
+    finally:
+        _restore_ent(original)
+    call = fake.calls[0]
+    assert call["private"] is True, "a POV VM is on a private network by construction"
+    assert call["ctx"]["api_key"] == "ent-key"
+    assert call["ctx"]["agent_token_name"] == "pov-agent"
+    assert call["sudo_user"] == "ec2-user"
+    db.refresh(vm)
+    assert vm.entitle_integration_id == "int-1"
+    db.close()
+
+
+def test_a_windows_vm_is_skipped_because_the_app_mints_accounts_over_ssh():
+    db = d.SessionLocal()
+    env = _ent_env(db)
+    vm = _vm(db, env, name="dc01", os_family="windows")
+    fake = _FakeEntitle()
+    original = _install_ent(fake)
+    try:
+        ent = asyncio.run(w.entitle_context(db, env))
+        line = asyncio.run(w.register_vm_entitle(db, env, vm, ent=ent))
+    finally:
+        _restore_ent(original)
+    assert "skipped Entitle" in line and fake.calls == []
+    db.close()
+
+
+def test_a_vm_already_registered_is_not_registered_twice():
+    db = d.SessionLocal()
+    env = _ent_env(db)
+    vm = _vm(db, env)
+    vm.entitle_integration_id = "int-existing"
+    db.commit()
+    fake = _FakeEntitle()
+    original = _install_ent(fake)
+    try:
+        ent = asyncio.run(w.entitle_context(db, env))
+        line = asyncio.run(w.register_vm_entitle(db, env, vm, ent=ent))
+    finally:
+        _restore_ent(original)
+    assert "already in Entitle" in line and fake.calls == []
+    db.close()
+
+
+def test_an_entitle_failure_does_not_touch_the_other_two_artifacts():
+    db = d.SessionLocal()
+    env = _ent_env(db)
+    vm = _vm(db, env)
+    vm.pra_jump_id = "101"
+    vm.ps_managed_system_id = "900"
+    db.commit()
+    original = _install_ent(_FakeEntitle(raises="owner own-1 not found"))
+    try:
+        ent = asyncio.run(w.entitle_context(db, env))
+        line = asyncio.run(w.register_vm_entitle(db, env, vm, ent=ent))
+    finally:
+        _restore_ent(original)
+    assert "FAILED" in line
+    db.refresh(vm)
+    assert vm.pra_jump_id == "101" and vm.ps_managed_system_id == "900"
+    assert "Entitle" in vm.wiring_error
+    db.close()
+
+
+def test_an_entitle_tenant_with_no_agent_does_not_fail_the_run():
+    """The PRA half is independently useful, and the agent is a prerequisite the operator
+    supplies rather than a fault in the POV."""
+    db = d.SessionLocal()
+    env = _ent_env(db, agent_token_name="")
+    _vm(db, env, name="web01")
+    eid = env.id
+    db.close()
+    jid = _job(eid)
+    original = _install(_FakeTF())
+    ent_original = _install_ent(_FakeEntitle())
+    try:
+        asyncio.run(w.run_env_wireup(jid, {"environment_id": eid}))
+    finally:
+        _restore(original)
+        _restore_ent(ent_original)
+    status, _ = _job_status(jid)
+    assert status == "completed"
+    db = d.SessionLocal()
+    row = db.query(d.PovEnvironmentVM).filter(
+        d.PovEnvironmentVM.environment_id == eid).first()
+    assert row.pra_jump_id, "the PRA half was skipped because Entitle was not ready"
+    assert row.entitle_integration_id is None
+    db.close()
+
+
+def test_teardown_removes_the_integrations_first_and_clears_the_key():
+    """An integration is standing ACCESS, so it is the artifact whose lingering matters
+    most."""
+    db = d.SessionLocal()
+    env = _ent_env(db)
+    vm = _vm(db, env)
+    vm.pra_jump_tf_state = '{"resources":[]}'
+    vm.entitle_tf_state = '{"resources":[]}'
+    vm.entitle_integration_id = "int-1"
+    db.commit()
+    original = _install(_FakeTF())
+    ent_original = _install_ent(_FakeEntitle())
+    try:
+        line = asyncio.run(w.teardown(db, env))
+    finally:
+        _restore(original)
+        _restore_ent(ent_original)
+    assert line.index("Entitle integration") < line.index("PRA jump item")
+    assert "Cleared the stored Entitle SSH key" in line
+    db.refresh(vm)
+    assert vm.entitle_tf_state is None and vm.entitle_integration_id is None
+    assert not w.has_entitle_key(env)
+    db.close()
+
+
+def test_a_failed_entitle_removal_keeps_its_state_and_does_not_stop_the_rest():
+    db = d.SessionLocal()
+    env = _ent_env(db)
+    vm = _vm(db, env)
+    vm.pra_jump_tf_state = '{"resources":[]}'
+    vm.entitle_tf_state = '{"resources":[]}'
+    db.commit()
+    original = _install(_FakeTF())
+    ent_original = _install_ent(_FakeEntitle(remove_raises="403"))
+    try:
+        line = asyncio.run(w.teardown(db, env))
+    finally:
+        _restore(original)
+        _restore_ent(ent_original)
+    assert "could not be" in line and "Removed 1 PRA jump item" in line
+    db.refresh(vm)
+    assert vm.entitle_tf_state, "the state was cleared despite the failure"
+    db.close()
+
+
+def test_an_entitle_context_with_no_api_key_is_refused_by_the_service():
+    """The same partial-override rule the PRA and Password Safe services follow."""
+    from web_dashboard.services import entitle_registration_service as ers
+    try:
+        ers._tf_env(None, {"endpoint": "https://api.entitle.io"})
+        raise AssertionError("a context with no api key was accepted")
+    except ers.EntitleRegistrationError as exc:
+        assert "no API key" in str(exc)
+
+
+def test_the_entitle_context_reaches_both_the_env_and_the_hcl():
+    """Unlike PRA and Password Safe, an Entitle registration's DESTINATION is written into
+    the HCL rather than the environment — so a credential-only override would have left it
+    pointing at the install's own tenant."""
+    from web_dashboard.services import entitle_registration_service as ers
+    ctx = ers.tenant_ctx(api_key="k", endpoint="https://tenant.example",
+                         owner_id="o", workflow_id="wf", agent_token_name="a")
+    assert ers._tf_env(None, ctx)["TF_VAR_entitle_api_key"] == "k"
+    assert ers._provider_endpoint(ctx) == "https://tenant.example"
+    attrs = ers._common_attrs_hcl(True, ctx=ctx)
+    assert "o" in attrs and "wf" in attrs and "a" in attrs
 
 
 # ── the job type ─────────────────────────────────────────────────────────────

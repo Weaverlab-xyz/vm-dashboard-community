@@ -76,8 +76,12 @@ OPTION_KEYS = {
     # already follows) — one account cannot serve both a Linux and a Windows target.
     "password_safe": ("api_account_name", "workgroup",
                       "linux_functional_account", "windows_functional_account"),
-    # The synthetic machine user Entitle's behalfOf policy needs.
-    "entitle": ("machine_identity_email",),
+    # The synthetic machine user Entitle's behalfOf policy needs, plus what a POV VM
+    # needs to become an SSH ephemeral-accounts integration. Owner and workflow are ids
+    # inside THAT tenant; the agent token names an Entitle agent running inside the POV's
+    # network, which the dashboard does not install — see docs/pov-instance.md.
+    "entitle": ("machine_identity_email", "owner_id", "workflow_id",
+                "agent_token_name", "ssh_sudo_user"),
 }
 
 # Kinds whose credentials can be checked without side effects. PRA and Password Safe both
@@ -104,6 +108,10 @@ OPTION_LABELS = {
     "linux_functional_account": "Functional account (Linux)",
     "windows_functional_account": "Functional account (Windows)",
     "machine_identity_email": "Machine identity email",
+    "owner_id": "Owner id",
+    "workflow_id": "Workflow id",
+    "agent_token_name": "Agent token name",
+    "ssh_sudo_user": "SSH sudo user",
 }
 
 # Options whose absence makes a tenant unusable rather than merely incomplete. Reported

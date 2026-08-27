@@ -118,7 +118,49 @@ def _api_key() -> str:
     return _cfg("entitle_api_key") or _cfg("entitle_api_token")
 
 
-def _tf_env(extra_vars: Optional[dict] = None) -> dict:
+# Everything an Entitle registration reads that differs per TENANT. Resolved once into a
+# plain dict and threaded through, because unlike the PRA and Password Safe services these
+# values reach the run through two different channels — the api key rides TF_VAR_*, while
+# the endpoint, owner, workflow and agent name are written into the HCL itself. A single
+# override on `_tf_env` would therefore have covered the credential and silently left the
+# *destination* pointing at the install's own tenant.
+#
+# ``None`` means "read the configured singletons", which is every existing caller.
+CTX_KEYS = ("api_key", "endpoint", "owner_id", "workflow_id", "agent_token_name",
+            "ssh_sudo_user")
+
+
+def tenant_ctx(*, api_key: str, endpoint: str = "", owner_id: str = "",
+               workflow_id: str = "", agent_token_name: str = "",
+               ssh_sudo_user: str = "") -> dict:
+    """Build the per-tenant context the functions below accept. One spelling."""
+    return {"api_key": api_key, "endpoint": endpoint, "owner_id": owner_id,
+            "workflow_id": workflow_id, "agent_token_name": agent_token_name,
+            "ssh_sudo_user": ssh_sudo_user}
+
+
+def _ctx(ctx: Optional[dict], key: str) -> str:
+    """One field, from the tenant context when there is one.
+
+    A context with **no api key** is refused rather than falling back: registering a
+    customer's host into the install's own Entitle tenant is the silent cross-tenant
+    mistake the registry exists to prevent, and it would look like success.
+    """
+    if ctx is not None:
+        if not str(ctx.get("api_key") or "").strip():
+            raise EntitleRegistrationError(
+                "an Entitle tenant context was supplied with no API key. Refusing rather "
+                "than falling back to the configured tenant.")
+        return str(ctx.get(key) or "").strip()
+    if key == "api_key":
+        return _api_key()
+    return _cfg({"endpoint": "entitle_endpoint", "owner_id": "entitle_owner_id",
+                 "workflow_id": "entitle_workflow_id",
+                 "agent_token_name": "entitle_agent_token_name",
+                 "ssh_sudo_user": "entitle_ssh_sudo_user"}[key])
+
+
+def _tf_env(extra_vars: Optional[dict] = None, ctx: Optional[dict] = None) -> dict:
     """Environment for Terraform calls. Secrets are passed as TF_VAR_* so the
     HCL template never contains them in plain text."""
     env = dict(os.environ)
@@ -127,7 +169,7 @@ def _tf_env(extra_vars: Optional[dict] = None) -> dict:
     env["TF_INPUT"] = "0"
     env["TF_CLI_ARGS"] = "-no-color"
 
-    key = _api_key()
+    key = _ctx(ctx, "api_key")
     if key:
         env["TF_VAR_entitle_api_key"] = key
     for var, val in (extra_vars or {}).items():
@@ -148,7 +190,8 @@ def _durations_hcl() -> str:
 
 
 def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True,
-                      allow_changing_account_permissions: Optional[bool] = None) -> str:
+                      allow_changing_account_permissions: Optional[bool] = None,
+                      ctx: Optional[dict] = None) -> str:
     """The required owner/workflow blocks + allowed_durations, plus the
     ``agent_token`` block **only for private targets**.
 
@@ -169,15 +212,15 @@ def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True,
     ``true`` — e.g. the Kubernetes connector, live-validated with it unset. The
     **SSH Ephemeral Accounts** app rejects that default (API 400 "This application
     restricts changing accounts permissions"), so the SSH path passes ``False``."""
-    owner_id = _cfg("entitle_owner_id")
-    workflow_id = _cfg("entitle_workflow_id")
+    owner_id = _ctx(ctx, "owner_id")
+    workflow_id = _ctx(ctx, "workflow_id")
     if not owner_id:
         raise EntitleRegistrationError("entitle_owner_id is not configured")
     if not workflow_id:
         raise EntitleRegistrationError("entitle_workflow_id is not configured")
     agent_block = ""
     if private:
-        agent = _cfg("entitle_agent_token_name")
+        agent = _ctx(ctx, "agent_token_name")
         if not agent:
             raise EntitleRegistrationError(
                 "private target requires entitle_agent_token_name — provision the "
@@ -207,12 +250,12 @@ def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True,
 # sensitive TF_VARs (ssh_private_key / db_password) interpolate without ever
 # being written to the HCL file on disk.
 
-def _provider_endpoint() -> str:
+def _provider_endpoint(ctx: Optional[dict] = None) -> str:
     """Endpoint for the entitleio/entitle provider. Prefer an explicit ``entitle_endpoint``;
     otherwise derive it from the shared ``entitle_api_url`` normalized to scheme+host (the
     provider appends its own version paths, so a ``/v1`` base would double-version). Blank →
     the provider's built-in default (https://api.entitle.io)."""
-    ep = _cfg("entitle_endpoint")
+    ep = _ctx(ctx, "endpoint")
     if ep:
         return ep.rstrip("/")
     api_url = _cfg("entitle_api_url")
@@ -224,8 +267,8 @@ def _provider_endpoint() -> str:
     return ""
 
 
-def _provider_header(extra_vars: str = "") -> str:
-    endpoint = _provider_endpoint()
+def _provider_header(extra_vars: str = "", ctx: Optional[dict] = None) -> str:
+    endpoint = _provider_endpoint(ctx)
     endpoint_line = f'  endpoint = {json.dumps(endpoint)}\n' if endpoint else ""
     return f"""\
 terraform {{
@@ -245,9 +288,10 @@ provider "entitle" {{
 """
 
 
-def _generate_ssh_hcl(*, name: str, hostname: str, sudo_user: str, port: int, private: bool) -> str:
+def _generate_ssh_hcl(*, name: str, hostname: str, sudo_user: str, port: int, private: bool,
+                      ctx: Optional[dict] = None) -> str:
     label = _safe_name(name)
-    header = _provider_header('variable "ssh_private_key" { sensitive = true }\n')
+    header = _provider_header('variable "ssh_private_key" { sensitive = true }\n', ctx)
     # connection_json for the "SSH Ephemeral Accounts" connector is host/key/user
     # (see docs.beyondtrust.com/entitle/docs/entitle-integration-ssh_ephemeral_accounts);
     # the private key is `key`, NOT `privateKey`, and there is no `port` field.
@@ -261,7 +305,7 @@ resource "entitle_integration" {json.dumps(label)} {{
     user = {json.dumps(sudo_user)}
     key  = var.ssh_private_key
   }})
-{_common_attrs_hcl(private, allow_changing_account_permissions=False)}}}
+{_common_attrs_hcl(private, allow_changing_account_permissions=False, ctx=ctx)}}}
 
 output "integration_id" {{
   value = entitle_integration.{label}.id
@@ -442,12 +486,12 @@ def _run_tf(args: list, work_dir: str, env: dict, timeout: int = 120) -> subproc
     return _go()
 
 
-def _apply_hcl_sync(hcl: str, tf_vars: dict) -> dict:
+def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional[dict] = None) -> dict:
     """Write HCL, init+apply, return ``{integration_id, outputs, tf_state_json}``.
 
     ``outputs`` is the full ``terraform output`` map (values unwrapped); ``integration_id``
     is kept as a convenience for the registration callers."""
-    env = _tf_env(tf_vars)
+    env = _tf_env(tf_vars, ctx)
     with tempfile.TemporaryDirectory(prefix="entitle_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(hcl)
 
@@ -475,7 +519,7 @@ def _apply_hcl_sync(hcl: str, tf_vars: dict) -> dict:
         return {"integration_id": integration_id, "outputs": outputs, "tf_state_json": tf_state_json}
 
 
-def _destroy_sync(tf_state_json: str) -> None:
+def _destroy_sync(tf_state_json: str, ctx: Optional[dict] = None) -> None:
     """Restore stored state and ``terraform destroy`` the integration.
 
     A resource present in state but absent from configuration is destroyed by
@@ -486,9 +530,9 @@ def _destroy_sync(tf_state_json: str) -> None:
     except json.JSONDecodeError as e:
         raise EntitleRegistrationError(f"tf_state_json is not valid JSON: {e}") from e
 
-    env = _tf_env()
+    env = _tf_env(None, ctx)
     with tempfile.TemporaryDirectory(prefix="entitle_tf_destroy_") as work_dir:
-        Path(work_dir, "main.tf").write_text(_provider_header())
+        Path(work_dir, "main.tf").write_text(_provider_header("", ctx))
         Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
         init = _run_tf(["init", "-upgrade=false"], work_dir, env, timeout=60)
         if init.returncode != 0:
@@ -505,6 +549,7 @@ def _destroy_sync(tf_state_json: str) -> None:
 async def register_ssh_host(
     *, name: str, hostname: str, sudo_user: str, private_key: str,
     port: int = 22, private: bool = True, tag: str = "vm-dashboard",
+    ctx: Optional[dict] = None,
 ) -> dict:
     """Register a Linux VM as an Entitle SSH ephemeral-accounts integration.
 
@@ -521,8 +566,9 @@ async def register_ssh_host(
     if not private_key:
         raise EntitleRegistrationError("entitle_ssh_private_key_ref resolved empty")
     hcl = _generate_ssh_hcl(name=name, hostname=hostname, sudo_user=sudo_user,
-                            port=port, private=private)
-    return await asyncio.to_thread(_apply_hcl_sync, hcl, {"ssh_private_key": private_key})
+                            port=port, private=private, ctx=ctx)
+    return await asyncio.to_thread(_apply_hcl_sync, hcl,
+                                   {"ssh_private_key": private_key}, ctx)
 
 
 async def register_database(
@@ -942,6 +988,9 @@ async def destroy_agent_token() -> str:
     return name or "unknown"
 
 
-async def deregister(tf_state_json: str) -> None:
-    """Destroy a previously registered Entitle integration using its stored state."""
-    await asyncio.to_thread(_destroy_sync, tf_state_json)
+async def deregister(tf_state_json: str, ctx: Optional[dict] = None) -> None:
+    """Destroy a previously registered Entitle integration using its stored state.
+
+    ``ctx`` must be the SAME tenant it was registered against — a destroy pointed at
+    another authenticates fine, removes nothing, and reports success."""
+    await asyncio.to_thread(_destroy_sync, tf_state_json, ctx)

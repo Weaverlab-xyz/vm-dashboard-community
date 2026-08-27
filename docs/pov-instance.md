@@ -428,22 +428,23 @@ to have reaped it.
 
 ---
 
-## Wiring the VMs into PRA and Password Safe
+## Wiring the VMs into PRA, Password Safe and Entitle
 
 The point at which a POV becomes usable by a *person*. **POV page → the Wired column →
 wire.**
 
-Two artifacts per VM, and they are **independent**:
+Up to three artifacts per VM, and they are **independent**:
 
 * a **PRA jump item** in the customer's own appliance, tagged `POV`. Linux guests get a
   Shell Jump on 22; Windows guests a Remote RDP jump on 3389, with a Vault account for
   credential injection when the lab platform has a login for that VM;
 * a **Password Safe managed system + managed account**, reached *through* the Resource
-  Broker.
+  Broker;
+* an **Entitle SSH ephemeral-accounts integration**, for Linux guests.
 
-A POV with no Password Safe tenant gets the first and skips the second with a line in the
-job log. That is not a degraded outcome — a POV wired into PRA is already useful, and
-failing the jump items over a half-configured Password Safe tenant would be the wrong
+A POV with no Password Safe or Entitle tenant gets the first and skips the rest with a line
+in the job log. That is not a degraded outcome — a POV wired into PRA is already useful,
+and failing the jump items over a half-configured tenant elsewhere would be the wrong
 trade.
 
 ### Which Gateway they route through
@@ -509,12 +510,42 @@ When the lab platform has a login for the VM, it is seeded as the managed accoun
 initial credential, so the first rotation replaces a password somebody knows rather than
 one nobody does.
 
+### Entitle needs an agent this dashboard does not install
+
+Worth reading before you plan a POV around it. Entitle's SSH connector reaches a **private**
+target through an **Entitle agent** running inside that network — a Kubernetes deployment,
+named on the tenant as its *agent token*. A POV's VMs are on a private network by
+construction, so every POV integration is a private one.
+
+This dashboard installs a [Gateway](#the-pov-gateway) and a
+[Resource Broker](#the-resource-broker) inside a POV. It does **not** install an Entitle
+agent. So the agent is a prerequisite you deploy and then name on the tenant, and a POV
+whose Entitle tenant names none is skipped with exactly that reason rather than being
+registered against this instance's own Entitle tenant.
+
+It also needs a **key**. Entitle's connector authenticates with an SSH private key, not
+the password the lab platform holds — so this is the one credential in the whole POV
+wire-up that cannot be derived from something already there. Store the private half of the
+key baked into your template's Linux guests with **ssh key** on the POV row; it is
+encrypted like every other secret here and cleared at teardown.
+
+Windows guests are skipped: the ephemeral-accounts app mints an account *over SSH*, which
+a Windows guest does not answer.
+
+Four things come from the tenant, because they are ids and names inside *that* Entitle
+tenant: the **owner id**, the **workflow id**, the **agent token name** and the **SSH sudo
+user**.
+
 ### Teardown
 
-Destroying a POV off-boards the managed systems and removes the jump items **first**,
-before anything else. A Password Safe off-board that fails does not stop the jump-item
-removal: a managed system left in the tenant is untidy, and stopping the removal over it
-leaves something worse behind. They are the only
+Destroying a POV removes the Entitle integrations **first**, then off-boards the managed
+systems, then removes the jump items — all before the Gateway, the broker agent and the
+environment itself.
+
+Entitle goes first because an integration is standing *access*: of the three, it is the
+artifact whose lingering matters most. None of them stops the others — an integration or
+managed system left in a tenant is untidy, while stopping the chain leaves something
+worse behind, and a row whose removal failed keeps its state so a re-run can finish it. They are the only
 artifacts in a *customer's* appliance, and every later teardown step removes something they
 were resolved through — the tenant, the Gateway, the environment.
 
@@ -576,6 +607,13 @@ usual cause.
 
 **Wiring is refused with "this POV has no Gateway".** Working as intended — see
 [which Gateway they route through](#which-gateway-they-route-through). Install one first.
+
+**Wiring skips the Entitle half with "names no agent token".** Working as intended: a
+POV's VMs are private and Entitle reaches a private target through an agent inside the
+network, which this dashboard does not install. Deploy it and name its token on the tenant.
+
+**Wiring skips the Entitle half with "no Entitle SSH key".** Its connector authenticates
+with a key rather than a password. Use **ssh key** on the POV row.
 
 **Wiring skips the Password Safe half with "no Resource Broker".** Working as intended:
 without one the platform has no route to a private address. Install one from the Resource
