@@ -58,18 +58,24 @@ class _FakeJobRow:
 
 # ── fake Password Safe API ────────────────────────────────────────────────────
 
+# ``account_name`` is the account's OWN name in Password Safe, and every DB plugin parses
+# it positionally as ``<mode>:<dbLogin>`` — so these fixtures carry the shape a real
+# reference-mode account must have, not a bare service-account name. The config value
+# (the dict key below) is what the operator types; the account name is what the plugin
+# splits, and the two are independent here on purpose.
 FAKE_FA = {"id": 77, "platform_id": 909,
-           "platform_name": "psql SSM Custom Plugin", "account_name": "clouddb-ssm-postgres"}
+           "platform_name": "psql SSM Custom Plugin",
+           "account_name": "psafe-clouddb-ssm:psfa"}
 # The GCP siblings, on the Cloud SQL plugin platforms. "clouddb-gcp-wrong" sits on a
 # platform whose name carries neither token, so it exercises the mismatch guard.
 FAKE_FA_GCP = {"id": 88, "platform_id": 808,
                "platform_name": "GCP Cloud SQL PostgreSQL",
-               "account_name": "clouddb-gcp-postgres"}
+               "account_name": "IMP:bt-rotator@acme-data-prod.iam"}
 FAKE_FA_GCP_MYSQL = dict(FAKE_FA_GCP, id=89, platform_id=807,
                          platform_name="GCP Cloud SQL MySQL",
-                         account_name="clouddb-gcp-mysql")
+                         account_name="IMP:bt-rotator@acme-data-prod.iam")
 FAKE_FA_WRONG = dict(FAKE_FA_GCP, id=90, platform_name="Azure Active Directory",
-                     account_name="clouddb-gcp-wrong")
+                     account_name="IMP:bt-rotator@acme-data-prod.iam")
 _FAKE_ACCOUNTS = {
     "clouddb-ssm-postgres": FAKE_FA,
     "pra-config-api": FAKE_FA,
@@ -77,7 +83,7 @@ _FAKE_ACCOUNTS = {
     "clouddb-gcp-mysql": FAKE_FA_GCP_MYSQL,
     "clouddb-gcp-mssql": dict(FAKE_FA_GCP, id=91, platform_id=806,
                               platform_name="GCP Cloud SQL SQL Server",
-                              account_name="clouddb-gcp-mssql"),
+                              account_name="SA:sqlserver"),
     "clouddb-gcp-wrong": FAKE_FA_WRONG,
 }
 
@@ -344,6 +350,103 @@ def test_the_managed_system_is_registered_against_the_referenced_account():
     _onboard(clouddb_ps_functional_account_mode="reference",
              clouddb_ps_functional_account_postgres="clouddb-ssm-postgres")
     assert ("register", 77, 909) in CALLS, "the system must inherit the account's platform"
+
+
+# ── the referenced account's NAME must be one the plugin can parse ────────────
+#
+# The failure this closes (live 2026-08-27): a reference-mode functional account named
+# "psafe-clouddb-ssm" — the IAM user's name, and nothing else — passed the platform check,
+# onboarded green, and then failed EVERY credential action on the psql SSM plugin with
+# "Index was outside the bounds of the array". All four v24.2.x actions run
+# ``accountName.Split(':')[1]`` with no bounds check, so the crash is in the plugin, hours
+# after the job that caused it went green. The platform guard cannot see this: the account
+# was on exactly the right platform.
+
+def _resolve_named(account_name, *, label="ssm", platform_name="psql SSM Custom Plugin",
+                   tokens=("ssm",)):
+    _reset(clouddb_ps_functional_account_mode="reference",
+           clouddb_ps_functional_account_postgres="the-account")
+
+    async def _named(name):
+        CALLS.append(("get_functional_account", name))
+        return {"id": 77, "platform_id": 909, "platform_name": platform_name,
+                "account_name": account_name}
+
+    prev = sys.modules["web_dashboard.services.ps_api_service"].get_functional_account
+    sys.modules["web_dashboard.services.ps_api_service"].get_functional_account = _named
+    try:
+        return _resolve(label=label, platform_tokens=tokens)
+    finally:
+        sys.modules["web_dashboard.services.ps_api_service"].get_functional_account = prev
+
+
+def test_reference_mode_rejects_a_functional_account_name_with_no_delimiter():
+    try:
+        _resolve_named("psafe-clouddb-ssm")
+    except svc.CloudDatabaseError as exc:
+        msg = str(exc)
+        # The error has to carry the shape to type AND the symptom the operator already
+        # saw in BeyondInsight, or it is just another "onboarding failed".
+        assert "psafe-clouddb-ssm" in msg
+        assert "<EC2|iamUserName>:<dbLogin>" in msg
+        assert "Index was outside the bounds of the array" in msg
+        # ...and the password contract, which the API can never show us.
+        assert "secretAccessKey" in msg
+        assert "clouddb_ps_functional_account_postgres" in msg
+    else:
+        raise AssertionError("an unparseable functional account name must raise")
+
+
+def test_reference_mode_rejects_an_empty_db_login_half():
+    # "EC2:" parses, but PGUSER is then empty and psql falls back to the jump host's OS
+    # user — an authentication failure a long way from its cause.
+    for name in ("EC2:", ":psfa", "EC2:   "):
+        try:
+            _resolve_named(name)
+        except svc.CloudDatabaseError:
+            pass
+        else:
+            raise AssertionError(f"{name!r} must raise")
+
+
+def test_reference_mode_rejects_a_wrong_case_ec2_prefix():
+    # The plugin compares `fa_name == "EC2"` with exact case, so "ec2:" silently selects
+    # IAM mode and calls AWS with the password's first two segments as an access key pair.
+    # No error anywhere — just the wrong credential — which is why this is checked.
+    try:
+        _resolve_named("ec2:psfa")
+    except svc.CloudDatabaseError as exc:
+        assert "exact case" in str(exc)
+        assert "EC2:psfa" in str(exc), "the error must show the corrected name"
+    else:
+        raise AssertionError("a lower-case EC2 prefix must raise")
+
+
+def test_reference_mode_accepts_the_article_shaped_names():
+    # Both AWS modes from the vendor article: the case-sensitive EC2 literal, and an IAM
+    # user name in the same position (the plugin only ever compares this half to "EC2").
+    for name in ("EC2:psfa", "psafe-clouddb-ssm:psfa"):
+        fa_id, _platform, owned = _resolve_named(name)
+        assert (fa_id, owned) == (77, False), name
+
+
+def test_the_pra_vault_account_name_is_not_held_to_a_db_plugin_shape():
+    # The "PRA Vault Username Password" platform takes a plain OAuth client id. Applying
+    # the DB grammar to it would reject every correctly configured install.
+    fa_id, _platform, owned = _resolve_named(
+        "pra-config-api-client", label="PRA Vault",
+        platform_name="PRA Vault Username Password", tokens=("pra vault",))
+    assert (fa_id, owned) == (77, False)
+
+
+def test_gcp_iam_auth_may_carry_no_db_login():
+    # Under IAM database authentication the Cloud SQL plugins legitimately have no
+    # password segment and no DB login to name, so only the delimiter and the mode
+    # prefix are required on that label.
+    fa_id, _platform, owned = _resolve_named(
+        "ADC:", label="gcp", platform_name="GCP Cloud SQL PostgreSQL",
+        tokens=("cloud sql",))
+    assert (fa_id, owned) == (77, False)
 
 
 

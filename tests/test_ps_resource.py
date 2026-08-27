@@ -322,6 +322,43 @@ def test_dbssm_registration_defaults_the_ip_to_the_placeholder():
     assert ps._line("dns_name", json.dumps(_DB_DNS)) in captured["hcl"]
 
 
+def test_dbssm_registration_sets_the_plugin_sleep_timeout():
+    """The vendor article's "timeout in milliseconds is used to give more time for
+    Systems Manager to provide status" note, pinned. Every SSM DB action reads
+    GetCommandInvocation once, and only if the status is still "InProgress" does
+    `Thread.Sleep(timeout)` and read again — where `timeout` is the managed system's
+    own Timeout field. Password Safe defaults it to 30, i.e. 30 MILLISECONDS, after
+    which the second read is still "InProgress" — a status the action treats as neither
+    Failed nor Success, so it falls through and reports SUCCESS for a rotation it never
+    confirmed. Not setting this field is therefore not a slow rotation, it is a silently
+    unverified one."""
+    import asyncio
+    captured = {}
+
+    def _capture(hcl, tf_vars, tenant=None):
+        captured["hcl"] = hcl
+        return {"managed_system_id": "1", "managed_account_id": "2", "tf_state_json": None}
+
+    real = ps._apply_hcl_sync
+    ps._apply_hcl_sync = _capture
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="pg", host_name="pg", functional_account_id=1, platform_id=20,
+            workgroup_id="wg", method="dbssm", dns_name=_DB_DNS))
+    finally:
+        ps._apply_hcl_sync = real
+    assert ps._line("timeout", ps._DBSSM_PLUGIN_TIMEOUT_MS) in captured["hcl"]
+    # Milliseconds, and comfortably longer than an SSM shell round-trip plus a psql
+    # ALTER USER against RDS. A seconds-shaped value here is the 30ms bug again.
+    assert ps._DBSSM_PLUGIN_TIMEOUT_MS >= 10000
+
+
+def test_the_ssh_shape_does_not_carry_a_plugin_timeout():
+    # `timeout` exists for the custom plugin's Thread.Sleep, not for Password Safe's own
+    # SSH connection, so the traditional shape must be left exactly as it was.
+    assert "timeout" not in ps._generate_managed_system_hcl(**_COMMON)
+
+
 def test_dbssm_account_is_password_managed_no_key_no_dss():
     hcl = ps._generate_managed_system_hcl(**_DBSSM)
     assert ps._line("account_name", '"psafe_ab12cd34ef56"') in hcl

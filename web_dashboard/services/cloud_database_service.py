@@ -1652,6 +1652,81 @@ def _dbssm_fa_fields(*, admin_user: str, admin_password: str,
             f"{access_key_id or 'x'}:{secret_access_key or 'x'}:{admin_password}")
 
 
+# ── Referenced functional-account name grammar ────────────────────────────────
+#
+# Every DB plugin parses its functional account POSITIONALLY, exactly the way it parses
+# the managed-system address. All four "{engine} SSM Custom Plugin" v24.2.x actions open
+# with the same three unguarded splits:
+#
+#   accountName.Split(':')[1]  -> the DB login the plugin exports as PGUSER
+#   password.Split(':')[0..1]  -> the AWS access key pair (ignored in EC2 mode)
+#   password.Split(':')[2]     -> that DB login's password
+#
+# so a functional account whose NAME carries no ':' fails EVERY action — Verify FA,
+# Verify MA, Change FA, Change MA — with "Index was outside the bounds of the array",
+# thrown inside the plugin long after onboarding reported success. Seen live 2026-08-27:
+# a reference-mode account named 'psafe-clouddb-ssm' (a perfectly good IAM user name,
+# and nothing else) onboarded green and then failed every credential action on the
+# managed system it was attached to.
+#
+# "create" mode composes both fields itself (_dbssm_fa_fields above), so it cannot get
+# this wrong. "reference" mode takes the operator's account as-is, which is exactly why
+# the name is checked here — before Terraform runs, while the error can still name the
+# field to fix. The PASSWORD cannot be checked: Password Safe never returns a functional
+# account's password over the API, so its contract is stated in the error text instead.
+_FA_NAME_SHAPES = {
+    # label -> (format the plugin parses, prefixes it compares with EXACT case)
+    "ssm":   ("<EC2|iamUserName>:<dbLogin>", ("EC2",)),
+    "azure": ("<SP|MSI>:<dbLogin>", ("SP", "MSI")),
+    "gcp":   ("<ADC|IMP|SA>:<dbLogin>", ("ADC", "IMP", "SA")),
+}
+_FA_PASSWORD_SHAPES = {
+    "ssm": "<accessKeyId>:<secretAccessKey>:<dbLoginPassword>' (EC2 mode uses "
+           "'x:x:<dbLoginPassword>')",
+    "azure": "<clientId>:<clientSecret>:<dbLoginPassword>' (MSI mode uses "
+             "'-:-:<dbLoginPassword>')",
+    "gcp": "-:<impersonationTarget|->:<dbLoginPassword|->'",
+}
+
+
+def _validate_referenced_fa_name(account_name: str, *, label: str, config_key: str) -> None:
+    """Raise CloudDatabaseError unless ``account_name`` is a name the plugin will parse.
+
+    Grammar only, and only for the three DB plugin families — the PRA Vault platform
+    takes a plain account name and is deliberately absent from ``_FA_NAME_SHAPES``.
+
+    The DB login half is required for ``ssm``/``azure`` because the plugin exports it as
+    the DB client's user: empty, ``psql``/``mysql``/``sqlcmd`` silently falls back to the
+    jump host's OS user and the rotation fails as an authentication error somewhere far
+    from its cause. GCP's IAM-auth channels legitimately carry no DB login, so only the
+    delimiter and the mode prefix are required there."""
+    shape = _FA_NAME_SHAPES.get(label)
+    if not shape:
+        return
+    fmt, exact_prefixes = shape
+    name = (account_name or "").strip()
+    prefix, sep, db_login = name.partition(":")
+    if not sep or not prefix or (not db_login.strip() and label != "gcp"):
+        raise CloudDatabaseError(
+            f"Password Safe functional account {name!r} is not a name the {label} "
+            f"database plugin can parse: it must be '{fmt}'. The plugin reads the DB "
+            f"login as accountName.Split(':')[1] with no bounds check, so this account "
+            f"fails every credential action — Verify Functional Account included — with "
+            f"\"Index was outside the bounds of the array\". Rename the account in "
+            f"BeyondInsight (its password must be "
+            f"'{_FA_PASSWORD_SHAPES.get(label, '<part1>:<part2>:<dbLoginPassword>')}), "
+            f"or point {config_key} at one that already has the right shape.")
+    for want in exact_prefixes:
+        if prefix != want and prefix.upper() == want.upper():
+            raise CloudDatabaseError(
+                f"Password Safe functional account {name!r} spells its mode prefix "
+                f"{prefix!r}, but the {label} database plugin compares it to {want!r} "
+                f"with exact case. {prefix!r} therefore selects a DIFFERENT mode "
+                f"silently — no error, just the wrong credential — so rename the "
+                f"account to {want}:{db_login} (or set {config_key} to an account that "
+                f"spells the prefix correctly).")
+
+
 def _ps_fa_mode() -> str:
     """Where the DB plugin's functional account comes from: ``"reference"`` (the
     operator created it and named it in config -- VM/k8s parity) or ``"create"``
@@ -1708,9 +1783,15 @@ async def _resolve_db_functional_account(*, config_key: str, platform_id: int,
             f"{' '.join(platform_tokens)!r} platform -- the managed system would land on "
             f"the wrong platform. Point {config_key} at the functional account you "
             f"created on your {label} plugin platform.")
+    # The platform check above proves the account is attached to the right PLUGIN; this
+    # proves the plugin can actually parse it. Both are needed, and only this one catches
+    # the failure that survives onboarding: a name with no ':' registers fine and then
+    # fails every credential action from inside the plugin (see _FA_NAME_SHAPES).
+    _validate_referenced_fa_name(fa.get("account_name") or "",
+                                 label=label, config_key=config_key)
     logger.info("clouddb: using operator-created %s functional account %r "
-                "(id=%s platform=%r) -- not created here, not deleted on decommission",
-                label, name, fa["id"], pname)
+                "(id=%s name=%r platform=%r) -- not created here, not deleted on "
+                "decommission", label, name, fa["id"], fa.get("account_name"), pname)
     return int(fa["id"]), int(fa["platform_id"]), False
 
 

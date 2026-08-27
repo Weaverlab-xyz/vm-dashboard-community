@@ -48,6 +48,59 @@ Three consequences worth knowing before you pick it:
 - **A blank name is an error**, not a quiet fall-through to `create`. Deliberate: this feature
   already has two silent fallbacks too many (§3 and §1.2).
 
+### The account you reference must be `<mode>:<dbLogin>`, not a plain name
+
+**This is the single most expensive mistake in `reference` mode**, because everything about
+it looks fine until a rotation runs. Every DB plugin parses its functional account
+**positionally**, exactly the way it parses the managed-system address. All four AWS SSM
+actions — *Verify FA*, *Verify MA*, *Change FA*, *Change MA* — open with:
+
+```
+accountName.Split(':')[1]   -> the DB login the plugin exports as PGUSER / -U / -U
+password.Split(':')[0], [1] -> the AWS access key pair (ignored in EC2 mode)
+password.Split(':')[2]      -> that DB login's password on the target database
+```
+
+None of those indexes is bounds-checked. So a functional account named for the IAM user
+alone — `psafe-clouddb-ssm`, which is the obvious thing to type — **onboards green** and
+then fails *every* credential action with:
+
+> Index was outside the bounds of the array.
+
+thrown inside the plugin, on the managed system, hours after the provisioning job that
+attached it reported success. The platform check cannot catch it: the account is on exactly
+the right platform. (Live 2026-08-27, AWS postgres.)
+
+| Cloud | Functional account **Username** | Functional account **Password** |
+|---|---|---|
+| **AWS** (IAM-user mode) | `<iamUserName>:<dbLogin>` | `<accessKeyId>:<secretAccessKey>:<dbLoginPassword>` |
+| **AWS** (EC2-role mode) | `EC2:<dbLogin>` — **case-sensitive** | `x:x:<dbLoginPassword>` |
+| **Azure** | `SP:<dbLogin>` / `MSI:<dbLogin>` | `<clientId>:<clientSecret>:<dbLoginPassword>` / `-:-:<dbLoginPassword>` |
+| **GCP** | `ADC:<dbLogin>` / `IMP:<dbLogin>` | `-:<impersonationTarget|->:<dbLoginPassword|->` |
+
+Two traps inside the trap:
+
+- **`EC2` is compared with exact case.** The plugin tests `fa_name == "EC2"`; `ec2:` or
+  `Ec2:` therefore selects **IAM-user mode** silently and calls AWS with the password's
+  first two segments as an access key pair. No error names the cause.
+- **The `<dbLogin>` half is not decorative.** It becomes the DB client's user. Leave it
+  empty and `psql` falls back to the jump host's OS user, which surfaces as an
+  authentication failure a long way from the field that caused it.
+
+Onboarding now **refuses** a referenced account whose name it can prove the plugin cannot
+parse, and the error names both halves of the contract — but only the *name* can be
+checked. Password Safe never returns a functional account's password over the API, so a
+password with fewer than three `:`-parts still fails the same way, inside the plugin.
+
+**The `<dbLogin>` must also exist on every managed server, with that password.** The
+dashboard creates only the dedicated managed user (`psafe_<id12>`); it never creates the
+functional account's own DB login, and it cannot — it does not know that password. On AWS
+this is the real cost of `reference` mode: each provisioned RDS instance gets a *random*
+master password, so one shared functional account can only work if you create its login
+(e.g. `psfa`, with `CREATEROLE`) on each server yourself. If that is not something you want
+to do per database, use `create` mode on AWS, where the functional account *is* that
+database's own master user and the whole question disappears.
+
 ### What `create` mode packs into the account it mints
 
 Only relevant if you stay on the legacy default. The dashboard calls
@@ -211,7 +264,12 @@ rotation fails at the AWS call. Either way, create an IAM user with:
 - `ssm:ListCommandInvocations`
 
 and an access key. The *IAM Username* field is informational only — the plugin never sees
-it; the mode is selected purely by the key pair's presence.
+it; in `create` mode the mode is selected purely by the key pair's presence.
+
+In `reference` mode the mode is selected by **your account's Username** instead, and it
+must be `<iamUserName>:<dbLogin>` (or the case-sensitive `EC2:<dbLogin>`) with the access
+key pair in the password — see *The account you reference must be `<mode>:<dbLogin>`* in §0
+before you create it. A name with no `:` is the one mistake here that survives onboarding.
 
 Keep *Assume Role* at `NoAssumeRole` (a full AssumeRole ARN belongs there only in the
 cross-account EC2-broker mode). The segment must be **≥ 12 characters** — the plugin
@@ -551,9 +609,9 @@ whose only trace was a `Password Safe onboarding skipped (non-fatal)` log line.)
 | `role "psafe_…" already exists` / `CREATE USER` fails on **Register in Password Safe** | a previous attempt created the managed database user before failing later. Onboarding is create-or-reset on every engine, so this is fixed — a build from before 2026-08-27 needs the user dropped by hand, or the newer image |
 | `Bad IP value: '<packed address>' in 'IPAddress' field` | a managed system registered by a build between 2026-08-25 and 2026-08-27, which put the packed address in the IP field. Re-register from the row's **Register in Password Safe** action |
 | (AWS) `Index and length must refer to a location within the string` | the address's assumeRole segment is under 12 characters — the pre-fix `local` default; re-register, or fix the address in BeyondInsight (`NoAssumeRole` or a full role ARN) |
-| (AWS) rotation fails and the functional account's name has no `:` (a bare `EC2`, or an IAM username) | a pre-fix `create`-mode account — the plugin parses `EC2:<dbAdmin>` / `IAM:<dbAdmin>` over a three-part password; delete it and re-register |
+| (AWS) rotation fails and the functional account's name has no `:` (a bare `EC2`, or an IAM username) | the account cannot be parsed at all — `<mode>:<dbLogin>` over a three-part password (§0). In `create` mode it is a pre-fix account: delete it and re-register. In `reference` mode it is **your** account: rename it in BeyondInsight and fix its password, then **Register in Password Safe**. New onboardings refuse an unparseable name up front, so this only reaches the plugin on systems registered before that guard |
 | (AWS) `Caught exception when trying to Send Command` | the parse succeeded — the failure is AWS-side: credentials (EC2 mode on an off-EC2 broker, §1.4), instance id, region, or SSM permissions |
-| (AWS) Verify reports success within seconds but nothing changed | the plugins misread the managed system's Timeout (seconds) as **milliseconds** between SSM status polls, so a still-`InProgress` command can fall through as success — leave Timeout at its default and treat instant Verify results as advisory (plugin-side fix pending) |
+| (AWS) Verify reports success within seconds but nothing changed | the plugins read the managed system's Timeout as **milliseconds** for their one retry of the SSM status poll, so at Password Safe's default of `30` a still-`InProgress` command falls through as success. New AWS DB managed systems are registered with Timeout `30000`; a system onboarded before that carries `30` — re-register it from the row's **Register in Password Safe** action, or raise Timeout to `30000` on the managed system in BeyondInsight |
 | `PSPLUGIN_CHANGE_FAILED: … must have admin option on role` / `CREATE USER denied` / `ALTER ANY LOGIN` | self-rotation is **off**, so Password Safe called the via-functional-account action against a server with no privileged login — turn on `clouddb_ps_self_rotation` (§0) |
 | `PSPLUGIN_CHANGE_FAILED: … password authentication failed for user psafe_…` (self-rotation) | Password Safe's stored current password drifted from the server |
 | `CredentialUnavailableException` / `DefaultAzureCredential failed to retrieve a token` | an `MSI:` functional account reached tier 3 on a broker with no managed identity — switch the FA to `SP:`, assign an MI, or configure `ControlPlane` (§0) |
