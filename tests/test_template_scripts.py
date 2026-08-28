@@ -270,6 +270,56 @@ def test_every_x_data_component_is_defined_somewhere():
         "x-data names a function nothing defines:\n  " + "\n  ".join(missing))
 
 
+# Routes that are deliberately reachable without a token: the setup wizard runs before a
+# user exists, login (password or passkey) is how a token is obtained, and the feature map
+# and health check sit on _SETUP_BYPASS_PREFIXES in main.py for the same reason. Listed as
+# individual prefixes rather than `/api/auth/`, because `/api/auth/me` DOES need the header
+# and login.html duly sends one.
+_PUBLIC_API = ("/api/features", "/api/health", "/api/setup/", "/api/auth/login",
+               "/api/auth/webauthn/login/")
+
+_BARE_FETCH = re.compile(r"""(?<![\w.])fetch\(\s*(['"`])(/api/[^'"`]*)\1""")
+
+
+def test_no_unauthenticated_api_fetch():
+    """A template must not call an authenticated /api/ route with a bare `fetch()`.
+
+    This dashboard authenticates every API route off the `Authorization` header --
+    `get_current_user` depends on `OAuth2PasswordBearer` and the app sets no cookie
+    anywhere -- so `fetch('/api/...')` with no headers is an ANONYMOUS request. It comes
+    back 401 `{"detail":"Not authenticated"}` however healthy the integration behind the
+    route is.
+
+    The failure is nasty because it does not look like an auth failure. The POV page made
+    six of these, and the first one it fired rendered "Could not read the lab platform
+    registry" -- so a Skytap credential that had passed Settings -> Verify seconds earlier
+    read as a broken Skytap. Nothing 500s, nothing is logged as an error, and the page's
+    own error text names the wrong system.
+
+    A `fetch()` whose URL is a variable is not checked: that is the wrapper pattern
+    (`window.API.request`, and the per-page `apiFetch` helpers), which is exactly where a
+    bare `fetch` is supposed to end up.
+    """
+    offenders = []
+    for path in sorted(TEMPLATES.rglob("*.html")):
+        text = path.read_text(encoding="utf-8")
+        for m in _BARE_FETCH.finditer(text):
+            url = m.group(2)
+            if url.startswith(_PUBLIC_API):
+                continue
+            # The options object, if there is one, follows the URL argument. The header
+            # has to be in it.
+            if "Authorization" in text[m.end():m.end() + 400]:
+                continue
+            line = text.count("\n", 0, m.start()) + 1
+            offenders.append("%s:%d: fetch('%s')"
+                             % (path.relative_to(_ROOT), line, url))
+    assert not offenders, (
+        "bare fetch() of an authenticated API route -- these return 401 "
+        "'Not authenticated', not the integration error the page will show:\n  "
+        + "\n  ".join(offenders))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

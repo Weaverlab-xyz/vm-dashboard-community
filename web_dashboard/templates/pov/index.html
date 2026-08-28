@@ -719,7 +719,7 @@ function povPage() {
 
     async init() {
       try {
-        const res = await fetch('/api/pov/platforms');
+        const res = await this.apiFetch('/api/pov/platforms');
         if (!res.ok) { this.error = 'Could not read the lab platform registry.'; this.loading = false; return; }
         const data = await res.json();
         this.platforms = data.platforms || [];
@@ -768,10 +768,29 @@ function povPage() {
       }, 5000);
     },
 
+    // Every /api/ route authenticates off the Authorization header -- the dashboard sets
+    // no cookie anywhere, so a bare fetch() from a page is an ANONYMOUS request and comes
+    // back 401 "Not authenticated" whatever the integration behind the route is doing.
+    // That is what made a Skytap credential which passes Settings -> Verify read on this
+    // page as "Could not read the lab platform registry": /api/pov/platforms never
+    // reaches the registry at all. Same shape as window.API and the raw fetches in
+    // k8s/index.html; a 401 is a dead session rather than a page error, so it logs out
+    // the way window.API does instead of being rendered as one.
+    async apiFetch(url, opts) {
+      const token = Alpine.store('auth').token;
+      const o = opts || {};
+      const res = await fetch(url, {
+        ...o,
+        headers: { ...(o.headers || {}), ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+      });
+      if (res.status === 401) Alpine.store('auth').logout();
+      return res;
+    },
+
     async fetchList(url, key, quiet) {
       try {
         const q = url.includes('/managed') ? '' : `?platform=${encodeURIComponent(this.platform)}`;
-        const res = await fetch(url + q);
+        const res = await this.apiFetch(url + q);
         if (res.status === 409) { if (!quiet) this.notConfigured = true; return []; }
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
@@ -786,7 +805,7 @@ function povPage() {
     },
 
     async post(url, body, method) {
-      const res = await fetch(url, {
+      const res = await this.apiFetch(url, {
         method: method || 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: body ? JSON.stringify(body) : undefined,
@@ -842,7 +861,7 @@ function povPage() {
 
     async loadTenants() {
       try {
-        const res = await fetch('/api/pov/tenants');
+        const res = await this.apiFetch('/api/pov/tenants');
         if (!res.ok) { this.tenants = []; return; }
         const data = await res.json();
         this.tenants = data.tenants || [];
@@ -963,7 +982,7 @@ function povPage() {
     async checkGateway(env) {
       this.error = ''; this.notice = '';
       try {
-        const res = await fetch(`/api/pov/managed/${env.id}/gateway`);
+        const res = await this.apiFetch(`/api/pov/managed/${env.id}/gateway`);
         const data = await res.json().catch(() => ({}));
         if (!res.ok) { this.error = data.detail || `Could not check (${res.status}).`; return; }
         // The detail carries the remedy, so it goes in front of the operator rather than
@@ -975,7 +994,7 @@ function povPage() {
 
     async loadWinAssets() {
       try {
-        const res = await fetch('/api/config-mgmt/assets');
+        const res = await this.apiFetch('/api/config-mgmt/assets');
         if (!res.ok) { this.winAssets = []; return; }
         const data = await res.json();
         const rows = data.assets || data || [];
