@@ -1,27 +1,26 @@
 # Skytap
 
 The first **lab platform** for POV environments. A POV is a Skytap *template* instantiated
-whole; the dashboard reads and (in a later release) creates those environments, then wires
-their VMs into that POV's PRA and Password Safe tenant.
+whole; the dashboard creates those environments and wires their VMs into that POV's PRA,
+Password Safe and Entitle tenants.
 
 Available on a **POV instance only** — see [pov-instance.md](../pov-instance.md). On a demo
 instance the integration is masked off and Settings refuses to enable it.
 
-> **Partial PAM wiring.** The dashboard can create an environment from a template, power
-> it on and off, destroy it, enrol an **agent inside it** — see
-> [The broker VM](#the-broker-vm) and the [template contract](#the-template-contract) —
-> install a **BeyondTrust Gateway** on that broker, registered into the POV's own PRA
-> tenant ([the POV Gateway](../pov-instance.md#the-pov-gateway)), and install a **Password
-> Safe Resource Broker** on a Windows VM beside it
-> ([the Resource Broker](../pov-instance.md#the-resource-broker)), and create **one PRA
-> jump item per VM** through that Gateway
-> onboard each VM into **Password Safe** through that Resource Broker, and register the
-> Linux guests in **Entitle**
+> **What the dashboard does with an environment.** Create it from a template, power it on
+> and off, and destroy it. Enrol an **agent inside it** — see
+> [The broker VM](#the-broker-vm) and the [template contract](#the-template-contract).
+> Install a **BeyondTrust Gateway** on that broker, registered into the POV's own PRA
+> tenant ([the POV Gateway](../pov-instance.md#the-pov-gateway)), and a **Password Safe
+> Resource Broker** on a Windows VM beside it
+> ([the Resource Broker](../pov-instance.md#the-resource-broker)).
+> Then, per VM: **one PRA jump item** through that Gateway, **Password Safe onboarding**
+> through that Resource Broker, and **Entitle registration** for the Linux guests
 > ([wiring the VMs](../pov-instance.md#wiring-the-vms-into-pra-password-safe-and-entitle)).
-> and publish a **customer-facing share link** for the whole environment
+> Publish a **customer-facing share link** for the whole environment
 > ([the share link](../pov-instance.md#the-customer-facing-share-link)) — Skytap calls it a
-> publish set, and the dashboard always gives it a generated password and an expiry — and
-> reap the whole environment on an **auto-delete timer**
+> publish set, and the dashboard always gives it a generated password and an expiry. And
+> reap the environment on an **auto-delete timer**
 > ([the auto-delete timer](../pov-instance.md#the-auto-delete-timer)), which warns on a
 > ladder rather than once because an evaluation outlives whoever set it up.
 
@@ -53,10 +52,35 @@ error message says so rather than reporting a generic failure.
 | API URL | `https://cloud.skytap.com` unless your account is on another region's endpoint |
 | Username | The account's login, usually an email address |
 | API security token | From the account page. Stored encrypted; the panel shows "stored — leave blank to keep" once set |
-| Project ID | Optional. Scopes environments to a Skytap project, for access control and usage reporting |
+| Project ID | Optional. Templates and environments are **listed from** this project, and new environments are **created inside** it. Blank lists everything the token can see |
 
 The token is encrypted at rest with the same Fernet key as every other secret, and — like
 any secret in this dashboard — it can instead be a reference into an external vault.
+
+### Verifying the connection
+
+The Skytap panel has a **Test connection** button. It reads the **saved** values, not what
+is currently in the form, so save first.
+
+It issues one page of `GET /v2/templates` — the same read the POV page makes — scoped to
+the Project ID when one is set. That single call answers three questions at once: whether
+the token authenticates, what this account can actually *see*, and whether the Project ID
+is real.
+
+It distinguishes five outcomes:
+
+| It says | Meaning |
+|---|---|
+| **Connected. Templates are visible** | Everything the POV page needs |
+| *not configured* | One of the three connection fields is empty |
+| *Skytap rejected the credentials* | Wrong username or token. Note it is an **API security token**, not your account password |
+| *exposes no templates* | The token works, but the account — or the project — shows nothing. There is nothing to build a POV from, so this is reported as a **failure**, not a warning |
+| *no project N (404)* | The credentials work; the Project ID is stale or wrong |
+| *the host could not be reached* | DNS, firewall or proxy — not a credential problem |
+
+An account that authenticates but exposes no templates is deliberately red. A POV cannot be
+created from an empty catalogue, so reporting green for a connection that cannot do the one
+thing it is for would be the exact false positive a check like this exists to prevent.
 
 ## What the dashboard does with the API
 
@@ -64,10 +88,14 @@ Three of Skytap's behaviours are easy to get wrong once and then wrong everywher
 three are handled in one place (`services/skytap_client.py`) rather than at each call site.
 
 **`423 Locked` is normal.** It is not an error — it is Skytap saying "this resource is
-busy, or the account is being rate-limited", and it carries a `Retry-After`. Environments
-also expose a `rate_limited` boolean, which the POV page surfaces as a badge. The client
-retries, honouring `Retry-After`, bounded; only after that does it report a failure, and
-the message says it is a rate limit rather than a fault.
+busy, or the account is being rate-limited", and it carries a `Retry-After`. A plain `429`
+is retried identically. Environments also expose a `rate_limited` boolean, which the POV
+page surfaces as a badge. The client retries, honouring `Retry-After`, bounded; only after
+that does it report a failure, and the message says it is a rate limit rather than a fault.
+
+The retry budget is per client. Provisioning gets the generous default, because a job that
+has already waited minutes should keep waiting; **Test connection** asks for one retry, so
+a rate-limited account answers the button instead of hanging behind a spinner.
 
 **Every read carries `keep_idle=true`.** Without it, *reading* an environment resets its
 idle timer. A dashboard that polls environments would hold every one of them awake and
@@ -76,6 +104,13 @@ symptom would be the invoice, which is exactly why it is not left to the caller.
 
 **Collections paginate by count/offset.** A single GET returns a first page that looks
 exactly like a complete answer, so listings are walked to the end.
+
+**Listings are project-scoped when a Project ID is set** — they read
+`/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` instead of the
+account-wide collections. A project id the token cannot see answers `404`, and the
+dashboard turns that into a message naming the remedy rather than a bare error. That is
+why the sub-resource paths were chosen over a filter parameter: a filter an API does not
+implement is silently ignored, and an unscoped list looks exactly like a correct one.
 
 ## The lifecycle
 
@@ -87,7 +122,9 @@ exactly like a complete answer, so listings are walked to the end.
 | **Gateway** | Start a BeyondTrust Gateway container on the broker VM, registered into this POV's PRA tenant |
 | **Resource Broker** | Run the staged Password Safe installer on a Windows VM, over WinRM from the broker |
 | **Wire** | One PRA jump item per VM through this POV's Gateway, one Password Safe managed system through its Resource Broker, and one Entitle integration per Linux guest |
-| **Destroy** | Revoke the broker agent, then delete the configuration and everything Skytap keeps inside it |
+| **Share** | Publish every VM as one password-protected, time-limited `publish_set`; re-sharing revokes the previous link first |
+| **Auto-delete** | Reap the whole environment when its timer expires, warning on a ladder as the deadline approaches |
+| **Destroy** | Revoke the share link, reap the PAM artifacts, revoke the broker agent, then delete the configuration and everything Skytap keeps inside it |
 
 Three orderings are load-bearing, and each is wrong in a way that leaves a resource nobody
 can reclaim:
@@ -259,6 +296,15 @@ a platform lacks degrades visibly instead of failing late:
 | Bootstrap injection | **metadata** — per-VM `user_data`, read by the guest at `http://169.254.169.254/skytap`. Used by [the broker VM](#the-broker-vm) |
 | Share link | yes — publish sets, with a password and an expiry |
 | Stored credentials | yes — `…/vms/{id}/credentials`. Used by [the Resource Broker install](../pov-instance.md#there-is-no-login-field-on-purpose), which is why the dashboard stores no Windows password for a POV |
+| Verify | yes — one page of `/v2/templates`, surfaced as **Test connection** in Settings |
+| Project scoping | yes — `/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` |
+
+> **The two project paths are not yet confirmed against a live account.** Three things are
+> assumed: that they return the same object shape as the account-wide collections, that
+> they honour `count`/`offset` pagination, and that a project id the token cannot see
+> answers `404` rather than an empty list. They are flagged the same way in the code, above
+> the one place the paths are built. Nothing changes for an install that leaves the Project
+> ID blank, and **Test connection** is the quickest way to check one that does not.
 
 `bootstrap_injection` is one intent with more than one mechanism. Skytap hands data to the
 guest and the guest fetches it; another platform might run a script on the guest instead.
@@ -276,10 +322,13 @@ rather than failing somewhere inside a job.
 | "Skytap rejected the credentials … uses an API token, not your account password" | The account password was pasted into the token field | Use the API security token from the Skytap account page |
 | The POV page says Skytap is not configured | No URL, username or token stored | Settings → Integrations → Skytap |
 | Settings refuses to enable it with a 409 | This is a demo instance | Skytap is POV-only; see [pov-instance.md](../pov-instance.md) |
-| No POV nav link at all | `pov_environments_enabled` is off, or the profile is `demo` | Both must be true — `GET /api/features` shows `install_profile` |
+| No POV nav link at all | `pov_environments_enabled` is off, or the profile is `demo` | The flag must be ON **and** the profile must be `pov` — `GET /api/features` shows `install_profile` |
 | "Skytap is still busy after N retries" | The account is genuinely rate-limited | Expected under heavy concurrent use; retry shortly. Running or suspending many VMs at once makes it more likely |
 | An environment shows a **rate-limited** badge | Skytap set `rate_limited` on it | Operations against it will be slow until it clears |
-| Environments list is empty but the account has some | The token's user cannot see them, or they belong to another project | Check the user's access in Skytap; clear the Project ID to widen the scope |
+| Environments list is empty but the account has some | The token's user cannot see them, or they are outside the configured project | Check the user's access in Skytap, or clear the Project ID to widen the scope. **Test connection** says which of the two it is |
+| **Test connection** says the account exposes no templates | The token authenticates but sees nothing | Check the user's access in Skytap. If a Project ID is set, clear it first to find out whether the project is the constraint |
+| "Skytap has no project N (404)" on the POV page or in Test connection | The Project ID is stale, wrong, or belongs to an account this token cannot see | Correct or clear it in Settings → Integrations → Skytap. Blank lists everything the token can see |
+| **Test connection** says the host could not be reached | DNS, a firewall or an outbound proxy | Not a credential problem. Check outbound HTTPS to the API URL from wherever the dashboard runs |
 | VM counts show `—` | The collection read did not include the VM array | Expected. Open the environment for the measured count — a dash means "not measured", never zero |
 | The Broker column reads **none** and the row names other VMs | No VM matches the POV's Broker VM name | Rename the template's broker VM, or create the POV with the name your template actually uses. The match is exact |
 | The Broker column reads **enrolling** and never changes | Nothing executed the payload | The broker VM has no metadata runner ([template contract](#the-template-contract)), is on a manual network, or cannot reach the agent endpoint. Fix it and press **Broker** to re-issue |

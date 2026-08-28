@@ -3752,8 +3752,31 @@
             <input type="text" x-model="panelCfg.skytap_project_id"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                    placeholder="e.g. 123456">
-            <p class="text-xs text-gray-400 mt-1">Scopes new environments to a Skytap project, for access control and usage reporting.</p>
+            <p class="text-xs text-gray-400 mt-1">
+              Templates and environments are listed from this project, and new environments
+              are created inside it. <strong>Blank lists everything the token can see</strong> —
+              which is also the fix if the lists come back empty.
+            </p>
           </div>
+
+          <div class="mt-3 flex items-center gap-2">
+            <button type="button" @click="testSkytapConnection()" :disabled="skytapTest.running"
+                    class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">
+              <span x-text="skytapTest.running ? 'Testing…' : 'Test connection'"></span>
+            </button>
+            <span x-show="skytapTest.ok === true" x-cloak
+                  class="text-xs text-green-700" x-text="skytapTest.message"></span>
+          </div>
+          <p x-show="skytapTest.ok === false" x-cloak
+             class="text-xs text-red-600 mt-2" x-text="skytapTest.error"></p>
+          <p class="text-[11px] text-gray-400 mt-1">
+            Reads one page of <code>GET /v2/templates</code> — the same read the POV page
+            makes — so it proves the token <strong>and</strong> what this account can
+            actually see, scoped to the Project ID above when one is set. An account that
+            authenticates but exposes no templates is reported as a failure, because there
+            would be nothing to build a POV from. Tests the <strong>saved</strong> values,
+            so save first.
+          </p>
         </div>
       </template>
 
@@ -5376,6 +5399,11 @@ function settingsPage() {
     // Distinct from wlcSources: that reports stored lease state, this authenticates live.
     wlcTest: { running: false, ok: null, error: '', message: '' },
 
+    // Skytap "Test connection". One page of the template catalogue, which proves the
+    // token AND what it can see — an account that authenticates but exposes no templates
+    // cannot build a POV, so it is reported red rather than green.
+    skytapTest: { running: false, ok: null, error: '', message: '' },
+
     // ── Slide-over panel state ───────────────────────────────────────────
     panel: null,
     panelLoading: false,
@@ -5663,6 +5691,7 @@ function settingsPage() {
       this.panelCfg = {};
       this.panelSecretsTouched = [];
       this.wlcTest = { running: false, ok: null, error: '', message: '' };
+      this.skytapTest = { running: false, ok: null, error: '', message: '' };
       this.panelError = '';
       this.panelLoading = true;
       try {
@@ -6221,6 +6250,30 @@ function settingsPage() {
         this.wlcTest = { running: false, ok: true, error: '', message: r.message || 'Connected.' };
       } catch (e) {
         this.wlcTest = { running: false, ok: false, error: e.message || String(e), message: '' };
+      }
+    },
+
+    // Prove the Skytap credentials for real. Reads the SAVED config, not the form.
+    //
+    // NOTE the difference from testWlcConnection above: that endpoint RAISES on a bad
+    // credential, so its only failure path is the catch. This one answers 200 either way
+    // with the verdict in the body, because "these credentials do not work" is an answer
+    // rather than a transport failure. So r.ok has to be read — treating any 200 as
+    // success would paint a failed check green.
+    async testSkytapConnection() {
+      this.skytapTest = { running: true, ok: null, error: '', message: '' };
+      try {
+        const r = await API.post('/api/setup/skytap/test', {});
+        this.skytapTest = {
+          running: false,
+          ok: !!r.ok,
+          message: r.ok ? (r.message || 'Connected.') : '',
+          error: r.ok ? '' : (r.message || 'The check failed.'),
+        };
+      } catch (e) {
+        // Only reached for a transport or auth-to-the-dashboard failure (401 from
+        // _require_admin), never for a bad Skytap credential.
+        this.skytapTest = { running: false, ok: false, error: e.message || String(e), message: '' };
       }
     },
 

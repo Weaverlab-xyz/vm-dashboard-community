@@ -38,7 +38,12 @@
   into PRA. Entitle additionally needs an agent running inside the POV, which this
   dashboard does NOT install, and an SSH key from the template.
 
-  Share links and the expiry timer arrive in later slices.
+  The Share column is the only thing on this page a CUSTOMER opens. The URL is shown with
+  a copy button rather than as a link on purpose: an accidental middle-click from here is
+  an SE opening a session as the customer.
+
+  The Expires column is the auto-delete timer. It warns on a ladder rather than once,
+  because a POV outlives whoever set it up.
 #}
 
 {% block content %}
@@ -111,6 +116,16 @@
         <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
         <input type="text" x-model="form.workgroup" placeholder="optional"
                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+      </div>
+      <div x-show="current.projects">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Project</label>
+        <input type="text" x-model="form.project_id"
+               placeholder="uses the Project ID from Settings"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <p class="text-xs text-gray-400 mt-1">
+          Where this environment is created on the lab platform. Blank uses the
+          configured default; the templates listed above are already scoped to it.
+        </p>
       </div>
       <div x-show="current.bootstrap_injection">
         <label class="block text-sm font-medium text-gray-700 mb-1">Broker VM name</label>
@@ -626,9 +641,9 @@ function povPage() {
     // `<kind>_field` rather than the API's `<kind>_tenant_id`, because the kinds come
     // from the server and building the key from one of them keeps the picker loop
     // generic — a fourth product is then a registry entry, not more markup.
-    form: { template_id: '', name: '', workgroup: '', broker_vm_name: '',
-            pra_field: '', password_safe_field: '', entitle_field: '',
-            suspend_on_idle_seconds: 3600 },
+    form: { template_id: '', name: '', workgroup: '', project_id: '',
+            broker_vm_name: '', pra_field: '', password_safe_field: '',
+            entitle_field: '', suspend_on_idle_seconds: 3600 },
     tenants: [],
     tenantKinds: [],
     showTenants: false,
@@ -797,6 +812,7 @@ function povPage() {
           template_id: this.form.template_id,
           name: this.form.name,
           workgroup: this.form.workgroup,
+          project_id: this.form.project_id,
           broker_vm_name: this.form.broker_vm_name,
           pra_tenant_id: this.form.pra_field,
           ps_tenant_id: this.form.password_safe_field,

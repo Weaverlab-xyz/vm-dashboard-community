@@ -21,15 +21,20 @@ from __future__ import annotations
 
 import logging
 
-from .skytap_client import DEFAULT_BASE_URL, SkytapClient, SkytapCreds, SkytapError
+import httpx
+
+from .skytap_client import (DEFAULT_BASE_URL, SkytapAuthError, SkytapClient, SkytapCreds,
+                            SkytapError)
 
 logger = logging.getLogger(__name__)
 
 # Re-exported so callers can catch one error type without importing the client too.
-__all__ = ["SkytapError", "VALID_RUNSTATES", "configured", "credentials",
+__all__ = ["SkytapError", "SkytapAuthError", "VALID_RUNSTATES", "SHARE_ACCESS",
+           "configured", "credentials", "configured_project_id", "verify",
            "list_templates", "list_environments", "get_environment",
-           "create_environment", "set_runstate", "delete_environment",
-           "inject_bootstrap", "stored_credentials"]
+           "create_environment", "update_environment", "set_runstate",
+           "wait_for_runstate", "delete_environment", "inject_bootstrap",
+           "stored_credentials", "create_share", "delete_share"]
 
 # Runstates a caller may ASK for. Skytap also reports "busy" while a transition is in
 # flight, which is a state you observe and never request — asking for it would be asking
@@ -62,6 +67,59 @@ def credentials() -> SkytapCreds:
 
 def configured() -> bool:
     return credentials().valid()
+
+
+def configured_project_id() -> str:
+    """The Skytap project every read and every new environment is scoped to, or "".
+
+    Blank is the widest scope and the right default: a project id this token cannot see
+    makes the whole catalogue invisible, which is exactly what the Troubleshooting table's
+    "clear the Project ID" remedy is about.
+    """
+    return _cfg("skytap_project_id").strip()
+
+
+# UNVERIFIED against a live Skytap account: the two project sub-resource paths below.
+#
+# Three things are assumed and none is confirmed — that they return the same object shape
+# as the flat collections (so `_template()` and `_environment()` map unchanged), that they
+# honour `count`/`offset` the way `SkytapClient.list` requires, and that a project id this
+# token cannot see answers 404 rather than an empty list.
+#
+# They were chosen over a `project_id` filter on the flat list precisely because of that
+# last point: a filter parameter an API does not implement is IGNORED, and a silently
+# unscoped list looks exactly like a correct one. A 404 is a fact you can report and act
+# on, which is what `_scoped_list` below turns into a remedy. If a live read 404s with a
+# project id that is definitely right, these two lines are the first place to look.
+def _templates_path() -> str:
+    pid = configured_project_id()
+    return f"/v2/projects/{pid}/templates" if pid else "/v2/templates"
+
+
+def _environments_path() -> str:
+    pid = configured_project_id()
+    return f"/v2/projects/{pid}/configurations" if pid else "/v2/configurations"
+
+
+async def _scoped_list(path: str, what: str) -> list:
+    """A collection read, with a 404 turned into the remedy for a bad Project ID.
+
+    Without this, a stale project id would surface as a bare 502 on the POV page (see
+    `api/pov._platform_error`) — turning today's harmless empty list into a hard failure
+    whose cause is named nowhere. Same `"(404)" in str(exc)` idiom the other two
+    idempotent paths in this module use.
+    """
+    try:
+        return await _client().list(path)
+    except SkytapError as exc:
+        pid = configured_project_id()
+        if pid and "(404)" in str(exc):
+            raise SkytapError(
+                f"Skytap has no project {pid} visible to this account (404), so no "
+                f"{what} can be listed. Correct or clear the Project ID in Settings → "
+                f"Integrations → Skytap — blank lists everything the token can see."
+            ) from exc
+        raise
 
 
 def _now() -> float:
@@ -170,23 +228,117 @@ def _vm(raw: dict) -> dict:
     }
 
 
+# ── verify ───────────────────────────────────────────────────────────────────
+
+def _network_reason(exc: Exception) -> str:
+    """Turn a transport failure into something that names the likely cause.
+
+    A local copy of ``bt_tenant_verify._http_reason`` rather than an import: that is a
+    private function in a BeyondTrust-tenant module, and a lab-platform adapter reaching
+    into it is the wrong dependency direction. The rule it encodes is the part worth
+    copying — **the exception's own text is never interpolated, only its type.** A caught
+    exception's ``str()`` is not written for an operator: it can carry local paths, the
+    resolved address behind a hostname, or a chained cause from somewhere else entirely,
+    and all of it would land in an HTTP response body. The cause belongs in the log.
+    """
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "the host did not answer in time — check the API URL and any firewall"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "Skytap accepted the connection but did not answer — try again shortly"
+    if isinstance(exc, httpx.ConnectError):
+        return "the host could not be reached — check the API URL and DNS"
+    if isinstance(exc, httpx.InvalidURL):
+        return "that API URL is not one this dashboard can dial — check it for typos"
+    if isinstance(exc, httpx.HTTPError):
+        return f"the request failed ({type(exc).__name__}) — see the dashboard log"
+    return f"the check failed unexpectedly ({type(exc).__name__}) — see the dashboard log"
+
+
+async def verify() -> tuple[bool, str]:
+    """Prove the stored Skytap credentials, and say what is wrong when they fail.
+
+    **Returns ``(ok, message)`` and does not raise for an expected outcome.** That shape is
+    load-bearing rather than a style choice: CodeQL ``py/stack-trace-exposure`` fires on any
+    ``str(caught_exception)`` reaching a response body, and it took three rounds on #646 and
+    #647 to learn the fix is structural. "These credentials do not work" is an ANSWER, not
+    an error — so it is a return value, and the only exceptions this raises are about the
+    request rather than the outcome. Do not "simplify" this back into raising.
+
+    Reads ONE page of the template catalogue — the same read the real work makes
+    (:func:`list_templates`, and the template-id check in ``api/pov.provision``). A verify
+    that authenticates differently from the work can pass while the work fails.
+
+    Deliberately **not** ``_client().list()``: that walks to the end of the collection at
+    100 rows a page, so a large account would issue nine GETs to answer a yes/no question.
+
+    An empty catalogue is reported as a FAILURE, not a warning. A POV cannot be created
+    from zero templates — ``api/pov.provision`` refuses before anything exists — so
+    reporting green for a connection that cannot do the one thing it is for is exactly the
+    false positive a verify exists to prevent.
+    """
+    # Before constructing a client: SkytapClient.__init__ raises on invalid credentials,
+    # and "not configured yet" must not arrive as an exception.
+    if not configured():
+        return False, ("Skytap is not configured — set the API URL, username and API "
+                       "security token, save, then test.")
+
+    path = _templates_path()
+    try:
+        # max_retries=1 and a short timeout: this answers while somebody watches a
+        # spinner. The provisioning default of six retries at up to 30s each is right for
+        # a job that has already waited minutes and wrong for a button.
+        client = SkytapClient(credentials(), timeout=15.0, max_retries=1)
+        raw = await client.request("GET", path, params={"count": 1, "offset": 0})
+    except SkytapAuthError as exc:
+        # The client authored this message and it already names the API-token trap. This
+        # is a typed, fully-authored error, not an arbitrary exception's str().
+        return False, str(exc)
+    except SkytapError as exc:
+        # The client's other authored refusals — rate limiting, a non-JSON body, and the
+        # project 404 shape (which cannot reach here, since verify does not go through
+        # _scoped_list; a bad project id arrives as a plain 404 below).
+        text = str(exc)
+        if "(404)" in text and configured_project_id():
+            return False, (
+                f"the credentials work, but Skytap has no project "
+                f"{configured_project_id()} visible to this account (404). Correct or "
+                f"clear the Project ID — blank lists everything the token can see.")
+        return False, text
+    except Exception as exc:  # noqa: BLE001 - the cause goes to the log, not the body
+        logger.warning("Skytap verify failed", exc_info=True)
+        return False, _network_reason(exc)
+
+    items = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+    if not items:
+        pid = configured_project_id()
+        where = f"project {pid}" if pid else "this account"
+        return False, (
+            f"the credentials work, but {where} exposes no templates — so there is "
+            f"nothing to build a POV from. Check the user's access in Skytap"
+            + (", or clear the Project ID to widen the scope." if pid else "."))
+
+    pid = configured_project_id()
+    scope = f" in project {pid}" if pid else ""
+    return True, f"Connected. Templates are visible{scope}."
+
+
 # ── the READ_CONTRACT ────────────────────────────────────────────────────────
 
 async def list_templates() -> list[dict]:
-    """Every template this account can instantiate."""
-    raw = await _client().list("/v2/templates")
+    """Every template this account can instantiate, within the configured project."""
+    raw = await _scoped_list(_templates_path(), "templates")
     return [_template(t) for t in raw if isinstance(t, dict)]
 
 
 async def list_environments() -> list[dict]:
-    """Every environment this account can see.
+    """Every environment this account can see, within the configured project.
 
     Includes environments the dashboard did not create. That is deliberate for a read-only
     view — an SE's existing hand-built POVs are exactly what they want to see next to the
     managed ones — and it is why the eventual POV table keys on the Skytap id rather than
     assuming it owns everything in the account.
     """
-    raw = await _client().list("/v2/configurations")
+    raw = await _scoped_list(_environments_path(), "environments")
     return [_environment(e) for e in raw if isinstance(e, dict)]
 
 
@@ -204,9 +356,14 @@ async def create_environment(template_id: str, name: str = "",
     if not template_id:
         raise SkytapError("a template id is required to create an environment")
 
+    # An explicit argument wins; the configured project is the DEFAULT. That ordering is
+    # what makes the Settings field mean "where new POVs go unless told otherwise" rather
+    # than an override nobody can escape.
+    project_id = str(project_id or "").strip() or configured_project_id()
+
     body: dict = {"template_id": template_id}
     if project_id:
-        body["project_id"] = str(project_id)
+        body["project_id"] = project_id
 
     raw = await _client().request("POST", "/v2/configurations", json=body)
     if not isinstance(raw, dict) or not raw.get("id"):

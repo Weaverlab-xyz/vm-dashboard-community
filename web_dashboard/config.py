@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     skytap_base_url: str = "https://cloud.skytap.com"
     skytap_username: str = ""
     skytap_api_token: str = ""          # secret; masked in Settings
-    skytap_project_id: str = ""         # OPTIONAL — scope new environments to a project
+    skytap_project_id: str = ""         # OPTIONAL — templates and environments are LISTED from this project and new ones CREATED in it; blank = everything the token can see
 
     vmware_enabled: bool = True         # VMs router + /vms page
     # The three BeyondTrust products the dashboard drives are gated independently —

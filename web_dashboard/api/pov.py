@@ -125,6 +125,9 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         "platform_environment_id": env.platform_environment_id or "",
         "template_id": env.template_id or "",
         "template_name": env.template_name or "",
+        # Which lab-platform project this environment lives in, resolved at create time
+        # from the request or the configured default. Blank means the account-wide scope.
+        "project_id": env.project_id or "",
         "status": env.status,
         "runstate": env.runstate or "",
         "region": env.region or "",
@@ -341,12 +344,23 @@ async def provision(payload: ProvisionRequest,
     except bt_tenant_service.BTTenantError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    # Record the project the environment will REALLY be created in, not just what the form
+    # sent. The adapter falls back to the configured default when the request names none,
+    # so storing the raw payload would leave this column blank for an environment that is
+    # in a project — a write-only field that misleads whoever reads it later.
+    #
+    # Resolved through the registry rather than importing skytap_service: this router must
+    # stay platform-agnostic, and `mod` is whatever `_adapter()` returned.
+    effective_project = (payload.project_id or "").strip()
+    if not effective_project and lab_platforms.supports(name, "projects"):
+        effective_project = mod.configured_project_id()
+
     env = PovEnvironment(
         platform=name,
         name=payload.name,
         template_id=str(payload.template_id),
         template_name=template_name,
-        project_id=payload.project_id or "",
+        project_id=effective_project,
         workgroup=payload.workgroup or None,
         created_by=getattr(current_user, "username", None),
         status=pov_env_service.STATUS_PROVISIONING,
