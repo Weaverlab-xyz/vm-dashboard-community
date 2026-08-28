@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Job {{ job_id[:8] }} – Infrastructure Management{% endblock %}
+{% block title %}Job {{ job_id[:8] }}{% endblock %}
 
 {% block content %}
 <div x-data="jobDetail('{{ job_id }}')" x-init="init()">

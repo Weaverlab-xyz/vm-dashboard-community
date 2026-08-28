@@ -90,13 +90,21 @@ _SHELL = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} · Docs</title>
+<title>{title} · {brand} Docs</title>
+<link rel="icon" href="{favicon}">
 <style>
   :root {{ color-scheme: light dark; }}
-  body {{ margin:0; background:#f8fafc; color:#0f172a;
+  body {{ margin:0; background:{body_bg}; color:#0f172a;
          font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }}
+  header {{ background:{nav_bg}; color:#fff; }}
+  header .lockup {{ max-width:820px; margin:0 auto; padding:.85rem 1.25rem;
+                    display:flex; align-items:center; gap:.6rem; }}
+  header .brand {{ font-size:1.05rem; font-weight:700; letter-spacing:-.01em; }}
+  header .slash {{ color:{nav_weft}; font-weight:300; }}
+  header .product {{ font-size:.85rem; opacity:.9; }}
+  .rail {{ height:4px; background:{rail}; }}
   main {{ max-width:820px; margin:0 auto; padding:2.5rem 1.25rem 4rem; }}
-  a {{ color:#2563eb; }}
+  a {{ color:{link}; }}
   h1,h2,h3 {{ line-height:1.25; margin-top:2rem; }}
   h1 {{ font-size:1.9rem; }} h2 {{ font-size:1.4rem; }} h3 {{ font-size:1.15rem; }}
   code {{ background:#eef2f7; padding:.1em .35em; border-radius:4px; font-size:.9em; }}
@@ -108,10 +116,58 @@ _SHELL = """<!doctype html>
   blockquote {{ border-left:3px solid #cbd5e1; margin:1rem 0; padding:.25rem 1rem; color:#475569; }}
   .back {{ font-size:.85rem; }}
 </style></head>
-<body><main>
+<body>
+<header><div class="lockup">
+<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke-width="2.2"
+     stroke-linecap="round" aria-hidden="true">
+<path d="{mark_warp}" stroke="{nav_warp}"/><path d="{mark_weft}" stroke="{nav_weft}"/></svg>
+<span class="brand">{brand}</span><span class="slash">/</span><span class="product">{product}</span>
+</div></header>{rail_el}
+<main>
 <p class="back"><a href="/settings">← Back to dashboard</a></p>
 {body}
 </main></body></html>"""
+
+
+def _shell(title: str, body: str) -> str:
+    """Wrap rendered Markdown in the branded shell.
+
+    One helper rather than two direct ``.format()`` call sites: the shell now takes ten
+    fields instead of two, and threading those through both callers by hand is how one of
+    them ends up a version behind.
+
+    The profile lookup is best-effort on purpose. This module's whole premise is that the
+    docs renderer is non-essential and degrades to a readable ``<pre>`` fallback rather
+    than taking the whole dashboard down -- ``install_profile()`` reads ``config_service``,
+    so a database that is down or not yet migrated must yield an unbranded-but-readable
+    page, never a 500. The env default is the same fallback ``feature_flags`` itself uses.
+
+    Note ``/docs`` is public and unauthenticated, so this makes the profile name readable
+    without signing in. That is deliberate, and already true of ``GET /api/features`` which
+    serves ``install_profile`` to anyone -- but it is a decision, not an accident, and it
+    would need revisiting if that endpoint were ever locked down.
+    """
+    from ..config import settings
+    from ..services import ui_theme
+    try:
+        from ..services import feature_flags
+        profile = feature_flags.install_profile()
+    except Exception:
+        profile = settings.install_profile
+    theme = ui_theme.theme_for(profile, settings.app_env)
+    rail = theme["hex"]["rail"]
+    return _SHELL.format(
+        title=title,
+        body=body,
+        brand=theme["brand"],
+        product=theme["product"],
+        favicon=theme["favicon"],
+        mark_warp=theme["mark_warp_path"],
+        mark_weft=theme["mark_weft_path"],
+        rail=rail or "transparent",
+        rail_el='<div class="rail"></div>' if rail else "",
+        **{k: theme["hex"][k] for k in ("nav_bg", "nav_warp", "nav_weft", "body_bg", "link")},
+    )
 
 
 @router.get("/docs", response_class=HTMLResponse)
@@ -142,7 +198,7 @@ async def doc_index() -> HTMLResponse:
         for title, href in groups[section]:
             parts.append(f'<li><a href="/docs/{_html.escape(href)}">{_html.escape(title)}</a></li>')
         parts.append("</ul>")
-    return HTMLResponse(_SHELL.format(title="Documentation", body="".join(parts)))
+    return HTMLResponse(_shell("Documentation", "".join(parts)))
 
 
 @router.get("/docs/{page:path}", response_class=HTMLResponse)
@@ -165,4 +221,4 @@ async def doc_page(page: str) -> HTMLResponse:
     # it originates from the request path, so render it as text, not markup
     # (prevents reflected XSS; CodeQL py/reflective-xss).
     title = _html.escape(rel.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").title())
-    return HTMLResponse(_SHELL.format(title=title, body=html))
+    return HTMLResponse(_shell(title, html))

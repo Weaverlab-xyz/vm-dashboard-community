@@ -10,6 +10,15 @@
 <a href="/" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/' %}{{ nav_active }}{% endif %}">Dashboard</a>
 
+{# POV sits second, directly after Dashboard, and carries the accent colour: on a POV
+   instance it is the reason the instance exists, not one workload page among many.
+   pov_environments_enabled is in feature_flags._POV_ONLY, so this can only ever render
+   on a POV instance and the position needs no further guard. #}
+{% if pov_environments_enabled %}
+<a href="/pov" class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
+   {% if request.url.path.startswith('/pov') %}{{ nav_active }}{% else %}{{ theme.weft }}{% endif %}">POV</a>
+{% endif %}
+
 {# ── On-premises hypervisors ───────────────────────────────────────── #}
 {% if vmware_enabled %}
 <a href="/vms" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
@@ -89,10 +98,6 @@
 {% if ansible_enabled %}
 <a href="/config-mgmt" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>
-{% endif %}
-{% if pov_environments_enabled %}
-<a href="/pov" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/pov') %}{{ nav_active }}{% endif %}">POV</a>
 {% endif %}
 <a href="/inventory" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/inventory') %}{{ nav_active }}{% endif %}">Inventory</a>

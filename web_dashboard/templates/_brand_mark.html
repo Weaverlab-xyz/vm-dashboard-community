@@ -1,0 +1,16 @@
+{# Mark A, "the weave" -- the Weaver Lab logo, as inline SVG.
+
+   Two paths, and the split is the brand system: the warp (vertical) is neutral on both
+   instances, the weft (horizontal) carries the profile accent. Same loom, one strand
+   dyed differently. Path data lives in services/ui_theme so the docs browser -- which
+   does not render through Jinja -- reads the same strings.
+
+   Callers pass mark_warp / mark_weft / mark_size / mark_stroke via {% with %}, because
+   {% include %} hands the child a COPY of the context: a {% set %} in here would not
+   reach the includer, and the two call sites need different sizes and palettes. #}
+<svg class="{{ mark_size|default('h-7 w-7') }} flex-shrink-0" viewBox="0 0 24 24" fill="none"
+     stroke-width="{{ mark_stroke|default('2.2') }}" stroke-linecap="round"
+     aria-hidden="true">
+  <path d="{{ theme.mark_warp_path }}" class="{{ mark_warp }}" stroke="currentColor"/>
+  <path d="{{ theme.mark_weft_path }}" class="{{ mark_weft }}" stroke="currentColor"/>
+</svg>
