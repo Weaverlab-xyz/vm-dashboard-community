@@ -989,6 +989,21 @@ class Settings(BaseSettings):
     storage_local_username: str = ""
     storage_local_password: str = ""           # encrypted at rest
     storage_local_domain: str = ""
+    # Remote filesystem / UNC reached THROUGH a remote agent. The same kind of
+    # target as storage_local_* above, minus its constraint: the dashboard never
+    # touches the share, so a cloud-hosted dashboard with no route to a corporate
+    # file server can still use one. That is the whole point — on ACA (and on a POV
+    # instance, which has no cloud provider at all) the local backend above is the
+    # one backend designed for on-prem assets that cannot be used.
+    #
+    # NOTE WHAT IS *NOT* HERE: no path, no username, no password. Those live in the
+    # agent's own shares.yaml, which the dashboard cannot read or write, and the
+    # agent's policy.yaml grants share NAMES. This field is one half of a join, the
+    # same way agent_connection_name is for a hypervisor connection — the string is
+    # the whole contract, and a corporate share credential never enters this DB.
+    storage_agent_id: str = ""                 # RemoteAgent.id that brokers the share
+    storage_agent_share: str = ""              # `name:` of an entry in its shares.yaml
+    storage_agent_subpath: str = ""            # optional subdirectory within the share
 
     # ── Promote runner ───────────────────────────────────────────────────────
     # Transient container launched in the target cloud to convert + upload a

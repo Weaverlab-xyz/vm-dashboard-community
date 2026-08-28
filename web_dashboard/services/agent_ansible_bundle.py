@@ -104,14 +104,28 @@ def _winrm_options(transport: str, port: int) -> dict:
     }
 
 
-async def _playbook_and_asset(asset: str, asset_backend: str) -> tuple:
+async def _playbook_and_asset(asset: str, asset_backend: str,
+                              prefetched_b64: str = "") -> tuple:
     """``(playbook_yaml, asset_name, asset_bytes)`` for one run.
 
     A ``.yml`` asset is the playbook. Anything else is wrapped in a generated play that
     copies or runs it, and its bytes travel beside the playbook — the agent's sibling has
     **no bind mounts**, so the wrapper cannot point at a mounted asset directory the way the
     dashboard-local runner's does.
+
+    ``prefetched_b64`` is the asset read at ENQUEUE time. Only the agent-brokered storage
+    backend supplies it, and it is not an optimisation — reading that backend from here
+    would deadlock. This function runs inside the agent's own bundle request, while that
+    agent is blocked waiting on the response, so an ``agent_storage`` job queued for it
+    could not be leased until the deadline expired. See api/config_mgmt.py.
     """
+    if prefetched_b64:
+        try:
+            raw = base64.b64decode(prefetched_b64)
+        except Exception as exc:  # noqa: BLE001
+            raise BundleError(f"The stored copy of asset {asset!r} is unreadable: {exc}")
+        return _split_playbook_and_asset(asset, raw)
+
     try:
         if asset_backend:
             raw = await storage_service.fetch_asset_in(asset_backend, asset)
@@ -120,6 +134,16 @@ async def _playbook_and_asset(asset: str, asset_backend: str) -> tuple:
     except storage_service.StorageError as exc:
         raise BundleError(f"Asset storage error: {exc}") from exc
 
+    return _split_playbook_and_asset(asset, raw)
+
+
+def _split_playbook_and_asset(asset: str, raw: bytes) -> tuple:
+    """Turn the asset's bytes into ``(playbook_yaml, asset_name, asset_bytes)``.
+
+    Split out from :func:`_playbook_and_asset` so the prefetched and the freshly-read
+    paths cannot diverge on the auto-wrap semantics — the thing the ``replace`` below
+    exists to keep identical between the two runners in the first place.
+    """
     if ansible_local_service.asset_type(asset) == "playbook":
         return raw.decode("utf-8", "replace"), "", b""
 
@@ -146,7 +170,8 @@ async def build(db, *, job, agent) -> tuple:
 
     Raises :class:`BundleError` for anything the operator can fix.
     """
-    meta = agent_ansible_meta.run_kwargs(job.metadata_dict or {})
+    raw_meta = job.metadata_dict or {}
+    meta = agent_ansible_meta.run_kwargs(raw_meta)
     problem = agent_ansible_meta.check(meta)
     if problem:
         raise BundleError(problem)
@@ -159,8 +184,12 @@ async def build(db, *, job, agent) -> tuple:
             f"set them — one of them could redirect the play into the runner container "
             f"instead of the target. Remove them and re-run.")
 
+    # Read off the RAW metadata, not `meta`: run_kwargs normalises to the closed key set
+    # the agent's envelope uses, and these bytes deliberately are not in it — they stay on
+    # the dashboard side of the bundle.
     playbook, asset_name, asset_bytes = await _playbook_and_asset(
-        meta["asset"], meta["asset_backend"])
+        meta["asset"], meta["asset_backend"],
+        prefetched_b64=str(raw_meta.get("asset_bytes_b64") or ""))
 
     run_kind = meta["run_kind"]
     transport = meta["transport"]

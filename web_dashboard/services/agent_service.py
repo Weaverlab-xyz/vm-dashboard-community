@@ -64,7 +64,7 @@ AUDIENCE_CONFIG = "agent_base_url"
 # jobs_worker.HANDLED_TYPES; the static test enforces it. These run on a network the
 # local worker cannot reach, so a type in both would be raced between two executors.
 AGENT_JOB_TYPES = ("agent_discover", "agent_hypervisor", "agent_ansible",
-                   "agent_gateway")
+                   "agent_gateway", "agent_storage")
 
 # An agent is "online" if it polled within this many seconds. Three times the default
 # poll interval, so one dropped request does not flap the badge.
@@ -441,6 +441,11 @@ MIN_ANSIBLE_VERSION = (2, 3)
 # this the job type is not in HANDLERS at all, so the agent refuses it by name.
 MIN_GATEWAY_VERSION = (2, 4)
 
+# The agent build that first carried the `agent_storage` handler and the shares.yaml
+# reader — the remote filesystem / UNC storage backend. Below this the job type is not in
+# HANDLERS at all, so the agent refuses it by name.
+MIN_STORAGE_VERSION = (2, 5)
+
 
 def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
     """Whether this agent's self-reported version is at least ``minimum``.
@@ -518,6 +523,33 @@ def gateway_upgrade_hint(agent: RemoteAgent) -> str:
             f"a POV both are fixed the same way: press **Broker** on the POV to re-issue "
             f"the enrolment and rewrite the policy, having first pulled a newer "
             f"chrweav/dashboard-agent onto the broker VM. Nothing was queued.")
+
+
+def supports_storage(agent: RemoteAgent) -> bool:
+    """Whether this agent can broker a remote filesystem / UNC share.
+
+    Read at ENQUEUE time, like every other version gate here — and it matters more than
+    most, because the storage backend is called from the request path. A job that will be
+    refused on the far side still costs the operator a full round trip of waiting before
+    the listing errors, and the error would land in Live Output rather than on the page
+    that asked.
+    """
+    return _version_at_least(agent, MIN_STORAGE_VERSION)
+
+
+def storage_upgrade_hint(agent: RemoteAgent) -> str:
+    """The refusal an operator sees when the agent behind a share is too old.
+
+    Names both halves, because a fresh install needs both and the second is invisible from
+    the dashboard: a newer image, AND the operator's own policy.yaml granting the job type
+    and the share. The dashboard cannot write that file — that is the point of it.
+    """
+    return (f"Agent '{agent.name}' reports version {agent.agent_version or 'unknown'} and "
+            f"brokering a file share needs at least "
+            f"{'.'.join(str(p) for p in MIN_STORAGE_VERSION)}. Pull a newer "
+            f"chrweav/dashboard-agent onto that host, then add `agent_storage` to "
+            f"`job_types:` in its policy.yaml and a `storage:` block granting the share by "
+            f"name, and restart it. Nothing was queued.")
 
 
 def supports_dashboard_secret(agent: RemoteAgent) -> bool:

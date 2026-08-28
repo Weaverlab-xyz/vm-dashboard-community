@@ -53,7 +53,7 @@ _TYPE_MAP = {
     ".msi":  "winpkg",
 }
 
-BACKENDS = ("s3", "azure_blob", "gcs", "oci_object_storage", "local")
+BACKENDS = ("s3", "azure_blob", "gcs", "oci_object_storage", "local", "agent_local")
 
 # Backends that may NOT be selected as the *active* backend, with the reason shown
 # to the operator. The active backend also decides where Terraform state lives
@@ -138,6 +138,11 @@ def _backend_configured(backend: str) -> bool:
         return bool(_cfg("storage_oci_bucket"))
     if backend == "local":
         return bool(_cfg("storage_local_path"))
+    if backend == "agent_local":
+        # Both halves of the join, because either alone is unusable: an agent with no
+        # share name has nothing to open, and a share name with no agent has nobody to
+        # open it. The path is deliberately not here — it lives in the agent's shares.yaml.
+        return bool(_cfg("storage_agent_id") and _cfg("storage_agent_share"))
     return False
 
 
@@ -550,6 +555,131 @@ def _local_delete_sync(name: str) -> None:
             raise StorageError(f"Local delete failed for {target}: {e}") from e
 
 
+# ── Remote filesystem / UNC backend, brokered by an agent ────────────────────
+# The same kind of target as the `local` backend above, minus its constraint. `local`
+# speaks SMB from inside THIS container, which is why it is pinned to the local Ansible
+# runner and why a dashboard hosted in a cloud — where the container has no route to a
+# corporate file server — cannot use it at all. Here the agent does the I/O, from inside
+# the network where the share already lives.
+#
+# Three differences from every other backend in this file, all of them consequences of the
+# work happening on somebody else's host:
+#
+#   1. THE OPS ARE ASYNC. Each one is an agent job round trip, not a blocking call to
+#      wrap in a thread — see `_run_op` below for how the dispatch table carries both.
+#   2. LISTING IS CACHED. A round trip is 5-15s against the agent's poll interval, and
+#      `list_all_assets` fans out over every configured backend for six pages' asset
+#      pickers. Fetch, upload and delete are not cached: they are deliberate acts and an
+#      operator waiting for one is expecting to wait.
+#   3. THERE IS A SIZE CEILING. The signed envelope and the result are both capped at
+#      `agent_service.MAX_RESULT_BYTES`, so about 190 KB of file once base64 has taken
+#      its third. Playbooks, scripts and inventories fit; packages do not, and the
+#      refusal below says so rather than letting the agent reject a job mid-transfer.
+
+
+def _agent_cache_key() -> str:
+    """Cache key for this share's listing.
+
+    Scoped by agent, share AND subpath. A `key_global("agent_storage_list")` would be
+    correct for exactly as long as one dashboard talks to one share — and wrong silently
+    afterwards, serving the previous share's filenames for a full TTL to a page that has
+    no way to know. See tests/test_cache_key_scoping.py.
+    """
+    from . import agent_storage_service, cache_service
+    agent_id, share, subpath = agent_storage_service.configured()
+    return cache_service.key_param("agent_storage_list", agent=agent_id, share=share,
+                                   subpath=subpath)
+
+
+def _agent_max_content_bytes() -> int:
+    """Largest file that fits one job envelope, after base64 expands it by 4/3."""
+    from . import agent_service
+    return (agent_service.MAX_RESULT_BYTES // 4) * 3
+
+
+async def _agent_run(op: str, **kwargs) -> dict:
+    """One agent round trip, with the agent-side exception remapped.
+
+    ``AgentStorageError`` becomes ``StorageError`` so that every existing
+    ``except StorageError`` — which is what turns a failure into a 503 or an unavailable
+    tile — keeps working without knowing an agent was involved.
+    """
+    from . import agent_storage_service
+    try:
+        return await agent_storage_service.run_op(op, **kwargs)
+    except agent_storage_service.AgentStorageError as exc:
+        raise StorageError(str(exc)) from exc
+
+
+async def _agent_list_uncached() -> list[dict]:
+    result = await _agent_run("list")
+    out = []
+    for item in (result.get("assets") or []):
+        name = str((item or {}).get("name") or "")
+        # Filtered here as well as agent-side. The agent applies its own extension list,
+        # but this is the one that has to agree with the rest of the dashboard — an asset
+        # the pickers cannot render is worse than one they never saw.
+        if not name or not any(name.endswith(ext) for ext in _ASSET_EXTENSIONS):
+            continue
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        out.append({"name": name, "type": _asset_type(name), "size": size})
+    return sorted(out, key=lambda x: x["name"])
+
+
+async def _agent_list() -> list[dict]:
+    from . import cache_service
+    payload, _cached_at = await cache_service.get_or_refresh(
+        _agent_cache_key(), cache_service.TTL["agent_storage_list"], _agent_list_uncached)
+    return payload or []
+
+
+async def _agent_invalidate_list() -> None:
+    """Drop the cached listing after a write, so the next read shows the change."""
+    from . import cache_service
+    await cache_service.invalidate(_agent_cache_key())
+
+
+async def _agent_fetch(name: str) -> bytes:
+    result = await _agent_run("fetch", name=name)
+    # Presence, not truthiness. A zero-byte file on the share is a perfectly good answer
+    # and base64-encodes to "", so `or ""` here would report an empty playbook as a
+    # protocol failure — and send the operator looking at the agent instead of the file.
+    # An oversize file never reaches this branch: the agent's result is rejected at
+    # `complete_job`, which fails the job and surfaces as an AgentStorageError above.
+    if "content_b64" not in result:
+        raise StorageError(
+            f"The agent's reply for '{name}' carried no content field. Job output on "
+            f"/jobs has the detail.")
+    try:
+        return base64.b64decode(result["content_b64"] or "")
+    except Exception as e:
+        raise StorageError(f"The agent returned unreadable content for '{name}': {e}") from e
+
+
+async def _agent_upload(name: str, data: bytes) -> None:
+    ceiling = _agent_max_content_bytes()
+    if len(data) > ceiling:
+        # Refused here rather than at the agent, for the reason every preflight in
+        # agent_storage_service is where it is: a job that fails on the far side reads as
+        # an agent fault, and the operator has no way to see that the file was simply too
+        # big for the transport.
+        raise StorageError(
+            f"'{name}' is {len(data) // 1024} KB. A share reached through an agent moves "
+            f"files inside a signed job envelope, which is capped at "
+            f"{ceiling // 1024} KB — playbooks and scripts fit, packages do not. Use a "
+            f"cloud backend for this file.")
+    await _agent_run("upload", name=name, content_b64=base64.b64encode(data).decode())
+    await _agent_invalidate_list()
+
+
+async def _agent_delete(name: str) -> None:
+    await _agent_run("delete", name=name)
+    await _agent_invalidate_list()
+
+
 # ── Backend dispatch table ────────────────────────────────────────────────────
 
 _BACKEND_OPS = {
@@ -558,7 +688,30 @@ _BACKEND_OPS = {
     "gcs":        {"list": _gcs_list_sync,   "fetch": _gcs_fetch_sync,   "upload": _gcs_upload_sync,   "delete": _gcs_delete_sync},
     "oci_object_storage": {"list": _oci_list_sync, "fetch": _oci_fetch_sync, "upload": _oci_upload_sync, "delete": _oci_delete_sync},
     "local":      {"list": _local_list_sync, "fetch": _local_fetch_sync, "upload": _local_upload_sync, "delete": _local_delete_sync},
+    # The one set of async entries. Every other backend blocks and is wrapped in a thread;
+    # these await an agent. `_run_op` is what lets one table hold both.
+    "agent_local": {"list": _agent_list,     "fetch": _agent_fetch,      "upload": _agent_upload,      "delete": _agent_delete},
 }
+
+
+async def _run_op(backend: str, op: str, *args):
+    """Dispatch one backend operation, whether it blocks or awaits.
+
+    Every backend but ``agent_local`` is a synchronous SDK call that must not run on the
+    event loop, so it goes to storage's own bounded thread pool via ``_to_thread``. The
+    agent-brokered one is already a coroutine — putting it in a thread would mean a thread
+    parked for the length of an agent round trip, and there are only so many of those.
+
+    One function rather than an ``if`` at each of the eight call sites below, because the
+    eight would drift and the drift would be invisible: an awaited coroutine handed to
+    ``_to_thread`` returns a coroutine object, which every caller here would then treat as
+    a result and store, list or upload.
+    """
+    import inspect
+    fn = _BACKEND_OPS[backend][op]
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args)
+    return await _to_thread(fn, *args)
 
 
 def _require_active() -> str:
@@ -582,7 +735,7 @@ def _validate_backend(backend: str) -> None:
 async def list_assets() -> list[dict]:
     backend = _require_active()
     try:
-        return await _to_thread(_BACKEND_OPS[backend]["list"])
+        return await _run_op(backend, "list")
     except StorageError:
         raise
     except Exception as e:
@@ -597,7 +750,7 @@ async def list_playbooks() -> list[str]:
 async def fetch_asset_b64(name: str) -> str:
     backend = _require_active()
     try:
-        data = await _to_thread(_BACKEND_OPS[backend]["fetch"], name)
+        data = await _run_op(backend, "fetch", name)
         return base64.b64encode(data).decode()
     except StorageError:
         raise
@@ -617,7 +770,7 @@ async def upload_asset(name: str, data: bytes) -> None:
             f"Allowed extensions: {', '.join(sorted(_ASSET_EXTENSIONS))}"
         )
     try:
-        await _to_thread(_BACKEND_OPS[backend]["upload"], name, data)
+        await _run_op(backend, "upload", name, data)
     except StorageError:
         raise
     except Exception as e:
@@ -627,7 +780,7 @@ async def upload_asset(name: str, data: bytes) -> None:
 async def delete_asset(name: str) -> None:
     backend = _require_active()
     try:
-        await _to_thread(_BACKEND_OPS[backend]["delete"], name)
+        await _run_op(backend, "delete", name)
     except StorageError:
         raise
     except Exception as e:
@@ -639,7 +792,7 @@ async def delete_asset(name: str) -> None:
 async def list_assets_in(backend: str) -> list[dict]:
     _validate_backend(backend)
     try:
-        return await _to_thread(_BACKEND_OPS[backend]["list"])
+        return await _run_op(backend, "list")
     except StorageError:
         raise
     except Exception as e:
@@ -649,7 +802,7 @@ async def list_assets_in(backend: str) -> list[dict]:
 async def fetch_asset_in(backend: str, name: str) -> bytes:
     _validate_backend(backend)
     try:
-        return await _to_thread(_BACKEND_OPS[backend]["fetch"], name)
+        return await _run_op(backend, "fetch", name)
     except StorageError:
         raise
     except Exception as e:
@@ -664,7 +817,7 @@ async def upload_asset_to(backend: str, name: str, data: bytes) -> None:
             f"Allowed extensions: {', '.join(sorted(_ASSET_EXTENSIONS))}"
         )
     try:
-        await _to_thread(_BACKEND_OPS[backend]["upload"], name, data)
+        await _run_op(backend, "upload", name, data)
     except StorageError:
         raise
     except Exception as e:
@@ -676,7 +829,7 @@ async def delete_asset_in(backend: str, name: str) -> None:
     targets the active backend)."""
     _validate_backend(backend)
     try:
-        await _to_thread(_BACKEND_OPS[backend]["delete"], name)
+        await _run_op(backend, "delete", name)
     except StorageError:
         raise
     except Exception as e:
@@ -733,15 +886,15 @@ async def move_asset(name: str, from_backend: str, to_backend: str) -> None:
     # Copy first; only delete the source if the copy succeeded so a failure
     # mid-flight doesn't lose data.
     try:
-        data = await _to_thread(_BACKEND_OPS[from_backend]["fetch"], name)
+        data = await _run_op(from_backend, "fetch", name)
     except Exception as e:
         raise StorageError(f"Failed to read '{name}' from {from_backend}: {e}") from e
     try:
-        await _to_thread(_BACKEND_OPS[to_backend]["upload"], name, data)
+        await _run_op(to_backend, "upload", name, data)
     except Exception as e:
         raise StorageError(f"Failed to write '{name}' to {to_backend}: {e}") from e
     try:
-        await _to_thread(_BACKEND_OPS[from_backend]["delete"], name)
+        await _run_op(from_backend, "delete", name)
     except Exception as e:
         # Copy succeeded but delete didn't — the asset is now duplicated. Surface
         # the warning rather than failing the whole operation so the user can
@@ -758,7 +911,17 @@ async def test_backend(backend: str) -> dict:
     Used by /api/storage/test for the page's "Test connection" button."""
     _validate_backend(backend)
     try:
-        items = await _to_thread(_BACKEND_OPS[backend]["list"])
+        if backend == "agent_local":
+            # Deliberately NOT through `_run_op`, which would read the cached listing.
+            # An operator pressing "Test connection" is asking whether the agent and the
+            # share are reachable right now; answering from a two-minute-old cache would
+            # report OK for an agent that has since gone offline, which is the one answer
+            # this button exists to rule out. It also means the button is the way to force
+            # a refresh after somebody changes the share outside the dashboard.
+            items = await _agent_list_uncached()
+            await _agent_invalidate_list()
+        else:
+            items = await _run_op(backend, "list")
         return {"ok": True, "count": len(items)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -835,9 +998,22 @@ def _gcs_state_put_sync(key: str, data: bytes) -> None:
     _gcs_client().bucket(_cfg("storage_gcs_bucket")).blob(key).upload_from_string(data)
 
 
+# Backends with a native Terraform state backend. `local` and `agent_local` are both
+# absent because services/terraform.py maps neither — they fall through to its
+# ``("local", {}, {})`` branch, so their state genuinely lives in the deploy directory
+# rather than on the filesystem or the share. The helpers below say so instead of
+# implying the share holds it; a state file is not an asset and never crosses to an agent.
 _STATE_KEYS = {"s3": _s3_state_keys_sync, "azure_blob": _azure_state_keys_sync, "gcs": _gcs_state_keys_sync}
 _STATE_GET = {"s3": _s3_state_get_sync, "azure_blob": _azure_state_get_sync, "gcs": _gcs_state_get_sync}
 _STATE_PUT = {"s3": _s3_state_put_sync, "azure_blob": _azure_state_put_sync, "gcs": _gcs_state_put_sync}
+
+
+# Backends whose Terraform state stays in the container's deploy directory because
+# services/terraform.py has no remote state backend for them. Reading and writing it is
+# therefore plain local file I/O for BOTH of them — the agent is not involved, and must
+# not be: a state file is not an asset, it is not extension-filtered, and it is regularly
+# larger than a job envelope can carry.
+_DEPLOY_DIR_STATE_BACKENDS = ("local", "agent_local")
 
 
 def _local_state_jobs() -> list:
@@ -862,7 +1038,7 @@ def _local_state_put(job: str, data: bytes) -> None:
 async def has_terraform_state(backend: str) -> bool:
     """True if ``backend`` holds any live Terraform state. Used to guard a
     storage-backend swap so state isn't stranded."""
-    if backend == "local":
+    if backend in _DEPLOY_DIR_STATE_BACKENDS:
         return bool(await _to_thread(_local_state_jobs))
     fn = _STATE_KEYS.get(backend)
     if not fn:
@@ -885,7 +1061,7 @@ async def migrate_terraform_state(from_backend: str, to_backend: str) -> int:
         return 0
 
     items = []  # (job_id, bytes)
-    if from_backend == "local":
+    if from_backend in _DEPLOY_DIR_STATE_BACKENDS:
         for job in await _to_thread(_local_state_jobs):
             items.append((job, await _to_thread(_local_state_get, job)))
     else:
@@ -895,7 +1071,7 @@ async def migrate_terraform_state(from_backend: str, to_backend: str) -> int:
                 items.append((job, await _to_thread(_STATE_GET[from_backend], key)))
 
     for job, data in items:
-        if to_backend == "local":
+        if to_backend in _DEPLOY_DIR_STATE_BACKENDS:
             await _to_thread(_local_state_put, job, data)
         else:
             await _to_thread(_STATE_PUT[to_backend], _tf_state_object_key(to_backend, job), data)
@@ -970,6 +1146,11 @@ def image_url(backend: str, key: str) -> str:
     if backend == "local":
         base = _cfg("storage_local_path").rstrip("/").rstrip("\\")
         return f"file://{base}/{key.lstrip('/')}"
+    if backend == "agent_local":
+        # A branch that refuses, not a missing one. Falling through to "Unknown backend"
+        # would be a lie — the backend is perfectly well known, it just holds no images —
+        # and it is the message an operator would take to the wrong page.
+        _agent_image_op_unsupported()
     raise StorageError(f"Unknown backend '{backend}'")
 
 
@@ -1438,6 +1619,27 @@ def _local_presigned_url_unsupported(*_args, **_kwargs):
     )
 
 
+def _agent_image_op_unsupported(*_args, **_kwargs):
+    """Every image-path operation on the agent-brokered backend.
+
+    Spelled out rather than left out of :data:`_IMAGE_OPS`. A missing key there is a
+    ``KeyError`` from inside a Packer export or a promote runner — an exception with no
+    remedy in it, several layers below the operator — whereas this is one sentence saying
+    which backend cannot do this and why. tests/test_packer_oci.py pins that every
+    backend implements every op for exactly that reason.
+
+    It is a hard "no" rather than a slow path: image artefacts are VM disks, routinely
+    multi-GB, and the agent moves files inside a 256 KB signed job envelope. Chunking one
+    across ~15,000 job round trips at five seconds each is not a slower version of this
+    feature, it is a different one.
+    """
+    raise StorageError(
+        "The agent-brokered filesystem backend can't hold image artefacts — VM disk "
+        "images are multi-GB and files reach an agent inside a 256 KB job envelope. "
+        "Set the image-registry hub to s3, azure_blob, gcs or oci_object_storage."
+    )
+
+
 _IMAGE_OPS = {
     "s3": {
         "upload":   _s3_upload_image_sync,
@@ -1478,6 +1680,17 @@ _IMAGE_OPS = {
         "head":     _local_head_image_sync,
         "copy":     _local_copy_same_sync,
         "presign":  _local_presigned_url_unsupported,
+    },
+    # The only backend with no image path at all. See _agent_image_op_unsupported —
+    # every op refuses with the same sentence rather than being absent and raising a
+    # KeyError from inside a Packer export.
+    "agent_local": {
+        "upload":   _agent_image_op_unsupported,
+        "download": _agent_image_op_unsupported,
+        "delete":   _agent_image_op_unsupported,
+        "head":     _agent_image_op_unsupported,
+        "copy":     _agent_image_op_unsupported,
+        "presign":  _agent_image_op_unsupported,
     },
 }
 

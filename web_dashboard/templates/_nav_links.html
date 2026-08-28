@@ -49,7 +49,11 @@
    {% if request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Connections</a>
 {% endif %}
 
-{# ── Cloud providers ──────────────────────────────────────────────── #}
+{# ── Cloud providers ──────────────────────────────────────────────────
+   `cloud_pages` is not a feature flag — it is a profile-owned page group, so these four
+   and Images below disappear on a POV instance, whose wizard deliberately writes no cloud
+   credentials. main._profile_page_gate 404s the same five paths from the same reader. #}
+{% if cloud_pages %}
 <a href="/aws" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
 <a href="/azure" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
@@ -58,15 +62,18 @@
    {% if request.url.path == '/gcp' %}{{ nav_active }}{% endif %}">GCP</a>
 <a href="/oci" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/oci' %}{{ nav_active }}{% endif %}">OCI</a>
+{% endif %}
 
 {# ── Workloads / artefacts ────────────────────────────────────────── #}
 {% if portainer_enabled %}
 <a href="/containers" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/containers' %}{{ nav_active }}{% endif %}">Containers</a>
 {% endif %}
+{% if cloud_pages %}
 <a x-show="$store.auth.isAdmin" href="/images"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/images') %}{{ nav_active }}{% endif %}">Images</a>
+{% endif %}
 <a x-show="$store.auth.isAdmin" href="/storage"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>

@@ -20,10 +20,10 @@ deploys, see [Image Management](image-management.md).
 
 ## Philosophy
 
-The dashboard talks to one **active** object-storage backend at a time. You
-pick from three providers, configure as many as you like, and choose one
-to be active. Backends not currently active stay reachable through the
-migration UI so you can copy assets between them without downtime.
+The dashboard talks to one **active** storage backend at a time. You pick
+from the list below, configure as many as you like, and choose one to be
+active. Backends not currently active stay reachable through the migration
+UI so you can copy assets between them without downtime.
 
 | Backend | Underlying service | Best for |
 |---|---|---|
@@ -31,8 +31,9 @@ migration UI so you can copy assets between them without downtime.
 | **Azure Blob Storage** | Storage account + container + blob prefix | Teams on Azure; integrates with Azure SP creds |
 | **Google Cloud Storage** | GCS bucket + object prefix | Teams on GCP; same SA creds as Compute Engine |
 | **Local Filesystem / UNC** | Filesystem path inside the dashboard container, or a corporate `\\server\share` UNC accessed via SMB | On-prem hypervisor targets when a corporate file share is the source of truth — see [the constraint below](#constraint-local-backend-only-works-with-the-local-ansible-runner) |
+| **Remote Filesystem / UNC (via agent)** | The same kind of target, reached by a [remote agent](remote-agents.md) instead of by the dashboard container | A **cloud-hosted** dashboard — or a [POV instance](pov-instance.md) — that needs an on-prem share it has no network route to. See [below](#remote-filesystem--unc-via-agent) |
 
-All four are interchangeable from the dashboard's perspective. Switching
+They are interchangeable from the dashboard's perspective. Switching
 backends does **not** move data; the Migrate panel does that explicitly,
 and only deletes from the source if you ask it to (today: never — see
 "Migration semantics" below).
@@ -198,6 +199,80 @@ Concrete fit: if your contributors test on-prem hypervisor targets
 (Proxmox VE, vSphere/ESXi, Nutanix AHV, XCP-ng, Hyper-V) with playbooks
 hosted on a corporate share, the Local backend is the right choice.
 
+**If the dashboard itself is in a cloud, this backend is the wrong one** —
+that container has no route to your file server either. Use the
+agent-brokered backend below instead, which has no runner constraint at all.
+
+### Remote Filesystem / UNC (via agent)
+
+The same kind of target as the Local backend, with the constraint removed.
+The dashboard does not open the SMB socket; a [remote agent](remote-agents.md)
+already inside your network does, and reports back over the same
+outbound-polling channel it uses for hypervisor and Config-Management work.
+
+That inverts who has to be where. A dashboard on Azure Container Apps, or a
+[POV instance](pov-instance.md) with no cloud provider at all, can use a
+corporate share as its storage backend — and because the dashboard fetches
+the bytes and hands them to whichever Ansible runner is selected, a **cloud
+runner is fine**. There is no `ansible_runner=local` requirement.
+
+| Field | Notes |
+|---|---|
+| **Agent** | Required. Any enrolled agent, granted the `agent_storage` job type on the Agents page, running **2.5.0 or later**. |
+| **Share name** | Required. Must match a `name:` in that agent's `shares.yaml` **and** a `name:` under `storage.shares:` in its `policy.yaml`. |
+| **Subpath** | Optional relative directory inside the share. Relative only — an absolute path is refused, not quietly made relative. |
+
+#### What the dashboard does not hold
+
+**No path, no username, no password.** All three live in the agent's own
+`shares.yaml`, next to its `connections.yaml`, and the dashboard has no API
+that can read or write that file. What it stores is one half of a join — the
+same arrangement hypervisor connections already use, where the dashboard
+holds a connection *name* and the credential never leaves the customer's
+host.
+
+That is also why a compromised dashboard cannot reach an arbitrary share.
+There is no path field anywhere in the job protocol, so `\\some-other-server\c$`
+is not refused, it is unsayable. A job names a share the operator already
+wrote down, plus a bare filename; both the dashboard and the agent
+independently refuse anything containing a separator or a leading dot.
+
+#### Three grants, all required
+
+| Where | What |
+|---|---|
+| Agents page | the `agent_storage` job type granted to this agent |
+| `policy.yaml` → `job_types:` | `agent_storage` |
+| `policy.yaml` → `storage:` | `enabled: true` and the share listed by name, plus `write: true` if the dashboard should be able to upload or delete |
+
+Read is implied by naming the share. **Write is off by default** — the
+common case is a share somebody else populates and the dashboard only
+consumes. Without `write: true`, uploads and deletes are refused by name.
+See [`examples/remote-agent/policy.example.yaml`](../examples/remote-agent/policy.example.yaml)
+and [`shares.example.yaml`](../examples/remote-agent/shares.example.yaml).
+
+#### Two things that behave differently from a cloud backend
+
+**It is slower, and listings are cached.** Every operation is a real agent
+job, and agents poll every five seconds, so a round trip is 5–15 seconds.
+Asset *listings* are therefore cached for two minutes, keyed on agent +
+share + subpath — without that, the asset pickers on six other pages would
+each sit on a round trip. Uploads and deletes invalidate the cache
+immediately, and **Test connection** deliberately bypasses it, so it is also
+how you force a refresh after somebody changes the share outside the
+dashboard.
+
+**There is a ~190 KB ceiling per file.** Files travel inside the signed job
+envelope, which is capped at 256 KB before base64 takes its third.
+Playbooks, `.sh`, `.ps1` and inventories are far below it. Packages
+(`.rpm`, `.deb`, `.exe`, `.msi`) are not, and an oversize upload is refused
+at the dashboard with a message naming the limit rather than failing halfway
+through a transfer. Put those on a cloud backend.
+
+Like the Local backend, it cannot be the [image-registry hub](#image-registry-hub)
+— promote runners need an HTTPS URL, and a multi-GB VHD does not fit an
+envelope — and it holds no Terraform state (see below).
+
 After filling in fields, click **Test connection** to probe the backend —
 it lists the bucket/container as a quick reachability check. Save with
 **Save configuration**; activation flips the moment the save succeeds.
@@ -226,10 +301,12 @@ has four options:
   want the image hub in another (e.g. day-to-day in S3, image hub in
   GCS for cost reasons).
 
-Local / SMB backends can't be the hub. The promote runners need an
-HTTPS-reachable URL for the source artefact, which the local
-filesystem doesn't offer. The page's picker doesn't list `local`;
-posting it via the API returns a 400 with a pointer to this section.
+Neither filesystem backend can be the hub — `local` or `agent_local`.
+The promote runners need an HTTPS-reachable URL for the source
+artefact, which a filesystem doesn't offer; and a multi-GB VHD would
+not fit an agent job envelope in any case. The page's picker lists
+neither; posting either via the API returns a 400 with a pointer to
+this section.
 
 **What the hub does.** After every successful Packer build the
 dashboard exports a portable VHD via the cloud's native export API
@@ -301,6 +378,15 @@ backend. Operating principles:
   active backend and confirm the state migration → verify → delete from the
   old backend by hand. Losing that state orphans the resources it tracks
   (see [Infrastructure as Code → State](infrastructure-as-code.md#state-the-thing-that-makes-iac-work)).
+- **Neither filesystem backend holds Terraform state at all.** Terraform ships
+  no state backend for a filesystem, so with `local` *or* `agent_local` active,
+  state stays in the container's deploy directory — which on Azure Container
+  Apps has no volume and does not survive a recreate. A state file never crosses
+  to an agent: it is not an asset, it is not extension-filtered, and it is
+  regularly larger than a job envelope can carry. The `/storage` page shows an
+  amber warning whenever one of these is active. If you provision cloud
+  resources, put the active backend on S3, Azure Blob or GCS and use a
+  filesystem backend for assets only.
 
 The migrate result block on the page summarises three lists: Copied,
 Skipped, Failed. Save the page or screenshot before navigating away if

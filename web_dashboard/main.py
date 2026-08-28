@@ -788,6 +788,30 @@ def _feature_gate(flag: str):
     return Depends(_check)
 
 
+def _profile_page_gate(name: str):
+    """FastAPI dependency: 404 if this instance's profile does not own the named page.
+
+    The sibling of :func:`_feature_gate` for pages that are not feature flags. The four
+    cloud consoles and the image registry are gated on credential presence rather than on
+    a toggle, so there is no flag for ``_DEMO_ONLY`` to mask and they kept rendering on a
+    POV instance -- pages that instance can never put data in, because its wizard
+    deliberately writes no cloud credentials.
+
+    It exists as a gate rather than only a hidden nav link for the reason commit 28cfc67
+    gave: dropping the link leaves the page reachable by URL and by anything that
+    remembered it. Resolution goes through ``feature_flags.profile_page_allowed``, which
+    is also what ``_feature_flags()`` ships to the nav, so the two cannot drift.
+    """
+    def _check():
+        if not feature_flags.profile_page_allowed(name):
+            raise HTTPException(
+                status_code=404,
+                detail=f"This page is not available on a "
+                       f"'{feature_flags.install_profile()}' instance.",
+            )
+    return Depends(_check)
+
+
 app.include_router(setup.router)
 app.include_router(secrets.router)
 app.include_router(cloud_identity_api.router)
@@ -1224,23 +1248,27 @@ async def job_detail_page(request: Request, job_id: str):
     return templates.TemplateResponse("jobs/detail.html", {"request": request, "job_id": job_id})
 
 
-@app.get("/aws", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/aws", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_profile_page_gate("cloud_pages")])
 async def aws_page(request: Request):
     return templates.TemplateResponse("aws/index.html", {"request": request})
 
 
-@app.get("/azure", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/azure", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_profile_page_gate("cloud_pages")])
 async def azure_page(request: Request):
     location = config_service.get("azure_location") or settings.azure_location
     return templates.TemplateResponse("azure/index.html", {"request": request, "default_location": location})
 
 
-@app.get("/gcp", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/gcp", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_profile_page_gate("cloud_pages")])
 async def gcp_page(request: Request):
     return templates.TemplateResponse("gcp/index.html", {"request": request})
 
 
-@app.get("/oci", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/oci", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_profile_page_gate("cloud_pages")])
 async def oci_page(request: Request):
     return templates.TemplateResponse("oci/index.html", {"request": request})
 
@@ -1260,7 +1288,8 @@ async def storage_page(request: Request):
     return templates.TemplateResponse("storage/index.html", {"request": request})
 
 
-@app.get("/images", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/images", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_profile_page_gate("cloud_pages")])
 async def images_page(request: Request):
     return templates.TemplateResponse("images/index.html", {"request": request})
 

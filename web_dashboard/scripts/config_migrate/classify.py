@@ -99,6 +99,16 @@ _INSTANCE_LOCAL = frozenset({
 # eventually try to reconcile or tear them down.
 
 _RUNTIME_HANDLES = frozenset({
+    # The agent brokering the remote-filesystem storage backend. A `remote_agents.id`
+    # generated on the SOURCE instance, where agents enrol per-instance — the target has
+    # its own agents with their own ids, so copying this points storage at a row that
+    # either does not exist or, worse, is some unrelated agent.
+    #
+    # `storage_agent_share` and `storage_agent_subpath` are deliberately NOT here. Those
+    # are names the operator wrote in their own shares.yaml, they mean the same thing on
+    # any instance pointed at the same host, and carrying them means the target needs
+    # only the agent picked again rather than the whole backend reconfigured.
+    "storage_agent_id",
     # Rancher management plane — provisioned node + its generated credentials.
     #
     # Note what is NOT here: `rancher_bootstrap_password` is only ever *read*

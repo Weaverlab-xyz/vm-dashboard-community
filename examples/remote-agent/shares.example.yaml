@@ -1,0 +1,67 @@
+# File shares — YOUR file, not the dashboard's.
+#
+# The dashboard's storage backend can point at a filesystem path or a corporate UNC share
+# and have THIS agent do the reading and writing. That is the whole reason this file
+# exists: the dashboard's own "Local Filesystem / UNC" backend opens the SMB socket from
+# inside its own container, so a dashboard hosted in a cloud — which is most of them —
+# cannot reach a file server at all. The agent already can.
+#
+# The split is the same one connections.yaml makes, for the same reason. The dashboard
+# stores an agent and a SHARE NAME. The path behind that name, and any credential it
+# needs, are here and are never sent anywhere. A job can ask for a granted operation on a
+# name you already wrote down, and nothing else — there is no path field anywhere in the
+# protocol, so a UNC path to some other server is not refused, it is unsayable.
+#
+# Mount it read-only, next to policy.yaml:
+#   -v "$PWD/shares.yaml:/etc/dashboard-agent/shares.yaml:ro,Z"        # bash
+#   -v "${PWD}/shares.yaml:/etc/dashboard-agent/shares.yaml:ro,Z"      # PowerShell
+#
+# The `,Z` is not decoration — see the same note in policy.example.yaml. On an
+# SELinux-enforcing host a file in your home directory is labelled `user_home_t` and the
+# container cannot read it whatever its mode bits say.
+#
+# THIS FILE IS NOT ENOUGH ON ITS OWN. Naming a share here says where it is; policy.yaml
+# says whether this agent may touch it, and whether it may write. Both, or nothing
+# happens. See the `storage:` block in policy.example.yaml.
+#
+# Absent is fine. An agent that brokers no shares has no reason to have one, and a storage
+# job then fails with "unknown share" — which names the missing thing rather than the
+# missing file.
+
+shares:
+  # A path INSIDE THIS CONTAINER. Typically a directory you bind-mounted from the host,
+  # or a share the host already has mounted. Nothing SMB happens for this form — it is
+  # ordinary file I/O — so it needs no credential and works identically on Linux and
+  # Windows hosts.
+  - name: playbook-share
+    path: /srv/playbooks
+
+  # A corporate UNC share, read over SMB by the agent itself. No host-side mount and no
+  # cifs-utils: the agent speaks the protocol directly.
+  #
+  # `name` is the string you also type into the Share name field on the dashboard's
+  # /storage page, and into the `storage.shares:` list in policy.yaml. Those three
+  # strings must match; nothing else joins them.
+  #
+  # - name: corp-automation
+  #   path: \\fs01.corp.example.com\automation\playbooks
+  #
+  #   # Optional, and only for UNC. `username` may be bare or DOMAIN\user; `domain` is a
+  #   # convenience for the latter. Give this account the least it needs — read-only on
+  #   # the share is enough unless you granted `write: true` in policy.yaml.
+  #   username: svc-dashboard
+  #   password: ...
+  #   domain: CORP
+
+# ── What travels, and what does not ───────────────────────────────────────────
+# The password above stays on this host. It is not sealed and sent, it is not reported at
+# enrolment, and there is no dashboard API that reads it — the agent opens the file itself
+# when a granted job arrives. The dashboard learns only what a listing returns: file
+# names, sizes and types.
+#
+# ── The size ceiling ──────────────────────────────────────────────────────────
+# Files move inside the signed job envelope, which is capped at 256 KB — about 190 KB of
+# file once base64 has taken its third. Playbooks, shell and PowerShell scripts and
+# inventories are all far below it. Packages (.rpm, .deb, .exe, .msi) are not, and the
+# dashboard refuses them before queueing rather than letting a transfer fail halfway.
+# Put those on a cloud backend.

@@ -561,7 +561,9 @@ def test_the_base_example_mounts_no_container_socket():
 
 # ── Image hygiene ─────────────────────────────────────────────────────────────
 
-_ALLOWED_THIRD_PARTY = {"requests", "yaml", "cryptography"}
+# `smbclient` is the module name smbprotocol installs. It is imported lazily, inside
+# the share helpers, so an agent that brokers no shares never loads it.
+_ALLOWED_THIRD_PARTY = {"requests", "yaml", "cryptography", "smbclient"}
 
 
 def test_the_agent_depends_on_almost_nothing():
@@ -600,11 +602,22 @@ def _dockerfile_instructions() -> str:
 def test_the_image_installs_only_the_allowed_dependencies():
     body = _dockerfile_instructions()
     installed = set(re.findall(r'"([a-zA-Z0-9_-]+)[><=]', body))
-    unexpected = {p.lower() for p in installed} - {"requests", "pyyaml", "cryptography"}
+    unexpected = ({p.lower() for p in installed}
+                  - {"requests", "pyyaml", "cryptography", "smbprotocol"})
     assert not unexpected, f"unexpected pip package in the agent image: {sorted(unexpected)}"
     for banned in ("ansible", "kubectl", "helm", "docker.io", "docker-ce"):
         assert banned not in body.lower(), (
             f"the agent image must not contain {banned} — it is a supervisor, not a runner")
+
+
+def test_the_allowed_dependencies_carry_no_code_execution():
+    """The rule this image enforces is not "few packages", it is "nothing that can run
+    operator-supplied code". Stated as its own test so that adding a fourth dependency —
+    smbprotocol, for the storage backend — is measured against the actual rule rather
+    than against a count somebody happened to write down."""
+    assert _ALLOWED_THIRD_PARTY == {"requests", "yaml", "cryptography", "smbclient"}, (
+        "a new agent dependency needs a deliberate answer to: can a job cause this "
+        "library to execute something the customer did not put on the host?")
 
 
 def test_the_published_image_is_wired_into_ci():
