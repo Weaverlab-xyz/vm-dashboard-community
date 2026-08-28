@@ -5,7 +5,7 @@ Creates, updates, and queries background job records.
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from sqlalchemy import and_, text
 from sqlalchemy.exc import IntegrityError
@@ -469,6 +469,64 @@ def log_audit(
             db.rollback()
             if attempt == 2:
                 raise
+
+
+# -- Terraform state-lock safety ----------------------------------------------
+# An operator force-unlock (api/jobs.force_unlock_job_state) must never break a lock
+# something is still using. Mapping a state key back to "the job holding it" is not
+# generically possible -- a decommission destroys in the PROVISION job's deploy dir, so
+# the holder is not the job whose id names the state key, and any guard built on "is
+# the owning job terminal?" would happily yank a lock out from under a live destroy.
+#
+# The lock's own timestamp answers it without that mapping:
+#
+#     a lock created at T can only be held by something already running at T.
+#
+# So a job that STARTED AFTER the lock was created provably is not its holder. The
+# inference errs only toward naming a blocker that turns out to be innocent (some
+# unrelated long-running job), never toward calling a live holder safe -- the
+# direction that matters when being wrong corrupts someone's state.
+#
+# Out of scope by construction: the PRA / Entitle / Password-Safe services shell out
+# to their own terraform in a tempdir, so they never touch a `terraform-state/<job_id>`
+# key and can hold no lock this reasoning applies to.
+
+
+def _as_utc(value) -> Optional[datetime]:
+    """Job timestamps are naive UTC (``datetime.utcnow``); lock stamps are aware."""
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def lock_blocking_jobs(jobs, lock_created: datetime) -> list:
+    """Of ``jobs``, those that could still be holding a lock created at
+    ``lock_created``. Pure, so the reasoning above is testable on its own.
+
+    A running job with no ``started_at`` counts as a blocker: it cannot be ruled out,
+    and "cannot be ruled out" must never read as safe here."""
+    blockers = []
+    for job in jobs:
+        # `pending`/`queued` are excluded: they have not run terraform yet, so they
+        # cannot hold a lock that already exists. If one starts and locks after we
+        # break this one, that is a NEW lock and no business of ours.
+        if job.status != "running":
+            continue
+        # An unreadable lock stamp rules nothing out, so every running job stays a
+        # blocker rather than the age check silently passing them all.
+        if lock_created is None:
+            blockers.append(job)
+            continue
+        started = _as_utc(job.started_at)
+        if started is None or started <= lock_created:
+            blockers.append(job)
+    return blockers
+
+
+def terraform_lock_blockers(db: Session, lock_created: datetime) -> list:
+    """:func:`lock_blocking_jobs` over every currently-running job."""
+    return lock_blocking_jobs(
+        db.query(Job).filter(Job.status == "running").all(), lock_created)
 
 
 def verify_audit_chain(db: Session) -> dict:
