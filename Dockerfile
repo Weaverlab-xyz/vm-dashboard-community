@@ -211,7 +211,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip \
         qemu-utils \
     && install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
        > /etc/apt/sources.list.d/docker.list \
@@ -278,6 +279,14 @@ RUN --mount=type=secret,id=github_token,required=false \
 # Install OPA (Open Policy Agent) — the bundled binary admission_service shells
 # for pre-action policy guardrails (services/_opa.py). Static build, arch-aware
 # (multi-arch image: amd64 + arm64). See docs/policy-guardrails.md.
+#
+# --retry/--retry-all-errors: the openpolicyagent.org download endpoint
+# intermittently drops the connection mid-transfer — observed as
+# `curl: (56) OpenSSL SSL_read: ... unexpected eof while reading` on the amd64
+# leg of release v26.9.7, which failed the whole multi-arch build. curl's
+# built-in retry only covers timeouts and a few HTTP codes, so a dropped
+# stream (exit 56) needs --retry-all-errors to be retried at all. The
+# `opa version` below stays the proof the binary arrived intact.
 ARG OPA_VERSION=0.70.0
 RUN ARCH=$(dpkg --print-architecture) \
     && case "$ARCH" in \
@@ -285,7 +294,8 @@ RUN ARCH=$(dpkg --print-architecture) \
          arm64) OPA_ARCH=arm64 ;; \
          *) echo "unsupported arch $ARCH for OPA" && exit 1 ;; \
        esac \
-    && curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_${OPA_ARCH}_static" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_${OPA_ARCH}_static" \
         -o /usr/local/bin/opa \
     && chmod +x /usr/local/bin/opa \
     && /usr/local/bin/opa version
@@ -317,7 +327,8 @@ RUN ARCH=$(dpkg --print-architecture) \
 # registry never ships an image missing a cached provider.
 ENV TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
 RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/terraform.zip \
     && unzip -qo /tmp/terraform.zip -d /usr/local/bin/ \
     && rm /tmp/terraform.zip \
@@ -380,8 +391,10 @@ RUN ARCH=$(dpkg --print-architecture) \
 # failure class (entrypoint, CA trust, shared volume, file perms). Fetched on CI's
 # clean network; both are architecture-aware (linux/amd64 + linux/arm64).
 RUN ARCH=$(dpkg --print-architecture) \
-    && KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
-    && curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/${ARCH}/kubectl" \
+    && KVER="$(curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        https://dl.k8s.io/release/stable.txt)" \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        "https://dl.k8s.io/release/${KVER}/bin/linux/${ARCH}/kubectl" \
         -o /usr/local/bin/kubectl \
     && chmod +x /usr/local/bin/kubectl \
     && kubectl version --client \

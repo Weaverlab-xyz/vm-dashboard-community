@@ -45,14 +45,21 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # helm CLI — required by the kubernetes.core.helm module (it shells out to helm).
-RUN curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-$(dpkg --print-architecture).tar.gz" \
-      | tar xz -C /tmp \
+# --retry/--retry-all-errors: these release fetches are the same transient-blip
+# failure class that killed the main image on a dropped TLS stream (curl exit 56)
+# — see the OPA/terraform fetches in the root Dockerfile. The tarball lands in a
+# file before it is unpacked rather than being piped into tar, because a retry
+# restarts the download and tar cannot un-consume the bytes it already read.
+RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+      "https://get.helm.sh/helm-${HELM_VERSION}-linux-$(dpkg --print-architecture).tar.gz" \
+      -o /tmp/helm.tar.gz \
+ && tar xzf /tmp/helm.tar.gz -C /tmp \
  && mv "/tmp/linux-$(dpkg --print-architecture)/helm" /usr/local/bin/helm \
- && rm -rf /tmp/linux-* \
+ && rm -rf /tmp/helm.tar.gz /tmp/linux-* \
  && helm version
 
 # kubectl — handy for ad-hoc `command:`/`shell:` tasks; not required by k8s_info/k8s.
-RUN curl -fsSL -o /usr/local/bin/kubectl \
+RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl" \
  && chmod +x /usr/local/bin/kubectl \
  && kubectl version --client
