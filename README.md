@@ -13,10 +13,6 @@ the dashboard deploys resources into **your** accounts.
 > adds multi-tenant isolation, automatic rotation, and managed upgrades.
 > See [docs/saas-comparison.md](docs/saas-comparison.md) for how it compares.
 
-> **Status:** private preview. This README is a placeholder — a full rewrite
-> with screenshots lands with the public release. An intro video is already
-> available above.
-
 ## How the dashboard thinks
 
 Before you spin it up, the reference docs below explain the
@@ -41,6 +37,7 @@ works:
 | [Generic OIDC (SSO)](docs/integrations/oidc.md) | Discovery-driven OpenID Connect login for any IdP (Okta, Entra, Keycloak, Google, …); PKCE, group→workgroup mapping, admin Settings panel. | You want single sign-on for the dashboard instead of local passwords. |
 | [Auto-delete Timer](docs/auto-delete-timer.md) | Give provisioned VMs, databases and clusters an expiry, then run the same teardown the Destroy button runs. The four gates, the two one-hour arming clocks, extending and pinning. | You want lab resources to clean themselves up — read it *before* enabling, because it deletes infrastructure. |
 | [Notifications](docs/notifications.md) | Outbound webhooks — Slack, Microsoft Teams (Power Automate Workflows), or a signed JSON envelope you point at anything. Auto-delete warnings, job failures, budget/secret/drift alerts. | You've turned on the auto-delete timer and want to hear about it without opening the dashboard. |
+| [Remote Agents](docs/remote-agents.md) | Reaching infrastructure the dashboard cannot route to: an outbound-dialing agent an operator runs inside the private network — no inbound ports, no stored path in. Enrolment and credential sealing (*the config file travels, the key does not*), discovery, agent-executed Config Management, and the one-shot sibling runners for Hyper-V and bare ESXi. | Your hypervisors, databases or clusters live somewhere the dashboard can't reach — a customer network, a lab behind NAT, an air-gapped segment. |
 | [Cloud Hosting](docs/cloud-hosting.md) | Running the dashboard itself on Azure Container Apps / Cloud Run / ECS instead of Compose: the gateway sidecar that splits the agent endpoint from the UI, why an unset `DATABASE_URL` or `JWT_SECRET_KEY` fails silently, and what on-premises capability you give up. | You want the dashboard reachable from outside your LAN, or fronting remote agents. |
 | [Config Migration](docs/config-migration.md) | Moving Settings configuration between two instances. Why `pg_dump` of the config table restores unreadable ciphertext without erroring, and what deliberately stays behind. | You're standing up a second instance and don't want to re-type months of configuration. |
 | [POV Instance](docs/pov-instance.md) | Running a **second** dashboard for customer POV/POC environments: why `install_profile` makes demo and POV mutually exclusive, which features each profile gets, the **BeyondTrust tenant registry** that replaces the singletons (and why an explicit tenant never falls back to the default), and the four things that bite — its own JWT key, a cold first boot, a reachable agent endpoint, and an unarmed auto-delete timer. | You do customer proof-of-value work and don't want it sharing an instance, a database or a BeyondTrust tenant with your demo estate. |
@@ -121,6 +118,8 @@ go deeper on each axis once you're up and running.
   Gallery, Azure Container Instances
 - **GCP** — Compute Engine deployment (public OS images + custom images),
   instance management, image capture, Secret Manager SSH-key integration
+- **OCI** — Compute deployment, custom images, Autonomous Database, OKE
+  clusters; API-key signing auth, compartment-scoped
 - **Identity** — local username/password, optional WebAuthn/FIDO2 MFA,
   optional Sign in with Microsoft (Entra ID)
 - **Jobs** — background task tracking with live WebSocket updates
@@ -151,6 +150,22 @@ The wizard turns a flag on; the per-integration fields live in Settings:
   runner is one-shot — see [docs/config-management.md](docs/config-management.md)
   for the security argument. Integration setup in
   [docs/integrations/ansible.md](docs/integrations/ansible.md).
+- **Remote Agents** — an outbound-dialing agent you run inside a private
+  network so the dashboard can manage what it can't route to: hypervisor
+  discovery and inventory, agent-executed Config Management, and Hyper-V /
+  bare-ESXi access via a one-shot sibling container. The agent holds the
+  credentials; the dashboard never needs a path in. See
+  [docs/remote-agents.md](docs/remote-agents.md).
+- **Cloud Databases** — provision private Postgres / MySQL / SQL Server on
+  AWS/Azure/GCP and Oracle on OCI, brokered through a PRA tunnel, or register a
+  database you already run (on-premises included) as a Config Management
+  target. See [docs/databases.md](docs/databases.md).
+- **Kubernetes** — provision or import EKS / AKS / GKE / OKE, run a Rancher
+  management plane, deliver secrets via ESO, and layer PRA tunnels, Password
+  Safe token rotation and Entra→RBAC federation on top. See
+  [docs/kubernetes.md](docs/kubernetes.md).
+- **Cloud Costs** — a spend tile and a `/costs` page built on AWS Cost Explorer
+  and Azure Cost Management, scoped to what the dashboard deployed.
 - **BeyondTrust Password Safe** — on-demand checkout of SSH keys and passwords, plus onboarding of the VMs, databases and Kubernetes tokens the dashboard builds as managed systems + accounts. See [docs/integrations/password-safe.md](docs/integrations/password-safe.md).
 - **BeyondTrust Privileged Remote Access** — Shell Jump, Web Jump, Remote RDP and protocol-tunnel jump items plus PRA Vault accounts, and the Gateway hosts they broker through. See [docs/integrations/privileged-remote-access.md](docs/integrations/privileged-remote-access.md).
 - **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/epml.md](docs/integrations/epml.md).
@@ -171,6 +186,8 @@ on release:
 | [`chrweav/ansible-winrm`](https://hub.docker.com/r/chrweav/ansible-winrm) | Default Ansible config-management runner — upstream `willhallonline/ansible` **+ `pywinrm`**, so both Linux SSH and Windows WinRM targets work out of the box. Built from [`runners/ansible-winrm/`](runners/ansible-winrm/). |
 | [`chrweav/ansible-cloud`](https://hub.docker.com/r/chrweav/ansible-cloud) | Ansible runner for **Kubernetes cluster / database** targets — `kubernetes.core` + the helm CLI + the DB collections and client libs, for `hosts: localhost` plays on an in-cloud runner or — for on-prem targets — a sibling container on the dashboard host. Built from [`runners/ansible-cloud/`](runners/ansible-cloud/). |
 | [`chrweav/dashboard-promote-runner`](https://hub.docker.com/r/chrweav/dashboard-promote-runner) | One-shot cross-cloud image-promote runner (ECS / ACI / Cloud Run). Built from [`runners/promote/`](runners/promote/). |
+| [`chrweav/dashboard-agent`](https://hub.docker.com/r/chrweav/dashboard-agent) | The **remote on-prem agent** — a long-lived container an operator runs inside a private network, which dials the dashboard outbound (no inbound ports, no credentials in the dashboard). Carries exactly three dependencies and deliberately no ansible / kubectl / helm / container client. Built from [`runners/agent/`](runners/agent/). Unlike the runners above, **you pull this one** — the Agents page hands out an install command naming this tag, so the published image *is* the distribution channel. See [docs/remote-agents.md](docs/remote-agents.md). |
+| [`chrweav/hypervisor-runner`](https://hub.docker.com/r/chrweav/hypervisor-runner) | The agent's one-shot **sibling runner** for the two transports its three-dependency image can't carry: Hyper-V (WinRM/NTLM) and bare ESXi (SOAP). Built from [`runners/hypervisor/`](runners/hypervisor/). Operator-pulled as well — the agent never pulls it for you, because a pull is a network fetch of executable content and that's the operator's call, not a job's. |
 
 ## License
 

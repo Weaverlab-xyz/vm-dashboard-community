@@ -96,7 +96,7 @@ jobs:
       # shared NAT on a hosted runner, so it is regularly exhausted by unrelated
       # tenants (this failed release v26.7.3 with a 403). Authenticating raises
       # it to 1000 req/hour/repo. Passed as a build secret, not a --build-arg,
-      # so it never lands in the published image history; the other three images
+      # so it never lands in the published image history; the other five images
       # don't mount it and are unaffected. contents:read above is all it needs
       # (it only reads public hashicorp/packer-plugin-* release tags).
       - name: Build and push

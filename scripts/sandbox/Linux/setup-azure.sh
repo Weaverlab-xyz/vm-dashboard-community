@@ -507,14 +507,14 @@ fi
 
 # ── 6d. Container Registry (ACR) — mirror public images to dodge Docker Hub limits ──
 # Azure rate-limits anonymous Docker Hub pulls, and every ACI runner (Shell-Jump
-# Jumpoint, config-mgmt Ansible, cross-cloud promote) pulls a public image at deploy
-# time. Stand up a small ACR, mirror the three images into it once (az acr import is
-# server-side — no local Docker), and grant the SP pull access. The dashboard then pulls
-# from ACR via the azure_acr_* / ansible_aci_acr_* keys emitted below. The ACI Jumpoint
-# image stays bare (the runner prepends azure_acr_server itself) — so the VM jumpoint,
-# which shares that key and docker-runs without a registry login, keeps working off
-# Docker Hub. One ACR serves every region (globally pullable); re-runs reuse it. Opt out
-# with SANDBOX_SKIP_ACR=1 (Basic SKU ≈ $5/mo).
+# Jumpoint, config-mgmt Ansible, cross-cloud promote, Kubernetes) pulls a public image
+# at deploy time. Stand up a small ACR, mirror the four images into it once (az acr
+# import is server-side — no local Docker), and grant the SP pull access. The dashboard
+# then pulls from ACR via the azure_acr_* / ansible_aci_acr_* keys emitted below. The
+# ACI Jumpoint image stays bare (the runner prepends azure_acr_server itself) — so the
+# VM jumpoint, which shares that key and docker-runs without a registry login, keeps
+# working off Docker Hub. One ACR serves every region (globally pullable); re-runs reuse
+# it. Opt out with SANDBOX_SKIP_ACR=1 (Basic SKU ≈ $5/mo).
 ACR_LOGIN_SERVER=""
 if [[ -z "${SANDBOX_SKIP_ACR:-}" ]]; then
   section "Container Registry (ACR)"
