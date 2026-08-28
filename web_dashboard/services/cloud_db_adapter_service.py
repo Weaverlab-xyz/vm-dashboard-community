@@ -57,6 +57,11 @@ _SQLSERVER_FLAVOR = {"aws": "rds", "azure": "azure_sql", "gcp": "cloudsql"}
 # the function as a value — each cloud resolves a reference.
 _SECRET_BACKEND = {"aws": "aws_sm", "azure": "azure_kv", "gcp": "gcp_sm"}
 
+# For the staging failure message: the Secrets page panel an operator has to go fix,
+# spelled as that page spells it — "gcp_sm" is the internal key, not a place.
+_BACKEND_LABEL = {"aws_sm": "AWS Secrets Manager", "azure_kv": "Azure Key Vault",
+                  "gcp_sm": "GCP Secret Manager"}
+
 # The Cloud Functions workload that IS the adapter. Public: the Databases page needs
 # it to find a row's existing adapter, and a second spelling of "db_grant" is how the
 # lookup and the deploy drift apart.
@@ -227,7 +232,20 @@ def _stage_admin_secret(row: CloudDatabase, admin_password: str) -> dict:
     if not backend:
         raise AdapterPairingError(f"no secret backend for cloud {row.cloud!r}")
     key = secret_key(row)
-    name = secrets_backend_service.write_sync(backend, key, admin_password)
+    try:
+        name = secrets_backend_service.write_sync(backend, key, admin_password)
+    except Exception as exc:
+        # The job detail view shows error_message and nothing else, so a bare SDK
+        # error here reads as a broken secret store: GCP's is a protobuf dump naming
+        # only secretmanager.googleapis.com, Azure's a 403 on a vault URL. Name the
+        # stage and the backend, because staging is the one step whose prerequisite
+        # (a configured secret store) is not implied by having provisioned the
+        # database at all.
+        raise AdapterPairingError(
+            f"could not stage the admin credential in the {backend} secret store, "
+            f"which the adapter reads it from — check Secrets → "
+            f"{_BACKEND_LABEL.get(backend, backend)} and use its Test button: {exc}"
+        ) from exc
 
     if row.cloud == "aws":
         # The ARN, not the name: the role's policy names ARNs, and AWS appends a

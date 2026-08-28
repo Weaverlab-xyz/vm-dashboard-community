@@ -45,11 +45,43 @@ def _azure_kv_cfg() -> tuple[str, str, str, str]:
 
 
 def _gcp_cfg() -> tuple[str, str, str]:
+    """``(project, prefix, service_account_json)`` for GCP Secret Manager.
+
+    The project falls back to the main GCP config the way ``_aws_cfg``'s region
+    falls back to ``settings.aws_region``, and for the same reason: the credential
+    on the line below is already the MAIN one (``gcp_service_account_json``), so
+    reading the project from a Secrets-page-only field made a client authenticated
+    against one place and addressed at nowhere. Unset, that produced a parent of
+    ``"projects/"`` and a raw ``400 RESOURCE_PROJECT_INVALID`` from CreateSecret —
+    which named Secret Manager, not the empty field that caused it. Same
+    resolution order as every other GCP caller (``gcp_project`` then
+    ``gcp_project_id``), and it matches what ``test_gcp_sm``'s own error message
+    already promised: "Set it in Setup → GCP or Secrets → GCP Secret Manager".
+    """
     cs = _cs()
-    project = cs.get("secrets_gcp_project", "")
+    from ..config import settings
+    project = (cs.get("secrets_gcp_project", "") or cs.get("gcp_project", "")
+               or cs.get("gcp_project_id", "") or settings.gcp_project_id or "")
     prefix = cs.get("secrets_gcp_prefix") or "dashboard"
     sa_json = cs.get("gcp_service_account_json", "")
     return project, prefix, sa_json
+
+
+def _gcp_project_or_raise() -> str:
+    """The GCP project, or an actionable error instead of an SDK 400.
+
+    Every GCP SM call builds a ``projects/{project}`` parent, and an empty project
+    is accepted by the client and rejected by the API with a message that mentions
+    only ``secretmanager.googleapis.com`` — so the failure reads as a broken
+    Secret Manager rather than an unset field. ``test_gcp_sm`` has guarded this
+    since it was written; the write/list/delete paths did not.
+    """
+    project, _, _ = _gcp_cfg()
+    if not project:
+        raise ValueError(
+            "GCP project is not configured, so there is no project to address Secret "
+            "Manager in. Set it in Setup → GCP or Secrets → GCP Secret Manager.")
+    return project
 
 
 def _bt_cfg() -> tuple[str, str]:
@@ -380,9 +412,7 @@ def _gcp_client():
 
 
 def test_gcp_sm() -> dict:
-    project, _, _ = _gcp_cfg()
-    if not project:
-        raise ValueError("GCP project is not configured. Set it in Setup → GCP or Secrets → GCP Secret Manager.")
+    project = _gcp_project_or_raise()
     client = _gcp_client()
     parent = f"projects/{project}"
     # list_secrets returns a ListSecretsPager which is iterable but not an
@@ -404,7 +434,7 @@ def _gcp_secret_id(key: str) -> str:
 
 def write_gcp_sm(key: str, value: str) -> str:
     from google.api_core.exceptions import AlreadyExists
-    project, _, _ = _gcp_cfg()
+    project = _gcp_project_or_raise()
     client = _gcp_client()
     secret_id = _gcp_secret_id(key)
     parent = f"projects/{project}"
@@ -434,7 +464,7 @@ def write_gcp_sm_ephemeral(name: str, value: str, runner_sa: str) -> str:
     credential is ``value``. Returns the resource id."""
     from . import ephemeral_secrets as _eph
     from google.api_core.exceptions import AlreadyExists
-    project, _, _ = _gcp_cfg()
+    project = _gcp_project_or_raise()
     client = _gcp_client()
     parent = f"projects/{project}"
     resource = f"{parent}/secrets/{name}"
@@ -462,7 +492,7 @@ def list_gcp_sm_ephemeral() -> list:
     """List ephemeral secrets (by label) as ``[{"id": secret_id, "created_ts": epoch}]``
     for the GC sweeper."""
     from . import ephemeral_secrets as _eph
-    project, _, _ = _gcp_cfg()
+    project = _gcp_project_or_raise()
     client = _gcp_client()
     parent = f"projects/{project}"
     out = []
@@ -492,7 +522,7 @@ def read_gcp_sm(ref: str, vault_id: str | None = None) -> str:
         if row:
             project = row.endpoint
     if project is None:
-        project, _, _ = _gcp_cfg()
+        project = _gcp_project_or_raise()
     client = _gcp_client()
     name = f"projects/{project}/secrets/{ref}/versions/latest"
     resp = client.access_secret_version(request={"name": name})
@@ -855,7 +885,7 @@ def describe_gcp_sm(ref: str, vault_id: str | None = None):
         if row:
             project = row.endpoint
     if project is None:
-        project, _, _ = _gcp_cfg()
+        project = _gcp_project_or_raise()
     ver = _gcp_client().get_secret_version(
         request={"name": f"projects/{project}/secrets/{ref}/versions/latest"})
     return _naive_utc(getattr(ver, "create_time", None))
@@ -1001,7 +1031,8 @@ def delete_azure_kv(ref: str) -> None:
 # ── GCP SM — list + delete ────────────────────────────────────────────────────
 
 def list_gcp_sm() -> list[dict]:
-    project, prefix, _ = _gcp_cfg()
+    project = _gcp_project_or_raise()
+    _, prefix, _ = _gcp_cfg()
     client = _gcp_client()
     parent = f"projects/{project}"
     out: list[dict] = []
@@ -1026,7 +1057,7 @@ def delete_gcp_sm(ref: str) -> None:
     ephemeral cleanup (post-run in `ansible_local_run_service`, plus the
     `ephemeral_gc` sweeper).
     """
-    project, _, _ = _gcp_cfg()
+    project = _gcp_project_or_raise()
     client = _gcp_client()
     name = f"projects/{project}/secrets/{ref}"
     client.delete_secret(request={"name": name})
