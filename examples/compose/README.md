@@ -7,8 +7,8 @@ ACI**, and **GCE (Container-Optimized OS)** via the dashboard's
 
 These are the community-edition answer to an application catalog: instead of a
 one-click catalog (a SaaS-edition feature), you upload one of these files, edit
-the placeholders, and deploy. The apps mirror the curated
-[non-privileged container backlog](../../docs/non-privileged-container-backlog.md).
+the placeholders, and deploy. Every app here runs unprivileged — no Docker
+socket, no host mounts — so it is safe to hand to a one-shot cloud runtime.
 
 ## How to deploy
 

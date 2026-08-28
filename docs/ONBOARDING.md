@@ -514,7 +514,8 @@ The script:
   and from the Docker build context; it is mounted into the container at runtime via
   Docker Secrets and is never written to `.env`.
 - Auto-generates `POSTGRES_PASSWORD` in `.env` if it's still at the placeholder value.
-- Brings up the Compose stack (`db` + `app`) — with `--hub`, from `docker-compose.hub.yml`
+- Brings up the Compose stack (`db` + `app` + `worker`, the last at
+  `WORKER_REPLICAS` replicas, default 3) — with `--hub`, from `docker-compose.hub.yml`
   using the published image (a `docker compose pull` runs first so reruns pick up new
   releases); otherwise it builds the `app` image locally.
 - Waits for `http://localhost:8001/api/health` to respond.

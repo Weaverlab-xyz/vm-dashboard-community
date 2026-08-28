@@ -399,7 +399,7 @@ POST /api/k8s/rancher/entitle-register   {"action": "register"}   # or "deregist
 Because the node is publicly reachable, Entitle's cloud connects to it directly
 (no agent token). For tenants who lock the node behind CIDRs that Entitle can't
 traverse, set `entitle_rancher_private = true` to attach the shared Entitle agent
-token instead. See the [Entitle guide](/docs/integrations/entitle) for enabling
+token instead. See the [Entitle guide](entitle.md) for enabling
 resource registration.
 
 ---
