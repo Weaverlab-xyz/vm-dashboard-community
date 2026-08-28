@@ -7,13 +7,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
+import socket
 import subprocess
 import contextlib
 try:
     import fcntl  # POSIX-only; the app runs in Linux containers (absent on Windows dev hosts → locking is a no-op there).
 except ImportError:  # pragma: no cover
     fcntl = None
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from ..config import settings
@@ -332,12 +335,145 @@ def _build_var_args(variables: dict) -> list:
     return args
 
 
+# -- Stale state locks left by a cancelled run --------------------------------
+# Cancelling a job kills the terraform subprocess (see :func:`_stream`), and a
+# killed terraform never releases its state lock. The lock outlives the job
+# forever, so every later run against that state -- including the DESTROY that
+# would clean the cancelled deployment up -- dies with "Error acquiring the state
+# lock", and the resources are orphaned with no in-app way out. Live case: a
+# cancelled clouddb_provision left the GCS default.tflock held by the very worker
+# that killed it; the follow-up decommission could not destroy, and the lock
+# object had to be deleted by hand.
+#
+# So the cancel path releases the lock it just orphaned. This is deliberately the
+# NARROW half of the problem: it only ever breaks a lock this process can PROVE is
+# dead, because it killed the holder itself. Locks stranded any other way (worker
+# OOM-killed, replica rolled mid-apply) are left alone -- nothing here can prove
+# those holders are gone, and that case wants a deliberate operator action, which
+# is what `terraform force-unlock` is for.
+#
+# Two conditions must BOTH hold before we unlock, and any of them failing -- or
+# anything at all going wrong -- means we simply do not:
+#   Who      matches this container's own "<user>@<hostname>", so we can never
+#            break a lock held by another replica.
+#   Created  is at or after the moment we spawned the subprocess, so we can never
+#            break a lock that a DIFFERENT, still-live terraform on this same
+#            container took in this same deploy dir before we started.
+
+# `force-unlock` needs the lock's ID, and the backend-agnostic way to learn it is
+# to offer an ID that cannot possibly match: terraform then fails the unlock and
+# renders the CURRENT lock's info (statemgr.LockError -> LockInfo.String()), the
+# same "Lock Info:" block an operator sees in a failed job.
+#
+# Ask terraform rather than reading the .tflock object, because the ID in that
+# object is NOT always the ID force-unlock wants: the GCS backend replaces it with
+# the lock object's GENERATION number. The live incident showed both -- the object
+# held "ffa69909-e728-a06e-1556-af7e1852acb7" while the error (and the only value
+# that would have unlocked it) read "1787928588291305". Parsing terraform's own
+# output is the only thing that stays correct across backends.
+#
+# The sentinel is not a UUID and not an integer, so it can match neither spelling
+# of a real lock ID and can never unlock one by accident.
+_LOCK_PROBE_ID = "dashboard-probe-not-a-lock-id"
+
+_LOCK_FIELD_RE = re.compile(r"^\s*(ID|Path|Operation|Who|Version|Created):\s*(.+?)\s*$", re.M)
+
+# terraform renders Created with Go's default time.Time layout
+# ("2026-08-28 14:49:48.17098413 +0000 UTC") -- not RFC3339, and with up to nine
+# fractional digits where datetime accepts at most six. Match a prefix and
+# truncate the fraction; the trailing zone NAME is ignored (the offset is what
+# matters). The tflock OBJECT stores RFC3339 ("...T14:49:48.17098413Z"), so both
+# separators and both zone spellings are accepted.
+_LOCK_TIME_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})[T ](?P<time>\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<frac>\d+))?\s*(?P<tz>Z|[+-]\d{2}:?\d{2})?"
+)
+
+
+def _parse_lock_info(text: str) -> dict:
+    """Pull terraform's ``Lock Info:`` block out of command output.
+
+    ``{}`` when there is no such block -- which is equally what "no lock is held"
+    and "this backend does not lock" look like, and callers treat all of them as
+    nothing to release."""
+    at = (text or "").find("Lock Info:")
+    if at < 0:
+        return {}
+    return dict(_LOCK_FIELD_RE.findall(text[at:]))
+
+
+def _parse_lock_time(value: str):
+    """Parse a lock ``Created`` stamp to an aware datetime; ``None`` if unparseable
+    (which is a REFUSAL to unlock, not a pass -- see :func:`_release_own_lock_sync`)."""
+    m = _LOCK_TIME_RE.match((value or "").strip())
+    if not m:
+        return None
+    frac = (m.group("frac") or "").ljust(6, "0")[:6]
+    tz = m.group("tz") or "Z"
+    if tz == "Z":
+        tz = "+00:00"
+    elif ":" not in tz:
+        tz = tz[:3] + ":" + tz[3:]
+    try:
+        return datetime.fromisoformat(f"{m.group('date')}T{m.group('time')}.{frac}{tz}")
+    except ValueError:  # pragma: no cover -- regex already constrains the shape
+        return None
+
+
+def _self_lock_owner() -> str:
+    """This process's terraform lock identity. terraform builds ``Who`` as
+    ``user.Current().Username + "@" + os.Hostname()``; in the container that is
+    ``root@<replica>``, which is what we match against."""
+    try:
+        import pwd  # POSIX-only, like fcntl above
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except Exception:  # pragma: no cover -- non-POSIX dev host
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
+    return f"{user}@{socket.gethostname()}"
+
+
+def _release_own_lock_sync(deploy_dir: str, env: Optional[dict], started_at) -> str:
+    """Release a state lock this process orphaned by killing its own terraform.
+
+    Returns a short status string for the log. NEVER raises and never re-raises:
+    the caller is already unwinding a cancel, and every failure mode here just
+    leaves the lock exactly where a cancel used to leave it anyway."""
+    try:
+        probe = _run(["force-unlock", "-force", _LOCK_PROBE_ID], deploy_dir,
+                     timeout=60, env=env)
+        info = _parse_lock_info((probe.stdout or "") + "\n" + (probe.stderr or ""))
+        if not info:
+            return "none held"
+        lock_id = info.get("ID", "")
+        if not lock_id:
+            return "held, but terraform reported no lock id"
+        who, mine = info.get("Who", ""), _self_lock_owner()
+        if who != mine:
+            return f"left alone - held by {who!r}, not by us ({mine!r})"
+        created = _parse_lock_time(info.get("Created", ""))
+        if created is None:
+            return f"left alone - unparseable Created {info.get('Created', '')!r}"
+        if created < started_at:
+            return (f"left alone - taken {created.isoformat()}, before this run started "
+                    f"{started_at.isoformat()} (another terraform on this host holds it)")
+        r = _run(["force-unlock", "-force", lock_id], deploy_dir, timeout=60, env=env)
+        if r.returncode != 0:
+            return f"force-unlock {lock_id} failed: {(r.stderr or r.stdout).strip()[:300]}"
+        return f"released {lock_id}"
+    except Exception as exc:
+        return f"release failed: {exc}"
+
+
 async def _stream(tf_args: list, cwd: str, env: Optional[dict],
                   on_line: Callable[[str], Awaitable[None]]) -> tuple[int, str]:
     """Run a terraform subcommand, streaming each stdout line to the async
     ``on_line`` callback (stderr merged into stdout). Returns (returncode,
     full_output). Mirrors packer_service._stream_command; merges env OVER
     os.environ like :func:`_run` so PATH / SSL_CERT_FILE survive."""
+    # Stamped BEFORE the spawn: any lock our terraform takes is necessarily created
+    # after this, which is how the cancel path below tells our own lock apart from
+    # one a different terraform on this host already held (see _release_own_lock_sync).
+    started_at = datetime.now(timezone.utc)
     proc = await asyncio.create_subprocess_exec(
         settings.terraform_executable, *tf_args,
         cwd=cwd,
@@ -362,6 +498,22 @@ async def _stream(tf_args: list, cwd: str, env: Optional[dict],
                 await asyncio.wait_for(proc.wait(), timeout=10)
             except asyncio.TimeoutError:
                 proc.kill()
+                # Reap it: the lock release below is only sound once the holder is
+                # provably gone, and a SIGKILLed process cannot outlive this wait.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=10)
+            # The terraform we just killed never released its state lock, and that
+            # lock would otherwise wedge every later run against this state --
+            # including the destroy that cleans this deployment up. Break the one we
+            # orphaned, and only that one. Log-only on purpose: on_line just raised
+            # JobCancelled, so it cannot carry this to the Live Output.
+            try:
+                status = await asyncio.to_thread(
+                    _release_own_lock_sync, cwd, env, started_at)
+                logger.info("terraform cancel in %s: state lock %s", cwd, status)
+            except Exception as exc:  # pragma: no cover -- defence in depth
+                logger.warning("terraform cancel in %s: releasing the state lock "
+                               "failed: %s", cwd, exc)
             raise
         except Exception:
             pass  # a UI-broadcast hiccup must never abort the terraform run
