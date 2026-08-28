@@ -210,6 +210,13 @@ from its own output fails validation.
 Changing a probe changes the template, which mints a new revision — i.e. a restart. Do
 it deliberately, not during an incident.
 
+**The worker is a separate Container App and needs its own probe.** It has no ingress, so
+for a long time it had no port and could not be probed at all — it now serves
+`/api/health` on `WORKER_HEALTH_PORT` (8080) for exactly this purpose, and reports
+unhealthy until its run loop is turning. Probe config, and the reason you must not point a
+probe at it before the deployed image contains the listener, are in
+[job-worker.md](job-worker.md#health-endpoint).
+
 ### Replicas
 
 **Login no longer constrains this.** OIDC/OAuth CSRF state and FIDO2 challenges

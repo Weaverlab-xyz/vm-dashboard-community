@@ -40,6 +40,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from . import worker_health
 from .database import SessionLocal, Job, init_db, pool_capacity
 from .logging_context import LOG_FORMAT, correlation, install_log_correlation
 from .services import job_service, worker_policy
@@ -823,8 +824,15 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL,
     last_reconcile = time.monotonic()
     running: dict = {}                  # task -> (tier, job_type)
     logger.info("job runner started; handling %d job types", len(HANDLED_TYPES))
+    # Only now: _reconcile_stale() above is a synchronous DB write and can block on a
+    # lock just like init_db can, so it belongs on the unhealthy side of this line.
+    worker_health.mark(worker_health.RUNNING)
 
     while not shutdown.is_set():
+        # One beat per pass. This is what a Liveness probe reads, and it is the only
+        # thing that distinguishes a loop still claiming work from a process that is
+        # merely still resident.
+        worker_health.beat()
         # Off the event loop: this opens a session and may emit notifications, and every
         # in-flight job's progress writes share this loop.
         if time.monotonic() - last_reconcile >= RECONCILE_INTERVAL:
@@ -871,6 +879,7 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL,
         # No sleep: loop straight back so ONE pass fills every free slot. That is what
         # makes a burst of queued exports start together instead of one every 2s.
 
+    worker_health.mark(worker_health.DRAINING)
     await _drain(running, float(worker_policy.drain_timeout_s()))
 
 
@@ -1059,8 +1068,15 @@ def main() -> None:
     )
     # depends_on only waits for the DB to be healthy, not for the app's migrations;
     # if the runner wins the boot race the new JobLog table must still exist.
+    # BEFORE init_db, and that ordering is the point: init_db can block indefinitely on
+    # its advisory lock when the app and the runner cold-start together, and that is
+    # exactly the state we need to be able to observe. The endpoint reports unhealthy
+    # until the run loop turns, so a probe fails while we are stuck here instead of
+    # reporting a container that is up and doing nothing. See worker_health.
+    worker_health.serve()
     # init_db is advisory-locked (Postgres) + idempotent, so racing the app is safe.
     init_db()
+    worker_health.mark(worker_health.DB_READY)
     logger.info("job runner: database ready")
     asyncio.run(_main())
 

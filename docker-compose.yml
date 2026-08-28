@@ -74,7 +74,9 @@ services:
   # Dedicated background job runner — runs long jobs (k8s + cloud-DB provision/
   # decommission, and the k8s management-plane / ESO installs) OUT of the gunicorn
   # request workers so they survive worker recycling/crashes/redeploys. Same image
-  # as `app`; shares DB + config + state backend. No HTTP port.
+  # as `app`; shares DB + config + state backend. Serves nothing but a health endpoint
+  # on WORKER_HEALTH_PORT (8080), deliberately NOT published to the host: it exists for
+  # platform probes, and `--scale worker=N` below would collide on a published port.
   #
   # ONE worker runs SEVERAL jobs at a time, capped by kind (light/medium/heavy — see
   # jobs_worker's tier tuples). Tune it in Settings → Job Worker, which applies within

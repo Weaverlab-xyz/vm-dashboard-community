@@ -1199,6 +1199,12 @@ class Settings(BaseSettings):
     worker_max_concurrency: int = 3
     worker_executor_threads: int = 0               # 0 = derive from the caps above
     worker_drain_timeout_s: int = 20               # SIGTERM grace; see the pool note below
+    # Health endpoint for the runner, which has no other port. ENV-ONLY and deliberately
+    # not a Settings toggle: it is read once in jobs_worker.main() before init_db(), which
+    # is BEFORE the first config read can happen, and moving it later would defeat it --
+    # the wedge it exists to catch happens inside init_db(). 0 disables the listener.
+    # Not 8000: that is the app's port, and the two containers read the same .env.
+    worker_health_port: int = 8080
 
     # ── Database connection pool ─────────────────────────────────────────────
     # ENV-ONLY, and it cannot be otherwise: create_engine runs at import in database.py,
