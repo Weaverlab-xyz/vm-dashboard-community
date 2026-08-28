@@ -489,9 +489,36 @@ Four things must agree, the same shape Config Management uses:
 3. a `gateway:` block naming the image and setting `privileged: true`;
 4. the deploy key, which the dashboard holds and the agent fetches per job, sealed.
 
+**Requires an agent image of 2.4.0 or newer.** Below that, `agent_gateway` is not in the
+agent's closed `HANDLERS` dict at all, so it refuses the job *by name* — and "unknown job
+type" in Live Output reads as a dashboard bug rather than as "this container is a build
+behind". The dashboard refuses at enqueue instead, and the refusal names both halves,
+because on a POV both are usually true at once: the image has to be newer **and** the
+policy has to grant `agent_gateway`. On a POV that file is generated rather than edited, so
+the remedy for the second half is the **Broker** button — which is the difference between a
+one-click fix and an SSH session into a customer's environment. Pull
+`chrweav/dashboard-agent:latest` and restart; the agent keeps its identity, so no
+re-enrolment.
+
 The image comes from your file and never from a job — a job says only *install* or
 *remove*. Pull it yourself; the agent will not. Pin a tag rather than tracking `latest`
 under a registered Gateway.
+
+**A green job does not mean the node registered.** All the agent proves is that the
+container did not exit within the first minute — which is the failure a wrong image tag or a
+kernel without `/dev/net/tun` produces. Whether PRA *accepted* the node is a question only
+the dashboard can ask, against the tenant's own API, so it asks it separately; an agent that
+guessed would report green for a Gateway with a bad deploy key.
+
+**Re-running replaces the container rather than reusing it.** A changed deploy key is the
+usual reason to run this again, and a running container holds the key it started with. The
+container name is generated (`pov-gateway`), never taken from the job — there is no field in
+the protocol through which a dashboard string could name something on your host.
+
+**Removing does not need the grant that installing does.** A `remove` skips the policy check
+and the key fetch entirely, so a POV whose policy was later narrowed does not become
+un-teardownable. In `audit` mode nothing is fetched and nothing is started — the deploy key
+is never released.
 
 It needs the Docker socket, which is root on the host — the same requirement and the same
 overlay as the other runners.
@@ -1334,6 +1361,16 @@ an objection into a demonstration.
 | A VM is listed in the target picker but **disabled**, hover says "no address" | Its sync reports no guest address. All three of: guest powered on, guest tools installed in it, and `sync_guest_details: true` on that connection in `connections.yaml`. Then **Sync Now**. On Hyper-V this also needs a re-pulled `chrweav/hypervisor-runner` — that image is what asks the guest. |
 | A VM does not appear in the picker at all | Either its connection is not agent-bound, or the row is untagged and you are not an admin — an untagged synced VM is admin-only until an admin assigns a workgroup, the same rule every hypervisor page keeps. |
 | The dashboard refuses to queue: *"needs at least 2.3"* | The bound agent predates agent-executed Config Management. Pull `chrweav/dashboard-agent:latest` and restart; the agent keeps its identity, so no re-enrolment. |
+| The dashboard refuses to queue: *"needs at least 2.4"* | The bound agent predates `agent_gateway`. The refusal names two halves and on a POV both are usually true: pull `chrweav/dashboard-agent:latest` **and** press **Broker** to rewrite the generated policy. Identity survives, so no re-enrolment. |
+| `the broker agent … reports it may run … — its policy.yaml predates the Gateway grant` | The image is current but its `policy.yaml` has no `agent_gateway` in `job_types:`. On a POV that file is **generated**, so the fix is the **Broker** button, not an editor — the generic advice ("edit policy.yaml") would mean SSH-ing into a customer's environment. |
+| `this dashboard does not permit … to run Gateway jobs` | The dashboard operator's half of the permission. Widen the agent's allowed job types on the Agents page. Distinct from the row above: this one is refused before the agent is consulted. |
+| `this agent's policy.yaml does not enable the BeyondTrust Gateway` | No `gateway:` block. Add one with `enabled: true`, the image, and `privileged: true`. Two narrower versions of the same refusal exist and are worth telling apart: *"names no `gateway.image`"* (add the key **and** pull it — the agent will not pull for you) and *"does not set `gateway.privileged: true`"*. |
+| `policy.yaml enables the Gateway but does not set gateway.privileged: true` | Refused deliberately rather than attempted. A Gateway needs `NET_ADMIN`, `NET_RAW`, `IPC_LOCK` and `/dev/net/tun`; without them it registers **online** and every tunnel times out, which reads as a firewall for days. The agent will not start one it knows cannot work. |
+| `the Gateway image … is not present on this host` | `docker pull` it on the agent host. The agent will not fetch it for you — a pull is a network fetch of executable content, and that is the operator's decision, not a job's. Same rule as the sibling runner. |
+| `the Gateway container exited (code N)` | Read `docker logs pov-gateway` on that host. **A wrong image tag and a kernel without `/dev/net/tun` look identical from here**, which is why the message names both. |
+| `the dashboard sent an empty Gateway deploy key` | The POV has a key stored but it is blank. Create a Gateway in PRA, copy its deploy key, and paste it onto the POV. Two preflight refusals cover the earlier cases — *"this POV has no Gateway deploy key stored"* and *"this POV names no Gateway"* (the name is what the status check and every later jump item look it up by). |
+| A Gateway job goes **green** but PRA shows no node | Expected, and not a contradiction: the agent only proves the container stayed up. The dashboard confirms registration separately against the tenant API. If it stays unregistered, the deploy key is the first suspect — and see [Gateway "never registered"](integrations/gateways.md) for the stale-node case, where a recreated Gateway keeps its **name** but gets a fresh IP. |
+| `the Gateway container would not be removed` | Remove it by hand on that host: `docker rm -f pov-gateway`. A removal deliberately does not need the install grant, so a narrowed policy is not the cause. |
 | `Agent 'x' is not granted the Config-Management job type` | The dashboard operator's half of the permission. Agents page → that agent → grant `agent_ansible`. Your `policy.yaml` still has to grant it too. |
 | `the dashboard sent ansible_connection as extra vars, and this agent refuses them` | Working as intended, and it is the most important refusal here. `ansible_*` variables are connection configuration, not data — `ansible_connection: local` would run the playbook inside the runner container instead of against the target. Use the run form's own user / key / become fields. |
 | `this host's Docker logging driver is not file-based … (the Engine answered 501)` | The daemon forbids the per-container `json-file` driver the agent asks for. Check `log-driver` in `/etc/docker/daemon.json`. Without a readable log there is no way to stream the run's output, so this is fatal rather than cosmetic — and it is the default on RHEL, Fedora, Rocky and Alma, which is why the agent pins the driver per container. |
