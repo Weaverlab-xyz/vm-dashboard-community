@@ -130,8 +130,6 @@ you raise it.
 
 ---
 
----
-
 ## The tenant registry
 
 The reason this profile exists, made concrete. **POV page → BeyondTrust tenants.**
@@ -245,8 +243,6 @@ is a constrained slug and not somewhere to type a company. Use a reference: `poc
 
 ---
 
----
-
 ## The POV Gateway
 
 The point at which a POV becomes *reachable*. **POV page → the Gateway column → edit.**
@@ -320,7 +316,8 @@ nothing.
 ### Upgrading a POV that predates this
 
 A broker enrolled before this release has a `policy.yaml` with no `agent_gateway` grant
-and no `gateway:` block, and an agent image a version behind. Both are fixed the same way:
+and no `gateway:` block, and an agent image below **2.4.0**, the build that first carried
+the `agent_gateway` handler. Both are fixed the same way:
 pull a newer `chrweav/dashboard-agent` onto the broker VM, then press **Broker** on the
 POV, which re-issues the enrolment and rewrites the policy. The install refuses with that
 remedy rather than queueing a job the broker would decline.
@@ -334,8 +331,6 @@ cleanly, with a line in the job log saying the PRA-side node will linger.
 
 The stored deploy key is cleared synchronously, because that is local state and leaving a
 customer's credential in this database after their POV is gone is the part that matters.
-
----
 
 ---
 
@@ -423,8 +418,6 @@ need the very WinRM session the teardown is about to make unreachable.
 The broker's registration in the Password Safe tenant is a customer-side object this
 dashboard never created, so the job log says it is still listed there rather than pretending
 to have reaped it.
-
----
 
 ---
 
