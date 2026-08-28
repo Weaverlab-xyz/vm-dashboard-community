@@ -398,7 +398,11 @@ async def _warm_cost_summary() -> None:
     await asyncio.sleep(random.uniform(0, 10))
     while True:
         try:
-            if config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled):
+            # Through feature_flags.enabled, not config_service: on a POV instance
+            # cost_explorer_enabled is masked off, and this loop would otherwise keep
+            # polling the demo tenant's Cost Management from the instance doing
+            # customer work.
+            if feature_flags.enabled("cost_explorer_enabled", settings.cost_explorer_enabled):
                 await cost_cache.warm()
         except asyncio.CancelledError:
             raise
@@ -526,7 +530,7 @@ async def _warm_portainer_containers() -> None:
     while True:
         # Gate each pass on the live flag + a configured URL so the loop stays
         # quiet until Portainer is set up, and honors Settings changes live.
-        enabled = config_service.get_bool("portainer_enabled", settings.portainer_enabled)
+        enabled = feature_flags.enabled("portainer_enabled", settings.portainer_enabled)
         configured = bool(config_service.get("portainer_url") or settings.portainer_url)
         if enabled and configured:
             db = SessionLocal()
@@ -1055,10 +1059,9 @@ async def login_page(request: Request):
     )
 
 
-@app.get("/vms", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/vms", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("vmware_enabled")])
 async def vms_page(request: Request):
-    if not config_service.get_bool("vmware_enabled", settings.vmware_enabled):
-        raise HTTPException(status_code=404, detail="VMware integration is disabled")
     # Always agent-bound, and structurally so: `workstation` is in
     # hypervisor_connection_service.AGENT_ONLY_KINDS because the dashboard has no
     # transport to vmrest under any configuration. Deliberately NOT taken from
@@ -1112,10 +1115,9 @@ async def connections_page(request: Request):
     return templates.TemplateResponse("connections/index.html", {"request": request, **flags})
 
 
-@app.get("/proxmox", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/proxmox", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("proxmox_enabled")])
 async def proxmox_page(request: Request):
-    if not config_service.get_bool("proxmox_enabled", settings.proxmox_enabled):
-        raise HTTPException(status_code=404, detail="Proxmox integration is disabled")
     conn = _hypervisor_page_host("proxmox")
     return templates.TemplateResponse(
         "proxmox/index.html",
@@ -1124,10 +1126,9 @@ async def proxmox_page(request: Request):
          **_feature_flags()})
 
 
-@app.get("/vsphere", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/vsphere", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("vsphere_enabled")])
 async def vsphere_page(request: Request):
-    if not config_service.get_bool("vsphere_enabled", settings.vsphere_enabled):
-        raise HTTPException(status_code=404, detail="vSphere integration is disabled")
     conn = _hypervisor_page_host("vsphere")
     return templates.TemplateResponse(
         "vsphere/index.html",
@@ -1136,10 +1137,9 @@ async def vsphere_page(request: Request):
          **_feature_flags()})
 
 
-@app.get("/hyperv", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/hyperv", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("hyperv_enabled")])
 async def hyperv_page(request: Request):
-    if not config_service.get_bool("hyperv_enabled", settings.hyperv_enabled):
-        raise HTTPException(status_code=404, detail="Hyper-V integration is disabled")
     conn = _hypervisor_page_host("hyperv")
     return templates.TemplateResponse(
         "hyperv/index.html",
@@ -1150,10 +1150,9 @@ async def hyperv_page(request: Request):
     )
 
 
-@app.get("/nutanix", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/nutanix", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("nutanix_enabled")])
 async def nutanix_page(request: Request):
-    if not config_service.get_bool("nutanix_enabled", settings.nutanix_enabled):
-        raise HTTPException(status_code=404, detail="Nutanix integration is disabled")
     conn = _hypervisor_page_host("nutanix")
     return templates.TemplateResponse(
         "nutanix/index.html",
@@ -1164,10 +1163,9 @@ async def nutanix_page(request: Request):
     )
 
 
-@app.get("/xcpng", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/xcpng", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("xcpng_enabled")])
 async def xcpng_page(request: Request):
-    if not config_service.get_bool("xcpng_enabled", settings.xcpng_enabled):
-        raise HTTPException(status_code=404, detail="XCP-ng integration is disabled")
     conn = _hypervisor_page_host("xcpng")
     return templates.TemplateResponse(
         "xcpng/index.html",
@@ -1178,21 +1176,21 @@ async def xcpng_page(request: Request):
     )
 
 
-@app.get("/config-mgmt", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/config-mgmt", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("ansible_enabled")])
 async def config_mgmt_page(request: Request):
-    if not config_service.get_bool("ansible_enabled", settings.ansible_enabled):
-        raise HTTPException(status_code=404, detail="Ansible integration is disabled")
     return templates.TemplateResponse("config-mgmt/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/containers", response_class=HTMLResponse, include_in_schema=False)
 async def containers_page(request: Request):
-    # Always accessible: surfaces On-Premises (Portainer), AWS ECS, Azure ACI,
-    # GCP Cloud Run. Each tab self-gates on its own configuration.
-    portainer_enabled = config_service.get_bool("portainer_enabled", settings.portainer_enabled)
+    # Deliberately NOT feature-gated: this page surfaces On-Premises (Portainer), AWS
+    # ECS, Azure ACI and GCP Cloud Run, and each tab self-gates on its own configuration.
+    # portainer_enabled comes from _feature_flags() like every other flag — a local
+    # config_service read here was both unmasked and dead, since the spread below it won.
     return templates.TemplateResponse(
         "containers/index.html",
-        {"request": request, "portainer_enabled": portainer_enabled, **_feature_flags()},
+        {"request": request, **_feature_flags()},
     )
 
 
@@ -1207,11 +1205,12 @@ async def inventory_page(request: Request):
     return templates.TemplateResponse("inventory/list.html", {"request": request, **_feature_flags()})
 
 
-@app.get("/costs", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/costs", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("cost_explorer_enabled")])
 async def costs_page(request: Request):
     """Cloud cost page: account-total summary + dashboard-managed spend breakdown.
-    Nav-gated on cost_explorer_enabled (+ admin); the /api/costs/* routes are
-    admin-only and feature-gated."""
+    Nav-, page- and router-gated on cost_explorer_enabled; /api/costs/* is
+    additionally admin-only."""
     return templates.TemplateResponse("costs/index.html", {"request": request, **_feature_flags()})
 
 
@@ -1261,18 +1260,20 @@ async def images_page(request: Request):
     return templates.TemplateResponse("images/index.html", {"request": request, **_feature_flags()})
 
 
-@app.get("/desktops", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/desktops", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("vdesktops_enabled")])
 async def desktops_page(request: Request):
-    """Virtual-desktop management page. Nav-gated on vdesktops_enabled;
-    the /api/desktops router is feature-gated."""
+    """Virtual-desktop management page. Nav-, page- and router-gated on
+    vdesktops_enabled."""
     return templates.TemplateResponse("desktops/index.html", {"request": request, **_feature_flags()})
 
 
-@app.get("/databases", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/databases", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("cloud_database_enabled")])
 async def databases_page(request: Request):
-    """Cloud database infrastructure page. Nav-gated on cloud_database_enabled;
-    the /api/databases router self-gates per call. PostgreSQL/MySQL/SQL Server
-    are live across AWS/Azure/GCP."""
+    """Cloud database infrastructure page. Nav- and page-gated on
+    cloud_database_enabled; the /api/databases router self-gates per call.
+    PostgreSQL/MySQL/SQL Server are live across AWS/Azure/GCP."""
     return templates.TemplateResponse("databases/index.html", {
         "request": request,
         # Not in the shared feature map: this is a sub-setting of the Password Safe
@@ -1286,17 +1287,19 @@ async def databases_page(request: Request):
     })
 
 
-@app.get("/functions", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/functions", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("cloud_functions_enabled")])
 async def functions_page(request: Request):
-    """Cloud Functions page (preview). Nav-gated on cloud_functions_enabled; the
-    /api/functions router is feature-gated."""
+    """Cloud Functions page (preview). Nav-, page- and router-gated on
+    cloud_functions_enabled."""
     return templates.TemplateResponse("functions/index.html", {"request": request, **_feature_flags()})
 
 
-@app.get("/k8s", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/k8s", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("k8s_management_enabled")])
 async def k8s_page(request: Request):
-    """Kubernetes management page — Phase 3a. Nav-gated on k8s_management_enabled;
-    the /api/k8s router is feature-gated."""
+    """Kubernetes management page — Phase 3a. Nav-, page- and router-gated on
+    k8s_management_enabled."""
     return templates.TemplateResponse("k8s/index.html", {"request": request, **_feature_flags()})
 
 
