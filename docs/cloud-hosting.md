@@ -163,6 +163,53 @@ database it takes a Postgres advisory lock, creates every table and applies ~45
 idempotent DDL statements. Concurrent starts queue on that lock rather than
 racing, which is correct but is real wall-clock time.
 
+**Set them.** Without probes ACA has nothing to fail, so it reports a revision
+`Healthy` with `restartCount: 0` no matter what the app is doing — and an app whose
+`lifespan` never reaches `yield` holds the listening socket open, so the ingress
+accepts the connection and returns `504` only after its full ~240s timeout, on every
+path including one that does not exist. That is a total outage that looks like a
+network fault and never self-heals. A startup probe turns it into a restart.
+
+The app container takes the HTTP probe; the sidecar must not.
+
+| Container | Probe | Type | Period | Failures |
+|---|---|---|---|---|
+| `app` | Startup | `httpGet /api/health:8000` | 30s | 10 |
+| `app` | Liveness | `httpGet /api/health:8000` | 30s | 3 |
+| `app` | Readiness | `httpGet /api/health:8000` | 10s | 3 |
+| `gateway` | Liveness | `tcpSocket:80` | 30s | 3 |
+| `gateway` | Readiness | `tcpSocket:80` | 10s | 3 |
+
+`failureThreshold` caps at 10, so the startup budget is `periodSeconds x 10` — 30s x 10
+gives the five minutes the DDL run above wants.
+
+**The sidecar gets a TCP probe, not an HTTP one.** The Caddyfile answers `404` for any
+`Host` it does not recognise, and a probe request matches neither `AGENT_HOSTNAME` nor
+`UI_HOSTNAME`. ACA counts a `404` as a failure, so an `httpGet` probe on the gateway
+fails forever and restart-loops the sidecar. Accepting a connection on `:80` is the
+strongest signal available without adding a health route to the image.
+
+Readiness matters here even at one replica: it pulls the replica out of ingress, so a
+broken app returns a fast `503` instead of that 240s hang.
+
+`az containerapp create` and `update` have **no probe flags** — probes come from YAML or
+an ARM PATCH. Prefer the PATCH, and send only `properties.template`: `az containerapp
+show` renders every secret with `value: null`, so round-tripping its output through
+`update --yaml` can blank `database-url` and `jwt-secret-key`. Omitting
+`properties.configuration` leaves secrets, ingress and registries untouched.
+
+```bash
+# probes live in properties.template.containers[].probes
+az rest --method PATCH --url "https://management.azure.com/subscriptions/<sub>/resourceGroups/RG-DASH/providers/Microsoft.App/containerApps/dash?api-version=2025-01-01" --body @patch.json
+```
+
+Use `api-version=2025-01-01` or later. `2024-03-01` rejects the `cooldownPeriod` and
+`pollingInterval` fields that `az containerapp show` puts in `scale`, so a patch built
+from its own output fails validation.
+
+Changing a probe changes the template, which mints a new revision — i.e. a restart. Do
+it deliberately, not during an incident.
+
 ### Replicas
 
 **Login no longer constrains this.** OIDC/OAuth CSRF state and FIDO2 challenges
