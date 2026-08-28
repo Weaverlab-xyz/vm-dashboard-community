@@ -13,7 +13,11 @@ So these assertions are structural and read the source rather than the behaviour
     in the one funnel every job row passes through rather than in each call site;
   * no call site anywhere passes ``agent_id`` with a contradicting ``status``;
   * the agent API never reaches for ``require_permission``, whose empty-permissions
-    fallback means *unrestricted*.
+    fallback means *unrestricted*;
+  * every type in ``AGENT_JOB_TYPES`` has its own branch in ``_envelope_payload``, and
+    the chain ends in a raise rather than a default — a default does not error, it
+    projects one type's metadata through another type's allowlist and lets the agent
+    run its own fallback.
 
 Pure: parses the modules with ``ast`` rather than importing them, so it runs with no
 FastAPI, no SQLAlchemy and no database. Runs under pytest, or standalone:
@@ -340,6 +344,99 @@ def test_replay_protection_relies_on_the_unique_constraint():
     src = _function_source(_AGENT_SERVICE, "_consume_nonce")
     assert "IntegrityError" in src, (
         "_consume_nonce must detect a replay via the unique constraint, not a lookup")
+
+
+# ── the lease envelope ────────────────────────────────────────────────────────
+
+def _envelope_branch_types():
+    """The job types ``api.agent._envelope_payload`` dispatches on, read structurally.
+
+    Matches ``if job_type == "<literal>"`` and the ``in ("a", "b")`` form, so the shape
+    of the chain can change without this test going quietly vacuous.
+    """
+    tree = ast.parse(_read(_AGENT_API))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "_envelope_payload"), None)
+    assert fn is not None, "_envelope_payload() not found in api/agent.py"
+
+    found = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+            continue
+        if not (isinstance(node.left, ast.Name) and node.left.id == "job_type"):
+            continue
+        op, comp = node.ops[0], node.comparators[0]
+        if isinstance(op, ast.Eq) and isinstance(comp, ast.Constant):
+            found.add(comp.value)
+        elif isinstance(op, ast.In) and isinstance(comp, (ast.Tuple, ast.List, ast.Set)):
+            found.update(e.value for e in comp.elts if isinstance(e, ast.Constant))
+    return fn, found
+
+
+def test_every_agent_job_type_has_an_envelope_branch():
+    """Each leasable type must project its metadata through its OWN allowlist.
+
+    The failure this pins is not an error. A type with no branch used to fall through to
+    the discovery allowlist, which drops every key discovery does not declare and
+    substitutes discovery's defaults for the rest — so the agent's handler receives a
+    payload missing the fields it reads and runs whatever it defaults to. That is what
+    happened to ``agent_gateway``: ``gateway_action`` never crossed the wire, the agent
+    defaulted to ``install``, and a POV teardown asking to REMOVE a Gateway installed one
+    and reported success. Nothing anywhere logged a problem.
+
+    So this asserts equality, not containment: an unused branch is dead code worth
+    knowing about too.
+    """
+    _fn, branches = _envelope_branch_types()
+    types = _tuple_constant(_AGENT_SERVICE, "AGENT_JOB_TYPES")
+    missing = types - branches
+    assert not missing, (
+        f"_envelope_payload has no branch for {sorted(missing)} — those jobs would be "
+        f"leased with another type's payload, which fails silently rather than loudly")
+    extra = branches - types
+    assert not extra, (
+        f"_envelope_payload branches on {sorted(extra)}, which no agent can be leased")
+
+
+def test_the_envelope_dispatch_has_no_fall_through_default():
+    """Guard the guard. A trailing ``return <some>_kwargs(meta)`` makes the test above
+    pass forever while a new job type silently borrows that builder — the exact shape of
+    the original bug. The chain must end by raising."""
+    fn, _branches = _envelope_branch_types()
+    assert isinstance(fn.body[-1], ast.Raise), (
+        "_envelope_payload must end in a raise, not a default return — a default is how "
+        "a job type with no branch gets another type's allowlist instead of an error")
+    # And no `else:` doing the same job one level in.
+    for node in ast.walk(fn):
+        if isinstance(node, ast.If) and node.orelse:
+            assert not any(isinstance(n, ast.Return) for n in node.orelse
+                           if not isinstance(n, ast.If)), (
+                "an `else: return ...` is a fall-through default wearing a different hat")
+
+
+def test_the_gateway_envelope_carries_the_action_the_agent_reads():
+    """The two sides of one wire, pinned together.
+
+    ``envelope_payload`` builds the keys and ``run_gateway`` reads them, in two files
+    that ship as two different images. A rename on either side does not raise — it makes
+    the agent fall back to ``install``, which is the destructive direction for a removal.
+    """
+    meta_src = _read(os.path.join(_WEB, "services", "agent_gateway_meta.py"))
+    keys = _tuple_constant(os.path.join(_WEB, "services", "agent_gateway_meta.py"),
+                           "GATEWAY_META_KEYS")
+    assert "gateway_action" in keys, "the envelope must carry the action"
+
+    agent_src = _read(os.path.join(_ROOT, "runners", "agent", "agent.py"))
+    handler = agent_src[agent_src.index("def run_gateway("):]
+    handler = handler[:handler.index("\nHANDLERS")]
+    for key in keys:
+        assert f'payload.get("{key}")' in handler, (
+            f"agent_gateway_meta sends {key!r} but run_gateway never reads it")
+
+    # The decoy that caused this: a second builder whose key names differ from the ones
+    # the agent reads, sitting under the `*_kwargs` name the other branches use.
+    assert "def gateway_kwargs" not in meta_src, (
+        "gateway_kwargs returned {'action': ...}, a key run_gateway does not read")
 
 
 if __name__ == "__main__":
