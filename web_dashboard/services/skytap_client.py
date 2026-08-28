@@ -118,6 +118,7 @@ class SkytapClient:
 
     def __init__(self, creds: SkytapCreds, *, timeout: float = 30.0,
                  transport: httpx.BaseTransport | None = None,
+                 max_retries: int = _MAX_RETRIES,
                  sleep=asyncio.sleep):
         if not creds.valid():
             raise SkytapError(
@@ -126,6 +127,11 @@ class SkytapClient:
         self._creds = creds
         self._timeout = timeout
         self._transport = transport
+        # Per-client rather than the module constant, for the one caller that must answer
+        # while somebody watches a spinner. Six retries at up to 30s each is right for a
+        # provision that has already waited minutes, and wrong for the Settings "Test
+        # connection" button — see skytap_service.verify, which passes 1.
+        self._max_retries = max(0, int(max_retries))
         # Injectable so tests do not spend real seconds proving the retry waits.
         self._sleep = sleep
 
@@ -160,15 +166,16 @@ class SkytapClient:
         cli = client or self._client()
         try:
             last: httpx.Response | None = None
-            for attempt in range(_MAX_RETRIES + 1):
+            for attempt in range(self._max_retries + 1):
                 resp = await cli.request(method, path, params=params, json=json)
                 last = resp
-                if resp.status_code in _RETRY_STATUSES and attempt < _MAX_RETRIES:
+                if resp.status_code in _RETRY_STATUSES and attempt < self._max_retries:
                     wait = _retry_after_seconds(resp)
                     logger.info(
                         "Skytap %s %s -> %s (busy/rate-limited); retrying in %.1fs "
                         "(attempt %d/%d)",
-                        method, path, resp.status_code, wait, attempt + 1, _MAX_RETRIES)
+                        method, path, resp.status_code, wait, attempt + 1,
+                        self._max_retries)
                     await self._sleep(wait)
                     continue
                 return self._decode(resp, method, path)
@@ -178,8 +185,10 @@ class SkytapClient:
             if own_client:
                 await cli.aclose()
 
-    @staticmethod
-    def _decode(resp: httpx.Response, method: str, path: str):
+    # An instance method rather than a staticmethod so the rate-limit message can report
+    # THIS client's retry budget. Saying "after 6 retries" when the caller asked for 1 is a
+    # small lie that sends the reader looking for a retry loop that never ran.
+    def _decode(self, resp: httpx.Response, method: str, path: str):
         if resp.status_code in (401, 403):
             raise SkytapAuthError(
                 f"Skytap rejected the credentials for {method} {path} "
@@ -187,9 +196,9 @@ class SkytapClient:
                 f"Skytap uses an API token, not your account password.")
         if resp.status_code in _RETRY_STATUSES:
             raise SkytapError(
-                f"Skytap is still busy after {_MAX_RETRIES} retries on {method} {path} "
-                f"({resp.status_code}). The environment or the account is rate-limited; "
-                f"try again shortly.")
+                f"Skytap is still busy after {self._max_retries} retries on {method} "
+                f"{path} ({resp.status_code}). The environment or the account is "
+                f"rate-limited; try again shortly.")
         if resp.status_code >= 400:
             raise SkytapError(
                 f"Skytap {method} {path} failed ({resp.status_code}): {resp.text[:400]}")

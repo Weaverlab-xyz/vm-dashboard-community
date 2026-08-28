@@ -1840,6 +1840,29 @@ def test_oidc_discovery(request: Request):
     }
 
 
+# ── Skytap connection probe ───────────────────────────────────────────────────
+
+@router.post("/skytap/test")
+async def test_skytap_connection(request: Request):
+    """Prove the stored Skytap credentials from Settings.
+
+    Answers **200 either way**, with the outcome in the body — deliberately unlike the
+    OIDC probe above, which 400s on a bad configuration. A credential that does not work
+    is an ANSWER, not a transport failure, and an endpoint that raises here is one
+    refactor away from somebody writing ``detail=str(exc)`` and re-introducing the
+    stack-trace exposure that took three rounds to remove from the tenant verifier. It
+    also means "not configured" and "wrong token" render through the same branch, so this
+    handler has none.
+
+    No feature gate: on a demo instance the Skytap keys are unset and the adapter answers
+    "not configured", which is the honest thing for that instance to say.
+    """
+    _require_admin(request)
+    from ..services import skytap_service
+    ok, message = await skytap_service.verify()
+    return {"ok": ok, "message": message}
+
+
 # ── Azure per-region config sets (multi-region, Follow-on 6 PR3) ──────────────
 #
 # Each cloud's region map lives as ONE JSON value (``<cloud>_region_configs``) rather

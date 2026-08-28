@@ -82,6 +82,17 @@ CAPABILITIES = {
         "bootstrap_injection": "metadata",
         "share_link": True,            # publish_sets: password + expiration_date
         "stored_credentials": True,    # …/vms/{id}/credentials
+        # A cheap authenticated read that proves the credential AND what it can see, so an
+        # operator can settle "is Skytap working?" from Settings instead of from a 502 on
+        # the POV page. Deliberately a capability rather than a READ_CONTRACT entry: not
+        # every platform will have a read that proves a credential without a side effect,
+        # and inventing one is how a Verify starts reporting green for a token that does
+        # not work — the reason `bt_tenant_verify` leaves Entitle unverifiable.
+        "verify": True,                # adapter.verify() -> (ok, message)
+        # Skytap scopes templates and environments by project. A platform without projects
+        # simply has no such field to offer, which is why the POV create form asks this
+        # before rendering one.
+        "projects": True,              # /v2/projects/{id}/{templates,configurations}
     },
 }
 

@@ -44,6 +44,7 @@ from web_dashboard.services.skytap_client import SkytapClient, SkytapCreds  # no
 _REQUIRED_CAPABILITY_KEYS = {
     "label", "templates", "runstate", "idle_suspend",
     "bootstrap_injection", "share_link", "stored_credentials",
+    "verify", "projects",
 }
 
 # bootstrap_injection is one INTENT with different mechanisms, so it is an enum.
@@ -244,6 +245,34 @@ def test_ids_are_strings_so_they_survive_json_round_trips():
     finally:
         _restore(original)
     assert envs[0]["id"] == "42"
+
+
+def test_a_platform_that_claims_verify_actually_has_one():
+    """The capability is what the UI renders a Test button from, so a platform claiming it
+    without the function would offer a button that 500s. Same shape as the pairing
+    `bt_tenant_service.VERIFIABLE_KINDS` keeps with its own verifiers."""
+    for name in lp.VALID_PLATFORMS:
+        fn = getattr(lp.adapter(name), "verify", None)
+        claims = lp.supports(name, "verify")
+        assert claims == callable(fn), (
+            f"{name}: capabilities say verify={claims} but the adapter "
+            f"{'has' if callable(fn) else 'has no'} verify()")
+        if claims:
+            assert inspect.iscoroutinefunction(fn), (
+                f"{name}.verify must be async — every other adapter read is, and the "
+                f"endpoint awaits it")
+
+
+def test_a_platform_that_claims_projects_can_report_the_configured_one():
+    """`api/pov.provision` asks the registry for the configured project so it can record
+    what a new environment was really created in. A platform claiming `projects` without
+    the accessor would make that read blow up at provision time."""
+    for name in lp.VALID_PLATFORMS:
+        if not lp.supports(name, "projects"):
+            continue
+        fn = getattr(lp.adapter(name), "configured_project_id", None)
+        assert callable(fn), f"{name} claims projects but has no configured_project_id()"
+        assert isinstance(fn(), str), f"{name}.configured_project_id() must return a str"
 
 
 if __name__ == "__main__":
