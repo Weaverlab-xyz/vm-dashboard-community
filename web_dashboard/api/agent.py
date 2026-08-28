@@ -46,8 +46,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, RemoteAgent, User, get_db
-from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_guard,
-                        agent_hypervisor_meta, agent_job_meta,
+from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_meta,
+                        agent_guard, agent_hypervisor_meta, agent_job_meta,
                         agent_ps_credential_service, agent_sealing, agent_service,
                         agent_signing, config_service, hypervisor_connection_service,
                         hypervisor_sync_service, job_service, public_url)
@@ -337,15 +337,35 @@ def _envelope_payload(job_type: str, meta: dict) -> dict:
     Dispatched rather than hardcoded to discovery, and each branch goes through that
     type's OWN closed allowlist — which is what stops a field added for one job type
     from silently becoming reachable by another.
+
+    Every member of ``agent_service.AGENT_JOB_TYPES`` gets an explicit branch, and there
+    is deliberately **no fall-through default**. A default is not a safe shortcut here:
+    it does not fail, it silently projects the new type's metadata through some other
+    type's allowlist, so every field the new handler reads arrives missing and the agent
+    runs its own defaults instead. That is exactly how ``agent_gateway`` shipped for a
+    while — dropped through to the discovery allowlist, lost ``gateway_action``, and a
+    POV teardown asking to *remove* a Gateway installed one and reported success.
+    ``test_every_agent_job_type_has_an_envelope_branch`` pins the coverage.
     """
+    if job_type == "agent_discover":
+        return agent_job_meta.discover_kwargs(meta)
     if job_type == "agent_hypervisor":
         return agent_hypervisor_meta.hypervisor_kwargs(meta)
     if job_type == "agent_ansible":
-        # The narrowest of the three: four scalars, and the playbook is not among them. The
+        # The narrowest of the four: four scalars, and the playbook is not among them. The
         # agent fetches the rest from /jobs/{id}/ansible-bundle, sealed — see
         # agent_ansible_meta for why executable content may not be merely *signed*.
         return agent_ansible_meta.envelope_payload(meta)
-    return agent_job_meta.discover_kwargs(meta)
+    if job_type == "agent_gateway":
+        # Two scalars, and `gateway_action` is the load-bearing one: it is the whole
+        # difference between putting a privileged container on a host and taking it away.
+        # The deploy key is NOT here — it rides the sealed per-job channel.
+        return agent_gateway_meta.envelope_payload(meta)
+    # Unreachable: `lease_one` filters on `allowed_job_types`, itself a subset of
+    # AGENT_JOB_TYPES, so a type with no branch cannot have been claimed. Raising rather
+    # than defaulting is the point — a job stuck in `running` is a bug someone chases,
+    # a job that ran the wrong action and reported success is one nobody does.
+    raise ValueError(f"no lease-envelope builder for job type {job_type!r}")
 
 
 class LeaseRequest(BaseModel):

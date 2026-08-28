@@ -70,15 +70,18 @@ def envelope_payload(meta: dict) -> dict:
 
     Everything in :data:`GATEWAY_META_KEYS` and nothing else — notably not
     ``description``, which is the one free-form string on the row.
+
+    The ONLY builder for this job type, and the key names are the contract: the agent's
+    ``run_gateway`` reads ``payload["gateway_action"]`` and ``payload["timeout_s"]``
+    straight off the envelope. This module used to also carry a ``gateway_kwargs``
+    returning the same two values under ``{"action", "timeout_s"}`` — dead, but a decoy,
+    because it matched the ``*_kwargs`` name the discovery and hypervisor branches use
+    and its `action` key is one the agent would silently ignore. Renaming a key here
+    without renaming it in ``run_gateway`` does not fail; it makes the agent fall back to
+    ``install``.
     """
     clean = normalize(meta)
     return {key: clean[key] for key in GATEWAY_META_KEYS}
-
-
-def gateway_kwargs(meta: dict) -> dict:
-    """Keyword arguments for the agent's ``run_gateway`` handler."""
-    clean = normalize(meta)
-    return {"action": clean["gateway_action"], "timeout_s": clean["timeout_s"]}
 
 
 def normalize(meta: dict) -> dict:
