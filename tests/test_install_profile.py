@@ -65,6 +65,88 @@ def test_the_router_gate_resolves_through_the_same_reader():
         "_feature_gate still reads config_service directly"
 
 
+def _html_page_routes():
+    """Every ``@app.get(..., response_class=HTMLResponse ...)`` route in main.py, as
+    (path, decorator_text, body_text)."""
+    src = _read(_MAIN)
+    out = []
+    for chunk in src.split("@app.get(")[1:]:
+        path = chunk.split('"')[1]
+        head, _, rest = chunk.partition("async def")
+        if "HTMLResponse" not in head:
+            continue
+        out.append((path, head, rest.split("\n@app.")[0]))
+    return out
+
+
+def test_no_page_route_reads_a_masked_flag_through_config_service():
+    """A page guard that calls config_service.get_bool bypasses the profile mask.
+
+    This is the /pov bug pointing the other way: /proxmox and its siblings guarded on the
+    raw config row, so a POV instance with a stale ``proxmox_enabled`` row served a demo
+    hypervisor page — on the instance that does customer work. The mask lives in
+    feature_flags.enabled(), so a guard that does not go through it is not a guard.
+    """
+    from web_dashboard.services import feature_flags as ff
+    offenders = []
+    for path, _head, body in _html_page_routes():
+        for flag in re.findall(r'config_service\.get_bool\(\s*"(\w+)"', body):
+            if flag in ff._DEMO_ONLY or flag in ff._POV_ONLY:
+                offenders.append(f"{path} reads {flag} directly")
+    assert not offenders, (
+        "profile-masked flags read through config_service on a page route: "
+        f"{offenders}. Use dependencies=[_feature_gate(flag)] instead.")
+
+
+def test_every_profile_masked_page_is_actually_gated():
+    """A nav link is not a gate — it hides the door, it does not lock it.
+
+    /costs, /desktops, /databases, /functions and /k8s each described themselves as
+    "Nav-gated on <flag>" and had no page guard at all, so on a POV instance the link
+    vanished and the page still rendered to anyone who typed the URL.
+
+    /containers is the one deliberate exception: it surfaces AWS ECS, Azure ACI and GCP
+    Cloud Run alongside Portainer, and each tab self-gates. The exemption is listed here
+    rather than inferred, so adding a second one has to be a decision someone makes.
+    """
+    from web_dashboard.services import feature_flags as ff
+    exempt = {"/containers"}
+    owned = {
+        "/vms": "vmware_enabled", "/proxmox": "proxmox_enabled",
+        "/vsphere": "vsphere_enabled", "/hyperv": "hyperv_enabled",
+        "/nutanix": "nutanix_enabled", "/xcpng": "xcpng_enabled",
+        "/costs": "cost_explorer_enabled", "/desktops": "vdesktops_enabled",
+        "/databases": "cloud_database_enabled", "/functions": "cloud_functions_enabled",
+        "/k8s": "k8s_management_enabled", "/pov": "pov_environments_enabled",
+    }
+    for flag in owned.values():
+        assert flag in ff._DEMO_ONLY or flag in ff._POV_ONLY, \
+            f"{flag} is no longer profile-masked; this map is stale"
+
+    heads = {path: head for path, head, _body in _html_page_routes()}
+    ungated = []
+    for path, flag in owned.items():
+        if path in exempt:
+            continue
+        assert path in heads, f"{path} is no longer an HTML page route; update this map"
+        if f'_feature_gate("{flag}")' not in heads[path]:
+            ungated.append(f"{path} (expected _feature_gate({flag!r}))")
+    assert not ungated, f"profile-masked pages with no page gate: {ungated}"
+
+
+def test_the_background_warmers_respect_the_mask():
+    """Worse than an ungated page: these make outbound calls on a timer. Reading the raw
+    config row meant a POV instance kept polling the DEMO tenant's Cost Management, and a
+    Portainer the profile masks off."""
+    src = _read(_MAIN)
+    for warmer in ("_warm_cost_summary", "_warm_portainer_containers"):
+        body = src.split(f"async def {warmer}", 1)[1].split("\nasync def ", 1)[0]
+        assert "feature_flags.enabled(" in body, \
+            f"{warmer} does not resolve its flag through the mask"
+        assert "config_service.get_bool(" not in body, \
+            f"{warmer} still reads config_service directly"
+
+
 def test_there_is_no_both_profile():
     """A `both` profile would have to pick a tenant source at every call site."""
     src = _read(_FLAGS)
