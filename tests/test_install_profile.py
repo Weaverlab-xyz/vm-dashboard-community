@@ -147,43 +147,62 @@ def test_the_background_warmers_respect_the_mask():
             f"{warmer} still reads config_service directly"
 
 
-def test_every_base_extending_page_supplies_the_nav_flags():
-    """base.html includes _nav_links.html, which gates every optional link on a
-    ``*_enabled`` value from ``_feature_flags()``. A route that renders a base-extending
-    template without spreading it does not render a *smaller* nav — it renders one where
-    Workstation, Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng, Connections, Containers,
-    Desktops, Databases, Functions, Kubernetes, Costs, Configuration, POV and Agents are
-    all silently missing. Jinja resolves an undefined name to falsey, so every
-    ``{% if <flag> %}`` fails closed and nothing errors.
+def test_the_context_processor_supplies_the_nav_flags():
+    """One supplier, so a page's chrome cannot depend on the route remembering it.
 
-    /users, /groups and /workgroups had exactly this: admin pages reached *from* those
-    links, which then dropped them, so the way out was the browser's back button.
-
-    Passing the dict through a local (``flags = _feature_flags()`` ... ``**flags``) counts
-    — /connections does that so it can also gate on the values.
+    Before #664 the flags were spread per route and three routes forgot: /users, /groups
+    and /workgroups rendered a nav with fifteen links missing. Nothing errored, because
+    Jinja resolves an undefined name to falsey and every ``{% if <flag> %}`` failed
+    closed. Making a route's own chrome its own responsibility is what caused that.
     """
-    tpl_dir = os.path.join(_ROOT, "web_dashboard", "templates")
     src = _read(_MAIN)
+    proc = src.split("def _profile_context", 1)[1].split("\ntemplates = ", 1)[0]
+    assert "_feature_flags()" in proc, \
+        "_profile_context no longer supplies the feature flags"
+    assert "context_processors=[_profile_context]" in src, \
+        "_profile_context is not registered on the templates object"
+
+
+def test_no_route_hands_a_flag_name_to_templateresponse():
+    """Starlette applies context processors with ``context.update(...)`` AFTER the route's
+    own context, so a value the processor returns OVERWRITES whatever the route passed.
+
+    That makes an overriding route silently ineffective — the same invisible-failure shape
+    as #664, pointing the other way. The rule is therefore: no route passes a flag name at
+    all, by key or by spreading _feature_flags(). This test is the only thing that makes
+    breaking it loud.
+
+    (If a route ever genuinely needs a per-page override, the answer is a differently
+    named key, or inverting precedence in a Jinja2Templates subclass — not a quiet re-add.)
+
+    Parsed with ast rather than matched textually: a dict literal spanning six lines with
+    a comment in the middle is exactly where a regex quietly stops finding things.
+    """
+    import ast
+    from web_dashboard.services import feature_flags as ff
+    flag_names = set(ff.flags().keys())
+
+    tree = ast.parse(_read(_MAIN))
     offenders = []
-    for chunk in src.split("@app.get(")[1:]:
-        path = chunk.split('"')[1]
-        head, _, rest = chunk.partition("async def")
-        if "HTMLResponse" not in head:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        body = rest.split("\n@app.")[0]
-        m = re.search(r'TemplateResponse\(\s*"?([\w/.\-]+\.html)', body)
-        if not m:
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "TemplateResponse"):
             continue
-        tpl = os.path.join(tpl_dir, m.group(1))
-        if not os.path.isfile(tpl):
-            continue
-        if 'extends "base.html"' not in _read(tpl):
-            continue          # login/setup/swagger draw their own chrome
-        if "_feature_flags()" not in body:
-            offenders.append(f"{path} -> {m.group(1)}")
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            if not isinstance(arg, ast.Dict):
+                continue
+            for key, value in zip(arg.keys, arg.values):
+                if key is None:                      # a ** unpacking
+                    src = ast.unparse(value)
+                    if "_feature_flags" in src or src == "flags":
+                        offenders.append(f"line {node.lineno}: **{src}")
+                elif isinstance(key, ast.Constant) and key.value in flag_names:
+                    offenders.append(f"line {node.lineno}: {key.value!r}")
     assert not offenders, (
-        "pages that extend base.html but never receive the nav flags, so every optional "
-        f"nav link renders blank: {offenders}")
+        "route context passes flag names that the context processor overwrites, so the "
+        f"route's own values are silently discarded: {offenders}")
 
 
 def test_there_is_no_both_profile():

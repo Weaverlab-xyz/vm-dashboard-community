@@ -686,6 +686,16 @@ if os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 
+def _feature_flags() -> dict:
+    """Raw ``*_enabled`` flags, for the context processor below and for the two callers
+    that need to *read* a flag rather than render one (``/connections`` gates on them).
+
+    Lives in services/feature_flags so the job worker can read the same map without
+    importing this module (and with it the whole FastAPI app).
+    """
+    return feature_flags.flags()
+
+
 def _profile_context(request: Request) -> dict:
     """Brand + chrome tokens for every template render, on every route.
 
@@ -693,18 +703,25 @@ def _profile_context(request: Request) -> dict:
     DB-backed value the setup wizard writes (api/setup.py), so a global -- read once at
     import time, like ``app_env`` below -- would show the old brand until a restart.
 
-    It is equally deliberately not part of ``_feature_flags()``: /users, /groups and
-    /workgroups don't spread that dict, and the brand would go blank on exactly those three
-    pages. A processor reaches every render, including the standalone login.html, with no
-    per-route change.
+    The feature flags ride along for the same reason. They used to be spread per route,
+    and three routes forgot -- /users, /groups and /workgroups rendered a nav with fifteen
+    links missing, silently, because Jinja resolves an undefined name to falsey and every
+    ``{% if <flag> %}`` failed closed (#664). A page's own chrome should not depend on
+    every future route author remembering to pass it.
 
-    ``install_profile()`` reads config_service, which is cached per process, so this is one
-    cheap lookup per page.
+    NOTE on precedence: Starlette applies processors with ``context.update(...)`` AFTER
+    the route's own context, so anything returned here OVERWRITES what a route passed.
+    That is why no route may hand a flag name to TemplateResponse -- it would be silently
+    discarded. tests/test_install_profile pins that, since the failure is invisible.
+
+    Both reads go through config_service, whose cache is the whole table on a 5s TTL, so
+    this is a handful of dict lookups per page rather than a query per flag.
     """
     profile = feature_flags.install_profile()
     return {
         "install_profile": profile,
         "theme": ui_theme.theme_for(profile, settings.app_env),
+        **_feature_flags(),
     }
 
 
@@ -715,14 +732,6 @@ templates = Jinja2Templates(
 # Kept: read by call sites outside the theme, and theme_for() takes it as an argument
 # rather than reading settings itself so it stays a pure function.
 templates.env.globals["app_env"] = settings.app_env
-
-
-def _feature_flags() -> dict:
-    """Raw ``*_enabled`` flags for the ~30 template responses below.
-
-    Lives in services/feature_flags so the job worker can read the same map without
-    importing this module (and with it the whole FastAPI app)."""
-    return feature_flags.flags()
 
 
 # ── Register API routers ──────────────────────────────────────────────────────
@@ -857,7 +866,7 @@ app.openapi = _custom_openapi
 async def swagger_ui(request: Request):
     """API explorer. Authenticates client-side, then loads the schema with the
     stored bearer token attached."""
-    return templates.TemplateResponse("swagger.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("swagger.html", {"request": request})
 
 app.include_router(websocket.router)
 app.include_router(aws.router)
@@ -1041,7 +1050,7 @@ async def setup_page(request: Request):
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root(request: Request):
     """Serve the dashboard."""
-    return templates.TemplateResponse("dashboard.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("dashboard.html", {"request": request})
 
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -1069,7 +1078,7 @@ async def vms_page(request: Request):
     # would ungrey every button on an install whose connection failed to resolve.
     return templates.TemplateResponse(
         "vms/list.html",
-        {"request": request, "via_agent": True, **_feature_flags()})
+        {"request": request, "via_agent": True})
 
 
 def _hypervisor_page_host(kind: str) -> dict:
@@ -1108,11 +1117,13 @@ def _hypervisor_page_host(kind: str) -> dict:
 async def connections_page(request: Request):
     """Hypervisor connections. Reachable whenever ANY hypervisor integration is on —
     it is the one place their credentials now live."""
+    # Read, not rendered: the template gets its flags from _profile_context. This local
+    # exists only for the gate below, which is why it is not passed to TemplateResponse.
     flags = _feature_flags()
     if not any(flags.get(f"{k}_enabled") for k in
                ("proxmox", "vsphere", "hyperv", "nutanix", "xcpng", "vmware")):
         raise HTTPException(status_code=404, detail="No hypervisor integration is enabled")
-    return templates.TemplateResponse("connections/index.html", {"request": request, **flags})
+    return templates.TemplateResponse("connections/index.html", {"request": request})
 
 
 @app.get("/proxmox", response_class=HTMLResponse, include_in_schema=False,
@@ -1122,8 +1133,7 @@ async def proxmox_page(request: Request):
     return templates.TemplateResponse(
         "proxmox/index.html",
         {"request": request, "connection_name": conn["connection_name"],
-         "via_agent": conn["via_agent"], "synced_at": conn["synced_at"],
-         **_feature_flags()})
+         "via_agent": conn["via_agent"], "synced_at": conn["synced_at"]})
 
 
 @app.get("/vsphere", response_class=HTMLResponse, include_in_schema=False,
@@ -1133,8 +1143,7 @@ async def vsphere_page(request: Request):
     return templates.TemplateResponse(
         "vsphere/index.html",
         {"request": request, "connection_name": conn["connection_name"],
-         "via_agent": conn["via_agent"], "synced_at": conn["synced_at"],
-         **_feature_flags()})
+         "via_agent": conn["via_agent"], "synced_at": conn["synced_at"]})
 
 
 @app.get("/hyperv", response_class=HTMLResponse, include_in_schema=False,
@@ -1145,8 +1154,7 @@ async def hyperv_page(request: Request):
         "hyperv/index.html",
         {"request": request, "hyperv_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
-         "synced_at": conn["synced_at"],
-         **_feature_flags()},
+         "synced_at": conn["synced_at"]},
     )
 
 
@@ -1158,8 +1166,7 @@ async def nutanix_page(request: Request):
         "nutanix/index.html",
         {"request": request, "nutanix_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
-         "synced_at": conn["synced_at"],
-         **_feature_flags()},
+         "synced_at": conn["synced_at"]},
     )
 
 
@@ -1171,38 +1178,36 @@ async def xcpng_page(request: Request):
         "xcpng/index.html",
         {"request": request, "xcpng_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
-         "synced_at": conn["synced_at"],
-         **_feature_flags()},
+         "synced_at": conn["synced_at"]},
     )
 
 
 @app.get("/config-mgmt", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_feature_gate("ansible_enabled")])
 async def config_mgmt_page(request: Request):
-    return templates.TemplateResponse("config-mgmt/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("config-mgmt/index.html", {"request": request})
 
 
 @app.get("/containers", response_class=HTMLResponse, include_in_schema=False)
 async def containers_page(request: Request):
     # Deliberately NOT feature-gated: this page surfaces On-Premises (Portainer), AWS
     # ECS, Azure ACI and GCP Cloud Run, and each tab self-gates on its own configuration.
-    # portainer_enabled comes from _feature_flags() like every other flag — a local
-    # config_service read here was both unmasked and dead, since the spread below it won.
+    # portainer_enabled reaches the template via _profile_context like every other flag.
     return templates.TemplateResponse(
         "containers/index.html",
-        {"request": request, **_feature_flags()},
+        {"request": request},
     )
 
 
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
 async def jobs_page(request: Request):
-    return templates.TemplateResponse("jobs/list.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("jobs/list.html", {"request": request})
 
 
 @app.get("/inventory", response_class=HTMLResponse, include_in_schema=False)
 async def inventory_page(request: Request):
     """Cross-provider deployment inventory (read-only aggregation of DB records)."""
-    return templates.TemplateResponse("inventory/list.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("inventory/list.html", {"request": request})
 
 
 @app.get("/costs", response_class=HTMLResponse, include_in_schema=False,
@@ -1211,53 +1216,53 @@ async def costs_page(request: Request):
     """Cloud cost page: account-total summary + dashboard-managed spend breakdown.
     Nav-, page- and router-gated on cost_explorer_enabled; /api/costs/* is
     additionally admin-only."""
-    return templates.TemplateResponse("costs/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("costs/index.html", {"request": request})
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse, include_in_schema=False)
 async def job_detail_page(request: Request, job_id: str):
-    return templates.TemplateResponse("jobs/detail.html", {"request": request, "job_id": job_id, **_feature_flags()})
+    return templates.TemplateResponse("jobs/detail.html", {"request": request, "job_id": job_id})
 
 
 @app.get("/aws", response_class=HTMLResponse, include_in_schema=False)
 async def aws_page(request: Request):
-    return templates.TemplateResponse("aws/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("aws/index.html", {"request": request})
 
 
 @app.get("/azure", response_class=HTMLResponse, include_in_schema=False)
 async def azure_page(request: Request):
     location = config_service.get("azure_location") or settings.azure_location
-    return templates.TemplateResponse("azure/index.html", {"request": request, "default_location": location, **_feature_flags()})
+    return templates.TemplateResponse("azure/index.html", {"request": request, "default_location": location})
 
 
 @app.get("/gcp", response_class=HTMLResponse, include_in_schema=False)
 async def gcp_page(request: Request):
-    return templates.TemplateResponse("gcp/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("gcp/index.html", {"request": request})
 
 
 @app.get("/oci", response_class=HTMLResponse, include_in_schema=False)
 async def oci_page(request: Request):
-    return templates.TemplateResponse("oci/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("oci/index.html", {"request": request})
 
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page(request: Request):
-    return templates.TemplateResponse("settings.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("settings.html", {"request": request})
 
 
 @app.get("/secrets", response_class=HTMLResponse, include_in_schema=False)
 async def secrets_page(request: Request):
-    return templates.TemplateResponse("secrets/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("secrets/index.html", {"request": request})
 
 
 @app.get("/storage", response_class=HTMLResponse, include_in_schema=False)
 async def storage_page(request: Request):
-    return templates.TemplateResponse("storage/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("storage/index.html", {"request": request})
 
 
 @app.get("/images", response_class=HTMLResponse, include_in_schema=False)
 async def images_page(request: Request):
-    return templates.TemplateResponse("images/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("images/index.html", {"request": request})
 
 
 @app.get("/desktops", response_class=HTMLResponse, include_in_schema=False,
@@ -1265,7 +1270,7 @@ async def images_page(request: Request):
 async def desktops_page(request: Request):
     """Virtual-desktop management page. Nav-, page- and router-gated on
     vdesktops_enabled."""
-    return templates.TemplateResponse("desktops/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("desktops/index.html", {"request": request})
 
 
 @app.get("/databases", response_class=HTMLResponse, include_in_schema=False,
@@ -1282,8 +1287,7 @@ async def databases_page(request: Request):
         # choice as "the configured default", so a box that started unticked while the
         # setting was on would silently turn onboarding off for that database.
         "clouddb_ps_onboarding_enabled": config_service.get_bool(
-            "clouddb_ps_onboarding_enabled", settings.clouddb_ps_onboarding_enabled),
-        **_feature_flags(),
+            "clouddb_ps_onboarding_enabled", settings.clouddb_ps_onboarding_enabled)
     })
 
 
@@ -1292,7 +1296,7 @@ async def databases_page(request: Request):
 async def functions_page(request: Request):
     """Cloud Functions page (preview). Nav-, page- and router-gated on
     cloud_functions_enabled."""
-    return templates.TemplateResponse("functions/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("functions/index.html", {"request": request})
 
 
 @app.get("/k8s", response_class=HTMLResponse, include_in_schema=False,
@@ -1300,14 +1304,14 @@ async def functions_page(request: Request):
 async def k8s_page(request: Request):
     """Kubernetes management page — Phase 3a. Nav-, page- and router-gated on
     k8s_management_enabled."""
-    return templates.TemplateResponse("k8s/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("k8s/index.html", {"request": request})
 
 
 @app.get("/agents", response_class=HTMLResponse, include_in_schema=False)
 async def agents_page(request: Request):
     """Remote on-prem agents. Nav-gated on remote_agents_enabled (+ admin); the
     /api/agent router is feature-gated and its operator half is admin-only."""
-    return templates.TemplateResponse("agents/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("agents/index.html", {"request": request})
 
 
 @app.get("/pov", response_class=HTMLResponse, include_in_schema=False,
@@ -1321,7 +1325,7 @@ async def pov_page(request: Request):
     route rendered the POV page on a DEMO instance to anyone who typed the URL — a page
     whose whole premise is a registry of customer tenants that a demo instance does not have.
     """
-    return templates.TemplateResponse("pov/index.html", {"request": request, **_feature_flags()})
+    return templates.TemplateResponse("pov/index.html", {"request": request})
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)
@@ -1334,8 +1338,7 @@ async def users_page(request: Request):
             # Inject the backend permission catalog so the assignment grid
             # can't drift from api/auth.py (was hard-coded in the template).
             "permission_scopes": auth.PERMISSION_SCOPES,
-            "permission_levels": auth.PERMISSION_LEVELS,
-            **_feature_flags(),
+            "permission_levels": auth.PERMISSION_LEVELS
         },
     )
 
@@ -1350,8 +1353,7 @@ async def groups_page(request: Request):
             # Inject the backend permission catalog so the assignment grid
             # can't drift from api/auth.py (was hard-coded in the template).
             "permission_scopes": auth.PERMISSION_SCOPES,
-            "permission_levels": auth.PERMISSION_LEVELS,
-            **_feature_flags(),
+            "permission_levels": auth.PERMISSION_LEVELS
         },
     )
 
@@ -1359,7 +1361,7 @@ async def groups_page(request: Request):
 @app.get("/workgroups", response_class=HTMLResponse, include_in_schema=False)
 async def workgroups_page(request: Request):
     return templates.TemplateResponse(
-        "workgroups/index.html", {"request": request, **_feature_flags()})
+        "workgroups/index.html", {"request": request})
 
 
 # ── Health / diagnostic ───────────────────────────────────────────────────────

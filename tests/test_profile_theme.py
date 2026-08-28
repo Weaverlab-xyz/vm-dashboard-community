@@ -269,8 +269,10 @@ def test_page_titles_do_not_repeat_the_brand():
 
 def test_the_theme_is_injected_by_a_context_processor():
     """Not env.globals: install_profile is DB-backed and the setup wizard writes it, so a
-    global read at import time shows the old brand until a restart. Not _feature_flags()
-    either: /users, /groups and /workgroups do not spread it."""
+    global read at import time shows the old brand until a restart.
+
+    The processor now carries the feature flags too — the per-route spread it was
+    originally kept separate from is gone. See test_install_profile for that half."""
     src = _read(_MAIN)
     assert "context_processors=[_profile_context]" in src, \
         "the theme is no longer injected by a context processor"
