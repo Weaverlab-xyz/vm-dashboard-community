@@ -68,6 +68,10 @@ services:
       # The dashboard stores only the NAME of each entry here — never the credential.
       # Same `,Z` for the same reason.
       # - ./connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z
+      # Optional: file shares, for the dashboard's remote-filesystem storage backend.
+      # Same split as connections.yaml above — the dashboard stores only the NAME of each
+      # share, never its path and never its SMB credential. Same `,Z` for the same reason.
+      # - ./shares.yaml:/etc/dashboard-agent/shares.yaml:ro,Z
       # Copy the inspection CA next to this file rather than mounting it from /usr/local:
       # `,Z` relabels the source, and doing that to a shared system trust store affects
       # everything else on the host that reads it.

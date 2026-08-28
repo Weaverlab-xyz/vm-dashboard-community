@@ -49,8 +49,9 @@ from ..database import Job, RemoteAgent, User, get_db
 from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_meta,
                         agent_guard, agent_hypervisor_meta, agent_job_meta,
                         agent_ps_credential_service, agent_sealing, agent_service,
-                        agent_signing, config_service, hypervisor_connection_service,
-                        hypervisor_sync_service, job_service, public_url)
+                        agent_signing, agent_storage_meta, config_service,
+                        hypervisor_connection_service, hypervisor_sync_service,
+                        job_service, public_url)
 from ..services.hypervisor_connection_service import HypervisorConnectionError
 from ..services.agent_guard import AgentThrottled
 from ..services.agent_service import AgentError
@@ -361,6 +362,11 @@ def _envelope_payload(job_type: str, meta: dict) -> dict:
         # difference between putting a privileged container on a host and taking it away.
         # The deploy key is NOT here — it rides the sealed per-job channel.
         return agent_gateway_meta.envelope_payload(meta)
+    if job_type == "agent_storage":
+        # Carries a filename and, for an upload, its bytes — the only envelope here that
+        # does. It does NOT carry a path: the share is named, and the path behind that
+        # name lives in the agent's own shares.yaml. See agent_storage_meta.
+        return agent_storage_meta.envelope_payload(meta)
     # Unreachable: `lease_one` filters on `allowed_job_types`, itself a subset of
     # AGENT_JOB_TYPES, so a type with no branch cannot have been claimed. Raising rather
     # than defaulting is the point — a job stuck in `running` is a bug someone chases,

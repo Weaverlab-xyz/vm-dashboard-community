@@ -47,6 +47,11 @@ SCOPED_CACHES = {
     "oci_network_opts":   "region",
     "oci_instances":      "region",
     "ps_db_candidates":   "workgroup",
+    # Assets on a share reached through a remote agent. The dimension is which SHARE, and
+    # it takes three values to say so: two dashboards could point at the same agent, or
+    # one agent at two shares, or one share at two subdirectories. An unscoped key would
+    # serve the wrong filenames for a full TTL to a page with no way to know.
+    "agent_storage_list": "share",
 }
 
 # Names whose key is built by a helper that takes the cache name as a *parameter*, so

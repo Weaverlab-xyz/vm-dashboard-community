@@ -70,6 +70,16 @@ TTL = {
     # runs on an hourly-plus schedule and nothing here changes faster than that.
     # Keyed on the workgroup filter — see SCOPED_CACHES in tests/test_cache_key_scoping.py.
     "ps_db_candidates":    300,   # 5 min
+    # Asset listing on a share reached through a remote agent. Not a cloud API call but a
+    # full agent job round trip — the agent polls every 5s, so an uncached listing costs
+    # five to fifteen seconds. storage_service.list_all_assets fans out over every
+    # configured backend and feeds the asset pickers on six pages, so without this every
+    # one of those pickers would sit on that round trip.
+    #
+    # Keyed on agent + share + subpath, never globally: two shares behind one dashboard
+    # would otherwise serve each other's listings for a full TTL. See SCOPED_CACHES in
+    # tests/test_cache_key_scoping.py.
+    "agent_storage_list":  120,   # 2 min
 }
 
 # How long past its TTL an entry stays SERVABLE to get_or_refresh. Additive and global,

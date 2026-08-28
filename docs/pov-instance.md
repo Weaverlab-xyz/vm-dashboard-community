@@ -49,14 +49,29 @@ Two properties worth knowing:
 | On-prem hypervisors (Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng) | yes | — |
 | Cloud databases, Kubernetes, containers, cloud functions | yes | — |
 | Virtual desktops, EPM-L, cost reporting | yes | — |
+| The AWS / Azure / GCP / OCI consoles and Images | yes | — |
 | POV environments | — | yes |
 | Lab platforms (Skytap) | — | yes |
 | PRA, Password Safe, Entitle | yes | yes |
-| Remote agents, Config Management | yes | yes |
+| Remote agents, Config Management, Storage | yes | yes |
 | Auto-delete timer, notifications, secret scanning, auth/SSO | yes | yes |
 
 The third block is deliberate: a POV instance needs PRA, Password Safe and the agent more
 than a demo instance does, so those are profile-neutral rather than owned by either.
+
+The cloud-console row is the one entry that is **not** a feature flag. Those five pages
+gate on credential *presence*, so there was no flag for the mask to subtract and all five
+kept rendering on a POV instance — pointing at pages the wizard guarantees can never hold
+data. They resolve through `feature_flags.profile_page_allowed` and `main._profile_page_gate`
+instead, which obey the same rule as the flag gate: one reader for the nav link and the
+route, or you get a link to a 404.
+
+**Storage stays**, and it is load-bearing rather than an oversight. Config Management is
+gated on there being an active storage backend, so without one a POV instance cannot run
+a playbook at all — and it has no cloud to put one in. The
+[agent-brokered filesystem backend](storage-management.md#remote-filesystem--unc-via-agent)
+is the answer: a POV already runs an agent inside the customer's environment, and that
+agent can reach a share the dashboard cannot.
 
 A demo-only integration on a POV instance is not merely toggled off — **Settings refuses to
 enable it**, with a 409 naming the profile. Accepting the write would store a flag that

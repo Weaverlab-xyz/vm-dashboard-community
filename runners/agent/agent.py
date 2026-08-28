@@ -102,7 +102,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 #     any `ansible_*` extra var. A dashboard-supplied inventory could set
 #     `ansible_connection: local`, which would run the operator's playbook inside the runner
 #     container on this network instead of against the target it names.
-AGENT_VERSION = "2.4.0"
+AGENT_VERSION = "2.5.0"
 
 log = logging.getLogger("agent")
 
@@ -957,7 +957,8 @@ class Policy:
     def __init__(self, allow: list, deny: list, job_types: set, limits: dict,
                  digest: str, connection_verbs: dict = None, sibling: dict = None,
                  loopback_connections: set = None, ansible: dict = None,
-                 ansible_allow: list = None, gateway: dict = None):
+                 ansible_allow: list = None, gateway: dict = None,
+                 storage: dict = None):
         self.allow = allow            # [(network, {ports} or None)]
         self.deny = deny              # [network]
         self.job_types = job_types
@@ -1012,6 +1013,33 @@ class Policy:
         self.gateway_network = str(gateway.get("network")
                                    or (sibling or {}).get("network") or "bridge")
 
+        # File shares this agent may read or write on the dashboard's behalf. Off unless
+        # the customer turns it on AND names a share.
+        #
+        # Its own block, and its own grant, for the reason `ansible:` has one: "may be
+        # TCP-probed" and "may have files read out of it and written into it" are different
+        # things, and an operator who widened `targets:` to run a discovery sweep has not
+        # agreed to the second. There is no fallback to any other list.
+        #
+        # READ AND WRITE ARE SEPARATE, and write defaults to FALSE. The common case is a
+        # corporate share somebody else populates and the dashboard only reads; an operator
+        # who enables this block without reading gets that, not a writable share.
+        #
+        # THE PATHS ARE NOT HERE EITHER. They live in shares.yaml alongside the SMB
+        # credential, exactly as hypervisor endpoints live in connections.yaml — this file
+        # stays credential-free, and a job names a share the customer already wrote down.
+        storage = storage or {}
+        self.storage_enabled = bool(storage.get("enabled"))
+        self.storage_shares = {}          # {share name: {"read": bool, "write": bool}}
+        for entry in storage.get("shares") or []:
+            if isinstance(entry, dict) and entry.get("name"):
+                self.storage_shares[str(entry["name"])] = {
+                    # Read is implied by naming the share at all — granting a share you
+                    # may not read would mean nothing. Write is the opt-in.
+                    "read": True,
+                    "write": bool(entry.get("write")),
+                }
+
         # The sibling runner is off unless the customer turns it on AND names an image.
         # The image comes from here and never from a job, so a compromised dashboard
         # cannot choose what gets run on the host.
@@ -1049,6 +1077,30 @@ class Policy:
                 f"policy.yaml does not grant {verb!r} on {connection_ref!r} "
                 f"(granted: {', '.join(sorted(granted)) or 'none'}). Add it to that "
                 f"connection's `verbs:` list and restart the agent.")
+
+    def check_share(self, share: str, write: bool) -> None:
+        """Raise :class:`PolicyRefusal` unless policy.yaml grants this access here.
+
+        Three distinct refusals rather than one, because they have three different
+        remedies and the operator reading this in Live Output is looking at a dashboard
+        that cannot fix any of them.
+        """
+        if not self.storage_enabled:
+            raise PolicyRefusal(
+                "policy.yaml has no `storage:` block, so this agent brokers no file "
+                "shares. Add one with `enabled: true` and a `shares:` list, and restart "
+                "the agent.")
+        granted = self.storage_shares.get(share)
+        if granted is None:
+            raise PolicyRefusal(
+                f"policy.yaml grants no access to share {share!r}. Add it under "
+                f"`storage.shares:` and restart the agent. The name must also match a "
+                f"`name:` in shares.yaml, which is where its path lives.")
+        if write and not granted.get("write"):
+            raise PolicyRefusal(
+                f"policy.yaml grants {share!r} read-only. Add `write: true` to that "
+                f"share and restart the agent if the dashboard should be able to change "
+                f"its contents.")
 
     def ansible_image(self, run_kind: str) -> str:
         """The sibling image for this kind of run, or raise :class:`PolicyRefusal`.
@@ -1261,9 +1313,44 @@ class Policy:
         ansible = doc.get("ansible") if isinstance(doc.get("ansible"), dict) else {}
         ansible_allow = cls._parse_targets(ansible.get("targets"), "ansible.targets")
         gateway = doc.get("gateway") if isinstance(doc.get("gateway"), dict) else {}
+        storage = cls._parse_storage(doc.get("storage"))
         return cls(allow, deny, job_types, limits,
                    hashlib.sha256(raw).hexdigest(), verbs, sibling, loopback,
-                   ansible, ansible_allow, gateway)
+                   ansible, ansible_allow, gateway, storage)
+
+    @staticmethod
+    def _parse_storage(value):
+        """Validate the `storage:` block, or raise :class:`AgentFatal`.
+
+        Fatal rather than skipped, like every other block in this file. A share entry that
+        is silently dropped for being the wrong shape is a share the dashboard then reports
+        as ungranted — which sends the operator to add a grant that is already there.
+        """
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise AgentFatal("policy.yaml: `storage:` must be a mapping.")
+        shares = value.get("shares")
+        if shares is None:
+            return value
+        if not isinstance(shares, list):
+            raise AgentFatal("policy.yaml: `storage.shares` must be a list of entries "
+                             "with a `name:`.")
+        for entry in shares:
+            if not isinstance(entry, dict):
+                raise AgentFatal(f"policy.yaml: bad `storage.shares` entry {entry!r} — "
+                                 f"each one must be a mapping with a `name:`.")
+            if not entry.get("name"):
+                raise AgentFatal("policy.yaml: a `storage.shares` entry has no `name:`. "
+                                 "It must match a `name:` in shares.yaml.")
+            write = entry.get("write")
+            # A scalar that is not a bool is refused rather than coerced. `write: "false"`
+            # is truthy in Python, so accepting it would grant the opposite of what it says.
+            if write is not None and not isinstance(write, bool):
+                raise AgentFatal(
+                    f"policy.yaml: `write:` on share {entry['name']!r} must be true or "
+                    f"false, not {write!r}.")
+        return value
 
     def check(self, ip: str, port: int) -> None:
         """Raise :class:`PolicyRefusal` unless this exact address:port is allowed."""
@@ -2066,6 +2153,69 @@ class HypervisorConnections:
                 f"{known}. The dashboard holds no credential for it; the name is the "
                 f"whole join between the two.")
         return conn
+
+
+# ── File shares: the customer's file, not the dashboard's ────────────────────
+#
+# The same split as connections.yaml above, for the same reason. A storage job names a
+# share by the string it has HERE; the agent resolves it to a path locally, and for a UNC
+# path supplies the SMB credential locally too. The dashboard stores an agent id and a
+# share name and nothing else, so a fully compromised dashboard can ask for a granted
+# operation on a share the customer already wrote down, and nothing more.
+#
+# There is no path field anywhere in an agent_storage envelope. That is what makes
+# a UNC path to some other server unreachable rather than merely refused.
+
+SHARES_FILE = os.environ.get("AGENT_SHARES_FILE", "/etc/dashboard-agent/shares.yaml")
+
+
+class FileShares:
+    """Parsed shares.yaml, keyed by name."""
+
+    def __init__(self, by_name: dict):
+        self.by_name = by_name
+
+    @classmethod
+    def load(cls, path: str = "") -> "FileShares":
+        path = path or SHARES_FILE
+        if not os.path.exists(path):
+            # Absent is fine — most agents broker no shares. A storage job then fails with
+            # "unknown share", which names the missing thing rather than the missing file.
+            return cls({})
+        try:
+            with open(path, "rb") as fh:
+                doc = yaml.safe_load(fh.read()) or {}
+        except OSError as exc:
+            raise AgentFatal(
+                f"Cannot read the shares file at {path}: {exc}. Mount it :ro,Z — "
+                f"see docs/remote-agents.md.")
+        except yaml.YAMLError as exc:
+            raise AgentFatal(f"shares.yaml is not valid YAML: {exc}")
+        if not isinstance(doc, dict):
+            raise AgentFatal("shares.yaml must be a mapping at the top level.")
+
+        by_name = {}
+        for entry in doc.get("shares") or []:
+            if isinstance(entry, dict) and entry.get("name"):
+                if not entry.get("path"):
+                    raise AgentFatal(
+                        f"shares.yaml: share {entry['name']!r} has no `path:`. A share "
+                        f"with no path is one every job against it fails on.")
+                by_name[str(entry["name"])] = entry
+        return cls(by_name)
+
+    def names(self) -> list:
+        return sorted(self.by_name)
+
+    def get(self, name: str) -> dict:
+        share = self.by_name.get(name)
+        if share is None:
+            known = ", ".join(self.names()) or "none"
+            raise PolicyRefusal(
+                f"unknown share {name!r} — this agent's shares.yaml defines: {known}. "
+                f"The dashboard holds no path for it; the name is the whole join between "
+                f"the two.")
+        return share
 
 
 # ── Password Safe just-in-time checkout ───────────────────────────────────────
@@ -4397,10 +4547,206 @@ def run_gateway(payload: dict, policy: "Policy", emit, cancelled, job_id: str = 
     return {"started": True, "container": GATEWAY_CONTAINER, "image": image}
 
 
+# ── Storage: file I/O on a share the dashboard cannot reach ──────────────────
+#
+# Four operations, matching the four the dashboard's storage abstraction already
+# dispatches for S3, Azure Blob and GCS. The dashboard's own "Local Filesystem / UNC"
+# backend does exactly this work, but from inside its own container — which is why it only
+# works when the dashboard is on the same network as the share. Here that constraint goes
+# away: the agent already is.
+#
+# WHAT A JOB MAY SAY, in full: which named share, an optional subdirectory, a bare
+# filename, and for an upload its bytes. There is no path, no glob and no recursion. Two
+# independent things would both have to fail for a job to reach a file outside the share:
+# the dashboard's own validation (services/agent_storage_meta.py) and `_share_path` below,
+# which resolves the result and refuses anything that lands outside the root.
+
+# What a listing will show. Kept in step with storage_service._ASSET_EXTENSIONS on the
+# dashboard side; a mismatch is invisible rather than loud, so the dashboard filters again.
+_SHARE_EXTENSIONS = (".yml", ".yaml", ".sh", ".ps1", ".rpm", ".deb", ".exe", ".msi")
+
+# A filename, and only a filename. The dashboard applies the same rule before it queues;
+# this is the half that does not trust it.
+_SHARE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+
+
+def _share_is_unc(path: str) -> bool:
+    return path.startswith("\\\\") or path.startswith("//")
+
+
+def _share_root(share: dict) -> str:
+    return str(share.get("path") or "").rstrip("/\\")
+
+
+def _share_smb_session(share: dict) -> None:
+    """Register SMB credentials for this share's server. Idempotent.
+
+    The credential comes from shares.yaml and nowhere else. Nothing in a job envelope can
+    influence which server it is offered to, because the server is parsed out of the path
+    that lives beside it in the same file entry.
+    """
+    import smbclient
+    user = str(share.get("username") or "")
+    if not user:
+        return
+    domain = str(share.get("domain") or "")
+    root = _share_root(share).replace("\\", "/").lstrip("/")
+    server = root.split("/", 1)[0] if root else ""
+    if server:
+        smbclient.register_session(
+            server,
+            username=(f"{domain}\\{user}" if domain else user),
+            password=str(share.get("password") or "") or None,
+        )
+
+
+def _share_dir(share: dict, subpath: str) -> str:
+    """The directory a job operates in: the share root plus its configured subdirectory."""
+    root = _share_root(share)
+    if not root:
+        raise PolicyRefusal("this share has no path in shares.yaml")
+    sep = "\\" if _share_is_unc(root) else "/"
+    clean = (subpath or "").replace("\\", "/").strip("/")
+    if not clean:
+        return root
+    return root + sep + clean.replace("/", sep)
+
+
+def _share_path(share: dict, subpath: str, name: str) -> str:
+    """The absolute path of one file, refusing anything that escapes the share root.
+
+    The second of the two checks. The dashboard validated `name` before queueing, but an
+    agent that trusts the dashboard's validation is an agent whose file access is only as
+    good as the dashboard's — and the whole point of this file is that it is not.
+
+    UNC paths are string-joined rather than resolved: `os.path` normalisation is a local
+    filesystem concept, and there is nothing to resolve against on a remote share. The
+    name check is what carries it, which is why that check refuses separators outright
+    rather than trying to normalise them away.
+    """
+    if not _SHARE_NAME_RE.match(name or ""):
+        raise PolicyRefusal(
+            f"{name!r} is not a plain file name. A storage job names a file inside the "
+            f"share, never a path.")
+    base = _share_dir(share, subpath)
+    if _share_is_unc(base):
+        return base + "\\" + name
+    full = os.path.normpath(os.path.join(base, name))
+    root = os.path.normpath(base)
+    if full != os.path.join(root, name):
+        raise PolicyRefusal(
+            f"refusing to touch {full!r}: it is outside the share root {root!r}")
+    return full
+
+
+def _share_list(share: dict, subpath: str) -> list:
+    base = _share_dir(share, subpath)
+    out = []
+    if _share_is_unc(base):
+        import smbclient
+        _share_smb_session(share)
+        for entry in smbclient.scandir(base):
+            if not entry.is_file() or not entry.name.endswith(_SHARE_EXTENSIONS):
+                continue
+            try:
+                size = entry.stat().st_size
+            except Exception:  # noqa: BLE001 — a file we cannot stat still exists
+                size = 0
+            out.append({"name": entry.name, "size": size})
+    else:
+        if not os.path.isdir(base):
+            raise PolicyRefusal(f"{base} is not a directory on this host")
+        for name in os.listdir(base):
+            full = os.path.join(base, name)
+            if not os.path.isfile(full) or not name.endswith(_SHARE_EXTENSIONS):
+                continue
+            out.append({"name": name, "size": os.path.getsize(full)})
+    return sorted(out, key=lambda item: item["name"])
+
+
+def _share_read(share: dict, path: str) -> bytes:
+    if _share_is_unc(path):
+        import smbclient
+        _share_smb_session(share)
+        with smbclient.open_file(path, mode="rb") as fh:
+            return fh.read()
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def _share_write(share: dict, path: str, data: bytes) -> None:
+    if _share_is_unc(path):
+        import smbclient
+        _share_smb_session(share)
+        with smbclient.open_file(path, mode="wb") as fh:
+            fh.write(data)
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def _share_remove(share: dict, path: str) -> None:
+    if _share_is_unc(path):
+        import smbclient
+        _share_smb_session(share)
+        smbclient.remove(path)
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        # Deleting something already gone is the outcome the caller asked for. Reporting
+        # it as a failure would leave the dashboard's asset list permanently showing a
+        # file no operator can clear.
+        pass
+
+
+def run_storage(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
+                dashboard) -> dict:
+    """Perform one file operation on a granted share."""
+    op = str(payload.get("op") or "")
+    share_name = str(payload.get("share") or "")
+    subpath = str(payload.get("subpath") or "")
+    name = str(payload.get("name") or "")
+
+    if op not in ("list", "fetch", "upload", "delete"):
+        raise PolicyRefusal(f"unknown storage operation {op!r}")
+    # The grant is checked before the share is even looked up, so an ungranted name is
+    # refused without confirming whether it exists on this host.
+    policy.check_share(share_name, write=op in ("upload", "delete"))
+    share = FileShares.load().get(share_name)
+
+    where = share_name + (f"/{subpath}" if subpath else "")
+    if op == "list":
+        assets = _share_list(share, subpath)
+        emit(f"listed {len(assets)} asset(s) in {where}")
+        return {"assets": assets}
+
+    path = _share_path(share, subpath, name)
+    if op == "fetch":
+        data = _share_read(share, path)
+        emit(f"read {len(data)} bytes from {where}/{name}")
+        return {"content_b64": base64.b64encode(data).decode(), "size": len(data)}
+
+    if op == "upload":
+        try:
+            data = base64.b64decode(payload.get("content_b64") or "", validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise PolicyRefusal(f"the upload payload is not valid base64: {exc}")
+        _share_write(share, path, data)
+        emit(f"wrote {len(data)} bytes to {where}/{name}")
+        return {"size": len(data)}
+
+    _share_remove(share, path)
+    emit(f"deleted {where}/{name}")
+    return {"deleted": name}
+
+
 HANDLERS = {"agent_discover": run_discovery,
             "agent_hypervisor": run_hypervisor,
             "agent_ansible": run_ansible,
-            "agent_gateway": run_gateway}
+            "agent_gateway": run_gateway,
+            "agent_storage": run_storage}
 
 
 # ── Job execution ─────────────────────────────────────────────────────────────

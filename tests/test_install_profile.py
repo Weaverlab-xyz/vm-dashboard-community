@@ -134,6 +134,89 @@ def test_every_profile_masked_page_is_actually_gated():
     assert not ungated, f"profile-masked pages with no page gate: {ungated}"
 
 
+def test_every_profile_owned_page_group_is_actually_gated():
+    """The same rule as above, for pages that are not feature flags.
+
+    AWS/Azure/GCP/OCI and Images are gated on credential PRESENCE, not on a toggle, so
+    there was no flag for _DEMO_ONLY to mask and all five kept rendering on a POV
+    instance — pointing at pages that instance can never put data in, because its wizard
+    deliberately writes no cloud credentials.
+
+    Source-parsing, like its sibling, so a new cloud page cannot regress this one route
+    at a time.
+    """
+    from web_dashboard.services import feature_flags as ff
+    owned = {"/aws": "cloud_pages", "/azure": "cloud_pages", "/gcp": "cloud_pages",
+             "/oci": "cloud_pages", "/images": "cloud_pages"}
+    for name in set(owned.values()):
+        assert name in ff._PROFILE_PAGES, f"{name} is no longer a profile page group"
+
+    heads = {path: head for path, head, _body in _html_page_routes()}
+    ungated = []
+    for path, name in owned.items():
+        assert path in heads, f"{path} is no longer an HTML page route; update this map"
+        if f'_profile_page_gate("{name}")' not in heads[path]:
+            ungated.append(f"{path} (expected _profile_page_gate({name!r}))")
+    assert not ungated, f"profile-owned pages with no page gate: {ungated}"
+
+
+def test_the_profile_page_gate_resolves_through_the_same_reader_as_the_nav():
+    """The 28cfc67 rule, restated for page groups: one reader, or the nav link and the
+    route disagree and you get a link to a 404 — or a page with no link that still
+    serves."""
+    src = _read(_MAIN)
+    gate = src.split("def _profile_page_gate", 1)[1].split("\ndef ", 1)[0]
+    assert "feature_flags.profile_page_allowed(name)" in gate, (
+        "_profile_page_gate does not resolve through feature_flags.profile_page_allowed")
+
+    from web_dashboard.services import feature_flags as ff
+    assert "cloud_pages" in ff.flags(), (
+        "flags() does not ship cloud_pages, so _nav_links.html cannot read it and every "
+        "cloud link would fail closed on EVERY profile")
+
+
+def test_a_profile_page_group_is_masked_on_the_other_profile():
+    _ensure_schema()
+    from web_dashboard.services import config_service
+    ff = _with_profile("pov")
+    try:
+        assert ff.profile_page_allowed("cloud_pages") is False
+        assert ff.flags()["cloud_pages"] is False,             "the nav reads this key; masking only the gate leaves five live links"
+    finally:
+        config_service.delete("install_profile")
+        config_service.invalidate()
+
+    ff = _with_profile("demo")
+    try:
+        assert ff.profile_page_allowed("cloud_pages") is True
+        assert ff.flags()["cloud_pages"] is True
+    finally:
+        config_service.delete("install_profile")
+        config_service.invalidate()
+
+
+def test_an_unclaimed_page_group_is_allowed_everywhere():
+    """Matching profile_masks: a name nobody claims is profile-neutral, not forbidden."""
+    from web_dashboard.services import feature_flags as ff
+    assert ff.profile_page_allowed("something_nobody_owns") is True
+
+
+def test_the_nav_gates_the_cloud_links_on_the_same_name():
+    """The other half of the pair. A gate with no nav guard leaves five links to pages
+    that 404; a nav guard with no gate is what 28cfc67 was written about."""
+    nav = _read(os.path.join(_ROOT, "web_dashboard", "templates", "_nav_links.html"))
+    assert nav.count("{% if cloud_pages %}") == 2, (
+        "expected two cloud_pages blocks in the nav — the four cloud consoles and Images")
+    for href in ('href="/aws"', 'href="/azure"', 'href="/gcp"', 'href="/oci"',
+                 'href="/images"'):
+        assert href in nav
+    # Storage is deliberately NOT gated: it is where the agent-brokered filesystem
+    # backend gets configured, which is the only storage a POV instance can have.
+    assert 'href="/storage"' in nav
+    storage_line = [ln for ln in nav.splitlines() if 'href="/storage"' in ln][0]
+    assert "cloud_pages" not in storage_line
+
+
 def test_the_background_warmers_respect_the_mask():
     """Worse than an ungated page: these make outbound calls on a timer. Reading the raw
     config row meant a POV instance kept polling the DEMO tenant's Cost Management, and a

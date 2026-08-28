@@ -19,6 +19,7 @@ Target types:
     On-premises group key  — "proxmox", "vsphere", "hyperv", "nutanix", "xcpng"
     Bare IP / hostname     — ad-hoc; cloud field determines SSH key source
 """
+import base64
 import json
 import logging
 import uuid
@@ -580,6 +581,26 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
     problem = agent_ansible_meta.check(meta)
     if problem:
         raise HTTPException(status_code=400, detail=problem)
+
+    # Read the asset NOW, not when the agent asks for its bundle. For every other backend
+    # that would be a pointless early fetch; for `agent_local` it is what stops a deadlock.
+    #
+    # The bundle is built inside `POST /api/agent/jobs/{id}/ansible-bundle`, which the
+    # agent calls while it is RUNNING this job and blocked on the response. Fetching an
+    # agent-brokered asset there would queue an `agent_storage` job for an agent that
+    # cannot lease anything until the request it is waiting on returns — so it would sit
+    # until the storage deadline expired and then fail the run, with an error naming
+    # storage rather than the shape of the problem. Common setup, too: one agent, one
+    # share, playbooks run on that same network.
+    #
+    # Failing here also means a share problem is a 400 on the run form with no job row,
+    # rather than a red job whose Live Output blames the agent.
+    if asset_backend == "agent_local":
+        try:
+            raw_asset = await storage_service.fetch_asset_in(asset_backend, payload.asset)
+        except storage_service.StorageError as exc:
+            raise HTTPException(status_code=400, detail=f"Asset storage error: {exc}")
+        meta["asset_bytes_b64"] = base64.b64encode(raw_asset).decode()
 
     job = job_service.create_job(
         db, job_type="agent_ansible", created_by=current_user.username,

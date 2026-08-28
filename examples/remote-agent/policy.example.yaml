@@ -69,6 +69,10 @@ job_types:
   # on its own — see the `gateway:` block, which needs an image and an explicit
   # `privileged: true` because a Gateway cannot tunnel without it.
   # - agent_gateway
+  # Uncomment to let this agent read and write a FILE SHARE on this network for the
+  # dashboard's storage backend. Also not enough on its own — see the `storage:` block
+  # further down, which names each share and grants write separately.
+  # - agent_storage
 
 # ── What may be done to each hypervisor ───────────────────────────────────────
 # Per-connection verb grants. YOU decide what may be done to each target; the
@@ -241,6 +245,48 @@ job_types:
 #   privileged: true
 #   # Which Docker network the Gateway joins. Defaults to `sibling.network`, then `bridge`.
 #   # network: bridge
+
+# ── File shares (OFF, and it needs no Docker socket) ─────────────────────────
+# Letting the dashboard use a directory or a corporate UNC share on THIS network as its
+# storage backend — the place its playbooks, scripts and inventories live. The agent does
+# the reading and writing; the dashboard never opens a socket to your file server.
+#
+# This is the mildest of the four blocks above it. It starts no container, needs no
+# Docker socket, and executes nothing: it opens files. Read it as "the dashboard may see
+# and change the contents of this one directory", which is a real grant but a bounded one.
+#
+# READ AND WRITE ARE SEPARATE, AND WRITE IS OFF. Naming a share grants reading it. The
+# common case is a share somebody else populates and the dashboard only consumes, so
+# `write: true` is a second, deliberate act — without it an upload or a delete from the
+# /storage page is refused by name.
+#
+# THE PATH IS NOT HERE. It is in shares.yaml, alongside the SMB credential if the share
+# needs one, exactly as hypervisor endpoints live in connections.yaml. This file stays
+# credential-free. `name` must match a `name:` in that file AND the "Share name" field on
+# the dashboard's /storage page — those three strings are the whole join.
+#
+# Three things must agree before a single file moves:
+#   1. the dashboard grants this agent the `agent_storage` job type (Agents page);
+#   2. `agent_storage` is in `job_types:` above;
+#   3. this block is enabled and lists the share — with `write: true` if the dashboard
+#      should be able to change it.
+# Withhold any one and nothing happens.
+#
+# Note what is NOT consulted: `targets:` at the top of this file. That list grants a port
+# PROBE on a network, which has nothing to say about which directory may be read. As with
+# `ansible.targets`, widening one must never widen the other.
+#
+# storage:
+#   enabled: true
+#   shares:
+#     - name: playbook-share
+#       write: false          # read-only, the default and the safer one
+#     # - name: corp-automation
+#     #   write: true         # the dashboard may upload and delete here
+#
+# Files move inside the signed job envelope, capped at 256 KB — about 190 KB of file.
+# Playbooks and scripts fit; packages (.rpm, .deb, .exe, .msi) do not, and the dashboard
+# refuses those before queueing rather than failing a transfer halfway.
 
 # ── Ceilings ──────────────────────────────────────────────────────────────────
 # Applied on top of whatever the dashboard requested; the smaller number always wins.

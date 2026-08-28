@@ -55,6 +55,7 @@
               <span x-show="b.active"     class="text-[10px] uppercase font-semibold text-blue-700  bg-blue-50  border border-blue-200  px-1.5 py-0.5 rounded">active</span>
               <span x-show="b.runner_locked" x-cloak class="text-[10px] uppercase font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">local runner only</span>
               <span x-show="b.hub_only" x-cloak class="text-[10px] uppercase font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded">image hub only</span>
+              <span x-show="b.via_agent" x-cloak class="text-[10px] uppercase font-semibold text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">via agent</span>
             </div>
             <!-- Two distinct reasons a backend can't be activated: the runner has
                  no path to it (UNC), or it can't hold Terraform state (OCI). -->
@@ -235,6 +236,62 @@
       </div>
     </div>
 
+    <!-- ── Remote Filesystem / UNC (via agent) fields ────────────────────── -->
+    <div class="grid grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+      <div class="col-span-2 flex items-center gap-2">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Remote Filesystem / UNC (via agent)</p>
+        <span class="text-[10px] uppercase font-semibold text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">via agent</span>
+      </div>
+      <p class="col-span-2 text-xs text-gray-500 -mt-1">
+        The same kind of target as the backend above, reached by a remote agent
+        instead of by this container — so it works when the dashboard is hosted in a
+        cloud with no route to your file server, and it has no
+        <code class="bg-white px-1 rounded">ansible_runner=local</code> constraint.
+        <span class="font-semibold">The path is not configured here.</span> It lives in
+        that agent's own <code class="bg-white px-1 rounded">shares.yaml</code> alongside
+        any SMB credential, and its <code class="bg-white px-1 rounded">policy.yaml</code>
+        grants the share by name — the dashboard never holds either. Files move inside a
+        signed job envelope, so playbooks and scripts work and packages
+        (<code class="bg-white px-1 rounded">.rpm</code>,
+        <code class="bg-white px-1 rounded">.deb</code>,
+        <code class="bg-white px-1 rounded">.msi</code>) are too large.
+      </p>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
+        <select x-model="cfg.storage_agent_id"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="">— none —</option>
+          <template x-for="a in agents" :key="a.id">
+            <option :value="a.id" x-text="a.name + (a.status === 'online' ? '' : ' (' + a.status + ')')"></option>
+          </template>
+        </select>
+        <p x-show="agentsError" x-cloak class="text-xs text-amber-700 mt-1" x-text="agentsError"></p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Share name</label>
+        <input type="text" x-model="cfg.storage_agent_share"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="playbook-share">
+        <p class="text-xs text-gray-500 mt-1">Name in the agent's <code class="bg-white px-1 rounded">shares.yaml</code>.</p>
+      </div>
+      <div class="col-span-2">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Subpath <span class="text-gray-400 font-normal">(optional)</span></label>
+        <input type="text" x-model="cfg.storage_agent_subpath"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="windows/prod">
+        <p class="text-xs text-gray-500 mt-1">A directory inside the share. Relative only — leave blank for its root.</p>
+      </div>
+      <div class="col-span-2">
+        <button @click="testBackend('agent_local')"
+                :disabled="!cfg.storage_agent_id || !cfg.storage_agent_share || testing.agent_local"
+                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+          <span x-show="!testing.agent_local">Test connection</span>
+          <span x-show="testing.agent_local" x-cloak>Testing… (up to 90s)</span>
+        </button>
+        <span class="text-xs text-gray-500 ml-2">Runs a real job on the agent — expect this to take a few seconds, not to be instant.</span>
+      </div>
+    </div>
+
     <!-- ── Terraform state location ───────────────────────────────────────── -->
     <div class="mb-5 p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
       <p class="text-xs font-semibold text-indigo-700 uppercase tracking-wide mb-1">
@@ -252,15 +309,19 @@
         kept as a backup).
       </p>
 
-      <!-- Amber warning when active backend is local or unset -->
-      <p x-show="!cfg.storage_active_backend || cfg.storage_active_backend === 'local'"
+      <!-- Amber warning when the active backend is a filesystem one, or unset.
+           Both filesystem backends land here: Terraform has no state backend for
+           either, so state stays in the deploy dir even for the agent-brokered one.
+           A state file never crosses to the agent. -->
+      <p x-show="!cfg.storage_active_backend || cfg.storage_active_backend === 'local' || cfg.storage_active_backend === 'agent_local'"
          x-cloak
          class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mt-2">
         <span class="font-semibold">Heads up:</span>
         with no cloud backend active, Terraform state stays on the container's
         ephemeral deploy disk and is <span class="font-semibold">lost if the
         container is recreated</span>. Select a cloud backend (S3, Azure Blob, or
-        GCS) above to keep state safe.
+        GCS) above to keep state safe. A filesystem backend — including one reached
+        through an agent — does not hold state; only assets.
       </p>
     </div>
 
@@ -602,12 +663,15 @@ function storagePage() {
       storage_oci_bucket: '', storage_oci_namespace: '', storage_oci_prefix: '',
       storage_local_path: '', storage_local_username: '',
       storage_local_password: '', storage_local_domain: '',
+      storage_agent_id: '', storage_agent_share: '', storage_agent_subpath: '',
     },
     ansibleRunner: 'local',
+    agents: [],
+    agentsError: '',
     assets: [],
     loadingAssets: false,
     saving: false,
-    testing: { s3: false, azure_blob: false, gcs: false, oci_object_storage: false, local: false },
+    testing: { s3: false, azure_blob: false, gcs: false, oci_object_storage: false, local: false, agent_local: false },
     migrate: { source: '', target: '', overwrite: false },
     migrating: false,
     migrationResult: null,
@@ -628,7 +692,7 @@ function storagePage() {
     async init() {
       requireAuth();
       await Promise.all([this.loadBackends(), this.loadConfig(), this.loadAssets(),
-                         this.loadFeatureFlags()]);
+                         this.loadFeatureFlags(), this.loadAgents()]);
     },
 
     async loadFeatureFlags() {
@@ -691,6 +755,7 @@ function storagePage() {
         gcs:        'Google Cloud Storage',
         oci_object_storage: 'OCI Object Storage',
         local:      'Local Filesystem / UNC',
+        agent_local: 'Remote Filesystem / UNC (via agent)',
       })[id] || id;
     },
 
@@ -710,6 +775,22 @@ function storagePage() {
         this.ansibleRunner = data.ansible_runner || 'local';
       } catch (e) {
         this.showToast(e.message || 'Failed to load backends', 'error');
+      }
+    },
+
+    // Agents that could broker the remote-filesystem backend. /api/agent is gated on
+    // the Remote Agents integration, so a 404 here is a configuration answer rather
+    // than a failure — say which one, instead of leaving an empty picker.
+    async loadAgents() {
+      try {
+        const r = await API.get('/api/agent');
+        this.agents = (r && r.agents) || [];
+        this.agentsError = this.agents.length ? ''
+          : 'No agents are enrolled yet. Enrol one on the Agents page first.';
+      } catch (e) {
+        this.agents = [];
+        this.agentsError = 'Remote Agents is off or unreachable, so no agent can broker '
+          + 'a share. Enable it in Settings → Integrations.';
       }
     },
 

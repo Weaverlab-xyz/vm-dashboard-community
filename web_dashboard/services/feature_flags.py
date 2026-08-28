@@ -65,6 +65,19 @@ _POV_ONLY = (
 _PROFILE_OF = {f: "demo" for f in _DEMO_ONLY}
 _PROFILE_OF.update({f: "pov" for f in _POV_ONLY})
 
+# Pages that belong to one profile but are NOT feature flags. The four cloud consoles and
+# the image registry are gated on credential PRESENCE, not on a toggle -- which is how they
+# survived the mask above and kept rendering on a POV instance, pointing at pages that can
+# never hold data there (the wizard deliberately writes no cloud credentials on a POV; see
+# api/setup.py `_apply_config`).
+#
+# They are here rather than in _DEMO_ONLY because a flag needs a default, and a
+# `cloud_pages_enabled` defaulting to False would hide AWS on every demo instance that
+# already exists while one defaulting to True would be a toggle nobody should ever turn
+# off. A profile is not a preference, so this maps a NAME to its owning profile and reads
+# nothing from config at all.
+_PROFILE_PAGES = {"cloud_pages": "demo"}
+
 
 def install_profile() -> str:
     """This instance's profile, defaulting to ``demo``.
@@ -82,6 +95,22 @@ def profile_masks(flag: str) -> bool:
     """Whether this instance's profile makes ``flag`` unavailable regardless of config."""
     owner = _PROFILE_OF.get(flag)
     return owner is not None and owner != install_profile()
+
+
+def profile_page_allowed(name: str) -> bool:
+    """Whether a profile-owned PAGE renders on this instance. See :data:`_PROFILE_PAGES`.
+
+    The page equivalent of :func:`profile_masks`, and it has to obey the same rule that
+    commit 28cfc67 established for flags: both the nav link and the route must resolve
+    through one reader, or you get a link to a page that 404s -- or worse, a page with no
+    link that still serves. ``main._profile_page_gate`` and :func:`flags` are those two
+    readers, and this is the function they share.
+
+    An unknown name is allowed, matching :func:`profile_masks`: a name nobody claims is
+    profile-neutral, not forbidden.
+    """
+    owner = _PROFILE_PAGES.get(name)
+    return owner is None or owner == install_profile()
 
 
 def enabled(flag: str, default: bool = False) -> bool:
@@ -142,6 +171,10 @@ def flags() -> dict:
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   enabled("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
         "entitle_request_portal_url": config_service.get("entitle_request_portal_url",   settings.entitle_request_portal_url),
+        # Not a feature flag — a profile-owned page group. Shipped in this dict because
+        # _nav_links.html already spreads it, so the nav link and main._profile_page_gate
+        # keep reading the same answer. See _PROFILE_PAGES.
+        "cloud_pages":          profile_page_allowed("cloud_pages"),
     }
 
 def cloud_configured(cloud: str) -> bool:

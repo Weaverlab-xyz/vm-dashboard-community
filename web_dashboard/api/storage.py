@@ -39,6 +39,9 @@ _REQUIRED_FIELDS = {
     "gcs":        ["storage_gcs_bucket"],
     "oci_object_storage": ["storage_oci_bucket"],
     "local":      ["storage_local_path"],
+    # Both halves of the join. The path is NOT here — it lives in the agent's shares.yaml,
+    # which is the point of this backend.
+    "agent_local": ["storage_agent_id", "storage_agent_share"],
 }
 
 # All editable per-backend config keys, in canonical order.
@@ -49,11 +52,22 @@ _BACKEND_KEYS = {
     "oci_object_storage": ["storage_oci_bucket", "storage_oci_namespace", "storage_oci_prefix"],
     "local":      ["storage_local_path",      "storage_local_username",  "storage_local_password",
                    "storage_local_domain"],
+    "agent_local": ["storage_agent_id",       "storage_agent_share",     "storage_agent_subpath"],
 }
 
 # Backends that only make sense for the local Ansible runner (no cloud
 # runner has a network path back to a corporate file server).
+#
+# `agent_local` is deliberately NOT here, and the difference is the whole feature. The
+# constraint on `local` is that THIS CONTAINER opens the SMB socket; the agent-brokered
+# backend never asks anything in a cloud to reach a file server, because the dashboard
+# fetches the bytes through the agent first and hands them to the runner exactly as it
+# does for S3.
 _LOCAL_RUNNER_ONLY_BACKENDS = {"local"}
+
+# Backends that cannot host the image-registry hub. The promote runners read the canonical
+# artefact over HTTPS from a presigned URL, and neither of these has a URL surface at all.
+_NO_HUB_BACKENDS = {"local", "agent_local"}
 
 
 def _cfg_get(key: str) -> str:
@@ -82,6 +96,7 @@ async def list_backends(current_user: User = Depends(get_current_user)):
         "gcs":        "Google Cloud Storage",
         "oci_object_storage": "OCI Object Storage",
         "local":      "Local Filesystem / UNC",
+        "agent_local": "Remote Filesystem / UNC (via agent)",
     }
     return {
         "backends": [
@@ -97,6 +112,9 @@ async def list_backends(current_user: User = Depends(get_current_user)):
                 "selectable":    (b not in _LOCAL_RUNNER_ONLY_BACKENDS or runner == "local")
                                  and b not in storage_service.ACTIVE_BACKEND_EXCLUSIONS,
                 "runner_locked": b in _LOCAL_RUNNER_ONLY_BACKENDS,
+                # Brokered by a remote agent rather than reached from this container.
+                # The UI badges it, and the fields card asks for an agent instead of a path.
+                "via_agent":     b == "agent_local",
                 # Hub-capable but not activatable (OCI: no Terraform state backend).
                 # The UI disables the "active" radio and shows this as the reason.
                 "hub_only":      b in storage_service.ACTIVE_BACKEND_EXCLUSIONS,
@@ -188,6 +206,9 @@ class StorageConfigPatch(BaseModel):
     storage_local_username: str | None = None
     storage_local_password: str | None = None
     storage_local_domain:   str | None = None
+    storage_agent_id:       str | None = None
+    storage_agent_share:    str | None = None
+    storage_agent_subpath:  str | None = None
     # Control flag (NOT persisted): when switching storage_active_backend while
     # live Terraform state exists in the current backend, set this true to copy
     # the state to the new backend first instead of being blocked.
@@ -300,15 +321,15 @@ async def patch_config(
                 status_code=400,
                 detail=f"Invalid hub backend '{chosen_hub}'. Valid: {', '.join(BACKENDS)}.",
             )
-        # Hub holds VHD artefacts the promote runners read via HTTPS, so the
-        # local/UNC backend can't be a hub (no presigned URL surface).
-        if chosen_hub == "local":
+        # Hub holds VHD artefacts the promote runners read via HTTPS, so neither
+        # filesystem backend can be a hub (no presigned URL surface).
+        if chosen_hub in _NO_HUB_BACKENDS:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Local/SMB backend can't host the image-registry hub — promote "
-                    "runners need a cloud-native URL. Pick s3, azure_blob, gcs, or "
-                    "oci_object_storage."
+                    "A filesystem backend can't host the image-registry hub — promote "
+                    "runners need a cloud-native URL, and multi-GB VHDs do not fit a "
+                    "job envelope. Pick s3, azure_blob, gcs, or oci_object_storage."
                 ),
             )
         if chosen_hub:
