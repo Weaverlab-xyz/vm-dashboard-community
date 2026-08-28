@@ -554,9 +554,12 @@ if (-not $env:SANDBOX_SKIP_ACR) {
 
     # Mirror the public images server-side. --force makes re-runs refresh :latest. Optional
     # Docker Hub creds (DOCKERHUB_USERNAME/DOCKERHUB_TOKEN) dodge the anonymous import limit.
+    # The Ansible entry is chrweav/ansible-winrm (the app default), NOT upstream
+    # willhallonline/ansible: only the former carries pywinrm, without which every
+    # Windows/WinRM config-management target fails.
     foreach ($img in @(
         'beyondtrust/sra-jumpoint:latest',
-        'willhallonline/ansible:latest',
+        'chrweav/ansible-winrm:latest',
         'chrweav/dashboard-promote-runner:latest',
         'dtzar/helm-kubectl:latest')) {
         if ($env:DOCKERHUB_USERNAME -and $env:DOCKERHUB_TOKEN) {
@@ -658,7 +661,7 @@ if ($AcrLoginServer) {
         "azure_acr_server=$AcrLoginServer",
         "azure_acr_username=$SpAppId                            # SP appId (granted AcrPull above)",
         "azure_acr_password=$SpPassword",
-        "ansible_aci_image=$AcrLoginServer/willhallonline/ansible:latest   # full path: the ansible runner does not prepend the server",
+        "ansible_aci_image=$AcrLoginServer/chrweav/ansible-winrm:latest   # full path: the ansible runner does not prepend the server",
         "ansible_aci_acr_server=$AcrLoginServer",
         "ansible_aci_acr_username=$SpAppId",
         "ansible_aci_acr_password=$SpPassword",
