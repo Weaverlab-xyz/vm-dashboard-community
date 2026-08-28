@@ -32,7 +32,9 @@ page. The tile is gated on the same `beyondtrust` flag as the tab.
 
 ## Two kinds of gateway, one table
 
-The tab lists both, distinguished by a **`managed`** badge on the name:
+The tab lists both, distinguished by a **`managed`** badge on the name. Both are hosts the
+dashboard put in a *cloud*; there is a
+[third kind that is deliberately not in this table](#a-third-kind-a-gateway-on-an-agent-host).
 
 | | **managed** | **requested** |
 |---|---|---|
@@ -80,6 +82,60 @@ on the next teardown pass once the count reaches zero.
 "Three in `us-central1` and two in `us-east-2`" is the stated use case, and the right
 number is a function of session load — which the dashboard cannot see. Cloud quotas are the
 real ceiling, so the dashboard doesn't invent a smaller one.
+
+---
+
+## A third kind: a Gateway on an agent host
+
+A [remote agent](../remote-agents.md#the-beyondtrust-gateway) can run a Gateway **on its
+own host**, inside a network the dashboard cannot route to at all. The dashboard never
+touches a cloud API for this one — it queues an `agent_gateway` job and the agent starts a
+privileged container beside itself. Today the driver is the
+[POV feature](../pov-instance.md#the-pov-gateway), which generates the whole policy for a
+broker VM it created.
+
+**It is not in this tab, and that is not an oversight.** The `gateways` inventory is
+per-cloud — a row's `cloud` is one of `aws`, `azure`, `gcp` — and nothing writes a row for a
+Gateway on somebody's own hardware. So an agent-installed Gateway is absent from:
+
+- the **Gateways tab** and the **Gateways tile** count;
+- the **reconcile pass**, which compares rows against what is actually running in a cloud;
+- the **reference-counted lifecycle** — nothing holds a reference on it, and the idle
+  teardown cannot reach it.
+
+You see it on its **POV row** instead, which shows whether a Gateway is named and whether a
+deploy key is stored, plus a button for the live PRA answer.
+
+### It is its own PRA Gateway, not another node
+
+This is the important difference from
+[one Gateway, many nodes](#one-pra-gateway-many-nodes). Cloud hosts all launch with the
+*same* per-cloud deploy key, which is why they cluster into a single PRA Gateway. An agent-installed Gateway
+takes a deploy key **you paste onto that POV**, so it is a separate, separately-named
+Gateway — nothing joins the cloud one, and adding one gives the cloud Gateway no capacity.
+
+It may also live in an entirely **different PRA appliance**. The tenant comes from the
+POV's explicit entry in the BeyondTrust tenant registry, and a POV whose tenant was deleted
+or disabled is an **error** rather than a quiet fall back to the default — because the
+fallback would install a customer's Gateway into somebody else's appliance.
+
+Capability requirements are the same as the GCP host in the table below: a tunnel needs
+`NET_ADMIN`, `NET_RAW`, `IPC_LOCK` and `/dev/net/tun`. Docker cannot grant that set
+granularly, which is why the agent's `policy.yaml` has to say `privileged: true` and why the
+agent refuses to start one without it. Everything else about the agent side — the four
+grants, the 2.4.0 image floor — is in
+[Remote Agents](../remote-agents.md#the-beyondtrust-gateway).
+
+### Its status is read live, never stored
+
+The POV row's Gateway state is a question asked of PRA at the moment you press the button,
+not a column. A stored status is how a row still reads *connected* three weeks after the
+environment was suspended.
+
+`connected` is deliberately **tri-state**: some appliance versions spell the field
+differently and simply do not answer, and reporting that as *disconnected* would send you to
+debug a Gateway that is fine. So "unknown — check the appliance directly" is a distinct
+result from "disconnected".
 
 ---
 
@@ -342,6 +398,14 @@ recreate) when they disagree; before that it reused the stored id unconditionall
 item kept dialling the dead address and no redeploy could converge it. If you are on an
 older build, tear the node down (**Stop**, which removes the jump item) rather than
 redeploying it.
+
+**A Gateway shows in PRA but no node is connected — and the host was rebuilt** — PRA keeps
+the **dead node**. A recreated host registers under the same Gateway *name* but from a fresh
+address, so the appliance ends up listing the old node alongside the new one, and the
+Gateway can read as disconnected while something is in fact connected. **Compare node
+counts** before and after: that, not the name, is what tells the two apart. This is the
+usual explanation for an agent-installed Gateway whose job went green while PRA looked
+empty — see [A third kind](#a-third-kind-a-gateway-on-an-agent-host).
 
 **I can't remove the managed gateway** — by design; it is created and reclaimed by the
 reference-counted lifecycle. Remove whatever still
