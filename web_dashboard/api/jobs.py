@@ -1,16 +1,20 @@
 """
 Job management API endpoints.
 """
+import logging
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
 from ..models.job import JobResponse, JobListResponse
-from ..services import agent_job_meta, job_service
-from .auth import get_current_user, can_audit_jobs
+from ..services import agent_job_meta, job_service, terraform
+from .auth import get_current_user, can_audit_jobs, require_admin
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -188,6 +192,164 @@ async def get_job_findings(
 
     return {"job_id": job.id, "status": job.status,
             **agent_job_meta.discover_findings(job.metadata_dict)}
+
+
+# -- Terraform state lock ------------------------------------------------------
+# A killed or lost terraform leaves its state lock behind, and that lock then wedges
+# every later run against that state -- including the destroy that would clean the
+# deployment up. services/terraform.py releases the locks a CANCEL orphans, because
+# there the worker killed the holder itself and knows it is dead. Everything else
+# (worker OOM-killed, replica rolled mid-apply) is an operator's call, taken against
+# the lock's own Who/Created. These two endpoints are that call, in-app, instead of
+# "go delete the .tflock object out of the bucket".
+#
+# The state key is never taken from the caller. It is read out of the failed job's own
+# error text, so an admin can break a lock a job actually complained about and nothing
+# else -- and it is read from the lock's PATH rather than assumed to be the job's own
+# id, because a decommission destroys in the provision job's deploy dir and those two
+# ids differ exactly when this feature is needed.
+
+
+def _lock_view(job) -> dict:
+    """The lock ``job`` reported, or ``{}``. Reads error_message because that is the
+    projection the operator is actually looking at on the job page."""
+    return terraform.reported_lock(job.error_message or "")
+
+
+def _blocker_view(db, created) -> list:
+    return [{"job_id": j.id, "job_type": j.job_type,
+             "started_at": j.started_at.isoformat() if j.started_at else None}
+            for j in job_service.terraform_lock_blockers(db, created)]
+
+
+def _blocker_reason(blockers: list) -> str:
+    """Why the unlock is refused, in terms the operator can act on.
+
+    Deliberately conservative: EVERY running job is considered, not an allowlist of
+    the ones known to run terraform. An allowlist would go stale the first time a new
+    job type started using terraform, and it would go stale in the unsafe direction --
+    silently failing to name a real holder. In practice this rarely fires, because a
+    blocker has to have been running since before the lock was taken, and a stale lock
+    is usually hours old. When it does fire on a wedged job, cancelling that job is the
+    way through, so say so."""
+    names = ", ".join(f"{b['job_type']} {b['job_id'][:8]}" for b in blockers)
+    return ("A job that was already running when this lock was taken could still be "
+            f"holding it: {names}. Wait for it to finish, or cancel it if it is stuck.")
+
+
+@router.get("/{job_id}/state-lock")
+async def get_job_state_lock(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Report the Terraform state lock this job failed on, and whether it is safe to
+    break. Admin-only, and a plain 200 with ``reported: null`` when the job named no
+    lock -- the panel that calls this is speculative, and a 404 for the overwhelmingly
+    common "this job is not about a lock" case would be noise, not information."""
+    job = job_service.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    reported = _lock_view(job)
+    if not reported:
+        return {"job_id": job_id, "reported": None, "can_unlock": False,
+                "reason": "This job did not report a Terraform state lock."}
+
+    state_job_id = reported["state_job_id"]
+    out = {"job_id": job_id, "reported": reported, "state_job_id": state_job_id}
+    try:
+        live = await terraform.inspect_state_lock(state_job_id)
+    except Exception as exc:
+        logger.warning("state-lock inspect for job %s (state %s) failed: %s",
+                       job_id, state_job_id, exc)
+        return {**out, "can_unlock": False,
+                "reason": f"Could not read the lock from the state backend: {exc}"}
+
+    out.update(live)
+    if not live.get("supported"):
+        return {**out, "can_unlock": False, "reason": live.get("detail", "")}
+    if not live.get("locked"):
+        return {**out, "can_unlock": False,
+                "reason": "The lock is already gone - whatever held it released it. "
+                          "Retry the operation that failed."}
+
+    created = terraform._parse_lock_time(live["info"].get("Created", ""))
+    out["age_seconds"] = (
+        int((datetime.now(timezone.utc) - created).total_seconds()) if created else None)
+
+    blockers = _blocker_view(db, created)
+    out["blockers"] = blockers
+    if blockers:
+        return {**out, "can_unlock": False, "reason": _blocker_reason(blockers)}
+    return {**out, "can_unlock": True, "reason": ""}
+
+
+@router.delete("/{job_id}/state-lock")
+async def force_unlock_job_state(
+    job_id: str,
+    request: Request,
+    lock_id: str = Query(..., description="The lock id the operator was shown. The "
+                                          "unlock is refused if it no longer matches."),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Break the Terraform state lock this job failed on. Admin-only.
+
+    Every guard from the GET is re-evaluated here rather than trusted from the page:
+    the state key is re-read from the job's error, the blocker check is re-run against
+    the LIVE lock's stamp, and terraform.force_unlock_state re-reads the lock and
+    refuses unless ``lock_id`` is still the one held. A page left open for an hour
+    therefore cannot break a lock some run took five minutes ago."""
+    job = job_service.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    reported = _lock_view(job)
+    if not reported:
+        raise HTTPException(status_code=409,
+                            detail="This job did not report a Terraform state lock.")
+    state_job_id = reported["state_job_id"]
+
+    try:
+        live = await terraform.inspect_state_lock(state_job_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not read the lock from the state backend: {exc}")
+    if not live.get("locked"):
+        raise HTTPException(
+            status_code=409,
+            detail="No lock is held on this state any more - nothing to break.")
+
+    created = terraform._parse_lock_time(live["info"].get("Created", ""))
+    blockers = _blocker_view(db, created)
+    if blockers:
+        raise HTTPException(status_code=409, detail=_blocker_reason(blockers))
+
+    try:
+        result = await terraform.force_unlock_state(state_job_id, lock_id)
+    except terraform.TerraformError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        logger.warning("force-unlock for job %s (state %s) failed: %s",
+                       job_id, state_job_id, exc)
+        raise HTTPException(status_code=502, detail=f"force-unlock failed: {exc}")
+
+    broken = result.get("info", {})
+    job_service.log_audit(
+        db, current_user.username, "terraform.force_unlock",
+        ip_address=(request.client.host if request.client else ""),
+        details={"job_id": job_id, "state_job_id": state_job_id,
+                 "backend": result.get("backend", ""),
+                 "lock_id": result.get("lock_id", ""),
+                 "who": broken.get("Who", ""), "created": broken.get("Created", ""),
+                 "operation": broken.get("Operation", "")})
+    logger.warning("terraform state lock %s on %s force-unlocked by %s (held by %s "
+                   "since %s)", result.get("lock_id", ""), state_job_id,
+                   current_user.username, broken.get("Who", ""),
+                   broken.get("Created", ""))
+    return {"message": "State lock released", "state_job_id": state_job_id, **result}
 
 
 @router.delete("/{job_id}")

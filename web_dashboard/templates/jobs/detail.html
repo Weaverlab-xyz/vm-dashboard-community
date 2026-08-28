@@ -65,6 +65,90 @@
     <pre class="text-sm text-red-600 font-mono whitespace-pre-wrap overflow-x-auto" x-text="job.error_message"></pre>
   </div>
 
+  <!--
+    Terraform state lock (admin only, and only when this job actually failed on one).
+
+    A killed or lost terraform never releases its state lock, and that lock then wedges
+    every later run against that state — including the destroy that would clean the
+    deployment up. Without this panel the only remedy was deleting the .tflock object
+    out of the storage bucket by hand.
+
+    The panel deliberately renders the lock's own Who / Created / age BEFORE offering
+    the button: force-unlock is a judgement about whether a process is dead, and an
+    operator cannot make that judgement from a bare "Unlock" control. The server
+    re-checks every guard on the click, so nothing here is load-bearing for safety —
+    it is here so the decision is an informed one.
+  -->
+  <div x-show="stateLock && stateLock.reported" x-cloak
+       class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+    <div class="flex items-start justify-between gap-4">
+      <div>
+        <p class="text-sm font-semibold text-amber-800">Terraform state lock</p>
+        <p class="text-xs text-amber-700 mt-0.5">
+          This run could not acquire the state lock. Until the lock is released, every
+          later run against this state — including a teardown — will fail the same way.
+        </p>
+      </div>
+      <span class="text-xs px-2 py-1 rounded bg-amber-100 text-amber-800 font-mono shrink-0"
+            x-text="stateLock.backend || 'unknown'"></span>
+    </div>
+
+    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 mt-3 text-xs">
+      <div class="flex gap-2">
+        <dt class="text-amber-700 w-20 shrink-0">Held by</dt>
+        <dd class="font-mono text-amber-900 break-all" x-text="lockField('Who')"></dd>
+      </div>
+      <div class="flex gap-2">
+        <dt class="text-amber-700 w-20 shrink-0">Since</dt>
+        <dd class="font-mono text-amber-900" x-text="lockAge()"></dd>
+      </div>
+      <div class="flex gap-2">
+        <dt class="text-amber-700 w-20 shrink-0">Operation</dt>
+        <dd class="font-mono text-amber-900" x-text="lockField('Operation')"></dd>
+      </div>
+      <div class="flex gap-2">
+        <dt class="text-amber-700 w-20 shrink-0">Lock id</dt>
+        <dd class="font-mono text-amber-900 break-all" x-text="lockField('ID')"></dd>
+      </div>
+      <div class="flex gap-2 sm:col-span-2">
+        <dt class="text-amber-700 w-20 shrink-0">State</dt>
+        <dd class="font-mono text-amber-900 break-all" x-text="stateLock.state_job_id"></dd>
+      </div>
+    </dl>
+
+    <!-- Refused: say which guard said no, in terms the operator can act on. -->
+    <p x-show="!stateLock.can_unlock" class="text-xs text-amber-800 mt-3 pt-3 border-t border-amber-200"
+       x-text="stateLock.reason"></p>
+
+    <div x-show="stateLock.can_unlock" class="mt-3 pt-3 border-t border-amber-200">
+      <template x-if="!confirmUnlock">
+        <button @click="confirmUnlock = true"
+                class="text-xs px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded transition">
+          Break this lock…
+        </button>
+      </template>
+      <template x-if="confirmUnlock">
+        <div>
+          <p class="text-xs text-amber-900 mb-2">
+            Only break this lock if the process above is genuinely gone. If it is still
+            running, releasing the lock lets a second run write the same state and can
+            corrupt it.
+          </p>
+          <div class="flex items-center gap-2">
+            <button @click="forceUnlock()" :disabled="unlocking"
+                    class="text-xs px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded transition disabled:opacity-50">
+              <span x-text="unlocking ? 'Releasing…' : 'Yes, release it'"></span>
+            </button>
+            <button @click="confirmUnlock = false" :disabled="unlocking"
+                    class="text-xs px-3 py-1.5 bg-white border border-amber-300 text-amber-800 rounded transition disabled:opacity-50">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
   <!-- Live log output -->
   <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-6">
     <div class="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
@@ -283,6 +367,12 @@
       // an empty array means "this scan genuinely found nothing", which is a result.
       findings: null,
       scan: {},
+      // null unless this job failed on a terraform state lock AND the viewer is an
+      // admin — the panel is hidden for everyone else, and for every job type that
+      // never touches terraform (which is nearly all of them).
+      stateLock: null,
+      confirmUnlock: false,
+      unlocking: false,
 
       // Fallback when the job_type isn't in JOB_ORIGIN (typically only hit
       // when a new job_type is added without updating the map). Dashboard
@@ -300,6 +390,7 @@
           this.connectWs();
         }
         await this.loadFindings();
+        await this.loadStateLock();
       },
 
       isTerminal() {
@@ -334,8 +425,10 @@
             if (data.type === 'state' && data.status && ['completed', 'failed', 'cancelled'].includes(data.status)) {
               this.loadJob(); // Refresh for final details
               // A scan that finishes while the operator is watching should fill the
-              // findings panel in place, not on the next reload.
+              // findings panel in place, not on the next reload. Same for a run that
+              // fails on a state lock: the remedy should appear with the failure.
               this.loadFindings();
+              this.loadStateLock();
               this.wsConnected = false;
             }
           },
@@ -388,6 +481,62 @@
       streamLabel() {
         if (this.wsConnected) return 'Connected';
         return this.isTerminal() ? 'Output complete' : 'Disconnected';
+      },
+
+      // ── Terraform state lock (admin only) ──
+      // Speculative: most jobs never touch terraform, so a null stateLock keeps the
+      // panel hidden and this whole path costs one 200 with reported:null. The server
+      // decides everything that matters — which state key this job may act on, whether
+      // anything could still be holding the lock, and whether the id still matches on
+      // the click. Nothing here is a security control.
+      async loadStateLock() {
+        if (!this.$store.auth.isAdmin) return;
+        if (!['failed', 'cancelled'].includes(this.job.status)) return;
+        try {
+          const resp = await API.get(`/api/jobs/${this.jobId}/state-lock`);
+          this.stateLock = (resp && resp.reported) ? resp : null;
+        } catch (e) {
+          this.stateLock = null;   // a 403/404 here is not worth a toast
+        }
+      },
+
+      lockField(name) {
+        return (this.stateLock && this.stateLock.info && this.stateLock.info[name])
+          || (this.stateLock && this.stateLock.reported && this.stateLock.reported[name])
+          || '—';
+      },
+
+      // The age is what an operator actually reasons about ("that replica died an hour
+      // ago"), so lead with it and keep the raw stamp alongside.
+      lockAge() {
+        const secs = this.stateLock ? this.stateLock.age_seconds : null;
+        const stamp = this.lockField('Created');
+        if (secs === null || secs === undefined) return stamp;
+        const mins = Math.floor(secs / 60);
+        let rough;
+        if (mins < 1) rough = 'just now';
+        else if (mins < 60) rough = `${mins}m ago`;
+        else if (mins < 1440) rough = `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+        else rough = `${Math.floor(mins / 1440)}d ago`;
+        return `${rough} (${stamp})`;
+      },
+
+      async forceUnlock() {
+        const id = this.lockField('ID');
+        this.unlocking = true;
+        try {
+          await API.delete(`/api/jobs/${this.jobId}/state-lock?lock_id=${encodeURIComponent(id)}`);
+          toast('State lock released — retry the operation that failed.', 'success');
+          this.stateLock = null;
+          this.confirmUnlock = false;
+        } catch (e) {
+          // A 409 here is a guard doing its job (the lock turned over, or something is
+          // still running), so the message is the useful part — surface it verbatim.
+          toast(e.message || 'Failed to release the state lock', 'error');
+          await this.loadStateLock();
+        } finally {
+          this.unlocking = false;
+        }
       },
 
       // ── Discovery findings (agent_discover) ──

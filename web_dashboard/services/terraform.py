@@ -11,6 +11,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import contextlib
 try:
     import fcntl  # POSIX-only; the app runs in Linux containers (absent on Windows dev hosts → locking is a no-op there).
@@ -399,7 +400,15 @@ def _parse_lock_info(text: str) -> dict:
     at = (text or "").find("Lock Info:")
     if at < 0:
         return {}
-    return dict(_LOCK_FIELD_RE.findall(text[at:]))
+    # FIRST value wins per field. A job's error text can carry more than one block
+    # (the error itself, then the same failure echoed in the captured output), and
+    # dict() over findall would take the LAST -- blending two blocks into a lock that
+    # never existed if they ever differ. The first block is the one "Lock Info:"
+    # introduces, which is the one the operator is looking at.
+    out: dict = {}
+    for key, value in _LOCK_FIELD_RE.findall(text[at:]):
+        out.setdefault(key, value)
+    return out
 
 
 def _parse_lock_time(value: str):
@@ -462,6 +471,135 @@ def _release_own_lock_sync(deploy_dir: str, env: Optional[dict], started_at) -> 
         return f"released {lock_id}"
     except Exception as exc:
         return f"release failed: {exc}"
+
+
+# -- Operator-driven force-unlock ---------------------------------------------
+# The half the cancel path above deliberately refuses. A lock stranded any OTHER way
+# -- worker OOM-killed, replica rolled mid-apply, container recreated -- is held by a
+# process nothing in here can prove is dead, so breaking it is an operator's decision,
+# taken against the lock's own Who/Created. That is what `terraform force-unlock` is
+# for, and this is the in-app equivalent so the remedy is not "delete the .tflock
+# object out of the bucket by hand".
+#
+# Two properties keep it narrow, and both live at the API layer's call site:
+#   - The state to act on is READ OUT OF THE FAILED JOB'S OWN ERROR (see
+#     :func:`reported_lock`), never supplied by the caller. An operator can only
+#     break a lock a job actually complained about.
+#   - The unlock is optimistic: it re-reads the lock and refuses unless the id still
+#     matches the one the operator was shown, so a run that grabbed the lock between
+#     the page load and the click is never the one that gets broken.
+
+# A job id path segment, as it appears in `terraform-state/<job_id>/…`. Anchored and
+# strict because it is interpolated into a filesystem path below: this comes out of a
+# terraform error message, which is not a trusted source of path components.
+_STATE_JOB_ID_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{7,63}$")
+_STATE_PATH_RE = re.compile(
+    re.escape(_TF_STATE_PREFIX) + r"/(?P<job>[0-9a-fA-F][0-9a-fA-F-]{7,63})/")
+
+
+def reported_lock(text: str) -> dict:
+    """The lock a failed run complained about: its ``Lock Info`` fields plus the
+    ``state_job_id`` its Path names. ``{}`` when the text reports no lock.
+
+    This is the only thing that decides WHICH state an operator unlock may touch, so
+    it deliberately reads the state key out of the lock's own Path rather than
+    assuming the failing job's id. Those differ in the common case: a decommission
+    destroys in the PROVISION job's deploy dir, so its lock lives under the provision
+    job's state key while the failure is recorded against the decommission job."""
+    info = _parse_lock_info(text)
+    if not info:
+        return {}
+    m = _STATE_PATH_RE.search(info.get("Path", ""))
+    if not m:
+        return {}
+    return {**info, "state_job_id": m.group("job")}
+
+
+@contextlib.contextmanager
+def _lock_workdir(state_job_id: str):
+    """A throwaway dir NAMED for the deployment, so :func:`_backend_settings` resolves
+    the same state key that deployment uses.
+
+    Only ``backend.tf`` goes in it: `terraform init` against a bare backend block is
+    enough to reach the lock, so breaking one needs neither the module (which may not
+    even be shipped in this image) nor any provider credentials -- only the backend's."""
+    if not _STATE_JOB_ID_RE.match(state_job_id or ""):
+        raise TerraformError(f"Refusing to act on state key {state_job_id!r}: "
+                             "not a job id.")
+    root = tempfile.mkdtemp(prefix="tf-unlock-")
+    try:
+        work = os.path.join(root, state_job_id)
+        os.makedirs(work)
+        yield work
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _read_lock_sync(work: str, backend_env: Optional[dict]) -> dict:
+    """Probe an initialised dir for the lock its backend currently holds."""
+    probe = _run(["force-unlock", "-force", _LOCK_PROBE_ID], work, timeout=60,
+                 env=backend_env)
+    return _parse_lock_info((probe.stdout or "") + "\n" + (probe.stderr or ""))
+
+
+_LOCAL_BACKEND_DETAIL = (
+    "The active storage backend is local, so state and its lock live in the deploy "
+    "directory and the operating system drops that lock when the process dies. There "
+    "is no remote lock to break."
+)
+
+
+def _inspect_state_lock_sync(state_job_id: str) -> dict:
+    """Report the lock currently held on ``state_job_id``'s state."""
+    with _lock_workdir(state_job_id) as work:
+        backend_type, backend_config, backend_env = _backend_settings(work)
+        if backend_type == "local":
+            return {"backend": "local", "supported": False, "locked": False,
+                    "info": {}, "detail": _LOCAL_BACKEND_DETAIL}
+        _init_sync(work, backend_env, backend_type, backend_config)
+        info = _read_lock_sync(work, backend_env)
+        return {"backend": backend_type, "supported": True,
+                "locked": bool(info.get("ID")), "info": info, "detail": ""}
+
+
+def _force_unlock_state_sync(state_job_id: str, expected_id: str) -> dict:
+    """Break the lock on ``state_job_id``'s state, but only if it is still the lock
+    the caller was shown. Raises :class:`TerraformError` on every refusal."""
+    with _lock_workdir(state_job_id) as work:
+        backend_type, backend_config, backend_env = _backend_settings(work)
+        if backend_type == "local":
+            raise TerraformError(_LOCAL_BACKEND_DETAIL)
+        _init_sync(work, backend_env, backend_type, backend_config)
+        # Re-read rather than trusting what the page was rendered from. The gap
+        # between an operator loading the panel and clicking the button is unbounded,
+        # and a legitimate run can take the lock inside it.
+        info = _read_lock_sync(work, backend_env)
+        lock_id = info.get("ID", "")
+        if not lock_id:
+            raise TerraformError(
+                "No lock is held on this state any more — nothing to break. "
+                "Whatever held it released it; retry the operation that failed.")
+        if lock_id != expected_id:
+            raise TerraformError(
+                f"This is no longer the lock you were shown (it is now {lock_id}, you "
+                f"confirmed {expected_id}), so it was NOT broken — a new run has taken "
+                "the lock since the page loaded. Re-read the lock and decide again.")
+        r = _run(["force-unlock", "-force", lock_id], work, timeout=60, env=backend_env)
+        if r.returncode != 0:
+            raise TerraformError(
+                f"terraform force-unlock failed:\n{(r.stderr or r.stdout).strip()}")
+        return {"unlocked": True, "lock_id": lock_id, "info": info,
+                "backend": backend_type}
+
+
+async def inspect_state_lock(state_job_id: str) -> dict:
+    """Async wrapper for :func:`_inspect_state_lock_sync`."""
+    return await asyncio.to_thread(_inspect_state_lock_sync, state_job_id)
+
+
+async def force_unlock_state(state_job_id: str, expected_id: str) -> dict:
+    """Async wrapper for :func:`_force_unlock_state_sync`."""
+    return await asyncio.to_thread(_force_unlock_state_sync, state_job_id, expected_id)
 
 
 async def _stream(tf_args: list, cwd: str, env: Optional[dict],
