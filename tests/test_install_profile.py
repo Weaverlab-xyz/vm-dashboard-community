@@ -147,6 +147,45 @@ def test_the_background_warmers_respect_the_mask():
             f"{warmer} still reads config_service directly"
 
 
+def test_every_base_extending_page_supplies_the_nav_flags():
+    """base.html includes _nav_links.html, which gates every optional link on a
+    ``*_enabled`` value from ``_feature_flags()``. A route that renders a base-extending
+    template without spreading it does not render a *smaller* nav — it renders one where
+    Workstation, Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng, Connections, Containers,
+    Desktops, Databases, Functions, Kubernetes, Costs, Configuration, POV and Agents are
+    all silently missing. Jinja resolves an undefined name to falsey, so every
+    ``{% if <flag> %}`` fails closed and nothing errors.
+
+    /users, /groups and /workgroups had exactly this: admin pages reached *from* those
+    links, which then dropped them, so the way out was the browser's back button.
+
+    Passing the dict through a local (``flags = _feature_flags()`` ... ``**flags``) counts
+    — /connections does that so it can also gate on the values.
+    """
+    tpl_dir = os.path.join(_ROOT, "web_dashboard", "templates")
+    src = _read(_MAIN)
+    offenders = []
+    for chunk in src.split("@app.get(")[1:]:
+        path = chunk.split('"')[1]
+        head, _, rest = chunk.partition("async def")
+        if "HTMLResponse" not in head:
+            continue
+        body = rest.split("\n@app.")[0]
+        m = re.search(r'TemplateResponse\(\s*"?([\w/.\-]+\.html)', body)
+        if not m:
+            continue
+        tpl = os.path.join(tpl_dir, m.group(1))
+        if not os.path.isfile(tpl):
+            continue
+        if 'extends "base.html"' not in _read(tpl):
+            continue          # login/setup/swagger draw their own chrome
+        if "_feature_flags()" not in body:
+            offenders.append(f"{path} -> {m.group(1)}")
+    assert not offenders, (
+        "pages that extend base.html but never receive the nav flags, so every optional "
+        f"nav link renders blank: {offenders}")
+
+
 def test_there_is_no_both_profile():
     """A `both` profile would have to pick a tenant source at every call site."""
     src = _read(_FLAGS)

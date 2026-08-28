@@ -1335,6 +1335,7 @@ async def users_page(request: Request):
             # can't drift from api/auth.py (was hard-coded in the template).
             "permission_scopes": auth.PERMISSION_SCOPES,
             "permission_levels": auth.PERMISSION_LEVELS,
+            **_feature_flags(),
         },
     )
 
@@ -1350,13 +1351,15 @@ async def groups_page(request: Request):
             # can't drift from api/auth.py (was hard-coded in the template).
             "permission_scopes": auth.PERMISSION_SCOPES,
             "permission_levels": auth.PERMISSION_LEVELS,
+            **_feature_flags(),
         },
     )
 
 
 @app.get("/workgroups", response_class=HTMLResponse, include_in_schema=False)
 async def workgroups_page(request: Request):
-    return templates.TemplateResponse("workgroups/index.html", {"request": request})
+    return templates.TemplateResponse(
+        "workgroups/index.html", {"request": request, **_feature_flags()})
 
 
 # ── Health / diagnostic ───────────────────────────────────────────────────────
