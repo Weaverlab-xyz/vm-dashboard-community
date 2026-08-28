@@ -3,28 +3,32 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Login – Infrastructure Management</title>
+  <title>{{ theme.title_prefix }}Sign in</title>
+  <link rel="icon" href="{{ theme.favicon }}">
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <script src="/static/js/app.js"></script>
 </head>
-<body class="bg-gradient-to-br from-blue-900 to-blue-700 min-h-screen flex items-center justify-center">
+<body class="{{ theme.login_bg }} min-h-screen flex items-center justify-center">
 
   <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm"
        x-data="loginForm()">
 
     <!-- Logo -->
-    <div class="flex justify-center mb-6">
-      <div class="bg-blue-100 rounded-full p-4">
-        <svg class="h-10 w-10 text-blue-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
-        </svg>
+    <div class="flex justify-center mb-5">
+      <div class="{{ theme.login_icon_bg }} rounded-full p-4">
+        {% with mark_warp = theme.login_mark_warp, mark_weft = theme.login_mark_weft,
+                mark_size = 'h-10 w-10', mark_stroke = '2' %}
+          {% include '_brand_mark.html' %}
+        {% endwith %}
       </div>
     </div>
 
-    <h1 class="text-2xl font-bold text-center text-gray-800 mb-1">Infrastructure Management</h1>
-    <p class="text-sm text-center text-gray-500 mb-6">Sign in to manage your virtual machines</p>
+    <h1 class="text-2xl font-bold text-center text-gray-800 mb-1">{{ theme.brand }}</h1>
+    <p class="text-xs text-center text-gray-400 mb-3">{{ theme.brand_full }}</p>
+    <div class="flex justify-center mb-6">
+      <span class="text-xs font-semibold {{ theme.chip_class }} px-2.5 py-0.5 rounded-full">{{ theme.product }} &middot; {{ theme.chip_label }}</span>
+    </div>
 
     <!-- Error alert -->
     <div x-show="error" x-cloak
@@ -37,7 +41,7 @@
         <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
         <input type="text" x-model="username" required
                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
-                      focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      focus:outline-none focus:ring-2 {{ theme.login_ring }} focus:border-transparent"
                placeholder="Enter username"
                :disabled="loading">
       </div>
@@ -46,13 +50,13 @@
         <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
         <input type="password" x-model="password" required
                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
-                      focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      focus:outline-none focus:ring-2 {{ theme.login_ring }} focus:border-transparent"
                placeholder="Enter password"
                :disabled="loading">
       </div>
 
       <button type="submit"
-              class="w-full bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-semibold
+              class="w-full {{ theme.login_btn }} disabled:opacity-50 text-white font-semibold
                      py-2.5 rounded-lg transition text-sm"
               :disabled="loading">
         <span x-show="!loading">Sign In</span>
@@ -98,8 +102,8 @@
     <div x-show="step === 'fido2'" x-cloak>
       <div class="flex flex-col items-center text-center mb-6">
         <!-- Security key icon -->
-        <div class="bg-blue-50 rounded-full p-4 mb-4">
-          <svg class="h-10 w-10 text-blue-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div class="{{ theme.login_alt_bg }} rounded-full p-4 mb-4">
+          <svg class="h-10 w-10 {{ theme.login_alt_fg }}" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                   d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
           </svg>
@@ -111,7 +115,7 @@
       </div>
 
       <button @click="submitFido2()"
-              class="w-full bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-semibold
+              class="w-full {{ theme.login_btn }} disabled:opacity-50 text-white font-semibold
                      py-2.5 rounded-lg transition text-sm mb-3"
               :disabled="loading">
         <span x-show="!loading">Verify with Security Key</span>

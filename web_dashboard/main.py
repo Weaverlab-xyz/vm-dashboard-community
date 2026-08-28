@@ -26,6 +26,7 @@ from .logging_context import (
 from .database import SessionLocal, User, create_admin_user, init_db
 from .services import cache_service
 from .services import config_service, feature_flags
+from .services import ui_theme
 from .services import public_url
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -680,7 +681,35 @@ _templates_dir = os.path.join(_base_dir, "templates")
 if os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
-templates = Jinja2Templates(directory=_templates_dir)
+
+def _profile_context(request: Request) -> dict:
+    """Brand + chrome tokens for every template render, on every route.
+
+    Deliberately a context processor rather than ``env.globals``: ``install_profile`` is a
+    DB-backed value the setup wizard writes (api/setup.py), so a global -- read once at
+    import time, like ``app_env`` below -- would show the old brand until a restart.
+
+    It is equally deliberately not part of ``_feature_flags()``: /users, /groups and
+    /workgroups don't spread that dict, and the brand would go blank on exactly those three
+    pages. A processor reaches every render, including the standalone login.html, with no
+    per-route change.
+
+    ``install_profile()`` reads config_service, which is cached per process, so this is one
+    cheap lookup per page.
+    """
+    profile = feature_flags.install_profile()
+    return {
+        "install_profile": profile,
+        "theme": ui_theme.theme_for(profile, settings.app_env),
+    }
+
+
+templates = Jinja2Templates(
+    directory=_templates_dir,
+    context_processors=[_profile_context],
+)
+# Kept: read by call sites outside the theme, and theme_for() takes it as an argument
+# rather than reading settings itself so it stays a pure function.
 templates.env.globals["app_env"] = settings.app_env
 
 
@@ -1278,10 +1307,17 @@ async def agents_page(request: Request):
     return templates.TemplateResponse("agents/index.html", {"request": request, **_feature_flags()})
 
 
-@app.get("/pov", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/pov", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("pov_environments_enabled")])
 async def pov_page(request: Request):
-    """POV environments. Nav- and router-gated on pov_environments_enabled, which is
-    available on a POV instance only — see docs/pov-instance.md."""
+    """POV environments. Nav-, page- and router-gated on pov_environments_enabled, which is
+    available on a POV instance only — see docs/pov-instance.md.
+
+    The page gate goes through _feature_gate (and so through feature_flags.enabled) rather
+    than config_service, because that is also what renders the nav link. Without it this
+    route rendered the POV page on a DEMO instance to anyone who typed the URL — a page
+    whose whole premise is a registry of customer tenants that a demo instance does not have.
+    """
     return templates.TemplateResponse("pov/index.html", {"request": request, **_feature_flags()})
 
 

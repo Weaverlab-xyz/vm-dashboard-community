@@ -3,7 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{% block title %}Infrastructure Management{% endblock %}</title>
+  <title>{{ theme.title_prefix }}{% block title %}Infrastructure Management{% endblock %}</title>
+  {# Profile-tinted mark. Fully percent-encoded in ui_theme -- a literal '#' in a hex
+     colour would start a URI fragment and truncate the SVG. #}
+  <link rel="icon" href="{{ theme.favicon }}">
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <script src="/static/js/app.js"></script>
@@ -12,29 +15,36 @@
     .progress-bar-fill { transition: width 0.4s ease; }
   </style>
 </head>
-<body class="bg-gray-50 min-h-screen font-sans text-gray-800">
+<body class="{{ theme.body_bg }} min-h-screen font-sans text-gray-800">
 
   <!-- Navigation -->
-  <nav class="{{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} text-white shadow-lg relative" x-data="responsiveNav()" x-cloak x-show="$store.auth.isLoggedIn" @keydown.escape.window="mobileNav = false">
+  <nav class="{{ theme.nav_bg }} text-white shadow-lg relative" x-data="responsiveNav()" x-cloak x-show="$store.auth.isLoggedIn" @keydown.escape.window="mobileNav = false">
     <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
       <div x-ref="navRow" class="flex items-center justify-between h-16 overflow-hidden">
         <!-- Brand -->
-        <div class="flex items-center space-x-3">
-          <svg class="h-7 w-7 {{ 'text-blue-300' if app_env == 'production' else 'text-emerald-200' }}" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
-          </svg>
-          <a href="/" class="text-lg font-bold tracking-tight {{ 'hover:text-blue-200' if app_env == 'production' else 'hover:text-emerald-200' }}">Infrastructure Management</a>
-          {% if app_env != 'production' %}
-          <span class="text-xs font-semibold bg-emerald-500 text-white px-2 py-0.5 rounded-full uppercase tracking-wide mr-3">Community</span>
-          {% endif %}
+        {# Brand lockup: [mark] Weaver Lab / <product> [chip].
+
+           Weaver Lab is constant across both instances; the product word, the accent
+           slash and the chip are what say WHICH instance you are on. The chip is not
+           colour-only on purpose -- "Demo" vs "Customer tenants" survives a greyscale
+           screenshot and colour-vision deficiency, which a violet nav bar does not. #}
+        <div class="flex items-center space-x-2.5">
+          {% with mark_warp = theme.warp, mark_weft = theme.weft %}
+            {% include '_brand_mark.html' %}
+          {% endwith %}
+          <a href="/" class="text-lg font-bold tracking-tight {{ theme.brand_hover }}">{{ theme.brand }}</a>
+          <span class="{{ theme.slash }} font-light" aria-hidden="true">/</span>
+          <span class="text-sm font-medium text-white/90">{{ theme.product }}</span>
+          {# No uppercase/tracking-wide: it cost 17px of nav-bar width for no legibility,
+             and responsiveNav folds the whole nav the moment the row overflows. #}
+          <span class="text-xs font-semibold {{ theme.chip_class }} px-2 py-0.5 rounded-full mr-3">{{ theme.chip_label }}</span>
         </div>
 
         <!-- Nav links: same content rendered twice — inline in the bar
              when it fits, in a right-side flyout drawer when it doesn't.
              _nav_links.html is the single source for the link list. -->
-        {% set nav_hover = 'hover:bg-blue-800' if app_env == 'production' else 'hover:bg-emerald-600' %}
-        {% set nav_active = 'bg-blue-800' if app_env == 'production' else 'bg-emerald-600' %}
+        {% set nav_hover = theme.nav_hover %}
+        {% set nav_active = theme.nav_active %}
         <div x-show="!compact"
              @click="mobileNav = false"
              class="flex items-center space-x-1 flex-shrink-0">
@@ -48,14 +58,14 @@
              x-transition:leave="transition ease-in duration-200 transform"
              x-transition:leave-start="translate-x-0"
              x-transition:leave-end="translate-x-full"
-             class="fixed top-0 right-0 h-full w-72 flex flex-col items-stretch space-y-1 {{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} shadow-2xl z-50 p-4 pt-20 overflow-y-auto"
+             class="fixed top-0 right-0 h-full w-72 flex flex-col items-stretch space-y-1 {{ theme.nav_bg }} shadow-2xl z-50 p-4 pt-20 overflow-y-auto"
              x-cloak>
           {% include '_nav_links.html' %}
         </div>
 
         <!-- User menu -->
-        {% set user_text = 'text-blue-200' if app_env == 'production' else 'text-emerald-200' %}
-        {% set logout_btn = 'bg-blue-700 hover:bg-blue-600' if app_env == 'production' else 'bg-emerald-600 hover:bg-emerald-500' %}
+        {% set user_text = theme.user_text %}
+        {% set logout_btn = theme.logout_btn %}
         <div class="flex items-center space-x-3">
           <button @click="mobileNav = !mobileNav"
                   x-show="compact"
@@ -95,6 +105,10 @@
          class="fixed inset-0 bg-black/40 z-40"
          x-cloak></div>
   </nav>
+
+  {# Profile accent rail. Empty on a demo instance; on POV it is the one bit of chrome
+     that stays visible in a cropped screenshot of the page body. #}
+  {% if theme.rail %}<div class="{{ theme.rail }}"></div>{% endif %}
 
   <!-- Page content -->
   <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
