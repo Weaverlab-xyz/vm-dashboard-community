@@ -1753,6 +1753,34 @@ class PovEnvironment(Base):
     # exists to prevent — see services/pov_share. NULL = no link published.
     share_expires_at = Column(DateTime, nullable=True)
 
+    # What the reconcile sweep last read back off the platform. Written by
+    # services/pov_reconcile and by nothing else, so a stale value is always "the sweep
+    # has not run", never "some other writer disagreed".
+    #
+    # These exist because `runstate` above was, until the sweep landed, written ONLY at
+    # provision and at an explicit power action. So `suspend_on_idle` — the single biggest
+    # lever on lab-platform spend — would suspend a POV and this row would go on claiming
+    # it was running forever. The page gates its Start/Suspend buttons on that value, so
+    # the cost feature working correctly was exactly what broke the controls.
+    platform_seen_at = Column(DateTime, nullable=True)
+    # The platform's own throttle flag. On the row rather than only in the live read
+    # because the managed table is where the buttons are, and "this will be slow" belongs
+    # next to the button, not on the read-only table beside it.
+    rate_limited = Column(Boolean, default=False, nullable=True)
+    # The environment was not visible on the platform at the last sweep, AND a direct read
+    # of it answered 404. Two signals rather than one on purpose: the listing is
+    # project-scoped, so absence from it can mean "outside the configured project" rather
+    # than "gone", and marking a live customer environment as missing on that evidence
+    # would be the same false positive `verify` refuses to make.
+    #
+    # Never acted on automatically. It is a flag for a human, because the row still holds
+    # the only record of what this POV was wired into.
+    platform_missing = Column(Boolean, default=False, nullable=True)
+    # The platform's idle timer, in seconds, as last read. Display-only today: it is set
+    # at provision from the create form and there is currently no way to change it after,
+    # which is worth being able to SEE before it is worth being able to edit.
+    suspend_on_idle_seconds = Column(Integer, nullable=True)
+
     # Slice 8: the auto-delete timer. NULL = never, exactly as elsewhere — so enabling
     # expiry on an existing estate selects zero rows.
     expires_at = Column(DateTime, nullable=True, index=True)
@@ -2146,6 +2174,13 @@ def init_db():
             # original create_all, so an install from before this one has the table but
             # not this column. Backfills to NULL, which reads as "no link published".
             "ALTER TABLE pov_environments ADD COLUMN share_expires_at TIMESTAMP",
+            # The reconcile sweep's four columns. Every one backfills to NULL, which reads
+            # as "the sweep has not seen this row yet" — the correct answer for an estate
+            # that predates it, and what keeps the first pass from inventing history.
+            "ALTER TABLE pov_environments ADD COLUMN platform_seen_at TIMESTAMP",
+            "ALTER TABLE pov_environments ADD COLUMN rate_limited BOOLEAN",
+            "ALTER TABLE pov_environments ADD COLUMN platform_missing BOOLEAN",
+            "ALTER TABLE pov_environments ADD COLUMN suspend_on_idle_seconds INTEGER",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.

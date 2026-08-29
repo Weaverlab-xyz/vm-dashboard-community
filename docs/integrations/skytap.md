@@ -103,6 +103,15 @@ idle timer. A dashboard that polls environments would hold every one of them awa
 quietly defeat `suspend_on_idle` — the single biggest lever on Skytap spend. The only
 symptom would be the invoice, which is exactly why it is not left to the caller.
 
+**The dashboard's view of an environment is refreshed on a timer.** A POV's `runstate` used
+to be written only when this dashboard changed it — at provision, or at an explicit Start or
+Suspend. Nothing asked Skytap again. So `suspend_on_idle`, the biggest lever on spend, would
+suspend an environment and the POV page would go on saying `running` indefinitely; worse, it
+gates the Start button on that value, so the environment you most needed to wake was the one
+whose Start button was hidden. A **reconcile sweep** (`services/pov_reconcile`) now reads
+every managed environment back every ten minutes — one paginated collection read — and the
+POV page shows when each row was last confirmed rather than implying it is live.
+
 **Collections paginate by count/offset.** A single GET returns a first page that looks
 exactly like a complete answer, so listings are walked to the end.
 
@@ -117,6 +126,7 @@ implement is silently ignored, and an unscoped list looks exactly like a correct
 
 | Action | What happens |
 |---|---|
+| **Reconcile** | Every ten minutes, and on **Re-check platform**: read every managed environment back, update its runstate, rate-limit flag and idle timer, and flag one that has vanished. Never destroys anything |
 | **Build a template** | Instantiate a base template into a scratch environment, check it against [the template contract](#the-template-contract), install the metadata runner on its broker VM, save the environment back as a **new template**, then reap the scratch environment. See [building a template](#building-a-template) |
 | **Create** | Instantiate a template, set the idle timer, power on, wait for it to settle, read the VMs back, then enrol [the broker agent](#the-broker-vm) |
 | **Start / Suspend** | A runstate change, then a poll until it settles |
@@ -419,6 +429,9 @@ rather than failing somewhere inside a job.
 | No POV nav link at all | `pov_environments_enabled` is off, or the profile is `demo` | The flag must be ON **and** the profile must be `pov` — `GET /api/features` shows `install_profile` |
 | "Skytap is still busy after N retries" | The account is genuinely rate-limited | Expected under heavy concurrent use; retry shortly. Running or suspending many VMs at once makes it more likely |
 | An environment shows a **rate-limited** badge | Skytap set `rate_limited` on it | Operations against it will be slow until it clears |
+| A POV reads **running** on the page but is suspended in Skytap | The reconcile sweep has not run since it changed | The row says how old the reading is — `confirmed 8m ago`. Press **Re-check platform** for the answer now. Both power buttons show while a reading is stale, so the one you need is never hidden |
+| A POV is badged **gone from the platform** | Skytap answered 404 for it | Somebody deleted the environment outside this dashboard. The row is kept deliberately — it holds this POV's tenant references and reaping manifest — so use **Destroy** to close it out, which is idempotent on a 404 |
+| A POV is badged gone but definitely exists | The Project ID changed under it, and the direct read also failed | The sweep confirms with a direct read before flagging, so this needs both to fail. Check the Project ID, then press **Re-check platform** — the flag clears by itself once the environment is visible again |
 | Environments list is empty but the account has some | The token's user cannot see them, or they are outside the configured project | Check the user's access in Skytap, or clear the Project ID to widen the scope. **Test connection** says which of the two it is |
 | **Test connection** says the account exposes no templates | The token authenticates but sees nothing | Check the user's access in Skytap. If a Project ID is set, clear it first to find out whether the project is the constraint |
 | "Skytap has no project N (404)" on the POV page or in Test connection | The Project ID is stale, wrong, or belongs to an account this token cannot see | Correct or clear it in Settings → Integrations → Skytap. Blank lists everything the token can see |

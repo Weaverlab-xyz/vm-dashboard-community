@@ -60,7 +60,7 @@ HANDLED_TYPES = (
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "pov_env_provision", "pov_env_destroy", "pov_env_power", "pov_env_broker",
-    "pov_env_wireup", "pov_template_build",
+    "pov_env_wireup", "pov_template_build", "pov_env_reconcile",
     "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
@@ -182,6 +182,10 @@ LIGHT_TYPES = (
     # enrolment that happens in the APP process. Nothing local, nothing streamed -- and
     # tiering it heavier would let one POV's enrolment wait block another POV's provision.
     "pov_env_broker",
+    # One paginated collection read per configured lab platform, then a handful of row
+    # updates. No local process, no streamed output — and it must never queue behind a
+    # provision, because a stale runstate is what it exists to fix.
+    "pov_env_reconcile",
 )
 
 # At most ONE in flight per type, whatever the tier allows. These write DEPLOYMENT-global
@@ -399,9 +403,10 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import portainer_import_service
             await portainer_import_service.run_import(db, job_id=job_id, meta=meta)
         elif job_type in ("pov_env_provision", "pov_env_destroy", "pov_env_power",
-                          "pov_env_broker", "pov_env_wireup", "pov_template_build"):
-            from .services import (pov_broker, pov_env_service, pov_template_builder,
-                                   pov_wireup)
+                          "pov_env_broker", "pov_env_wireup", "pov_template_build",
+                          "pov_env_reconcile"):
+            from .services import (pov_broker, pov_env_service, pov_reconcile,
+                                   pov_template_builder, pov_wireup)
             handler = {
                 "pov_env_provision": pov_env_service.run_env_provision,
                 "pov_env_destroy": pov_env_service.run_env_destroy,
@@ -409,6 +414,7 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                 "pov_env_broker": pov_broker.run_env_broker,
                 "pov_env_wireup": pov_wireup.run_env_wireup,
                 "pov_template_build": pov_template_builder.run_template_build,
+                "pov_env_reconcile": pov_reconcile.run_reconcile,
             }[job_type]
             await handler(job_id, meta)
         elif job_type == "clouddb_provision":

@@ -110,6 +110,11 @@ async def lifespan(app: FastAPI):
     warmers.append(
         asyncio.create_task(_expiry_sweeper_loop(), name="expiry_sweeper_loop")
     )
+    # POV reconcile — always launched; no-ops while POV environments are off or masked,
+    # so turning the feature on activates the next pass without a restart.
+    warmers.append(
+        asyncio.create_task(_pov_reconcile_loop(), name="pov_reconcile_loop")
+    )
     # Cost-summary warmer — always launched; no-ops (no billable calls) while the
     # cost feature is off, so flipping the flag in Settings warms the next pass.
     warmers.append(
@@ -285,6 +290,44 @@ async def _expiry_sweeper_loop() -> None:
             interval = expiry_policy.sweep_interval_seconds()
         except Exception:
             interval = 30 * 60
+        await asyncio.sleep(interval)
+
+
+# ── POV reconcile loop ───────────────────────────────────────────────────────
+
+async def _pov_reconcile_loop() -> None:
+    """Enqueue one POV reconcile per interval.
+
+    Same shape and the same reasoning as _expiry_sweeper_loop: this ONLY enqueues, and
+    winning ``jobs_worker._claim_one``'s row is what makes a pass single-flight across both
+    app workers and every worker replica.
+
+    Deliberately NOT folded into the expiry sweep, which already walks the same rows.
+    ``expiry_reaper.enqueue_sweep_if_due`` returns None while ``resource_expiry_enabled``
+    is off, and a fresh POV instance starts with it off (docs/pov-instance.md) — so a POV's
+    runstate would stop being refreshed because an unrelated feature had not been turned on.
+
+    Always launched, and a no-op when POV environments are off or masked by the profile, so
+    turning the feature on activates the next pass with no restart.
+    """
+    from .database import SessionLocal
+    from .services import pov_reconcile
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(pov_reconcile.enqueue_if_due, db)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("POV reconcile enqueue failed: %s", exc)
+        try:
+            interval = pov_reconcile.interval_seconds()
+        except Exception:
+            interval = pov_reconcile.DEFAULT_INTERVAL_S
         await asyncio.sleep(interval)
 
 

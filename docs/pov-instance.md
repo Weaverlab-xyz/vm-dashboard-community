@@ -197,6 +197,39 @@ left to paste. A field the POV already carries is never overwritten.
 
 ---
 
+## Keeping the view true
+
+A POV's `runstate` is a **remembered** value, and for most of this feature's life it was
+only ever written when this dashboard changed it. Two things change it that this dashboard
+does not: the platform's own `suspend_on_idle` timer, and anybody with a Skytap login.
+
+So a reconcile sweep runs every ten minutes — one collection read per configured platform —
+and writes back what the platform says: runstate, the rate-limit flag, and the idle timer's
+current value. **Re-check platform** on the POV page runs the same pass on demand.
+
+Three properties are worth knowing, because each is a way this could do more harm than the
+staleness it fixes:
+
+**The page prefers a live read when it has one.** Opening `/pov` already reads every
+environment on the platform for the read-only table, so the managed table shows that and
+labels it `live`. The sweep is what keeps the *rows* honest for everything that reads them
+when no page is open. Each row says which it is showing — `live`, `confirmed 8m ago`, or
+`not confirmed` — because a remembered value presented as a current one is the whole bug.
+
+**Both power buttons show while a reading is stale.** Gating Start on a remembered runstate
+is what hid it from every POV the platform had suspended: the cost feature working exactly
+as designed removed the control needed to undo it.
+
+**A missing environment is flagged, never reaped.** Absence from the listing is not proof of
+deletion — the listing is project-scoped, so an environment outside the configured project
+is invisible and perfectly alive — so the sweep confirms with a direct read and only a 404
+sets the flag. Even then it only flags: the row holds the only record of which PRA, Password
+Safe and Entitle tenants that POV was wired into, and the manifest for reaping them. Use
+**Destroy** to close one out; it is idempotent on a 404. The flag clears by itself if the
+environment becomes visible again.
+
+---
+
 ## The tenant registry
 
 The reason this profile exists, made concrete. **POV page → BeyondTrust tenants.**
