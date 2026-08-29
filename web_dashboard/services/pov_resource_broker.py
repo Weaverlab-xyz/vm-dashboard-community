@@ -132,6 +132,17 @@ def rb_vm_name(env: PovEnvironment) -> str:
             or DEFAULT_RB_VM_NAME)
 
 
+def stored_rb_vm_name(env: PovEnvironment) -> str:
+    """What was actually stored, or "" — as opposed to ``rb_vm_name``, which substitutes
+    the default.
+
+    A caller deciding whether to fill a blank field needs to tell "nobody set this" from
+    "somebody set it to the default", and the defaulted reader above cannot. The one caller
+    is the blueprint pre-fill, whose whole rule is never to overwrite a value the operator
+    chose."""
+    return str(env.metadata_dict.get(_META_VM_NAME) or "").strip()
+
+
 def configure(db: Session, env: PovEnvironment, *, zone_name: str | None = None,
               asset_key: str | None = None, vm_name: str | None = None) -> None:
     """Set the non-secret half. ``None`` leaves a field alone; ``""`` clears it."""

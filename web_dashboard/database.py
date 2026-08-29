@@ -1827,6 +1827,166 @@ class PovEnvironmentVM(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class PovTemplateBuild(Base):
+    """One run of the template builder: a lab-platform template this dashboard authored.
+
+    A POV is a template instantiated whole, so until this table existed the whole feature
+    was downstream of a catalogue nobody could author from here. The builder closes that:
+    instantiate a base template, prepare the result (install the metadata runner the
+    template contract requires), and save it back as a new template.
+
+    **``build_environment_id`` is committed the moment the platform returns it**, before
+    anything else in the job can fail. That is the same rule ``PovEnvironment`` follows and
+    for the same reason: a scratch environment that exists on the platform and not in this
+    database is the one failure mode nothing can clean up automatically — and unlike a POV,
+    this one is *supposed* to be short-lived, so an orphan bills for weeks unnoticed.
+
+    The row survives its environment on purpose. Once ``result_template_id`` is set the
+    scratch environment is reaped and only the build record remains, which is what lets the
+    page answer "where did this template come from?" long after.
+    """
+    __tablename__ = "pov_template_builds"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    platform = Column(String(32), nullable=False)      # lab_platforms.VALID_PLATFORMS
+    # The name the finished template gets. Slug-constrained by the API for the same reason
+    # PovEnvironment.name is: it reaches the platform's display name and job output.
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+
+    base_template_id = Column(String(64), nullable=True)
+    base_template_name = Column(String(255), nullable=True)
+    project_id = Column(String(64), nullable=True)
+
+    # The scratch environment. String for the same reason PovEnvironment's is: Skytap
+    # returns ids numeric in some payloads and string in others, and 42 != "42" finds
+    # nothing. NULL once it has been reaped.
+    build_environment_id = Column(String(64), nullable=True, index=True)
+    # Kept even after the environment is gone, so a finished row can still say which
+    # environment produced it.
+    build_environment_was = Column(String(64), nullable=True)
+
+    broker_vm_name = Column(String(255), nullable=True)
+    broker_vm_id = Column(String(64), nullable=True)
+
+    result_template_id = Column(String(64), nullable=True, index=True)
+    result_template_name = Column(String(255), nullable=True)
+
+    #   building -> preparing -> baking -> ready      (or failed at any point)
+    # `discarded` is the terminal state of a row whose scratch environment was reaped by
+    # hand without a template ever being baked.
+    status = Column(String(32), nullable=False, default="building", index=True)
+    # The template-contract report, as a JSON list of {check, status, detail}. Persisted
+    # rather than re-derived: it describes the environment at bake time, and that
+    # environment is gone by the time anybody reads the row.
+    contract_report = Column(Text, nullable=True)
+    # How the runner got onto the broker VM: "ssh" | "skipped" | "failed" | "".
+    # Distinct from `status` because a build that bakes with the runner NOT installed is a
+    # success with a caveat, not a failure — the operator can still paste the script in.
+    prepare_method = Column(String(16), nullable=True)
+    prepare_detail = Column(Text, nullable=True)
+
+    error_message = Column(Text, nullable=True)
+    job_id = Column(String(36), nullable=True, index=True)
+    # Leave the scratch environment up after a failure so it can be inspected by hand.
+    # Off by default: a running environment bills, and the common case is a build nobody
+    # is watching.
+    keep_build_environment = Column(Boolean, default=False, nullable=False)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    @property
+    def contract_list(self) -> list:
+        if not self.contract_report:
+            return []
+        try:
+            return json.loads(self.contract_report)
+        except Exception:
+            return []
+
+    @contract_list.setter
+    def contract_list(self, value: list):
+        self.contract_report = json.dumps(value or [])
+
+
+class PovBlueprint(Base):
+    """A saved POV recipe: everything the create form asks, under one name.
+
+    The POV create form has eleven fields, three of which are tenant references whose right
+    answer is the same every time for a given kind of POV. A blueprint records one correct
+    set so building the next POV is a choice rather than eleven, and so two SEs building
+    "the same" POV actually build the same POV.
+
+    It is deliberately **not** a second provision path. ``ProvisionRequest.blueprint_id``
+    supplies defaults for fields the request does not set; the request still wins field by
+    field, and everything after that is the one existing provision job. A blueprint that
+    forked the flow would be a second place for the provision rules to drift.
+
+    **There is no customer field here either**, for the reason ``PovEnvironment`` gives at
+    length: a blueprint is a shape of POV, not a customer's POV.
+    """
+    __tablename__ = "pov_blueprints"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), nullable=False, index=True)   # operator-chosen slug
+    description = Column(Text, nullable=True)
+    platform = Column(String(32), nullable=False)
+
+    # What to build from. `template_name` is denormalised so a blueprint still reads
+    # sensibly when the template has been deleted from the platform — the id alone would
+    # leave the page showing a number nobody recognises.
+    template_id = Column(String(64), nullable=False)
+    template_name = Column(String(255), nullable=True)
+    project_id = Column(String(64), nullable=True)
+    # Set when this blueprint was saved straight off a template the builder produced. Only
+    # a provenance link; nothing keys on it.
+    source_build_id = Column(String(36), nullable=True)
+
+    broker_vm_name = Column(String(255), nullable=True)
+    suspend_on_idle_seconds = Column(Integer, nullable=True)
+
+    # Which BeyondTrust tenants a POV from this blueprint is wired into. Same three-FK
+    # shape and the same ondelete as PovEnvironment — see the note there about SQLite not
+    # enforcing FKs, which is why bt_tenant_service validates every id it is handed.
+    pra_tenant_id = Column(String(36),
+                           ForeignKey("beyondtrust_tenants.id", ondelete="SET NULL"),
+                           index=True, nullable=True)
+    ps_tenant_id = Column(String(36),
+                          ForeignKey("beyondtrust_tenants.id", ondelete="SET NULL"),
+                          index=True, nullable=True)
+    entitle_tenant_id = Column(String(36),
+                               ForeignKey("beyondtrust_tenants.id", ondelete="SET NULL"),
+                               index=True, nullable=True)
+
+    # The non-secret configuration for the two in-environment installs, pre-filled onto a
+    # POV at provision time so the Gateway and Resource Broker panels open ready to press.
+    #
+    # **No secret is stored on a blueprint, and nothing here auto-runs.** Both installs go
+    # through the broker agent, which does not exist until minutes after a provision, and
+    # both need a credential that is per-tenant rather than per-recipe — a PRA deploy key
+    # and the Password Safe installer key. Copying those into a saved recipe would spread
+    # two secrets across every blueprint an SE ever makes, to save one paste. So a blueprint
+    # carries the half that is safe to repeat and leaves the half that is not to the person
+    # pressing the button, who by then is looking at the panel anyway.
+    gateway_name = Column(String(255), nullable=True)
+    rb_windows_vm_name = Column(String(255), nullable=True)
+    rb_zone = Column(String(255), nullable=True)
+    rb_asset = Column(String(255), nullable=True)
+
+    # NULL means "use expiry_policy.pov_default_hours", not "never". A blueprint that could
+    # silently mean never would be the one way to opt a POV out of the auto-delete timer
+    # without saying so.
+    expiry_hours = Column(Integer, nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                        nullable=False)
+
+
 def init_db():
     """Initialize database — create all tables and run lightweight migrations.
 

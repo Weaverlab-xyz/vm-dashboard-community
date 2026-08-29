@@ -145,6 +145,58 @@ you raise it.
 
 ---
 
+## Blueprints, and where templates come from
+
+**POV → Templates** (`/pov/templates`), admin only. Two things live there.
+
+**The template builder** authors the templates a POV is built from — see
+[building a template](integrations/skytap.md#building-a-template). It exists because a POV
+*is* a template instantiated whole, so before it the whole feature was downstream of a
+catalogue nobody could author from here, and because the one piece of the
+[template contract](integrations/skytap.md#the-template-contract) that has to live in your
+image — the metadata runner — had no automation at all.
+
+**A blueprint** is a saved POV recipe: the fields the create form asks, under one name. Pick
+one on the POV page and it fills the form; you still type the POV's own name. For a given
+*kind* of POV — a Password Safe evaluation, a PRA-only demo — every field except the name
+has the same right answer every time, and two SEs building "the same" POV should build the
+same POV.
+
+| A blueprint carries | It does not carry |
+|---|---|
+| The template, project and broker VM name | The POV's **name** — that is per-POV by definition |
+| The idle timeout and an expiry override | The **workgroup**, which decides RBAC and the expiry exempt list. Not something a saved recipe should set silently |
+| The three tenant references | Any **secret** — see below |
+| The Gateway name, and the Resource Broker's VM, zone and installer asset | |
+
+### It is defaults, not a second provision path
+
+A blueprint supplies values for the fields a request left blank and nothing else. Everything
+after that is the same provision job that runs without one — a blueprint that forked the
+flow would be a second place for the rules about orphaned environments to drift. If you
+typed a broker VM name before picking a recipe, the recipe does not overwrite it.
+
+The tenant ids on a blueprint are validated **when you save it**, against the same check the
+create form uses. A stored selection that only failed at provision time would move a form
+error into a job, against an environment that already exists.
+
+### Nothing on a blueprint auto-runs, and nothing on it is a secret
+
+It is tempting to have a blueprint chain the Gateway, Resource Broker and wire-up straight
+off a provision. It cannot, for two reasons that are worth stating rather than discovering:
+
+- **Both installs run through the broker agent**, which does not exist until minutes after
+  the environment comes up. A step enqueued at provision time would find no agent.
+- **Both need a credential that is per-tenant, not per-recipe** — a PRA deploy key and the
+  Password Safe installer key. A blueprint that carried those would spread two secrets
+  across every recipe an SE ever saved, to save one paste.
+
+So a blueprint fills in the non-secret half — the Gateway name, the Resource Broker's VM,
+zone and asset — onto the new POV, and those panels open ready to press with only the secret
+left to paste. A field the POV already carries is never overwritten.
+
+---
+
 ## The tenant registry
 
 The reason this profile exists, made concrete. **POV page → BeyondTrust tenants.**

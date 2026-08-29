@@ -60,7 +60,7 @@ HANDLED_TYPES = (
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "pov_env_provision", "pov_env_destroy", "pov_env_power", "pov_env_broker",
-    "pov_env_wireup",
+    "pov_env_wireup", "pov_template_build",
     "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
@@ -146,6 +146,10 @@ MEDIUM_TYPES = (
     # exactly ot_cell_deploy's shape. Tiered as MEDIUM now so the move does not need a
     # tier change on a live deployment.
     "pov_env_provision", "pov_env_destroy",
+    # A template build is a provision plus a bake: the same lab-platform API and long poll,
+    # plus one outbound SSH session to install the metadata runner. Same tier as the
+    # provision it is shaped like — a local process (asyncssh) with no streamed output.
+    "pov_template_build",
     # One short terraform per VM against the customer's PRA appliance — exactly
     # ot_cell_deploy's shape, and the tier that admits a local terraform process without
     # granting it light-tier concurrency.
@@ -395,14 +399,16 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import portainer_import_service
             await portainer_import_service.run_import(db, job_id=job_id, meta=meta)
         elif job_type in ("pov_env_provision", "pov_env_destroy", "pov_env_power",
-                          "pov_env_broker", "pov_env_wireup"):
-            from .services import pov_broker, pov_env_service, pov_wireup
+                          "pov_env_broker", "pov_env_wireup", "pov_template_build"):
+            from .services import (pov_broker, pov_env_service, pov_template_builder,
+                                   pov_wireup)
             handler = {
                 "pov_env_provision": pov_env_service.run_env_provision,
                 "pov_env_destroy": pov_env_service.run_env_destroy,
                 "pov_env_power": pov_env_service.run_env_power,
                 "pov_env_broker": pov_broker.run_env_broker,
                 "pov_env_wireup": pov_wireup.run_env_wireup,
+                "pov_template_build": pov_template_builder.run_template_build,
             }[job_type]
             await handler(job_id, meta)
         elif job_type == "clouddb_provision":

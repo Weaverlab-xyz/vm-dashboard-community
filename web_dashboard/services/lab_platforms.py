@@ -61,6 +61,19 @@ WRITE_CONTRACT = (
     "delete_environment",   # (env_id) -> None
 )
 
+# The template-authoring slice. Separate from WRITE_CONTRACT rather than appended to it
+# because it is guarded by a capability of its own: a platform can be perfectly usable for
+# POVs while offering no way to save an environment back as a template, and folding these
+# into the list above would make that platform look like it failed a contract it was never
+# asked to meet.
+AUTHOR_CONTRACT = (
+    "get_template",              # (template_id) -> {..., vms: [...]}
+    "create_template",           # (env_id, name, description) -> template dict
+    "delete_template",           # (template_id) -> None
+    "publish_service",           # (env_id, vm_id, iface_id, port) -> {id, external_ip, ...}
+    "delete_published_service",  # (env_id, vm_id, iface_id, service_id) -> None
+)
+
 # What each platform can actually do. This table is the part that keeps the abstraction
 # honest: where a platform lacks something the feature must degrade **explicitly and say
 # so**, rather than failing late with a confusing error.
@@ -93,6 +106,16 @@ CAPABILITIES = {
         # simply has no such field to offer, which is why the POV create form asks this
         # before rendering one.
         "projects": True,              # /v2/projects/{id}/{templates,configurations}
+        # Can an environment be saved back as a template? This is what makes the template
+        # BUILDER possible at all — see services/pov_template_builder and
+        # docs/integrations/skytap.md#building-a-template. Skytap has no "edit a template"
+        # call, so authoring is always instantiate → change → bake, never edit in place.
+        "template_authoring": True,    # POST /v2/templates {configuration_id}
+        # Can a guest port be NAT-ed to a public ip:port? The builder needs exactly one of
+        # these, for the length of one build, to reach a brand-new VM on a private lab
+        # network and install the metadata runner. A platform without it degrades to the
+        # generate-and-paste path rather than failing — the builder asks before publishing.
+        "published_services": True,    # …/interfaces/{id}/services
     },
 }
 

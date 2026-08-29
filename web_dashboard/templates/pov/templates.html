@@ -1,0 +1,702 @@
+{% extends "base.html" %}
+{% block title %}POV Templates{% endblock %}
+
+{#
+  Where the templates a POV is built from get authored.
+
+  The POV page can only build FROM a template. This page is where one comes from, and the
+  reason it exists is in three parts:
+
+    Build     — clone a base template into a scratch environment, prepare it, and save it
+                back as a new template. A template is immutable on every lab platform, so
+                authoring is always instantiate → change → bake, never edit in place. The
+                scratch environment is created, used and reaped inside one job.
+
+    Verify    — check a template somebody else authored against the template contract,
+                without building anything. This is the question an SE has about the
+                existing catalogue — "would a POV from this actually work?" — and before
+                this page there was no way to ask it.
+
+    Blueprint — a saved POV recipe. Not a Skytap object: the eleven fields the POV create
+                form asks, under one name, so building the next POV of a known kind is one
+                choice instead of eleven.
+
+  The contract report is shown per check rather than as one verdict. "no broker VM" and
+  "the broker is on a manual network" have different fixes, and collapsing them is how
+  somebody rebuilds the wrong thing — the same rule the POV page's Broker column follows.
+
+  Warnings never block a bake. "No Windows guest" means this template cannot host a
+  Resource Broker, which is a correct description of a PRA-and-Entitle POV, not a defect.
+  Only a `fail` stops the build, because a fail means the template cannot run a POV at all.
+
+  The install script is offered on EVERY build, not just a failed one. An operator whose
+  network has no route to a NAT-ed high port needs it as the primary route and should not
+  have to fail once to find out it exists.
+#}
+
+{% block content %}
+<div x-data="templatesPage()" x-init="init()" class="space-y-6">
+
+  <div class="flex items-start justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold text-gray-900">POV Templates</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        Author the templates a POV is built from, and save the recipes that build one.
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <select x-show="platforms.length > 1" x-model="platform" @change="load()"
+              class="rounded-md border-gray-300 text-sm">
+        <template x-for="p in platforms" :key="p.name">
+          <option :value="p.name" x-text="p.label || p.name"></option>
+        </template>
+      </select>
+      <button @click="load()" :disabled="loading"
+              class="px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50
+                     disabled:opacity-50">Refresh</button>
+    </div>
+  </div>
+
+  <div x-show="notConfigured" class="rounded-md bg-amber-50 border border-amber-200 p-4">
+    <p class="text-sm text-amber-800">
+      This lab platform is not configured. Set its API URL, username and API token in
+      <a href="/settings" class="underline font-medium">Settings → Integrations</a>, then
+      use <span class="font-medium">Test connection</span> there before building anything
+      here.
+    </p>
+  </div>
+
+  <div x-show="!notConfigured && !current.template_authoring"
+       class="rounded-md bg-amber-50 border border-amber-200 p-4">
+    <p class="text-sm text-amber-800">
+      <span x-text="current.label || platform"></span> cannot save an environment back as a
+      template, so templates cannot be built on it. Blueprints below still work.
+    </p>
+  </div>
+
+  <div x-show="error" class="rounded-md bg-red-50 border border-red-200 p-4">
+    <p class="text-sm text-red-800" x-text="error"></p>
+  </div>
+
+  {# ── Build a template ─────────────────────────────────────────────────── #}
+  <section class="bg-white rounded-lg shadow-sm border border-gray-200">
+    <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+      <h2 class="text-lg font-medium text-gray-900">Build a template</h2>
+      <button @click="showRunner = !showRunner"
+              class="text-sm text-blue-600 hover:underline"
+              x-text="showRunner ? 'Hide the install script' : 'Show the install script'">
+      </button>
+    </div>
+
+    <div x-show="showRunner" class="px-4 py-3 border-b border-gray-200 bg-gray-50">
+      <p class="text-sm text-gray-600 mb-2">
+        Run this as root on the broker VM if you would rather install the metadata runner
+        by hand — then bake the environment into a template. It is what the build installs
+        automatically, and it is idempotent.
+      </p>
+      <pre class="text-xs bg-white border border-gray-200 rounded p-3 overflow-x-auto"
+           x-text="runnerScript || 'Loading…'"></pre>
+      <button @click="copy(runnerScript)"
+              class="mt-2 px-3 py-1.5 text-sm rounded-md border border-gray-300
+                     hover:bg-gray-50">Copy</button>
+    </div>
+
+    <div class="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Base template</span>
+        <select x-model="form.base_template_id"
+                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+          <option value="">Choose a template…</option>
+          <template x-for="t in templates" :key="t.id">
+            <option :value="t.id"
+                    x-text="t.name + (t.vm_count !== null ? ` (${t.vm_count} VMs)` : '')">
+            </option>
+          </template>
+        </select>
+        <span class="text-xs text-gray-500">
+          The environment is cloned from this, prepared, and saved as a new template.
+        </span>
+      </label>
+
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">New template name</span>
+        <input type="text" x-model="form.name" placeholder="saas-pov-base"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+      </label>
+
+      <label class="block md:col-span-2">
+        <span class="text-sm font-medium text-gray-700">Description</span>
+        <input type="text" x-model="form.description"
+               placeholder="What a POV built from this template demonstrates"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+      </label>
+
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Broker VM name</span>
+        <input type="text" x-model="form.broker_vm_name" placeholder="broker"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+        <span class="text-xs text-gray-500">
+          Matched exactly, case-insensitively. Blank means <code>broker</code>.
+        </span>
+      </label>
+
+      <label class="block" x-show="current.projects">
+        <span class="text-sm font-medium text-gray-700">Project ID</span>
+        <input type="text" x-model="form.project_id"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+        <span class="text-xs text-gray-500">Blank uses the configured default.</span>
+      </label>
+
+      <label class="flex items-start gap-2 md:col-span-2">
+        <input type="checkbox" x-model="form.install_runner" class="mt-1 rounded">
+        <span class="text-sm text-gray-700">
+          Install the metadata runner on the broker VM
+          <span class="block text-xs text-gray-500">
+            Publishes SSH on the broker for the length of the build, installs the runner,
+            and revokes it. This reaches a NAT-ed high port on the lab platform, not the
+            API host — if your egress only allows HTTPS to the API URL, clear this and use
+            the install script above.
+          </span>
+        </span>
+      </label>
+
+      <label class="flex items-start gap-2 md:col-span-2">
+        <input type="checkbox" x-model="form.keep_build_environment" class="mt-1 rounded">
+        <span class="text-sm text-gray-700">
+          Keep the build environment after baking
+          <span class="block text-xs text-gray-500">
+            For inspecting what was baked. It stays running and it bills — Discard reaps it.
+          </span>
+        </span>
+      </label>
+    </div>
+
+    <div class="px-4 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
+      <button @click="verify()"
+              :disabled="!form.base_template_id || verifying"
+              class="px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50
+                     disabled:opacity-50"
+              x-text="verifying ? 'Checking…' : 'Verify the base template'"></button>
+      <button @click="build()"
+              :disabled="!form.base_template_id || !form.name || building
+                         || !current.template_authoring"
+              class="px-4 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700
+                     disabled:opacity-50"
+              x-text="building ? 'Starting…' : 'Build'"></button>
+    </div>
+  </section>
+
+  {# ── A verify result, when one has been asked for ─────────────────────── #}
+  <section x-show="verifyResult" class="bg-white rounded-lg shadow-sm border border-gray-200">
+    <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+      <h2 class="text-lg font-medium text-gray-900">
+        Contract check — <span x-text="verifyResult && verifyResult.name"></span>
+      </h2>
+      <span class="px-2 py-1 text-xs rounded-full"
+            :class="verifyResult && verifyResult.ok
+                    ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'"
+            x-text="verifyResult && verifyResult.ok
+                    ? 'can build a POV' : 'cannot build a POV'"></span>
+    </div>
+    <div class="p-4">
+      <template x-for="row in (verifyResult ? verifyResult.report : [])" :key="row.check">
+        <div class="flex items-start gap-3 py-2 border-b border-gray-100 last:border-0">
+          <span class="mt-0.5 px-2 py-0.5 text-xs rounded-full shrink-0"
+                :class="{'bg-green-100 text-green-800': row.status === 'pass',
+                         'bg-amber-100 text-amber-800': row.status === 'warn',
+                         'bg-red-100 text-red-800': row.status === 'fail'}"
+                x-text="row.status"></span>
+          <div>
+            <div class="text-sm font-medium text-gray-900" x-text="row.check"></div>
+            <div class="text-sm text-gray-600" x-text="row.detail"></div>
+          </div>
+        </div>
+      </template>
+      <p class="text-xs text-gray-500 mt-3">
+        Whether the runner is actually installed cannot be read from the platform — it is a
+        file inside the guest. A build answers that by installing one.
+      </p>
+    </div>
+  </section>
+
+  {# ── Builds ───────────────────────────────────────────────────────────── #}
+  <section class="bg-white rounded-lg shadow-sm border border-gray-200">
+    <div class="px-4 py-3 border-b border-gray-200">
+      <h2 class="text-lg font-medium text-gray-900">Builds</h2>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-left text-gray-600">
+          <tr>
+            <th class="px-4 py-2 font-medium">Template</th>
+            <th class="px-4 py-2 font-medium">From</th>
+            <th class="px-4 py-2 font-medium">Status</th>
+            <th class="px-4 py-2 font-medium">Runner</th>
+            <th class="px-4 py-2 font-medium">Build env</th>
+            <th class="px-4 py-2 font-medium">Created</th>
+            <th class="px-4 py-2 font-medium"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="b in builds" :key="b.id">
+            <tr>
+              <td class="px-4 py-2">
+                <div class="font-medium text-gray-900" x-text="b.name"></div>
+                <div class="text-xs text-gray-500" x-show="b.result_template_id"
+                     x-text="'id ' + b.result_template_id"></div>
+              </td>
+              <td class="px-4 py-2 text-gray-600"
+                  x-text="b.base_template_name || b.base_template_id || '—'"></td>
+              <td class="px-4 py-2">
+                <span class="px-2 py-0.5 text-xs rounded-full"
+                      :class="{'bg-green-100 text-green-800': b.status === 'ready',
+                               'bg-red-100 text-red-800': b.status === 'failed',
+                               'bg-gray-100 text-gray-700': b.status === 'discarded',
+                               'bg-blue-100 text-blue-800':
+                                 ['building','preparing','baking'].includes(b.status)}"
+                      x-text="b.status"></span>
+                <div class="text-xs text-red-700 mt-1" x-show="b.error_message"
+                     x-text="b.error_message"></div>
+              </td>
+              <td class="px-4 py-2">
+                {# `ssh` and `skipped` are different outcomes and neither is a failure.
+                   A build that baked without the runner is a usable template whose
+                   operator has one paste left to do — saying "failed" there would send
+                   somebody to rebuild a template that is fine. #}
+                <span class="px-2 py-0.5 text-xs rounded-full"
+                      :class="{'bg-green-100 text-green-800': b.prepare_method === 'ssh',
+                               'bg-amber-100 text-amber-800':
+                                 ['skipped','failed'].includes(b.prepare_method),
+                               'bg-gray-100 text-gray-600': !b.prepare_method}"
+                      :title="b.prepare_detail"
+                      x-text="b.prepare_method || '—'"></span>
+              </td>
+              <td class="px-4 py-2 text-gray-600 text-xs">
+                <span x-show="b.build_environment_id" class="text-amber-700 font-medium"
+                      x-text="b.build_environment_id + ' (running)'"></span>
+                <span x-show="!b.build_environment_id">reaped</span>
+              </td>
+              <td class="px-4 py-2 text-gray-500 text-xs"
+                  x-text="new Date(b.created_at + 'Z').toLocaleString()"></td>
+              <td class="px-4 py-2 text-right whitespace-nowrap">
+                <a x-show="b.job_id" :href="'/jobs/' + b.job_id"
+                   class="text-blue-600 hover:underline text-sm mr-3">Job</a>
+                <button x-show="b.result_template_id" @click="saveBlueprintFrom(b)"
+                        class="text-blue-600 hover:underline text-sm mr-3">
+                  Save as blueprint</button>
+                <button x-show="b.build_environment_id" @click="discard(b)"
+                        class="text-red-600 hover:underline text-sm">Discard</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!builds.length">
+            <td colspan="7" class="px-4 py-6 text-center text-gray-500">
+              No templates built yet.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {# ── Blueprints ───────────────────────────────────────────────────────── #}
+  <section class="bg-white rounded-lg shadow-sm border border-gray-200">
+    <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+      <div>
+        <h2 class="text-lg font-medium text-gray-900">Blueprints</h2>
+        <p class="text-xs text-gray-500 mt-0.5">
+          Saved POV recipes. Picking one on the POV page fills the create form.
+        </p>
+      </div>
+      <button @click="showBlueprintForm = !showBlueprintForm"
+              class="px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50"
+              x-text="showBlueprintForm ? 'Cancel' : 'New blueprint'"></button>
+    </div>
+
+    <div x-show="showBlueprintForm" class="p-4 border-b border-gray-200 bg-gray-50
+                                           grid grid-cols-1 md:grid-cols-2 gap-4">
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Name</span>
+        <input type="text" x-model="bp.name" placeholder="password-safe-eval"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+        <span class="text-xs text-gray-500">Lowercase letters, digits and hyphens.</span>
+      </label>
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Template</span>
+        <select x-model="bp.template_id"
+                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+          <option value="">Choose a template…</option>
+          <template x-for="t in templates" :key="t.id">
+            <option :value="t.id" x-text="t.name"></option>
+          </template>
+        </select>
+      </label>
+      <label class="block md:col-span-2">
+        <span class="text-sm font-medium text-gray-700">Description</span>
+        <input type="text" x-model="bp.description"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+      </label>
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Broker VM name</span>
+        <input type="text" x-model="bp.broker_vm_name" placeholder="broker"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+      </label>
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Suspend on idle</span>
+        <select x-model.number="bp.suspend_on_idle_seconds"
+                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+          <option :value="0">Off</option>
+          <option :value="1800">30 minutes</option>
+          <option :value="3600">1 hour</option>
+          <option :value="7200">2 hours</option>
+        </select>
+      </label>
+
+      <template x-for="kind in tenantKinds" :key="kind.kind">
+        <label class="block">
+          <span class="text-sm font-medium text-gray-700"
+                x-text="kind.label + ' tenant'"></span>
+          <select x-model="bp[tenantField(kind.kind)]"
+                  class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+            <option value="">Not chosen</option>
+            <template x-for="t in tenantsOfKind(kind.kind)" :key="t.id">
+              <option :value="t.id" x-text="t.name"></option>
+            </template>
+          </select>
+        </label>
+      </template>
+
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Gateway name</span>
+        <input type="text" x-model="bp.gateway_name"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+      </label>
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Resource Broker VM</span>
+        <input type="text" x-model="bp.rb_windows_vm_name"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+      </label>
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Resource Broker zone</span>
+        <input type="text" x-model="bp.rb_zone"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+      </label>
+      <label class="block">
+        <span class="text-sm font-medium text-gray-700">Resource Broker installer asset</span>
+        <input type="text" x-model="bp.rb_asset"
+               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+      </label>
+
+      <p class="md:col-span-2 text-xs text-gray-500">
+        No secret is stored on a blueprint, and nothing here runs by itself. The Gateway
+        deploy key and the Password Safe installer key are per-tenant, and both installs go
+        through the broker agent, which does not exist until minutes after a POV comes up.
+        A blueprint fills these fields in so the panels open ready to press.
+      </p>
+
+      <div class="md:col-span-2 flex justify-end">
+        <button @click="saveBlueprint()" :disabled="!bp.name || !bp.template_id || savingBp"
+                class="px-4 py-2 text-sm rounded-md bg-blue-600 text-white
+                       hover:bg-blue-700 disabled:opacity-50"
+                x-text="savingBp ? 'Saving…' : 'Save blueprint'"></button>
+      </div>
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-left text-gray-600">
+          <tr>
+            <th class="px-4 py-2 font-medium">Name</th>
+            <th class="px-4 py-2 font-medium">Template</th>
+            <th class="px-4 py-2 font-medium">Broker VM</th>
+            <th class="px-4 py-2 font-medium">Tenants</th>
+            <th class="px-4 py-2 font-medium"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="b in blueprints" :key="b.id">
+            <tr>
+              <td class="px-4 py-2">
+                <div class="font-medium text-gray-900" x-text="b.name"></div>
+                <div class="text-xs text-gray-500" x-text="b.description"></div>
+              </td>
+              <td class="px-4 py-2 text-gray-600"
+                  x-text="b.template_name || b.template_id"></td>
+              <td class="px-4 py-2 text-gray-600"
+                  x-text="b.broker_vm_name || 'broker'"></td>
+              <td class="px-4 py-2 text-gray-600 text-xs">
+                <template x-for="kind in tenantKinds" :key="kind.kind">
+                  <div x-show="b[tenantField(kind.kind)]"
+                       x-text="kind.label + ': ' + tenantName(b, kind.kind)"></div>
+                </template>
+                <span x-show="!tenantKinds.some(k => b[tenantField(k.kind)])">none</span>
+              </td>
+              <td class="px-4 py-2 text-right">
+                <button @click="deleteBlueprint(b)"
+                        class="text-red-600 hover:underline text-sm">Delete</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!blueprints.length">
+            <td colspan="5" class="px-4 py-6 text-center text-gray-500">
+              No blueprints saved yet.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+function templatesPage() {
+  return {
+    platform: '',
+    platforms: [],
+    templates: [],
+    builds: [],
+    blueprints: [],
+    tenants: [],
+    tenantKinds: [],
+    loading: false,
+    building: false,
+    verifying: false,
+    savingBp: false,
+    notConfigured: false,
+    error: '',
+    showRunner: false,
+    showBlueprintForm: false,
+    runnerScript: '',
+    verifyResult: null,
+    _poll: null,
+    form: { base_template_id: '', name: '', description: '', broker_vm_name: '',
+            project_id: '', install_runner: true, keep_build_environment: false },
+    bp: {},
+
+    get current() {
+      return this.platforms.find(p => p.name === this.platform) || {};
+    },
+
+    // Same mapping the POV page uses. The API column for a kind is not derivable from the
+    // kind alone -- password_safe is ps_tenant_id -- so it lives in one function on both
+    // pages rather than being spelled out at each use.
+    tenantField(kind) {
+      return (kind === 'password_safe' ? 'ps' : kind) + '_tenant_id';
+    },
+
+    tenantsOfKind(kind) {
+      return this.tenants.filter(t => t.kind === kind && t.is_active);
+    },
+
+    tenantName(row, kind) {
+      const id = row[this.tenantField(kind)];
+      if (!id) return '';
+      const found = this.tenants.find(t => t.id === id);
+      return found ? found.name : '(unknown)';
+    },
+
+    blankBlueprint() {
+      return { name: '', template_id: '', description: '', broker_vm_name: '',
+               suspend_on_idle_seconds: 3600, pra_tenant_id: '', ps_tenant_id: '',
+               entitle_tenant_id: '', gateway_name: '', rb_windows_vm_name: '',
+               rb_zone: '', rb_asset: '', source_build_id: '' };
+    },
+
+    // Every /api/ route authenticates off the Authorization header -- this dashboard sets
+    // no cookie, so a bare fetch() is an ANONYMOUS request and comes back 401 whatever the
+    // integration behind it is doing. Same helper and same reasoning as pov/index.html.
+    async apiFetch(url, opts) {
+      const token = Alpine.store('auth').token;
+      const o = opts || {};
+      const res = await fetch(url, {
+        ...o,
+        headers: {
+          ...(o.headers || {}),
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+      });
+      if (res.status === 401) Alpine.store('auth').logout();
+      return res;
+    },
+
+    async apiJson(url, opts) {
+      const res = await this.apiFetch(url, opts);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `${url} failed (${res.status})`);
+      return body;
+    },
+
+    async init() {
+      this.bp = this.blankBlueprint();
+      try {
+        const body = await this.apiJson('/api/pov/platforms');
+        this.platforms = body.platforms || [];
+        this.platform = body.default || (this.platforms[0] || {}).name || '';
+      } catch (e) { this.error = e.message; return; }
+      await this.load();
+      this.loadRunner();
+    },
+
+    async load() {
+      this.loading = true;
+      this.error = '';
+      this.notConfigured = false;
+      try {
+        const q = `?platform=${encodeURIComponent(this.platform)}`;
+        // The template read is the only one that talks to the lab platform, so it is the
+        // only one allowed to fail the page softly: an unreachable account should still
+        // show the builds and blueprints already recorded here.
+        const [tpl, builds, bps, registry] = await Promise.all([
+          this.apiJson('/api/pov/templates' + q).catch(e => { this.error = e.message;
+                                                              return {}; }),
+          this.apiJson('/api/pov/builds'),
+          this.apiJson('/api/pov/blueprints'),
+          // One call: /api/pov/tenants serves the rows AND the registry's shape, so the
+          // UI does not hardcode which products exist or what they are called.
+          this.apiJson('/api/pov/tenants').catch(() => ({})),
+        ]);
+        this.templates = tpl.templates || [];
+        this.builds = builds.builds || [];
+        this.blueprints = bps.blueprints || [];
+        this.tenants = registry.tenants || [];
+        this.tenantKinds = registry.kinds || [];
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.loading = false;
+      }
+      this.schedulePoll();
+    },
+
+    // A build runs for minutes. Poll only while one is actually in flight -- a page that
+    // polls forever is a page that keeps a browser tab and a worker busy over nothing.
+    schedulePoll() {
+      if (this._poll) { clearTimeout(this._poll); this._poll = null; }
+      const busy = this.builds.some(
+        b => ['building', 'preparing', 'baking'].includes(b.status));
+      if (!busy) return;
+      this._poll = setTimeout(async () => {
+        try {
+          this.builds = (await this.apiJson('/api/pov/builds')).builds || [];
+        } catch (e) { /* a transient read must not clear the page */ }
+        this.schedulePoll();
+      }, 5000);
+    },
+
+    async loadRunner() {
+      try {
+        this.runnerScript = (await this.apiJson('/api/pov/runner-script')).install_script;
+      } catch (e) { this.runnerScript = ''; }
+    },
+
+    async verify() {
+      this.verifying = true;
+      this.error = '';
+      try {
+        const q = new URLSearchParams({
+          target_id: this.form.base_template_id, kind: 'template',
+          platform: this.platform, broker_vm_name: this.form.broker_vm_name,
+        });
+        this.verifyResult = await this.apiJson('/api/pov/verify?' + q.toString());
+      } catch (e) {
+        this.error = e.message;
+        this.verifyResult = null;
+      } finally {
+        this.verifying = false;
+      }
+    },
+
+    async build() {
+      this.building = true;
+      this.error = '';
+      try {
+        await this.apiJson('/api/pov/builds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            platform: this.platform,
+            base_template_id: this.form.base_template_id,
+            name: this.form.name,
+            description: this.form.description,
+            broker_vm_name: this.form.broker_vm_name,
+            project_id: this.form.project_id,
+            install_runner: this.form.install_runner,
+            keep_build_environment: this.form.keep_build_environment,
+          }),
+        });
+        this.form.name = '';
+        this.form.description = '';
+        await this.load();
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.building = false;
+      }
+    },
+
+    async discard(b) {
+      if (!confirm(`Reap the build environment for "${b.name}"? `
+                   + 'It is deleted on the lab platform.')) return;
+      this.error = '';
+      try {
+        await this.apiJson('/api/pov/builds/' + encodeURIComponent(b.id),
+                           { method: 'DELETE' });
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    saveBlueprintFrom(b) {
+      this.bp = Object.assign(this.blankBlueprint(), {
+        name: b.name,
+        template_id: b.result_template_id,
+        template_name: b.result_template_name,
+        description: b.description || `Built from ${b.base_template_name || 'a template'}.`,
+        broker_vm_name: b.broker_vm_name,
+        source_build_id: b.id,
+      });
+      this.showBlueprintForm = true;
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    },
+
+    async saveBlueprint() {
+      this.savingBp = true;
+      this.error = '';
+      try {
+        const tpl = this.templates.find(t => t.id === this.bp.template_id);
+        await this.apiJson('/api/pov/blueprints', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...this.bp,
+            platform: this.platform,
+            template_name: this.bp.template_name || (tpl ? tpl.name : ''),
+          }),
+        });
+        this.bp = this.blankBlueprint();
+        this.showBlueprintForm = false;
+        await this.load();
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.savingBp = false;
+      }
+    },
+
+    async deleteBlueprint(b) {
+      if (!confirm(`Delete the blueprint "${b.name}"? `
+                   + 'POVs already built from it are unaffected.')) return;
+      this.error = '';
+      try {
+        await this.apiJson('/api/pov/blueprints/' + encodeURIComponent(b.id),
+                           { method: 'DELETE' });
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    copy(text) {
+      if (navigator.clipboard) navigator.clipboard.writeText(text || '');
+    },
+  };
+}
+</script>
+{% endblock %}
