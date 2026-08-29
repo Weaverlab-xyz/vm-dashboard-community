@@ -63,6 +63,13 @@
           <option :value="p.name" x-text="p.label"></option>
         </template>
       </select>
+      <!-- Writes what the platform says back onto the rows. The table above already
+           prefers this load's live read for display, so this is for the half a live read
+           cannot do: persisting the runstate for everything else that reads these rows,
+           and re-checking a POV flagged as gone from the platform. -->
+      <button @click="recheck()" :disabled="notConfigured || rechecking"
+              class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              x-text="rechecking ? 'Checking…' : 'Re-check platform'"></button>
       <button @click="showCreate = !showCreate" :disabled="notConfigured"
               class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
         New POV
@@ -242,7 +249,27 @@
                 <a x-show="e.provision_job_id" :href="'/jobs/' + e.provision_job_id"
                    class="ml-2 text-xs text-blue-600 underline">job</a>
               </td>
-              <td class="px-4 py-2 text-gray-600" x-text="e.runstate || '—'"></td>
+              <td class="px-4 py-2 text-gray-600">
+                {# The live read this page already makes when it can, and what the
+                   reconcile sweep last confirmed otherwise -- see runstateOf(). Either way
+                   the row SAYS which, because a remembered value shown as a current one is
+                   the bug this column had: a POV the platform suspended on its idle timer
+                   sat here reading "running" forever, and the Start button that would have
+                   undone it was hidden on the strength of that. #}
+                <span x-text="runstateOf(e) || '—'"
+                      :class="staleRunstate(e) ? 'text-gray-400' : ''"></span>
+                <span class="block text-xs text-gray-400"
+                      :title="e.platform_seen_at
+                              ? 'the reconcile sweep last confirmed this at ' + e.platform_seen_at + 'Z'
+                              : 'the reconcile sweep has not read this environment back yet'"
+                      x-text="seenAgo(e)"></span>
+                <span x-show="rateLimited(e)"
+                      class="inline-block mt-1 text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800"
+                      title="The platform is throttling this environment. Actions against it will be slow.">rate-limited</span>
+                <span x-show="e.platform_missing"
+                      class="inline-block mt-1 text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700"
+                      title="The platform answered 404 for this environment. The row is kept because it holds this POV's tenant references and reaping manifest.">gone from the platform</span>
+              </td>
               <td class="px-4 py-2">
                 <span class="text-xs px-2 py-0.5 rounded-full"
                       :class="{'bg-green-100 text-green-700': e.broker_status === 'online',
@@ -437,10 +464,18 @@
               <td class="px-4 py-2 text-gray-600" x-text="e.template_name || e.template_id || '—'"></td>
               <td class="px-4 py-2 text-gray-600" x-text="e.created_by || '—'"></td>
               <td class="px-4 py-2 text-right whitespace-nowrap">
-                <button x-show="e.runstate !== 'running'" @click="power(e, 'running')"
+                {# Both buttons show while the runstate is stale or was never confirmed.
+                   Gating on a remembered value is what hid Start from every POV the
+                   platform had suspended on its idle timer -- the cost feature working as
+                   designed was what removed the control needed to undo it. Once the
+                   reconcile has confirmed a runstate the gating is honest again, so it
+                   comes back. #}
+                <button x-show="runstateOf(e) !== 'running' || staleRunstate(e)"
+                        @click="power(e, 'running')"
                         :disabled="!actionable(e)"
                         class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Start</button>
-                <button x-show="e.runstate === 'running'" @click="power(e, 'suspended')"
+                <button x-show="runstateOf(e) === 'running' || staleRunstate(e)"
+                        @click="power(e, 'suspended')"
                         :disabled="!actionable(e)"
                         class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Suspend</button>
                 <button x-show="current.bootstrap_injection" @click="brokerRun(e)"
@@ -669,6 +704,7 @@ function povPage() {
     tenantKinds: [],
     blueprints: [],
     selectedBlueprint: '',
+    rechecking: false,
     showTenants: false,
     savingTenant: false,
     editingTenants: '',
@@ -691,6 +727,61 @@ function povPage() {
 
     get current() {
       return this.platforms.find(p => p.name === this.platform) || {};
+    },
+
+    // How old a confirmed runstate may be before the page stops trusting it to hide a
+    // button. Deliberately looser than the sweep's own interval: a pass that ran a little
+    // late must not make every row read as stale, and the cost of being wrong here is one
+    // extra button, not a wrong one.
+    STALE_AFTER_MS: 30 * 60 * 1000,
+
+    // The live platform read for a managed row, if this load found one.
+    //
+    // `load()` already fetches every environment on the platform for the read-only table
+    // below -- the same collection read a reconcile makes. So the freshest possible answer
+    // is ALREADY on this page, and asking the server for it again would be a third
+    // platform call on a page that makes two, against an account this integration is
+    // careful not to rate-limit. The server-side sweep still runs on its timer: it is what
+    // keeps the ROWS honest for everything that reads them when no page is open.
+    liveFor(e) {
+      if (!e.platform_environment_id) return null;
+      return this.environments.find(
+        x => String(x.id) === String(e.platform_environment_id)) || null;
+    },
+
+    // What to show and what to gate the power buttons on: the live read when this load
+    // got one, else what the reconcile sweep last confirmed.
+    runstateOf(e) {
+      const live = this.liveFor(e);
+      return (live && live.runstate) || e.runstate || '';
+    },
+
+    // A runstate nobody has confirmed, or confirmed too long ago to gate a control on.
+    // A live read is never stale. `platform_seen_at` is empty for every row that predates
+    // the reconcile sweep, which is exactly the estate whose runstate is least trustworthy.
+    staleRunstate(e) {
+      if (this.liveFor(e)) return false;
+      if (!e.platform_seen_at) return true;
+      const seen = Date.parse(e.platform_seen_at + 'Z');
+      if (Number.isNaN(seen)) return true;
+      return (Date.now() - seen) > this.STALE_AFTER_MS;
+    },
+
+    seenAgo(e) {
+      if (this.liveFor(e)) return 'live';
+      if (!e.platform_seen_at) return 'not confirmed';
+      const seen = Date.parse(e.platform_seen_at + 'Z');
+      if (Number.isNaN(seen)) return 'not confirmed';
+      const mins = Math.max(0, Math.round((Date.now() - seen) / 60000));
+      if (mins < 1) return 'confirmed just now';
+      if (mins < 60) return `confirmed ${mins}m ago`;
+      const hrs = Math.round(mins / 60);
+      return hrs < 24 ? `confirmed ${hrs}h ago` : `confirmed ${Math.round(hrs / 24)}d ago`;
+    },
+
+    rateLimited(e) {
+      const live = this.liveFor(e);
+      return live ? !!live.rate_limited : !!e.rate_limited;
     },
 
     // The API column name for a kind. One place, because the picker, the row and the
@@ -902,6 +993,32 @@ function povPage() {
         this.notice = `${env.name}: requested ${runstate}.`;
         await this.load();
       } catch (e) { this.error = e.message; }
+    },
+
+    // Read every managed environment back off the platform and persist what it says.
+    // Unlike the rest of load(), this one REPORTS its failures: the operator pressed a
+    // button and is waiting, so a silent no-op would read as "checked, all fine".
+    async recheck() {
+      this.rechecking = true;
+      this.error = ''; this.notice = '';
+      try {
+        const res = await this.apiFetch(
+          `/api/pov/managed/reconcile?platform=${encodeURIComponent(this.platform)}`,
+          { method: 'POST' });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || `Re-check failed (${res.status}).`);
+        const r = body.reconciled || {};
+        const bits = [`checked ${r.checked || 0}`];
+        if (r.updated) bits.push(`updated ${r.updated}`);
+        if (r.missing) bits.push(`${r.missing} gone from the platform`);
+        if (r.recovered) bits.push(`${r.recovered} back`);
+        this.notice = bits.join(', ') + '.';
+        await this.load();
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.rechecking = false;
+      }
     },
 
     // Best-effort: blueprints are a convenience on this page, so a failed read leaves the

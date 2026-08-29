@@ -6,6 +6,8 @@
   GET    /api/pov/environments/{id}     — one, live from the platform
   GET    /api/pov/managed               — the POVs this dashboard provisioned
   POST   /api/pov/managed               — provision one from a template
+  POST   /api/pov/managed/reconcile     — read every managed environment back off the
+                                          platform, now
   POST   /api/pov/managed/{id}/power    — running | suspended | stopped | halted
   POST   /api/pov/managed/{id}/broker   — install / re-enrol the in-environment agent
   POST   /api/pov/managed/{id}/gateway  — configure and install the POV's BeyondTrust Gateway
@@ -49,7 +51,8 @@ from sqlalchemy.orm import Session
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, expiry_policy, expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
-                        pov_gateway, pov_resource_broker, pov_share, pov_wireup)
+                        pov_gateway, pov_reconcile, pov_resource_broker, pov_share,
+                        pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -137,6 +140,11 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         "status": env.status,
         "runstate": env.runstate or "",
         "region": env.region or "",
+        # What the reconcile sweep last read off the platform. `runstate` above is only as
+        # fresh as `platform_seen_at` says — the page shows that rather than implying the
+        # value is live, because presenting a stale runstate as current is the exact bug
+        # services/pov_reconcile exists to end.
+        **pov_reconcile.describe(env),
         "workgroup": env.workgroup or "",
         "created_by": env.created_by or "",
         "created_at": env.created_at.isoformat() if env.created_at else None,
@@ -302,6 +310,28 @@ async def get_managed(env_id: str, db: Session = Depends(get_db),
     vms = (db.query(PovEnvironmentVM)
              .filter(PovEnvironmentVM.environment_id == env.id).all())
     return {"environment": _serialize(env, vms, broker=pov_broker.describe(db, env))}
+
+
+@router.post("/managed/reconcile")
+async def reconcile_now(platform: str = Query(_DEFAULT_PLATFORM),
+                        db: Session = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
+    """Read every managed environment back off the platform, now.
+
+    Not 202 and not a job: this is one collection read and a handful of row updates, and
+    the caller is a person who just pressed Refresh and is waiting to see the answer.
+    Queuing it would mean the page reports success before the numbers change.
+
+    The timer path (``services/pov_reconcile``, enqueued by ``main._pov_reconcile_loop``)
+    is what keeps the rows honest when nobody is looking; this is the same function for
+    when somebody is.
+    """
+    name, _mod = _adapter(platform)
+    try:
+        summary = await pov_reconcile.reconcile(db, name)
+    except Exception as exc:  # noqa: BLE001
+        raise _platform_error(exc, f"reading {name} environments back") from exc
+    return {"reconciled": summary}
 
 
 @router.post("/managed", status_code=202)
