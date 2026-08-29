@@ -91,6 +91,27 @@
   <div x-show="showCreate && !notConfigured" x-transition
        class="border border-gray-200 rounded-lg p-4 space-y-4 bg-gray-50">
     <h2 class="text-lg font-medium text-gray-900">New POV environment</h2>
+
+    <!-- A blueprint fills the form below rather than replacing it. Applying client-side
+         means every field it set is visible and editable before anything is sent, so an
+         SE can see what the recipe chose instead of discovering it on the row afterwards.
+         The server applies the same defaults again for anything still blank, which is what
+         keeps the API usable without this page. -->
+    <div x-show="blueprints.length">
+      <label class="block text-sm font-medium text-gray-700 mb-1">Blueprint</label>
+      <select x-model="selectedBlueprint" @change="applyBlueprint()"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        <option value="">None — fill the form by hand</option>
+        <template x-for="b in blueprints" :key="b.id">
+          <option :value="b.id"
+                  x-text="b.name + (b.description ? ' — ' + b.description : '')"></option>
+        </template>
+      </select>
+      <p class="text-xs text-gray-500 mt-1">
+        Saved recipes from <a href="/pov/templates" class="underline">POV Templates</a>.
+      </p>
+    </div>
+
     <div class="grid grid-cols-2 gap-3">
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Template</label>
@@ -646,6 +667,8 @@ function povPage() {
             entitle_field: '', suspend_on_idle_seconds: 3600 },
     tenants: [],
     tenantKinds: [],
+    blueprints: [],
+    selectedBlueprint: '',
     showTenants: false,
     savingTenant: false,
     editingTenants: '',
@@ -675,6 +698,26 @@ function povPage() {
     // matching the server.
     tenantField(kind) {
       return (kind === 'password_safe' ? 'ps' : kind) + '_tenant_id';
+    },
+
+    // Fill only what the operator has not already typed. A blueprint is a set of defaults,
+    // and somebody who typed a broker VM name before picking a recipe meant it -- the same
+    // precedence the server applies in pov_blueprint_service.apply_to.
+    applyBlueprint() {
+      const b = this.blueprints.find(x => x.id === this.selectedBlueprint);
+      if (!b) return;
+      if (!this.form.template_id) this.form.template_id = b.template_id || '';
+      if (!this.form.project_id) this.form.project_id = b.project_id || '';
+      if (!this.form.broker_vm_name) this.form.broker_vm_name = b.broker_vm_name || '';
+      if (b.suspend_on_idle_seconds) {
+        this.form.suspend_on_idle_seconds = b.suspend_on_idle_seconds;
+      }
+      // The tenant pickers are keyed `<kind>_field`, not by the API column, so the mapping
+      // has to be crossed here -- see the note on `form` above.
+      for (const kind of this.tenantKinds) {
+        const key = kind.kind + '_field';
+        if (!this.form[key]) this.form[key] = b[this.tenantField(kind.kind)] || '';
+      }
     },
 
     tenantsOfKind(kind) {
@@ -740,6 +783,7 @@ function povPage() {
       // this one — loading them the other way round paints '(unknown)' on every row for
       // one frame.
       await this.loadTenants();
+      await this.loadBlueprints();
       this.managed = await this.fetchList('/api/pov/managed', 'environments', true);
       if (this.notConfigured) { this.environments = []; this.templates = []; this.loading = false; return; }
       const [envs, tpls] = await Promise.all([
@@ -837,6 +881,7 @@ function povPage() {
           ps_tenant_id: this.form.password_safe_field,
           entitle_tenant_id: this.form.entitle_field,
           suspend_on_idle_seconds: this.form.suspend_on_idle_seconds,
+          blueprint_id: this.selectedBlueprint,
         });
         this.notice = `Creating ${this.form.name}. Watch its job for progress.`;
         this.showCreate = false;
@@ -857,6 +902,16 @@ function povPage() {
         this.notice = `${env.name}: requested ${runstate}.`;
         await this.load();
       } catch (e) { this.error = e.message; }
+    },
+
+    // Best-effort: blueprints are a convenience on this page, so a failed read leaves the
+    // form working by hand rather than showing an error for something nobody asked for.
+    async loadBlueprints() {
+      try {
+        const res = await this.apiFetch('/api/pov/blueprints');
+        if (!res.ok) { this.blueprints = []; return; }
+        this.blueprints = (await res.json()).blueprints || [];
+      } catch (e) { this.blueprints = []; }
     },
 
     async loadTenants() {

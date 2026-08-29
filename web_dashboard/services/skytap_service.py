@@ -34,7 +34,9 @@ __all__ = ["SkytapError", "SkytapAuthError", "VALID_RUNSTATES", "SHARE_ACCESS",
            "list_templates", "list_environments", "get_environment",
            "create_environment", "update_environment", "set_runstate",
            "wait_for_runstate", "delete_environment", "inject_bootstrap",
-           "stored_credentials", "create_share", "delete_share"]
+           "stored_credentials", "create_share", "delete_share",
+           "get_template", "create_template", "delete_template",
+           "publish_service", "delete_published_service"]
 
 # Runstates a caller may ASK for. Skytap also reports "busy" while a transition is in
 # flight, which is a state you observe and never request — asking for it would be asking
@@ -167,26 +169,49 @@ def _os_family(raw: dict) -> str:
     return ""
 
 
-def _interfaces(raw_vm: dict) -> tuple[str, list[dict]]:
-    """(private_ip, published_services) for a VM.
+def _interfaces(raw_vm: dict) -> tuple[str, list[dict], list[dict]]:
+    """(private_ip, published_services, interfaces) for a VM.
 
     A published service is Skytap NAT-ing a guest port to a public ip:port. We surface them
     because they are useful to see, NOT because the wire-up uses them — POV wiring reaches
     VMs on their private IPs through an in-environment Gateway. See docs/pov-instance.md.
+
+    The third return value is the NICs themselves, each with its **id**. Publishing a
+    service is a POST *under an interface*, so a caller that only has the flattened service
+    list above has no way to name where a new one should go. The one caller today is the
+    template builder's SSH prepare step (``services/pov_template_builder``), which publishes
+    port 22 for the length of one build and revokes it in a ``finally``.
+
+    ``nic_type`` and ``network_id`` come along because they are how a caller tells an
+    automatic network from a manual one — the distinction Skytap's metadata service turns
+    on, and therefore the one the template contract check has to report.
     """
     private_ip = ""
     published: list[dict] = []
+    nics: list[dict] = []
     for iface in (raw_vm.get("interfaces") or []):
         if not private_ip and iface.get("ip"):
             private_ip = str(iface["ip"])
+        services = []
         for svc in (iface.get("services") or []):
-            published.append({
+            entry = {
                 "id": str(svc.get("id") or ""),
                 "internal_port": svc.get("internal_port"),
                 "external_ip": svc.get("external_ip") or "",
                 "external_port": svc.get("external_port"),
-            })
-    return private_ip, published
+            }
+            published.append(entry)
+            services.append(entry)
+        nics.append({
+            "id": str(iface.get("id") or ""),
+            "ip": str(iface.get("ip") or ""),
+            "nic_type": str(iface.get("nic_type") or ""),
+            "network_id": str((iface.get("network_id")
+                               or (iface.get("network") or {}).get("id") or "")),
+            "network_type": str((iface.get("network") or {}).get("network_type") or ""),
+            "services": services,
+        })
+    return private_ip, published, nics
 
 
 def _template(raw: dict) -> dict:
@@ -217,7 +242,7 @@ def _environment(raw: dict) -> dict:
 
 
 def _vm(raw: dict) -> dict:
-    private_ip, published = _interfaces(raw)
+    private_ip, published, nics = _interfaces(raw)
     return {
         "id": str(raw.get("id") or ""),
         "name": raw.get("name") or "",
@@ -225,6 +250,10 @@ def _vm(raw: dict) -> dict:
         "os_family": _os_family(raw),
         "private_ip": private_ip,
         "published_services": published,
+        # The NICs, with their ids. `published_services` above stays flattened because
+        # every existing caller renders it as a list and none of them cares which NIC a
+        # service hangs off; this is the addressable form the publish call needs.
+        "interfaces": nics,
     }
 
 
@@ -657,3 +686,190 @@ async def get_environment(env_id: str) -> dict:
     # The nested read is authoritative where the collection read was not.
     out["vm_count"] = len(out["vms"])
     return out
+
+
+# ── authoring templates ──────────────────────────────────────────────────────
+#
+# The write half of the catalogue. Until this landed the dashboard could only *read*
+# `/v2/templates`, which made the whole POV feature downstream of a catalogue nobody could
+# author from here — see docs/integrations/skytap.md#building-a-template.
+#
+# Skytap has no "edit a template" call, and that is not an omission this module should try
+# to paper over. A template is immutable; the way you change one is to instantiate it, change
+# the *environment*, and save that back as a new template. So the pipeline is
+# create_environment -> (prepare it) -> create_template, which is exactly what
+# services/pov_template_builder drives.
+#
+# UNVERIFIED against a live Skytap account, the same way the publish_sets block above is:
+# `POST /v2/templates` is documented to take `configuration_id`, and the description is set
+# by a follow-up PUT because the create call is documented only for `configuration_id` and
+# `name`. If a live create 422s, `configuration_id` is the field to look at first.
+
+
+async def get_template(template_id: str) -> dict:
+    """One template, with its VMs.
+
+    The collection read (`list_templates`) gives a `vm_count` and nothing else, so the
+    template contract cannot be checked from it — a check needs the VM *names*, to answer
+    "is there a broker in here?". This is the nested read that can.
+    """
+    template_id = str(template_id or "").strip()
+    if not template_id:
+        raise SkytapError("a template id is required")
+    raw = await _client().get(f"/v2/templates/{template_id}")
+    if not isinstance(raw, dict):
+        raise SkytapError(f"Skytap returned no template for id {template_id!r}")
+    out = _template(raw)
+    out["vms"] = [_vm(v) for v in (raw.get("vms") or []) if isinstance(v, dict)]
+    # Authoritative here where the collection read was a guess, exactly as get_environment
+    # overrides its own vm_count.
+    out["vm_count"] = len(out["vms"])
+    return out
+
+
+async def create_template(env_id: str, name: str, description: str = "") -> dict:
+    """Save an environment back as a new template.
+
+    Returns the new template in `_template` shape. The caller must persist
+    ``id`` before doing anything else that can fail: a template that exists in Skytap and
+    not in this database is an orphan nobody can attribute later, which is the same rule
+    `create_environment` follows for the same reason.
+
+    The description is a **separate PUT**, and a failure to set it is deliberately not
+    fatal — the template exists and its id is what everything keys on, so stranding a real
+    template over a cosmetic field would be the wrong trade. `create_environment` makes the
+    identical call for the identical reason.
+    """
+    env_id = str(env_id or "").strip()
+    name = str(name or "").strip()
+    if not env_id:
+        raise SkytapError("an environment id is required to create a template")
+    if not name:
+        raise SkytapError("a template name is required")
+
+    raw = await _client().request("POST", "/v2/templates",
+                                  json={"configuration_id": env_id, "name": name})
+    if not isinstance(raw, dict) or not raw.get("id"):
+        raise SkytapError(
+            f"Skytap accepted the template create from environment {env_id} but returned "
+            f"no template id; check the account for an orphan before retrying")
+
+    out = _template(raw)
+    if description:
+        try:
+            updated = await _client().request(
+                "PUT", f"/v2/templates/{out['id']}", json={"description": description})
+            if isinstance(updated, dict):
+                out = _template(updated)
+        except SkytapError:
+            logger.warning("Skytap: created template %s but could not set its description",
+                           out["id"], exc_info=True)
+    return out
+
+
+async def delete_template(template_id: str) -> None:
+    """Delete a template.
+
+    Idempotent on 404 for the same reason `delete_environment` is: a teardown that fails
+    because the thing is already gone leaves a row nobody can ever clean up.
+    """
+    template_id = str(template_id or "").strip()
+    if not template_id:
+        raise SkytapError("a template id is required")
+    try:
+        await _client().request("DELETE", f"/v2/templates/{template_id}")
+    except SkytapError as exc:
+        if "(404)" in str(exc):
+            logger.info("Skytap: template %s was already gone", template_id)
+            return
+        raise
+
+
+# ── published services ───────────────────────────────────────────────────────
+#
+# Skytap NATs a guest port to a public ip:port. docs/integrations/skytap.md is explicit
+# that POV *wiring* does not use these, because a published address changes per environment
+# and per power cycle — the wire-up reaches VMs on their private IPs through a Gateway
+# inside the environment.
+#
+# A template BUILD is the one case where that objection does not apply, and it is worth
+# saying so here rather than leaving a reader to reconcile two rules. The build publishes
+# port 22 on one VM, uses the address once within the same job, and revokes it in a
+# `finally`. Nothing persists it and nothing reads it later, so there is no address to
+# churn. See services/pov_template_builder.prepare_broker_vm.
+#
+# UNVERIFIED against a live account: the path is built as
+# /v2/configurations/{env}/vms/{vm}/interfaces/{nic}/services, which is the nested form the
+# services API documents. If a live create 404s, this path is the field to look at first.
+
+
+def _published_service(raw: dict) -> dict:
+    return {
+        "id": str(raw.get("id") or ""),
+        "internal_port": raw.get("internal_port"),
+        "external_ip": str(raw.get("external_ip") or ""),
+        "external_port": raw.get("external_port"),
+    }
+
+
+def _service_path(env_id: str, vm_id: str, interface_id: str) -> str:
+    return (f"/v2/configurations/{env_id}/vms/{vm_id}"
+            f"/interfaces/{interface_id}/services")
+
+
+async def publish_service(env_id: str, vm_id: str, interface_id: str,
+                          internal_port: int) -> dict:
+    """NAT one guest port to a public ip:port, and return where it landed.
+
+    Skytap allocates the external ip and port; asking for a specific one is not offered
+    here because nothing in this dashboard needs a stable address — the one caller uses it
+    once and revokes it.
+    """
+    env_id = str(env_id or "").strip()
+    vm_id = str(vm_id or "").strip()
+    interface_id = str(interface_id or "").strip()
+    if not (env_id and vm_id and interface_id):
+        raise SkytapError(
+            "an environment id, a VM id and an interface id are required to publish a "
+            "service")
+    try:
+        port = int(internal_port)
+    except (TypeError, ValueError) as exc:
+        raise SkytapError(f"internal_port must be a number, not {internal_port!r}") from exc
+
+    raw = await _client().request("POST", _service_path(env_id, vm_id, interface_id),
+                                  json={"internal_port": port})
+    if not isinstance(raw, dict) or not raw.get("id"):
+        raise SkytapError(
+            f"Skytap accepted the publish of port {port} on VM {vm_id} but returned no "
+            f"service id; check the environment for a stray published service")
+    out = _published_service(raw)
+    if not out["external_ip"] or not out["external_port"]:
+        raise SkytapError(
+            f"Skytap published port {port} on VM {vm_id} as service {out['id']} but "
+            f"returned no external address; revoke it and retry")
+    return out
+
+
+async def delete_published_service(env_id: str, vm_id: str, interface_id: str,
+                                   service_id: str) -> None:
+    """Revoke a published service.
+
+    Idempotent on 404. This runs in a caller's ``finally``, where raising would replace the
+    real failure with a bookkeeping one.
+    """
+    env_id = str(env_id or "").strip()
+    vm_id = str(vm_id or "").strip()
+    interface_id = str(interface_id or "").strip()
+    service_id = str(service_id or "").strip()
+    if not (env_id and vm_id and interface_id and service_id):
+        raise SkytapError("an environment, VM, interface and service id are all required")
+    try:
+        await _client().request(
+            "DELETE", f"{_service_path(env_id, vm_id, interface_id)}/{service_id}")
+    except SkytapError as exc:
+        if "(404)" in str(exc):
+            logger.info("Skytap: published service %s on VM %s was already gone",
+                        service_id, vm_id)
+            return
+        raise

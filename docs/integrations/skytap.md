@@ -33,6 +33,7 @@ instance the integration is masked off and Settings refuses to enable it.
 | Account | A Skytap account whose user can see the templates you want to build POVs from |
 | Credential | An **API security token** from the Skytap account page — **not** your account password |
 | Network | Outbound HTTPS from the dashboard to `cloud.skytap.com` |
+| Network, for template builds only | Outbound **TCP to an arbitrary high port** at a Skytap NAT address. Only the automatic runner install needs this — see [building a template](#building-a-template). An egress rule that allows 443 to the API host and nothing else will block it, and the builder says so rather than reporting a generic connection failure |
 
 ### Getting the token
 
@@ -116,6 +117,7 @@ implement is silently ignored, and an unscoped list looks exactly like a correct
 
 | Action | What happens |
 |---|---|
+| **Build a template** | Instantiate a base template into a scratch environment, check it against [the template contract](#the-template-contract), install the metadata runner on its broker VM, save the environment back as a **new template**, then reap the scratch environment. See [building a template](#building-a-template) |
 | **Create** | Instantiate a template, set the idle timer, power on, wait for it to settle, read the VMs back, then enrol [the broker agent](#the-broker-vm) |
 | **Start / Suspend** | A runstate change, then a poll until it settles |
 | **Broker** | Re-issue the enrolment code and re-write the bootstrap. The remedy for every way the first attempt can fail |
@@ -218,12 +220,102 @@ Once the agent enrols, the dashboard **clears `user_data`**. It is readable by a
 can read the environment in Skytap, and clearing it also stops a reboot re-running a
 bootstrap whose code is spent.
 
+## Building a template
+
+**POV → Templates** (`/pov/templates`), admin only.
+
+A POV *is* a template instantiated whole, so until this page existed the whole feature was
+downstream of a catalogue that could only be authored by hand in Skytap's own console. That
+matters most where the existing catalogue was built for an **on-premises** approach: a
+template carrying a full product stack inside the environment is the wrong shape for the
+SaaS-first POV this dashboard runs, where PRA, Password Safe and Entitle are *tenants*
+reached from outside and the environment needs only the customer-like VMs plus a broker.
+
+A template is immutable — there is no *edit a template* call — so authoring is a bake:
+
+```
+clone a base template → power on → check the contract → install the runner → save as a
+template → reap the scratch environment
+```
+
+The scratch environment is created, used and reaped inside one job. Its id is committed the
+moment Skytap returns it, before anything else can fail, for the reason the whole
+[lifecycle](#the-lifecycle) section gives: an environment that exists on the platform and
+not in this database is the one failure nothing can clean up — and a scratch one bills
+until somebody notices.
+
+### What the build does about the runner
+
+This is the point of the page. [The template contract](#the-template-contract) below
+requires the broker VM to carry a metadata runner, because Skytap hands `user_data` to the
+guest and **nothing executes it**. Before this, that runner existed only as an example in
+this document for somebody to copy into an image by hand — and it is the single most common
+way a POV fails.
+
+The build installs it. It publishes SSH on the broker VM, reads the login from Skytap's own
+[stored credentials](#capabilities), installs the runner and its systemd unit, and revokes
+the published service in a `finally`. Three things are worth knowing before you rely on it:
+
+- **It reaches a NAT-ed high port, not the API host.** See the prerequisites table above.
+  If your egress only allows HTTPS to `cloud.skytap.com`, clear **Install the metadata
+  runner** and use the install script the page offers instead.
+- **There is no host key to pin.** The VM was created minutes ago by the same API call that
+  said where to reach it, and it is destroyed at the end of the job. That trade is
+  acceptable for one connection to a machine with a lifetime in minutes, and it is exactly
+  why this path is not reused for anything longer-lived — POV wiring reaches VMs through a
+  Gateway inside the environment.
+- **A failed install does not fail the build.** A template that bakes without the runner is
+  still a usable template; you paste the script in, which is what you do today. The reason
+  lands in the **Runner** column, never in the build's error — which means "this build is
+  broken".
+
+Published services are otherwise [deliberately unused](#what-is-deliberately-not-used),
+because a published address changes per environment and per power cycle. A build is the one
+case where that does not matter: the address is used once and revoked in the same job.
+
+### The contract report
+
+**Verify** checks a template — including one somebody else authored — against the contract
+without building anything. Each check is reported on its own, never collapsed into one
+badge, because "no broker VM" and "the broker is on a manual network" have different fixes:
+
+| Check | `fail` means |
+|---|---|
+| Broker VM | No VM matches the broker name, so a POV from this template has nowhere to run its agent. The report names the VMs it *did* find |
+| Broker network | The broker is on a manual network. The metadata service answers **only** on automatic networks, so the guest would receive no bootstrap at all — which looks exactly like a missing runner |
+| Resource Broker host | Never fails. No Windows guest is a **warning**: a PRA-and-Entitle POV does not need one |
+| Workload VMs | Never fails. A broker-only template is a **warning** — a POV built from it has nothing to demonstrate |
+
+Only a `fail` stops a build. A warning is a statement about what a template is *for*, not a
+defect in it.
+
+Whether the runner is actually installed cannot be read from the platform at all — it is a
+file inside the guest. A Verify says so rather than guessing; a build answers it by
+installing one.
+
+### The scratch environment bills
+
+Three guards, because a running environment costs money whether or not anyone is watching:
+
+1. **`suspend_on_idle` is set on it before the power-on.** This is the only one that
+   survives the worker being killed mid-build, which is the failure nobody notices.
+2. The job reaps it after a successful bake, unless you asked to keep it. It deliberately
+   does **not** reap on failure — a build that broke is the one whose environment you may
+   want to look at.
+3. **Discard** on any build row reaps it by hand. A failed build keeps its environment id
+   precisely so this can work — and a failed *reap* does not mark the row discarded, because
+   that would hide an environment that is still running.
+
 ## The template contract
 
 Skytap's `bootstrap_injection` mechanism is **`metadata`**: the platform stores the payload
 and the guest fetches it. There is no cloud-init datasource and nothing runs it for you, so
-the broker VM in your template must carry a small runner. This is the one piece of the
-feature that lives in your image rather than in this dashboard.
+the broker VM in your template must carry a small runner.
+
+> **The builder writes this for you.** [Building a template](#building-a-template) generates
+> the runner from the same marker constants the dashboard writes into the payload, and
+> installs it. The shape below is what it generates, and what you need if you are baking a
+> template by hand — **POV → Templates** will also just hand you the script to paste.
 
 The runner has to do four things. Anything that does them is fine; this is the shape:
 
@@ -298,6 +390,8 @@ a platform lacks degrades visibly instead of failing late:
 | Stored credentials | yes — `…/vms/{id}/credentials`. Used by [the Resource Broker install](../pov-instance.md#there-is-no-login-field-on-purpose), which is why the dashboard stores no Windows password for a POV |
 | Verify | yes — one page of `/v2/templates`, surfaced as **Test connection** in Settings |
 | Project scoping | yes — `/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` |
+| Template authoring | yes — `POST /v2/templates` with a `configuration_id`. There is no *edit a template* call on any lab platform, so authoring is always instantiate → change → bake. Used by [building a template](#building-a-template) |
+| Published services | yes — `…/interfaces/{id}/services`, a guest port NAT-ed to a public `ip:port`. Used **only** by a template build, for the length of one build |
 
 > **The two project paths are not yet confirmed against a live account.** Three things are
 > assumed: that they return the same object shape as the account-wide collections, that
@@ -335,4 +429,10 @@ rather than failing somewhere inside a job.
 | "no agent enrolled within 14 minutes" | Same causes as above | The bootstrap is still on the VM — `docker logs dashboard-agent` there, if it ever started, says which |
 | "this dashboard does not know its own public URL" | No pinned audience and no `public_base_url` | An agent inside a customer network needs an address. Set it in Settings → Integrations → Remote Agents |
 | "the agent endpoint is `http://…`" | The audience is plaintext | The agent refuses to sign over plaintext, so the broker would never enrol. Terminate TLS and correct **Public base URL** |
+| A build fails with "does not satisfy the template contract" | The base template has no broker VM, or its broker is on a manual network | Read the contract report on the build row. Press **Discard** to reap the scratch environment, fix the base template, and build again |
+| The **Runner** column reads `failed` and names a firewall | The SSH install could not reach the published port | It dials a NAT-ed high port, not `cloud.skytap.com`. Either open that egress or clear **Install the metadata runner** and paste the install script onto the broker VM by hand — the template itself is fine |
+| The **Runner** column reads `skipped` | You cleared the checkbox, or no broker VM was resolved | Not a failure. Paste the install script from **POV → Templates** onto the broker VM |
+| A build row shows a **build env** that is still running | The build failed, or you asked to keep it | It is billing. Press **Discard** to reap it. A failed build keeps the id on purpose, so this always works |
+| Discard says the environment could not be deleted | Skytap refused the delete | The row stays visible with its id rather than being marked discarded — marking it would hide a running environment. Clear the cause and press Discard again |
+| A POV built from a new template still reads **enrolling** | The runner is present but the broker cannot reach the agent endpoint | The runner is not the only requirement — see [the broker VM](#the-broker-vm). Check Docker and the automatic network, then press **Broker** |
 | The broker was online and 401s after a re-run | Its state volume survived a re-broker | The generated bootstrap removes it. A hand-run `docker run` that skipped that line leaves the old identity in place — remove the `dashboard_agent_state` volume and press **Broker** |

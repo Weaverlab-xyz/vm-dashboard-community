@@ -48,8 +48,8 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, expiry_policy, expiry_reaper, job_service,
-                        lab_platforms, pov_broker, pov_env_service, pov_gateway,
-                        pov_resource_broker, pov_share, pov_wireup)
+                        lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
+                        pov_gateway, pov_resource_broker, pov_share, pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -67,8 +67,14 @@ class ProvisionRequest(BaseModel):
     """Note what is absent: there is no customer field, and adding one later should be
     treated as a schema regression. A POV is scoped by workgroup and created_by."""
     platform: str = _DEFAULT_PLATFORM
-    template_id: str
+    # Optional once a blueprint is named: a blueprint carries the template, so requiring
+    # both would make the dropdown that fills the form also mandatory to fill in by hand.
+    template_id: str = ""
     name: str
+    # A saved recipe to take defaults from. It supplies only fields this request left
+    # blank — see pov_blueprint_service.apply_to. Deliberately NOT a second provision
+    # path: everything below this line is the same code with or without it.
+    blueprint_id: str = ""
     workgroup: str = ""
     project_id: str = ""
     # 0 disables it. Defaulted by the caller rather than here so the value that reaches
@@ -307,6 +313,31 @@ async def provision(payload: ProvisionRequest,
     202, not 201: the environment does not exist yet. This returns the row and the job
     that will build it, and the job is where the progress and the failure live.
     """
+    # A blueprint supplies defaults for fields this request left blank, BEFORE anything is
+    # resolved — so the template id it carries is validated against the platform exactly
+    # like a hand-typed one, and every refusal below reads the same either way. The request
+    # still wins field by field.
+    blueprint = None
+    if payload.blueprint_id.strip():
+        blueprint = pov_blueprint_service.get(db, payload.blueprint_id.strip())
+        if blueprint is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no blueprint {payload.blueprint_id!r}")
+        # The platform comes from the blueprint when the request did not name one other
+        # than the default: a blueprint built for one platform cannot be provisioned on
+        # another, and silently using the default would create it in the wrong place.
+        if payload.platform == _DEFAULT_PLATFORM and blueprint.platform:
+            payload.platform = blueprint.platform
+        for field, value in pov_blueprint_service.apply_to(blueprint, payload).items():
+            setattr(payload, field, value)
+
+    if not str(payload.template_id or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="a template id is required — pick one, or choose a blueprint that "
+                   "names one")
+
     name, mod = _adapter(payload.platform)
 
     if db.query(PovEnvironment).filter(
@@ -375,8 +406,23 @@ async def provision(payload: ProvisionRequest,
     # exists. A POV gets its own much longer default than a cloud VM — see
     # expiry_policy.pov_default_hours.
     env.expires_at = expiry_policy.default_expiry_for_kind("pov")
+    # A blueprint may shorten or lengthen that. Applied only when the feature is on — a
+    # blueprint must not be able to stamp a timer on an instance where expiry is off, or
+    # the "NULL means never, so enabling it later acts on nothing that already exists"
+    # property would depend on which recipe somebody used. `clamp_hours` still applies the
+    # ceiling, so a blueprint cannot outrun resource_expiry_max_total_hours either.
+    if (blueprint is not None and (blueprint.expiry_hours or 0) > 0
+            and env.expires_at is not None):
+        env.expires_at = expiry_policy.expiry_from_now(
+            expiry_policy.clamp_hours(blueprint.expiry_hours))
     db.add(env)
     db.commit()
+
+    # The blueprint's non-secret install configuration, copied onto the row now that it
+    # exists. Nothing is run — see pov_blueprint_service — this only means the Gateway and
+    # Resource Broker panels open with the fields that are the same for every POV of this
+    # kind already filled in.
+    prefilled = pov_blueprint_service.prefill_environment(db, blueprint, env)
 
     job = job_service.create_job(
         db, job_type="pov_env_provision",
@@ -390,7 +436,9 @@ async def provision(payload: ProvisionRequest,
         })
     env.provision_job_id = job.id
     db.commit()
-    return {"environment": _serialize(env), "job_id": job.id}
+    return {"environment": _serialize(env), "job_id": job.id,
+            "blueprint": blueprint.name if blueprint else "",
+            "prefilled": prefilled}
 
 
 @router.post("/managed/{env_id}/power", status_code=202)

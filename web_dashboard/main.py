@@ -1008,6 +1008,13 @@ try:
     from .api import bt_tenants as bt_tenants_api  # noqa: E402
     app.include_router(bt_tenants_api.router,
                        dependencies=[_feature_gate("pov_environments_enabled")])
+    # The template builder and the blueprint registry. Same prefix and the same gate:
+    # authoring the templates a POV is built from is part of the POV feature, not a
+    # separate Skytap admin surface — see services/lab_platforms on why the feature is not
+    # named after its first platform.
+    from .api import pov_templates as pov_templates_api  # noqa: E402
+    app.include_router(pov_templates_api.router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
 except ImportError as exc:
     logger.warning("API router 'pov' not loaded: %s", exc)
 
@@ -1355,6 +1362,22 @@ async def pov_page(request: Request):
     whose whole premise is a registry of customer tenants that a demo instance does not have.
     """
     return templates.TemplateResponse("pov/index.html", {"request": request})
+
+
+@app.get("/pov/templates", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("pov_environments_enabled")])
+async def pov_templates_page(request: Request):
+    """The template builder and blueprint registry.
+
+    Under /pov rather than at /skytap: authoring the templates a POV is built from is part
+    of the POV feature, and services/lab_platforms opens by saying that naming the feature
+    after its first platform is the mistake that module exists to prevent. The page carries
+    the same platform selector the POV page does.
+
+    Same gate as /pov, and for the same reason — this page writes to a customer's lab
+    platform account, which a demo instance does not have.
+    """
+    return templates.TemplateResponse("pov/templates.html", {"request": request})
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)

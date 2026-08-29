@@ -184,12 +184,23 @@ def dashboard_agent_url() -> str:
 
 # ── selection ────────────────────────────────────────────────────────────────
 
+def name_matches_broker(name: str, wanted: str) -> bool:
+    """Whether a VM name is THE broker name: exact, case-insensitive, trimmed.
+
+    One predicate rather than the same expression written out wherever a broker is picked.
+    The rule it encodes is the load-bearing part: "contains broker" also matches a customer
+    VM called ``password-broker``, and the cost of that wrong answer is an agent installed
+    on a machine nobody expected. Both callers — ``select_broker_vm`` below, over database
+    rows, and the template builder, over a live platform read — have to agree on it, and
+    two copies of a rule are two chances to relax one of them.
+    """
+    return (name or "").strip().lower() == (wanted or "").strip().lower()
+
+
 def select_broker_vm(db: Session, env: PovEnvironment) -> PovEnvironmentVM:
     """The VM that will run the agent, or a refusal naming what was actually found.
 
-    Exact name match, case-insensitively. Deliberately not a fuzzy one: "contains
-    'broker'" also matches a customer VM called ``password-broker``, and the cost of the
-    wrong answer is an agent installed on a machine nobody expected.
+    Exact name match, case-insensitively — see ``name_matches_broker``.
     """
     wanted = broker_vm_name(env).strip().lower()
     rows = (db.query(PovEnvironmentVM)
@@ -200,7 +211,7 @@ def select_broker_vm(db: Session, env: PovEnvironment) -> PovEnvironmentVM:
             "broker on. Refresh the POV and try again once the platform reports its VMs.")
 
     for row in rows:
-        if (row.name or "").strip().lower() == wanted:
+        if name_matches_broker(row.name, wanted):
             return row
 
     found = ", ".join(sorted((r.name or r.platform_vm_id) for r in rows)) or "none"

@@ -15,8 +15,16 @@
    pov_environments_enabled is in feature_flags._POV_ONLY, so this can only ever render
    on a POV instance and the position needs no further guard. #}
 {% if pov_environments_enabled %}
+{# `== '/pov'`, not `startswith('/pov')`: Templates below is its own page, and a prefix
+   test would light both links at once — which reads as "you are in two places". #}
 <a href="/pov" class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
-   {% if request.url.path.startswith('/pov') %}{{ nav_active }}{% else %}{{ theme.weft }}{% endif %}">POV</a>
+   {% if request.url.path == '/pov' %}{{ nav_active }}{% else %}{{ theme.weft }}{% endif %}">POV</a>
+{# The template builder. Admin-only, unlike POV itself: it writes to the lab platform
+   account — baking templates and creating scratch environments that bill — while the POV
+   page's own actions are scoped to a POV somebody already provisioned. #}
+<a x-show="$store.auth.isAdmin" href="/pov/templates"
+   class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
+   {% if request.url.path.startswith('/pov/templates') %}{{ nav_active }}{% else %}{{ theme.weft }}{% endif %}">Templates</a>
 {% endif %}
 
 {# ── On-premises hypervisors ───────────────────────────────────────── #}
