@@ -766,9 +766,23 @@ def _profile_context(request: Request) -> dict:
     this is a handful of dict lookups per page rather than a query per flag.
     """
     profile = feature_flags.install_profile()
+    # The persona rides along for the same reason the flags do: the nav is rendered on
+    # every page by _nav_links.html, and its pinned order has to be in hand at render time
+    # rather than fetched. A per-page /api/persona call from base.html would be a request
+    # on every navigation for a value the server already has.
+    #
+    # It is deliberately ONLY the pins and the label. A persona may reorder the nav; it may
+    # not decide which links exist -- that stays with the feature flags above, and
+    # _nav_links.html never learns a persona key. See services/personas.py.
+    persona_key, persona_source = personas.resolve(request)
+    persona = personas.get(persona_key)
     return {
         "install_profile": profile,
         "theme": ui_theme.theme_for(profile, settings.app_env),
+        "persona": persona_key,
+        "persona_label": persona.label if persona else "",
+        "persona_source": persona_source,
+        "persona_nav_pins": ",".join(persona.nav_pins) if persona else "",
         **_feature_flags(),
     }
 
