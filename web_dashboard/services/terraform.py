@@ -373,9 +373,26 @@ def _build_var_args(variables: dict) -> list:
 # that would have unlocked it) read "1787928588291305". Parsing terraform's own
 # output is the only thing that stays correct across backends.
 #
-# The sentinel is not a UUID and not an integer, so it can match neither spelling
-# of a real lock ID and can never unlock one by accident.
-_LOCK_PROBE_ID = "dashboard-probe-not-a-lock-id"
+# That output only appears if the backend gets far enough to READ the lock, which
+# makes the sentinel's format load-bearing rather than cosmetic: it has to satisfy
+# every backend's id FORMAT while still matching no real lock. "0" is the only
+# value that does both:
+#
+#   gcs     — the lock id is the .tflock object's GENERATION, so the backend runs
+#             strconv.ParseInt BEFORE it reads anything and rejects a non-numeric id
+#             with a bare "Lock ID should be numerical value" and NO Lock Info block.
+#             A word-shaped sentinel therefore made every GCS lock read as "no lock
+#             held" — silently disabling both the cancel-path release below and the
+#             operator force-unlock panel. Generation 0 does not exist (GCS assigns
+#             positive int64s), and the conditional delete is refused CLIENT-side
+#             ("storage: Delete: empty conditions") before any API call, so the probe
+#             cannot break the lock it is reading.
+#   s3      — id is compared as an opaque string; "0" mismatches the stored UUID and
+#   azurerm   the backend returns its LockError with Info attached, same as before.
+#
+# Anything that changes this value must stay numeric; see the guard test in
+# tests/test_terraform_cancel_lock_release.py.
+_LOCK_PROBE_ID = "0"
 
 _LOCK_FIELD_RE = re.compile(r"^\s*(ID|Path|Operation|Who|Version|Created):\s*(.+?)\s*$", re.M)
 
@@ -409,6 +426,38 @@ def _parse_lock_info(text: str) -> dict:
     for key, value in _LOCK_FIELD_RE.findall(text[at:]):
         out.setdefault(key, value)
     return out
+
+
+# Text that means "the backend looked and there is genuinely no lock object",
+# as opposed to "the probe could not reach the lock at all". Only the first may be
+# reported as unlocked -- see :func:`_classify_lock_probe`.
+_NO_LOCK_MARKERS = (
+    "object doesn't exist",       # gcs: lockInfo() got storage.ErrObjectNotExist
+    "object does not exist",
+    "nosuchkey",                  # s3
+    "status code: 404",
+    "blobnotfound",               # azurerm
+    "lock already broken",
+)
+
+
+def _classify_lock_probe(text: str):
+    """``("locked", info)`` | ``("unlocked", {})`` | ``("unknown", {})``.
+
+    The third case is the point. A probe whose output carries no ``Lock Info:``
+    block is NOT evidence that nothing is locked -- a 403 on the state bucket, a
+    TLS failure through the corp proxy, an uninitialised dir and a backend that
+    rejected the sentinel's FORMAT all look identical to "no lock held". Reporting
+    any of them as unlocked tells an operator the wedge cleared itself and to go
+    retry the run that just failed, which is the one thing guaranteed not to work.
+    """
+    info = _parse_lock_info(text)
+    if info.get("ID"):
+        return "locked", info
+    low = (text or "").lower()
+    if any(m in low for m in _NO_LOCK_MARKERS):
+        return "unlocked", {}
+    return "unknown", {}
 
 
 def _parse_lock_time(value: str):
@@ -450,9 +499,15 @@ def _release_own_lock_sync(deploy_dir: str, env: Optional[dict], started_at) -> 
     try:
         probe = _run(["force-unlock", "-force", _LOCK_PROBE_ID], deploy_dir,
                      timeout=60, env=env)
-        info = _parse_lock_info((probe.stdout or "") + "\n" + (probe.stderr or ""))
-        if not info:
+        verdict, info = _classify_lock_probe(
+            (probe.stdout or "") + "\n" + (probe.stderr or ""))
+        if verdict == "unlocked":
             return "none held"
+        if verdict == "unknown":
+            # Never "none held": that reads as "nothing was orphaned" in the cancel
+            # log and hides a lock this process may well still be holding.
+            return ("could not read the lock: "
+                    + ((probe.stderr or probe.stdout or "").strip()[:200] or "no output"))
         lock_id = info.get("ID", "")
         if not lock_id:
             return "held, but terraform reported no lock id"
@@ -536,10 +591,23 @@ def _lock_workdir(state_job_id: str):
 
 
 def _read_lock_sync(work: str, backend_env: Optional[dict]) -> dict:
-    """Probe an initialised dir for the lock its backend currently holds."""
+    """Probe an initialised dir for the lock its backend currently holds.
+
+    ``{}`` means the backend confirmed there is no lock. Raises
+    :class:`TerraformError` when the probe could not determine that either way, so
+    callers surface "could not read the lock" instead of inventing "not locked".
+    """
     probe = _run(["force-unlock", "-force", _LOCK_PROBE_ID], work, timeout=60,
                  env=backend_env)
-    return _parse_lock_info((probe.stdout or "") + "\n" + (probe.stderr or ""))
+    text = (probe.stdout or "") + "\n" + (probe.stderr or "")
+    verdict, info = _classify_lock_probe(text)
+    if verdict == "locked":
+        return info
+    if verdict == "unlocked":
+        return {}
+    raise TerraformError(
+        "Could not determine whether this state is locked -- terraform neither "
+        "reported a lock nor confirmed the absence of one:\n" + text.strip()[:600])
 
 
 _LOCAL_BACKEND_DETAIL = (

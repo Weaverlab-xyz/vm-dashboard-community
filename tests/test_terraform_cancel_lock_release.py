@@ -64,9 +64,14 @@ except Exception as exc:  # pragma: no cover — skip if other app deps are miss
         sys.exit(0)
 
 
-# The real force-unlock failure output, GCS backend. Note the ID: it is the lock
-# OBJECT's generation number, not the UUID stored inside the .tflock — which is
-# exactly why the id is read back from terraform instead of from the object.
+# force-unlock failure output in the s3/azurerm shape: those backends COMPARE the
+# id and hand back a statemgr.LockError with Info attached. The ID here is still a
+# GCS generation number rather than the UUID inside the .tflock, because that is
+# why the id is read back from terraform instead of from the object.
+#
+# GCS's own wording differs and is pinned separately in REAL_GCS_LOCKED_PROBE
+# below -- this fixture originally claimed to BE the GCS output, and that fiction
+# is what let a non-numeric sentinel ship green.
 def _probe_output(who, created="2026-08-28 14:49:48.17098413 +0000 UTC",
                   lock_id="1787928588291305"):
     return f"""Failed to unlock state: lock id "{tf._LOCK_PROBE_ID}" does not match existing lock
@@ -305,6 +310,121 @@ def test_a_hung_terminate_is_killed_and_reaped_before_the_release():
     assert calls.index("kill") < calls.index("release"), \
         "force-unlock is only sound once the holder is provably dead"
     assert calls.count("wait") >= 2, "the killed process must be reaped, not just signalled"
+
+
+# ── the sentinel's FORMAT (the bug that shipped) ───────────────────────────────
+#
+# All three of the following were captured live on 2026-08-31 (terraform 1.10.5,
+# gcs backend) while probing the real lock left behind by a wedged k8s_decommission.
+
+# A state that IS locked. Note there is no "does not match" phrasing anywhere: the
+# gcs backend uses the generation as a delete PRECONDITION instead of comparing
+# ids, and precondition 0 is refused client-side before any API call -- which is
+# what keeps the probe non-destructive while still rendering the block.
+REAL_GCS_LOCKED_PROBE = """Failed to unlock state: storage: Delete: empty conditions
+Lock Info:
+  ID:        1788210674129164
+  Path:      gs://bucket/terraform-state/38fd3bb8-e404-4813-ab54-8a73ec72d657/default.tflock
+  Operation: OperationTypeApply
+  Who:       root@dash-worker--0000023-7bc784f647-49pvx
+  Version:   1.10.5
+  Created:   2026-08-31 21:11:14.036246578 +0000 UTC
+  Info:
+"""
+
+# What gcs says when the sentinel is not numeric. It is a BARE error, not a
+# statemgr.LockError, so it carries no Lock Info block no matter what holds the
+# lock -- which silently blinded both the cancel release and the operator panel on
+# every GCS deployment.
+REAL_GCS_NON_NUMERIC_REJECTION = (
+    "Failed to unlock state: Lock ID should be numerical value, "
+    "got 'dashboard-probe-not-a-lock-id'\n")
+
+# A state with no .tflock at all.
+REAL_GCS_ABSENT_LOCK = ("Failed to unlock state: storage: Delete: empty conditions\n"
+                        "storage: object doesn't exist\n")
+
+
+def test_the_sentinel_is_numeric():
+    # gcs parses the lock id as an int64 BEFORE it reads the lock, so a non-numeric
+    # sentinel can never render a Lock Info block on that backend.
+    try:
+        int(tf._LOCK_PROBE_ID)
+    except (TypeError, ValueError):
+        raise AssertionError(
+            "_LOCK_PROBE_ID must be numeric or the GCS backend rejects it on format "
+            "and every lock reads as absent; got %r" % (tf._LOCK_PROBE_ID,))
+
+
+def test_the_sentinel_cannot_be_a_real_gcs_generation():
+    # Generations are positive int64s, so 0 matches nothing that can exist.
+    assert int(tf._LOCK_PROBE_ID) <= 0, "the sentinel must not be a plausible generation"
+
+
+def test_real_gcs_locked_output_is_classified_locked():
+    verdict, info = tf._classify_lock_probe(REAL_GCS_LOCKED_PROBE)
+    assert verdict == "locked", verdict
+    assert info["ID"] == "1788210674129164", info
+    assert info["Who"] == "root@dash-worker--0000023-7bc784f647-49pvx", info
+
+
+def test_real_gcs_absent_lock_is_classified_unlocked():
+    assert tf._classify_lock_probe(REAL_GCS_ABSENT_LOCK) == ("unlocked", {})
+
+
+def test_a_format_rejection_is_unknown_never_unlocked():
+    # THE regression. Classifying this as "unlocked" is what told an operator the
+    # lock had cleared itself while it was provably still held, and sent them off to
+    # retry a run that could only fail in exactly the same way.
+    verdict, _info = tf._classify_lock_probe(REAL_GCS_NON_NUMERIC_REJECTION)
+    assert verdict == "unknown", verdict
+
+
+def test_an_unreadable_probe_is_unknown_not_unlocked():
+    for text in ("", None, "Error: Backend initialization required",
+                 "Error: googleapi: Error 403: caller lacks storage.objects.get",
+                 "tls: failed to verify certificate: x509: unknown authority"):
+        verdict, _info = tf._classify_lock_probe(text)
+        assert verdict == "unknown", (text, verdict)
+
+
+def _read_lock(probe_out):
+    """Drive _read_lock_sync with a stubbed _run."""
+    def fake_run(cmd, cwd, timeout=600, env=None):
+        return subprocess.CompletedProcess(cmd, 1, "", probe_out)
+    orig = tf._run
+    tf._run = fake_run
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            return tf._read_lock_sync(tmp, None)
+    finally:
+        tf._run = orig
+
+
+def test_read_lock_sync_returns_the_lock_when_one_is_held():
+    assert _read_lock(REAL_GCS_LOCKED_PROBE)["ID"] == "1788210674129164"
+
+
+def test_read_lock_sync_reports_absence_only_when_confirmed():
+    assert _read_lock(REAL_GCS_ABSENT_LOCK) == {}
+
+
+def test_read_lock_sync_raises_rather_than_inventing_unlocked():
+    # The panel renders "the lock is already gone" off a falsy result, so an
+    # unreadable probe has to raise and surface as "could not read the lock".
+    try:
+        _read_lock(REAL_GCS_NON_NUMERIC_REJECTION)
+    except tf.TerraformError as exc:
+        assert "Could not determine" in str(exc), str(exc)
+    else:
+        raise AssertionError("an unreadable probe must not be reported as 'no lock'")
+
+
+def test_cancel_never_reports_none_held_when_it_cannot_read_the_lock():
+    status, cmds = _release(REAL_GCS_NON_NUMERIC_REJECTION, BEFORE, who=ME)
+    assert status != "none held", "an unreadable probe must not read as 'nothing orphaned'"
+    assert "could not read the lock" in status, status
+    assert len(cmds) == 1, "nothing may be force-unlocked off an unreadable probe"
 
 
 if __name__ == "__main__":
