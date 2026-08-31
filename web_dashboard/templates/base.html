@@ -45,10 +45,37 @@
              _nav_links.html is the single source for the link list. -->
         {% set nav_hover = theme.nav_hover %}
         {% set nav_active = theme.nav_active %}
+        {# The inline row. `navInline` is what responsiveNav.applyPins() reorders, and it is
+           scoped by ref rather than by document.querySelectorAll on purpose: BOTH renders
+           of _nav_links.html are in the DOM at once, and a document-wide selector would
+           scramble the drawer below — which is the guaranteed-complete escape hatch that
+           makes "a persona can never make a page unreachable" true at the DOM level.
+
+           data-nav-pins is a comma-joined list from main._profile_context. Empty for the
+           neutral persona, and applyPins returns immediately on empty, so a user who never
+           picks a focus gets byte-identical DOM to before this existed. #}
         <div x-show="!compact"
+             x-ref="navInline"
+             data-nav-pins="{{ persona_nav_pins }}"
              @click="mobileNav = false"
              class="flex items-center space-x-1 flex-shrink-0">
           {% include '_nav_links.html' %}
+          {# Overflow menu. Lives here rather than in _nav_links.html so the drawer never
+             grows one: that include is rendered twice and must stay a flat, complete list.
+             Hidden unless applyPins actually moved something into it. #}
+          <div class="relative" x-show="moreCount > 0" x-cloak
+               @keydown.escape="moreOpen = false">
+            <button @click.stop="moreOpen = !moreOpen"
+                    class="px-2 py-2 rounded-md text-sm font-medium {{ theme.nav_hover }}"
+                    :aria-expanded="moreOpen"
+                    aria-label="More navigation links">More ▾</button>
+            <div x-ref="navMore"
+                 x-show="moreOpen" x-cloak
+                 @click.outside="moreOpen = false"
+                 @click="mobileNav = false; moreOpen = false"
+                 class="absolute right-0 mt-1 w-56 flex flex-col items-stretch space-y-1
+                        {{ theme.nav_bg }} shadow-2xl rounded-lg z-50 p-2"></div>
+          </div>
         </div>
         <div x-show="compact && mobileNav"
              @click="mobileNav = false"

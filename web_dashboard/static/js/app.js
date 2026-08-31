@@ -376,8 +376,83 @@ function responsiveNav() {
     return {
         compact: false,
         mobileNav: false,
+        moreOpen: false,
+        moreCount: 0,
         _measuring: false,
+        _pinned: false,
         _t: null,
+
+        // Persona nav pinning. CURATION ONLY: every link that was in the row is still
+        // reachable — the ones the persona did not pin move into the "More" menu, and the
+        // flyout drawer keeps the complete list in shipped order regardless.
+        //
+        // This exists to BUY nav width, not spend it. base.html's x-ref="navRow" spans the
+        // brand, the links AND the user menu, and the row folds entirely into the drawer
+        // the moment it overflows (61px of headroom at 1280px — tests/test_profile_theme
+        // pins the brand side of that budget). Six pinned links plus one "More" button is
+        // materially narrower than the twenty-link row, so a persona strictly reduces fold
+        // pressure rather than adding to it.
+        //
+        // Scoped to $refs.navInline, never document: both renders of _nav_links.html are in
+        // the DOM at once and a document-wide selector would scramble the drawer.
+        //
+        // Runs ONCE (_pinned). It is a DOM move, not a render, so repeating it on every
+        // resize would re-walk an already-pinned row for nothing.
+        applyPins() {
+            if (this._pinned) return;
+            const inline = this.$refs.navInline;
+            const menu = this.$refs.navMore;
+            if (!inline || !menu) return;
+            this._pinned = true;
+
+            const pins = (inline.dataset.navPins || '')
+                .split(',').map(s => s.trim()).filter(Boolean);
+            // Neutral: no pins, no menu, DOM untouched.
+            if (!pins.length) return;
+
+            const links = Array.from(inline.querySelectorAll('a[data-nav]'));
+            const byId = new Map(links.map(a => [a.dataset.nav, a]));
+
+            // Hoist the pinned links to the front, in the order the persona named them.
+            // insertBefore on a node already in the parent MOVES it, so this reorders
+            // without cloning — cloning would drop the Alpine x-show bindings that hide
+            // the admin-only links from non-admins.
+            let cursor = null;
+            for (const id of pins) {
+                const el = byId.get(id);
+                if (!el) continue;              // a pin for a link this instance lacks
+                inline.insertBefore(el, cursor ? cursor.nextSibling : inline.firstChild);
+                cursor = el;
+            }
+
+            // Everything unpinned goes to the overflow menu. `w-full` so the links fill the
+            // vertical popover; the drawer already proves these classes read fine stacked.
+            for (const a of links) {
+                if (pins.includes(a.dataset.nav)) continue;
+                a.classList.add('w-full');
+                menu.appendChild(a);
+            }
+        },
+
+        // How many overflow links are actually reachable. Counted rather than assumed,
+        // because most unpinned links are admin-only (`x-show="$store.auth.isAdmin"`) and a
+        // non-admin would otherwise get a "More" button opening an empty popover.
+        //
+        // The test is the element's OWN computed display, which is independent of its
+        // ancestors'. That distinction is the whole reason this is not a one-liner: the menu
+        // itself is `x-show="moreOpen"`, so at the moment this runs it is display:none, and
+        // an `offsetParent !== null` check therefore returns 0 for EVERY link — the button
+        // would never appear and the overflow links would be reachable only from the drawer.
+        // Measured in a browser with Alpine: inside a hidden menu, a genuinely visible link
+        // has offsetParent === null and offsetWidth === 0 but computed display 'inline',
+        // while one its own x-show has hidden computes to 'none'.
+        countMore() {
+            const menu = this.$refs.navMore;
+            if (!menu) { this.moreCount = 0; return; }
+            this.moreCount = Array.from(menu.querySelectorAll('a[data-nav]'))
+                .filter(a => getComputedStyle(a).display !== 'none').length;
+        },
+
         init() {
             const measure = () => {
                 if (this._measuring || this.mobileNav) return;
@@ -385,8 +460,13 @@ function responsiveNav() {
                 // Force the inline layout so we can read the row's natural
                 // vs available width. One-frame flash on resize is fine.
                 this.compact = false;
+                // Before the read, not after: the fold decision has to see the PINNED
+                // width. Measuring first would decide on the twenty-link width and throw
+                // away the entire width benefit for that page load.
+                this.applyPins();
                 this.$nextTick(() => {
                     const row = this.$refs.navRow;
+                    this.countMore();
                     if (row) {
                         this.compact = row.scrollWidth > row.clientWidth + 1;
                     }
