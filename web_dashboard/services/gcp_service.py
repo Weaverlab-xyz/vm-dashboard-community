@@ -4053,20 +4053,52 @@ def _export_build_error_detail(project_id, build_id, creds, since, fallback: str
     return tail.strip() or fallback
 
 
-def _export_candidate_zones(project_id: str, preferred_zone: str, creds, limit: int = 10) -> list:
+def _gcs_bucket_region_sync(bucket: str, creds=None) -> str:
+    """Lowercase location of ``bucket`` ("us-central1"), or "" if it can't be read.
+
+    Returns the raw GCS location, so a multi-region bucket yields "us" and a
+    dual-region one "nam4" — neither matches a compute region, which is what
+    callers rely on to mean "no single region to prefer". Best-effort by design:
+    the export must still run if the caller lacks buckets.get."""
+    try:
+        from google.cloud import storage as gcs
+    except ImportError:
+        return ""
+    try:
+        client = gcs.Client(credentials=creds or _gcp_creds(), project=_cfg("gcp_project_id"))
+        return (client.get_bucket(bucket).location or "").strip().lower()
+    except Exception as e:
+        logger.warning("export: could not read location of gs://%s (%s); "
+                       "zone ladder will not prefer the hub region", bucket, e)
+        return ""
+
+
+def _export_candidate_zones(project_id: str, preferred_zone: str, creds, limit: int = 10,
+                            hub_region: str = "") -> list:
     """Ordered list of zones to try for the export worker VM.
 
     The Daisy exporter creates a temporary VM in a single zone and fails hard
     with ZONE_RESOURCE_POOL_EXHAUSTED when that zone is out of capacity — and,
     left to its own devices, it keeps picking the *same* zone, so a plain retry
     doesn't help. Tried in order:
-      1. the preferred zone,
-      2. the preferred region's other UP zones (a single-zone blip), then
+      1. ``hub_region``'s UP zones (see below) — the preferred zone first if it
+         happens to live there,
+      2. the preferred zone and its region's other UP zones (a single-zone blip),
       3. one UP zone from each *other* US region — so a whole-region outage
          (e.g. us-central1 at capacity, observed 2026-07-15) still finds
-         somewhere to run the export. The source image is global and the
-         exporter auto-creates a per-region scratch bucket, so a cross-region
-         worker is fine; it just adds some GCS egress on the way to the hub.
+         somewhere to run the export.
+
+    ``hub_region`` is the region of the *destination* bucket, and it outranks
+    ``preferred_zone`` because it is what decides the egress bill. The exporter
+    writes the whole ~17 GB disk from the worker VM to the hub bucket, so a
+    worker outside the hub's region pays inter-region egress on every attempt —
+    not just on a fallback. This used to be waved off as "some GCS egress"; the
+    2026-08-31 cost audit priced it at $1.32 in a single day (67 GB across four
+    us-east1 attempts against a us-central1 hub), which was 15% of that month's
+    entire GCP bill. Anchoring on the config's zone instead of the bucket meant
+    a project whose configured zone simply differed from its hub bucket paid
+    that on *every* export, first attempt included.
+
     Best-effort: falls back to ``[preferred]`` (or ``[""]`` — let Daisy choose)
     if the project's zones can't be enumerated."""
     pref = (preferred_zone or "").strip()
@@ -4084,17 +4116,37 @@ def _export_candidate_zones(project_id: str, preferred_zone: str, creds, limit: 
         logger.warning("export: could not enumerate zones (%s); no zone fallback", e)
         return [pref] if pref else [""]
 
+    return _order_export_zones(up, pref, hub_region, limit)
+
+
+def _order_export_zones(up: list, preferred_zone: str, hub_region: str = "",
+                        limit: int = 10) -> list:
+    """Pure ordering half of :func:`_export_candidate_zones` — see its docstring
+    for the ordering rules and why ``hub_region`` outranks the preferred zone.
+    Split out so the ladder is testable without a cloud account."""
+    pref = (preferred_zone or "").strip()
+
     def region_of(z: str) -> str:
         return z.rsplit("-", 1)[0]
 
     up_set = set(up)
     pref_region = region_of(pref) if pref else ""
+    hub = (hub_region or "").strip().lower()
     ordered: list = []
 
     def add(z: str) -> None:
         if z and z not in ordered:
             ordered.append(z)
 
+    # The hub bucket's region first — it owns the egress bill. A multi-region or
+    # dual-region bucket ("US", "NAM4") has no single region to match, so `hub`
+    # simply won't equal any region_of(z) and this block no-ops.
+    if hub:
+        if pref in up_set and region_of(pref) == hub:
+            add(pref)
+        for z in up:
+            if region_of(z) == hub:
+                add(z)
     if pref in up_set:
         add(pref)
     for z in up:                       # same-region siblings (single-zone blip)
@@ -4103,7 +4155,7 @@ def _export_candidate_zones(project_id: str, preferred_zone: str, creds, limit: 
     seen_regions = set()               # then one zone per other US region
     for z in up:
         r = region_of(z)
-        if r == pref_region or not r.startswith("us-") or r in seen_regions:
+        if r in (pref_region, hub) or not r.startswith("us-") or r in seen_regions:
             continue
         seen_regions.add(r)
         add(z)
@@ -4157,7 +4209,10 @@ def _export_custom_image_to_vhd_sync(
     if subnet:
         base_args.append("-subnet=" + subnet)
 
-    zones = _export_candidate_zones(project_id, zone, creds)
+    # Prefer the hub bucket's own region: the worker writes the whole disk there,
+    # so any other region bills inter-region egress on every attempt.
+    zones = _export_candidate_zones(
+        project_id, zone, creds, hub_region=_gcs_bucket_region_sync(dest_bucket, creds))
     total = len(zones)
     last_err: Optional[GCPError] = None
     for attempt, z in enumerate(zones, start=1):
