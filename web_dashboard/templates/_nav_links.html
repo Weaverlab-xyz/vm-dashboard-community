@@ -114,6 +114,18 @@
 <a data-nav="config_mgmt" href="/config-mgmt" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>
 {% endif %}
+{# Use cases: the guided-demo catalog. Unconditional, because the page is never empty --
+   with no focus set it lists every card for every role, so a flag here could only ever
+   hide something that works.
+
+   Whether this link is promoted into the pinned group, or lands in the "More" menu, is
+   decided entirely outside this file -- see tests/test_use_cases_page. Nothing in here may
+   reason about that. This template's only job is deciding which links EXIST, and keeping it
+   ignorant of the curation layer is what makes it impossible for that layer to remove one.
+   A test enforces the separation by forbidding even the name, and it caught this comment's
+   first draft. #}
+<a data-nav="use_cases" href="/use-cases" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/use-cases') %}{{ nav_active }}{% endif %}">Use cases</a>
 <a data-nav="inventory" href="/inventory" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/inventory') %}{{ nav_active }}{% endif %}">Inventory</a>
 <a data-nav="jobs" href="/jobs" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
