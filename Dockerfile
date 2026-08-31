@@ -308,7 +308,23 @@ RUN ARCH=$(dpkg --print-architecture) \
 # download at run time — so cloud-DB provisioning works behind a TLS-inspecting
 # proxy without the corp-CA dance, and isn't subject to flaky registry pulls.
 # Keep these in sync with the version constraints in terraform/db_*/main.tf.
-# The plugin cache directory is set via TF_PLUGIN_CACHE_DIR in terraform_pra_service.py.
+#
+# The providers land in a READ-ONLY FILESYSTEM MIRROR (TF_PROVIDER_MIRROR_DIR, wired up
+# via /etc/terraform.tfrc below), not in a runtime TF_PLUGIN_CACHE_DIR. TF_PLUGIN_CACHE_DIR
+# is used HERE, at build time, only because `terraform init` is how the providers get
+# downloaded and unpacked in the first place — it must NOT be set at run time. Two reasons:
+#
+#   * The plugin cache is shared MUTABLE state. `terraform init` symlinks
+#     .terraform/providers/<...> straight at the cache entry, so a running apply/destroy
+#     EXECUTES the cached binary, while any init that has to (re)install that same
+#     provider rewrites it in place -> ETXTBSY "text file busy", failing an unrelated
+#     job (job cc8743c3, a clouddb_decommission killed by a concurrent k8s destroy).
+#     A mirror is only ever read, so that race cannot exist.
+#   * The plugin cache is NOT an offline store: Terraform still queries
+#     registry.terraform.io to resolve versions even when the cache holds the answer,
+#     which defeats the whole point of baking providers in and breaks init behind a
+#     TLS-inspecting proxy. A filesystem_mirror + `direct { exclude }` resolves entirely
+#     from disk, so a pulled image really does provision with no outbound provider fetch.
 #
 # `terraform init` here talks to registry.terraform.io, whose client enforces a
 # 10s default timeout (TF_REGISTRY_CLIENT_TIMEOUT). When the registry is briefly
@@ -325,8 +341,9 @@ RUN ARCH=$(dpkg --print-architecture) \
 # Fix: raise the registry client timeout to 30s AND keep a retry loop (fresh
 # attempt each time), hard-failing after 8 tries so a genuinely unreachable
 # registry never ships an image missing a cached provider.
-ENV TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
-RUN ARCH=$(dpkg --print-architecture) \
+ENV TF_PROVIDER_MIRROR_DIR=/opt/terraform-provider-mirror
+RUN export TF_PLUGIN_CACHE_DIR="${TF_PROVIDER_MIRROR_DIR}" \
+    && ARCH=$(dpkg --print-architecture) \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
         "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/terraform.zip \
@@ -382,6 +399,59 @@ RUN ARCH=$(dpkg --print-architecture) \
            sleep $((attempt * 5)); \
        done \
     && rm -rf /tmp/tf_provider_init /tmp/tf_provider_init_az4 /tmp/tf_provider_init_g6 /tmp/tf_provider_init_g7
+
+# Serve those providers to every run-time `terraform init` as a read-only filesystem
+# mirror. `direct { exclude = ["*/*/*"] }` bans the registry outright, so init resolves
+# from disk alone: no version query, no download, and nothing ever writes the shared
+# directory (the ETXTBSY race above is structurally impossible, not merely serialized).
+# The path comes from TF_PROVIDER_MIRROR_DIR so the mirror the config names and the
+# directory the pre-cache populated cannot drift apart.
+#
+# Consequence, deliberately loud: a provider that is NOT baked in above fails init with
+# "was not found in any of the search locations" instead of silently downloading. Adding
+# a provider (or widening a version constraint past what is cached) therefore REQUIRES a
+# matching leg in the pre-cache block — which is what the verification below proves.
+#
+# NOTHING may set TF_PLUGIN_CACHE_DIR at run time: with the cache pointed at the mirror,
+# terraform tries to install the mirror's own directory over itself and every init dies
+# with "cannot install existing provider directory ... to itself".
+RUN printf 'provider_installation {\n  filesystem_mirror {\n    path    = "%s"\n    include = ["*/*/*"]\n  }\n  direct {\n    exclude = ["*/*/*"]\n  }\n}\n' \
+        "${TF_PROVIDER_MIRROR_DIR}" > /etc/terraform.tfrc \
+    && cat /etc/terraform.tfrc
+ENV TF_CLI_CONFIG_FILE=/etc/terraform.tfrc
+
+# Prove the mirror can actually serve every module the image ships plus the three
+# providers the PRA / Password-Safe / Entitle services generate HCL for. This is the
+# real run-time code path (same tfrc, same modules, registry banned), so a pre-cache leg
+# that no longer satisfies a module's constraint fails the BUILD instead of failing a
+# customer's provision months later. Each module is init'd in a COPY: an init in place
+# would leave a .terraform symlink farm that `terraform._materialize` (shutil.copytree,
+# which dereferences) would then duplicate ~100 MB of provider into every deploy dir.
+RUN set -eu; \
+    fail=""; \
+    check() { \
+        if terraform -chdir=/tmp/tfverify init -input=false -no-color >/tmp/tfverify.log 2>&1; then \
+            echo "provider mirror OK   : $1"; \
+        else \
+            echo "provider mirror MISS : $1" >&2; cat /tmp/tfverify.log >&2; fail="yes"; \
+        fi; \
+    }; \
+    for dir in $(find /app/terraform -name '*.tf' -exec dirname {} \; | sort -u); do \
+        grep -qs required_providers "$dir"/*.tf || continue; \
+        rm -rf /tmp/tfverify; mkdir -p /tmp/tfverify; cp "$dir"/*.tf /tmp/tfverify/; \
+        check "$dir"; \
+    done; \
+    for spec in 'beyondtrust/sra|~> 1.0' 'BeyondTrust/passwordsafe|~> 1.0' 'entitleio/entitle|~> 3.0'; do \
+        rm -rf /tmp/tfverify; mkdir -p /tmp/tfverify; \
+        printf 'terraform {\n  required_providers {\n    p = { source = "%s", version = "%s" }\n  }\n}\n' \
+            "${spec%%|*}" "${spec#*|}" > /tmp/tfverify/main.tf; \
+        check "${spec%%|*} (generated HCL)"; \
+    done; \
+    rm -rf /tmp/tfverify /tmp/tfverify.log; \
+    if [ -n "$fail" ]; then \
+        echo "the provider mirror cannot satisfy every shipped module — add/adjust a leg in the pre-cache block above" >&2; \
+        exit 1; \
+    fi
 
 # kubectl + helm -- baked in so the k8s management-plane / ESO / Entitle-agent ops
 # run them as in-process subprocesses (services/k8s_service), NOT as sibling

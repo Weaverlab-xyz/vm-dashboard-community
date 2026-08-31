@@ -3,9 +3,10 @@ BeyondTrust PRA Shell Jump provisioning via the beyondtrust/sra Terraform provid
 
 Replaces the btapi binary for jump management so the dashboard runs natively on
 ARM64 containers (Apple Silicon, AWS Graviton) without Rosetta or x86-64 emulation.
-HashiCorp ships Terraform as a native ARM64 binary; the SRA provider is downloaded
-at build time and cached in $TF_PLUGIN_CACHE_DIR so containers have no outbound
-dependency at run time.
+HashiCorp ships Terraform as a native ARM64 binary; the SRA provider is downloaded at
+build time into the image's read-only provider mirror (see TF_PROVIDER_MIRROR_DIR /
+/etc/terraform.tfrc in the Dockerfile) so containers have no outbound dependency at
+run time.
 
 PREREQUISITES (enforced at runtime — not created by this service):
   - A Jump Group named bt_jump_group_name must already exist in PRA.
@@ -36,9 +37,11 @@ logger = logging.getLogger(__name__)
 # Terraform binary — baked into the Docker image at build time.
 _TERRAFORM = os.environ.get("TERRAFORM_EXECUTABLE", "terraform")
 
-# Provider plugin cache written at image-build time so containers never need
-# to download the provider at runtime.
-_PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/plugin-cache")
+# NOTE: no TF_PLUGIN_CACHE_DIR here, deliberately. The providers are served by the
+# image's read-only filesystem mirror (TF_CLI_CONFIG_FILE=/etc/terraform.tfrc, see the
+# Dockerfile), which terraform picks up from the inherited environment. Setting the
+# plugin cache as well points terraform at the mirror as a WRITABLE cache, and every
+# init dies with "cannot install existing provider directory ... to itself".
 
 
 def _cfg(key: str) -> str:
@@ -73,8 +76,9 @@ def _tf_env(tenant: Optional[dict] = None) -> dict:
     """Build the environment for Terraform subprocess calls.
 
     BT credentials are passed as TF_VAR_* so the HCL template never contains
-    secrets in plain text. TF_PLUGIN_CACHE_DIR points at the pre-cached
-    provider directory baked into the Docker image.
+    secrets in plain text. The provider itself comes from the image's read-only
+    filesystem mirror, which rides in on the inherited TF_CLI_CONFIG_FILE — this
+    function must not add TF_PLUGIN_CACHE_DIR (see the note by ``_TERRAFORM``).
 
     ``tenant`` overrides those three credentials for one call. It exists for the POV
     feature, where "which PRA appliance?" has as many answers as there are customers and
@@ -85,7 +89,6 @@ def _tf_env(tenant: Optional[dict] = None) -> dict:
     are used.
     """
     env = dict(os.environ)
-    env["TF_PLUGIN_CACHE_DIR"] = _PLUGIN_CACHE_DIR
     env["TF_IN_AUTOMATION"] = "1"
     # Suppress interactive prompts and colour codes in CI/container output
     env["TF_INPUT"] = "0"
@@ -182,17 +185,23 @@ def _run_tf(args: list, work_dir: str, timeout: int = 120,
             tenant: Optional[dict] = None) -> subprocess.CompletedProcess:
     """Run one terraform subcommand in ``work_dir``.
 
-    ``init`` is serialized on the shared plugin cache. Every caller here works in
-    its own ``TemporaryDirectory``, but they all point TF_PLUGIN_CACHE_DIR at the
-    ONE cache baked into the image (see ``_tf_env``), which is not concurrency-safe:
-    parallel inits race to place the same provider binary and fail with ETXTBSY
-    ("text file busy"). The lock lives in ``terraform.plugin_cache_lock`` so this
-    module and the main terraform path serialize against EACH OTHER, not just each
-    against itself — the app's two gunicorn workers could already race this, and
-    the job worker now runs several jobs at once. Taken here rather than at the
-    nine call sites so a new one cannot forget it; apply/destroy/output don't touch
-    the cache and stay parallel. Imported lazily to keep this module's import graph
-    flat."""
+    ``init`` takes ``terraform.plugin_cache_lock``. In the published image that is
+    belt-and-braces: providers are served by a READ-ONLY filesystem mirror, so no init
+    writes shared state and there is nothing to race. Off-image — a dev box, or any run
+    without /etc/terraform.tfrc — terraform falls back to downloading into a shared
+    plugin cache, which is not concurrency-safe: parallel inits race to place the same
+    provider binary and fail with ETXTBSY ("text file busy"). The lock lives in
+    ``terraform.plugin_cache_lock`` so this module and the main terraform path serialize
+    against EACH OTHER, not just each against itself — the app's two gunicorn workers
+    could already race this, and the job worker runs several jobs at once.
+
+    Note what the lock canNOT do, and why the mirror is the real fix: a plugin cache is
+    SYMLINKED into ``.terraform/providers``, so a running apply/destroy is executing the
+    cached binary while an unrelated init rewrites it. That is init-vs-apply, and no
+    amount of init-vs-init serialization prevents it.
+
+    Taken here rather than at the nine call sites so a new one cannot forget it.
+    Imported lazily to keep this module's import graph flat."""
     # `tenant` goes through _tf_env rather than extra_env so EVERY subcommand sees the
     # same credentials. `init` and `output` do not call the provider today, but a caller
     # who has to remember which ones do is a caller who will eventually get it wrong — and
