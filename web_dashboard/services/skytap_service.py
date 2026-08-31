@@ -394,14 +394,24 @@ async def create_environment(template_id: str, name: str = "",
     if project_id:
         body["project_id"] = project_id
 
-    raw = await _client().request("POST", "/v2/configurations", json=body)
+    # **v1, not v2, and that is not a typo.** Skytap's v2 API documents GET/PUT/DELETE on
+    # `/v2/configurations` and no POST at all — environments are created only by the v1
+    # `POST /configurations.json`, which takes `template_id` and, optionally, `project_id`
+    # and `name`. Posting to the v2 collection answers `404 {"error":"Not Found"}`, which
+    # reads exactly like "that template id does not exist" and sent the first live
+    # template build looking at the wrong field. Every *other* call in this module is v2
+    # because every other call has a v2 form; these two creates do not. See
+    # `create_template`.
+    raw = await _client().request("POST", "/configurations.json", json=body)
     if not isinstance(raw, dict) or not raw.get("id"):
         raise SkytapError(
             f"Skytap accepted the create for template {template_id} but returned no "
             f"environment id; check the account for an orphan before retrying")
 
     env = _environment(raw)
-    # Naming is a separate PUT: the create call takes a template, not a name.
+    # Naming is a separate PUT. v1 does accept a `name` at create, but keeping it here
+    # means the create body carries only what the environment cannot exist without —
+    # and a rejected name can never be the thing that strands a real environment.
     if name:
         try:
             env = await update_environment(env["id"], {"name": name})
@@ -700,10 +710,10 @@ async def get_environment(env_id: str) -> dict:
 # create_environment -> (prepare it) -> create_template, which is exactly what
 # services/pov_template_builder drives.
 #
-# UNVERIFIED against a live Skytap account, the same way the publish_sets block above is:
-# `POST /v2/templates` is documented to take `configuration_id`, and the description is set
-# by a follow-up PUT because the create call is documented only for `configuration_id` and
-# `name`. If a live create 422s, `configuration_id` is the field to look at first.
+# The create is the v1 `POST /templates.json` with a `configuration_id`; the description
+# is set by a follow-up PUT (v2), because the create call is documented only for
+# `configuration_id` and `name`. If a live create 422s, `configuration_id` is the field to
+# look at first.
 
 
 async def get_template(template_id: str) -> dict:
@@ -747,7 +757,10 @@ async def create_template(env_id: str, name: str, description: str = "") -> dict
     if not name:
         raise SkytapError("a template name is required")
 
-    raw = await _client().request("POST", "/v2/templates",
+    # v1, for the same reason `create_environment` posts to `/configurations.json`: there
+    # is no POST on the v2 templates collection. The follow-up PUT below is v2, which does
+    # implement it.
+    raw = await _client().request("POST", "/templates.json",
                                   json={"configuration_id": env_id, "name": name})
     if not isinstance(raw, dict) or not raw.get("id"):
         raise SkytapError(

@@ -87,7 +87,9 @@ def _run(handler, coro_factory):
 def test_create_template_posts_the_configuration_id():
     def handler(request):
         assert request.method == "POST", request.method
-        assert request.url.path == "/v2/templates", request.url.path
+        # v1: there is no POST on the v2 templates collection, and posting to it
+        # answers 404 {"error":"Not Found"}.
+        assert request.url.path == "/templates.json", request.url.path
         import json
         body = json.loads(request.content)
         assert body["configuration_id"] == "env-1", body
