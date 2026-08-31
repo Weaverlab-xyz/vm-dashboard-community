@@ -151,9 +151,10 @@ class Persona:
     tile_emphasis: tuple = ()
     nav_pins: tuple = ()
     quick_deploy: tuple = ()
-    # Persona narrative docs (docs/personas/<key>.md). Populated in a later slice; the
-    # "every docs path exists on disk" test is what keeps this honest, so it stays empty
-    # rather than pointing at files that are not written yet.
+    # Narrative docs for this role: what they own, why the PAM story lands, and which card
+    # to run. Kept separate from a UseCase.docs (which is the runbook for one demo) because
+    # the role story and the feature reference are different documents with different
+    # lifespans. A test asserts every path here resolves to a real file under docs/.
     docs: tuple = ()
     # The wizard PRE-TICKS these on the Features step. Only ever to true -- the profile
     # mask rule inverted: a persona may suggest a feature, never remove one.
@@ -170,6 +171,7 @@ _CLOUDOPS = Persona(
     tile_emphasis=("aws_instances", "azure_vms", "gcp_instances", "registered_images"),
     nav_pins=("dashboard", "aws", "azure", "gcp", "images", "inventory", "jobs"),
     quick_deploy=("ec2", "azure_vm", "gce", "oci"),
+    docs=("personas/cloudops",),
     preset_flags=("pra_enabled", "password_safe_enabled"),
     use_cases=(
         UseCase(
@@ -241,6 +243,7 @@ _DEVOPS = Persona(
     tile_emphasis=("k8s_clusters", "cloud_run_jobs", "ecs_tasks"),
     nav_pins=("dashboard", "config_mgmt", "secrets", "functions", "jobs", "inventory"),
     quick_deploy=("k8s", "gce", "ec2"),
+    docs=("personas/devops",),
     preset_flags=("ansible_enabled", "password_safe_enabled", "entitle_enabled"),
     use_cases=(
         UseCase(
@@ -308,6 +311,7 @@ _HYPERVISOR = Persona(
     tile_emphasis=("vsphere_vms", "proxmox_vms", "nutanix_vms", "gateways"),
     nav_pins=("dashboard", "vsphere", "proxmox", "connections", "agents", "jobs"),
     quick_deploy=("proxmox_vm", "nutanix_vm"),
+    docs=("personas/hypervisor",),
     preset_flags=("pra_enabled", "vsphere_enabled", "proxmox_enabled"),
     use_cases=(
         UseCase(
@@ -378,6 +382,7 @@ _ITOPS = Persona(
     tile_emphasis=("workstation_vms",),
     nav_pins=("dashboard", "vms", "desktops", "agents", "jobs", "inventory"),
     quick_deploy=("proxmox_vm",),
+    docs=("personas/itops",),
     preset_flags=("epml_enabled", "pra_enabled", "vdesktops_enabled"),
     use_cases=(
         UseCase(
@@ -453,6 +458,7 @@ _OT = Persona(
     # `pra_enabled` only. api/ot.py is gated on it and nothing else is required to demo a
     # cell -- a preset that ticks the union of everything a persona might touch is
     # indistinguishable from ticking everything.
+    docs=("personas/ot",),
     preset_flags=("pra_enabled",),
     use_cases=(
         UseCase(
@@ -527,6 +533,7 @@ _DBA = Persona(
     tile_emphasis=("cloud_databases",),
     nav_pins=("dashboard", "databases", "secrets", "jobs", "inventory"),
     quick_deploy=("database",),
+    docs=("personas/dba",),
     preset_flags=("cloud_database_enabled", "password_safe_enabled", "entitle_enabled"),
     use_cases=(
         UseCase(
@@ -595,6 +602,7 @@ _SECURITY = Persona(
     tile_emphasis=("active_jobs", "deployed_resources"),
     nav_pins=("dashboard", "inventory", "jobs", "secrets", "users", "groups"),
     quick_deploy=(),
+    docs=("personas/security",),
     preset_flags=("notifications_enabled", "admission_control_enabled",
                   "resource_expiry_enabled"),
     use_cases=(
@@ -659,6 +667,7 @@ _SRE = Persona(
     tile_emphasis=("k8s_clusters", "rancher_nodes", "portainer_endpoints"),
     nav_pins=("dashboard", "k8s", "containers", "jobs", "inventory"),
     quick_deploy=("k8s",),
+    docs=("personas/sre",),
     preset_flags=("k8s_management_enabled", "entitle_enabled", "pra_enabled"),
     use_cases=(
         UseCase(
@@ -684,7 +693,7 @@ _SRE = Persona(
         ),
         UseCase(
             id="sre-sa-token-rotation",
-            title="Rotate a service-account token",
+            title="Rotate a ServiceAccount token",
             summary="The long-lived token in a CI system or a sidecar, rotated on a "
                     "schedule with the consumer picking up the new value.",
             target="/k8s",

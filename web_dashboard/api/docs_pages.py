@@ -84,7 +84,38 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 # (design/, notes/, runbooks/) still render if you know the path — they're just
 # internal enough that we don't want them cluttering the operator-facing index.
 # "General" is the synthetic name for docs that live at the docs/ root.
-_INDEX_SECTIONS = {"General", "integrations"}
+#
+# `personas` is operator-facing: one page per role explaining which demo to run and why, so
+# it belongs in the index rather than behind a known path. NOTE that adding it does NOT make
+# this module persona-aware — the index still lists every file in the directory in the same
+# order for everybody. This shell is public and unauthenticated (see `_shell`), so reordering
+# it by the instance's chosen focus would leak that focus to anyone who asks; the
+# persona-aware view of the same material is /use-cases, behind the auth shell.
+_INDEX_SECTIONS = {"General", "integrations", "personas"}
+
+# Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
+# named after the persona key so /docs/personas/<key> matches the vocabulary the app, the API
+# and the nav all use -- which is right for the URL and useless as a label: the index derives
+# its text from the filename, so these would list as "Ot", "Dba" and "Sre".
+#
+# An explicit map, deliberately NOT "use each doc's H1 for every page". Measured across the 53
+# indexed docs that would change 40 titles and several for the worse -- one H1 is a
+# 78-character sentence, and an index entry is a link rather than a headline.
+#
+# These must match services/personas.Persona.label; tests/test_persona_docs pins that, so the
+# two cannot drift. The map is a literal rather than an import because this module is
+# deliberately independent of the persona registry -- see the note on _INDEX_SECTIONS above,
+# and _shell below for why this shell must never learn the ACTIVE persona.
+_TITLE_OVERRIDES = {
+    "personas/cloudops":   "Cloud Ops engineer",
+    "personas/devops":     "DevOps engineer",
+    "personas/hypervisor": "Hypervisor admin",
+    "personas/itops":      "IT engineer",
+    "personas/ot":         "OT / ICS engineer",
+    "personas/dba":        "DBA / data platform",
+    "personas/security":   "Security / IAM analyst",
+    "personas/sre":        "Platform / SRE",
+}
 
 _SHELL = """<!doctype html>
 <html lang="en"><head>
@@ -187,8 +218,10 @@ async def doc_index() -> HTMLResponse:
         section = "General" if section == "." else section
         if section not in _INDEX_SECTIONS:
             continue
-        title = rel.name.replace("-", " ").replace("_", " ").title()
-        groups.setdefault(section, []).append((title, str(rel).replace("\\", "/")))
+        href = str(rel).replace("\\", "/")
+        title = (_TITLE_OVERRIDES.get(href)
+                 or rel.name.replace("-", " ").replace("_", " ").title())
+        groups.setdefault(section, []).append((title, href))
 
     parts = ["<h1>Documentation</h1>",
              '<p>Shipped with this build. The API explorer lives at '
