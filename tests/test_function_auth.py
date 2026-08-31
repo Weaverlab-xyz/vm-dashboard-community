@@ -20,7 +20,9 @@ from fnruntime import auth, dispatch, logs
 from fnruntime.contract import Context, Request, Response
 
 _ENV_KEYS = ("FN_SHARED_SECRET", "FN_SHARED_SECRET_SECRET_ID", "FN_AUTH_HEADER",
-             "FN_AUTH_PREFIX", "FN_DEBUG", "FN_LOG_BODY")
+             "FN_AUTH_PREFIX", "FN_DEBUG", "FN_LOG_BODY",
+             "FN_AUTH_MODE_FRONT_DOOR", "FN_DBOPS_AUDIENCE",
+             "FN_DBOPS_ALLOWED_INVOKERS")
 
 
 def _reset_env(**overrides):
@@ -383,6 +385,148 @@ def test_no_module_puts_the_bearer_secret_in_a_plaintext_setting():
             if "FN_SHARED_SECRET" in code and "=" in code and "var.shared_secret" in code:
                 raise AssertionError(
                     f"{module} assigns the bearer secret to a plaintext setting: {line.strip()}")
+
+
+# ── The second inner gate: gcp_oidc (ps_dbops) ───────────────────────────────
+#
+# A workload may select a different inner gate with AUTH_MODE. These pin the same
+# three properties the shared-secret gate is pinned on, plus the one that is specific
+# to trusting the platform: it must refuse to run behind a front door that does not
+# verify tokens, because then the unverified claims would be the ONLY gate.
+
+def _jwt(claims_dict):
+    """A syntactically valid, deliberately UNSIGNED JWT. The signature is never
+    checked here by design — Cloud Run checked it — so a fake one is the honest
+    fixture."""
+    import base64
+
+    def seg(obj):
+        raw = json.dumps(obj).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return f"{seg({'alg': 'RS256'})}.{seg(claims_dict)}.sig"
+
+
+def _oidc_env(**overrides):
+    base = {"FN_AUTH_MODE_FRONT_DOOR": "run_invoker",
+            "FN_DBOPS_AUDIENCE": "https://svc-123.us-east1.run.app"}
+    base.update(overrides)
+    _reset_env(**base)
+
+
+def test_oidc_refuses_to_run_behind_an_unverified_front_door():
+    """The reasoning that lets this gate skip signature verification is that the
+    platform already did it. Without run_invoker that is false, so it fails closed —
+    and as an ALLOWLIST, so a missing value (a hand-rolled or pre-upgrade deploy) is
+    also refused."""
+    _oidc_env(FN_AUTH_MODE_FRONT_DOOR="none")
+    resp = auth.verify_gcp_oidc(_req({"authorization": "Bearer " + _jwt(
+        {"aud": "https://svc-123.us-east1.run.app", "email": "b@p.iam.gserviceaccount.com"})}))
+    assert resp is not None and resp.status == 500, resp
+    _reset_env(FN_DBOPS_AUDIENCE="https://svc-123.us-east1.run.app")   # unset entirely
+    resp = auth.verify_gcp_oidc(_req({"authorization": "Bearer " + _jwt(
+        {"aud": "https://svc-123.us-east1.run.app"})}))
+    assert resp is not None and resp.status == 500, resp
+
+
+def test_oidc_fails_closed_without_an_audience():
+    """An unset audience would accept a token minted for any other service the caller
+    can reach — the exact confused-deputy this claim exists to prevent."""
+    _oidc_env(FN_DBOPS_AUDIENCE="")
+    resp = auth.verify_gcp_oidc(_req({"authorization": "Bearer " + _jwt({"aud": "x"})}))
+    assert resp is not None and resp.status == 500, resp
+
+
+def test_oidc_accepts_the_right_audience():
+    _oidc_env()
+    assert auth.verify_gcp_oidc(_req({"authorization": "Bearer " + _jwt(
+        {"aud": "https://svc-123.us-east1.run.app"})})) is None
+
+
+def test_oidc_accepts_a_list_audience():
+    """Google issues a string, but the JWT spec allows a list and accepting only the
+    string form would be a silent outage if that ever changed."""
+    _oidc_env()
+    assert auth.verify_gcp_oidc(_req({"authorization": "Bearer " + _jwt(
+        {"aud": ["https://other", "https://svc-123.us-east1.run.app"]})})) is None
+
+
+def test_oidc_failures_are_byte_identical():
+    """Probing a credential-changing endpoint must reveal nothing about how it is
+    configured — not whether the audience was wrong, nor whether the principal was."""
+    _oidc_env(FN_DBOPS_ALLOWED_INVOKERS="broker@p.iam.gserviceaccount.com")
+    bodies = []
+    for token in (
+        None,                                                   # no credential
+        "Bearer not-a-jwt",                                     # unparseable
+        "Bearer " + _jwt({"aud": "https://someone-else"}),       # wrong audience
+        "Bearer " + _jwt({"aud": "https://svc-123.us-east1.run.app",
+                          "email": "stranger@p.iam.gserviceaccount.com"}),
+    ):
+        resp = auth.verify_gcp_oidc(_req({"authorization": token} if token else {}))
+        assert resp is not None and resp.status == 401, (token, resp)
+        bodies.append(json.dumps(resp.body, sort_keys=True))
+    assert len(set(bodies)) == 1, bodies
+
+
+def test_oidc_principal_allowlist_is_enforced_when_set():
+    _oidc_env(FN_DBOPS_ALLOWED_INVOKERS="broker@p.iam.gserviceaccount.com")
+    ok = _jwt({"aud": "https://svc-123.us-east1.run.app",
+               "email": "Broker@P.iam.gserviceaccount.com"})   # case-insensitive
+    assert auth.verify_gcp_oidc(_req({"authorization": "Bearer " + ok})) is None
+
+
+def test_verify_for_defaults_to_the_shared_secret():
+    """A workload that declares nothing gets the gate it has always had."""
+    _reset_env(FN_SHARED_SECRET="ok")
+    assert auth.verify_for("", _req({"authorization": "Bearer ok"})) is None
+    assert auth.verify_for("shared_secret", _req({"authorization": "Bearer no"})).status == 401
+
+
+def test_verify_for_refuses_an_unknown_mode():
+    """A typo in a workload's AUTH_MODE must not be the thing that opens the door."""
+    _reset_env(FN_SHARED_SECRET="ok")
+    resp = auth.verify_for("gcp_iodc", _req({"authorization": "Bearer ok"}))
+    assert resp is not None and resp.status == 500, resp
+
+
+def test_dispatch_routes_to_the_workloads_declared_gate():
+    _oidc_env()
+    called = []
+
+    class _Oidc:
+        NAME = "oidc"
+        AUTH_MODE = "gcp_oidc"
+
+        @staticmethod
+        def handle(req, ctx):
+            called.append(1)
+            return Response(200, {})
+
+    token = _jwt({"aud": "https://svc-123.us-east1.run.app"})
+    resp = dispatch.handle_request(_req({"authorization": "Bearer " + token}), _Oidc)
+    assert resp.status == 200 and called, resp
+    # …and the shared secret is NOT a way in for such a workload.
+    _oidc_env(FN_SHARED_SECRET="ok")
+    called.clear()
+    resp = dispatch.handle_request(_req({"authorization": "Bearer ok"}), _Oidc)
+    assert resp.status == 401 and not called, resp
+
+
+def test_ps_dbops_is_the_only_workload_that_opts_out_of_the_shared_secret():
+    """A static sweep, because this is the kind of thing that gets copy-pasted. If a
+    second workload needs a different gate, that is a decision to make deliberately —
+    and updating this list is where it gets made."""
+    import importlib
+    from web_dashboard.services import cloud_function_package
+
+    allowed = {"ps_dbops"}
+    for name in cloud_function_package.available_workloads():
+        module = importlib.import_module(f"fnworkloads.{name}")
+        mode = getattr(module, "AUTH_MODE", "")
+        if mode and mode != "shared_secret":
+            assert name in allowed, (
+                f"{name} declares AUTH_MODE={mode!r} — every workload but "
+                f"{sorted(allowed)} must use the shared-secret gate")
 
 
 if __name__ == "__main__":

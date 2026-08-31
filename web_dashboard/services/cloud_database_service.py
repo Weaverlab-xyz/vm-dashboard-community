@@ -1130,7 +1130,40 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
 
 # ── Optional Password Safe DB onboarding (AWS / Azure / GCP, opt-in) ──────────
 
-def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
+def _dbops_audience(row: CloudDatabase, db=None) -> str:
+    """Address field 4 for a GCP ``cloud-run`` managed system, or ``""``.
+
+    Resolution order, and the order is the whole point:
+
+    1. The **dashboard-deployed DB-Ops service in this database's own region**, as
+       recorded on its ``CloudFunction`` row. Needs a session, so callers that have
+       one pass it.
+    2. ``clouddb_ps_gcp_dbops_audience`` — the flat config key, for a service the
+       operator deployed, or one behind a custom domain / Private Service Connect.
+
+    The instinct is to let the explicit config key win, and that instinct is the trap
+    this repo has already been bitten by (see the note on the key in config.py). A
+    flat key answers "which service" globally, but a Cloud Run service on Direct VPC
+    egress is REGION-LOCKED. An operator who sets the key for a us-east1 service and
+    then onboards a database in europe-west1 would address every rotation for it at a
+    service that cannot reach the instance — and a rotation that times out may already
+    have applied the change. A per-region recorded fact must beat a global setting.
+    """
+    if db is not None:
+        try:
+            from . import clouddb_dbops_service
+            recorded = clouddb_dbops_service.audience_for_region(db, row.region or "")
+        except Exception as exc:
+            # Never let this be the thing that breaks onboarding: the fallback below
+            # is exactly the behaviour that shipped before the service existed.
+            logger.warning("dbops audience lookup failed for %s: %s", row.id, exc)
+            recorded = ""
+        if recorded:
+            return recorded
+    return _cfg("clouddb_ps_gcp_dbops_audience")
+
+
+def _ps_db_onboarding_enabled(row: CloudDatabase, db=None) -> bool:
     """Gate for the full Password Safe DB onboarding: the Password Safe OAuth
     client configured, the operator opt-in flag set, and a supported cloud —
     AWS (SSM plugin), Azure (Run Command plugins, unless the Azure method is set to
@@ -1150,11 +1183,13 @@ def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
             return False
         if row.engine not in _GCP_CHANNEL_DEFAULTS:
             return False
-        # The cloud-run channel talks to a Cloud Run service the OPERATOR deploys (the
-        # plugin repo ships a ps-dbops-sqlserver Terraform module for it), and the
-        # managed-system address carries that service's stable custom audience. Without
-        # the audience there is no address to build, so this is off rather than broken.
-        if _gcp_channel(row.engine) == "cloud-run" and not _cfg("clouddb_ps_gcp_dbops_audience"):
+        # The cloud-run channel talks to a Cloud Run service inside the VPC, and the
+        # managed-system address carries that service's audience. The dashboard can now
+        # DEPLOY that service itself (clouddb_dbops_service) — one per region — so
+        # either a deployed service in this row's region or the config-key override
+        # satisfies this. With neither there is no address to build, so the channel is
+        # off rather than broken.
+        if _gcp_channel(row.engine) == "cloud-run" and not _dbops_audience(row, db):
             return False
         return True
     return False
@@ -1934,6 +1969,45 @@ def _stash_on_job(db: Session, job_id: str, update: dict) -> None:
     db.commit()
 
 
+async def _admit_instance_to_dbops(db: Session, *, row: CloudDatabase, job_id: str,
+                                   conn_name: str) -> None:
+    """Add this instance to the region's DB-Ops allowlist, in place.
+
+    Applied INLINE rather than queued, for the same reason the adapter pairing drives
+    its deploy apply inline: the managed system this onboarding is about to create is
+    unusable until the service will act on the instance, and two jobs that must happen
+    in order are one job.
+
+    Non-fatal on failure, and deliberately so. The service may be an operator's own
+    (the config-key audience), in which case there is nothing here to update and
+    nothing wrong; or the update may fail for a reason that has no bearing on whether
+    the managed system is correct. What must not happen is silence — the remedy goes
+    on the job log, because a failed job shows ``error_message`` and nothing else.
+    """
+    try:
+        from . import clouddb_dbops_service, cloud_function_service
+
+        if clouddb_dbops_service.find_for_region(db, row.region or "") is None:
+            return      # a BYO service: its allowlist is not ours to manage
+        result = clouddb_dbops_service.refresh_allowlist(
+            db, region=row.region or "", created_by="clouddb-ps-onboarding")
+        if not result.get("changed"):
+            return
+        await cloud_function_service.run_update_apply(
+            db, fn_id=result["fn_id"], job_id=result["job_id"],
+            tf_variables=result["tf_variables"])
+        job_service.append_job_log(
+            db, job_id, f"Admitted {conn_name} to the DB-Ops service allowlist.")
+    except Exception as exc:
+        logger.warning("clouddb: dbops allowlist update failed for %s: %s", row.id, exc)
+        job_service.append_job_log(
+            db, job_id,
+            f"Could not add {conn_name} to the {row.region} DB-Ops service's allowed "
+            f"instances ({exc}). Rotations for this database will be refused by the "
+            f"service until you redeploy it from Settings → Password Safe, or add the "
+            f"instance to FN_DBOPS_ALLOWED_INSTANCES on the function.")
+
+
 async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id: str,
                                       engine: str, tf_variables: dict, ctx: dict) -> None:
     """Onboard the DB into Password Safe: a managed system + managed account on the
@@ -2004,14 +2078,24 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         # Address: channel;project:region:instance;dbName;audience;ssl[;key=value]
         conn_name = f"{ctx['project']}:{row.region}:{row.instance_id}"
         if channel == "cloud-run":
-            # Field 4 is the Cloud Run service's stable CUSTOM AUDIENCE, used verbatim as
-            # both the request target and the token audience — the generated *.run.app
-            # hostname changes if the service is recreated, and each revision gets its
-            # own URL, so the audience is what lets this address survive a redeploy.
+            # Field 4 is the Cloud Run service's audience, used verbatim as both the
+            # request target and the token audience. When the dashboard deployed the
+            # service the audience simply IS its URL — a custom audience exists to
+            # DECOUPLE those two, and there is nothing here to decouple. The URL is
+            # stable across revisions on Cloud Run v2; what can change it is recreating
+            # the service, and the dashboard now owns that and re-stamps rather than
+            # leaving an operator to find out at the next rotation.
             ssl_flag = ("sslTRUE" if config_service.get_bool("clouddb_ps_gcp_dbops_ssl", True)
                         else "sslFALSE")
             addr = [channel, conn_name, ctx["db_name"] or "",
-                    _cfg("clouddb_ps_gcp_dbops_audience"), ssl_flag]
+                    _dbops_audience(row, db), ssl_flag]
+            # The DB-Ops service refuses an instance it was not told about
+            # (FN_DBOPS_ALLOWED_INSTANCES fails closed), so admit this one BEFORE the
+            # managed system exists. Doing it after would register a system whose very
+            # first rotation is refused by our own service — a failure that reads like
+            # a permissions problem and is not.
+            await _admit_instance_to_dbops(db, row=row, job_id=job_id,
+                                           conn_name=conn_name)
         else:
             # Both control-plane fields are "-": the Cloud SQL APIs are always TLS and
             # never open a database connection, and the plugin rejects a value in either
@@ -2333,7 +2417,7 @@ async def run_ps_register(db: Session, *, db_id: str, job_id: str,
             reason = _ps_ineligible_reason(row)
             if reason:
                 raise CloudDatabaseError(reason)
-            if not _ps_db_onboarding_enabled(row):
+            if not _ps_db_onboarding_enabled(row, db):
                 raise CloudDatabaseError(
                     "Password Safe database onboarding is not enabled for this cloud — "
                     "see Settings → Integrations → Password Safe "
@@ -2578,7 +2662,7 @@ async def run_provision_apply(
         _ps_job = db.query(Job).filter(Job.id == job_id).first()
         _ps_choice = _ps_onboarding_opted((_ps_job.metadata_dict or {}) if _ps_job else {})
         onboard_ctx = None
-        if row.private_host and _ps_choice and _ps_db_onboarding_enabled(row):
+        if row.private_host and _ps_choice and _ps_db_onboarding_enabled(row, db):
             try:
                 if row.cloud == "azure":
                     onboard_ctx = await _create_db_managed_user_azure(

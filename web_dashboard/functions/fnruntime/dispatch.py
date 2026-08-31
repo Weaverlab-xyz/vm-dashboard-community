@@ -45,7 +45,14 @@ def handle_request(req: Request, workload_module, ctx: Context = None) -> Respon
     if ctx is None:
         ctx = Context.from_env(req, workload=getattr(workload_module, "NAME", ""))
 
-    denial = auth.verify(req)
+    # Which INNER gate this workload uses. Almost every workload is called by
+    # something that can present a secret the dashboard minted, so the default is the
+    # shared secret and stays the default: a workload that declares nothing gets the
+    # gate it has always had. ps_dbops cannot use it — its caller is a Password Safe
+    # Resource Broker presenting a Google OIDC token in the same header — so it
+    # declares "gcp_oidc" and gets a DIFFERENT gate, not none. An unknown value is an
+    # error, never a fall-through to unauthenticated (see auth.verify_for).
+    denial = auth.verify_for(getattr(workload_module, "AUTH_MODE", ""), req)
     if denial is not None:
         # Log the outcome, never the credential: `presented_secret` is not called
         # here and `headers` goes through redact(), which masks `authorization`.

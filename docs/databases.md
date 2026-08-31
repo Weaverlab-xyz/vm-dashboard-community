@@ -723,12 +723,43 @@ account rotate itself — both control-plane channels authenticate as the *calle
 cannot test an arbitrary principal's password. Set `clouddb_ps_gcp_channel` to
 `cloud-run` to put PostgreSQL and MySQL on it too.
 
-> **You deploy the Cloud Run service; the dashboard does not.** It is a .NET container the
-> plugin repository builds, and the dashboard has no path to build or publish that image.
-> The plugin repo ships a `ps-dbops-sqlserver` Terraform module for it. All the dashboard
-> needs afterwards is the service's stable **custom audience**, which goes in
-> `clouddb_ps_gcp_dbops_audience`. Leave it blank and SQL Server onboarding stays off,
-> because there would be no address to build.
+**`data-api` is not a fallback for SQL Server.** Forcing the channel does not work today,
+for two separate reasons in the address builder: it appends `iam=true` unconditionally,
+which the plugin *rejects* on SQL Server because Cloud SQL for SQL Server has no IAM
+database authentication at all; and it never emits `fasecret=`, which that combination
+*requires* — with no IAM token there has to be a Secret Manager version holding the
+functional account's password. So `cloud-run` is the only working path for SQL Server,
+not merely the recommended one, and standing the service up is a prerequisite rather than
+an ergonomics choice.
+
+> **The dashboard deploys the Cloud Run service.** Settings → Password Safe → *Cloud Run
+> channel* has a **Deploy** button per region (job `clouddb_dbops_deploy`). What the
+> dashboard cannot build is the plugin repository's .NET image — and it does not need to.
+> The plugin depends on an HTTP contract, not on an implementation language, so the
+> dashboard ships its own service (`fnworkloads/ps_dbops.py`) through the same Cloud
+> Functions gen2 source-deploy path that already builds, VPC-attaches and deploys the
+> `db_grant` adapter. A gen2 function *is* a Cloud Run service: Cloud Build turns the
+> package into a container, and the dashboard has been doing that on GCP all along.
+>
+> **One service per region, not per database.** Unlike `db_grant`, this one is stateless
+> with respect to the database — the instance, the catalog and the credential all arrive
+> in the request, because that is the contract. Direct VPC egress is region-locked (which
+> also rules out one per project), the warm instance it needs for correctness bills
+> continuously, and Cloud Run reserves subnet IPs in /28 blocks.
+>
+> **You still deploy it yourself if you want to.** `clouddb_ps_gcp_dbops_audience` remains,
+> now as an override for a service you stood up (the plugin repo's `ps-dbops-sqlserver`
+> Terraform module) or one behind a custom domain or Private Service Connect. With neither
+> a deployed service in the database's region nor that override, SQL Server onboarding
+> stays off, because there would be no address to build.
+>
+> **The v1 request contract is not implemented yet.** The service deploys, authenticates,
+> reaches the VPC and answers a health probe, but `/v1/credential-op` returns **501** with
+> the versions it can serve, and logs the request it was sent. That is deliberate: the
+> shape is defined by the plugin and is not in this repository, and a plausible guess would
+> produce a service that deploys cleanly and fails every rotation. Point one managed system
+> at it and click *Verify Managed Account* — the real request lands in Cloud Logging.
+> See [docs/design/ps-dbops-cloud-run.md](design/ps-dbops-cloud-run.md).
 
 The DB is registered on the **`GCP Cloud SQL {engine}`** platform with the five-field
 address `channel;project:region:instance;dbName;audience;ssl[;key=value]`:
@@ -775,14 +806,16 @@ with `OLD_PASSWORD` and the functional account needs no privilege over it at all
 - Upload the **`GCP Cloud SQL PostgreSQL`** / **`GCP Cloud SQL MySQL`** /
   **`GCP Cloud SQL SQL Server`** plugins and **`PRA Vault Username Password`**. No key
   pair and no broker certificate — there is none in this design.
-- **For SQL Server (or any engine you move onto `cloud-run`)**: deploy the Cloud Run
-  service from the plugin repo's `ps-dbops-sqlserver` Terraform module, with a stable
-  `--add-custom-audiences`, `--min-instances=1` (Direct VPC egress documents
-  connection-establishment delays over a minute on startup, and a rotation that times out
-  may already have applied), and `--concurrency=8` (each request holds a database
-  connection). Grant each Resource Broker's identity `roles/run.invoker` — **named
-  service accounts only**, never `allUsers` or `allAuthenticatedUsers`. Then put the
-  audience in `clouddb_ps_gcp_dbops_audience`.
+- **For SQL Server (or any engine you move onto `cloud-run`)**: list each Resource
+  Broker's service account in `clouddb_ps_gcp_dbops_invokers` — **named service accounts
+  only**, never `allUsers` or `allAuthenticatedUsers`, which the Terraform module refuses
+  outright — and press **Deploy** for the database's region. The dashboard sets
+  `--min-instances=1` (Direct VPC egress documents connection-establishment delays over a
+  minute on startup, and a rotation that times out may already have applied),
+  `--concurrency=8` (each request holds a database connection), `--timeout=120` and
+  `--no-allow-unauthenticated`, and records the audience itself: it is the service's own
+  URL, so there is no custom audience to invent. Not a manual step any more, and no
+  `clouddb_ps_gcp_dbops_audience` to fill in unless you deployed the service yourself.
 - Create the **rotator service account** and name it in the panel. **Keep the name
   short**: MySQL truncates an IAM database username at the `@` and caps it at **32
   characters**, so `bt-rotator` is safe and `bt-passwordsafe-cloudsql-rotator-prod` is not.
@@ -833,8 +866,12 @@ there are no client-image or key-material keys here):
 | `clouddb_ps_gcp_auth_mode` | `ADC` | `ADC` / `IMP` / `SA` — the functional-account username prefix |
 | `clouddb_ps_gcp_impersonate_target` | — | `IMP` mode: the service account to impersonate |
 | `clouddb_ps_gcp_rotator_service_account` | — | **`data-api` only.** The rotation identity, registered as an IAM database user per instance. Keep it ≤32 characters for MySQL |
-| `clouddb_ps_gcp_dbops_audience` | — | **`cloud-run` only, and required for it.** The service's stable custom audience — address field 4. Blank leaves SQL Server onboarding off |
+| `clouddb_ps_gcp_dbops_audience` | — | **`cloud-run` only.** An **override** — address field 4 for a service you deployed yourself, or one behind a custom domain / PSC. A dashboard-deployed service in the database's own region **beats it**, because Direct VPC egress is region-locked and one global value would address a rotation at a service that cannot reach the instance. With neither, SQL Server onboarding stays off |
 | `clouddb_ps_gcp_dbops_ssl` | `true` | `sslTRUE` / `sslFALSE` — address field 5, the service→database TLS choice |
+| `clouddb_ps_gcp_dbops_invokers` | — | Comma-separated IAM members granted `roles/run.invoker` on the deployed service — the Resource Brokers' identities. A bare email is accepted and prefixed. Named principals only |
+| `clouddb_ps_gcp_dbops_ingress` | `all` | `all` (public + IAM; the only thing an **on-premises** broker can reach) or `internal` |
+| `clouddb_ps_gcp_dbops_min_instances` | `1` | Warm instances. A **correctness** setting — see above. Bills continuously |
+| `clouddb_ps_gcp_dbops_concurrency` | `8` | Requests per instance, well under Cloud Run's default of 80: each one holds a database connection |
 
 ---
 

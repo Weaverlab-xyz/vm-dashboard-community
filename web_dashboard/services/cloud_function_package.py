@@ -68,6 +68,12 @@ _VENDOR_DIR = os.environ.get("FN_VENDOR_DIR", "/opt/fn-vendor/linux-x86_64")
 # SQL Database REQUIRES encryption, so there is no "skip TLS" escape.
 _WORKLOAD_VENDOR = {
     "db_grant": ("pymysql", "pytds", "OpenSSL", "cryptography", "cffi", "_cffi_backend"),
+    # Same chain, same reason: ps_dbops opens the database connection the Password
+    # Safe plugin's cloud-run channel exists to make, and Cloud SQL for SQL Server
+    # requires encryption. Identical to db_grant's set deliberately — the image's
+    # /opt/fn-vendor leg already carries it, so this workload needs no Dockerfile
+    # change and no second vendoring decision to keep in step.
+    "ps_dbops": ("pymysql", "pytds", "OpenSSL", "cryptography", "cffi", "_cffi_backend"),
 }
 
 # Extra dashboard modules copied into the zip for a workload, as
