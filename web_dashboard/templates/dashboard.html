@@ -4,10 +4,59 @@
 {% block content %}
 <div x-data="dashboard()" x-init="init()">
 
-  <!-- Header -->
-  <div class="mb-6">
-    <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
-    <p class="text-sm text-gray-500 mt-1">Infrastructure overview</p>
+  <!-- Header.
+
+       The lens lives HERE rather than in the nav bar, and that is a measurement rather
+       than a preference: base.html's x-ref="navRow" spans the brand, the links AND the
+       user menu, and tests/test_profile_theme records only 61px of headroom at 1280px
+       before responsiveNav folds the entire nav into the drawer. A control in the user
+       menu spends the same budget as one in the link row. The nav affordance arrives with
+       the pinned/"More" split, which buys back far more width than it costs.
+
+       Note what the persona is allowed to change here: the subtitle text, and a grey
+       chip. No colour. Chrome colour is the TENANCY signal (see ui_theme.py) and a
+       persona tinting anything would corrupt the one cue that stops an operator working
+       in a customer's POV instance while believing it is the demo one. -->
+  <div class="mb-6 flex items-start justify-between gap-4">
+    <div class="min-w-0">
+      <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
+      <p class="text-sm text-gray-500 mt-1"
+         x-text="persona.blurb || 'Infrastructure overview'"></p>
+    </div>
+
+    <!-- Lens selector -->
+    <div class="relative shrink-0" @keydown.escape="lensOpen = false">
+      <button @click="lensOpen = !lensOpen"
+              class="inline-flex items-center gap-2 text-sm border border-gray-200 bg-white
+                     hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded-lg transition"
+              :aria-expanded="lensOpen"
+              title="Change which role's material the dashboard leads with">
+        <svg class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M12 4v16m8-8H4"/>
+          <circle cx="12" cy="12" r="7" stroke-width="2"/>
+        </svg>
+        <span x-text="persona.label || 'No focus'"></span>
+        <span class="text-xs text-gray-400" x-show="personaSourceLabel()"
+              x-text="'· ' + personaSourceLabel()"></span>
+      </button>
+
+      <div x-show="lensOpen" x-cloak @click.outside="lensOpen = false"
+           class="absolute right-0 mt-1 w-72 bg-white border border-gray-200 rounded-lg
+                  shadow-lg z-30 py-1">
+        <p class="px-3 py-2 text-xs text-gray-400 border-b border-gray-100">
+          Changes what this page leads with. Nothing is hidden — every page stays reachable.
+        </p>
+        <template x-for="o in persona.options" :key="o.key || 'neutral'">
+          <button @click="setPersona(o.key)"
+                  class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 transition"
+                  :class="o.key === persona.persona ? 'text-blue-700 font-medium' : 'text-gray-700'">
+            <span x-text="o.label"></span>
+            <span x-show="o.key === persona.persona" class="text-blue-400">✓</span>
+          </button>
+        </template>
+      </div>
+    </div>
   </div>
 
   <!-- Loading state -->
@@ -79,7 +128,7 @@
   </div>
 
   <!-- Sections (rendered dynamically from tileSections) -->
-  <template x-for="section in tileSections" :key="section.id">
+  <template x-for="section in orderedSections" :key="section.id">
     <div x-show="visibleTiles(section.tiles).length > 0" class="mb-8">
       <div class="flex items-center justify-between mb-3">
         <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide" x-text="section.label"></p>
@@ -98,7 +147,7 @@
         </div>
       </div>
       <div :class="section.gridClass">
-        <template x-for="tile in visibleTiles(section.tiles)" :key="tile.key">
+        <template x-for="tile in orderedTiles(section)" :key="tile.key">
           <!-- A tile whose destination depends on its data (OT cells span three
                clouds) sends an href back with the stat; everything else uses the
                static one declared below. -->
@@ -205,6 +254,15 @@
       // Feature flags loaded from /api/features
       features: {},
       featuresLoaded: false,
+
+      // The active persona, from /api/persona. CURATION ONLY: it may reorder these tiles
+      // and shortcuts, never remove one — everything a neutral instance shows, every
+      // persona still shows. See services/personas.py for why that is load-bearing rather
+      // than a nicety, and note that no persona key string appears anywhere in this file:
+      // the ordering arrives as data so the page and the registry cannot drift.
+      persona: { persona: '', label: '', blurb: '', source: 'none',
+                 section_order: [], tile_emphasis: [], quick_deploy: [], options: [] },
+      lensOpen: false,
 
       // Tile stats keyed by tile.key — each entry is {value, secondary?}
       // null = loading, -1 = unavailable, number = OK
@@ -365,7 +423,7 @@
           }
         }
 
-        await this.loadFeatures();
+        await Promise.all([this.loadFeatures(), this.loadPersona()]);
         // ONE call for almost every tile. This used to be four un-awaited section
         // fan-outs — each a Promise.all over its tiles — which put ~22 requests in flight
         // simultaneously, every one of them holding a pooled connection for its whole
@@ -434,6 +492,43 @@
         this.featuresLoaded = true;
       },
 
+      // Best-effort, exactly like loadFeatures above. A persona is presentation: if this
+      // request fails the page must render in its shipped order rather than not render,
+      // so the catch leaves the neutral default in place and says nothing.
+      async loadPersona() {
+        try {
+          const r = await fetch('/api/persona');
+          const d = await r.json();
+          // Merge rather than assign, so a payload missing a key cannot leave an
+          // ordering field undefined and take rankBy() with it.
+          this.persona = Object.assign({}, this.persona, d || {});
+        } catch (e) { /* neutral default stands */ }
+      },
+
+      // Writes the cookie services/personas.resolve() reads, then reloads.
+      //
+      // A reload rather than a re-render: the persona also drives server-rendered chrome
+      // (the nav, from the next slice), and a page whose tiles had reordered while its nav
+      // had not would be a worse lie than a 200ms flash. `?persona=` deliberately does NOT
+      // persist, so if the current persona came from the URL, switching from it has to
+      // strip the parameter or the URL would immediately win again on the next load.
+      setPersona(key) {
+        this.lensOpen = false;
+        const val = encodeURIComponent(key || '');
+        document.cookie = `persona=${val}; path=/; max-age=31536000; samesite=lax`;
+        const u = new URL(window.location.href);
+        u.searchParams.delete('persona');
+        window.location.replace(u.toString());
+      },
+
+      // "your choice" / "from the URL" / "instance default" — shown in the lens.
+      // Without it, "why is my dashboard in a strange order" has three possible causes
+      // and no way to tell them apart, which is a support question rather than a UI.
+      personaSourceLabel() {
+        return { cookie: 'your choice', url: 'from the URL',
+                 default: 'instance default' }[this.persona.source] || '';
+      },
+
       // Tiles visible iff every gate they declare passes: `flag` must be truthy in
       // features, and `anyFlag` needs at least one of its keys truthy. A tile with
       // neither is always-on. Both stay false on a bare install, which is what keeps
@@ -446,9 +541,45 @@
         });
       },
 
-      // Sections visible iff at least one tile is visible
+      // Sections visible iff at least one tile is visible.
+      //
+      // Reads tileSections, NOT orderedSections: this decides the empty state and the
+      // count in it, and neither depends on what order the bands are in. Keeping it on
+      // the unordered list also means a bug in the ranking can never make the page look
+      // like a bare install.
       get visibleSections() {
         return this.tileSections.filter(s => this.visibleTiles(s.tiles).length > 0);
+      },
+
+      // Stable rank by a list of preferred ids. Anything the list does not name keeps its
+      // shipped relative order and follows — which is the whole contract: `order` is a
+      // hint, never a filter, so a persona can promote without ever removing. The index
+      // tiebreak is what makes it stable (Array.sort is only guaranteed stable for
+      // consistent comparators, and "unranked === unranked" is not one).
+      rankBy(items, order, idOf) {
+        const rank = id => {
+          const i = (order || []).indexOf(id);
+          return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+        };
+        return items
+          .map((item, i) => ({ item, i, r: rank(idOf(item)) }))
+          .sort((a, b) => (a.r - b.r) || (a.i - b.i))
+          .map(x => x.item);
+      },
+
+      // The bands, in the active persona's preferred order. Neutral leaves them exactly
+      // as shipped, because `section_order` is empty and rankBy is a no-op on an empty
+      // order — so a user who never picks a persona sees today's page unchanged.
+      get orderedSections() {
+        return this.rankBy(this.tileSections, this.persona.section_order, s => s.id);
+      },
+
+      // Tiles the persona calls out, pulled to the front WITHIN their own section. A tile
+      // is never moved between sections: the band labels are what tell an operator where
+      // a number comes from.
+      orderedTiles(section) {
+        return this.rankBy(this.visibleTiles(section.tiles),
+                           this.persona.tile_emphasis, t => t.key);
       },
 
       displayStat(val) {
@@ -469,18 +600,27 @@
       // Deploy shortcuts for whichever clouds/hypervisors are configured (cloud VMs
       // + the on-prem providers that support dashboard deploys). Each links to that
       // provider's page, where the deploy form lives.
+      //
+      // A table rather than the eight `if (f.x) t.push(...)` lines this used to be, so a
+      // persona can rank it without the ordering logic having to know any provider names.
+      // `id` is what services/personas.py Persona.quick_deploy refers to; a test pins
+      // that every id a persona names exists here, and that the NEUTRAL output is still
+      // today's exact eight in today's exact order.
+      quickDeployCatalog: [
+        { id: 'ec2',         label: 'EC2 instance',       href: '/aws',       flag: 'aws' },
+        { id: 'azure_vm',    label: 'Azure VM',           href: '/azure',     flag: 'azure' },
+        { id: 'gce',         label: 'GCE instance',       href: '/gcp',       flag: 'gcp' },
+        { id: 'oci',         label: 'OCI instance',       href: '/oci',       flag: 'oci' },
+        { id: 'proxmox_vm',  label: 'Proxmox VM',         href: '/proxmox',   flag: 'proxmox' },
+        { id: 'nutanix_vm',  label: 'Nutanix VM',         href: '/nutanix',   flag: 'nutanix' },
+        { id: 'database',    label: 'Database',           href: '/databases', flag: 'cloud_database' },
+        { id: 'k8s',         label: 'Kubernetes cluster', href: '/k8s',       flag: 'k8s_management' },
+      ],
+
       quickDeployTargets() {
         const f = this.features || {};
-        const t = [];
-        if (f.aws)     t.push({ label: 'EC2 instance', href: '/aws' });
-        if (f.azure)   t.push({ label: 'Azure VM',     href: '/azure' });
-        if (f.gcp)     t.push({ label: 'GCE instance', href: '/gcp' });
-        if (f.oci)     t.push({ label: 'OCI instance', href: '/oci' });
-        if (f.proxmox) t.push({ label: 'Proxmox VM',   href: '/proxmox' });
-        if (f.nutanix) t.push({ label: 'Nutanix VM',   href: '/nutanix' });
-        if (f.cloud_database) t.push({ label: 'Database',           href: '/databases' });
-        if (f.k8s_management) t.push({ label: 'Kubernetes cluster', href: '/k8s' });
-        return t;
+        const avail = this.quickDeployCatalog.filter(t => f[t.flag]);
+        return this.rankBy(avail, this.persona.quick_deploy, t => t.id);
       },
 
       async loadAttention() {

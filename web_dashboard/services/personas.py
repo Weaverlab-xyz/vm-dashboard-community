@@ -779,6 +779,20 @@ def all_personas() -> tuple:
     return tuple(_PERSONAS[k] for k in VALID_PERSONAS)
 
 
+def options() -> list:
+    """``[{key, label}, ...]`` for the lens selector, neutral first.
+
+    Rides along in :func:`describe` so the control that switches persona needs no second
+    request, and — the reason that matters — so no template ever hard-codes a persona key
+    just to render its own picker. Keys and labels come from here or they drift.
+
+    Neutral is first and it is a real option: "no focus" has to be as easy to get back to
+    as it was to leave, or the persona has effectively subtracted the plain dashboard.
+    """
+    return ([{"key": NEUTRAL, "label": "No focus — show everything"}]
+            + [{"key": p.key, "label": p.label} for p in all_personas()])
+
+
 # ── card readiness ───────────────────────────────────────────────────────────
 
 def _any_label(flags: tuple) -> str:
@@ -878,6 +892,7 @@ def describe(key: str, source: str = "none") -> dict:
             "quick_deploy": [],
             "docs": [],
             "use_cases": [],
+            "options": options(),
         }
     return {
         "persona": persona.key,
@@ -891,6 +906,7 @@ def describe(key: str, source: str = "none") -> dict:
         "quick_deploy": list(persona.quick_deploy),
         "docs": [f"/docs/{d}" for d in persona.docs],
         "use_cases": [describe_card(c) for c in persona.use_cases],
+        "options": options(),
     }
 
 
