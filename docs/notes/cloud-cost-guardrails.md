@@ -1,30 +1,46 @@
 # Cloud cost guardrails
 
-Rules and failure modes for keeping small AWS and Azure lab accounts honest. Written
+Rules and failure modes for keeping small AWS, Azure and GCP lab accounts honest. Written
 after audits on 2026-08-26 that found **roughly 60% of AWS spend and 43% of Azure spend
-was waste** — and that in both clouds the things previously blamed for it were wrong.
+was waste** — and that in both clouds the things previously blamed for it were wrong —
+plus a GCP audit on 2026-08-31 where **the reported cost increase was not a cost increase
+at all**, and 91% of the storage footprint turned out to be image-export scratch.
 
-Cost allocation tag: **`managed-by`** (values `vm-dashboard`, `dashboard-sandbox`).
-No account IDs, subscription IDs, or resource IDs here on purpose — this repo is public.
-Re-run the verification commands ([AWS](#aws-verification-commands),
-[Azure](#azure-verification-commands)) against your own accounts instead.
+Cost allocation tag/label: **`managed-by`** (values `vm-dashboard`, `dashboard-sandbox`).
+No account IDs, subscription IDs, project IDs, or resource IDs here on purpose — this
+repo is public. Re-run the verification commands ([AWS](#aws-verification-commands),
+[Azure](#azure-verification-commands), [GCP](#gcp-verification-commands)) against your own
+accounts instead.
 
-## The same three shapes in both clouds
+## Start here: is it even a cost increase?
 
-Every item found in either audit was one of these. Look for these first:
+Before hunting a resource, confirm the *cause* is spend and not accounting. A view that
+shows **net** cost reports an expiring credit as an infrastructure problem, and GCP's
+audit began by chasing a rise that came with a 56% **drop** in usage. Split gross from
+credits first — [see the GCP section](#the-trap-that-matters-most-a-credit-cliff-reads-as-a-cost-increase);
+it is the cheapest question in this document and it invalidates the whole hunt.
 
-| Shape | AWS | Azure |
-|---|---|---|
-| An expensive **network object serving nothing** | Secrets Manager interface VPC endpoint, ~$7.30/mo, in a VPC whose only ENI was its own | NAT gateway + its static IP, ~$36/mo, on a delegated subnet with zero IP configurations |
-| **Storage outliving its compute** | Orphaned EBS root volumes from AMIs shipping `DeleteOnTermination: false` | Unattached managed disk (13 months); VM backups still `Protected` after the VMs were deleted |
-| **Unassociated IPs** | Unattached Elastic IPs | Standard static public IPs with no `ipConfiguration` |
+## The same three shapes in every cloud
+
+Almost every item found across the three audits was one of these. Look for these first:
+
+| Shape | AWS | Azure | GCP |
+|---|---|---|---|
+| An expensive **network object serving nothing** | Secrets Manager interface VPC endpoint, ~$7.30/mo, in a VPC whose only ENI was its own | NAT gateway + its static IP, ~$36/mo, on a delegated subnet with zero IP configurations | Two Cloud NAT configs, two regions, attached to subnets with zero VMs |
+| **Storage outliving its compute** | Orphaned EBS root volumes from AMIs shipping `DeleteOnTermination: false` | Unattached managed disk (13 months); VM backups still `Protected` after the VMs were deleted | 185 GiB of image-export scratch + superseded VHDs, in a project with no compute at all; an orphaned Packer disk, 3.5 months |
+| **Unassociated IPs** | Unattached Elastic IPs | Standard static public IPs with no `ipConfiguration` | *(none found — GCP's were all in use)* |
+
+GCP added a fourth shape the other two did not have: **a pipeline that leaks a full-size
+artefact per attempt**, including per *failed* attempt. Worth checking anywhere a job
+writes a multi-GB blob to scratch.
 
 And one inverted trade worth knowing before you start:
 
-> **AWS charges you to query cost. Azure refuses to let you.**
+> **AWS charges you to query cost. Azure refuses to let you. GCP does neither.**
 > Cost Explorer bills ~$0.01/request and became the single largest line item in the AWS
 > account. Azure's Cost Management API is free but throttles so aggressively that it is
-> effectively unusable for an audit. Neither meters cleanly.
+> effectively unusable for an audit. GCP's BigQuery billing export is free and
+> unthrottled — so on GCP, query freely and re-run rather than cache.
 
 ---
 
@@ -329,6 +345,197 @@ billing for nothing:
 az network vnet subnet show -g <rg> --vnet-name <vnet> -n <subnet> \
   --query '{ipConfigs: length(ipConfigurations || `[]`), delegations: delegations[].serviceName}'
 ```
+
+---
+
+# GCP
+
+Audited 2026-08-31, and it did not fit the pattern of the other two at all. GCP's waste
+was neither a network object nor an unassociated IP — it was **scratch storage from the
+image-export pipeline**, and the reported cost increase that triggered the audit had
+nothing to do with usage.
+
+## The trap that matters most: a credit cliff reads as a cost increase
+
+The audit started from "my GCP cost is climbing and I don't know what changed." Nothing
+had changed. Gross usage had **fallen 56%** month over month. What ended was the
+free-trial credit:
+
+| Month | Gross usage | Credits | Net |
+|---|---|---|---|
+| month 1 | $0.18 | −$0.18 | **$0.00** |
+| month 2 | $31.38 | −$31.38 | **$0.00** |
+| month 3 | $13.73 | −$4.77 | **$8.96** |
+
+> **A trial credit expires on a 90-day clock, not when the balance runs out.**
+> Only ~$24 of a $300 trial had been consumed. The remaining ~$275 was simply
+> forfeited on the calendar.
+
+So on GCP, **always separate gross from net before looking for a cause.** Any dashboard
+tile that shows net cost will report a credit expiry as an infrastructure problem, and
+you can burn an entire audit hunting a resource that was always there and always
+costing exactly this much. The tell is unmistakable once you look: net cost is *exactly*
+$0.000/day and then non-zero every day after, with no matching step in gross.
+
+The corollary, which is easy to miss: **your first uncredited month understates your
+run-rate** if anything landed mid-month. Price the idle floor from the last few days,
+never from the month total.
+
+## Root cause of the waste: the Daisy exporter never cleans up
+
+`gcloud compute images export` / the `gce_vm_image_export` Cloud Build step runs Daisy,
+which auto-creates a scratch bucket `gs://<project>-daisy-bkt-<region>` on first use and
+**leaves everything in it, forever**:
+
+- every attempt leaves the full `outs/export-disk` intermediate — the **entire image**,
+  ~17 GB for a 20 GB source;
+- every *failed* attempt still leaves a `logs/` + `sources/` prefix;
+- the bucket it creates has **no lifecycle rule**.
+
+The audited lab held **36 scratch prefixes / 100 GiB** — in a project with zero VMs,
+zero clusters and zero databases. A second copy of each image also accumulated in the
+hub bucket, because the export destination object is timestamped per attempt and nothing
+prunes superseded ones: 5 copies of one image, 84 GiB, of which one was live.
+
+Together that was 185 GiB — enough that **storage was 100% of the idle burn**:
+
+| Idle-day line item | share |
+|---|---|
+| GCS standard storage | 57% |
+| Persistent disks | 31% |
+| Secret Manager replicas | 8% |
+| Compute image storage | 4% |
+
+### Why the fix is a lifecycle rule, not application cleanup
+
+Most of the leaked prefixes came from builds that **failed**. A "delete scratch after a
+successful export" step in the app would have missed the majority of them, and can never
+run at all for a build that timed out or was cancelled. `setup-gcp.sh` /
+`Setup-GcpSandbox.ps1` therefore pre-create the Daisy bucket with a 1-day TTL, so Daisy
+reuses a bucket that already has the rule rather than creating a rule-less one. The rule
+is applied **unconditionally**, because a bucket auto-created by an earlier export is
+exactly the case that needs it retrofitted.
+
+## "Some egress" was 15% of the bill
+
+`_export_candidate_zones` ordered its capacity-fallback ladder by the caller's preferred
+zone, and its docstring waved the consequence off as *"a cross-region worker is fine; it
+just adds some GCS egress on the way to the hub."*
+
+It is not fine. The worker VM writes the whole ~17 GB disk to the hub bucket, so the
+worker's region — not the source image, which is global — decides whether that write is
+free. One day of retries against a hub bucket in another region moved **67 GB for
+$1.32**, which was 15% of that month's entire net bill.
+
+The subtle part: this was **never** fallback-only. Because the ladder was anchored on the
+configured zone and never compared it to the bucket, a project whose configured zone
+merely *differed* from its hub bucket paid cross-region egress on **every export, first
+attempt included**. The ladder now takes a `hub_region` that outranks the preferred zone
+and exhausts the hub's region before leaving it — guarded by
+`tests/test_gcp_export_zone_ladder.py`, including that GCS reports bucket locations
+uppercase (`US-CENTRAL1`) while compute zones are lowercase, so comparing them raw
+silently disables the whole preference.
+
+## Free tiers hide cost rather than removing it
+
+Two GCP free tiers quietly absorbed real spend, and both are **per billing account**,
+not per project:
+
+- **`e2-micro` free tier.** An idle 24/7 `e2-micro` in a *different* project consumed
+  **77%** of the discount, leaving the main project's compute to pay near-full price. Its
+  own net cost read as $0.29, so no per-project view flags it.
+- **GKE free tier**, one zonal cluster. Covered the cluster fully — a second concurrent
+  cluster gets nothing.
+
+Both mean a resource can look free in the breakdown while making something *else*
+expensive. Check who is consuming a free tier, not just what it covers.
+
+## Latent items — $0 today, real later
+
+- Three **Network Intelligence Center** SKUs billed ~$2.16/mo gross and were 100%
+  credited by discounts literally named *"until billing comes into effect"*. If Google
+  flips those on, new cost appears with no change on your side. Disable it if unused.
+- **Cloud NAT configs outlive their workloads.** Two were active, in two regions,
+  attached to subnets with zero VMs and zero clusters — left behind by the on-demand
+  ref-counted teardown. Cheap while nothing runs; the moment a VM lands there, both bill.
+- Unlike AWS and Azure, **GCP charges nothing to query cost**. The BigQuery billing
+  export makes an audit essentially free, so there is no reason to cache aggressively or
+  to avoid re-running these queries.
+
+## GCP rules for new infrastructure
+
+1. **Any bucket a tool auto-creates for scratch gets a lifecycle rule**, applied
+   unconditionally and at setup time, not after a successful run.
+2. **Anything that writes a multi-GB blob picks its region from the destination**, not
+   from a config default or a zone ladder.
+3. **Never prune by "the newest wins"** without also deleting what it superseded — a
+   timestamped destination object turns every retry into permanent storage.
+4. **Read gross and net separately.** A net-only view cannot distinguish a new resource
+   from an expired credit.
+
+## GCP verification commands
+
+The billing export is the source of truth; it needs
+`bigquery.jobUser` + `dataViewer`. Substitute your own export table.
+
+```bash
+# THE first query: gross vs credits vs net, by month. Run this before anything else —
+# it distinguishes "something new is running" from "a credit expired".
+bq query --nouse_legacy_sql "
+SELECT invoice.month AS mo,
+       ROUND(SUM(cost),2) AS gross,
+       ROUND(SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c),0)),2) AS credits,
+       ROUND(SUM(cost)+SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c),0)),2) AS net
+FROM \`<project>.<dataset>.<export_table>\` GROUP BY mo ORDER BY mo"
+
+# Which credit stopped, and exactly when. A PROMOTION whose total is far below the trial
+# amount expired on the clock; it did not run out.
+bq query --nouse_legacy_sql "
+SELECT c.type, c.name, ROUND(SUM(c.amount),2) AS total,
+       MIN(DATE(usage_start_time)) AS first_day, MAX(DATE(usage_start_time)) AS last_day
+FROM \`<project>.<dataset>.<export_table>\`, UNNEST(credits) c
+GROUP BY 1,2 ORDER BY total"
+
+# The idle floor: cost on a day when nothing was running. Price the run-rate from THIS,
+# not from the month total, or a mid-month arrival will understate it.
+bq query --nouse_legacy_sql "
+SELECT sku.description AS sku, ROUND(SUM(cost),4) AS gross
+FROM \`<project>.<dataset>.<export_table>\`
+WHERE DATE(usage_start_time) = '<an-idle-day>'
+GROUP BY sku HAVING gross > 0 ORDER BY gross DESC"
+
+# Who is consuming a free tier (it is per BILLING ACCOUNT, so check every project).
+bq query --nouse_legacy_sql "
+SELECT project.id, sku.description, ROUND(SUM(cost),3) AS amt
+FROM \`<project>.<dataset>.<export_table>\`
+WHERE sku.description LIKE '%free tier%'
+GROUP BY 1,2 ORDER BY amt"
+```
+
+```bash
+# Image-export scratch. Expect ~0; anything else is pure leak.
+gcloud storage du --summarize --readable-sizes "gs://$(gcloud config get-value project)-daisy-bkt-<region>"
+gcloud storage buckets describe "gs://<bucket>" --format='yaml(lifecycle_config,location,soft_delete_policy)'
+```
+
+A `soft_delete_policy` with a non-zero retention means **deleted bytes keep billing** for
+that window — budget for it before a cleanup, and note it is also your undo.
+
+```bash
+# Idle resources that bill for nothing. An empty ATTACHED_TO is an orphan; Packer leaves
+# these behind on an aborted build, exactly as it does on AWS.
+gcloud compute disks list --format='table(name,zone.basename(),sizeGb,type.basename(),users.list():label=ATTACHED_TO)'
+gcloud compute addresses list --filter='status=RESERVED' --format='table(name,region.basename(),status,users.list())'
+
+# NAT configs with nothing to serve: a non-empty nats list plus an empty instance list.
+gcloud compute routers list --format='table(name,region.basename())'
+gcloud compute routers describe <router> --region <region> --format='value(nats.list())'
+gcloud compute instances list
+```
+
+Finally, set an actual budget. The audited billing account had **none** — the
+`billingbudgets` API was not even enabled, and the only "budget" was a number in the
+dashboard's own config, which Google knows nothing about and cannot alert on.
 
 ---
 

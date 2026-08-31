@@ -478,6 +478,37 @@ gcloud storage buckets add-iam-policy-binding "gs://$StorageBucket" `
     --member "serviceAccount:$SaEmail" --role 'roles/storage.objectAdmin' --quiet | Out-Null
 Write-Ok "Granted $SaEmail storage.objectAdmin on gs://$StorageBucket"
 
+# The Daisy image-exporter auto-creates its own scratch bucket
+# gs://<project>-daisy-bkt-<region> on first export and NEVER cleans it up: each
+# attempt leaves the full ~17 GB `outs/export-disk` intermediate behind, plus a
+# logs/ + sources/ prefix for every FAILED attempt too. Left alone this grows
+# without bound — the 2026-08-31 cost audit found 36 scratch prefixes holding
+# 100 GiB (~$2.30/mo, forever) in a lab that was otherwise idle. Pre-create the
+# bucket with a 1-day TTL so Daisy reuses ours instead of making a rule-less one.
+# A post-success cleanup in the app would not fix this: most of the leaked
+# prefixes came from builds that failed.
+$DaisyBucket = "$ProjectId-daisy-bkt-$Region"
+$DaisyLifecycle = [System.IO.Path]::GetTempFileName()
+'{"lifecycle":{"rule":[{"action":{"type":"Delete"},"condition":{"age":1}}]}}' |
+    Set-Content -Path $DaisyLifecycle -Encoding utf8
+& gcloud storage buckets describe "gs://$DaisyBucket" --project $ProjectId *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud storage buckets create "gs://$DaisyBucket" `
+        --project $ProjectId --location $Region `
+        --uniform-bucket-level-access `
+        --public-access-prevention --quiet *> $null
+}
+# Applied unconditionally: an existing bucket (auto-created by an earlier export)
+# is exactly the case that needs the rule retrofitted.
+gcloud storage buckets update "gs://$DaisyBucket" --project $ProjectId `
+    --lifecycle-file=$DaisyLifecycle --quiet *> $null
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Daisy export scratch gs://$DaisyBucket set to auto-delete at 1 day"
+} else {
+    Write-Warn "Could not set a lifecycle rule on gs://$DaisyBucket - image-export scratch will accumulate (~17 GB per attempt)"
+}
+Remove-Item -Path $DaisyLifecycle -Force -ErrorAction SilentlyContinue
+
 # ── 5c. Cloud Build image-export IAM ─────────────────────────────────────────
 # The dashboard SUBMITS the image-export Cloud Build as itself (granted
 # cloudbuild.builds.editor above), but the build RUNS as Cloud Build's default
