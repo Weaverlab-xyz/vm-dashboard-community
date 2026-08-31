@@ -668,6 +668,18 @@ def test_dbgcp_register_rejects_a_malformed_address():
         "cloud-run;p:r:i;db;https://x/path;sslTRUE",            # audience with a path
         "data-api;p:r:i;db;-;-;bogus=1",                        # unrecognised option
         "data-api;p:r:i;db;-;-;ver=1",                          # cloud-run-only option
+        # fasecret= must be a REGIONAL secret version. The global form is what the
+        # plugin article's own example prints and what the Secrets page produces, and
+        # the Data API rejects it at rotation time -- days after the address was
+        # written, from a Password Safe error that names none of this.
+        "data-api;p:r:i;db;-;-;fasecret=projects/p/secrets/s/versions/latest",
+        "data-api;p:r:i;db;-;-;fasecret=projects/p/locations/r/secrets/s",
+        "data-api;p:r:i;db;-;-;fasecret=bt-fa-secret",
+        # The two Data API database-session auth modes are alternatives, not a pair:
+        # a token minted per connection, or a stored password. Both together is how a
+        # SQL Server address looks when it kept the postgres/mysql default.
+        ("data-api;p:r:i;db;-;-;iam=true;"
+         "fasecret=projects/p/locations/r/secrets/s/versions/latest"),
     )
     for addr in bad:
         try:
@@ -682,8 +694,40 @@ def test_dbgcp_register_rejects_a_malformed_address():
 def test_dbgcp_accepts_the_shapes_the_dashboard_actually_builds():
     for addr in ("data-api;acme:us-central1:clouddb-ab12cd34;appdb;-;-;iam=true",
                  # MySQL carries the host qualifier the plugin refuses to assume.
-                 "data-api;acme:us-central1:clouddb-ab12cd34;appdb;-;-;iam=true;host=%"):
+                 "data-api;acme:us-central1:clouddb-ab12cd34;appdb;-;-;iam=true;host=%",
+                 # SQL Server on the control plane: no IAM database authentication
+                 # exists for it, so the session authenticates with a stored password
+                 # named by a REGIONAL secret version, and iam= is absent entirely.
+                 ("data-api;acme:us-central1:clouddb-ab12cd34;master;-;-;"
+                  "fasecret=projects/acme/locations/us-central1/secrets/"
+                  "clouddb-ab12cd34-psfa/versions/latest")):
         ps._validate_dbgcp_dns_name(addr)          # must not raise
+
+
+def test_dbgcp_fasecret_error_names_the_regional_form():
+    """The message is the whole value of this check: the Data API's own error names a
+    format and not a fix, and the article documents the wrong one."""
+    try:
+        ps._validate_dbgcp_dns_name(
+            "data-api;p:r:i;master;-;-;fasecret=projects/p/secrets/s/versions/latest")
+        raise AssertionError("global secret form accepted")
+    except ps.PSResourceError as exc:
+        assert "locations" in str(exc), exc
+        assert "regional" in str(exc).lower(), exc
+
+
+def test_dbgcp_length_message_mentions_the_secret_version():
+    """A fasecret= value is ~110 characters, so it is now one of the fields that can
+    push an address over 249 — and the message that lists the long fields is the only
+    place an operator learns which one to shorten."""
+    over = ("data-api;acme:us-central1:" + ("i" * 150) + ";master;-;-;"
+            "fasecret=projects/acme/locations/us-central1/secrets/x/versions/latest")
+    assert len(over) > ps._DBGCP_MAX_ADDRESS, len(over)
+    try:
+        ps._validate_dbgcp_dns_name(over)
+        raise AssertionError("expected the 249-character limit to reject this")
+    except ps.PSResourceError as exc:
+        assert "fasecret" in str(exc), exc
 
 
 def test_dbgcp_uses_the_plugins_tighter_249_limit_not_password_safes_255():
@@ -699,6 +743,31 @@ def test_dbgcp_uses_the_plugins_tighter_249_limit_not_password_safes_255():
         raise AssertionError("expected the 249-character limit to reject %d chars" % len(over))
     except ps.PSResourceError as exc:
         assert "249" in str(exc), exc
+
+
+def test_dbgcp_builder_chooses_iam_or_fasecret_but_never_both():
+    """The other half of the pin: this module owns the grammar, cloud_database_service
+    builds the string, and they used to disagree about SQL Server in both directions —
+    `iam=true` was appended unconditionally though the plugin rejects it on an engine
+    with no IAM database authentication, and `fasecret=` (which that engine REQUIRES)
+    was emitted nowhere. Read the source rather than import it: cloud_database_service
+    pulls in the app.
+    """
+    path = os.path.join(_ROOT, "web_dashboard", "services", "cloud_database_service.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    # The one fact three decisions read (the instance flag, the functional account's
+    # database user, and the address option). Its absence is what let them drift.
+    assert "def _iam_db_auth(" in src
+    i = src.index('addr = [channel, conn_name, control_db, "-", "-"]')
+    window = src[i:i + 900]
+    assert 'addr.append("iam=true")' in window, window
+    assert 'addr.append(f"fasecret=' in window, window
+    # An if/else, not two appends: they are alternatives, and this validator refuses
+    # an address that carries both.
+    assert window.index('addr.append("iam=true")') < window.index('addr.append(f"fasecret='), \
+        "iam=true must be the if-branch and fasecret= the else-branch"
+    assert "else:" in window[window.index('addr.append("iam=true")'):], window
 
 
 def test_dbgcp_self_rotation_is_narrowed_to_the_cloud_run_channel():

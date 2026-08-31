@@ -12,11 +12,12 @@ language. `web_dashboard/functions/fnworkloads/ps_dbops.py` serves that contract
 the same Cloud Functions gen2 source-deploy path that already builds, VPC-attaches and
 deploys the `db_grant` adapter.
 
-**This matters more than it first looked.** `cloud-run` is the *only* working path for
-Cloud SQL SQL Server, not merely the recommended one — forcing `data-api` produces an
-address the plugin rejects twice over (it appends `iam=true`, which SQL Server has no IAM
-database authentication for, and never emits the `fasecret=` that combination requires).
-So this is a prerequisite for MSSQL onboarding rather than an ergonomics improvement.
+**This matters more than it first looked.** When this was written `cloud-run` was the
+*only* working path for Cloud SQL SQL Server — forcing `data-api` produced an address the
+plugin rejected twice over. That has since been fixed separately (§9), so `data-api` is
+now a valid fallback. It is not a better one: it mirrors the functional account's password
+into Secret Manager, which is precisely the second authority this channel exists to avoid.
+`cloud-run` remains the default and the recommendation.
 
 Status: **built, except the v1 request parser** (§5). The service deploys, authenticates,
 reaches the VPC, answers a health probe, and logs the real plugin request.
@@ -263,9 +264,11 @@ capability was there all along.
   new driver.
 - **Live E2E.** Nothing here has been run against a real Cloud SQL instance or a real
   Resource Broker. The health probe is the first thing to try.
-- **The `data-api` SQL Server address bugs** (`iam=true` emitted unconditionally,
-  `fasecret=` never emitted). Documented here and in `docs/databases.md`; fixing them
-  would give SQL Server a control-plane option that needs no service at all, and is a
-  separate, smaller piece of work. Note that the Cloud SQL Data API accepts only a
-  **regional** Secret Manager secret — `gcp_service.write_regional_secret`, not the
-  Secrets-page backend.
+- ~~**The `data-api` SQL Server address bugs**~~ — **done separately.** `iam=` is now
+  suppressed for the one engine with no IAM database authentication, `fasecret=` is
+  emitted with a **regional** secret version (`gcp_service.write_regional_secret`, never
+  the Secrets-page backend, whose global form the Data API rejects outright), and
+  `ps_resource_service` refuses both the global form and an address carrying `iam=` and
+  `fasecret=` together. One predicate, `_iam_db_auth(engine, channel)`, now decides the
+  instance flag, the functional account's database user and the address option — they
+  drifted apart because they were three separate decisions.

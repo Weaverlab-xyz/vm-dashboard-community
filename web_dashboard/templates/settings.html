@@ -1834,6 +1834,25 @@
                     MySQL truncates an IAM database username at the <code class="bg-gray-100 px-1 rounded">@</code> and caps it at 32 characters.
                   </p>
                 </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Functional Account Secret Version</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_gcp_fa_secret_version"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="projects/my-project/locations/us-east1/secrets/bt-fa/versions/latest">
+                  <p class="text-xs text-gray-400 mt-1">
+                    <strong>Data API + SQL Server only</strong>, where it is address option
+                    <code class="bg-gray-100 px-1 rounded">fasecret=</code>. Cloud SQL for SQL Server has no IAM database authentication, so the Data
+                    API cannot mint a token for the session &mdash; it needs the functional account&#39;s real password out of Secret Manager. Must be
+                    a <strong>regional</strong> version; the global
+                    <code class="bg-gray-100 px-1 rounded">projects/&lt;p&gt;/secrets/&hellip;</code> form the plugin article prints is rejected.
+                    Leave blank in <em>create</em> mode &mdash; the dashboard stages the credential it minted, per database. <strong>Required in
+                    <em>reference</em> mode</strong>, because that account&#39;s password is one the dashboard has never seen.
+                  </p>
+                  <p class="text-xs text-amber-600 mt-1">
+                    Either way this is a <strong>second authority</strong> for a credential Password Safe exists to own, and nothing re-syncs the
+                    copy. Prefer the Cloud Run channel below, which mirrors nothing.
+                  </p>
+                </div>
                 <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
                   <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">Cloud Run channel (SQL Server)</p>
                   <p class="text-xs text-gray-400">

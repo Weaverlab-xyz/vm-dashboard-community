@@ -1189,7 +1189,17 @@ def _ps_db_onboarding_enabled(row: CloudDatabase, db=None) -> bool:
         # either a deployed service in this row's region or the config-key override
         # satisfies this. With neither there is no address to build, so the channel is
         # off rather than broken.
-        if _gcp_channel(row.engine) == "cloud-run" and not _dbops_audience(row, db):
+        channel = _gcp_channel(row.engine)
+        if channel == "cloud-run" and not _dbops_audience(row, db):
+            return False
+        # data-api + SQL Server needs the address's fasecret= option, and there is no
+        # sensible default for it: with no IAM database authentication the Data API has
+        # to be given the functional account's password out of Secret Manager. Off
+        # rather than broken, exactly as the cloud-run audience is above — an address
+        # with an empty fasecret= is refused by the plugin's own pre-flight, and finding
+        # that out from a rotation failure is the outcome this gate exists to avoid.
+        if (channel == "data-api" and not _iam_db_auth(row.engine, channel)
+                and not _dbgcp_fa_secret_available(row)):
             return False
         return True
     return False
@@ -1521,6 +1531,106 @@ def _fa_grant_statement(engine: str, *, fa_db_user: str, managed_user: str,
     return ""
 
 
+def _iam_db_auth(engine: str, channel: str) -> bool:
+    """Whether this (engine, channel) authenticates the DATABASE session with an IAM
+    token rather than a stored password.
+
+    The single fact three separate decisions used to spell out independently, and got
+    wrong together for SQL Server: whether to enable the ``cloudsql.iam_authentication``
+    flag, whether the functional account's database user is an IAM principal or a real
+    login, and whether the address carries ``iam=true`` or ``fasecret=``.
+
+    Cloud SQL for SQL Server supports IAM authentication for instance and backup
+    operations only, **never for database operations** — so on the control plane it is
+    the one engine that must take the stored-password route, and the plugin *rejects*
+    ``iam=`` on it rather than ignoring it.
+    """
+    return channel == "data-api" and engine != "sqlserver"
+
+
+def _fa_secret_resource_name(row_id: str) -> str:
+    """The NAME of the regional secret holding the functional account's database
+    password — not the password.
+
+    Distinct from :func:`_grant_secret_id`, and the difference is lifetime: that one
+    holds the master credential for the length of a single statement and is deleted in
+    a ``finally``, while this one has to OUTLIVE the onboarding — the plugin reads it on
+    every rotation. Sharing the id would have the grant's cleanup delete the credential
+    the managed system depends on, on the way out of a successful onboarding.
+
+    Named ``..._resource_name`` because the teardown path logs the value, and a name
+    containing "secret" makes CodeQL read the log line as leaking the credential (see
+    the note in :func:`_teardown_ps_onboarding`).
+    """
+    return f"clouddb-{row_id}-psfa"
+
+
+def _fa_secret_version_configured() -> str:
+    """The operator-staged functional-account secret version, if any."""
+    return _cfg("clouddb_ps_gcp_fa_secret_version")
+
+
+def _dbgcp_fa_secret_available(row: CloudDatabase) -> bool:
+    """Whether a ``fasecret=`` value can be produced for this row.
+
+    Cheap and side-effect-free, so the onboarding gate can ask before anything is
+    created. It answers "is there a route to one", not "does one exist yet": in
+    ``create`` mode the dashboard stages the credential it minted, which is a route
+    even before the secret is written.
+    """
+    if _fa_secret_version_configured():
+        return True
+    # "reference" mode names an account whose password the dashboard has never seen, so
+    # there is nothing to stage and the config key is the only source. A registered
+    # database has no minted admin credential either.
+    return (_ps_fa_mode(row.engine) != _FA_MODE_REFERENCE
+            and (getattr(row, "source", None) or "provisioned") != "registered")
+
+
+async def _stage_fa_secret_gcp(db: Session, *, row: CloudDatabase, job_id: str,
+                               project: str, region: str, password: str) -> str:
+    """Mirror the functional account's database password into a REGIONAL secret and
+    return the version resource name for ``fasecret=``. ``""`` on failure.
+
+    This is the mirror the ``cloud-run`` channel exists to avoid, and it is written
+    down as such on the job rather than done quietly: Password Safe is meant to be the
+    sole authority for this credential, and after this there are two. Nothing re-syncs
+    the copy, so rotating the functional account itself breaks every subsequent
+    rotation of the accounts it manages until the secret is updated by hand.
+
+    It is still the right thing to offer, because the alternative for SQL Server on the
+    control plane is no address at all. The recommendation stays cloud-run.
+    """
+    from . import gcp_service
+
+    if not (project and region and password):
+        return ""
+    resource_id = _fa_secret_resource_name(row.id)
+    try:
+        version = await gcp_service.write_regional_secret(
+            project, region, resource_id, password)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("clouddb: could not stage the functional-account secret for %s: %s",
+                       row.id, exc)
+        job_service.append_job_log(
+            db, job_id,
+            f"Could not stage the functional account's password in a regional Secret "
+            f"Manager secret ({exc}) — the data-api SQL Server address needs one "
+            f"(fasecret=), so this database cannot be onboarded on that channel. Use "
+            f"the cloud-run channel, or stage the secret yourself and set "
+            f"clouddb_ps_gcp_fa_secret_version.")
+        return ""
+    job_service.append_job_log(
+        db, job_id,
+        f"Mirrored the functional account's password into the regional secret "
+        f"{resource_id} ({region}) for the data-api address's fasecret= option. "
+        f"NOTE: Password Safe is no longer the sole authority for this credential — "
+        f"nothing re-syncs the copy, so rotating the functional account itself will "
+        f"break rotations until you update the secret. The cloud-run channel avoids "
+        f"this entirely.")
+    return version
+
+
 def _grant_secret_id(row_id: str) -> str:
     """Regional-secret id for the one-shot admin credential the grant runs as.
 
@@ -1626,14 +1736,20 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     port = row.port or sql.default_port(engine)
     channel = _gcp_channel(engine)
 
+    # Which authentication the DATABASE session uses on this channel. One fact, three
+    # consumers below — see _iam_db_auth for why SQL Server is the exception.
+    iam_db_auth = _iam_db_auth(engine, channel)
+
     # 1. Per-instance prerequisites, but ONLY for the control-plane channel. cloud-run
     #    opens a real database connection from a service inside the VPC, so it needs
-    #    neither the Data API nor IAM database authentication — and Cloud SQL for SQL
-    #    Server has no IAM database auth to enable in the first place. Patching an
-    #    instance for a channel that will not use it is a change we have no reason to
-    #    make.
+    #    neither the Data API nor IAM database authentication. On data-api the Data API
+    #    itself is always needed; the IAM flag is passed through iam_db_auth, because
+    #    Cloud SQL for SQL Server has no IAM database auth to enable in the first place
+    #    and asking for it is a patch that cannot succeed. Patching an instance for a
+    #    channel that will not use it is a change we have no reason to make.
     if channel == "data-api":
-        await gcp_service.ensure_cloudsql_rotation_prereqs(project, instance, iam_auth=True)
+        await gcp_service.ensure_cloudsql_rotation_prereqs(project, instance,
+                                                           iam_auth=iam_db_auth)
 
     # 2. The dedicated managed user (the rotation target — never the master admin).
     #    A MySQL account is identified by user@host, and cloud_db_sql_service's own
@@ -1652,14 +1768,21 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     #    minted per connection. Register the rotator, then read back the name the
     #    database actually stored (see _observed_iam_db_user).
     #
-    #    On cloud-run there is no IAM database auth (SQL Server has none), so the
-    #    functional account is a real database login with a real password. In "create"
-    #    mode that is the built-in admin this database was provisioned with — which does
-    #    mean the composite carries a PER-DATABASE password, exactly the property that
-    #    makes "reference" mode the better answer here, as it is on Azure.
+    #    Everywhere else the functional account is a real database login with a real
+    #    password: on cloud-run because the service opens a genuine connection, and on
+    #    data-api + SQL SERVER because that engine has no IAM database authentication at
+    #    all. In "create" mode that login is the built-in admin this database was
+    #    provisioned with — which does mean the composite carries a PER-DATABASE
+    #    password, exactly the property that makes "reference" mode the better answer
+    #    here, as it is on Azure.
+    #
+    #    The two differ in WHERE the password goes. cloud-run puts it in the composite,
+    #    so Password Safe stays the sole authority. data-api cannot: the Data API reads
+    #    it from Secret Manager, named by the address's fasecret= option — a second
+    #    authority for the credential, staged in step 5.
     rotator = _cfg("clouddb_ps_gcp_rotator_service_account")
     fa_db_user = ""
-    if channel == "cloud-run":
+    if not iam_db_auth:
         fa_db_user = admin_username
     elif rotator:
         await gcp_service.create_cloudsql_user(project, instance, rotator,
@@ -1685,9 +1808,17 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     #    run by hand stays as the fallback, never as the first answer.
     #    Self-rotation needs none of it: the managed account authenticates as itself and
     #    alters itself, which is the strongest argument for turning it on.
+    admin_password = (tf_variables.get("master_password")
+                      or tf_variables.get("administrator_password")
+                      or tf_variables.get("admin_password")
+                      or config_service.get(f"clouddb/{row.id}/admin") or "")
     self_rotating = (channel == "cloud-run"
                      and config_service.get_bool("clouddb_ps_self_rotation", False))
-    grant = "" if self_rotating else _fa_grant_statement(
+    # Nothing to grant when the functional account IS the built-in admin: it already
+    # carries every right over every principal on the instance, and issuing the
+    # statement anyway asks the admin to add itself to a role it is already in.
+    fa_is_admin = bool(fa_db_user) and fa_db_user == admin_username
+    grant = "" if (self_rotating or fa_is_admin) else _fa_grant_statement(
         engine, fa_db_user=fa_db_user, managed_user=managed_user,
         managed_host=managed_host)
     if grant and fa_db_user:
@@ -1697,10 +1828,6 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
             # channel and deliberately does not for cloud-run. Turning it on merely to
             # issue the grant would change the instance for a channel that will never
             # use it, which is the change that comment declines to make.
-            admin_password = (tf_variables.get("master_password")
-                              or tf_variables.get("administrator_password")
-                              or tf_variables.get("admin_password")
-                              or config_service.get(f"clouddb/{row.id}/admin") or "")
             applied = await _apply_fa_grant_gcp(
                 db, row=row, job_id=job_id, engine=engine, project=project,
                 instance=instance, region=region,
@@ -1717,14 +1844,29 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
                 f"Password Safe rotation needs one grant on this database, which the "
                 f"dashboard could not issue itself — run it as an admin: {grant}")
 
+    # 5. data-api + SQL Server only: the address's fasecret= option. With no IAM
+    #    database authentication the Data API has to be handed the functional account's
+    #    password out of Secret Manager, so unlike every other GCP path there is a
+    #    credential to stage. An operator-supplied version wins — in "reference" mode it
+    #    is the only possible source, because the dashboard has never seen that
+    #    account's password.
+    fa_secret_version = ""
+    if channel == "data-api" and not iam_db_auth:
+        fa_secret_version = _fa_secret_version_configured()
+        if not fa_secret_version and _ps_fa_mode(engine) != _FA_MODE_REFERENCE:
+            fa_secret_version = await _stage_fa_secret_gcp(
+                db, row=row, job_id=job_id, project=project, region=region,
+                password=admin_password)
+
     logger.info("clouddb: managed DB user %r created via Cloud SQL users.insert on %s "
-                "db_id=%s channel=%s (no jump host)",
-                managed_user, instance, row.id, channel)
+                "db_id=%s channel=%s iam_db_auth=%s (no jump host)",
+                managed_user, instance, row.id, channel, iam_db_auth)
     return {"managed_user": managed_user, "managed_pw": managed_pw,
             "managed_user_host": managed_host, "project": project, "instance": instance,
             "fa_db_user": fa_db_user, "region": region, "db_name": db_name,
             "admin_username": admin_username, "client_image": "", "port": port,
-            "channel": channel}
+            "channel": channel, "iam_db_auth": iam_db_auth,
+            "fa_secret_version": fa_secret_version}
 
 
 _FA_MODE_REFERENCE = "reference"
@@ -2033,6 +2175,15 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         "ps_db_admin_username": ctx["admin_username"],
         "ps_db_client_image": ctx.get("client_image", ""),
         "ps_db_name": ctx["db_name"],
+        # Only the data-api + SQL Server path stages one, and only when the DASHBOARD
+        # staged it — an operator-supplied clouddb_ps_gcp_fa_secret_version is shared by
+        # every database on that channel and is not ours to delete. Recorded so teardown
+        # can remove it: it holds a real database password, and a decommission that left
+        # it behind would park that credential in Secret Manager for good.
+        "ps_db_fa_sm_resource": (_fa_secret_resource_name(row.id)
+                                 if ctx.get("fa_secret_version")
+                                 and not _fa_secret_version_configured() else ""),
+        "ps_db_fa_sm_project": ctx.get("project", ""),
     }
 
     # ── DB managed system (cloud-specific custom plugin) ──
@@ -2114,7 +2265,19 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             # Postgres needs none of this: it grants CONNECT to PUBLIC by default.
             control_db = ("information_schema" if engine == "mysql"
                           else ctx["db_name"] or "")
-            addr = [channel, conn_name, control_db, "-", "-", "iam=true"]
+            addr = [channel, conn_name, control_db, "-", "-"]
+            # How the Data API authenticates the DATABASE session, and the two options
+            # are alternatives rather than a pair. `iam=true` mints an OAuth token per
+            # connection; `fasecret=` names the Secret Manager version holding the
+            # functional account's password. SQL Server has no IAM database
+            # authentication at all — the plugin REJECTS `iam=` on it — so it takes the
+            # second, and this used to append `iam=true` unconditionally and emit
+            # `fasecret=` nowhere, which made a forced data-api SQL Server address
+            # unparseable in both directions at once.
+            if ctx.get("iam_db_auth", _iam_db_auth(engine, channel)):
+                addr.append("iam=true")
+            else:
+                addr.append(f"fasecret={ctx.get('fa_secret_version') or ''}")
         if engine == "mysql":
             # The plugin deliberately REFUSES to default a MySQL host qualifier, because
             # app@% and app@10.0.0.5 are different accounts and rotating the wrong row
@@ -2778,6 +2941,7 @@ _PS_CONTEXT_KEYS = (
     "ps_db_client_image", "ps_db_name", "ps_db_system_id", "ps_db_account_id",
     "ps_pravault_system_id", "ps_pravault_account_id",
     "ps_db_functional_account_ref", "ps_pravault_functional_account_ref",
+    "ps_db_fa_sm_resource", "ps_db_fa_sm_project",
 )
 
 
@@ -2851,11 +3015,45 @@ async def _teardown_ps_onboarding(db: Session, *, row: Optional[CloudDatabase],
                 logger.warning("clouddb %s functional-account delete for %s failed: %s",
                                label, db_id, exc)
 
+    # The one context key with something to DELETE remotely: the regional secret
+    # mirroring the functional account's database password on the data-api + SQL Server
+    # path. Removed after the managed system, because the plugin reads it on every
+    # rotation and deleting it first would break the last one. Best-effort and never
+    # fatal — but noisy on failure, since what is left behind is a live credential.
+    #
+    # ``resource_id`` / ``ps_db_fa_sm_*``, not ``secret_id``, and the reason is the same
+    # one gcp_service._write_regional_secret_sync spells out: this value is the secret's
+    # NAME, the failure path has to log it so an operator knows which one to delete by
+    # hand, and a name containing "secret" makes CodeQL's clear-text-logging query treat
+    # it as the credential itself (py/clear-text-logging-sensitive-data). Naming it for
+    # what it actually is beats suppressing a query that is right to be suspicious. The
+    # credential never appears here at all.
+    resource_id = meta.get("ps_db_fa_sm_resource")
+    secret_gone = True
+    if resource_id and "ps_db_registration_tf_state" in done:
+        from . import gcp_service
+        project = meta.get("ps_db_fa_sm_project") or _cfg("gcp_project")
+        region = meta.get("ps_db_region") or ""
+        secret_gone = bool(project and region) and await gcp_service.delete_regional_secret(
+            project, region, resource_id)
+        if not secret_gone:
+            errors.append(
+                f"the functional account's regional Secret Manager entry {resource_id} "
+                f"in {region or '?'} was not deleted — it holds a database password, "
+                f"remove it by hand")
+        else:
+            logger.info("clouddb: functional-account regional SM entry %s removed "
+                        "db_id=%s", resource_id, db_id)
+
     if prov_job is not None and done:
         # Clear only what came off cleanly; the context keys go with the DB managed
-        # system, since they exist to describe it.
+        # system, since they exist to describe it. The secret keys are the exception:
+        # they name something that still EXISTS when its delete failed, so clearing them
+        # would leave a live database password in Secret Manager that nothing ever
+        # retries — the same rule the per-step clearing above follows.
         if "ps_db_registration_tf_state" in done:
-            done += [k for k in _PS_CONTEXT_KEYS if k in meta]
+            keep = () if secret_gone else ("ps_db_fa_sm_resource", "ps_db_fa_sm_project")
+            done += [k for k in _PS_CONTEXT_KEYS if k in meta and k not in keep]
         fresh = dict(prov_job.metadata_dict or {})
         for key in done:
             fresh.pop(key, None)
