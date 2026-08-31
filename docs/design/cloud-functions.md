@@ -128,6 +128,37 @@ for "missing" and "wrong" so it leaks nothing. Direct invokes bypass the HTTP
 front door, so the secret may also arrive as a `secret` field in the synthesized
 body — which is why `secret` is a redacted key (§2.5).
 
+**Gate 2 is selectable per workload, and the default never moved.** A workload may
+declare a module-level `AUTH_MODE`; `dispatch` passes it to `auth.verify_for`, and
+anything it does not recognise — including a typo — is a 500, never a pass. Two modes
+exist:
+
+| `AUTH_MODE` | Gate | Who declares it |
+|---|---|---|
+| absent / `shared_secret` | `auth.verify` — everything above | every workload but one |
+| `gcp_oidc` | `auth.verify_gcp_oidc` | `ps_dbops` only |
+
+`ps_dbops` needs it because its caller is a Password Safe Resource Broker presenting a
+Google-issued ID token in the same `Authorization` header — a credential the dashboard
+never issued and cannot compare against a secret it minted. So the inner gate is
+*replaced*, not removed: `verify_gcp_oidc` checks the token's `aud` against
+`FN_DBOPS_AUDIENCE` and its `email` against `FN_DBOPS_ALLOWED_INVOKERS`, with the same
+three properties — fails closed when unconfigured, byte-identical 401s, and a
+constant-time compare where it compares.
+
+It does **not** re-verify the signature, and that is the one thing to understand before
+copying this pattern. Cloud Run's front door has already validated signature, expiry and
+audience and confirmed the caller holds `roles/run.invoker`; re-doing it would mean
+fetching and caching Google's JWKS from a runtime whose whole contract is "stdlib only".
+The claims are parsed for *authorization* on top of an *authentication* decision the
+platform already made — which is only sound while the platform is actually making one.
+So the gate reads `FN_AUTH_MODE_FRONT_DOOR` (set by the GCP module from `auth_mode`) and
+fails closed on anything but `run_invoker`, as an **allowlist**: a missing value means a
+deploy whose front door we cannot vouch for, and the safe reading of "I don't know" is
+"no". `cloud_function_service._check_front_door` refuses such a deploy too, but the two
+checks live in different trust domains and the container-side one is the load-bearing
+half.
+
 ### 2.5 Logging
 
 One line of JSON per request to stdout — CloudWatch, App Insights, and Cloud
@@ -216,7 +247,19 @@ successful plan.
 |---|---|---|
 | AWS | `vpc_config { subnet_ids, security_group_ids }` | A VPC-attached Lambda has **no public internet** unless its subnets route through NAT. Callback-using workloads hang until timeout. |
 | Azure | `virtual_network_subnet_id` + `vnet_route_all_enabled` | Needs a subnet delegated to `Microsoft.Web/serverFarms` — a *different* subnet from `azure_db_subnet_id` (delegated to `…/flexibleServers`). And **`WEBSITE_DNS_SERVER = 168.63.129.16`**, or the `privatelink.*` zone won't resolve: `vnet_route_all_enabled` fixes routing, not DNS. |
-| GCP | `vpc_connector` + `PRIVATE_RANGES_ONLY` | Serverless VPC Access, **not** Direct VPC egress — `cloudfunctions2.service_config` only exposes `vpc_connector`. A connector runs ≥2 `e2-micro` instances (~$26/mo) whether invoked or not, so reference an **existing** connector rather than creating one per function. |
+| GCP | `vpc_connector` + `PRIVATE_RANGES_ONLY` | Serverless VPC Access, **not** Direct VPC egress — `cloudfunctions2.service_config` only exposes `vpc_connector`. A connector runs ≥2 `e2-micro` instances (~$26/mo) whether invoked or not, so reference an **existing** connector rather than creating one per function. *(Superseded: provider 7.21 added `direct_vpc_network_interface`, which the module now prefers — see its own comments.)* |
+
+### 5.1 Scaling and the front door (GCP)
+
+Four module variables exist for one workload's needs and default to today's behaviour
+for every other:
+
+| Variable | Default | Why it exists |
+|---|---|---|
+| `min_instances` | `0` | A **correctness** setting for `ps_dbops`: Direct VPC egress can take over a minute to establish on a cold start, and a rotation that times out may already have applied the change. Bills continuously. |
+| `concurrency` | `0` (platform default, 80) | A workload that holds a database connection for the life of a request hits Cloud SQL's connection limit long before Cloud Run decides it needs another instance. |
+| `ingress_settings` | `ALLOW_ALL` | Was **declared but never passed**, so every GCP function was `ALLOW_ALL` whatever the module said. Now reachable. |
+| `invoker_members` | `[]` | Named `roles/run.invoker` bindings, for `auth_mode = "run_invoker"`. A Terraform `validation` refuses `allUsers`/`allAuthenticatedUsers` — an operator who wants a public function says so with `auth_mode = "none"`, which is recorded on the row and visible in the UI. |
 
 ## 6. Workload catalog
 
@@ -229,6 +272,7 @@ Standalone-useful first; Phase-2-enabling second.
 | `cred_expiry_watch` | TLS handshake sweep → issuer/`not_after`/days remaining; on-demand or scheduled | Scheduled-invoke plumbing + the function→dashboard callback direction |
 | `db_grant` | Ephemeral DB account create/drop against the private DB | **The Phase 2 pilot** |
 | `local_account_broker` *(AWS)* | SSM-driven ephemeral OS account + authorized key | SSH ephemeral-accounts executor for hosts Entitle's agent can't reach |
+| `ps_dbops` *(GCP)* | The "bt-dbops" service: changes and verifies Cloud SQL credentials for the Password Safe plugin's `cloud-run` channel | None — a different contract (§9.1) |
 | `inventory_reporter` | Reports what it can see from inside the network, POSTing back to the dashboard | Reverse callback channel for revocation reconciliation |
 
 ## 7. Phase 2 — Entitle REST integrations

@@ -93,6 +93,29 @@ variable "max_instances" {
   description = "Capped low by default: a grant webhook should never fan out, and an unbounded ceiling turns a retry storm into a bill."
 }
 
+# Idle instances. 0 (scale to zero) is right for every event-driven workload here and
+# is the default. It is WRONG for ps_dbops, and the reason is correctness rather than
+# latency: Direct VPC egress documents connection-establishment delays over a minute on
+# instance start, and a credential rotation that times out MAY ALREADY HAVE APPLIED the
+# change — Password Safe then holds a password the database has replaced. One warm
+# instance per region removes that window. CPU throttling can stay at the default: the
+# instance staying ALIVE is what keeps the network interface attached; it needs no CPU
+# between requests.
+variable "min_instances" {
+  type        = number
+  default     = 0
+  description = "Idle instances kept warm. 0 = scale to zero. >0 bills continuously."
+}
+
+# 0 leaves the platform default (80 on Cloud Run). A workload that holds a DATABASE
+# connection for the life of a request must set this far lower: Cloud SQL's connection
+# limit is reached long before Cloud Run decides it needs another instance.
+variable "concurrency" {
+  type        = number
+  default     = 0
+  description = "Max simultaneous requests per instance. 0 = platform default."
+}
+
 variable "service_account_email" {
   type        = string
   default     = ""
@@ -108,7 +131,29 @@ variable "environment" {
 variable "ingress_settings" {
   type        = string
   default     = "ALLOW_ALL"
-  description = "ALLOW_ALL (reachable by Entitle) or ALLOW_INTERNAL_AND_GCLB"
+  description = "ALLOW_ALL (reachable by Entitle, and by an on-premises Password Safe Resource Broker) or ALLOW_INTERNAL_AND_GCLB"
+  validation {
+    condition     = contains(["ALLOW_ALL", "ALLOW_INTERNAL_ONLY", "ALLOW_INTERNAL_AND_GCLB"], var.ingress_settings)
+    error_message = "ingress_settings must be ALLOW_ALL, ALLOW_INTERNAL_ONLY or ALLOW_INTERNAL_AND_GCLB."
+  }
+}
+
+# NAMED callers, for auth_mode = "run_invoker". The two wildcard principals are refused
+# rather than discouraged: this module deploys credential-changing workloads, and
+# `allAuthenticatedUsers` on such a service means any Google account anywhere. An
+# operator who genuinely wants a public function sets auth_mode = "none", which is
+# explicit, recorded on the CloudFunction row, and visible in the UI.
+variable "invoker_members" {
+  type        = list(string)
+  default     = []
+  description = "IAM members granted roles/run.invoker (e.g. serviceAccount:broker@proj.iam.gserviceaccount.com). Named principals only."
+  validation {
+    condition = alltrue([
+      for m in var.invoker_members :
+      !contains(["allusers", "allauthenticatedusers"], lower(trimspace(m)))
+    ])
+    error_message = "invoker_members may not contain allUsers or allAuthenticatedUsers — use auth_mode = \"none\" if a public endpoint is really what you want."
+  }
 }
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -227,8 +272,13 @@ resource "google_cloudfunctions2_function" "this" {
     available_memory      = "${var.memory_mb}M"
     timeout_seconds       = var.timeout_seconds
     max_instance_count    = var.max_instances
+    min_instance_count    = var.min_instances
     ingress_settings      = var.ingress_settings
     service_account_email = var.service_account_email != "" ? var.service_account_email : null
+
+    # null, not 0: the field is "max requests per instance" and 0 is not a legal value —
+    # omitting it is how you ask for the platform default.
+    max_instance_request_concurrency = var.concurrency > 0 ? var.concurrency : null
 
     dynamic "direct_vpc_network_interface" {
       for_each = local.direct_vpc ? [1] : []
@@ -251,6 +301,12 @@ resource "google_cloudfunctions2_function" "this" {
       FN_NETWORK_MODE = local.vpc_attached ? "vpc" : "public"
       FN_NETWORK      = local.network_ref
       FN_VPC_EGRESS   = local.direct_vpc ? "direct" : (local.use_connector ? "connector" : "")
+      # What the RUNNING function is allowed to assume about its own front door.
+      # fnruntime.auth.verify_gcp_oidc trusts the platform to have verified the
+      # caller's token, which is only true under run_invoker — so it reads this and
+      # fails closed on anything else, rather than trusting a deploy-time check made
+      # in another trust domain.
+      FN_AUTH_MODE_FRONT_DOOR = var.auth_mode
     })
 
     # Kept out of environment_variables so it is not rendered into plan output
@@ -328,6 +384,20 @@ resource "google_cloud_run_service_iam_member" "public" {
   service  = google_cloudfunctions2_function.this.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+# The named-caller half of the same front door. A gen2 function IS a Cloud Run service,
+# so this is the binding a Password Safe Resource Broker needs before it can present an
+# OIDC token and be let in. Empty by default, which means NOBODY can call the service —
+# a deployed-but-unreachable endpoint, which is the safe direction and is visible
+# immediately rather than at the first rotation.
+resource "google_cloud_run_service_iam_member" "invokers" {
+  for_each = toset([for m in var.invoker_members : trimspace(m) if trimspace(m) != ""])
+  project  = var.project
+  location = var.region
+  service  = google_cloudfunctions2_function.this.name
+  role     = "roles/run.invoker"
+  member   = each.value
 }
 
 # ── Outputs ──────────────────────────────────────────────────────────────────

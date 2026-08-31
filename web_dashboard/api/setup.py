@@ -825,8 +825,14 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_gcp_auth_mode: str = "ADC"           # "ADC" | "IMP" | "SA" (SA busts the 1000-char limit)
     clouddb_ps_gcp_impersonate_target: str = ""     # IMP mode: service account to impersonate
     clouddb_ps_gcp_rotator_service_account: str = ""  # keep short: MySQL caps IAM db usernames at 32
-    clouddb_ps_gcp_dbops_audience: str = ""   # cloud-run: the service's stable custom audience
+    clouddb_ps_gcp_dbops_audience: str = ""   # cloud-run: OVERRIDE; the deployed service's URL wins
     clouddb_ps_gcp_dbops_ssl: bool = True     # cloud-run: address field 5
+    clouddb_ps_gcp_dbops_invokers: str = ""   # roles/run.invoker members; named SAs only
+    clouddb_ps_gcp_dbops_ingress: str = "all"  # all | internal
+    # int-annotated for the same reason as the k8s token keys below: _read_feature only
+    # coerces on an int annotation, and an unset int otherwise 422s the whole panel.
+    clouddb_ps_gcp_dbops_min_instances: int = 1
+    clouddb_ps_gcp_dbops_concurrency: int = 8
     # k8s ServiceAccount token rotation (Password Safe) — see config.py for the key
     # semantics. Every numeric key below MUST stay annotated `int`: _read_feature's
     # int-coercion branch only fires on an int annotation, and an unset int otherwise

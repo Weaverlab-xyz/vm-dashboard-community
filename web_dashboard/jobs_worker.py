@@ -64,7 +64,7 @@ HANDLED_TYPES = (
     "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
-    "clouddb_adapter_pair",
+    "clouddb_adapter_pair", "clouddb_dbops_deploy",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
@@ -103,6 +103,7 @@ HEAVY_TYPES = (
     "cloudfn_deploy", "cloudfn_update",               # cloud_function_service, same
     "cloudfn_decommission",
     "clouddb_adapter_pair",                           # drives cloudfn_deploy's apply inline
+    "clouddb_dbops_deploy",                           # same, twice (deploy then audience)
     "packer_aws_build", "packer_azure_build",         # packer_service._stream_command
     "packer_gcp_build", "packer_oci_build",
     "ansible_local",                                  # ansible_local_service, `docker run`
@@ -458,6 +459,13 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             await cloud_db_adapter_service.run_pairing(
                 db, db_id=meta["db_id"], job_id=job_id,
                 dry_run=meta.get("dry_run", True))
+        elif job_type == "clouddb_dbops_deploy":
+            # Deploys the Password Safe cloud-run channel's DB-Ops service for one
+            # region, then re-applies it with its own URL as the audience. One job
+            # because the service refuses every request between the two.
+            from .services import clouddb_dbops_service
+            await clouddb_dbops_service.run_deploy(
+                db, region=meta["region"], job_id=job_id)
         elif job_type == "ansible_cloud_run":
             # Config-Management localhost Ansible run against a Kubernetes cluster or
             # cloud database — always executes on a transient in-cloud runner.

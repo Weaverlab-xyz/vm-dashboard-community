@@ -324,7 +324,12 @@ has a counterpart on either GCP channel. What you create depends on the engine:
 | Engine | Channel | What you have to stand up |
 |---|---|---|
 | PostgreSQL, MySQL | `data-api` | A rotator service account. No infrastructure at all |
-| SQL Server | `cloud-run` | A Cloud Run service, plus `roles/run.invoker` for each broker |
+| SQL Server | `cloud-run` | Nothing by hand — name the broker service accounts and press **Deploy** (§below) |
+
+`cloud-run` is the only working path for SQL Server, not just the recommended one:
+forcing `data-api` builds an address the plugin rejects, because it appends `iam=true`
+(which SQL Server has no IAM database authentication for) and never emits the
+`fasecret=` the combination requires.
 
 **The rotation identity.** One service account per project, shared by every database:
 
@@ -362,40 +367,63 @@ authenticates to GCP:
 | `IMP:` | Broker already has some GCP identity | `roles/iam.serviceAccountTokenCreator` on the rotator, granted to that identity |
 | `SA:` | **Not supported in practice** | A base64 key is ~3.2 KB, over Password Safe's 1000-character credential limit, so the composite cannot survive a write-back |
 
-**The Cloud Run service (SQL Server).** The dashboard **cannot deploy this** — it is a
-.NET container the plugin repository builds, and the dashboard has no path to build or
-publish that image. Use the plugin repo's `ps-dbops-sqlserver` Terraform module, or by
-hand:
+**The Cloud Run service (SQL Server).** The dashboard deploys this. In
+Settings → Password Safe → *Cloud Run channel*:
 
-```
-gcloud run deploy bt-dbops --project=<project> --region=<region> \
-    --no-allow-unauthenticated \
-    --network=<vpc> --subnet=<subnet> --vpc-egress=private-ranges-only \
-    --service-account=bt-dbops@<project>.iam.gserviceaccount.com \
-    --min-instances=1 --concurrency=8 --max-instances=5 --timeout=120 \
-    --add-custom-audiences=https://bt-dbops.<your-domain>
-```
+1. Put each Resource Broker's service account in **Invoker service accounts**. A bare
+   email is fine — the dashboard prefixes it. `allUsers` and `allAuthenticatedUsers` are
+   refused by the Terraform module itself, not merely discouraged.
+2. Press **Deploy** for the region your database is in. One service per region: it holds
+   no per-database state, and Direct VPC egress is region-locked.
 
-Three of those are load-bearing:
+The job (`clouddb_dbops_deploy`) applies twice — once to create the service, once to
+stamp its own URL in as the audience, which does not exist until the first apply has
+finished. Between the two the service is deployed and refuses every request.
 
-- **`--add-custom-audiences`** is not optional. The generated `*.run.app` hostname changes
-  if the service is recreated and each revision gets its own URL; the stable audience is
-  what lets the managed-system address survive a redeploy, and it is what goes in
-  `clouddb_ps_gcp_dbops_audience`.
+What the dashboard sets, and why each one is load-bearing:
+
+- **The audience is the service's own URL.** `--add-custom-audiences` exists to *decouple*
+  the audience from the URL; when the dashboard owns the deployment there is nothing to
+  decouple, and nothing for an operator to invent. (The URL is stable across revisions on
+  Cloud Run v2 — only recreating the service can change it, and the dashboard owns that
+  too.) Field 4 is used verbatim as both the request target and the token audience.
 - **`--min-instances=1`** is a correctness decision, not a cost one. Direct VPC egress
   documents connection-establishment delays of a minute or more on startup, and a rotation
   that times out **may already have applied** — the worst outcome this system can produce.
 - **`--concurrency=8`**, well below the default, because each request holds a database
   connection and Cloud SQL's connection limit is reached long before Cloud Run notices.
+- **`--no-allow-unauthenticated`**, with `roles/run.invoker` bound to the named brokers.
 
-Then grant each broker identity `roles/run.invoker` — **named service accounts only**,
-never `allUsers` or `allAuthenticatedUsers`. If your brokers are outside GCP they cannot
-reach `ingress=internal`, so the service starts with public ingress plus IAM: a
-credential-changing API with a globally resolvable endpoint, protected by IAM rather than
-network position. Compensate with an org policy
+If your brokers are outside GCP they cannot reach `ingress=internal`, so the service
+defaults to public ingress plus IAM: a credential-changing API with a globally resolvable
+endpoint, protected by IAM rather than network position. Compensate with an org policy
 (`constraints/iam.allowedPolicyMemberDomains`) that makes an `allUsers` binding
-impossible. Private Service Connect is the follow-on hardening step, and the custom
-audience makes that flip invisible to Password Safe.
+impossible. Set **Ingress → Internal only** when every broker runs on Compute Engine.
+Private Service Connect is the follow-on hardening step; because the dashboard records
+the audience rather than an operator memorising it, that flip is a redeploy, not a
+migration.
+
+**Prove it before wiring a managed system to it.** The service answers an unauthenticated-
+by-IAM-only health probe that touches no database:
+
+```
+curl -H "Authorization: Bearer $(gcloud auth print-identity-token --audiences=<service-url>)" <service-url>/
+```
+
+It reports the contract path, the versions it can serve, its region, and how many
+instances are in its allowlist.
+
+**The v1 contract is not implemented yet.** `/v1/credential-op` returns **501** and logs
+the request it was sent. The shape is defined by the plugin and is not in this repository;
+guessing it would produce a service that deploys cleanly and fails every rotation, after
+possibly having applied the change. Point one managed system at the service, click
+*Verify Managed Account*, and read the real request out of Cloud Logging
+(`jsonPayload.msg="dbops_contract_capture"`).
+
+**Deploying it yourself is still supported.** Use the plugin repo's `ps-dbops-sqlserver`
+Terraform module and put its stable custom audience in `clouddb_ps_gcp_dbops_audience` —
+that key is now an override rather than the only source, and a dashboard-deployed service
+in the database's own region beats it.
 
 The Cloud Run service account is strikingly small — it needs **none** of
 `roles/cloudsql.client`, `roles/cloudsql.instanceUser` or `roles/cloudsql.admin`, because

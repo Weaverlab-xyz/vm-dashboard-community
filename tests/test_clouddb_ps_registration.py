@@ -347,7 +347,11 @@ def test_the_api_preflight_uses_that_same_function():
     button and the endpoint drift apart."""
     api = open(_API, encoding="utf-8").read()
     assert "cloud_database_service._ps_ineligible_reason(row)" in api
-    assert "cloud_database_service._ps_db_onboarding_enabled(row)" in api
+    # The session is part of the call now: the GCP cloud-run gate is satisfied by a
+    # DEPLOYED per-region DB-Ops service as well as by the config key, and that lookup
+    # needs a session. A route that dropped it would silently answer "not enabled" for
+    # every region the dashboard deployed into.
+    assert "cloud_database_service._ps_db_onboarding_enabled(row, db)" in api
     assert "cloud_database_service.VALID_PS_DB_ACTIONS" in api
 
 

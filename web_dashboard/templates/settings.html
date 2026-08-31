@@ -1837,20 +1837,100 @@
                 <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
                   <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">Cloud Run channel (SQL Server)</p>
                   <p class="text-xs text-gray-400">
-                    The Cloud Run service holds the database drivers and connects over direct VPC egress. <strong>You deploy it</strong> &mdash; the
-                    plugin repository ships a <code class="bg-gray-100 px-1 rounded">ps-dbops-sqlserver</code> Terraform module, and the dashboard
-                    cannot build its container image. Grant each Resource Broker&#39;s identity
-                    <code class="bg-gray-100 px-1 rounded">roles/run.invoker</code> on it, named service accounts only.
+                    A small service inside the VPC holds the database drivers and opens the connection, so the credential can travel in the request
+                    body instead of being mirrored into Secret Manager. <strong>The dashboard deploys it</strong> &mdash; one per region, because it
+                    holds no per-database state and Direct VPC egress is region-locked. This is the only working path for Cloud SQL SQL Server:
+                    the control-plane channel has no IAM database authentication to use.
+                  </p>
+
+                  <!-- Per-region services. Once the dashboard owns the deployment the audience is a
+                       RECORDED fact, so this shows what each region actually resolves to rather than
+                       asking the operator to trust the override box below. -->
+                  <div class="border border-gray-200 rounded-lg divide-y divide-gray-100">
+                    <div class="flex items-center justify-between px-3 py-2 bg-gray-50">
+                      <span class="text-xs font-medium text-gray-600">DB-Ops services</span>
+                      <button type="button" @click="loadDbops()" :disabled="dbopsLoading"
+                              class="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400">
+                        <span x-text="dbopsLoading ? 'Loading…' : 'Refresh'"></span>
+                      </button>
+                    </div>
+                    <template x-if="!dbops">
+                      <p class="px-3 py-2 text-xs text-gray-400">Not loaded &mdash; the Databases feature and Cloud Functions must both be on.</p>
+                    </template>
+                    <template x-for="r in (dbops?.regions || [])" :key="r.region">
+                      <div class="px-3 py-2 flex items-center justify-between gap-3">
+                        <div class="min-w-0">
+                          <p class="text-sm font-mono text-gray-700" x-text="r.region"></p>
+                          <p class="text-xs truncate"
+                             :class="r.audience_source === 'deployed' ? 'text-green-600' : (r.audience_source === 'config' ? 'text-amber-600' : 'text-gray-400')"
+                             x-text="r.audience ? (r.audience + (r.audience_source === 'config' ? ' (from the override below)' : '')) : (r.reason || 'no service')"></p>
+                        </div>
+                        <button type="button" @click="deployDbops(r.region)"
+                                :disabled="dbopsBusy === r.region || !r.deployable"
+                                :title="r.reason || ''"
+                                class="shrink-0 px-2 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+                          <span x-text="dbopsBusy === r.region ? 'Deploying…' : (r.status === 'available' ? 'Deployed' : 'Deploy')"></span>
+                        </button>
+                      </div>
+                    </template>
+                  </div>
+
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Invoker service accounts</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_gcp_dbops_invokers"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="broker-a@my-project.iam.gserviceaccount.com, broker-b@my-project.iam.gserviceaccount.com">
+                    <p class="text-xs text-gray-400 mt-1">
+                      Each Resource Broker&#39;s identity, granted <code class="bg-gray-100 px-1 rounded">roles/run.invoker</code>.
+                      <strong>Named service accounts only</strong> &mdash; the Terraform module refuses
+                      <code class="bg-gray-100 px-1 rounded">allUsers</code> and <code class="bg-gray-100 px-1 rounded">allAuthenticatedUsers</code>,
+                      because this is an API that changes credentials. Blank deploys a service nothing can call.
+                    </p>
+                  </div>
+                  <div class="grid grid-cols-3 gap-3">
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Ingress</label>
+                      <select x-model="panelCfg.clouddb_ps_gcp_dbops_ingress"
+                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="all">Public + IAM</option>
+                        <option value="internal">Internal only</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Warm instances</label>
+                      <input type="number" min="0" max="5" x-model.number="panelCfg.clouddb_ps_gcp_dbops_min_instances"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Concurrency</label>
+                      <input type="number" min="1" max="80" x-model.number="panelCfg.clouddb_ps_gcp_dbops_concurrency"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                  </div>
+                  <p class="text-xs text-amber-600"
+                     x-show="(panelCfg.clouddb_ps_gcp_dbops_ingress || 'all') === 'all'">
+                    Public ingress means a credential-changing API on a globally resolvable endpoint, protected by IAM rather than by network
+                    position. It is the default because an <strong>on-premises</strong> Resource Broker cannot reach an internal-only service.
+                    Compensate with an org policy (<code class="bg-gray-100 px-1 rounded">constraints/iam.allowedPolicyMemberDomains</code>); Private
+                    Service Connect is the follow-on.
+                  </p>
+                  <p class="text-xs text-gray-400">
+                    <strong>Warm instances</strong> is a correctness setting, not a latency one: Direct VPC egress can take over a minute to
+                    establish on a cold start, and a rotation that times out <strong>may already have applied</strong> the change. 1 bills
+                    continuously &mdash; a few dollars a month per region. <strong>Concurrency</strong> is well under Cloud Run&#39;s default of 80
+                    because each request holds a database connection.
                   </p>
                   <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Cloud Run Audience</label>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Audience override</label>
                     <input type="text" x-model="panelCfg.clouddb_ps_gcp_dbops_audience"
                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                            placeholder="https://bt-dbops.example.internal">
                     <p class="text-xs text-gray-400 mt-1">
-                      The service&#39;s stable <strong>custom audience</strong>, not a revision URL &mdash; it is sent verbatim as both the request
-                      target and the token audience, so the string configured on the service is the string that goes here. A path, query or fragment
-                      is rejected. <strong>Blank leaves SQL Server onboarding off</strong>, because there would be no address to build.
+                      Only for a service <strong>you</strong> deployed, or one behind a custom domain or Private Service Connect. A
+                      dashboard-deployed service in the database&#39;s own region <strong>wins over this box</strong> &mdash; a Cloud Run service on
+                      Direct VPC egress is region-locked, and one global value would address a rotation at a service that cannot reach the instance.
+                      Sent verbatim as both the request target and the token audience, so a path, query or fragment is rejected.
+                      With neither this nor a deployed service, SQL Server onboarding stays off: there would be no address to build.
                     </p>
                   </div>
                   <label class="flex items-center gap-2">
@@ -5464,6 +5544,12 @@ function settingsPage() {
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
     agentAudience: null,     // read-only view of the pinned agent signing audience (Remote Agents panel)
     agentAudienceResetting: false,
+    // Password Safe panel: the per-region DB-Ops services and the audience each one
+    // resolves to. Read-only — never merged into panelCfg, so a stale open panel
+    // cannot write a computed audience back over the operator's override.
+    dbops: null,
+    dbopsLoading: false,
+    dbopsBusy: '',
     rancherFirewall: null,   // read-only breakdown of the Rancher node firewall allow-list (k8s panel)
     portainerFirewall: null, // same for the managed Portainer node (Containers panel)
     expirySweep: null,       // last auto-delete sweep summary (Auto-delete Timer panel)
@@ -5781,6 +5867,14 @@ function settingsPage() {
           try {
             this.rancherFirewall = await API.get('/api/containers/rancher/firewall');
           } catch (e) { /* node/GCP not configured yet — panel just omits the box */ }
+        }
+        // Password Safe: the GCP cloud-run channel's audience is no longer a single
+        // config value — a deployed per-region service beats it — so the panel has to
+        // show what each region actually resolves to, or the box lies about three
+        // regions out of four.
+        if (intg.key === 'password_safe') {
+          this.dbops = null;
+          await this.loadDbops();
         }
         // Remote agents: the pinned signing audience is write-once and was previously
         // invisible, so an audience pinned to the wrong hostname looked identical to a
@@ -6365,6 +6459,39 @@ function settingsPage() {
         this.showToast('Could not reset the signing audience: ' + e.message, 'error');
       } finally {
         this.agentAudienceResetting = false;
+      }
+    },
+
+    // ── Password Safe: the GCP cloud-run channel's DB-Ops services ───────
+    async loadDbops() {
+      this.dbopsLoading = true;
+      try {
+        this.dbops = await API.get('/api/databases/dbops/status');
+      } catch (e) {
+        // The Databases router is feature-gated, so "off" is a 403 here. Leave the box
+        // saying "not loaded" rather than throwing a toast at someone who has simply
+        // not turned the feature on yet.
+        this.dbops = null;
+      } finally {
+        this.dbopsLoading = false;
+      }
+    },
+
+    async deployDbops(region) {
+      if (!confirm(
+        `Deploy the DB-Ops service to ${region}?\n\n` +
+        'It is a Cloud Run service inside the VPC, deployed with a warm instance that ' +
+        'bills continuously (a few dollars a month). Only the invoker service accounts ' +
+        'configured here will be able to call it.')) return;
+      this.dbopsBusy = region;
+      try {
+        const r = await API.post('/api/databases/dbops/deploy', { region });
+        this.showToast(`Deploying the DB-Ops service in ${region} — job ${r.job_id}.`);
+        await this.loadDbops();
+      } catch (e) {
+        this.showToast('Could not deploy the DB-Ops service: ' + e.message, 'error');
+      } finally {
+        this.dbopsBusy = '';
       }
     },
 

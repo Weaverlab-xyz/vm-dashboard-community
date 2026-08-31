@@ -9,6 +9,8 @@ Database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
   DELETE /api/databases/{id}            — decommission, or deregister if registered
   POST   /api/databases/{id}/ps-register — onboard into Password Safe (or remove that)
   POST   /api/databases/{id}/adapter-pair — deploy the db_grant Entitle adapter beside it
+  POST   /api/databases/dbops/deploy    — deploy the Password Safe DB-Ops service (per region)
+  GET    /api/databases/dbops/status    — per-region DB-Ops services + resolved audience
 
 Provisioning is cloud-only because it needs a Terraform module; registering needs
 only somewhere to reach, so it also covers on-premises (``cloud='local'``).
@@ -30,8 +32,9 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import CloudDatabase, User, get_db
 from ..services import (aws_service, cache_service, cloud_database_service,
-                        cloud_db_adapter_service, cloud_function_service, config_service,
-                        job_service, ps_api_service, ps_database_catalog, region_catalog)
+                        cloud_db_adapter_service, cloud_function_service,
+                        clouddb_dbops_service, config_service, job_service,
+                        ps_api_service, ps_database_catalog, region_catalog)
 from ..services.aws_service import AWSError
 from ..services.region_config import deployable_regions, resolve_region
 from .auth import require_permission
@@ -43,6 +46,11 @@ router = APIRouter(prefix="/api/databases", tags=["databases"])
 def _require_enabled() -> None:
     if not config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled):
         raise HTTPException(status_code=403, detail="database infrastructure is disabled")
+
+
+class DbOpsDeployRequest(BaseModel):
+    """A REGION, not a database id — the DB-Ops service is per region by design."""
+    region: str
 
 
 class ProvisionRequest(BaseModel):
@@ -825,7 +833,7 @@ async def register_database_in_password_safe(
         reason = cloud_database_service._ps_ineligible_reason(row)
         if reason:
             raise HTTPException(status_code=400, detail=reason)
-        if not cloud_database_service._ps_db_onboarding_enabled(row):
+        if not cloud_database_service._ps_db_onboarding_enabled(row, db):
             raise HTTPException(
                 status_code=409,
                 detail="Password Safe database onboarding is not enabled for this cloud "
@@ -945,3 +953,85 @@ async def pair_database_with_adapter(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, "status": "pairing", "db_id": db_id,
             "adapter_name": name, "job_id": result["job_id"]}
+
+
+@router.post("/dbops/deploy", status_code=202)
+async def deploy_dbops_service(
+    payload: DbOpsDeployRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
+):
+    """Deploy the **DB-Ops service** the Password Safe GCP Cloud SQL plugin's
+    ``cloud-run`` channel talks to — one per region, VPC-attached, behind
+    ``roles/run.invoker``.
+
+    Not per-database, which is why this endpoint takes a REGION rather than a database
+    id: the service holds no per-database state (the instance, catalog and credential
+    all arrive in the request), Direct VPC egress is region-locked, and the warm
+    instance it needs for correctness bills continuously. See
+    docs/design/ps-dbops-cloud-run.md.
+
+    Async — enqueues a ``clouddb_dbops_deploy`` job; open the job for status. The job
+    applies twice: once to create the service and once to stamp its own URL in as the
+    audience, which does not exist until the first apply has finished.
+    """
+    _require_enabled()
+    _require_function_write(current_user)
+    # Two features, two flags — the same split the adapter-pair endpoint makes.
+    if not config_service.get_bool("cloud_functions_enabled", settings.cloud_functions_enabled):
+        raise HTTPException(
+            status_code=409,
+            detail="Cloud Functions is disabled — the DB-Ops service is deployed "
+                   "through that machinery (set cloud_functions_enabled)")
+    region = region_catalog.normalize("gcp", payload.region or "")
+    if region not in deployable_regions("gcp"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"no per-region configuration for {payload.region!r} on gcp — the "
+                   f"DB-Ops service must sit in the database's own region to reach it "
+                   f"over the VPC, and without one it would deploy onto the default "
+                   f"region's network. Add a config set for {payload.region} under "
+                   f"Settings → Multi-region.")
+    try:
+        cloud_function_service.package_location("gcp", "preflight", "0" * 64)
+    except cloud_function_service.CloudFunctionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        result = clouddb_dbops_service.start_deploy(
+            db, region=region, created_by=current_user.username)
+    except clouddb_dbops_service.DbOpsDeployError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "status": "deploying", "region": region,
+            "job_id": result["job_id"]}
+
+
+@router.get("/dbops/status")
+async def dbops_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "read")),
+):
+    """Per-region DB-Ops services, and the audience each one resolves to.
+
+    The panel shows the RESOLVED audience rather than the config key, because after
+    this feature the key is only one of two sources and showing it alone would tell an
+    operator the wrong string for every region with a deployed service.
+    """
+    out = []
+    for region in deployable_regions("gcp"):
+        row = clouddb_dbops_service.find_for_region(db, region)
+        out.append({
+            "region": region,
+            "fn_id": row.id if row else None,
+            "name": row.name if row else None,
+            "status": row.status if row else None,
+            "audience": clouddb_dbops_service.audience_for_region(db, region)
+                        or (config_service.get("clouddb_ps_gcp_dbops_audience") or ""),
+            "audience_source": ("deployed"
+                                if clouddb_dbops_service.audience_for_region(db, region)
+                                else ("config" if config_service.get(
+                                    "clouddb_ps_gcp_dbops_audience") else "none")),
+            "deployable": clouddb_dbops_service.deploy_ineligible_reason(db, region) is None,
+            "reason": clouddb_dbops_service.deploy_ineligible_reason(db, region),
+        })
+    return {"ok": True, "invokers": len(clouddb_dbops_service.invoker_members()),
+            "regions": out}

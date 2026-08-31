@@ -51,7 +51,20 @@ VALID_NETWORK_MODES = ("public", "vpc")
 _CLOUD_RESTRICTED = {
     # Uses boto3 for ssm:SendCommand; only the Lambda runtime ships an AWS SDK.
     "local_account_broker": ("aws",),
+    # Serves the Password Safe GCP Cloud SQL plugin's "cloud-run" channel. Not a
+    # missing SDK — a missing CALLER: the contract, the OIDC front door and the
+    # instance connection name are all GCP concepts, and the same code on Lambda
+    # would be a credential-changing endpoint nothing ever calls.
+    "ps_dbops": ("gcp",),
 }
+
+# Workloads that may not be deployed with an open front door or without a VPC.
+# ``ps_dbops`` receives a live database credential in the request body and opens a
+# connection to a private-IP instance, so "public + shared secret" (the GCP default,
+# below) and "no VPC attachment" are both deploys that must fail at the click rather
+# than produce a working, wrong service.
+_REQUIRES_AUTHENTICATED_FRONT_DOOR = ("ps_dbops",)
+_REQUIRES_VPC = ("ps_dbops",)
 
 _PROVIDER = {"aws": "lambda", "azure": "function_app", "gcp": "cloudrun_function"}
 # One runtime, three spellings. Keeping them in a dict beats three string literals
@@ -109,6 +122,9 @@ _AZURE_KV_PREFIX = "@Microsoft.KeyVault("
 
 _DEFAULT_TIMEOUT_SECONDS = 60
 _DEFAULT_MEMORY_MB = 256
+# Matches the gcp_cloudrun module's own default, so passing it explicitly changes
+# nothing for an existing function while giving a caller a way to raise it.
+_DEFAULT_MAX_INSTANCES = 3
 
 # Function names: cloud-safe intersection (Lambda allows 64 chars incl. '-'/'_';
 # an Azure Function App name becomes a DNS label, so lowercase alphanumeric + '-'
@@ -166,6 +182,27 @@ def _check_target(workload: str, cloud: str) -> None:
             f"the {workload!r} workload is not available on {cloud} "
             f"(it needs a cloud SDK that only {'/'.join(clouds_for(workload))} "
             "ships in its runtime)")
+
+
+def _check_front_door(workload: str, *, auth_mode: str, network_mode: str) -> None:
+    """Refuse a deploy whose front door or placement makes the workload unsafe.
+
+    Separate from :func:`_check_target` because these are not facts about the
+    workload's availability — they are facts about THIS deploy's options, and the
+    message has to name the option to change.
+    """
+    if workload in _REQUIRES_AUTHENTICATED_FRONT_DOOR and (auth_mode or "").lower() in (
+            "none", "no", "public"):
+        raise CloudFunctionError(
+            f"the {workload!r} workload may not be deployed with auth_mode={auth_mode!r} "
+            "— it takes a live database credential in the request body, so the platform "
+            "front door (roles/run.invoker) is the authentication, not an extra. Deploy "
+            "it with auth_mode='run_invoker'")
+    if workload in _REQUIRES_VPC and network_mode != "vpc":
+        raise CloudFunctionError(
+            f"the {workload!r} workload needs network_mode='vpc' — it connects to a "
+            "private-IP database, and a public deploy would succeed and then fail every "
+            "request")
 
 
 def available_workloads() -> tuple:
@@ -592,6 +629,16 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
             # merges the two.
             "secret_environment": dict(opts.get("secret_environment") or {}),
             "db_admin_secret": opts.get("db_admin_secret", ""),
+            # Scaling and the front door. All four were module variables with no way
+            # to reach them: ingress_settings was DECLARED but never passed, so every
+            # GCP function was ALLOW_ALL whatever the module said, and there was no
+            # variable at all for the named-invoker bindings a Password Safe Resource
+            # Broker needs. Defaults keep every existing function byte-identical.
+            "ingress_settings": opts.get("ingress_settings") or "ALLOW_ALL",
+            "min_instances": int(opts.get("min_instances") or 0),
+            "concurrency": int(opts.get("concurrency") or 0),
+            "max_instances": int(opts.get("max_instances") or _DEFAULT_MAX_INSTANCES),
+            "invoker_members": _csv(opts.get("invoker_members")),
         }
 
     # Azure: no bucket/key vars — run-from-package takes a single SAS URL, and the
@@ -883,6 +930,9 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
     Does **not** run Terraform — the API schedules :func:`run_deploy_apply`.
     Returns ``{ok, fn_id, job_id, tf_variables}`` (secrets already stripped)."""
     _check_target(workload, cloud)
+    _check_front_door(workload,
+                      auth_mode=auth_mode or _DEFAULT_AUTH_MODE[cloud],
+                      network_mode=network_mode)
     if not region:
         raise CloudFunctionError("region is required")
     # Canonicalise + validate, as the cloud-database path does
@@ -995,6 +1045,11 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
             "sku_name": opts.get("sku_name") or _cfg("azure_functions_plan_sku"),
             "service_account_email": opts.get("service_account_email")
             or _cfg("gcp_functions_service_account"),
+            "ingress_settings": opts.get("ingress_settings", ""),
+            "min_instances": opts.get("min_instances", 0),
+            "concurrency": opts.get("concurrency", 0),
+            "max_instances": opts.get("max_instances", 0),
+            "invoker_members": opts.get("invoker_members", []),
             # Credential references. Both spellings reach the module: the generic
             # secret_environment, and the two workload-specific options the pairing
             # path passes. Without this they were dropped silently — the AWS role

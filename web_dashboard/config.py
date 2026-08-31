@@ -688,14 +688,51 @@ class Settings(BaseSettings):
     # "@" and caps it at 32 characters, so "bt-rotator" is safe and
     # "bt-passwordsafe-cloudsql-rotator-prod" is not.
     clouddb_ps_gcp_rotator_service_account: str = ""  # e.g. bt-rotator@<project>.iam.gserviceaccount.com
-    # The cloud-run channel's Cloud Run service. The AUDIENCE is address field 4 and is
-    # used verbatim as both the request target and the OIDC token audience — the
-    # generated *.run.app hostname changes if the service is recreated and every
-    # revision gets its own URL, so a stable custom audience is what lets a managed-system
-    # address survive a redeploy. Blank turns the cloud-run channel off (there would be
-    # no address to build), which is why SQL Server stays dark until it is set.
-    clouddb_ps_gcp_dbops_audience: str = ""   # e.g. https://bt-dbops.example.internal
+    # The cloud-run channel's Cloud Run service. The dashboard can DEPLOY this now
+    # (clouddb_dbops_service, one per region), so the audience below is an OVERRIDE
+    # rather than the only source: cloud_database_service._dbops_audience prefers the
+    # recorded invoke_url of the deployed service IN THE DATABASE'S OWN REGION and
+    # falls back to this key.
+    #
+    # That order is deliberate and is the opposite of the usual instinct. A flat key
+    # answers "which service" globally; a Cloud Run service on Direct VPC egress is
+    # REGION-LOCKED. An operator who sets this for a us-east1 service and later
+    # onboards a database in europe-west1 would otherwise address every rotation for
+    # it at a service that physically cannot reach the instance — and a rotation that
+    # times out may already have applied the change.
+    #
+    # Address field 4 is used verbatim as BOTH the request target and the OIDC token
+    # audience, so it must be a bare origin that actually resolves. When the dashboard
+    # owns the service the audience simply IS the service URL, and no custom audience
+    # is needed — --add-custom-audiences exists to decouple the two. Set this only for
+    # a service you deployed yourself, or one behind a custom domain / Private Service
+    # Connect front door.
+    clouddb_ps_gcp_dbops_audience: str = ""   # override, e.g. https://bt-dbops.example.internal
     clouddb_ps_gcp_dbops_ssl: bool = True     # address field 5: sslTRUE | sslFALSE
+    # Who may call the service. Comma-separated IAM members granted roles/run.invoker —
+    # the Resource Brokers' own identities. NAMED SERVICE ACCOUNTS ONLY: the Terraform
+    # module refuses allUsers/allAuthenticatedUsers outright, because this is an API
+    # that changes credentials. Empty deploys a service nobody can call, which is the
+    # safe direction and is visible immediately rather than at the first rotation.
+    clouddb_ps_gcp_dbops_invokers: str = ""   # serviceAccount:broker@proj.iam.gserviceaccount.com,...
+    # Ingress. "all" because an ON-PREMISES Resource Broker cannot reach an
+    # internal-only Cloud Run service, and on-prem brokers are the common case. The
+    # trade-off is real and is stated in docs/databases.md: a credential-changing API
+    # on a globally resolvable endpoint, protected by IAM rather than by network
+    # position. Compensate with constraints/iam.allowedPolicyMemberDomains at the org.
+    # "internal" is correct when every broker runs on Compute Engine.
+    clouddb_ps_gcp_dbops_ingress: str = "all"   # all | internal
+    # Idle instances. 1 is a CORRECTNESS setting, not a latency one: Direct VPC egress
+    # documents connection-establishment delays over a minute on instance start, and a
+    # rotation that times out may already have applied the password change — Password
+    # Safe then holds a credential the database has replaced. It bills continuously;
+    # that is the trade being made deliberately. MUST stay annotated `int` (see the
+    # note on the k8s token keys in api/setup.py).
+    clouddb_ps_gcp_dbops_min_instances: int = 1
+    # Per-request concurrency on the service. Well below Cloud Run's default of 80,
+    # because each request holds a database connection and Cloud SQL's connection
+    # limit is reached long before Cloud Run decides it needs another instance.
+    clouddb_ps_gcp_dbops_concurrency: int = 8
 
     # EPM for Linux (EPM-L) — Pathfinder public API gateway.
     # The gateway base is api.beyondtrust.io (NOT app.beyondtrust.io — that host
