@@ -5022,3 +5022,83 @@ async def execute_cloudsql_sql(project: str, instance: str, database: str, state
                             statement, auto_iam_authn=auto_iam_authn, user=user,
                             password_secret_version=password_secret_version)
 
+
+# ── Regional Secret Manager, for executeSql's passwordSecretVersion ───────────
+#
+# The Data API accepts ONLY a regional secret. Handing it the global form --
+# "projects/*/secrets/*/versions/*", which is what secrets_backend_service's
+# write_gcp_sm creates and what the plugin article's own fasecret= example prints --
+# fails with:
+#
+#   The provided Secret ID [...] does not match the expected format
+#   [projects/*/locations/*/secrets/*/versions/*]
+#
+# So these cannot reuse the Secrets-page backend. Regional secrets also live behind a
+# per-region endpoint (secretmanager.<region>.rep.googleapis.com) rather than the
+# global host, and the installed google-cloud-secret-manager/gcloud may predate
+# regional support entirely, so this is deliberately plain REST on the authed session.
+
+def _regional_sm_base(region: str) -> str:
+    return f"https://secretmanager.{region}.rep.googleapis.com/v1"
+
+
+def _write_regional_secret_sync(project: str, region: str, secret_id: str,
+                                value: str) -> str:
+    """Create (if absent) a REGIONAL secret and add ``value`` as a new version.
+    Returns the full version resource name for ``passwordSecretVersion``.
+
+    Synchronous; callers wrap in ``_to_thread``."""
+    import base64
+
+    s = _authed_session()
+    base = _regional_sm_base(region)
+    parent = f"{base}/projects/{project}/locations/{region}/secrets"
+
+    r = s.post(f"{parent}?secretId={secret_id}", json={})
+    # 409 is the secret already existing from an earlier onboarding of the same row --
+    # expected on a re-register, and we add a new version below regardless.
+    if not r.ok and r.status_code != 409:
+        raise GCPError(
+            f"could not create the regional secret {secret_id!r} in {region} "
+            f"(HTTP {r.status_code}): {(r.text or '')[:300]}")
+
+    payload = base64.b64encode(value.encode()).decode()
+    vr = s.post(f"{parent}/{secret_id}:addVersion", json={"payload": {"data": payload}})
+    if not vr.ok:
+        raise GCPError(
+            f"could not add a version to the regional secret {secret_id!r} in {region} "
+            f"(HTTP {vr.status_code}): {(vr.text or '')[:300]}")
+    return f"projects/{project}/locations/{region}/secrets/{secret_id}/versions/latest"
+
+
+async def write_regional_secret(project: str, region: str, secret_id: str,
+                                value: str) -> str:
+    """Async wrapper for :func:`_write_regional_secret_sync`."""
+    return await _to_thread(_write_regional_secret_sync, project, region, secret_id, value)
+
+
+def _delete_regional_secret_sync(project: str, region: str, secret_id: str) -> bool:
+    """Best-effort delete of a regional secret. Returns whether it is gone.
+
+    Never raises: this only ever runs in a cleanup path, where the credential having
+    been *used* already matters more than the tidy-up, and a failure here must not
+    mask the outcome of the statement it was staged for."""
+    try:
+        s = _authed_session()
+        base = _regional_sm_base(region)
+        r = s.delete(f"{base}/projects/{project}/locations/{region}/secrets/{secret_id}")
+        if r.ok or r.status_code == 404:
+            return True
+        logger.warning("gcp: regional secret %s in %s not deleted (HTTP %s) — it holds an "
+                       "admin credential, remove it by hand", secret_id, region,
+                       r.status_code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gcp: regional secret %s in %s not deleted (%s) — it holds an "
+                       "admin credential, remove it by hand", secret_id, region, exc)
+    return False
+
+
+async def delete_regional_secret(project: str, region: str, secret_id: str) -> bool:
+    """Async wrapper for :func:`_delete_regional_secret_sync`."""
+    return await _to_thread(_delete_regional_secret_sync, project, region, secret_id)
+
