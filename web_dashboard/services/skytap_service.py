@@ -760,8 +760,23 @@ async def create_template(env_id: str, name: str, description: str = "") -> dict
     # v1, for the same reason `create_environment` posts to `/configurations.json`: there
     # is no POST on the v2 templates collection. The follow-up PUT below is v2, which does
     # implement it.
-    raw = await _client().request("POST", "/templates.json",
-                                  json={"configuration_id": env_id, "name": name})
+    try:
+        raw = await _client().request("POST", "/templates.json",
+                                      json={"configuration_id": env_id, "name": name})
+    except SkytapError as exc:
+        # Skytap answers a bake it will not do with `409 {"error":"The machine was busy.
+        # Try again later."}`, and "try again later" is a lie: a multi-VM environment that
+        # is running answers that way every time, forever. The caller is expected to have
+        # shut it down (`pov_template_builder._quiesce`), so this fires only when
+        # something else is mid-transition — but the remedy has to be IN the message,
+        # because a failed job surfaces nothing but this string.
+        if "(409)" in str(exc):
+            raise SkytapError(
+                f"Skytap will not save environment {env_id} as a template while it is "
+                f"busy (409). Its VMs must be stopped — not running, not mid-transition. "
+                f"Shut the environment down and bake it again."
+            ) from exc
+        raise
     if not isinstance(raw, dict) or not raw.get("id"):
         raise SkytapError(
             f"Skytap accepted the template create from environment {env_id} but returned "

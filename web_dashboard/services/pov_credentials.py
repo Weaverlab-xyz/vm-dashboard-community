@@ -112,13 +112,24 @@ def parse(text: str) -> tuple[str, str]:
         "a password. Expected something like 'administrator / Passw0rd'")
 
 
-def pick(entries: list, *, vm_label: str = "the VM") -> tuple[str, str]:
+# The default remedy names the POV's own login field, which is where a caller that HAS one
+# sends the reader. A template build has no such field — its row carries a broker VM name
+# and nothing to log in with — so it passes its own. Advice you cannot follow is worse than
+# no advice: it sends an SE looking for a control that does not exist.
+DEFAULT_REMEDY = "Leave one on the VM, or set the login on the POV by hand."
+
+
+def pick(entries: list, *, vm_label: str = "the VM",
+         remedy: str = DEFAULT_REMEDY) -> tuple[str, str]:
     """The one credential in ``entries``, parsed. Ambiguity is a refusal.
 
     ``entries`` is what an adapter's ``stored_credentials`` returned. More than one usable
     entry is refused rather than resolved by order: which one an SE meant is not something
     a position in a list can answer, and installing a Resource Broker as the wrong account
     is not a mistake worth being clever about.
+
+    ``remedy`` is the sentence that tells the reader what to DO about either refusal; see
+    ``DEFAULT_REMEDY``.
     """
     usable = []
     problems = []
@@ -133,11 +144,10 @@ def pick(entries: list, *, vm_label: str = "the VM") -> tuple[str, str]:
         detail = f" ({problems[0]})" if problems else ""
         raise CredentialParseError(
             f"{vm_label} has no stored credential this dashboard can use{detail}. Add one "
-            f"on the VM in the lab platform, or set the login on the POV by hand.")
+            f"on the VM in the lab platform. {remedy}")
     if len(usable) > 1:
         # Names how many, never which — the count is diagnostic, the contents are not.
         raise CredentialParseError(
             f"{vm_label} has {len(usable)} usable stored credentials and there is no way "
-            f"to tell which is meant. Leave one on the VM, or set the login on the POV by "
-            f"hand.")
+            f"to tell which is meant. {remedy}")
     return usable[0]

@@ -12,7 +12,8 @@ Safe and Entitle are *tenants* reached from outside.
 back. That is the pipeline here, and it is why a build owns a scratch environment for its
 duration.
 
-    create_environment  ->  power on  ->  check the contract  ->  prepare  ->  bake  ->  reap
+    create_environment -> power on -> check the contract -> prepare -> shut down ->
+    bake -> reap
 
 The one part worth reading twice is **prepare**, because it is the piece with no automation
 before this. ``docs/integrations/skytap.md#the-template-contract`` requires the broker VM to
@@ -80,6 +81,20 @@ BUILD_SUSPEND_ON_IDLE_S = 1800
 # updates is the reason the POV broker payload is injected after power-on rather than
 # before.
 BUILD_POWERON_TIMEOUT_S = 2400.0
+
+# **Skytap will not bake a multi-VM environment that is still running.** Its own
+# documentation says so obliquely — "if the environment contains multiple VMs, Save as
+# Template may generate an error; if this happens, shut down the environment and try
+# again" — and what it actually answers is `409 {"error":"The machine was busy. Try again
+# later."}`, which reads like a transient and is not one: every retry hits it again for as
+# long as the VMs are up. So the shutdown is a pipeline STAGE, not error handling.
+#
+# Four Windows guests shutting down gracefully is the long pole, and a guest that hangs on
+# a shutdown dialog would otherwise wedge the whole build — hence `halted` as the fallback
+# below, which is Skytap's documented escape hatch ("forces a transition to stopped … when
+# the VM won't shut down due to errors in the guest VM"). Graceful first, because a
+# template baked from a hard power-off is a template every future POV boots dirty from.
+BUILD_SHUTDOWN_TIMEOUT_S = 900.0
 
 # The guest port published for the prepare step, and how long we will wait to reach it.
 _SSH_PORT = 22
@@ -466,7 +481,12 @@ async def prepare_broker_vm(mod, env_id: str, vm: dict) -> str:
     try:
         entries = await mod.stored_credentials(env_id, vm.get("id"))
         username, password = pov_credentials.pick(
-            entries, vm_label=f"the broker VM {vm.get('name')!r}")
+            entries, vm_label=f"the broker VM {vm.get('name')!r}",
+            # A build has no login field to fall back on, so the only remedy is on the
+            # platform side. See pov_credentials.DEFAULT_REMEDY.
+            remedy=("Leave exactly one usable credential on that VM in the lab platform "
+                    "and build again, or install the runner by hand — the build carries "
+                    "no login of its own."))
         return await _ssh_install(published["external_ip"],
                                   int(published["external_port"]), username, password)
     finally:
@@ -517,6 +537,41 @@ async def _reap(db: Session, build: PovTemplateBuild, mod, job_id: str) -> None:
             db, job_id,
             f"WARNING: the build environment {env_id} could not be deleted ({exc}). It is "
             f"still running and still billing — reap it with Discard, or in the platform.")
+
+
+async def _quiesce(db: Session, build: PovTemplateBuild, mod, job_id: str) -> None:
+    """Shut the build environment down so the bake can succeed. Raises if it will not go.
+
+    Unlike `_reap`, a failure here is fatal on purpose: the only thing after this is the
+    bake, and baking a running environment is precisely what does not work. Failing with
+    "it would not shut down" is a fact the reader can act on; letting it through would
+    surface as the 409 that names no cause.
+
+    The graceful stop is tried first and the forced one only after it times out, because
+    the difference is visible in every POV that is ever built from the result.
+    """
+    env_id = build.build_environment_id
+    try:
+        await mod.set_runstate(env_id, "stopped")
+        await mod.wait_for_runstate(env_id, "stopped",
+                                    timeout_s=BUILD_SHUTDOWN_TIMEOUT_S)
+        job_service.append_job_log(db, job_id,
+                                   f"Build environment {env_id} is stopped.")
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("template build %s: graceful shutdown of %s failed",
+                       build.id, env_id, exc_info=True)
+        job_service.append_job_log(
+            db, job_id,
+            f"The graceful shutdown did not finish ({exc}). Forcing the VMs off — see "
+            f"the build log if the baked template misbehaves on first boot.")
+
+    # `halted` is Skytap's documented force-off, and it settles on `stopped` — so that is
+    # still what we wait for. Waiting for 'halted' would time out on a success.
+    await mod.set_runstate(env_id, "halted")
+    await mod.wait_for_runstate(env_id, "stopped", timeout_s=BUILD_SHUTDOWN_TIMEOUT_S)
+    job_service.append_job_log(
+        db, job_id, f"Build environment {env_id} was forced off and is stopped.")
 
 
 async def run_template_build(job_id: str, meta: dict) -> None:
@@ -624,9 +679,16 @@ async def run_template_build(job_id: str, meta: dict) -> None:
             job_service.append_job_log(
                 db, job_id, f"Prepare: {build.prepare_method} — {build.prepare_detail}")
 
-            # ── bake ─────────────────────────────────────────────────────────
+            # ── quiesce ──────────────────────────────────────────────────────
+            # See BUILD_SHUTDOWN_TIMEOUT_S: the bake below fails with a 409 that names no
+            # cause for as long as these VMs are running.
             build.status = STATUS_BAKING
             db.commit()
+            job_service.update_progress(db, job_id, 72,
+                                        "Shutting the build environment down…")
+            await _quiesce(db, build, mod, job_id)
+
+            # ── bake ─────────────────────────────────────────────────────────
             job_service.update_progress(db, job_id, 80, "Saving it as a template…")
             tpl = await mod.create_template(build.build_environment_id, build.name,
                                             build.description or "")
@@ -643,7 +705,8 @@ async def run_template_build(job_id: str, meta: dict) -> None:
                 job_service.append_job_log(
                     db, job_id,
                     f"Keeping the build environment {build.build_environment_id} as "
-                    f"asked. It is running and it bills — Discard reaps it.")
+                    f"asked. It is stopped, but its storage still bills — Discard "
+                    f"reaps it.")
             else:
                 job_service.update_progress(db, job_id, 92,
                                             "Reaping the build environment…")
