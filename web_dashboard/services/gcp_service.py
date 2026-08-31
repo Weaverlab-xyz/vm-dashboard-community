@@ -4751,7 +4751,21 @@ async def wait_sql_instance_runnable(project: str, name: str, clouddb_id: str) -
 # gcloud command when the field is rejected.
 _SQL_DATA_API_FIELD = "dataApiAccess"
 _SQL_DATA_API_ON = "ALLOW_DATA_API"
+# The IAM-database-authentication flag is spelled DIFFERENTLY per engine: PostgreSQL
+# uses the dotted `cloudsql.iam_authentication`, MySQL the underscored
+# `cloudsql_iam_authentication`. Sending the wrong one is not a soft failure — Cloud SQL
+# answers `404 invalidFlagName` and rejects the whole patch (or create). SQL Server has
+# no IAM database auth at all, which is why callers pass iam_auth=False for it.
 _SQL_IAM_AUTH_FLAG = "cloudsql.iam_authentication"
+_SQL_IAM_AUTH_FLAG_MYSQL = "cloudsql_iam_authentication"
+
+
+def _sql_iam_auth_flag(database_version: str) -> str:
+    """Flag name that turns IAM database authentication on for ``database_version``
+    (the Cloud SQL ``databaseVersion`` string, e.g. ``MYSQL_8_4``, ``POSTGRES_16``)."""
+    return (_SQL_IAM_AUTH_FLAG_MYSQL
+            if str(database_version or "").upper().startswith("MYSQL")
+            else _SQL_IAM_AUTH_FLAG)
 
 
 def _sql_wait_operation(session, project: str, op_name: str, *, timeout_s: int,
@@ -4784,8 +4798,9 @@ def _ensure_cloudsql_rotation_prereqs_sync(
 ) -> dict:
     """Idempotently enable, on Cloud SQL instance ``instance``, the two things the
     Password Safe ``data-api`` plugins need: the **Cloud SQL Data API** (off by default
-    per instance) and, for PostgreSQL/MySQL, the ``cloudsql.iam_authentication``
-    database flag.
+    per instance) and, for PostgreSQL/MySQL, the IAM-database-authentication flag —
+    whose name is engine-dependent, so it is read off the instance's ``databaseVersion``
+    rather than hard-coded (see :func:`_sql_iam_auth_flag`).
 
     Reads first and patches only what is missing, so a re-provision or a repeated
     registration is a no-op rather than a restart. Returns
@@ -4801,11 +4816,13 @@ def _ensure_cloudsql_rotation_prereqs_sync(
     if r.status_code == 404:
         raise GCPError(f"Cloud SQL instance {instance!r} not found in project {project!r}")
     r.raise_for_status()
-    settings_body = (r.json() or {}).get("settings") or {}
+    inst_body = r.json() or {}
+    settings_body = inst_body.get("settings") or {}
+    iam_flag = _sql_iam_auth_flag(inst_body.get("databaseVersion"))
 
     want_data_api = str(settings_body.get(_SQL_DATA_API_FIELD) or "") != _SQL_DATA_API_ON
     flags = list(settings_body.get("databaseFlags") or [])
-    have_iam = any(str(f.get("name")) == _SQL_IAM_AUTH_FLAG
+    have_iam = any(str(f.get("name")) == iam_flag
                    and str(f.get("value")).lower() == "on" for f in flags)
     want_iam = bool(iam_auth) and not have_iam
 
@@ -4816,8 +4833,8 @@ def _ensure_cloudsql_rotation_prereqs_sync(
     if want_data_api:
         patch["settings"][_SQL_DATA_API_FIELD] = _SQL_DATA_API_ON
     if want_iam:
-        merged = [f for f in flags if str(f.get("name")) != _SQL_IAM_AUTH_FLAG]
-        merged.append({"name": _SQL_IAM_AUTH_FLAG, "value": "on"})
+        merged = [f for f in flags if str(f.get("name")) != iam_flag]
+        merged.append({"name": iam_flag, "value": "on"})
         patch["settings"]["databaseFlags"] = merged
 
     pr = s.patch(inst_url, json=patch)

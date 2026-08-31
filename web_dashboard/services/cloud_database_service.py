@@ -270,8 +270,8 @@ def _aws_db_security_groups(regional: dict, opts: dict) -> list[str]:
 
 
 def _gcp_iam_auth_wanted() -> bool:
-    """Whether a NEW Cloud SQL instance should come up with
-    ``cloudsql.iam_authentication`` on — i.e. whether GCP Password Safe onboarding is
+    """Whether a NEW Cloud SQL instance should come up with IAM database
+    authentication on — i.e. whether GCP Password Safe onboarding is
     configured at all. Reads the same two switches as :func:`_ps_db_onboarding_enabled`
     minus the per-row parts, because tf variables are built before there is a row to
     inspect. Harmless when onboarding is later turned off; the flag only ever *permits*
@@ -1536,7 +1536,7 @@ def _iam_db_auth(engine: str, channel: str) -> bool:
     token rather than a stored password.
 
     The single fact three separate decisions used to spell out independently, and got
-    wrong together for SQL Server: whether to enable the ``cloudsql.iam_authentication``
+    wrong together for SQL Server: whether to enable the IAM-database-authentication
     flag, whether the functional account's database user is an IAM principal or a real
     login, and whether the address carries ``iam=true`` or ``fasecret=``.
 

@@ -89,7 +89,7 @@ variable "private_network" {
 }
 
 variable "iam_authentication" {
-  # Turns on `cloudsql.iam_authentication`, which lets an IAM principal authenticate to
+  # Turns on `cloudsql_iam_authentication`, which lets an IAM principal authenticate to
   # the database with a short-lived OAuth token instead of a stored password. The
   # Password Safe "GCP Cloud SQL {engine}" plugins need it on the data-api channel: with
   # it, the functional account has NO database password to store, rotate or leak.
@@ -166,7 +166,12 @@ resource "google_sql_database_instance" "this" {
     dynamic "database_flags" {
       for_each = var.iam_authentication ? [1] : []
       content {
-        name  = "cloudsql.iam_authentication"
+        # MySQL spells this flag with UNDERSCORES. The dotted `cloudsql.iam_authentication`
+        # is the PostgreSQL spelling (see ../db_gcp_postgres) and Cloud SQL rejects it here
+        # with `Error 404 ... invalidFlagName` at CREATE time, so the whole apply dies
+        # before the instance exists. Google documents both, one per engine page; there is
+        # no engine-neutral spelling.
+        name  = "cloudsql_iam_authentication"
         value = "on"
       }
     }
