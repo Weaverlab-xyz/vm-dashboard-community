@@ -128,6 +128,60 @@
       </div>
     </div>
 
+    <!-- ── Focus ──
+         Deliberately unlike Purpose above in three ways, because it is a different KIND of
+         answer. "No focus" is a real option and it is first and selected by default, since
+         a focus is optional where a profile is mandatory. There is no amber warning panel,
+         because nothing here is switched off and there is no cross-tenant hazard to raise.
+         And the copy says out loud that this is changeable later, from the nav. -->
+    <div x-show="stepKey === 'persona'" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Who will you be showing this to?</h2>
+        <p class="text-gray-500 text-sm mt-1">
+          Changes what the dashboard leads with, and pre-ticks the integrations this focus
+          usually needs. Nothing is switched off, every page stays reachable, and you can
+          change focus at any time from the nav bar.
+        </p>
+      </div>
+
+      <div class="space-y-3 max-h-96 overflow-y-auto pr-1">
+        <template x-for="opt in personaOptions" :key="opt.key || 'neutral'">
+          <div @click="selectPersona(opt.key)"
+               class="flex items-start gap-4 p-4 rounded-xl border cursor-pointer transition-colors"
+               :class="form.persona.default_persona === opt.key
+                         ? 'border-blue-300 bg-blue-50' : 'border-gray-200 bg-white hover:border-gray-300'">
+            <span class="mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center"
+                  :class="form.persona.default_persona === opt.key ? 'border-blue-600' : 'border-gray-300'">
+              <span x-show="form.persona.default_persona === opt.key"
+                    class="w-2 h-2 rounded-full bg-blue-600"></span>
+            </span>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-gray-900" x-text="opt.label"></p>
+              <p class="text-xs text-gray-500 mt-0.5" x-text="opt.blurb"></p>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- Says which toggles were pre-ticked, so "preset" is observable rather than a
+           claim. Hidden on reconfigure, where nothing is pre-ticked at all. -->
+      <div x-show="!isReconfig && presetNames().length > 0"
+           class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 space-y-1">
+        <p class="text-xs text-blue-800 font-medium">
+          Pre-ticked on the Features step: <span x-text="presetNames().join(', ')"></span>
+        </p>
+        <p class="text-xs text-blue-700">
+          Untick anything you don't want before finishing — what you submit is what is
+          saved. A focus never switches an integration off.
+        </p>
+      </div>
+
+      <p x-show="isReconfig" class="text-xs text-gray-500">
+        Your existing feature toggles are left exactly as they are — changing focus during a
+        reconfigure only changes what the dashboard leads with.
+      </p>
+    </div>
+
     <!-- ── AWS ── -->
     <div x-show="stepKey === 'aws'" class="px-8 py-6 space-y-5">
       <div>
@@ -807,6 +861,10 @@ function wizard() {
     allSteps: [
       { key: 'admin',    label: 'Admin'    },
       { key: 'profile',  label: 'Purpose'  },
+      // No `profiles:` restriction, and that absence is the point: every focus is valid on
+      // both install profiles. A restriction here would be the first crack in the two axes
+      // being orthogonal.
+      { key: 'persona',  label: 'Focus'    },
       { key: 'aws',      label: 'AWS',   profiles: ['demo'] },
       { key: 'azure',    label: 'Azure', profiles: ['demo'] },
       { key: 'gcp',      label: 'GCP',   profiles: ['demo'] },
@@ -831,6 +889,7 @@ function wizard() {
     form: {
       admin:    { username: 'admin', password: '', confirm: '' },
       profile:  { install_profile: 'demo' },
+      persona:  { default_persona: '' },
       aws:      { aws_access_key_id: '', aws_secret_access_key: '', aws_region: 'us-east-2',
                   ec2_ssh_key_secret: '', ec2_ssm_instance_profile: '',
                   aws_ecs_docker_deploy_key: '' },
@@ -920,6 +979,12 @@ function wizard() {
       { value: 'asia-southeast1',         label: 'Asia (Singapore)' },
       { value: 'australia-southeast1',    label: 'Australia (Sydney)' },
     ],
+
+    // Fetched from /api/persona/catalog in init(), never embedded: the keys, labels,
+    // blurbs and preset flags all live in services/personas.py, and a copy here would let
+    // the picker describe a focus differently from the dashboard that honours it.
+    // Neutral is prepended client-side and is the default selection.
+    personaOptions: [],
 
     profileOptions: [
       { value: 'demo',
@@ -1038,7 +1103,64 @@ function wizard() {
       },
     ],
 
+    // The focus picker's options, from the registry. Best-effort: if this fails the step
+    // shows only "No focus", which is a usable wizard rather than a broken one.
+    async loadPersonaOptions() {
+      // Bare fetch is correct: /api/persona is public by design and on
+      // main._SETUP_BYPASS_PREFIXES precisely so this step can read it BEFORE setup is
+      // complete, when there is no token to send.
+      try {
+        const r = await fetch('/api/persona/catalog');
+        const d = await r.json();
+        this.personaOptions = [{ key: '', label: 'No focus — show everything',
+                                 blurb: 'The dashboard leads with everything it can do. '
+                                      + 'You can pick a focus later from the nav bar.',
+                                 preset_flags: [] }]
+          .concat((d.personas || []).map(p => ({
+            key: p.persona, label: p.label, blurb: p.blurb,
+            preset_flags: p.preset_flags || [],
+          })));
+      } catch (e) {
+        this.personaOptions = [{ key: '', label: 'No focus — show everything',
+                                 blurb: '', preset_flags: [] }];
+      }
+    },
+
+    // Selecting a focus pre-ticks its integrations. THREE rules, each load-bearing:
+    //
+    //   1. Only ever to `true`. The profile mask rule inverted -- a focus may suggest a
+    //      feature, never remove one -- so switching focus never unticks anything, and an
+    //      operator who unticks something keeps that decision.
+    //   2. Never on reconfigure. `_apply_config` writes every feature flag
+    //      unconditionally, so re-ticking here would PERSIST a flag the operator turned
+    //      off months ago, on a reconfigure of something unrelated.
+    //   3. Only toggles this wizard actually renders. A preset naming a flag the Features
+    //      step does not offer would be a silent no-op; services/personas.py keeps that
+    //      list honest and tests/test_persona_wizard pins it.
+    selectPersona(key) {
+      this.form.persona.default_persona = key || '';
+      if (this.isReconfig) return;
+      const settable = new Set(this.featureFlags.map(f => f.key));
+      for (const flag of this.presetFlags()) {
+        if (settable.has(flag)) this.form.features[flag] = true;
+      }
+    },
+
+    presetFlags() {
+      const opt = this.personaOptions.find(o => o.key === this.form.persona.default_persona);
+      return (opt && opt.preset_flags) || [];
+    },
+
+    // Human labels for the pre-ticked toggles, read from the wizard's own feature list so
+    // the confirmation names them exactly as the Features step will.
+    presetNames() {
+      const by = {};
+      for (const f of this.featureFlags) by[f.key] = f.label || f.key;
+      return this.presetFlags().filter(k => by[k]).map(k => by[k]);
+    },
+
     async init() {
+      await this.loadPersonaOptions();
       // Check setup state and pre-populate if reconfiguring
       try {
         const res = await fetch('/api/setup/status');
@@ -1057,6 +1179,10 @@ function wizard() {
             // demo feature. Reconfiguring must never change what kind of instance this is
             // unless the operator says so on the Purpose step.
             if (cfg.install_profile) this.form.profile.install_profile = cfg.install_profile;
+            // After the profile, deliberately. get_all_public() already returns every
+            // global row, so this arrives for free with no new endpoint. Absent means the
+            // instance has no default focus, and '' is the correct value for that.
+            this.form.persona.default_persona = cfg.default_persona || '';
             // Pre-populate non-secret fields
             if (cfg.aws_region)                this.form.aws.aws_region                = cfg.aws_region;
             if (cfg.aws_access_key_id)         this.form.aws.aws_access_key_id         = cfg.aws_access_key_id;
@@ -1165,6 +1291,7 @@ function wizard() {
             password: this.form.admin.password,
           },
           profile:  this.form.profile,
+          persona:  this.form.persona,
           aws:      this.form.aws,
           azure:    this.form.azure,
           gcp:      this.form.gcp,

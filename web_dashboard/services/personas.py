@@ -156,8 +156,18 @@ class Persona:
     # the role story and the feature reference are different documents with different
     # lifespans. A test asserts every path here resolves to a real file under docs/.
     docs: tuple = ()
-    # The wizard PRE-TICKS these on the Features step. Only ever to true -- the profile
+    # The wizard PRE-TICKS these on its Features step. Only ever to true -- the profile
     # mask rule inverted: a persona may suggest a feature, never remove one.
+    #
+    # Every entry must be a toggle that step actually RENDERS, or the preset is a silent
+    # no-op; tests/test_persona_wizard pins that. Flags a focus needs but the wizard does
+    # not offer (the auto-delete timer, notifications, virtual desktops) are deliberately
+    # absent rather than listed and ignored -- the cards already report them as
+    # `needs_flag` and point at Settings, which is where they are configured.
+    #
+    # They are NOT added to the wizard to make this list longer: `_apply_config` writes
+    # every feature flag unconditionally, so a reconfigure that left the auto-delete timer
+    # unticked would write 0 and silently disarm a live one.
     preset_flags: tuple = ()
     use_cases: tuple = ()
 
@@ -383,7 +393,7 @@ _ITOPS = Persona(
     nav_pins=("dashboard", "vms", "desktops", "agents", "jobs", "inventory"),
     quick_deploy=("proxmox_vm",),
     docs=("personas/itops",),
-    preset_flags=("epml_enabled", "pra_enabled", "vdesktops_enabled"),
+    preset_flags=("epml_enabled", "pra_enabled"),
     use_cases=(
         UseCase(
             id="itops-epm-least-privilege",
@@ -603,8 +613,7 @@ _SECURITY = Persona(
     nav_pins=("dashboard", "inventory", "jobs", "secrets", "users", "groups"),
     quick_deploy=(),
     docs=("personas/security",),
-    preset_flags=("notifications_enabled", "admission_control_enabled",
-                  "resource_expiry_enabled"),
+    preset_flags=("admission_control_enabled",),
     use_cases=(
         UseCase(
             id="security-who-has-access",
@@ -899,6 +908,7 @@ def describe(key: str, source: str = "none") -> dict:
             "tile_emphasis": [],
             "nav_pins": [],
             "quick_deploy": [],
+            "preset_flags": [],
             "docs": [],
             "use_cases": [],
             "options": options(),
@@ -913,6 +923,7 @@ def describe(key: str, source: str = "none") -> dict:
         "tile_emphasis": list(persona.tile_emphasis),
         "nav_pins": list(persona.nav_pins),
         "quick_deploy": list(persona.quick_deploy),
+        "preset_flags": list(persona.preset_flags),
         "docs": [f"/docs/{d}" for d in persona.docs],
         "use_cases": [describe_card(c) for c in persona.use_cases],
         "options": options(),
