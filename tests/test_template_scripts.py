@@ -276,7 +276,14 @@ def test_every_x_data_component_is_defined_somewhere():
 # individual prefixes rather than `/api/auth/`, because `/api/auth/me` DOES need the header
 # and login.html duly sends one.
 _PUBLIC_API = ("/api/features", "/api/health", "/api/setup/", "/api/auth/login",
-               "/api/auth/webauthn/login/")
+               "/api/auth/webauthn/login/",
+               # The persona is curation -- ordering hints and demo-script copy. It is
+               # ungated on purpose (a persona may never gate anything) and sits on
+               # _SETUP_BYPASS_PREFIXES because the wizard's Focus step reads the catalog
+               # before setup is complete. It discloses nothing /api/features does not:
+               # install_profile is already public there and in the /docs shell, and a
+               # card's ready/needs_flag state is derived from the same feature map.
+               "/api/persona")
 
 _BARE_FETCH = re.compile(r"""(?<![\w.])fetch\(\s*(['"`])(/api/[^'"`]*)\1""")
 
