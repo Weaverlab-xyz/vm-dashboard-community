@@ -1669,9 +1669,11 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
             applied = await _apply_fa_grant_gcp(
                 db, row=row, job_id=job_id, engine=engine, project=project,
                 instance=instance, region=region,
-                # ALTER SERVER ROLE is server-scoped and lives in master; the other two
-                # engines run it in the database the managed user belongs to.
-                database=("master" if engine == "sqlserver" else db_name),
+                # db_name is already connection_db_name's answer, which resolves SQL
+                # Server to master on its own — ALTER SERVER ROLE is server-scoped and
+                # lives there. Re-deciding that here would be a sixth inline copy of the
+                # ternary that resolver exists to have exactly one of.
+                database=db_name,
                 admin_username=admin_username, admin_password=admin_password,
                 grant=grant)
         if not applied:
