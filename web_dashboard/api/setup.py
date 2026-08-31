@@ -825,6 +825,7 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_gcp_auth_mode: str = "ADC"           # "ADC" | "IMP" | "SA" (SA busts the 1000-char limit)
     clouddb_ps_gcp_impersonate_target: str = ""     # IMP mode: service account to impersonate
     clouddb_ps_gcp_rotator_service_account: str = ""  # keep short: MySQL caps IAM db usernames at 32
+    clouddb_ps_gcp_fa_secret_version: str = ""  # data-api + SQL Server: REGIONAL secret version
     clouddb_ps_gcp_dbops_audience: str = ""   # cloud-run: OVERRIDE; the deployed service's URL wins
     clouddb_ps_gcp_dbops_ssl: bool = True     # cloud-run: address field 5
     clouddb_ps_gcp_dbops_invokers: str = ""   # roles/run.invoker members; named SAs only

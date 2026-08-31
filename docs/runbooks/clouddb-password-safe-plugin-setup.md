@@ -325,13 +325,36 @@ has a counterpart on either GCP channel. What you create depends on the engine:
 |---|---|---|
 | PostgreSQL, MySQL | `data-api` | A rotator service account. No infrastructure at all |
 | SQL Server | `cloud-run` | Nothing by hand — name the broker service accounts and press **Deploy** (§below) |
+| SQL Server | `data-api` *(fallback)* | No infrastructure, but a **regional** Secret Manager version holding the functional account's password |
 
-`cloud-run` is the only working path for SQL Server, not just the recommended one:
-forcing `data-api` builds an address the plugin rejects, because it appends `iam=true`
-(which SQL Server has no IAM database authentication for) and never emits the
-`fasecret=` the combination requires.
+`cloud-run` is the recommended path for SQL Server and the default. `data-api` works too
+now, but it is a genuine trade rather than a free alternative: with no IAM database
+authentication the Data API has to be handed the functional account's password out of
+Secret Manager (address option `fasecret=`), so **Password Safe stops being the sole
+authority for that credential and nothing re-syncs the copy**. Rotating the functional
+account itself then breaks every rotation it drives until you update the secret by hand.
+`cloud-run` mirrors nothing — the credential travels in the request body.
 
-**The rotation identity.** One service account per project, shared by every database:
+If you take the `data-api` route: in `create` mode the dashboard stages the regional
+secret itself, one per database, and deletes it on decommission. In `reference` mode it
+cannot — that account's password is one the dashboard has never seen — so stage it
+yourself and put the **version resource name** in `clouddb_ps_gcp_fa_secret_version`:
+
+```
+projects/<project>/locations/<region>/secrets/<name>/versions/latest
+```
+
+**It must be regional.** The global `projects/<project>/secrets/…` form is what the
+plugin article's own example prints and what the dashboard's Secrets page creates, and
+the Data API rejects it with *"does not match the expected format
+`[projects/*/locations/*/secrets/*/versions/*]`"*. The dashboard refuses the global form
+when you save the address rather than letting a rotation find out. Note that `gcloud`
+578 cannot create a regional secret either (no `--location`), so use the API directly.
+
+**The rotation identity.** One service account per project, shared by every database —
+and a **PostgreSQL/MySQL** concept. SQL Server has no IAM database authentication on
+either channel, so it never registers one, on either; its functional account is a real
+login. Skip this whole subsection if SQL Server is all you are onboarding.
 
 ```
 gcloud iam service-accounts create bt-rotator --project=<project> \

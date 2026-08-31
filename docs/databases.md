@@ -723,14 +723,29 @@ account rotate itself — both control-plane channels authenticate as the *calle
 cannot test an arbitrary principal's password. Set `clouddb_ps_gcp_channel` to
 `cloud-run` to put PostgreSQL and MySQL on it too.
 
-**`data-api` is not a fallback for SQL Server.** Forcing the channel does not work today,
-for two separate reasons in the address builder: it appends `iam=true` unconditionally,
-which the plugin *rejects* on SQL Server because Cloud SQL for SQL Server has no IAM
-database authentication at all; and it never emits `fasecret=`, which that combination
-*requires* — with no IAM token there has to be a Secret Manager version holding the
-functional account's password. So `cloud-run` is the only working path for SQL Server,
-not merely the recommended one, and standing the service up is a prerequisite rather than
-an ergonomics choice.
+**`data-api` on SQL Server needs `fasecret=`, and the dashboard now emits it.** The two
+control-plane channels authenticate the *database session* in one of two mutually
+exclusive ways: `iam=true` mints an OAuth token per connection, or `fasecret=` names a
+Secret Manager version holding the functional account's password. Cloud SQL for SQL
+Server has no IAM database authentication at all, so it takes the second — and the
+address builder used to append `iam=true` unconditionally and emit `fasecret=` nowhere,
+which made a forced `data-api` SQL Server address unparseable in both directions at once.
+
+The secret must be **regional**. The global
+`projects/<p>/secrets/<s>/versions/latest` form — which is what the plugin article's own
+example prints, and what the Secrets page creates — is rejected by the Data API with
+*"does not match the expected format `[projects/*/locations/*/secrets/*/versions/*]`"*.
+The dashboard stages a regional one itself in `create` mode (per database, deleted on
+decommission) and takes `clouddb_ps_gcp_fa_secret_version` otherwise; the address
+validator refuses the global form at the click rather than letting a rotation discover it.
+
+> **This is a second authority for a credential Password Safe exists to own.** Nothing
+> re-syncs the mirrored copy, so rotating the functional account *itself* breaks every
+> subsequent rotation until the secret is updated by hand. `cloud-run` mirrors nothing —
+> the credential travels in the request body — which is why it stays both the default and
+> the recommendation for SQL Server. `data-api` is now a *valid* fallback, not a better
+> one. With neither a secret version nor a route to one, SQL Server onboarding on
+> `data-api` stays off rather than building an address the plugin refuses.
 
 > **The dashboard deploys the Cloud Run service.** Settings → Password Safe → *Cloud Run
 > channel* has a **Deploy** button per region (job `clouddb_dbops_deploy`). What the
@@ -766,7 +781,8 @@ address `channel;project:region:instance;dbName;audience;ssl[;key=value]`:
 
 | Channel | Address the dashboard builds |
 |---|---|
-| `data-api` | `data-api;{project}:{region}:{instance};{dbName};-;-;iam=true` — MySQL appends `;host=%` |
+| `data-api` (postgres, mysql) | `data-api;{project}:{region}:{instance};{dbName};-;-;iam=true` — MySQL appends `;host=%` |
+| `data-api` (sqlserver) | `data-api;{project}:{region}:{instance};master;-;-;fasecret={regional version}` — **no `iam=`**, which the plugin rejects on this engine |
 | `cloud-run` | `cloud-run;{project}:{region}:{instance};{dbName};{audience};sslTRUE` |
 
 Field 2 is the instance **connection name**, not a hostname. On the control-plane channel
@@ -850,6 +866,16 @@ actually stored** rather than deriving it — there is in-house precedent for GC
 an unexpected principal name, and a functional account naming a principal the database
 does not have fails Verify with an unhelpful message.
 
+**SQL Server on `data-api` skips the IAM half of all of that**, because it has none: the
+Data API is still enabled, but the `cloudsql.iam_authentication` flag is not requested
+(there is nothing to request), no rotator is registered as an IAM database user, and the
+functional account is the built-in admin login rather than an IAM principal. One
+predicate — `_iam_db_auth(engine, channel)` — decides the instance flag, the functional
+account's database user and the address option together, because deciding them
+separately is exactly how they drifted apart. Since the functional account *is* the
+admin there, the rotation grant is skipped too: it already holds every right over every
+principal on the instance.
+
 On the **`cloud-run`** path none of that runs. The service connects over TCP with a
 database login, so there is no Data API to enable, no IAM database authentication to turn
 on, and no instance to patch — the dashboard creates the managed user and stops.
@@ -865,7 +891,8 @@ there are no client-image or key-material keys here):
 | `clouddb_ps_functional_account_gcp_postgres` / `_mysql` / `_sqlserver` | — | `reference` mode: the operator-created account on each Cloud SQL platform |
 | `clouddb_ps_gcp_auth_mode` | `ADC` | `ADC` / `IMP` / `SA` — the functional-account username prefix |
 | `clouddb_ps_gcp_impersonate_target` | — | `IMP` mode: the service account to impersonate |
-| `clouddb_ps_gcp_rotator_service_account` | — | **`data-api` only.** The rotation identity, registered as an IAM database user per instance. Keep it ≤32 characters for MySQL |
+| `clouddb_ps_gcp_rotator_service_account` | — | **`data-api` only, and not SQL Server.** The rotation identity, registered as an IAM database user per instance. Keep it ≤32 characters for MySQL |
+| `clouddb_ps_gcp_fa_secret_version` | — | **`data-api` + SQL Server only.** Address option `fasecret=` — a **regional** Secret Manager version holding the functional account's password. Blank is fine in `create` mode (the dashboard stages one per database); **required** in `reference` mode |
 | `clouddb_ps_gcp_dbops_audience` | — | **`cloud-run` only.** An **override** — address field 4 for a service you deployed yourself, or one behind a custom domain / PSC. A dashboard-deployed service in the database's own region **beats it**, because Direct VPC egress is region-locked and one global value would address a rotation at a service that cannot reach the instance. With neither, SQL Server onboarding stays off |
 | `clouddb_ps_gcp_dbops_ssl` | `true` | `sslTRUE` / `sslFALSE` — address field 5, the service→database TLS choice |
 | `clouddb_ps_gcp_dbops_invokers` | — | Comma-separated IAM members granted `roles/run.invoker` on the deployed service — the Resource Brokers' identities. A bare email is accepted and prefixed. Named principals only |

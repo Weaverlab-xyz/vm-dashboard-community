@@ -396,6 +396,21 @@ _DBGCP_SSL_FLAGS = frozenset({"ssltrue", "sslfalse"})
 # project:region:instance — three non-empty segments, and no ';' smuggled through.
 _DBGCP_CONNECTION_NAME = re.compile(r"^[^:;]+:[^:;]+:[^:;]+$")
 
+# fasecret= names the Secret Manager VERSION holding the functional account's database
+# password, for the one combination that has no IAM token to authenticate with
+# (data-api + SQL Server). It must be REGIONAL. The global form — which is what the
+# plugin article's own example prints, and what secrets_backend_service.write_gcp_sm
+# creates — is rejected by the Data API at rotation time with:
+#
+#   The provided Secret ID [...] does not match the expected format
+#   [projects/*/locations/*/secrets/*/versions/*]
+#
+# That is a runtime failure on a credential change, discovered from a Password Safe
+# error days after the address was written, so it is checked HERE instead. See
+# gcp_service._write_regional_secret_sync, which produces exactly this shape.
+_DBGCP_FA_SECRET = re.compile(
+    r"^projects/[^/;]+/locations/[^/;]+/secrets/[^/;]+/versions/[^/;]+$")
+
 
 def _validate_dbgcp_dns_name(dns_name: str) -> None:
     """Raise PSResourceError unless ``dns_name`` is an address the plugin will parse.
@@ -414,7 +429,8 @@ def _validate_dbgcp_dns_name(dns_name: str) -> None:
             f"{len(addr) - _DBGCP_MAX_ADDRESS} over the {_DBGCP_MAX_ADDRESS} character "
             f"limit the plugin enforces (Password Safe truncates the field at 255, and a "
             f"truncated address silently becomes a different, wrong address). The instance "
-            f"connection name and the audience are the two long fields.")
+            f"connection name, the audience, and a 'fasecret' secret version (a full "
+            f"regional resource name, ~110 characters) are the long fields.")
 
     fields = [f.strip() for f in addr.split(";")]
     channel = fields[0].lower()
@@ -470,11 +486,13 @@ def _validate_dbgcp_dns_name(dns_name: str) -> None:
                 f"on {channel!r}, not {ssl_flag!r} — the plugin rejects a value here rather "
                 f"than letting anyone believe they disabled it")
 
+    seen_options = set()
     for field in fields[_DBGCP_POSITIONAL:]:
         if not field:
             continue
         key, sep, value = field.partition("=")
         key = key.strip().lower()
+        seen_options.add(key)
         if not sep or not key or key not in _DBGCP_OPTION_KEYS:
             raise PSResourceError(
                 f"{field!r} in managed system address {addr!r} is not a recognised option — "
@@ -489,6 +507,29 @@ def _validate_dbgcp_dns_name(dns_name: str) -> None:
         if not value.strip():
             raise PSResourceError(
                 f"the {key!r} option in managed system address {addr!r} has no value")
+        if key == "fasecret" and not _DBGCP_FA_SECRET.match(value.strip()):
+            raise PSResourceError(
+                f"fasecret={value.strip()!r} is not a REGIONAL Secret Manager version. "
+                f"The Cloud SQL Data API accepts only "
+                f"'projects/<project>/locations/<region>/secrets/<name>/versions/<v>' "
+                f"and rejects the global 'projects/<project>/secrets/…' form — which is "
+                f"what the plugin article's example prints — with \"does not match the "
+                f"expected format\". Stage it with a regional secret "
+                f"(gcp_service.write_regional_secret), not the Secrets page.")
+
+    # The two ways the Data API can authenticate a DATABASE session, and they are
+    # alternatives: iam= says "mint an OAuth token per connection", fasecret= says "read
+    # this stored password". Together they are not a stricter configuration, they are a
+    # contradiction — and the way it happens in practice is a SQL Server address that
+    # kept the postgres/mysql default. The engine is not in the address, so that
+    # specific mistake cannot be named here; the contradiction can.
+    if "iam" in seen_options and "fasecret" in seen_options:
+        raise PSResourceError(
+            f"managed system address {addr!r} carries both 'iam' and 'fasecret', which "
+            f"are the two alternative ways the Data API authenticates a database "
+            f"session — an OAuth token minted per connection, or a stored password. "
+            f"SQL Server has no IAM database authentication at all, so it takes "
+            f"'fasecret' alone; PostgreSQL and MySQL take 'iam=true' alone.")
 
 
 def _ssm_account_name(name: str, suffix: str) -> str:

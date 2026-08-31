@@ -522,7 +522,7 @@ def test_gcp_iam_auth_may_carry_no_db_login():
 _GCP_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433}
 
 
-def _onboard_gcp(engine="postgres", channel=None, **conf):
+def _onboard_gcp(engine="postgres", channel=None, ctx_extra=None, **conf):
     _reset(**conf)
     job_row = _FakeJobRow()
     row = _CloudDatabase(id="abcdef0123456789abcd", cloud="gcp",
@@ -538,6 +538,10 @@ def _onboard_gcp(engine="postgres", channel=None, **conf):
            "fa_db_user": ("sqlserver" if channel == "cloud-run"
                           else "bt-rotator@acme-data-prod.iam"),
            "managed_user_host": "%" if engine == "mysql" else ""}
+    # What _create_db_managed_user_gcp resolves and hands forward: whether the DATABASE
+    # session uses an IAM token, and (when it does not, on the control plane) the
+    # regional secret version holding the functional account's password.
+    ctx.update(ctx_extra or {})
     # run_provision_apply re-injects the admin password into tf_variables before it
     # reaches here, which is where the cloud-run functional account's database password
     # comes from in create mode. (On the post-hoc path tf_variables is the SECRET-STRIPPED
@@ -563,6 +567,103 @@ def test_gcp_address_is_the_data_api_five_field_form():
     assert fields[3] == "-" and fields[4] == "-", addr
     assert "iam=true" in fields[5:], addr
     assert LAST_REGISTER["method"] == "dbgcp"
+
+
+# -- SQL Server on the CONTROL PLANE (data-api) -------------------------------
+#
+# Not the recommended channel and not the default -- cloud-run is both -- but it has to
+# be a channel an operator can force without producing an address the plugin rejects.
+# It used to be exactly that, in two directions at once: `iam=true` was appended
+# unconditionally (SQL Server has NO IAM database authentication, and the plugin rejects
+# the option rather than ignoring it) and `fasecret=` was emitted nowhere, though that
+# combination is the only thing that tells the Data API how to authenticate the session.
+
+_FA_SECRET = ("projects/acme-data-prod/locations/us-central1/secrets/"
+              "clouddb-abcdef0123456789abcd-psfa/versions/latest")
+
+
+
+
+def _onboard_gcp_dataapi_mssql(**conf):
+    conf.setdefault("clouddb_ps_platform_gcp_sqlserver", "GCP Cloud SQL SQL Server")
+    return _onboard_gcp(engine="sqlserver", channel="data-api",
+                        ctx_extra={"iam_db_auth": False,
+                                   "fa_secret_version": _FA_SECRET,
+                                   "fa_db_user": "sqlserver"},
+                        **conf)
+
+
+def test_data_api_sqlserver_carries_fasecret_and_no_iam_option():
+    fields = _onboard_gcp_dataapi_mssql() and LAST_REGISTER["dns_name"].split(";")
+    assert fields[0] == "data-api", fields
+    # master, because ALTER LOGIN is server-scoped and that is the admin session catalog.
+    assert fields[2] == "master", fields
+    assert fields[3] == "-" and fields[4] == "-", fields
+    options = fields[5:]
+    assert f"fasecret={_FA_SECRET}" in options, options
+    # THE regression: the plugin REJECTS iam= on SQL Server, so its presence is not a
+    # harmless extra -- it fails the address at parse.
+    assert not any(o.startswith("iam=") for o in options), options
+
+
+def test_postgres_and_mysql_keep_iam_and_never_get_fasecret():
+    """The fix must be scoped to the one engine with no IAM database authentication.
+    Emitting fasecret= for postgres would mirror a password that does not exist."""
+    for engine in ("postgres", "mysql"):
+        _onboard_gcp(engine=engine,
+                     **{f"clouddb_ps_platform_gcp_{engine}": f"GCP Cloud SQL {engine}"})
+        options = LAST_REGISTER["dns_name"].split(";")[5:]
+        assert "iam=true" in options, (engine, options)
+        assert not any(o.startswith("fasecret=") for o in options), (engine, options)
+
+
+def test_the_address_the_data_api_sqlserver_path_builds_is_the_shape_that_parses():
+    """Half of a two-module pin. This module stubs ps_resource_service, so the real
+    plugin grammar cannot be applied here; the other half lives in
+    test_ps_resource.py::test_dbgcp_accepts_the_shapes_the_dashboard_actually_builds,
+    which feeds this exact shape to the REAL validator. Both halves of the old bug are
+    things that validator rejects, so the pair is what would have caught it."""
+    _onboard_gcp_dataapi_mssql()
+    fields = LAST_REGISTER["dns_name"].split(";")
+    assert len(fields) == 6, fields          # 5 positional + exactly one option
+    assert fields[5].startswith("fasecret=projects/"), fields
+    assert "/locations/" in fields[5], fields   # REGIONAL, which is the whole trap
+
+
+def test_iam_db_auth_is_one_fact_not_three_guesses():
+    """Whether the DATABASE session uses an IAM token decides three things that used to
+    be decided separately: the instance flag, whether the functional account's user is
+    an IAM principal or a real login, and which address option is emitted."""
+    assert svc._iam_db_auth("postgres", "data-api") is True
+    assert svc._iam_db_auth("mysql", "data-api") is True
+    assert svc._iam_db_auth("sqlserver", "data-api") is False
+    # cloud-run opens a real connection, so no engine uses IAM database auth there.
+    for engine in ("postgres", "mysql", "sqlserver"):
+        assert svc._iam_db_auth(engine, "cloud-run") is False
+
+
+def test_the_staged_secret_is_not_the_grants_one_shot_secret():
+    """They have different lifetimes: the grant's is deleted in a finally the moment
+    its statement returns, while the functional account's is read on every rotation.
+    One id for both would have the grant's cleanup delete the credential the managed
+    system depends on, on the way out of a SUCCESSFUL onboarding."""
+    assert svc._fa_secret_id("abc") != svc._grant_secret_id("abc")
+
+
+def test_a_dashboard_staged_secret_is_recorded_for_teardown():
+    """It holds a real database password. A decommission that did not know about it
+    would park that credential in Secret Manager permanently."""
+    meta = _onboard_gcp_dataapi_mssql()
+    assert meta["ps_db_fa_secret_id"] == "clouddb-abcdef0123456789abcd-psfa", meta
+    assert meta["ps_db_fa_secret_project"] == "acme-data-prod", meta
+    assert "ps_db_fa_secret_id" in svc._PS_CONTEXT_KEYS
+
+
+def test_an_operator_supplied_secret_is_never_recorded_for_deletion():
+    """clouddb_ps_gcp_fa_secret_version names one secret shared by every database on
+    the channel. Deleting it when one of them is decommissioned would break the rest."""
+    meta = _onboard_gcp_dataapi_mssql(clouddb_ps_gcp_fa_secret_version=_FA_SECRET)
+    assert not meta["ps_db_fa_secret_id"], meta
 
 
 def test_gcp_mysql_address_carries_the_host_qualifier():

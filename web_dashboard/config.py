@@ -688,6 +688,21 @@ class Settings(BaseSettings):
     # "@" and caps it at 32 characters, so "bt-rotator" is safe and
     # "bt-passwordsafe-cloudsql-rotator-prod" is not.
     clouddb_ps_gcp_rotator_service_account: str = ""  # e.g. bt-rotator@<project>.iam.gserviceaccount.com
+    # data-api + SQL SERVER only. Cloud SQL for SQL Server has no IAM database
+    # authentication, so the Data API cannot mint a token for the session — it needs the
+    # functional account's real password out of Secret Manager, named by address option
+    # "fasecret=". This is the address's SECOND authority for that credential, which is
+    # exactly why cloud-run remains the recommendation: nothing there is mirrored.
+    #
+    # It must be a REGIONAL version resource name. The global form the plugin article's
+    # example prints is rejected by the Data API with "does not match the expected
+    # format [projects/*/locations/*/secrets/*/versions/*]"; ps_resource_service refuses
+    # it at the click rather than letting a rotation discover it days later.
+    #
+    # Blank is fine in "create" mode — the dashboard stages the credential it minted
+    # itself, per database. In "reference" mode it is REQUIRED, because the operator's
+    # functional account has a password the dashboard has never seen.
+    clouddb_ps_gcp_fa_secret_version: str = ""   # projects/<p>/locations/<r>/secrets/<n>/versions/latest
     # The cloud-run channel's Cloud Run service. The dashboard can DEPLOY this now
     # (clouddb_dbops_service, one per region), so the audience below is an OVERRIDE
     # rather than the only source: cloud_database_service._dbops_audience prefers the
