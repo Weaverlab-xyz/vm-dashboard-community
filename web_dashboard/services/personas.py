@@ -340,7 +340,7 @@ _HYPERVISOR = Persona(
             id="hypervisor-shell-jump-guest",
             title="Reach a guest VM with no inbound firewall rule",
             summary="Shell Jump to a VM on an isolated management network through a "
-                    "Jumpoint that only ever makes outbound connections.",
+                    "Gateway that only ever makes outbound connections.",
             target="/connections",
             minutes=8,
             docs="integrations/privileged-remote-access",
@@ -351,7 +351,7 @@ _HYPERVISOR = Persona(
         ),
         UseCase(
             id="hypervisor-gateway-lifecycle",
-            title="Stand up a Jumpoint and watch it register",
+            title="Stand up a Gateway and watch it register",
             summary="Build the gateway, see it appear in PRA, and use it — the piece "
                     "that makes every other item on this list possible.",
             target="/containers#gateways",
@@ -512,7 +512,7 @@ _OT = Persona(
         ),
         UseCase(
             id="ot-jumpoint-egress",
-            title="Where the Jumpoint sits, and why that is the whole story",
+            title="Where the Gateway sits, and why that is the whole story",
             summary="Walk the egress-only path from the cell subnet out to the appliance "
                     "— the architecture slide, told against a live gateway instead of "
                     "a diagram.",

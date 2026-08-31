@@ -45,12 +45,12 @@ because the objection is always "what breaks when it changes" and the answer is 
 
 ### Reach a guest VM with no inbound firewall rule
 
-Shell Jump to a VM on an isolated management network through a Jumpoint that only ever makes
+Shell Jump to a VM on an isolated management network through a Gateway that only ever makes
 outbound connections.
 
 **Guide:** [Privileged Remote Access](../integrations/privileged-remote-access.md)
 
-### Stand up a Jumpoint and watch it register
+### Stand up a Gateway and watch it register
 
 Build the gateway, see it appear, and use it. This is the piece that makes everything above
 possible, and showing it built rather than pre-existing answers "how much work is this to

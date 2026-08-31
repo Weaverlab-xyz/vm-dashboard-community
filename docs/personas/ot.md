@@ -69,7 +69,7 @@ once, so the credential a rep injects is real and current from the first session
 
 **Guide:** [OT Demo Cell](../cloud-ot.md) · [Password Safe](../integrations/password-safe.md)
 
-### Where the Jumpoint sits, and why that is the whole story
+### Where the Gateway sits, and why that is the whole story
 
 The architecture slide, told against a live gateway instead of a diagram: the broker inside
 the plant segment dials *outward*, so there is nothing to open on the perimeter.
