@@ -201,6 +201,24 @@ def _capture_create():
     return handler, bodies
 
 
+def test_the_environment_create_posts_to_the_v1_collection():
+    """Skytap has no POST on `/v2/configurations`.
+
+    It answers `404 {"error":"Not Found"}` there, which reads exactly like "that template
+    id does not exist" — the first live template build spent its time on the template
+    field. Environments are created only by the v1 `POST /configurations.json`.
+    """
+    paths = []
+
+    def handler(request):
+        if request.method == "POST":
+            paths.append(request.url.path)
+        return httpx.Response(200, json={"id": "42", "runstate": "stopped"})
+
+    _run(lambda: sk.create_environment("tmpl-1"), handler)
+    assert paths == ["/configurations.json"], paths
+
+
 def test_a_new_environment_inherits_the_configured_project():
     handler, bodies = _capture_create()
     _run(lambda: sk.create_environment("tmpl-1"), handler, project="123456")

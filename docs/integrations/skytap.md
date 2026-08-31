@@ -371,6 +371,22 @@ a link-local address every twenty seconds.
 > instead and pull `user_data` out of the JSON document. The payload is what matters; the
 > path is Skytap's.
 
+## The two calls that are v1
+
+Everything the dashboard sends is the v2 API **except the two creates**, which have no v2
+form: Skytap's v2 documents only `GET`/`PUT`/`DELETE` on `/v2/configurations` and
+`/v2/templates`.
+
+| Create | Call |
+|---|---|
+| An environment from a template | `POST /configurations.json` — `template_id`, optionally `project_id` and `name` |
+| A template from an environment | `POST /templates.json` — `configuration_id`, `name` |
+
+Posting either one to the v2 collection answers **`404 {"error":"Not Found"}`**, and that
+is the trap worth remembering: the message reads exactly like "the id you sent does not
+exist", so the first live template build was spent inspecting a base template id that was
+perfectly good. A 404 on a *create* means the endpoint, not the payload.
+
 ## What is deliberately not used
 
 **The Terraform provider.** `skytap/skytap` last released v0.15.1 in November 2022, and its
@@ -400,7 +416,7 @@ a platform lacks degrades visibly instead of failing late:
 | Stored credentials | yes — `…/vms/{id}/credentials`. Used by [the Resource Broker install](../pov-instance.md#there-is-no-login-field-on-purpose), which is why the dashboard stores no Windows password for a POV |
 | Verify | yes — one page of `/v2/templates`, surfaced as **Test connection** in Settings |
 | Project scoping | yes — `/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` |
-| Template authoring | yes — `POST /v2/templates` with a `configuration_id`. There is no *edit a template* call on any lab platform, so authoring is always instantiate → change → bake. Used by [building a template](#building-a-template) |
+| Template authoring | yes — `POST /templates.json` with a `configuration_id`. There is no *edit a template* call on any lab platform, so authoring is always instantiate → change → bake. Used by [building a template](#building-a-template) |
 | Published services | yes — `…/interfaces/{id}/services`, a guest port NAT-ed to a public `ip:port`. Used **only** by a template build, for the length of one build |
 
 > **The two project paths are not yet confirmed against a live account.** Three things are
