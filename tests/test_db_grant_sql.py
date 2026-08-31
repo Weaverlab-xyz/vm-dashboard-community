@@ -245,21 +245,82 @@ def test_generated_passwords_satisfy_sql_server_complexity():
 # ── Username derivation ──────────────────────────────────────────────────────
 
 def test_ephemeral_username_is_traceable_and_safe():
-    name = sql.ephemeral_username("alice@example.com", "AB12cd34EF56gh")
+    name = sql.ephemeral_username("alice@example.com", "AB12cd34EF56gh", "postgres")
     assert name.startswith("jit_alice_example_com"), name
     assert sql._IDENT_RE.match(name), name
     # Two grants for the same person must not collide.
-    other = sql.ephemeral_username("alice@example.com", "ZZ99")
+    other = sql.ephemeral_username("alice@example.com", "ZZ99", "postgres")
     assert name != other
 
 
+def test_ephemeral_username_fits_the_engine_it_is_for():
+    """MySQL stores account names in a char(32); Postgres allows 63 and SQL Server
+    128. One blind cap of 63 is what broke every live MySQL grant on 2026-08-31 —
+    ``jit_`` + a 24-char slug + ``_`` + a 12-char token is 41 characters, so MySQL
+    rejected the CREATE USER outright (1470) and pymysql surfaced it as a bare
+    OperationalError.
+    """
+    for engine in ("mysql", "postgres", "sqlserver"):
+        name = sql.ephemeral_username("karen.walker@weaverlab.xyz", "6a95b8ad0000",
+                                      engine)
+        assert len(name) <= sql.max_identifier_length(engine), (engine, name)
+        # Short enough to store, and still says whose account it is.
+        assert name.startswith("jit_karen"), (engine, name)
+        # Usable, which is the property the length is FOR.
+        sql.grant_plan(engine, username=name, password="Pw-1", database="appdb",
+                       role="read")
+
+
+def test_an_unknown_engine_gets_the_SMALLEST_limit():
+    """A name that is too short is ugly; a name that is too long does not exist. So
+    the default must be the tightest engine, never the loosest."""
+    name = sql.ephemeral_username("karen.walker@weaverlab.xyz", "6a95b8ad0000")
+    assert len(name) <= min(sql._MAX_IDENT.values()), name
+    assert len(name) <= sql.max_identifier_length("mysql")
+
+
+def test_the_collision_suffix_is_never_what_gets_clipped():
+    """Two grants colliding is a correctness bug; a clipped slug is a legibility
+    one. When the budget is tight the slug pays, not the token."""
+    a = sql.ephemeral_username("karen.walker@weaverlab.xyz", "aaaaaaaaaaaa", "mysql")
+    b = sql.ephemeral_username("karen.walker@weaverlab.xyz", "bbbbbbbbbbbb", "mysql")
+    assert a != b
+    assert a.endswith("aaaaaaaaaaaa") and b.endswith("bbbbbbbbbbbb")
+
+
+def test_a_name_longer_than_the_engine_allows_is_refused_not_attempted():
+    """A CloudDbSqlError is a 400 on the route that asked for it. Letting the driver
+    refuse it instead is the 500 that took a Cloud Logging session to diagnose."""
+    too_long = "jit_karen_walker_weaverlab_x_6a95b8ad0000"   # the live failure, verbatim
+    assert len(too_long) == 41
+    for builder in (
+        lambda u: sql.create_actor_plan("mysql", username=u, password="Pw-1",
+                                        database="appdb"),
+        lambda u: sql.give_access_plan("mysql", username=u, database="appdb"),
+        lambda u: sql.delete_actor_plan("mysql", username=u, database="appdb"),
+        lambda u: sql.grant_plan("mysql", username=u, password="Pw-1",
+                                 database="appdb", role="readwrite"),
+    ):
+        try:
+            builder(too_long)
+        except sql.CloudDbSqlError as exc:
+            assert "32" in str(exc) and "41" in str(exc), exc
+        else:
+            raise AssertionError("a 41-character MySQL account name was accepted")
+    # The same name is fine where the engine actually allows it.
+    sql.create_actor_plan("postgres", username=too_long, password="Pw-1",
+                          database="appdb")
+
+
 def test_ephemeral_username_survives_hostile_input():
-    for prefix in ("", "'; DROP TABLE x;--", "!!!", "x" * 200, "123"):
-        name = sql.ephemeral_username(prefix, "tok123")
-        assert sql._IDENT_RE.match(name), (prefix, name)
-        # And it must be usable as a real account name.
-        sql.grant_plan("mysql", username=name, password="Pw-1",
-                       database="appdb", role="read")
+    for engine in ("mysql", "postgres", "sqlserver"):
+        for prefix in ("", "'; DROP TABLE x;--", "!!!", "x" * 200, "123"):
+            name = sql.ephemeral_username(prefix, "tok123", engine)
+            assert sql._IDENT_RE.match(name), (prefix, name)
+            assert len(name) <= sql.max_identifier_length(engine), (prefix, name)
+            # And it must be usable as a real account name.
+            sql.grant_plan(engine, username=name, password="Pw-1",
+                           database="appdb", role="read")
 
 
 # ── The plan shape itself ────────────────────────────────────────────────────

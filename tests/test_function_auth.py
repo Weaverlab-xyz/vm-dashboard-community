@@ -211,6 +211,103 @@ def test_dispatch_converts_a_workload_crash_into_a_clean_500():
     assert "request_id" in resp.body
 
 
+def test_dispatch_records_the_driver_code_and_message_in_the_log():
+    """``error_type`` alone cost a live incident. pymysql maps only the errnos it
+    knows, so "name too long" (1470), "access denied" (1045) and "cannot create
+    user" (1396) all arrive as an identical bare ``OperationalError`` — and on
+    2026-08-31 working out which one had failed a real Entitle grant meant reading
+    Cloud Logging and re-deriving the generated username by hand, because the
+    message was in no log at all.
+    """
+    import io as _io
+    import contextlib
+
+    class _DriverError(Exception):
+        pass
+
+    class _DbWorkload:
+        NAME = "db"
+
+        @staticmethod
+        def handle(req, ctx):
+            raise _DriverError(
+                1470, "String 'jit_karen_walker_weaverlab_x_6a95b8ad0000' is too "
+                      "long for user name (should be no longer than 32)")
+
+    _reset_env(FN_SHARED_SECRET="ok")
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        resp = dispatch.handle_request(_req({"authorization": "Bearer ok"}), _DbWorkload)
+    output = buf.getvalue()
+    assert resp.status == 500
+    record = json.loads([l for l in output.strip().splitlines()
+                         if "workload_error" in l][-1])
+    assert record["error_code"] == 1470, record
+    assert "no longer than 32" in record["error_detail"], record
+    # The response still says nothing.
+    assert "1470" not in resp.rendered()[0]
+
+
+def test_a_non_driver_exception_logs_no_error_code():
+    """``args[0]`` is the vendor errno only for PEP 249 drivers. Reporting the first
+    argument of every exception as a code would make the field untrustworthy."""
+    assert dispatch._error_code(ValueError("nope")) is None
+    assert dispatch._error_code(RuntimeError()) is None
+    # bool is an int subclass, and `True` is not an error code.
+    assert dispatch._error_code(Exception(True, "x")) is None
+    assert dispatch._error_code(Exception(1045, "Access denied")) == 1045
+
+
+def test_a_credential_inside_an_error_message_is_scrubbed():
+    """Now that the message is logged, the message is an exfiltration path. A driver
+    quotes the offending SQL back, and the offending SQL for a JIT grant is
+    ``CREATE USER … IDENTIFIED BY '<the password just minted>'``.
+    """
+    leaks = [
+        "(1064, \"error in your SQL syntax near 'IDENTIFIED BY 'Ab#3xY-zQ9'' at line 1\")",
+        "CREATE ROLE \"x\" WITH LOGIN PASSWORD 's3cret-Pw';",
+        "CREATE LOGIN [x] WITH PASSWORD = 's3cret-Pw';",
+        "IDENTIFIED BY Ab#3xY-zQ9",
+        "secret-bearing failure: password=hunter2",
+        "auth failed, token: abc123xyz",
+    ]
+    for text in leaks:
+        out = logs.scrub_text(text)
+        for secret in ("Ab#3xY-zQ9", "s3cret-Pw", "hunter2", "abc123xyz"):
+            assert secret not in out, (text, out)
+        assert "***" in out, (text, out)
+
+
+def test_the_scrub_does_not_eat_the_diagnostic_it_exists_to_preserve():
+    """Matching MORE is easy; the hard part is matching less. MySQL's own 1819 is a
+    password-bearing message with no secret in it, and mangling it would destroy the
+    very diagnostic this makes loggable."""
+    keep = [
+        "(1819, 'Your password does not satisfy the current policy requirements')",
+        "(1470, \"String 'jit_karen_walker_we_x' is too long for user name "
+        "(should be no longer than 32)\")",
+        "(2003, \"Can't connect to MySQL server on '10.138.32.9' (timed out)\")",
+        "(1045, \"Access denied for user 'dbadmin'@'10.138.0.7'\")",
+    ]
+    for text in keep:
+        assert logs.scrub_text(text) == text, logs.scrub_text(text)
+
+
+def test_scrubbing_runs_before_truncation():
+    """A clause split by the 512-character cut must not leak its tail."""
+    padded = "x" * (logs._MAX_STR - 20) + " IDENTIFIED BY 'Ab#3xY-zQ9';"
+    out = logs.redact(padded)
+    assert "Ab#3xY-zQ9" not in out, out
+
+
+def test_scrub_text_never_raises_and_is_pure():
+    for value in (None, 42, b"bytes", [], {}, ""):
+        assert logs.scrub_text(value) == value
+    original = "password='p'"
+    logs.scrub_text(original)
+    assert original == "password='p'"
+
+
 def test_dispatch_wraps_a_bare_return_value():
     _reset_env(FN_SHARED_SECRET="ok")
     resp = dispatch.handle_request(_req({"authorization": "Bearer ok"}), _BareDict)

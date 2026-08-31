@@ -24,6 +24,20 @@ def _log_body_enabled() -> bool:
     return (os.environ.get("FN_LOG_BODY", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _error_code(exc: Exception):
+    """The driver's own error code, or ``None``.
+
+    PEP 249 drivers raise ``Error(code, message)`` — pymysql and python-tds both do —
+    so the first argument is the vendor errno. It is the single most useful field in
+    a database failure and it CANNOT be sensitive, being a number, so it is recorded
+    separately from the message rather than left for a human to parse out of it.
+    """
+    args = getattr(exc, "args", ()) or ()
+    if args and isinstance(args[0], int) and not isinstance(args[0], bool):
+        return args[0]
+    return None
+
+
 def handle_request(req: Request, workload_module, ctx: Context = None) -> Response:
     """Run one request end to end. Never raises — a workload blowing up becomes a
     500 with a request id, not a stack trace on the wire."""
@@ -58,7 +72,22 @@ def handle_request(req: Request, workload_module, ctx: Context = None) -> Respon
         # to the function's own log stream only. A traceback is genuinely useful
         # when debugging a private-network workload, so it is available — but
         # behind FN_DEBUG, never on by default and never in the response.
-        detail = {"error_type": type(exc).__name__}
+        #
+        # ``error_type`` ALONE is close to content-free for a database workload, and
+        # that cost a live incident: pymysql maps only the errnos it knows, so
+        # "name too long", "access denied" and "cannot create user" all arrive as an
+        # identical bare ``OperationalError``. Identifying which one it was took a
+        # Cloud Logging forensics session because the message was in no log at all.
+        # So the driver's own code and message are recorded here, always — a 500
+        # nobody can diagnose is not safer than one they can. Both go through
+        # ``logs.emit``, hence ``logs.scrub_text``, because a driver echoes the
+        # offending SQL and the offending SQL can carry the password just minted.
+        # Not truncated here: logs.redact already caps every string it walks, so a
+        # second limit would only be a second number to keep in step with the first.
+        detail = {"error_type": type(exc).__name__, "error_detail": str(exc)}
+        code = _error_code(exc)
+        if code is not None:
+            detail["error_code"] = code
         if _debug_enabled():
             import traceback
             detail["traceback"] = traceback.format_exc()[-4000:]

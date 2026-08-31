@@ -267,6 +267,55 @@ def test_the_armed_choice_survives_the_job_queue():
         "the worker does not forward the queued dry_run choice"
 
 
+# -- The two Entitle integrations are not interchangeable ----------------------
+
+def test_the_native_connector_button_hides_once_an_adapter_is_paired():
+    """A database wants ONE Entitle integration. Offering "Register in Entitle" right
+    beside a "DB grant" badge is how you end up with two that disagree about what a
+    grant even means — which is exactly the confusion this page produced live.
+    """
+    cell = _action_cell()
+    show = re.search(r'@click="entitleRegister\(d\)"\s+x-show="([^"]+)"', cell)
+    assert show, cell
+    assert "!d.adapter_fn_id" in show.group(1), show.group(1)
+
+
+def test_the_button_says_which_access_model_mysql_gets():
+    """Entitle's MySql connector assigns STANDING roles and cannot mint an account —
+    ``allow_creating_accounts=False`` in _generate_db_hcl — which is the entire
+    reason db_grant exists. A label that reads the same as the ephemeral engines'
+    invites the operator to register the one that cannot do what they want.
+    """
+    cell = _action_cell()
+    label = re.search(r'@click="entitleRegister\(d\)".*?x-text="([^"]+)"', cell,
+                      re.S)
+    assert label, cell
+    assert "entitleIsEphemeral(d)" in label.group(1)
+    assert "standing roles" in label.group(1)
+
+
+def test_the_ui_and_the_service_cannot_disagree_about_which_engine_is_ephemeral():
+    """entitleIsEphemeral mirrors `allow_creating = engine != "mysql"`. If the
+    service ever gains or loses an ephemeral engine, this fails rather than leaving
+    the page quietly promising the wrong thing."""
+    page = _read(_PAGE)
+    helper = page.split("entitleIsEphemeral(d) {")[1].split("}")[0]
+    assert "d.engine !== 'mysql'" in helper, helper
+
+    svc = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                             "entitle_registration_service.py"))
+    assert 'allow_creating = engine != "mysql"' in svc,         "the service changed which engines mint accounts; update entitleIsEphemeral"
+
+
+def test_the_confirm_does_not_promise_jit_for_a_standing_connector():
+    """The copy said "mints JIT (ephemeral) accounts" for every engine, MySQL
+    included, where it is simply false."""
+    body = _read(_PAGE).split("async entitleRegister(d)")[1].split("async entitleDeregister")[0]
+    assert "entitleIsEphemeral(d)" in body
+    assert "STANDING roles" in body
+    assert "db_grant" in body, "the standing-roles branch does not point anywhere useful"
+
+
 def test_every_key_the_button_reads_is_one_the_row_projection_declares():
     """_serialize is pure and takes no Session, so adapter_fn_id/adapter_status are
     declared there and filled in by list_databases. A key only list_databases supplies

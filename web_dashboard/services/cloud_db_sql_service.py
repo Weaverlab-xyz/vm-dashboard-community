@@ -48,6 +48,31 @@ _IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
 # admin password (secrets.token_urlsafe) is URL-safe base64 (also within this set).
 _SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9#\-_.]+$")
 
+# Longest account name each engine will ACCEPT. Not cosmetic, and not the same
+# number: MySQL's ``mysql.user.User`` column is ``char(32)`` and a longer name is
+# rejected outright with ER_WRONG_STRING_LENGTH (1470); Postgres truncates at
+# NAMEDATALEN-1 = 63; SQL Server's ``sysname`` is 128.
+#
+# One blind cap of 63 here is what broke the MySQL ephemeral path in full, live on
+# 2026-08-31: ``jit_`` + a 24-char slug + ``_`` + a 12-char request token is 41
+# characters, so EVERY grant for a real email address failed on the very first
+# statement. It read as an infrastructure fault rather than a naming one, because
+# pymysql maps no errno it does not recognise — 1470 arrives as a bare
+# ``OperationalError`` with the message nowhere in the log (see
+# fnruntime/dispatch.py, which now records the driver code and detail).
+#
+# 63 was right for exactly one engine and silently wrong for the one being used.
+_MAX_IDENT = {"postgres": 63, "mysql": 32, "sqlserver": 128}
+
+# What to assume when the engine is not known. The SMALLEST limit, never the
+# largest: a name that is too short is ugly, a name that is too long does not exist.
+_MIN_MAX_IDENT = min(_MAX_IDENT.values())
+
+
+def max_identifier_length(engine: str) -> int:
+    """The longest account name ``engine`` accepts (conservative if unknown)."""
+    return _MAX_IDENT.get(engine, _MIN_MAX_IDENT)
+
 
 class CloudDbSqlError(Exception):
     """Raised on invalid identifiers/values passed to the SQL builders."""
@@ -448,6 +473,16 @@ def _prepare(engine: str, *, username: str, database: str, flavor: str,
     """Validate every input once and return the normalised pieces."""
     _check_engine(engine)
     user = _ident(username)
+    # _IDENT_RE bounds the name at 63 for SAFETY (what is legal to interpolate);
+    # this bounds it at what the engine will actually store. Refusing here turns a
+    # too-long name into a 400 that names the problem, on the route that asked for
+    # it, instead of the driver error that becomes an opaque 500 — the same reason
+    # every other validation in this function is a CloudDbSqlError.
+    limit = max_identifier_length(engine)
+    if len(user) > limit:
+        raise CloudDbSqlError(
+            f"account name {user!r} is {len(user)} characters; {engine} accepts at "
+            f"most {limit}")
     pwd = _value(password) if password else ""
     checked_role = _check_role(role) if role else ""
     checked_flavor = _check_flavor(engine, flavor)
@@ -594,17 +629,30 @@ def revoke_plan(engine: str, *, username: str, database: str,
                                     database=database, flavor=flavor))
 
 
-def ephemeral_username(prefix: str, token: str) -> str:
-    """A safe, collision-resistant account name for one grant.
+def ephemeral_username(prefix: str, token: str, engine: str = "") -> str:
+    """A safe, collision-resistant account name for one grant, within ``engine``'s
+    identifier limit.
 
     Derived from the requester rather than random so an operator looking at
     ``sys.database_principals`` (or ``mysql.user``) can tell WHO an account belongs
     to without a lookup — the first question asked of any unexpected account.
+
+    ``engine`` is what makes the name USABLE, and omitting it is not free: the
+    budget is spent on the collision-resistant suffix FIRST and the readable slug
+    second, because two grants sharing a name is a correctness bug while a clipped
+    slug is only a legibility one. With no engine the smallest limit is assumed —
+    the result is short enough for every engine here, which is the only assumption
+    that cannot mint a name the target will refuse.
     """
+    limit = max_identifier_length(engine)
     slug = re.sub(r"[^A-Za-z0-9]", "_", (prefix or "").strip().lower()).strip("_")
-    slug = re.sub(r"_{2,}", "_", slug)[:24] or "jit"
+    slug = re.sub(r"_{2,}", "_", slug)
     suffix = re.sub(r"[^A-Za-z0-9]", "", token or "")[:12].lower() or "x"
+    # 24 stays the PREFERRED slug length, so the names this already generates on
+    # Postgres and SQL Server do not change; the engine budget only ever shortens it.
+    # len("jit_") + len("_") = 5 of that budget is structural.
+    slug = slug[:max(min(24, limit - len(suffix) - 5), 1)].strip("_") or "jit"
     name = f"jit_{slug}_{suffix}"
     if not name[0].isalpha():
         name = "j" + name
-    return name[:63]
+    return name[:limit]
