@@ -59,6 +59,24 @@ def _read(path):
         return fh.read()
 
 
+def _tuple_literal(src, name):
+    """The text of a ``name = ( ... )`` literal, balancing parens.
+
+    Splitting on the first ``)`` is not good enough: these tuples carry explanatory
+    comments and a parenthetical in one of them silently truncated the match, which made
+    this file's own assertion fail on a list that was in fact correct.
+    """
+    i = src.index(name + " = (") + len(name) + 4
+    depth, j = 1, i
+    while depth:
+        if src[j] == "(":
+            depth += 1
+        elif src[j] == ")":
+            depth -= 1
+        j += 1
+    return src[i:j - 1]
+
+
 def _tilesections_block():
     """The tileSections literal, located the way tests/test_dashboard_collect.py locates
     it. If this raises, that suite is already broken too."""
@@ -172,6 +190,30 @@ def test_no_template_or_script_hard_codes_a_persona_key():
     assert not offenders, (
         f"persona keys hard-coded in the front end: {offenders}. Read them from "
         "/api/persona instead.")
+
+
+def test_the_persona_route_is_public_in_both_places_that_decide_that():
+    """`fetch('/api/persona')` is bare on purpose, and two separate lists have to agree.
+
+    The app authenticates off the Authorization header and sets no cookie anywhere, so a
+    bare fetch is an ANONYMOUS request. tests/test_template_scripts guards against that
+    and keeps an allowlist of routes deliberately reachable without a token;
+    main._SETUP_BYPASS_PREFIXES is the other half, and without it the wizard's Focus step
+    would be handed a 302 to the wizard it is already in.
+
+    Nothing enforced that those two lists agree, and the failure is asymmetric and ugly:
+    drop it from the allowlist and CI fails loudly, drop it from the bypass list and the
+    wizard silently loses its persona step. So: both, pinned here.
+    """
+    guard = _read(os.path.join(_ROOT, "tests", "test_template_scripts.py"))
+    allow = _tuple_literal(guard, "_PUBLIC_API")
+    assert '"/api/persona"' in allow, (
+        "/api/persona is not in test_template_scripts._PUBLIC_API, so the bare fetch in "
+        "dashboard.html fails that guard")
+    bypass = _tuple_literal(_read(_MAIN), "_SETUP_BYPASS_PREFIXES")
+    assert '"/api/persona"' in bypass, (
+        "/api/persona is not in main._SETUP_BYPASS_PREFIXES — the wizard's Focus step "
+        "would be redirected to the wizard it is already in")
 
 
 def test_the_dashboard_reads_the_persona_from_the_api():
