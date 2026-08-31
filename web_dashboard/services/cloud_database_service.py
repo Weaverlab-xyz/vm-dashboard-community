@@ -1486,6 +1486,80 @@ def _fa_grant_statement(engine: str, *, fa_db_user: str, managed_user: str,
     return ""
 
 
+def _grant_secret_id(row_id: str) -> str:
+    """Regional-secret id for the one-shot admin credential the grant runs as.
+
+    Deliberately NOT ``cloud_db_adapter_service.secret_key``'s ``clouddb-<id>-admin``:
+    that secret is the db_grant adapter's long-lived credential, and this one is deleted
+    the moment the statement returns. Sharing the id would make onboarding a database
+    revoke a paired adapter's password."""
+    return f"clouddb-{row_id}-psgrant"
+
+
+async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, job_id: str,
+                              engine: str, project: str, instance: str, region: str,
+                              database: str, admin_username: str, admin_password: str,
+                              grant: str) -> bool:
+    """Issue the functional account's GRANT ourselves, as the built-in admin, over the
+    Data API. Returns whether it was applied.
+
+    ``executeSql`` authenticates as the *caller*, and the dashboard's own service
+    account is not a privileged database principal — which is why this cannot simply be
+    an ``autoIamAuthn`` call, and why this step used to be reported for an operator to
+    run by hand. The way through is the Data API's other authentication mode: a built-in
+    ``user`` whose password comes from Secret Manager. The dashboard already holds this
+    database's admin credential (it minted it), so it can stage it, execute one
+    statement as that admin, and take it back out again.
+
+    The secret is REGIONAL and is deleted in ``finally``. Both matter:
+
+    * The Data API rejects the global secret form outright — including the exact
+      ``fasecret=projects/<p>/secrets/<s>/versions/latest`` shape the plugin article
+      documents — with "does not match the expected format
+      [projects/*/locations/*/secrets/*/versions/*]".
+    * Leaving it behind would park the database's master password in Secret Manager
+      permanently to save one API call on a path that runs once per database.
+
+    Never raises. A failure here leaves the database and the managed user exactly as
+    they were and falls back to reporting the statement on the job, because a grant the
+    operator can still run by hand is a far better outcome than an onboarding that
+    unwinds itself over a permissions problem on one statement."""
+    from . import gcp_service
+
+    if not (grant and admin_password and admin_username and region):
+        return False
+    secret_id = _grant_secret_id(row.id)
+    version = ""
+    try:
+        version = await gcp_service.write_regional_secret(
+            project, region, secret_id, admin_password)
+        await gcp_service.execute_cloudsql_sql(
+            project, instance, database, grant,
+            auto_iam_authn=False, user=admin_username,
+            password_secret_version=version)
+    except Exception as exc:  # noqa: BLE001
+        # The statement, not the exception, is what the operator needs: this is the one
+        # step whose manual fallback is a single line they can paste.
+        logger.warning("clouddb: could not apply the PS rotation grant on %s db_id=%s: %s",
+                       instance, row.id, exc)
+        job_service.append_job_log(
+            db, job_id,
+            f"Could not apply the Password Safe rotation grant automatically ({exc}) — "
+            f"run it as an admin on {database}: {grant}")
+        return False
+    finally:
+        if version:
+            await gcp_service.delete_regional_secret(project, region, secret_id)
+
+    job_service.append_job_log(
+        db, job_id,
+        f"Applied the Password Safe rotation grant as {admin_username} on "
+        f"{database}: {grant}")
+    logger.info("clouddb: applied PS rotation grant on %s db_id=%s engine=%s",
+                instance, row.id, engine)
+    return True
+
+
 async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id: str,
                                       engine: str, tf_variables: dict) -> dict:
     """GCP counterpart of :func:`_create_db_managed_user`, and much the simplest of the
@@ -1570,9 +1644,10 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
 
     # 4. The functional account still needs rights over the managed principal. That is
     #    SQL, and executeSql authenticates as the CALLER, so the dashboard cannot issue
-    #    it without itself being a privileged database principal. Report the exact
-    #    statement on the job instead of failing: this mirrors AWS and Azure, which also
-    #    require an out-of-band grant, and the job log is where the operator looks.
+    #    it as itself. It CAN issue it as the built-in admin whose credential it minted,
+    #    which is what _apply_fa_grant_gcp does — one statement, over a regional secret
+    #    that is deleted again immediately. Reporting the statement for an operator to
+    #    run by hand stays as the fallback, never as the first answer.
     #    Self-rotation needs none of it: the managed account authenticates as itself and
     #    alters itself, which is the strongest argument for turning it on.
     self_rotating = (channel == "cloud-run"
@@ -1581,10 +1656,31 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
         engine, fa_db_user=fa_db_user, managed_user=managed_user,
         managed_host=managed_host)
     if grant and fa_db_user:
-        job_service.append_job_log(
-            db, job_id,
-            f"Password Safe rotation needs one grant on this database, which the "
-            f"dashboard cannot issue itself — run it as an admin: {grant}")
+        applied = False
+        if channel == "data-api":
+            # Only here is the Data API known to be on — step 1 enables it for this
+            # channel and deliberately does not for cloud-run. Turning it on merely to
+            # issue the grant would change the instance for a channel that will never
+            # use it, which is the change that comment declines to make.
+            admin_password = (tf_variables.get("master_password")
+                              or tf_variables.get("administrator_password")
+                              or tf_variables.get("admin_password")
+                              or config_service.get(f"clouddb/{row.id}/admin") or "")
+            applied = await _apply_fa_grant_gcp(
+                db, row=row, job_id=job_id, engine=engine, project=project,
+                instance=instance, region=region,
+                # db_name is already connection_db_name's answer, which resolves SQL
+                # Server to master on its own — ALTER SERVER ROLE is server-scoped and
+                # lives there. Re-deciding that here would be a sixth inline copy of the
+                # ternary that resolver exists to have exactly one of.
+                database=db_name,
+                admin_username=admin_username, admin_password=admin_password,
+                grant=grant)
+        if not applied:
+            job_service.append_job_log(
+                db, job_id,
+                f"Password Safe rotation needs one grant on this database, which the "
+                f"dashboard could not issue itself — run it as an admin: {grant}")
 
     logger.info("clouddb: managed DB user %r created via Cloud SQL users.insert on %s "
                 "db_id=%s channel=%s (no jump host)",
@@ -1888,7 +1984,21 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             # Both control-plane fields are "-": the Cloud SQL APIs are always TLS and
             # never open a database connection, and the plugin rejects a value in either
             # rather than letting anyone believe they disabled something.
-            addr = [channel, conn_name, ctx["db_name"] or "", "-", "-", "iam=true"]
+            #
+            # MySQL names information_schema rather than the application catalog. The
+            # rotation grant is GLOBAL (CREATE USER ON *.*) and confers no rights on any
+            # schema, so a MySQL connection that opens the application database as its
+            # default fails before running anything:
+            #   Error 1044 (42000): Access denied for user '<fa>'@'%' to database '<db>'
+            # The alternative — granting the rotation identity SELECT on the application
+            # database — would buy a working connection with read access to customer
+            # data, destroying the property that a compromised rotation identity can
+            # change passwords and nothing else. information_schema is readable by every
+            # principal, and ALTER USER is schema-independent, so nothing is lost.
+            # Postgres needs none of this: it grants CONNECT to PUBLIC by default.
+            control_db = ("information_schema" if engine == "mysql"
+                          else ctx["db_name"] or "")
+            addr = [channel, conn_name, control_db, "-", "-", "iam=true"]
         if engine == "mysql":
             # The plugin deliberately REFUSES to default a MySQL host qualifier, because
             # app@% and app@10.0.0.5 are different accounts and rotating the wrong row
