@@ -77,6 +77,8 @@ bt_api_host bt_client_id bt_client_secret bt_jump_group_name bt_jumpoint_name
 clouddb_ps_onboarding_enabled clouddb_ps_platform_postgres clouddb_ps_platform_mysql
 clouddb_ps_platform_sqlserver clouddb_ps_pravault_platform clouddb_ps_workgroup
 clouddb_ps_functional_account_mode clouddb_ps_functional_account_postgres
+clouddb_ps_functional_account_mode_postgres clouddb_ps_functional_account_mode_mysql
+clouddb_ps_functional_account_mode_sqlserver
 clouddb_ps_functional_account_mysql clouddb_ps_functional_account_sqlserver
 clouddb_ps_pravault_functional_account clouddb_ps_self_rotation
 clouddb_ps_import_workgroup clouddb_ps_import_default_cloud clouddb_ps_import_max_systems
@@ -119,6 +121,14 @@ pra_k8s_namespace pra_k8s_sa_name bt_vault_account_group_id
 ot_ps_pra_checkout_enabled ot_ps_pravault_platform ot_ps_pravault_functional_account
 ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
 """.split())
+
+# ADDED since the split, deliberately: the three `clouddb_ps_functional_account_mode_*`
+# per-engine overrides. The functional-account source was one global switch, which cannot
+# describe GCP Cloud SQL: SQL Server has no IAM database authentication, so it runs on the
+# cloud-run channel with a real login FOR THAT DATABASE, while PostgreSQL and MySQL on
+# data-api authenticate with a short-lived IAM token and carry no database password at
+# all. One shared operator-owned account can serve the second group and cannot serve the
+# first, so the mode has to be answerable per engine.
 
 # RETIRED, deliberately absent from LEGACY_KEYS above: the six `k8s_token_sync_*` keys
 # (enabled / interval_minutes / request_duration_min / max_per_pass / max_failures /

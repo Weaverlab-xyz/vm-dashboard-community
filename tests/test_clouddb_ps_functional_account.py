@@ -201,6 +201,10 @@ def _reset(**conf):
 
 
 def _resolve(**kw):
+    # The resolver takes the mode rather than reading it, so the DB account (per-engine)
+    # and the PRA Vault account (global, engine-less) cannot be forced to share one.
+    # Default it from the config these tests set, which keeps their meaning unchanged.
+    kw.setdefault("mode", svc._ps_fa_mode())
     kw.setdefault("config_key", "clouddb_ps_functional_account_postgres")
     kw.setdefault("platform_id", 0)
     kw.setdefault("platform_tokens", ("ssm",))
@@ -220,6 +224,64 @@ def test_mode_defaults_to_create():
 def test_mode_is_case_and_whitespace_tolerant():
     _reset(clouddb_ps_functional_account_mode="  Reference  ")
     assert svc._ps_fa_mode() == svc._FA_MODE_REFERENCE
+
+
+# ── per-engine mode ───────────────────────────────────────────────────────────
+#
+# The mode is not a preference, it is a consequence of whether the functional account
+# carries a PER-DATABASE secret. GCP SQL Server has no IAM database authentication, so
+# it lands on cloud-run with a real per-database login and must be "create"; postgres
+# and mysql on data-api are "-:-:-" and want "reference". One global switch cannot say
+# both, and whichever you pick breaks the other engines.
+
+def test_an_engine_override_beats_the_global():
+    _reset(clouddb_ps_functional_account_mode="reference",
+           clouddb_ps_functional_account_mode_sqlserver="create")
+    assert svc._ps_fa_mode("sqlserver") == "create"
+    assert svc._ps_fa_mode("postgres") == svc._FA_MODE_REFERENCE
+    assert svc._ps_fa_mode("mysql") == svc._FA_MODE_REFERENCE
+
+
+def test_a_blank_override_falls_back_to_the_global():
+    """Blank must mean "unset", not "create" — otherwise adding the key to a config
+    file would silently switch every engine off reference mode."""
+    _reset(clouddb_ps_functional_account_mode="reference",
+           clouddb_ps_functional_account_mode_sqlserver="")
+    assert svc._ps_fa_mode("sqlserver") == svc._FA_MODE_REFERENCE
+
+
+def test_no_engine_still_answers_the_global():
+    """The PRA Vault account has no engine and must keep reading the global key."""
+    _reset(clouddb_ps_functional_account_mode="reference")
+    assert svc._ps_fa_mode() == svc._FA_MODE_REFERENCE
+    _reset()
+    assert svc._ps_fa_mode() == "create"
+
+
+def test_the_override_is_case_and_whitespace_tolerant_too():
+    _reset(clouddb_ps_functional_account_mode="create",
+           clouddb_ps_functional_account_mode_sqlserver="  Reference ")
+    assert svc._ps_fa_mode("sqlserver") == svc._FA_MODE_REFERENCE
+
+
+def test_the_resolver_takes_the_mode_and_never_re_reads_it():
+    """The DB account and the PRA Vault account resolve in the same call frame with
+    different modes. If the resolver read config itself, the Vault account for a
+    Postgres database would follow the SQL Server setting."""
+    _reset(clouddb_ps_functional_account_mode="create",
+           clouddb_ps_functional_account_postgres="clouddb-ssm-postgres")
+    # Global says create, but an explicit reference mode must win over it.
+    fa_id, _platform_id, owned = _resolve(mode=svc._FA_MODE_REFERENCE)
+    assert owned is False and fa_id == FAKE_FA["id"]
+    assert not [c for c in CALLS if c[0] == "create"], "minted despite reference mode"
+
+
+def test_the_two_accounts_can_resolve_with_different_modes():
+    _reset(clouddb_ps_functional_account_mode="create",
+           clouddb_ps_functional_account_postgres="clouddb-ssm-postgres")
+    _ref_id, _p, ref_owned = _resolve(mode=svc._FA_MODE_REFERENCE)
+    _new_id, _p2, new_owned = _resolve(mode="create", platform_id=111)
+    assert ref_owned is False and new_owned is True
 
 
 # ── create mode: unchanged legacy behaviour ───────────────────────────────────
