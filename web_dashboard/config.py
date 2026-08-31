@@ -481,6 +481,15 @@ class Settings(BaseSettings):
     # One account per ENGINE per cloud: a functional account belongs to a platform, and
     # each engine is its own plugin platform — so there is no generic fallback key.
     clouddb_ps_functional_account_mode: str = "create"   # create | reference
+    # Per-engine overrides of the mode above; blank falls back to it. Needed because the
+    # mode is not a preference but a consequence of whether the functional account holds
+    # a PER-DATABASE secret. GCP SQL Server has no IAM database authentication, so it
+    # runs on cloud-run with a real per-database login and must be "create", while
+    # PostgreSQL/MySQL on data-api are "-:-:-" and want "reference". One global switch
+    # cannot express that, and either setting breaks the other engines.
+    clouddb_ps_functional_account_mode_postgres: str = ""    # blank = use the global
+    clouddb_ps_functional_account_mode_mysql: str = ""       # blank = use the global
+    clouddb_ps_functional_account_mode_sqlserver: str = ""   # blank = use the global
     clouddb_ps_functional_account_postgres: str = ""     # on "psql SSM Custom Plugin"
     clouddb_ps_functional_account_mysql: str = ""        # on "mysql SSM Custom Plugin"
     clouddb_ps_functional_account_sqlserver: str = ""    # on "mssql SSM Custom Plugin"

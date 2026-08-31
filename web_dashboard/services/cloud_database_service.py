@@ -1823,19 +1823,45 @@ def _validate_referenced_fa_name(account_name: str, *, label: str, config_key: s
                 f"spells the prefix correctly).")
 
 
-def _ps_fa_mode() -> str:
+def _ps_fa_mode(engine: str = "") -> str:
     """Where the DB plugin's functional account comes from: ``"reference"`` (the
     operator created it and named it in config -- VM/k8s parity) or ``"create"``
     (mint one per database from the configured credential material -- legacy default).
-    An explicit choice, never inferred from a blank field."""
-    return (_cfg("clouddb_ps_functional_account_mode") or "create").strip().lower()
+    An explicit choice, never inferred from a blank field.
+
+    Resolved PER ENGINE, falling back to the global key. The two modes are not a
+    preference, they are a consequence of whether the functional account carries a
+    PER-DATABASE secret:
+
+    * Where it does not -- GCP ``data-api`` under IAM database authentication, whose
+      composite is ``-:-:-`` -- one operator-owned account serves every database, and
+      ``reference`` is the better answer for the same reason it is on the VM and k8s
+      paths: nothing per-database is stored, and decommission deletes nothing.
+    * Where it does -- GCP ``cloud-run``, which opens a real database connection and
+      needs a real login, and the Azure Run Command plugins -- a single shared account
+      cannot hold N databases' passwords, so the dashboard must mint one per database.
+
+    SQL Server on Cloud SQL is the case that forces this to be per-engine: it has no
+    IAM database authentication, so it lands on ``cloud-run`` and needs ``create``,
+    while PostgreSQL and MySQL on the same cloud want ``reference``. A single global
+    switch cannot express that, and picking either one breaks the other engines."""
+    engine = (engine or "").strip().lower()
+    per_engine = _cfg(f"clouddb_ps_functional_account_mode_{engine}") if engine else ""
+    return (per_engine or _cfg("clouddb_ps_functional_account_mode")
+            or "create").strip().lower()
 
 
-async def _resolve_db_functional_account(*, config_key: str, platform_id: int,
+async def _resolve_db_functional_account(*, mode: str, config_key: str, platform_id: int,
                                          platform_tokens: tuple, label: str,
                                          create: dict) -> tuple:
     """Resolve the functional account to onboard against ->
     ``(functional_account_id, platform_id, owned)``.
+
+    ``mode`` is passed in rather than read here, because the two accounts this resolves
+    do not share one: the DB account's mode is per-engine (see :func:`_ps_fa_mode`),
+    while the PRA Vault account belongs to the appliance and has no engine at all.
+    Reading a per-engine key in here would silently make the Vault account follow SQL
+    Server's answer.
 
     ``reference`` mode RESOLVES an account the operator created in BeyondInsight,
     exactly as ``ps_vm_hook.register`` and ``ps_k8s_token_service`` do -- the account is
@@ -1854,7 +1880,7 @@ async def _resolve_db_functional_account(*, config_key: str, platform_id: int,
     the one durable, greppable trace of an operator error that produced no artifacts.
     """
     from . import ps_api_service, ps_vm_hook
-    if _ps_fa_mode() != _FA_MODE_REFERENCE:
+    if (mode or "").strip().lower() != _FA_MODE_REFERENCE:
         fa_id = await ps_api_service.create_functional_account_on_platform(
             platform_id=platform_id, **create)
         return int(fa_id), int(platform_id), True
@@ -1865,10 +1891,12 @@ async def _resolve_db_functional_account(*, config_key: str, platform_id: int,
                      "functional account to onboard against",
                      _FA_MODE_REFERENCE, config_key, label)
         raise CloudDatabaseError(
-            f"clouddb_ps_functional_account_mode is {_FA_MODE_REFERENCE!r} but no "
-            f"{label} functional account is configured -- set {config_key} to the name "
-            f"of the account you created in Password Safe, or switch the mode back to "
-            f"'create' to have the dashboard mint one per database")
+            f"the functional-account mode for this database is {_FA_MODE_REFERENCE!r} "
+            f"but no {label} functional account is configured -- set {config_key} to the "
+            f"name of the account you created in Password Safe, or switch the mode back "
+            f"to 'create' to have the dashboard mint one per database. The mode comes "
+            f"from clouddb_ps_functional_account_mode_<engine> if that is set, otherwise "
+            f"clouddb_ps_functional_account_mode")
     fa = await ps_api_service.get_functional_account(name)
     pname = fa.get("platform_name") or ""
     if not ps_vm_hook._platform_name_ok(pname, *platform_tokens):
@@ -1934,7 +1962,11 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     }
 
     # ── DB managed system (cloud-specific custom plugin) ──
-    fa_mode = _ps_fa_mode()
+    # Per-engine: SQL Server on Cloud SQL has no IAM database authentication, so it runs
+    # on cloud-run and its functional account carries THIS database's login — which one
+    # shared operator-owned account cannot do. PostgreSQL and MySQL on the same cloud
+    # want the opposite. See _ps_fa_mode.
+    fa_mode = _ps_fa_mode(engine)
     if row.cloud == "gcp":
         # "GCP Cloud SQL {engine}" on the data-api channel. No jump host, no broker
         # cert, no RSA key pair: the plugin reaches the private-IP instance through the
@@ -2090,6 +2122,7 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
                         else "sslFALSE")
         dns_name = ";".join(addr)
     db_fa_id, db_platform_id, db_fa_owned = await _resolve_db_functional_account(
+        mode=fa_mode,
         config_key=fa_key, platform_id=db_platform_id, platform_tokens=fa_tokens,
         label=fa_label, create={
             "account_name": fa_username, "display_name": f"{name}-{fa_label}-fa",
@@ -2151,11 +2184,17 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         pra_url = _cfg("bt_api_host")
         if not pra_url.lower().startswith("http"):
             pra_url = f"https://{pra_url}"
+        # The GLOBAL mode, deliberately, not fa_mode: this account is the PRA Config API
+        # credential for the appliance, shared by every database and tied to no engine.
+        # Following the engine's mode would let a SQL Server setting decide how the Vault
+        # account for a Postgres database is resolved.
+        pv_mode = _ps_fa_mode()
         pv_account = pv_secret = ""
-        if fa_mode != _FA_MODE_REFERENCE:
+        if pv_mode != _FA_MODE_REFERENCE:
             pv_account = _cfg("pra_config_api_client_id") or _cfg("bt_client_id")
             pv_secret = _cfg("pra_config_api_client_secret") or _cfg("bt_client_secret")
         pv_fa_id, pv_platform_id, pv_fa_owned = await _resolve_db_functional_account(
+            mode=pv_mode,
             config_key="clouddb_ps_pravault_functional_account",
             platform_id=pv_platform_id, platform_tokens=("pra vault",), label="PRA Vault",
             create={"account_name": pv_account, "display_name": f"{name}-pravault-fa",

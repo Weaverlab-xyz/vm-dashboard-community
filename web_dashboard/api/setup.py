@@ -722,6 +722,12 @@ class PasswordSafeFeatureConfig(BaseModel):
     # (VM/k8s parity). See config.py for the full semantics. One account per engine per
     # cloud, because a functional account belongs to a platform.
     clouddb_ps_functional_account_mode: str = "create"   # "create" | "reference"
+    # Per-engine overrides; blank falls back to the global. GCP SQL Server needs
+    # "create" (cloud-run carries a per-database login) while postgres/mysql on
+    # data-api want "reference" — see config.py.
+    clouddb_ps_functional_account_mode_postgres: str = ""
+    clouddb_ps_functional_account_mode_mysql: str = ""
+    clouddb_ps_functional_account_mode_sqlserver: str = ""
     clouddb_ps_functional_account_postgres: str = ""
     clouddb_ps_functional_account_mysql: str = ""
     clouddb_ps_functional_account_sqlserver: str = ""
