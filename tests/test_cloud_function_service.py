@@ -676,6 +676,89 @@ def test_a_non_200_from_check_config_is_refused():
         svc.invoke = real
 
 
+# ── The front door vs the workload: two failures wearing one status code ─────
+#
+# Live, a GCP pairing was refused at +11s, +44s and +51s past the terraform apply
+# with Cloud Run's "the access token could not be verified", then served normally at
+# +5m: the allUsers → roles/run.invoker binding had not taken effect yet. The job
+# failed reading "the adapter is broken" when nothing was.
+
+def test_the_two_401s_are_told_apart_by_the_body_not_the_status():
+    """fnruntime.auth always names `error`; no cloud's front door does."""
+    # The workload's own denial — the shared secret is wrong, waiting fixes nothing.
+    assert not svc._is_front_door_denial(401, {"error": "unauthorized"})
+    # Cloud Run: empty body, or Google's text. AWS Function URL under AWS_IAM.
+    assert svc._is_front_door_denial(401, "")
+    assert svc._is_front_door_denial(401, None)
+    assert svc._is_front_door_denial(401, "\n<html>401 Unauthorized</html>")
+    assert svc._is_front_door_denial(403, {"Message": "Forbidden"})
+    # Nothing else is a front-door denial, whatever the body looks like.
+    for status in (200, 404, 500, 502):
+        assert not svc._is_front_door_denial(status, ""), status
+
+
+def test_a_front_door_denial_is_waited_out_not_failed():
+    row = types.SimpleNamespace(id="fn1", name="jit-mysql-abc", workload="db_grant")
+    bodies = ["", "", {"data": {"valid": True, "problems": []}}]
+    calls = []
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        body = bodies[len(calls)]
+        calls.append(path)
+        return {"status": 200 if isinstance(body, dict) else 401, "body": body}
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    poll, svc._FRONT_DOOR_POLL_SECONDS = svc._FRONT_DOOR_POLL_SECONDS, 0
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row))     # must not raise
+    finally:
+        svc.invoke, svc._FRONT_DOOR_POLL_SECONDS = real, poll
+    assert len(calls) == 3, calls
+
+
+def test_a_front_door_that_never_opens_names_the_invoke_permission():
+    """Waiting costs nothing when the permission is genuinely missing: the same
+    refusal, later, pointing at the binding rather than at the adapter."""
+    row = types.SimpleNamespace(id="fn1", name="jit-mysql-abc", workload="db_grant")
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        return {"status": 403, "body": {"Message": "Forbidden"}}
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    try:
+        # grace_seconds=0: one call, no wait — the deadline check is the same one.
+        _run(svc._refuse_unconfigured_adapter(None, row, grace_seconds=0))
+    except svc.CloudFunctionError as exc:
+        assert "run.invoker" in str(exc) and "HTTP 403" in str(exc), str(exc)
+    else:
+        raise AssertionError("registered an adapter its own platform will not invoke")
+    finally:
+        svc.invoke = real
+
+
+def test_the_workloads_own_401_fails_at_once_and_names_the_secret():
+    """The one 401 that is NOT a race. Retrying it would delay a fixed diagnosis by
+    two minutes and then report the wrong cause."""
+    row = types.SimpleNamespace(id="fn1", name="jit-mysql-abc", workload="db_grant")
+    calls = []
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        calls.append(path)
+        return {"status": 401, "body": {"error": "unauthorized"}}
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row))
+    except svc.CloudFunctionError as exc:
+        assert "shared secret" in str(exc), str(exc)
+        assert "cloudfn/fn1/bearer" in str(exc), str(exc)
+    else:
+        raise AssertionError("registered an adapter that rejects the dashboard")
+    finally:
+        svc.invoke = real
+    assert calls == ["/check_config"], calls
+
+
 # ── Test invoke: reaching the route the operator actually meant ───────────────
 
 def test_the_invoke_path_is_appended_not_substituted():

@@ -1508,7 +1508,45 @@ async def invoke(db: Session, *, fn_id: str, payload: Optional[dict] = None,
             "elapsed_ms": int(response.elapsed.total_seconds() * 1000)}
 
 
-async def _refuse_unconfigured_adapter(db: Session, row: CloudFunction) -> None:
+def _is_front_door_denial(status: int, body) -> bool:
+    """Whether a 401/403 came from the CLOUD's front door rather than the workload.
+
+    The two are different failures wearing the same status code, and only one of
+    them is worth waiting on:
+
+    * The **workload** denies with ``fnruntime.auth``'s ``{"error": "unauthorized"}``
+      — a JSON body carrying ``error``. That means the shared secret is wrong, which
+      no amount of waiting fixes.
+    * The **platform** denies before the container ever runs, and its body is not
+      ours: Cloud Run answers a bearer it cannot verify as an ID token with an empty
+      401, a Lambda Function URL under AWS_IAM with ``{"Message": "Forbidden"}``,
+      the Azure host with an empty 401.
+
+    So the test is the body, not the status: ours always names ``error``.
+    """
+    if status not in (401, 403):
+        return False
+    return not (isinstance(body, dict) and "error" in body)
+
+
+# How long the preflight keeps re-asking when the FRONT DOOR is the one refusing.
+#
+# The pairing path calls /check_config seconds after terraform creates the invoke
+# permission, and an IAM change is not effective the moment the API returns it: GCP
+# documents up to ~2 minutes for a Cloud Run binding to take hold. Live, a pairing
+# was refused at +11s, +44s and +51s past the apply and served normally at +5m —
+# so without this the GCP path is a coin flip on every pairing, and the job that
+# loses reads as "the adapter is broken" when nothing is.
+#
+# Waiting costs nothing when the permission is genuinely missing: the same error is
+# raised, two minutes later, and it names the binding to go and check.
+_FRONT_DOOR_GRACE_SECONDS = 120
+_FRONT_DOOR_POLL_SECONDS = 5
+
+
+async def _refuse_unconfigured_adapter(
+        db: Session, row: CloudFunction, *,
+        grace_seconds: int = _FRONT_DOOR_GRACE_SECONDS) -> None:
     """Ask the adapter's own ``/check_config`` before publishing it to the tenant.
 
     Registration is outward-facing: it creates a live integration in Entitle, and an
@@ -1522,27 +1560,65 @@ async def _refuse_unconfigured_adapter(db: Session, row: CloudFunction) -> None:
     what ``/check_config`` is for. Only an explicit refusal blocks: an unrecognisable
     body is not treated as a failure, so this can never become the reason a working
     pairing job stops working.
-    """
-    try:
-        result = await invoke(db, fn_id=row.id, method="POST", path="/check_config",
-                              payload={})
-    except CloudFunctionError:
-        raise
-    except Exception as exc:
-        # Unreachable is disqualifying on its own: Entitle would be pointed at an
-        # endpoint that does not answer.
-        raise CloudFunctionError(
-            f"could not reach {row.name} to check its configuration "
-            f"({type(exc).__name__}) — Entitle would be pointed at a dead endpoint"
-        ) from exc
 
-    status = int(result.get("status") or 0)
-    body = result.get("body")
+    A front-door 401/403 is retried for ``grace_seconds`` — see
+    :func:`_is_front_door_denial` and ``_FRONT_DOOR_GRACE_SECONDS``. Everything else,
+    including the workload's OWN 401, is answered on the first call.
+    """
+    import asyncio
+    import time
+
+    deadline = time.monotonic() + max(0, int(grace_seconds))
+    waited = False
+    while True:
+        try:
+            result = await invoke(db, fn_id=row.id, method="POST",
+                                  path="/check_config", payload={})
+        except CloudFunctionError:
+            raise
+        except Exception as exc:
+            # Unreachable is disqualifying on its own: Entitle would be pointed at an
+            # endpoint that does not answer.
+            raise CloudFunctionError(
+                f"could not reach {row.name} to check its configuration "
+                f"({type(exc).__name__}) — Entitle would be pointed at a dead endpoint"
+            ) from exc
+
+        status = int(result.get("status") or 0)
+        body = result.get("body")
+        if not _is_front_door_denial(status, body):
+            break
+        if time.monotonic() >= deadline:
+            raise CloudFunctionError(
+                f"{row.name}'s own platform still refused the call (HTTP {status}) "
+                f"{int(grace_seconds)}s after the deploy — the function's front door "
+                "never opened, so /check_config could not run and Entitle would be "
+                "pointed at an endpoint it cannot invoke either. Check the invoke "
+                "permission: on GCP the allUsers → roles/run.invoker binding on the "
+                "Cloud Run service, on AWS the Function URL's lambda permission, on "
+                "Azure the host key.")
+        if not waited:
+            waited = True
+            logger.info(
+                "cloudfn: %s front door answered %s to /check_config; waiting up to "
+                "%ss for the invoke permission to take effect",
+                row.name, status, int(grace_seconds))
+        await asyncio.sleep(_FRONT_DOOR_POLL_SECONDS)
+
     data = body.get("data") if isinstance(body, dict) else None
     if status != 200:
         detail = ""
         if isinstance(body, dict):
             detail = str(body.get("problem") or body.get("error") or "")
+        # The workload's own 401 is the one 401 that reaches here, and it means one
+        # specific thing: the secret the dashboard holds is not the one the function
+        # verifies. Say so — "unauthorized" on its own sends you looking at Entitle.
+        if status == 401:
+            raise CloudFunctionError(
+                f"{row.name} rejected the dashboard's own shared secret — the value in "
+                f"cloudfn/{row.id}/bearer is not the FN_SHARED_SECRET the function "
+                "verifies. Redeploy the function to mint a matching pair, then "
+                "register it.")
         raise CloudFunctionError(
             f"{row.name} answered HTTP {status} to its own /check_config"
             + (f": {detail}" if detail else "")
