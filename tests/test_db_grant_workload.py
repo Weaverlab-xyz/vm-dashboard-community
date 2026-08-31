@@ -529,7 +529,44 @@ def test_ephemeral_create_actor_reads_provisioning_data_not_actor():
     _env()
     resp = _call("POST", "/create_actor", _ephemeral())
     assert resp.status == 200, resp.body
-    assert "jit_alice_example_com" in resp.body["data"]["identifier"]
+    # Clipped to MySQL's 32-character account name, so not the whole address — but
+    # still enough to say whose it is. See test_the_minted_name_fits_the_engine.
+    assert resp.body["data"]["identifier"].startswith("jit_alice_example")
+
+
+def test_the_minted_name_fits_the_engine_it_is_created_on():
+    """create_actor must pass its engine to ephemeral_username, or MySQL rejects the
+    CREATE USER for a name it cannot store.
+
+    Live 2026-08-31: every real ephemeral grant 500-ed here.
+    ``jit_karen_walker_weaverlab_x_6a95b8ad0000`` is 41 characters and MySQL's
+    ``mysql.user.User`` column is ``char(32)``, so the very first statement failed
+    with 1470 — which pymysql does not map, so it arrived as a bare
+    ``OperationalError`` with the message in no log at all. Offline tests never saw
+    it because they used short identities.
+    """
+    for engine, port in (("mysql", "3306"), ("sqlserver", "1433")):
+        _env(FN_DB_ENGINE=engine, FN_DB_PORT=port)
+        for identity in ("karen.walker@weaverlab.xyz",
+                         "a.very.long.name.indeed@some.subdomain.example.com"):
+            body = _call("POST", "/create_actor",
+                         _ephemeral(email=identity)).body
+            name = body["data"]["identifier"]
+            limit = cloud_db_sql_service.max_identifier_length(engine)
+            assert len(name) <= limit, (engine, len(name), name)
+            # And the statements were actually built for that name, not a longer one.
+            assert name in _statements(body)
+
+
+def test_the_standing_path_also_passes_its_engine():
+    """The multi-database create_actor mints a name too, from a different call site.
+    One of the two carrying the engine is not enough."""
+    _env(FN_DB_ENGINE="mysql", FN_DB_NAMES="appdb,otherdb")
+    del os.environ["FN_DB_NAME"]
+    body = _call("POST", "/create_actor",
+                 {"actor": {"email": "karen.walker@weaverlab.xyz"}}).body
+    name = body["data"]["identifier"]
+    assert len(name) <= cloud_db_sql_service.max_identifier_length("mysql"), name
 
 
 def test_ephemeral_without_a_role_field_takes_the_least_privileged_one():

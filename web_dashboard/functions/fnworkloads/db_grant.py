@@ -534,7 +534,9 @@ def _create_actor(req, ctx, targets):
 
     server = next(iter(targets.values()))
     databases = [target["database"] for target in targets.values()]
-    username = _sqlplan.ephemeral_username(identity, ctx.request_id)
+    # The engine is not optional: MySQL stores account names in a char(32), and
+    # without it every name minted for a real email address is too long to create.
+    username = _sqlplan.ephemeral_username(identity, ctx.request_id, server["engine"])
     password = _generate_password()
     try:
         plan = _sqlplan.create_actor_plan(
@@ -576,7 +578,7 @@ def _create_actor_with_access(payload: dict, ctx: Context, targets: dict, *,
     if refusal:
         return refusal
     role = _role_code(payload)
-    username = _sqlplan.ephemeral_username(identity, ctx.request_id)
+    username = _sqlplan.ephemeral_username(identity, ctx.request_id, target["engine"])
     password = _generate_password()
     try:
         plan = _sqlplan.grant_plan(

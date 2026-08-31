@@ -15,7 +15,12 @@
    (no provisioning credential to hand the connector) and managed SQL Server (Cloud
    SQL / RDS-standard / Azure SQL Database can't grant the sysadmin/CONTROL SERVER
    its connector needs). See _entitle_viable in cloud_database_service.py — the API
-   rejects the same rows with a 400, so hiding the button is belt-and-braces. #}
+   rejects the same rows with a 400, so hiding the button is belt-and-braces.
+   It is ALSO gated on !d.adapter_fn_id, because it is not the same integration as the
+   db_grant function beside it: this one is Entitle's own connector through the shared
+   agent, which on MySQL assigns standing roles rather than minting accounts. Two
+   integrations against one database is the confusing case, so a row offers whichever
+   of the two is not already there. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="databasesPage()" x-init="init()">
@@ -156,10 +161,20 @@
                         title="Remove this database's Password Safe managed systems (and any functional accounts the dashboard minted). The database and its managed user stay."
                         class="text-xs px-2 py-1 text-amber-700 hover:underline">Remove</button>
                 {% endif %}
+                <!-- Entitle's OWN connector for this engine, through the shared agent. NOT the
+                     same thing as the db_grant function below it, and on MySQL not even the
+                     same access model: Entitle's MySql connector assigns STANDING roles and
+                     cannot mint an account (entitle_registration_service._generate_db_hcl
+                     passes allow_creating_accounts=False for mysql), which is the entire
+                     reason db_grant exists. So the label says which model you get, and the
+                     button hides once an adapter function is paired — one database wants ONE
+                     integration, and offering the weaker one right beside a "DB grant" badge
+                     is how you end up with two that disagree about what a grant means. -->
                 <button @click="entitleRegister(d)"
-                        x-show="entitleRegEnabled && d.status === 'available' && !d.entitle_integration_id && d.entitle_viable"
-                        title="Register this database as an Entitle integration so users request JIT access (ephemeral accounts)"
-                        class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium">Register in Entitle</button>
+                        x-show="entitleRegEnabled && d.status === 'available' && !d.entitle_integration_id && d.entitle_viable && !d.adapter_fn_id"
+                        :title="entitleConnectorHint(d)"
+                        class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium"
+                        x-text="entitleIsEphemeral(d) ? 'Register in Entitle' : 'Register in Entitle (standing roles)'"></button>
                 <button @click="entitleDeregister(d)"
                         x-show="entitleRegEnabled && d.entitle_integration_id"
                         title="Remove this database's Entitle integration"
@@ -1249,8 +1264,31 @@ function databasesPage() {
       }
     },
 
+    // Whether Entitle's own connector for this engine MINTS accounts, mirroring
+    // `allow_creating = engine != "mysql"` in entitle_registration_service. Not cosmetic:
+    // it is the difference between a grant that hands the requester a fresh credential
+    // and one that needs the account to already exist.
+    entitleIsEphemeral(d) {
+      return d.engine !== 'mysql';
+    },
+
+    entitleConnectorHint(d) {
+      const base = `Register this database with Entitle's own ${d.engine} connector, reached `
+        + `through the shared Entitle agent.`;
+      return this.entitleIsEphemeral(d)
+        ? `${base} Users request just-in-time (ephemeral) accounts, which that connector mints.`
+        : `${base} That connector assigns STANDING roles to accounts that already exist — it `
+          + `cannot mint one. For just-in-time accounts, deploy the db_grant Cloud Function `
+          + `adapter instead (the "Function (DB grant)" button).`;
+    },
+
     async entitleRegister(d) {
-      if (!confirm(`Register "${d.engine}" database in ${d.region} as an Entitle integration?\n\nEntitle connects through the shared agent and mints JIT (ephemeral) accounts on the database. The PRA tunnel remains the path the user's client connects through. Track progress in Jobs.`)) return;
+      const how = this.entitleIsEphemeral(d)
+        ? `Entitle connects through the shared agent and mints JIT (ephemeral) accounts on the database.`
+        : `Entitle connects through the shared agent and assigns STANDING roles to accounts that `
+          + `already exist — its ${d.engine} connector cannot mint one. If you want just-in-time `
+          + `accounts, cancel and deploy the db_grant Cloud Function adapter instead.`;
+      if (!confirm(`Register "${d.engine}" database in ${d.region} as an Entitle integration?\n\n${how}\n\nThe PRA tunnel remains the path the user's client connects through. Track progress in Jobs.`)) return;
       try {
         await API.post(`/api/databases/${d.id}/entitle-register`, { action: 'register' });
         this.flash('Registering database in Entitle — track progress in Jobs.');
