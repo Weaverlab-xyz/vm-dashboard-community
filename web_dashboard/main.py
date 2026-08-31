@@ -1357,6 +1357,18 @@ async def storage_page(request: Request):
     return templates.TemplateResponse("storage/index.html", {"request": request})
 
 
+# DELIBERATELY UNGATED — no _feature_gate, no _profile_page_gate, and please do not "fix"
+# that. This page is a catalog of guided demos, and a persona may only ever surface things;
+# the moment it can 404 a page it has become a second install_profile. Every card on it
+# carries its own state instead: `ready` links, `needs_flag` points at Settings, and
+# `masked` renders with no href at all, resolved through services/feature_flags so a card
+# can never link to a page this instance's profile refuses. tests/test_use_cases_page pins
+# the absence of a gate here, because adding one would look like an improvement.
+@app.get("/use-cases", response_class=HTMLResponse, include_in_schema=False)
+async def use_cases_page(request: Request):
+    return templates.TemplateResponse("use_cases.html", {"request": request})
+
+
 @app.get("/images", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_profile_page_gate("cloud_pages")])
 async def images_page(request: Request):

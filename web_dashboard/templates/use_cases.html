@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Use cases{% endblock %}
+
+{#
+  The guided-demo catalog. Groups every card by the role it belongs to, with the active
+  persona's group first.
+
+  Under the neutral persona this page shows EVERY card from EVERY role. That is the point:
+  choosing no focus must not subtract anything, and this page is where an SE who has not
+  picked a role goes to find out what there is. A persona reorders it; it never filters it.
+
+  Nothing here hard-codes a persona key — the groups, their order and their copy all arrive
+  from /api/persona/catalog, which reads services/personas.py. A key spelled in this file
+  would let the page and the registry disagree, and the disagreement would be invisible.
+#}
+
+{% block content %}
+<div x-data="useCases()" x-init="init()">
+
+  <div class="mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">Use cases</h1>
+    <p class="text-sm text-gray-500 mt-1">
+      Guided demos, grouped by the role they are for. Each one links to the screen that
+      runs it.
+    </p>
+  </div>
+
+  <div x-show="!loaded" class="py-12 text-center text-gray-400 text-sm">
+    Loading use cases…
+  </div>
+
+  <div x-show="loaded && error" class="bg-white rounded-xl shadow-sm border border-red-200 p-6">
+    <p class="text-sm text-red-700" x-text="error"></p>
+  </div>
+
+  <template x-for="g in groups" :key="g.persona">
+    <div class="mb-8">
+      <div class="flex items-baseline justify-between mb-3">
+        <div>
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+            <span x-text="g.label"></span>
+            <!-- Grey, not coloured: chrome colour is the tenancy signal (ui_theme.py) and
+                 a persona accent anywhere — including inside the content area — is the
+                 same confusion one layer in. -->
+            <span x-show="g.persona === active"
+                  class="ml-2 text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+              your focus
+            </span>
+          </h2>
+          <p class="text-xs text-gray-400 mt-0.5" x-text="g.blurb"></p>
+        </div>
+        <span class="text-xs text-gray-400 shrink-0 ml-4"
+              x-text="g.use_cases.length + (g.use_cases.length === 1 ? ' use case' : ' use cases')"></span>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <template x-for="c in g.use_cases" :key="c.id">
+          <!-- Three states, three renders. `masked` carries NO href: a link the client
+               merely styles as inert is one stray middle-click from proving the page 404s
+               on this instance's profile. -->
+          <div class="bg-white rounded-xl shadow-sm border p-5 flex flex-col"
+               :class="c.state === 'ready' ? 'border-gray-200' : 'border-gray-100'">
+            <div class="flex items-start justify-between gap-2">
+              <!-- Two elements rather than one with a conditional href: an <a> with no
+                   href is still focusable and still looks like a link to a screen reader,
+                   and the whole point of `masked` is that there is nowhere to go. -->
+              <a x-show="c.state === 'ready'" :href="c.target"
+                 class="text-sm font-semibold text-blue-700 hover:underline"
+                 x-text="c.title"></a>
+              <span x-show="c.state !== 'ready'"
+                    class="text-sm font-semibold text-gray-400" x-text="c.title"></span>
+              <span class="text-xs text-gray-400 shrink-0"
+                    x-text="c.minutes + ' min'"></span>
+            </div>
+
+            <p class="text-sm mt-2 flex-1"
+               :class="c.state === 'ready' ? 'text-gray-600' : 'text-gray-400'"
+               x-text="c.summary"></p>
+
+            <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between gap-2">
+              <div class="min-w-0">
+                <!-- needs_flag is ACTIONABLE, so it says what to turn on and links to
+                     Settings. masked is not: api/setup.patch_feature_config would refuse
+                     the enable with a 409 naming the profile, so a Settings link there
+                     would send the operator to a switch that cannot move. -->
+                <p x-show="c.state === 'needs_flag'" class="text-xs text-amber-700 truncate"
+                   :title="'Needs: ' + c.needs.join(', ')">
+                  Needs <span x-text="c.needs.join(', ')"></span> —
+                  <a :href="c.settings_link" class="underline hover:no-underline">enable in Settings</a>
+                </p>
+                <p x-show="c.state === 'masked'" class="text-xs text-gray-400 truncate"
+                   :title="c.needs.join(', ')">
+                  Not available on
+                  <span x-text="profile === 'pov' ? 'a POV instance' : 'this instance'"></span>
+                  <span x-show="c.needs.length" x-text="' — needs ' + c.needs.join(', ')"></span>
+                </p>
+              </div>
+              <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                 class="text-xs text-gray-400 hover:text-blue-600 shrink-0">Guide →</a>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+
+</div>
+
+<script>
+  function useCases() {
+    return {
+      loaded: false,
+      error: '',
+      active: '',
+      profile: '',
+      groups: [],
+
+      async init() {
+        requireAuth();
+        try {
+          // Bare fetch is correct here: /api/persona is public by design and is listed in
+          // main._SETUP_BYPASS_PREFIXES and tests/test_template_scripts._PUBLIC_API. It
+          // holds ordering hints and demo-script copy, nothing an anonymous caller could
+          // not already read from /api/features.
+          const [act, cat] = await Promise.all([
+            fetch('/api/persona').then(r => r.json()),
+            fetch('/api/persona/catalog').then(r => r.json()),
+          ]);
+          this.active = act.persona || '';
+          this.profile = act.install_profile || '';
+          const all = (cat.personas || []);
+          // The active persona's group first; everything else keeps its declared order.
+          // Not a filter — every group is always present, which is what makes the neutral
+          // view the complete catalog rather than an empty one.
+          this.groups = all.slice().sort((a, b) =>
+            (a.persona === this.active ? 0 : 1) - (b.persona === this.active ? 0 : 1));
+        } catch (e) {
+          this.error = 'Could not load the use-case catalog.';
+        }
+        this.loaded = true;
+      },
+    };
+  }
+</script>
+{% endblock %}
