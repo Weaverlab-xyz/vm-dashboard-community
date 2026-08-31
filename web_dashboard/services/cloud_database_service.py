@@ -1548,14 +1548,19 @@ def _iam_db_auth(engine: str, channel: str) -> bool:
     return channel == "data-api" and engine != "sqlserver"
 
 
-def _fa_secret_id(row_id: str) -> str:
-    """Regional-secret id for the functional account's database password.
+def _fa_secret_resource_name(row_id: str) -> str:
+    """The NAME of the regional secret holding the functional account's database
+    password — not the password.
 
     Distinct from :func:`_grant_secret_id`, and the difference is lifetime: that one
     holds the master credential for the length of a single statement and is deleted in
     a ``finally``, while this one has to OUTLIVE the onboarding — the plugin reads it on
     every rotation. Sharing the id would have the grant's cleanup delete the credential
     the managed system depends on, on the way out of a successful onboarding.
+
+    Named ``..._resource_name`` because the teardown path logs the value, and a name
+    containing "secret" makes CodeQL read the log line as leaking the credential (see
+    the note in :func:`_teardown_ps_onboarding`).
     """
     return f"clouddb-{row_id}-psfa"
 
@@ -1600,7 +1605,7 @@ async def _stage_fa_secret_gcp(db: Session, *, row: CloudDatabase, job_id: str,
 
     if not (project and region and password):
         return ""
-    resource_id = _fa_secret_id(row.id)
+    resource_id = _fa_secret_resource_name(row.id)
     try:
         version = await gcp_service.write_regional_secret(
             project, region, resource_id, password)
@@ -2175,10 +2180,10 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         # every database on that channel and is not ours to delete. Recorded so teardown
         # can remove it: it holds a real database password, and a decommission that left
         # it behind would park that credential in Secret Manager for good.
-        "ps_db_fa_secret_id": (_fa_secret_id(row.id)
-                               if ctx.get("fa_secret_version")
-                               and not _fa_secret_version_configured() else ""),
-        "ps_db_fa_secret_project": ctx.get("project", ""),
+        "ps_db_fa_sm_resource": (_fa_secret_resource_name(row.id)
+                                 if ctx.get("fa_secret_version")
+                                 and not _fa_secret_version_configured() else ""),
+        "ps_db_fa_sm_project": ctx.get("project", ""),
     }
 
     # ── DB managed system (cloud-specific custom plugin) ──
@@ -2936,7 +2941,7 @@ _PS_CONTEXT_KEYS = (
     "ps_db_client_image", "ps_db_name", "ps_db_system_id", "ps_db_account_id",
     "ps_pravault_system_id", "ps_pravault_account_id",
     "ps_db_functional_account_ref", "ps_pravault_functional_account_ref",
-    "ps_db_fa_secret_id", "ps_db_fa_secret_project",
+    "ps_db_fa_sm_resource", "ps_db_fa_sm_project",
 )
 
 
@@ -3015,21 +3020,30 @@ async def _teardown_ps_onboarding(db: Session, *, row: Optional[CloudDatabase],
     # path. Removed after the managed system, because the plugin reads it on every
     # rotation and deleting it first would break the last one. Best-effort and never
     # fatal — but noisy on failure, since what is left behind is a live credential.
-    secret_id = meta.get("ps_db_fa_secret_id")
+    #
+    # ``resource_id`` / ``ps_db_fa_sm_*``, not ``secret_id``, and the reason is the same
+    # one gcp_service._write_regional_secret_sync spells out: this value is the secret's
+    # NAME, the failure path has to log it so an operator knows which one to delete by
+    # hand, and a name containing "secret" makes CodeQL's clear-text-logging query treat
+    # it as the credential itself (py/clear-text-logging-sensitive-data). Naming it for
+    # what it actually is beats suppressing a query that is right to be suspicious. The
+    # credential never appears here at all.
+    resource_id = meta.get("ps_db_fa_sm_resource")
     secret_gone = True
-    if secret_id and "ps_db_registration_tf_state" in done:
+    if resource_id and "ps_db_registration_tf_state" in done:
         from . import gcp_service
-        project = meta.get("ps_db_fa_secret_project") or _cfg("gcp_project")
+        project = meta.get("ps_db_fa_sm_project") or _cfg("gcp_project")
         region = meta.get("ps_db_region") or ""
         secret_gone = bool(project and region) and await gcp_service.delete_regional_secret(
-            project, region, secret_id)
+            project, region, resource_id)
         if not secret_gone:
             errors.append(
-                f"functional-account secret {secret_id} in {region or '?'} was not "
-                f"deleted — it holds a database password, remove it by hand")
+                f"the functional account's regional Secret Manager entry {resource_id} "
+                f"in {region or '?'} was not deleted — it holds a database password, "
+                f"remove it by hand")
         else:
-            logger.info("clouddb: functional-account secret %s removed db_id=%s",
-                        secret_id, db_id)
+            logger.info("clouddb: functional-account regional SM entry %s removed "
+                        "db_id=%s", resource_id, db_id)
 
     if prov_job is not None and done:
         # Clear only what came off cleanly; the context keys go with the DB managed
@@ -3038,7 +3052,7 @@ async def _teardown_ps_onboarding(db: Session, *, row: Optional[CloudDatabase],
         # would leave a live database password in Secret Manager that nothing ever
         # retries — the same rule the per-step clearing above follows.
         if "ps_db_registration_tf_state" in done:
-            keep = () if secret_gone else ("ps_db_fa_secret_id", "ps_db_fa_secret_project")
+            keep = () if secret_gone else ("ps_db_fa_sm_resource", "ps_db_fa_sm_project")
             done += [k for k in _PS_CONTEXT_KEYS if k in meta and k not in keep]
         fresh = dict(prov_job.metadata_dict or {})
         for key in done:

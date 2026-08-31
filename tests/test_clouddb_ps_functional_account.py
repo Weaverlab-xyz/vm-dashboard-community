@@ -647,23 +647,23 @@ def test_the_staged_secret_is_not_the_grants_one_shot_secret():
     its statement returns, while the functional account's is read on every rotation.
     One id for both would have the grant's cleanup delete the credential the managed
     system depends on, on the way out of a SUCCESSFUL onboarding."""
-    assert svc._fa_secret_id("abc") != svc._grant_secret_id("abc")
+    assert svc._fa_secret_resource_name("abc") != svc._grant_secret_id("abc")
 
 
 def test_a_dashboard_staged_secret_is_recorded_for_teardown():
     """It holds a real database password. A decommission that did not know about it
     would park that credential in Secret Manager permanently."""
     meta = _onboard_gcp_dataapi_mssql()
-    assert meta["ps_db_fa_secret_id"] == "clouddb-abcdef0123456789abcd-psfa", meta
-    assert meta["ps_db_fa_secret_project"] == "acme-data-prod", meta
-    assert "ps_db_fa_secret_id" in svc._PS_CONTEXT_KEYS
+    assert meta["ps_db_fa_sm_resource"] == "clouddb-abcdef0123456789abcd-psfa", meta
+    assert meta["ps_db_fa_sm_project"] == "acme-data-prod", meta
+    assert "ps_db_fa_sm_resource" in svc._PS_CONTEXT_KEYS
 
 
 def test_an_operator_supplied_secret_is_never_recorded_for_deletion():
     """clouddb_ps_gcp_fa_secret_version names one secret shared by every database on
     the channel. Deleting it when one of them is decommissioned would break the rest."""
     meta = _onboard_gcp_dataapi_mssql(clouddb_ps_gcp_fa_secret_version=_FA_SECRET)
-    assert not meta["ps_db_fa_secret_id"], meta
+    assert not meta["ps_db_fa_sm_resource"], meta
 
 
 def test_gcp_mysql_address_carries_the_host_qualifier():
