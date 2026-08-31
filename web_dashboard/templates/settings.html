@@ -1354,6 +1354,53 @@
                   </select>
                 </div>
               </div>
+              <!-- Per-engine overrides. Blank = "use the source above", which is why the
+                   x-init default is "" here and not 'create' as it is on the global.
+                   Spelled out one control per engine rather than an x-for over the
+                   names: the panel-binding guard reads x-model literals, and a computed
+                   key is a key an operator cannot find by searching the template. -->
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">PostgreSQL override</label>
+                  <select x-model="panelCfg.clouddb_ps_functional_account_mode_postgres"
+                          x-init="panelCfg.clouddb_ps_functional_account_mode_postgres = panelCfg.clouddb_ps_functional_account_mode_postgres || ''"
+                          class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">Use the source above</option>
+                    <option value="create">Create one per database</option>
+                    <option value="reference">Reference an existing account</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">MySQL override</label>
+                  <select x-model="panelCfg.clouddb_ps_functional_account_mode_mysql"
+                          x-init="panelCfg.clouddb_ps_functional_account_mode_mysql = panelCfg.clouddb_ps_functional_account_mode_mysql || ''"
+                          class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">Use the source above</option>
+                    <option value="create">Create one per database</option>
+                    <option value="reference">Reference an existing account</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">SQL Server override</label>
+                  <select x-model="panelCfg.clouddb_ps_functional_account_mode_sqlserver"
+                          x-init="panelCfg.clouddb_ps_functional_account_mode_sqlserver = panelCfg.clouddb_ps_functional_account_mode_sqlserver || ''"
+                          class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">Use the source above</option>
+                    <option value="create">Create one per database</option>
+                    <option value="reference">Reference an existing account</option>
+                  </select>
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">
+                The source is not really a preference — it follows whether the functional account has to carry a
+                <strong>per-database</strong> secret. On GCP, <code class="bg-gray-100 px-1 rounded">data-api</code>
+                (PostgreSQL, MySQL) authenticates with a short-lived IAM token and its composite is
+                <code class="bg-gray-100 px-1 rounded">-:-:-</code>, so one account you own serves every database.
+                <strong>SQL Server has no IAM database authentication</strong>, so it runs on
+                <code class="bg-gray-100 px-1 rounded">cloud-run</code> with a real login <em>for that database</em> —
+                which one shared account cannot hold. Set <code class="bg-gray-100 px-1 rounded">sqlserver</code> to
+                <em>Create one per database</em> and leave the others on the source above.
+              </p>
               <label class="flex items-center gap-2 text-sm text-gray-700">
                 <input type="checkbox" x-model="panelCfg.clouddb_ps_self_rotation"
                        class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
