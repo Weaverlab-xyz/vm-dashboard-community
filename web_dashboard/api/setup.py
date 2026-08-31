@@ -249,6 +249,31 @@ class ProfileSetup(BaseModel):
         return v
 
 
+class PersonaSetup(BaseModel):
+    """Which role's material this instance leads with. A DISPLAY DEFAULT, not a gate.
+
+    Orthogonal to ``install_profile`` in every way that matters: a persona only reorders
+    and surfaces, an empty value is a legitimate answer meaning "show everything", and any
+    user can change it later from the nav lens. See services/personas.
+    """
+    default_persona: str = ""
+
+    @field_validator("default_persona")
+    @classmethod
+    def _known_persona(cls, v: str) -> str:
+        # Imported here rather than at module scope for the same reason
+        # ProfileSetup._known_profile does it: several test files stub
+        # `web_dashboard.services` in sys.modules, and a top-level sibling import turns
+        # those suites into a SKIP rather than a failure.
+        from ..services import personas
+        v = (v or "").strip().lower()
+        # ONE deliberate divergence from _known_profile, which raises: an unrecognised
+        # persona COERCES to neutral. Getting install_profile wrong is a cross-tenant
+        # hazard and deserves a 422; a display preference does not, and failing a whole
+        # wizard save over one is the wrong trade.
+        return v if v in personas.VALID_PERSONAS else ""
+
+
 class SetupPayload(BaseModel):
     admin: AdminSetup
     # `None`, not a default ProfileSetup(): absent must mean "leave the profile alone",
@@ -257,6 +282,11 @@ class SetupPayload(BaseModel):
     # feature, which is exactly the silent cross-tenant hazard the profile exists to
     # prevent. _apply_config only writes the key when a value was actually sent.
     profile: ProfileSetup | None = None
+    # `None` for the same reason as `profile` above, with a milder consequence: absent must
+    # mean "leave the instance default alone", never "reset it to neutral". An older UI or a
+    # script that omits this block would otherwise silently clear a chosen focus on every
+    # reconfigure. _apply_config only writes the key when a value was actually sent.
+    persona: PersonaSetup | None = None
     aws: AWSSetup
     azure: AzureSetup
     gcp: GCPSetup = GCPSetup()
@@ -339,6 +369,13 @@ def _apply_config(payload: SetupPayload) -> None:
     pairs: dict = {}
     if payload.profile is not None:
         pairs["install_profile"] = payload.profile.install_profile
+    # The instance's default focus. Note what this does NOT do: it writes no feature flag
+    # of its own. A persona's preset only PRE-TICKS the wizard's own toggles in the browser,
+    # so what lands in `pairs` below is whatever the operator submitted after seeing them --
+    # which is the difference between a starting point and a lock, made visible rather than
+    # asserted.
+    if payload.persona is not None:
+        pairs["default_persona"] = payload.persona.default_persona
 
     # A POV instance skips the cloud steps, and must therefore skip the cloud WRITES —
     # not merely the screens. The loops below persist every NON-secret field whether or
