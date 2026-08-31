@@ -26,6 +26,7 @@ from .logging_context import (
 from .database import SessionLocal, User, create_admin_user, init_db
 from .services import cache_service
 from .services import config_service, feature_flags
+from .services import personas
 from .services import ui_theme
 from .services import public_url
 
@@ -669,7 +670,11 @@ async def warn_untrusted_forwarded_headers(request: Request, call_next):
 
 from starlette.responses import RedirectResponse as _Redirect  # noqa: E402
 
-_SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/api/features", "/api/secrets", "/api/storage")
+_SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/api/features",
+                          # The wizard's Focus step reads the persona catalog while setup is
+                          # still incomplete; without the bypass it gets a 302 to itself.
+                          "/api/persona",
+                          "/api/secrets", "/api/storage")
 
 # Machine callers that must never be handed a 302 to an HTML wizard. A remote agent
 # polls this API in a loop with follow_redirects off; a redirect would arrive as an
@@ -1475,6 +1480,40 @@ async def features():
     A thin delegate: services/dashboard_collect reads the same map to decide which tiles
     to collect, and it must agree with what the page renders."""
     return feature_flags.feature_map()
+
+
+# ── Personas ──────────────────────────────────────────────────────────────────
+# Curation only, and these two endpoints are deliberately UNGATED. A persona reorders and
+# surfaces; it never subtracts. Gating them would be the first step towards a persona that
+# can hide something, which is the one thing services/personas.py exists to forbid.
+#
+# They sit beside /api/features rather than in their own router for the same reason that
+# one does: a thin read-only delegate over a services/ module. Note both are also in
+# _SETUP_BYPASS_PREFIXES — the wizard's Focus step reads the catalog BEFORE setup is
+# complete, and without the bypass it would be handed a 302 to the wizard it is already in.
+
+@app.get("/api/persona", tags=["health"])
+async def persona(request: Request):
+    """The active persona for THIS request: ordering hints plus its use-case cards.
+
+    Resolved per request (query > cookie > instance default), so two SEs on one instance
+    can hold different personas at the same time — which is the whole point, and why this
+    is not an `install_profile`. Each card carries its own state, resolved through
+    feature_flags, so a card can never be a link to a page this profile 404s.
+    """
+    key, source = personas.resolve(request)
+    return personas.describe(key, source)
+
+
+@app.get("/api/persona/catalog", tags=["health"])
+async def persona_catalog():
+    """Every persona and every card. Feeds the wizard picker and /use-cases.
+
+    No Request: the catalog does not depend on who is asking. Card states still do — they
+    resolve against this instance's profile and flags — but the persona LIST does not.
+    """
+    return {"personas": personas.catalog(),
+            "default_persona": personas.default_persona()}
 
 
 @app.get("/api/cache/status", tags=["health"])
