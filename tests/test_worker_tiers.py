@@ -248,9 +248,12 @@ def test_the_heartbeat_write_is_off_the_event_loop():
 
 def test_no_terraform_init_runs_outside_the_plugin_cache_lock():
     """Terraform's plugin cache is explicitly not concurrency-safe: parallel inits race to
-    place the same provider binary and fail with ETXTBSY. Every service that shells out to
-    terraform works in its own tempdir but points TF_PLUGIN_CACHE_DIR at the ONE cache
-    baked into the image, so they must all serialize on terraform.plugin_cache_lock.
+    place the same provider binary and fail with ETXTBSY. The published image sidesteps
+    that entirely by installing from a read-only mirror (see
+    tests/test_terraform_modules_shipped.py), but off that image — dev boxes, and any run
+    without /etc/terraform.tfrc — init downloads into one shared cache again, so every
+    service that shells out to terraform must still serialize on
+    terraform.plugin_cache_lock.
 
     Checked by module rather than by call site: each of these funnels its init through a
     single `_run_tf`, which is where the lock belongs — nine call sites in one module

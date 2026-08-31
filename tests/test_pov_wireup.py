@@ -150,7 +150,7 @@ def test_a_full_override_replaces_the_singletons():
 def test_no_override_still_reads_the_singletons():
     """The compatibility contract: every existing caller passes nothing."""
     env = terraform_pra_service._tf_env()
-    assert "TF_PLUGIN_CACHE_DIR" in env   # it built an environment at all
+    assert "TF_IN_AUTOMATION" in env      # it built an environment at all
 
 
 def test_a_tenant_with_no_jump_group_is_refused():

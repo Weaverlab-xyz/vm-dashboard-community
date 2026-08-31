@@ -137,9 +137,9 @@ def _write_backend_tf(deploy_dir: str, backend_type: str) -> None:
 
 
 def _materialize(deploy_dir: str, template_dir: str) -> None:
-    """Copy a Terraform module template (incl. the cached .terraform/ providers)
-    into deploy_dir. Used by apply, and by destroy to rebuild a deploy dir that a
-    container recreate lost (remote state makes that destroy recoverable)."""
+    """Copy a Terraform module template into deploy_dir. Used by apply, and by destroy
+    to rebuild a deploy dir that a container recreate lost (remote state makes that
+    destroy recoverable)."""
     if not os.path.isdir(template_dir):
         # The module isn't shipped in the image (e.g. a cloud's k8s_cluster/<cloud>
         # module missing from the Dockerfile COPY). Fail clearly instead of letting
@@ -178,6 +178,9 @@ def _run(cmd: list, cwd: str, timeout: int = 600,
 
 
 def _init_lock_path() -> str:
+    # Just a stable well-known path for the flock; in the image TF_PLUGIN_CACHE_DIR is
+    # unset (providers come from the read-only mirror — see plugin_cache_lock) and this
+    # falls back to the default, creating an empty directory to hold the lock file.
     cache = os.environ.get("TF_PLUGIN_CACHE_DIR") or os.path.join(
         os.path.expanduser("~"), ".terraform.d", "plugin-cache")
     try:
@@ -191,21 +194,29 @@ def _init_lock_path() -> str:
 def plugin_cache_lock():
     """Serialize ``terraform init`` across processes/jobs.
 
-    Terraform's shared plugin cache (``TF_PLUGIN_CACHE_DIR``, populated once at
-    image build) is explicitly NOT concurrency-safe: parallel inits race to
-    (re)place the same provider binary and fail with "text file busy" (ETXTBSY) —
-    exactly what happens when several provisions/decommissions are kicked off at
-    once. A coarse exclusive file lock around init only (apply/destroy don't touch
-    the cache, so those still run in parallel) serializes provider placement
-    across gunicorn workers and concurrent jobs. ``flock`` is advisory and
+    A shared plugin cache (``TF_PLUGIN_CACHE_DIR``) is explicitly NOT concurrency-safe:
+    parallel inits race to (re)place the same provider binary and fail with "text file
+    busy" (ETXTBSY). A coarse exclusive file lock around init serializes provider
+    placement across gunicorn workers and concurrent jobs. ``flock`` is advisory and
     auto-released if a worker dies. No-op where ``fcntl`` is absent (Windows dev).
 
-    PUBLIC on purpose: this module is not the only thing that runs ``terraform
-    init`` against that one cache. The PRA / Entitle / Password-Safe services each
-    shell out to their own terraform in a tempdir, and every one of those inits
-    lands in the SAME plugin cache — so they take this lock too (see their
-    ``_run_tf``). Anything that adds a new ``terraform init`` call site must hold
-    it; ``tests/test_worker_tiers.py`` fails the build if one doesn't.
+    THIS LOCK IS NOT SUFFICIENT ON ITS OWN, and the published image does not rely on it.
+    A plugin cache entry is SYMLINKED into ``deploy_dir/.terraform/providers``, so a
+    running apply/destroy is *executing* the cached binary; an unrelated init that has to
+    reinstall that provider rewrites the file underneath it and gets ETXTBSY. That is
+    init-vs-APPLY — serializing inits against each other cannot prevent it (job
+    cc8743c3: a clouddb_decommission init killed by a concurrent k8s destroy). The image
+    therefore installs providers from a READ-ONLY filesystem mirror instead
+    (TF_CLI_CONFIG_FILE=/etc/terraform.tfrc — see the Dockerfile), which nothing writes;
+    this lock remains for runs off that image, where init downloads into a cache again.
+    Do not re-introduce TF_PLUGIN_CACHE_DIR anywhere: pointed at the mirror it makes
+    every init fail with "cannot install existing provider directory ... to itself".
+
+    PUBLIC on purpose: this module is not the only thing that runs ``terraform init``.
+    The PRA / Entitle / Password-Safe services each shell out to their own terraform in a
+    tempdir — so they take this lock too (see their ``_run_tf``). Anything that adds a
+    new ``terraform init`` call site must hold it; ``tests/test_worker_tiers.py`` fails
+    the build if one doesn't.
     """
     if fcntl is None:
         yield
@@ -233,9 +244,10 @@ def _init_args(backend_type: str, backend_config: Optional[dict]) -> list:
 
 def _init_sync(deploy_dir: str, env: Optional[dict] = None,
                backend_type: str = "local", backend_config: Optional[dict] = None) -> None:
-    # Providers are pre-cached in deploy_dir/.terraform/providers (copied from the
-    # template), so -upgrade=false keeps provider fetch offline; the remote backend
-    # init still reaches the state store (that is the point).
+    # Providers come from the image's read-only mirror (see plugin_cache_lock), which is
+    # what keeps this init offline — NOT the template, which ships main.tf only and has
+    # no pre-initialised .terraform to copy. The remote backend init still reaches the
+    # state store (that is the point).
     _write_backend_tf(deploy_dir, backend_type)
     with plugin_cache_lock():
         r = _run(_init_args(backend_type, backend_config), deploy_dir, timeout=300, env=env)
@@ -743,14 +755,11 @@ async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = 
     same way the packer flow does.
     deploy_dir should be unique per deployment (e.g. based on job_id).
 
-    The template directory is expected to have been pre-initialized once via
-    `terraform init` so the provider cache (.terraform/) can be copied and
-    re-used without requiring internet access on every deployment.
+    Templates are plain HCL — they are NOT pre-initialised, so every deploy dir runs its
+    own `terraform init`. What keeps that init offline is the image's read-only provider
+    mirror (see :func:`plugin_cache_lock`), not anything copied from the template.
     """
     src_template = template_dir or _TEMPLATE_DIR
-    # Copy the full template directory including the pre-cached .terraform/
-    # providers directory (populated by running `terraform init` in the
-    # template directory once).
     _materialize(deploy_dir, src_template)
 
     var_args = _build_var_args(variables)

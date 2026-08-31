@@ -12,8 +12,8 @@ Shaped like ``terraform_pra_service`` (which manages the PRA Shell Jump / DB
 tunnel): inline HCL written to an ephemeral workdir, ``terraform apply``, the new
 integration's id pulled from outputs, and the full ``terraform.tfstate`` returned
 so a later ``deregister`` can ``terraform destroy`` it. Secrets are passed as
-``TF_VAR_*`` so they never land in the HCL on disk. The provider plugin is
-pre-cached in ``$TF_PLUGIN_CACHE_DIR`` at image-build time (no runtime download).
+``TF_VAR_*`` so they never land in the HCL on disk. The provider plugin is baked into
+the image's read-only provider mirror at build time (no runtime download).
 
 Provider/resource schema confirmed against entitleio/entitle v3 docs
 (``entitle_integration`` resource): required ``name``, ``application = { name }``,
@@ -71,9 +71,9 @@ logger = logging.getLogger(__name__)
 # Terraform binary — baked into the Docker image at build time.
 _TERRAFORM = os.environ.get("TERRAFORM_EXECUTABLE", "terraform")
 
-# Provider plugin cache written at image-build time so containers never need to
-# download the provider at runtime (same dir the entitleio/sra providers use).
-_PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/plugin-cache")
+# NOTE: no TF_PLUGIN_CACHE_DIR here, deliberately — see terraform_pra_service. The
+# image's read-only provider mirror (TF_CLI_CONFIG_FILE) is inherited from the
+# environment; setting the plugin cache too breaks every init.
 
 # engine / kind → Entitle application catalog name, **lowercased**. These are the
 # display names returned by this tenant's `entitle_applications` data source
@@ -199,7 +199,6 @@ def _tf_env(extra_vars: Optional[dict] = None, ctx: Optional["EntitleTenantCtx"]
     """Environment for Terraform calls. Secrets are passed as TF_VAR_* so the
     HCL template never contains them in plain text."""
     env = dict(os.environ)
-    env["TF_PLUGIN_CACHE_DIR"] = _PLUGIN_CACHE_DIR
     env["TF_IN_AUTOMATION"] = "1"
     env["TF_INPUT"] = "0"
     env["TF_CLI_ARGS"] = "-no-color"
@@ -505,9 +504,10 @@ output "integration_id" {{
 def _run_tf(args: list, work_dir: str, env: dict, timeout: int = 120) -> subprocess.CompletedProcess:
     """Run one terraform subcommand in ``work_dir``.
 
-    ``init`` is serialized on the shared plugin cache via ``terraform.plugin_cache_lock``:
-    the tempdir is per-call but TF_PLUGIN_CACHE_DIR is the single cache baked into the
-    image, and parallel inits race to place the same provider binary (ETXTBSY). Same
+    ``init`` still takes ``terraform.plugin_cache_lock``. In the published image it is
+    belt-and-braces — the provider comes from a read-only mirror nothing can write — but
+    off-image (dev, or a run without /etc/terraform.tfrc) init downloads into a shared
+    cache again, and parallel inits race to place the same binary (ETXTBSY). Same
     reasoning as terraform_pra_service._run_tf — see the longer note there."""
     def _go() -> subprocess.CompletedProcess:
         return subprocess.run(

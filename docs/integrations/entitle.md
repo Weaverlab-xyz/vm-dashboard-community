@@ -269,9 +269,11 @@ cluster RBAC; that's handled by the cluster-admin binding `setup_entitle_agent` 
 **"entitle_owner_id / entitle_workflow_id is not configured"** — both are required to
 create an integration. Fill them in under Settings → Integrations → Entitle.
 
-**`terraform init` can't find the provider** — the `entitleio/entitle` provider is
-pre-cached in the image at `$TF_PLUGIN_CACHE_DIR`; rebuild the image if you changed the
-Dockerfile provider-cache step.
+**`terraform init` can't find the provider** ("was not found in any of the search
+locations") — the `entitleio/entitle` provider is baked into the image's read-only
+provider mirror (`$TF_PROVIDER_MIRROR_DIR`, served via `/etc/terraform.tfrc`), and the
+registry is deliberately not a fallback. Rebuild the image if you changed the Dockerfile
+provider pre-cache step or the provider version constraint.
 
 **Wrong application / connection** — `application.name` and the `connection_json` keys are
 application-specific. Verify the slug against the `entitle_applications` data source and the
