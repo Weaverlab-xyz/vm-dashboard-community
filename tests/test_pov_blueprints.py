@@ -317,7 +317,12 @@ def test_a_rename_to_its_own_name_is_allowed():
 class _StubAdapter:
     """The adapter surface run_template_build uses."""
 
-    def __init__(self, *, vms=None, fail_after_create=False):
+    def __init__(self, *, vms=None, fail_after_create=False, stubborn=False):
+        # Every runstate/bake call in order, so a test can pin that the environment was
+        # STOPPED before it was baked — Skytap 409s a bake on a running environment.
+        self.calls = []
+        # A guest that will not shut down gracefully, the case `halted` exists for.
+        self.stubborn = stubborn
         self.vms = vms if vms is not None else [
             {"id": "vm-1", "name": "broker", "os_family": "linux",
              "interfaces": [{"id": "nic-1", "ip": "10.0.0.5",
@@ -338,15 +343,19 @@ class _StubAdapter:
     async def set_runstate(self, env_id, runstate):
         if self.fail_after_create:
             raise RuntimeError("the power-on failed")
+        self.calls.append(f"runstate:{runstate}")
         return {"id": env_id, "runstate": runstate}
 
     async def wait_for_runstate(self, env_id, target, **kw):
+        if self.stubborn and target == "stopped" and "runstate:halted" not in self.calls:
+            raise RuntimeError("the guest ignored the shutdown")
         return {"id": env_id, "runstate": target}
 
     async def get_environment(self, env_id):
         return {"id": env_id, "vms": self.vms}
 
     async def create_template(self, env_id, name, description=""):
+        self.calls.append("bake")
         return {"id": "tpl-new", "name": name}
 
     async def delete_environment(self, env_id):
@@ -387,6 +396,38 @@ def _run_build(adapter, *, install_runner=True, prepare=None, keep=False):
     out = tb.serialize(row)
     db3.close()
     return out
+
+
+def test_the_environment_is_stopped_before_it_is_baked():
+    """Skytap answers a bake on a running multi-VM environment with
+
+        409 {"error":"The machine was busy. Try again later."}
+
+    and "try again later" never comes true — it fails that way for as long as the VMs are
+    up. The shutdown is therefore a pipeline stage, and its ORDER is the whole point, so
+    it is pinned here rather than left to be re-derived from a 5-minute build.
+    """
+    async def _prepare(mod, env_id, vm):
+        return "runner installed over SSH"
+
+    adapter = _StubAdapter()
+    out = _run_build(adapter, prepare=_prepare)
+    assert out["status"] == tb.STATUS_READY, out
+    assert adapter.calls == ["runstate:running", "runstate:stopped",
+                             "bake"], adapter.calls
+
+
+def test_a_guest_that_will_not_shut_down_is_forced_off():
+    """`halted` is Skytap's documented escape hatch for a guest that ignores the shutdown.
+    Without it one hung Windows dialog wedges the whole build."""
+    async def _prepare(mod, env_id, vm):
+        return "runner installed over SSH"
+
+    adapter = _StubAdapter(stubborn=True)
+    out = _run_build(adapter, prepare=_prepare)
+    assert out["status"] == tb.STATUS_READY, out
+    assert adapter.calls == ["runstate:running", "runstate:stopped", "runstate:halted",
+                             "bake"], adapter.calls
 
 
 def test_a_successful_build_bakes_a_template_and_reaps_the_environment():

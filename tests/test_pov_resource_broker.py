@@ -142,6 +142,20 @@ def test_two_usable_credentials_are_refused_not_ordered():
         assert "a / b" not in str(exc), "the refusal quoted a credential"
 
 
+def test_the_caller_can_say_what_the_remedy_is():
+    """A template build has no login field, so the default "set it on the POV by hand"
+    sends the reader hunting for a control that does not exist on that page. Both refusals
+    carry the caller's sentence, not just the ambiguous one."""
+    for entries in ([{"text": "a / b"}, {"text": "c / d"}], [{"text": "not a login"}]):
+        try:
+            pov_credentials.pick(entries, vm_label="rb01",
+                                 remedy="Fix it on the platform.")
+            raise AssertionError("it did not refuse")
+        except pov_credentials.CredentialParseError as exc:
+            assert "Fix it on the platform." in str(exc), exc
+            assert "on the POV by hand" not in str(exc), exc
+
+
 def test_an_unparseable_entry_beside_a_good_one_is_treated_as_a_note():
     got = pov_credentials.pick(
         [{"text": "this VM is the RB host"}, {"text": "administrator / Passw0rd"}],

@@ -244,9 +244,15 @@ reached from outside and the environment needs only the customer-like VMs plus a
 A template is immutable — there is no *edit a template* call — so authoring is a bake:
 
 ```
-clone a base template → power on → check the contract → install the runner → save as a
-template → reap the scratch environment
+clone a base template → power on → check the contract → install the runner → shut the
+environment down → save as a template → reap the scratch environment
 ```
+
+**The shutdown is a stage, not a courtesy.** Skytap will not bake a multi-VM environment
+whose VMs are running: it answers `409 {"error":"The machine was busy. Try again later."}`,
+and later never arrives — it fails the same way for as long as they are up. The job stops
+the environment gracefully and waits; a guest that ignores the shutdown gets `halted`,
+which is Skytap's documented force-off and still settles on `stopped`.
 
 The scratch environment is created, used and reaped inside one job. Its id is committed the
 moment Skytap returns it, before anything else can fail, for the reason the whole
