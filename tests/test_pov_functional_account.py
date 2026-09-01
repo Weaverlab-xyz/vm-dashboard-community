@@ -44,7 +44,28 @@ from web_dashboard import database as d  # noqa: E402
 d.Base.metadata.create_all(bind=d.engine)
 
 from web_dashboard.services import (bt_tenant_service, pov_env_service,  # noqa: E402
-                                    pov_functional_account as fa, pov_wireup as w)
+                                    pov_functional_account as fa, ps_api_service,
+                                    pov_wireup as w)
+
+
+# The POV's Password Safe tenant, as `_env` registers it. Named so the assertions can
+# compare the WHOLE credential dict for equality instead of searching for the host inside
+# a stringified one. A substring check passes for that host in ANY position — including as
+# a path or query segment on a URL whose real host is the install's own appliance — which
+# is precisely the cross-tenant mistake these tests exist to catch, so the weaker check
+# was the wrong assertion as well as a CodeQL finding.
+_PS_HOST = "acme.ps.beyondtrustcloud.com"
+_PS_CLIENT_ID = "ps-cid"
+_PS_SECRET = "ps-sekrit"
+
+
+def _assert_povs_tenant(creds, what):
+    """``creds`` names this POV's Password Safe tenant and no other."""
+    assert creds, f"{what} was made with no tenant credentials at all"
+    expected = ps_api_service.tenant_creds(_PS_HOST, _PS_CLIENT_ID, _PS_SECRET)
+    assert creds == expected, (
+        f"{what} was pointed at {creds!r} rather than this POV's tenant. A call that "
+        f"lands on the install's own Password Safe succeeds and does the wrong thing.")
 
 
 def _name(prefix):
@@ -64,7 +85,7 @@ def _env(db, **kw):
     options.update(kw.pop("options", {}))
     ps = bt_tenant_service.create(
         db, kind="password_safe", name=_name("ps"),
-        base_url="acme.ps.beyondtrustcloud.com", client_id="ps-cid", secret="ps-sekrit",
+        base_url=_PS_HOST, client_id=_PS_CLIENT_ID, secret=_PS_SECRET,
         created_by="t", options=options)
     env = d.PovEnvironment(platform="skytap", name=_name("poc"),
                            platform_environment_id="sky-1",
@@ -245,11 +266,8 @@ def test_the_mint_is_pointed_at_the_povs_tenant_and_not_the_singleton():
         asyncio.run(w.ps_context(db, env))
     # Both REST calls carry it, not just the create: a platform id read from the wrong
     # tenant is a number that means something else in this one.
-    for call in (ps.created[0], dict(zip(("name", "tenant"), ps.platform_lookups[0]))):
-        creds = call["tenant"]
-        assert creds, "a Password Safe call was made with no tenant credentials"
-        assert "acme.ps.beyondtrustcloud.com" in str(creds)
-        assert "ps-cid" in str(creds)
+    _assert_povs_tenant(ps.created[0]["tenant"], "the functional-account create")
+    _assert_povs_tenant(ps.platform_lookups[0][1], "the platform lookup")
     db.close()
 
 
@@ -486,7 +504,7 @@ def test_teardown_deletes_only_what_this_pov_minted_and_clears_it():
     assert [i for i, _ in ps.deleted] == [901]
     # Pointed at the POV's tenant — a delete against the wrong one 404s and reports the
     # account "already gone" while it is still sitting in the customer's tenant.
-    assert "acme.ps.beyondtrustcloud.com" in str(ps.deleted[0][1])
+    _assert_povs_tenant(ps.deleted[0][1], "the functional-account delete")
     assert "Deleted the linux functional account" in line
     db.refresh(env)
     assert env.ps_linux_functional_account_id is None
