@@ -1205,9 +1205,14 @@ class PovCloudFeatureConfig(BaseModel):
     ``/api/aws/*`` stay 404 on a POV — their deploys resolve the global BeyondTrust
     tenant singletons. The POV's view of its cloud is ``/pov/cloud``.
 
-    One cloud's fields per built adapter. Azure, GCP and OCI add theirs alongside when
-    their drivers land; until then ``pov_cloud_platform`` will not accept their names —
-    see ``lab_platforms.CLOUD_PLATFORMS``.
+    One cloud's fields per built driver. GCP and OCI add theirs alongside when they land;
+    until then ``pov_cloud_platform`` will not accept their names — see
+    ``lab_platforms.CLOUD_PLATFORMS``.
+
+    The panel renders only the selected cloud's block, but every field stays declared here
+    whatever is chosen. A bound-but-undeclared field is silently DISCARDED on save, and a
+    model that changed shape with the selection would drop the other cloud's credentials
+    the first time somebody switched — which reads as the dashboard having forgotten them.
     """
     enabled: bool = False
     # "" | "aws". Validated against the registry rather than a literal tuple here, so a
@@ -1216,6 +1221,11 @@ class PovCloudFeatureConfig(BaseModel):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""     # encrypted at rest
     aws_region: str = "us-east-2"
+    azure_client_id: str = ""
+    azure_client_secret: str = ""       # encrypted at rest
+    azure_tenant_id: str = ""
+    azure_subscription_id: str = ""
+    azure_location: str = "centralus"
 
     @field_validator("pov_cloud_platform")
     @classmethod
@@ -1704,6 +1714,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "proxmox_token_secret", "proxmox_password",
     "skytap_api_token",
     "aws_secret_access_key",
+    "azure_client_secret",
     "vsphere_password",
     "hyperv_password",
     "nutanix_password",

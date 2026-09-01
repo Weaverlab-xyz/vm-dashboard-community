@@ -178,8 +178,12 @@ def test_an_unparseable_network_is_refused_before_a_row_exists():
 
 
 def test_a_cloud_with_no_adapter_is_refused_by_name():
+    """Named dynamically rather than hardcoded: `CLOUD_PLATFORMS` grows as drivers land,
+    and a test naming the next one has to be edited by the commit that adds it."""
     db = _session()
-    msg = _refusal(svc.create, db, cloud="azure", name="future", vms=[_vm()])
+    unsupported = next(c for c in ("gcp", "oci", "digitalocean", "nimbus")
+                       if c not in lp.CLOUD_PLATFORMS)
+    msg = _refusal(svc.create, db, cloud=unsupported, name="future", vms=[_vm()])
     assert _CLOUD in msg, "the refusal should say what IS supported"
 
 

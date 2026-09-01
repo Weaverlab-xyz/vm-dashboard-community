@@ -201,7 +201,7 @@ left to paste. A field the POV already carries is never overwritten.
 
 Skytap is not the only place a POV can run. A POV instance may also select **one** public
 cloud, and build POVs on it through the same pages, the same blueprints, the same wire-up
-and the same auto-delete timer. Today that cloud is AWS.
+and the same auto-delete timer. Today that cloud is AWS or Azure.
 
 Turn it on in **Settings → Integrations → POV cloud provider**: pick the provider, paste
 its credentials, save, then **Test connection**. The POV page's platform selector gains it
@@ -300,6 +300,56 @@ That is worth knowing because it is what makes a **partial failure safe**. Creat
 environment is many API calls, not one, and a build can fail at VM three of five. The id is
 written to the POV row *before the first call*, so Destroy and the reaper both find
 everything that did get made. Tear the failed POV down from the POV page and build again.
+
+### Azure, and where it differs from AWS
+
+Azure is the second provider, and it maps onto this feature more naturally than AWS
+because it has the primitive AWS lacks: **a resource group is an environment.** One per
+POV, named `povenv-<name>`, and destroying the POV is a single `begin_delete` on the group
+that takes the VMs, their managed disks, NICs, public addresses, the VNet and the NSG with
+it, in ARM's own dependency order. The AWS driver unpicks six resource types by hand for
+the same result.
+
+Give the service principal **Contributor** on its own subscription, or on a scope where it
+can create resource groups.
+
+| | AWS | Azure |
+|---|---|---|
+| Environment | A tag on every resource | A resource group |
+| Teardown | Six resource types, in order | One call |
+| Listing | Per region | Subscription-wide, so the orphan sweep is complete |
+| Platform login | None | **Generated per POV** — see below |
+| Suspend | `StopInstances` | `begin_deallocate`, never power-off |
+| Private address | Persists across stop/start | **Made static**, because it does not |
+
+**Azure POVs have a platform login; AWS ones do not.** Not an inconsistency — Azure's
+`os_profile` requires an admin account at VM creation, for Linux as well as Windows, so a
+POV built there has one whether anybody wanted it or not. The dashboard generates it,
+stores it encrypted alongside the POV's other secrets, and puts the same account on every
+VM in the environment. That is why Azure's `stored_credentials` capability is True and
+AWS's is False, and it means the Resource Broker install has the login it needs without
+anybody pasting one.
+
+**The two Azure-specific traps this driver exists to avoid**, both of which fail quietly:
+
+- **Power-off is not suspend.** `begin_power_off` leaves a VM "Stopped" and still billing
+  for its compute. Only `begin_deallocate` reaches "Stopped (deallocated)". A nightly
+  schedule making that mistake would cost the full compute bill while the page reported
+  every POV asleep.
+- **Private addresses are allocated statically here**, unlike on the other three clouds. A
+  deallocated Azure VM with a dynamic private address can return on a different one — and
+  by then the wire-up has written the old address into a PRA jump item, a Password Safe
+  managed system and an Entitle integration. Every scheduled suspend would silently
+  invalidate all three.
+
+The network security group carries **no custom rules**, deliberately: Azure's defaults
+already allow the VNet to talk to itself, deny everything inbound from outside it, and
+allow outbound. Restating them would be three more things to keep correct and no change in
+behaviour.
+
+Template images take either a marketplace URN (`publisher:offer:sku:version`) or the
+resource id of a managed or gallery image. Anything else is refused by name — ARM's own
+error for a malformed reference names neither the field nor the value.
 
 ### The suspend schedule
 
@@ -428,7 +478,7 @@ Read these off the platform's capability row rather than discovering them:
 |---|---|
 | **Share link** | No cloud has publish sets. The customer's front door is PRA, which makes PRA **required** for a cloud POV where it is optional on Skytap |
 | **Idle suspend** | No cloud has a platform idle timer. The dashboard supplies a scheduled suspend instead |
-| **Stored credentials** | AWS holds no guest login to read back. The platform login comes from your image and its Vault account |
+| **Stored credentials** | **AWS only.** AWS holds no guest login to read back, so the platform login comes from your image and its Vault account. Azure generates one — see above |
 | **Published services** | No NAT-a-guest-port primitive, and none needed — access is PRA through this POV's own Gateway |
 
 ---
