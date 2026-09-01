@@ -510,6 +510,15 @@
         </label>
       </template>
 
+      <p class="md:col-span-2 -mt-1 text-xs text-gray-500">
+        These pickers list the tenants registered under <span class="font-medium">BeyondTrust
+        tenants</span> on <a href="/pov#bt-tenants" class="underline hover:no-underline">the POV
+        page</a> — not the single set in Settings, which is one tenant for the whole instance.
+        Left unchosen, a POV built from this blueprint falls back to that set.
+        <span x-show="!tenants.length" x-cloak class="text-amber-700">No tenants are registered
+        yet, so the pickers are empty.</span>
+      </p>
+
       <label class="block">
         <span class="text-sm font-medium text-gray-700">Gateway name</span>
         <input type="text" x-model="bp.gateway_name"

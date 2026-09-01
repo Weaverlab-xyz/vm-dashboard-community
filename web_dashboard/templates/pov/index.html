@@ -602,7 +602,7 @@
   </div>
 
   <!-- BeyondTrust tenants -->
-  <div x-show="!loading" class="space-y-3">
+  <div id="bt-tenants" x-show="!loading" class="space-y-3">
     <div class="flex items-baseline justify-between">
       <h2 class="text-lg font-medium text-gray-900">BeyondTrust tenants</h2>
       <button @click="showTenants = !showTenants" class="text-xs text-blue-600 underline"
@@ -976,6 +976,14 @@ function povPage() {
         return;
       }
       await this.load();
+      // /pov#bt-tenants is the link the Blueprints form points at when someone asks where
+      // a tenant is set. The section is collapsed by default and only rendered once the
+      // page has loaded, so the hash alone lands on nothing -- open it and go there.
+      if (window.location.hash === '#bt-tenants') {
+        this.showTenants = true;
+        this.$nextTick(() => document.getElementById('bt-tenants')
+          ?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      }
     },
 
     async load() {
