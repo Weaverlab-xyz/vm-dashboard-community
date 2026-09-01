@@ -40,6 +40,11 @@ from . import config_service, job_service, pov_share, pov_use_cases
 
 logger = logging.getLogger(__name__)
 
+# Who a customer-initiated start is attributed to. Its own actor, like `pov-schedule`
+# and `pov-spend-cap`: the /jobs row should say a prospect pressed the button rather
+# than name the SE who set the POV up.
+WAKE_ACTOR = "pov-accessor"
+
 
 class AccessorError(Exception):
     """A refusal carrying the remedy, not just the cause."""
@@ -476,6 +481,10 @@ def self_view(db: Session, user) -> dict:
         "use_cases": pov_use_cases.describe(db, env),
         "share": share_view(db, env),
         "wired": wired_view(db, env),
+        # Whether the prospect may start a suspended environment, and why not when
+        # they may not. Served with the page rather than probed — a control that
+        # fails when pressed is worse than one that explains itself.
+        "wake": wake_view(db, env),
     }
 
 
@@ -492,3 +501,81 @@ def env_for_writes(db: Session, user) -> PovEnvironment:
             "this login is not attached to a POV environment any more — it has probably "
             "been reaped. Ask your contact for a new one.")
     return env
+
+
+def wake_view(db: Session, env: PovEnvironment) -> dict:
+    """Whether this POV's accessor may start it, and why not when they may not.
+
+    A suspend schedule without a customer-reachable resume is a broken demo: the POV goes
+    to sleep at 19:00 and the prospect trying it at nine the next morning finds a dead
+    environment and an SE to email. This is the other half of that feature.
+
+    Computed and served with the page rather than probed, so the button renders in the
+    state it will actually behave in. Every refusal below is a sentence the prospect can
+    act on — "ask your contact" is the answer to most of them, and saying so is better
+    than a control that fails when pressed.
+    """
+    from . import lab_platforms, pov_env_service, pov_spend
+
+    out = {"can_wake": False, "reason": "", "running": False, "starting": False}
+    runstate = (env.runstate or "").lower()
+    out["running"] = runstate == "running"
+
+    if out["running"]:
+        out["reason"] = "This environment is already running."
+        return out
+    if pov_env_service.power_job_in_flight(db, env.id):
+        # Not an error, and not a refusal to show — the prospect pressed it and something
+        # is happening. A second job would be a race with the first over one environment.
+        out["starting"] = True
+        out["reason"] = "This environment is starting. Give it a few minutes."
+        return out
+
+    actionable, why = pov_env_service.may_act_on(env)
+    if not actionable:
+        out["reason"] = why
+        return out
+    if not lab_platforms.supports(env.platform, "runstate"):
+        out["reason"] = "This environment cannot be started from here."
+        return out
+
+    # **A POV over its spend cap is deliberately NOT wakeable.** The cap latches once it
+    # has acted, precisely so an operator can decide what to do without the sweep
+    # re-suspending underneath them — which means a prospect who woke it would leave it
+    # running past its cap indefinitely, and the one control the account owner has would
+    # be the one anybody could undo.
+    if pov_spend.describe(env).get("over"):
+        out["reason"] = ("This environment has reached the spend limit set for it. Ask "
+                         "your contact to raise it before starting it again.")
+        return out
+
+    out["can_wake"] = True
+    return out
+
+
+def wake(db: Session, env: PovEnvironment) -> dict:
+    """Start a POV. Returns the new wake view plus the job id.
+
+    Start only — never suspend and never destroy. An accessor is a prospect with a login
+    into one environment, and this one verb is the whole surface they have.
+
+    Takes the ENVIRONMENT, not the user, and the route resolves it with the same
+    `_accessor_env` helper every other accessor write uses. Resolving it in here would
+    work identically and would hide the property at the call site — and
+    `test_no_accessor_write_route_takes_an_environment_id` is right to insist it stays
+    visible there, because that is where a later edit would break it.
+    """
+    from . import job_service
+
+    view = wake_view(db, env)
+    if not view["can_wake"]:
+        raise AccessorError(view["reason"] or "This environment cannot be started.")
+
+    job = job_service.create_job(
+        db, job_type="pov_env_power", created_by=WAKE_ACTOR,
+        workgroup=env.workgroup,
+        metadata={"environment_id": env.id, "runstate": "running"})
+    logger.info("POV %s: woken from the accessor page (job %s)", env.name, job.id)
+    out = wake_view(db, env)
+    out["job_id"] = job.id
+    return out

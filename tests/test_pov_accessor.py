@@ -942,6 +942,142 @@ def test_the_open_question_is_recorded_where_the_person_who_can_answer_it_looks(
     assert "Ephemeral Accounts" in page, \
         "the page does not ask the operator to confirm the connection mode"
 
+def _fn_code(path, name):
+    """A function's executable source: no comments, no docstring.
+
+    Through `ast`, because this codebase documents the calls it deliberately does not make
+    — "never suspend and never destroy" — and a raw-text scan reads the warning as the bug,
+    then passes again the day somebody makes it.
+    """
+    for node in ast.walk(ast.parse(_read(path))):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body = body[1:]
+            return "\n".join(ast.unparse(s) for s in body).replace("'", '"')
+    raise AssertionError(f"no function named {name} in {path}")
+
+
+# ── the Wake button ──────────────────────────────────────────────────────────
+#
+# The other half of the suspend schedule: a POV that sleeps at 19:00 and cannot be woken
+# by the person evaluating it is a broken demo.
+
+class _WakeRow:
+    """A POV, as `wake_view` reads one."""
+
+    def __init__(self, runstate="stopped", status="active", platform="aws",
+                 cap=None, spent=0.0, capped_at=None):
+        self.id = "env-wake"
+        self.name = "acme-pov"
+        self.platform = platform
+        self.status = status
+        self.runstate = runstate
+        self.workgroup = None
+        self.spend_cap_usd = cap
+        self.spend_estimate_usd = spent
+        self.spend_accrued_at = None
+        self.spend_warned_at = None
+        self.spend_capped_at = capped_at
+
+
+def _wake_view(row, in_flight=False):
+    """`wake_view` with the one database question stubbed."""
+    from web_dashboard.services import pov_accessor_service, pov_env_service
+    original = pov_env_service.power_job_in_flight
+    pov_env_service.power_job_in_flight = lambda db, env_id: in_flight
+    try:
+        return pov_accessor_service.wake_view(None, row)
+    finally:
+        pov_env_service.power_job_in_flight = original
+
+
+def test_a_suspended_pov_can_be_woken_by_its_accessor():
+    view = _wake_view(_WakeRow(runstate="stopped"))
+    assert view["can_wake"] is True, view["reason"]
+    assert view["running"] is False
+
+
+def test_a_running_pov_offers_no_button():
+    view = _wake_view(_WakeRow(runstate="running"))
+    assert view["can_wake"] is False and view["running"] is True
+
+
+def test_a_pov_already_starting_says_so_rather_than_queueing_a_second_job():
+    """Two power jobs for one environment is a race over its runstate, and a prospect
+    pressing a button that appears to do nothing will press it again."""
+    view = _wake_view(_WakeRow(runstate="stopped"), in_flight=True)
+    assert view["can_wake"] is False
+    assert view["starting"] is True
+    assert "few minutes" in view["reason"]
+
+
+def test_a_pov_over_its_spend_cap_is_not_wakeable():
+    """The important refusal. The cap LATCHES once it has acted, so the sweep will not
+    re-suspend — which means a prospect who woke a capped POV would leave it running past
+    its cap indefinitely, and the account owner's one cost control would be the one
+    anybody could undo."""
+    from datetime import datetime as _dt
+    view = _wake_view(_WakeRow(runstate="stopped", cap=100.0, spent=120.0,
+                               capped_at=_dt(2026, 9, 1)))
+    assert view["can_wake"] is False
+    assert "spend limit" in view["reason"]
+    assert "your contact" in view["reason"], "the refusal gives the prospect no next step"
+
+
+def test_a_pov_under_its_cap_is_still_wakeable():
+    view = _wake_view(_WakeRow(runstate="stopped", cap=100.0, spent=40.0))
+    assert view["can_wake"] is True, view["reason"]
+
+
+def test_a_pov_that_is_not_actionable_is_refused_with_the_lifecycle_reason():
+    for status in ("provisioning", "destroying", "destroyed"):
+        view = _wake_view(_WakeRow(runstate="stopped", status=status))
+        assert view["can_wake"] is False, f"{status} was wakeable"
+        assert view["reason"], f"{status} refused with no reason"
+
+
+def test_the_accessor_can_only_start_and_never_stop_or_destroy():
+    """An accessor is a prospect with a login into one environment. The whole surface they
+    have is this one verb."""
+    body = _fn_code(_SERVICE, "wake")
+    assert '"runstate": "running"' in body, "wake does not ask for a start"
+    for banned in ("stopped", "suspend", "destroy"):
+        assert banned not in body.lower(), f"the accessor wake path can {banned}"
+
+
+def test_waking_enqueues_the_same_job_the_se_button_does():
+    """One teardown path, one power path. The action gets a /jobs row, Live Output and a
+    place in the failed-jobs panel like any other."""
+    body = _fn_code(_SERVICE, "wake")
+    assert 'job_type="pov_env_power"' in body
+
+
+def test_a_customer_start_is_attributed_to_its_own_actor():
+    """The /jobs row should say a prospect pressed the button, not name the SE who set the
+    POV up — the same reason `pov-schedule` and `pov-spend-cap` have their own."""
+    from web_dashboard.services import pov_accessor_service
+    assert pov_accessor_service.WAKE_ACTOR == "pov-accessor"
+    body = _fn_code(_SERVICE, "wake")
+    assert "created_by=WAKE_ACTOR" in body
+
+
+def test_the_page_renders_the_button_from_the_state_the_api_served():
+    """Not probed. A control that fails when pressed is worse than one that explains
+    itself, and the prospect is the audience least able to interpret a failure."""
+    page = _read(_ACCESS_PAGE)
+    assert "wake.can_wake" in page, "the page does not read the served wake state"
+    assert "/api/pov/accessor/self/wake" in page
+    assert "wake.reason" in page, "a refusal is never shown to the prospect"
+
+
+def test_the_page_offers_no_way_to_suspend_or_destroy():
+    page = _read(_ACCESS_PAGE)
+    for banned in ("self/power", "self/destroy", "'stopped'", '"stopped"'):
+        assert banned not in page, f"the accessor page offers {banned}"
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

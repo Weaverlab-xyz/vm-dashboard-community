@@ -10,6 +10,7 @@
   POST   /api/pov/accessor/self/use-cases/{cid}  tick a card / leave a note (accessor)
   DELETE /api/pov/accessor/self/use-cases/{cid}  un-tick it                (accessor)
   POST   /api/pov/accessor/self/share/reveal     the lab link's password   (accessor)
+  POST   /api/pov/accessor/self/wake             start a suspended POV    (accessor)
 
 Two routers in one module because they are two halves of one feature, and one file is
 where the relationship between them stays visible. Their AUTH is what differs, and sharply:
@@ -252,6 +253,28 @@ async def clear_self_use_case(card_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"card_id": card_id, "cleared": removed,
             "summary": pov_use_cases.summary_for(db, env)}
+
+
+@self_router.post("/self/wake")
+async def wake_self(db: Session = Depends(get_db),
+                    current_user: User = Depends(get_current_user)):
+    """Start the POV this login is attached to.
+
+    The other half of the suspend schedule. A POV that goes to sleep at 19:00 and cannot
+    be woken by the person evaluating it is a broken demo — they arrive at nine, find a
+    dead environment, and email the SE.
+
+    **Start only.** No id is taken, so the environment comes from the session's own
+    binding; there is no suspend and no destroy here, and no parameter that could name
+    somebody else's POV. A POV over its spend cap is refused — see
+    ``pov_accessor_service.wake_view`` for why the account owner's one control must not be
+    the one anybody can undo.
+    """
+    env = _accessor_env(db, current_user)
+    try:
+        return pov_accessor_service.wake(db, env)
+    except pov_accessor_service.AccessorError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @self_router.post("/self/share/reveal")

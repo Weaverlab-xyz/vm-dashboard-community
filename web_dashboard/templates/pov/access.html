@@ -87,6 +87,37 @@
         <!-- The way in. Shown as text with a copy button rather than as an anchor, the
              same as on the SE's page: this opens a session onto the lab, and a stray
              middle-click is not how anybody should arrive there. -->
+        {# The other half of the suspend schedule. A POV that sleeps at 19:00 and cannot be
+           woken by the person evaluating it is a broken demo — they arrive at nine, find a
+           dead environment, and email their contact.
+
+           Rendered from the state the API served rather than probed, so the button is only
+           offered when pressing it will work, and every other case says why in a sentence
+           a prospect can act on. #}
+        <template x-if="wake.can_wake || wake.starting || (!wake.running && wake.reason)">
+          <div class="rounded-lg border px-4 py-3 flex items-start justify-between gap-4"
+               :class="wake.can_wake ? 'border-blue-200 bg-blue-50'
+                       : (wake.starting ? 'border-blue-200 bg-blue-50'
+                                        : 'border-gray-200 bg-gray-50')">
+            <div class="min-w-0">
+              <p class="text-sm font-medium"
+                 :class="wake.can_wake || wake.starting ? 'text-blue-900' : 'text-gray-700'"
+                 x-text="wake.can_wake ? 'This environment is asleep'
+                         : (wake.starting ? 'Starting up' : 'This environment is asleep')"></p>
+              <p class="text-xs mt-0.5"
+                 :class="wake.can_wake || wake.starting ? 'text-blue-800' : 'text-gray-500'"
+                 x-text="wake.can_wake
+                         ? 'It is suspended outside working hours to keep costs down. Start it when you need it.'
+                         : wake.reason"></p>
+            </div>
+            <button x-show="wake.can_wake" @click="doWake()" :disabled="waking"
+                    class="shrink-0 px-3 py-2 text-sm font-medium rounded-md bg-blue-600 text-white
+                           hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+              <span x-text="waking ? 'Starting…' : 'Start it'"></span>
+            </button>
+          </div>
+        </template>
+
         <div x-show="share.url" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Your environment</h2>
           <div class="mt-3 flex items-center gap-2">
@@ -234,6 +265,8 @@
         wired: [],
         sharePassword: '',
         revealing: false,
+        wake: { can_wake: false, reason: '', running: false, starting: false },
+        waking: false,
         busy: '',
         saveError: '',
 
@@ -255,6 +288,7 @@
               this.summary = (data.use_cases || {}).summary || this.summary;
               this.share = data.share || {};
               this.wired = data.wired || [];
+              this.wake = data.wake || this.wake;
             }
           } catch (e) {
             this.error = 'Could not load your evaluation.';
@@ -283,6 +317,23 @@
           const data = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(data.detail || `${res.status}`);
           return data;
+        },
+
+        // Started, not toggled. There is deliberately no Suspend here: the schedule and
+        // the spend cap own that, and a prospect who could stop the environment could
+        // also stop somebody else's demo of it.
+        async doWake() {
+          this.waking = true;
+          this.saveError = '';
+          try {
+            this.wake = await this.post('/api/pov/accessor/self/wake', {}) || this.wake;
+            // The runstate the page is showing is now stale — the job is queued, not
+            // finished. Saying "starting" is honest; saying "running" would not be.
+            this.env = { ...this.env, runstate: 'starting' };
+          } catch (e) {
+            this.saveError = e.message;
+          }
+          this.waking = false;
         },
 
         // An empty `state` un-ticks. One handler for both buttons, so a card can never end
