@@ -347,6 +347,105 @@
         </template>
       </div>
 
+      <!-- ── Summary ──────────────────────────────────────────────────── -->
+      <!-- The one tab written for AFTER a POV is over. Its data comes from
+           /summary, which serves a destroyed POV as readily as a live one — the record
+           was always kept, and until the archive on /pov nothing could reach it. -->
+      <div x-show="tab === 'summary'" class="space-y-6">
+        <template x-if="summary_">
+          <div class="space-y-6">
+
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <div class="flex items-start justify-between gap-4">
+                <div>
+                  <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+                    What this evaluation covered
+                  </h2>
+                  <p class="text-sm text-gray-500 mt-1">
+                    <span x-text="summary_.coverage.done"></span> of
+                    <span x-text="summary_.coverage.total"></span> in scope<span
+                      x-show="summary_.coverage.skipped"> · <span
+                      x-text="summary_.coverage.skipped"></span> skipped</span>
+                    <span x-show="summary_.environment.products.length">
+                      · <span x-text="summary_.environment.products.join(', ')"></span>
+                    </span>
+                  </p>
+                  <!-- The claim the data actually supports. "They were given a login" is
+                       not the same evidence as "they used it". -->
+                  <p x-show="summary_.customer.took_part" class="text-sm text-violet-800 mt-2">
+                    The customer worked the checklist themselves.
+                  </p>
+                </div>
+                <button @click="copySummary()"
+                        class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 shrink-0">
+                  Copy as Markdown
+                </button>
+              </div>
+              <p x-show="notice" class="text-xs text-green-700 mt-2" x-text="notice"></p>
+            </div>
+
+            <div x-show="summary_.by_persona.length"
+                 class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div class="overflow-x-auto">
+                <table class="min-w-full text-sm">
+                  <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                    <tr>
+                      <th class="text-left px-5 py-2 font-medium">Role</th>
+                      <th class="text-left px-4 py-2 font-medium">Covered</th>
+                      <th class="text-left px-4 py-2 font-medium">Skipped</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-100">
+                    <template x-for="p in summary_.by_persona" :key="p.persona">
+                      <tr>
+                        <td class="px-5 py-2 text-gray-900" x-text="p.label"></td>
+                        <td class="px-4 py-2 text-gray-600">
+                          <span x-text="p.done"></span> / <span x-text="p.in_scope"></span>
+                        </td>
+                        <td class="px-4 py-2 text-gray-600" x-text="p.skipped || '—'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- What they said. The reason this tab is worth more than the counts above
+                 it, and rendered with x-text because somebody outside the account typed
+                 it. -->
+            <div x-show="summary_.notes.length" class="space-y-3">
+              <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+                What was said
+              </h3>
+              <template x-for="n in summary_.notes" :key="'note-' + n.id">
+                <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                  <p class="text-sm font-medium text-gray-900" x-text="n.title"></p>
+                  <p class="text-sm italic mt-1"
+                     :class="n.by_kind === 'accessor' ? 'text-violet-900' : 'text-gray-600'"
+                     x-text="n.note"></p>
+                  <p class="text-xs text-gray-400 mt-1">
+                    <span x-text="n.persona_label"></span> ·
+                    <span x-text="n.by_kind === 'accessor' ? 'the customer' : (n.by || 'your team')"></span>
+                  </p>
+                </div>
+              </template>
+            </div>
+
+            <div x-show="!summary_.covered.length && !summary_.skipped.length && !summary_.notes.length"
+                 class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <p class="text-sm text-gray-500">
+                Nothing has been ticked off yet. Work the
+                <button @click="select('use-cases')" class="underline hover:no-underline">Use cases</button>
+                tab, or hand the customer a login on the
+                <button @click="select('access')" class="underline hover:no-underline">Access</button>
+                tab and let them.
+              </p>
+            </div>
+
+          </div>
+        </template>
+      </div>
+
       <!-- ── Access ───────────────────────────────────────────────────── -->
       <div x-show="tab === 'access'" class="space-y-6">
 
@@ -513,11 +612,13 @@
       loading: true,
       error: '',
       busy: '',
+      notice: '',
       env: null,
       groups: [],
       products: {},
       summary: { done: 0, skipped: 0, total: 0, cards: 0 },
       accessors: [],
+      summary_: null,
       accessorForm: { email: '', full_name: '', days: null },
       minting: false,
       registering: false,
@@ -533,6 +634,7 @@
         { id: 'share',     label: 'Share' },
         { id: 'use-cases', label: 'Use cases' },
         { id: 'access',    label: 'Access' },
+        { id: 'summary',   label: 'Summary' },
       ],
 
       async init() {
@@ -542,7 +644,8 @@
         // every card on the page point at the same screen.
         const hash = window.location.hash.slice(1);
         if (this.tabs.some(t => t.id === hash)) this.tab = hash;
-        await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadAccessors()]);
+        await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadAccessors(),
+                           this.loadSummary()]);
         this.loading = false;
       },
 
@@ -587,6 +690,59 @@
           // Left silent on purpose: the environment above is the page, and a checklist
           // that failed to load must not replace it with an error.
         }
+      },
+
+      async loadSummary() {
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/summary`);
+          if (!res.ok) return;
+          this.summary_ = await res.json();
+        } catch (e) {
+          // Silent, like the others: the environment is the page.
+        }
+      },
+
+      // Built in the browser from what is already loaded, and copied rather than
+      // downloaded: the thing an SE does with this is paste it into a renewal note or a
+      // CRM, and a file on disk is one more step to the same place.
+      summaryMarkdown() {
+        const s = this.summary_;
+        if (!s) return '';
+        const e = s.environment;
+        const lines = [
+          `# ${e.name}`,
+          '',
+          `- Ran on: ${e.platform}${e.template ? ' · ' + e.template : ''}`,
+          `- Started: ${e.created_at ? e.created_at.slice(0, 10) : 'unknown'}`,
+          `- Wired into: ${e.products.length ? e.products.join(', ') : 'nothing yet'}`,
+          `- Covered: ${s.coverage.done} of ${s.coverage.total} in scope` +
+            (s.coverage.skipped ? ` · ${s.coverage.skipped} skipped` : ''),
+        ];
+        if (s.customer.took_part) {
+          lines.push(`- The customer worked the checklist themselves ` +
+                     `(${s.customer.accessors_issued} login(s) issued)`);
+        }
+        const section = (title, rows) => {
+          if (!rows.length) return;
+          lines.push('', `## ${title}`, '');
+          rows.forEach(r => {
+            lines.push(`- **${r.title}** — ${r.persona_label}` +
+                       (r.by_kind === 'accessor' ? ' · marked by the customer' : ''));
+            if (r.note) lines.push(`  > ${r.note.replace(/\n/g, ' ')}`);
+          });
+        };
+        section('Covered', s.covered);
+        section('Skipped', s.skipped);
+        const orphans = s.notes.filter(
+          n => !s.covered.some(c => c.id === n.id) && !s.skipped.some(k => k.id === n.id));
+        section('Commented on, no verdict', orphans);
+        return lines.join('\n');
+      },
+
+      copySummary() {
+        this.copy(this.summaryMarkdown());
+        this.notice = 'Summary copied.';
+        setTimeout(() => { this.notice = ''; }, 2500);
       },
 
       async loadAccessors() {

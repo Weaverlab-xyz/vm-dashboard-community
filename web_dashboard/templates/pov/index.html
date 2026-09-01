@@ -510,6 +510,65 @@
     </div>
   </div>
 
+  <!-- Past POVs. The table above filters destroyed rows out, which is right for a list of
+       things you can act on — and is why a finished evaluation had become unreachable
+       without its uuid. The record was always kept; this is the way back to it. Read-only
+       by construction: there is nothing left to do to one of these. -->
+  <div x-show="archive.length" class="space-y-3">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-lg font-medium text-gray-900">Past POVs</h2>
+      <span class="text-xs text-gray-400" x-show="archiveTruncated">
+        showing the most recent <span x-text="archive.length"></span>
+      </span>
+    </div>
+    <p class="text-sm text-gray-500">
+      Destroyed environments. The infrastructure is gone; what the evaluation covered is not.
+    </p>
+    <div class="overflow-hidden border border-gray-200 rounded-lg">
+      <table class="min-w-full divide-y divide-gray-200 text-sm">
+        <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+          <tr>
+            <th class="px-4 py-2 text-left font-medium">Name</th>
+            <th class="px-4 py-2 text-left font-medium">Started</th>
+            <th class="px-4 py-2 text-left font-medium">Wired into</th>
+            <th class="px-4 py-2 text-left font-medium">Covered</th>
+            <th class="px-4 py-2 text-left font-medium">Customer</th>
+            <th class="px-4 py-2 text-left font-medium">Created by</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100 bg-white">
+          <template x-for="a in archive" :key="a.id">
+            <tr>
+              <td class="px-4 py-2">
+                <a :href="'/pov/' + a.id + '#summary'"
+                   class="font-medium text-blue-700 hover:underline" x-text="a.name"></a>
+              </td>
+              <td class="px-4 py-2 text-gray-600"
+                  x-text="a.created_at ? a.created_at.slice(0, 10) : '—'"></td>
+              <td class="px-4 py-2 text-gray-600 text-xs"
+                  x-text="a.products.length ? a.products.join(', ') : '—'"></td>
+              <td class="px-4 py-2 text-gray-600">
+                <span x-text="a.done"></span>
+                <span x-show="a.skipped" class="text-gray-400">
+                  · <span x-text="a.skipped"></span> skipped</span>
+              </td>
+              <!-- Two different facts, and only the second is evidence: a login issued,
+                   and a login used. -->
+              <td class="px-4 py-2 text-xs">
+                <span x-show="a.by_customer" class="text-violet-800"
+                      x-text="a.by_customer + ' ticked by them'"></span>
+                <span x-show="!a.by_customer && a.accessors_issued" class="text-gray-400"
+                      x-text="a.accessors_issued + ' login(s), unused'"></span>
+                <span x-show="!a.accessors_issued" class="text-gray-300">—</span>
+              </td>
+              <td class="px-4 py-2 text-gray-600" x-text="a.created_by || '—'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- BeyondTrust tenants -->
   <div x-show="!loading" class="space-y-3">
     <div class="flex items-baseline justify-between">
@@ -709,6 +768,8 @@ function povPage() {
     platform: '',
     platforms: [],
     managed: [],
+    archive: [],
+    archiveTruncated: false,
     environments: [],
     templates: [],
     // `<kind>_field` rather than the API's `<kind>_tenant_id`, because the kinds come
@@ -893,6 +954,7 @@ function povPage() {
       await this.loadTenants();
       await this.loadBlueprints();
       this.managed = await this.fetchList('/api/pov/managed', 'environments', true);
+      await this.loadArchive();
       if (this.notConfigured) { this.environments = []; this.templates = []; this.loading = false; return; }
       const [envs, tpls] = await Promise.all([
         this.fetchList('/api/pov/environments', 'environments'),
@@ -937,6 +999,21 @@ function povPage() {
       });
       if (res.status === 401) Alpine.store('auth').logout();
       return res;
+    },
+
+    // Before the notConfigured return above, deliberately: a lab platform whose token has
+    // been removed does not un-happen the evaluations already run, and the record of them
+    // is the one thing on this page that does not need the platform to be reachable.
+    async loadArchive() {
+      try {
+        const res = await this.apiFetch('/api/pov/managed/archive');
+        if (!res.ok) return;
+        const data = await res.json();
+        this.archive = data.environments || [];
+        this.archiveTruncated = !!data.truncated;
+      } catch (e) {
+        // A missing archive is not worth an error beside a page that loaded.
+      }
     },
 
     async fetchList(url, key, quiet) {

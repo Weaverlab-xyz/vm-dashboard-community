@@ -5,6 +5,10 @@
   GET    /api/pov/environments          — environments visible on the platform
   GET    /api/pov/environments/{id}     — one, live from the platform
   GET    /api/pov/managed               — the POVs this dashboard provisioned
+  GET    /api/pov/managed/archive       — the ones that have been destroyed, and what
+                                          each evaluation covered
+  GET    /api/pov/managed/{id}/summary  — one evaluation's account: what was run, what
+                                          was skipped, and what the customer said
   POST   /api/pov/managed               — provision one from a template
   POST   /api/pov/managed/reconcile     — read every managed environment back off the
                                           platform, now
@@ -59,7 +63,8 @@ from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, expiry_policy, expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
-                        pov_resource_broker, pov_share, pov_use_cases, pov_wireup)
+                        pov_resource_broker, pov_share, pov_summary, pov_use_cases,
+                        pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -318,6 +323,23 @@ async def list_managed(db: Session = Depends(get_db),
               .order_by(PovEnvironment.created_at.desc()).all())
     return {"environments": [_serialize(e, broker=pov_broker.describe(db, e))
                              for e in rows]}
+
+
+# DECLARED BEFORE /managed/{env_id}, AND THAT IS LOAD-BEARING. Routes match in
+# declaration order, so below it "archive" is captured as an environment id and this
+# endpoint answers "No such POV environment" — the same trap /pov/templates and
+# /pov/access carry a comment about, and the same silence when it is wrong.
+@router.get("/managed/archive")
+async def list_archive(limit: int = Query(pov_summary.DEFAULT_LIMIT),
+                       db: Session = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
+    """Evaluations that are over.
+
+    ``list_managed`` above filters destroyed rows out, which is right for a page of things
+    you can act on and is why a finished POV had become unreachable without its uuid. The
+    record was kept and the way to it was not.
+    """
+    return pov_summary.archive(db, limit=limit)
 
 
 @router.get("/managed/{env_id}")
@@ -1016,6 +1038,21 @@ async def clear_use_case(env_id: str, card_id: str, db: Session = Depends(get_db
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"card_id": card_id, "cleared": removed,
             "summary": pov_use_cases.summary_for(db, env)}
+
+
+@router.get("/managed/{env_id}/summary")
+async def get_summary(env_id: str, db: Session = Depends(get_db),
+                      current_user: User = Depends(get_current_user)):
+    """One evaluation's account. Serves a destroyed POV as readily as a live one.
+
+    No status filter, deliberately: this is the endpoint written for after a POV is over,
+    and refusing the finished ones would leave it describing only the POVs whose story is
+    not finished being told.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    return pov_summary.build(db, env)
 
 
 @router.delete("/managed/{env_id}", status_code=202)
