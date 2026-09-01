@@ -244,6 +244,11 @@ async def reconcile(db: Session, platform: str, *, job_id: str = "") -> dict:
             env.suspend_on_idle_seconds = idle
             changed = True
 
+        # The spend accrual, from the read this pass ALREADY made. No extra platform call
+        # and no billing API: the live environment dict carries every VM's shape, disk and
+        # runstate, which is all a list-price rate needs. See services/pov_spend.
+        _accrue_spend(db, env, raw)
+
         if changed:
             out["updated"] += 1
 
@@ -260,6 +265,11 @@ async def reconcile(db: Session, platform: str, *, job_id: str = "") -> dict:
 # the schedule: the /jobs row should say why the POV suspended at 19:00, and a username
 # there reads as somebody having pressed a button.
 SCHEDULE_ACTOR = "pov-schedule"
+
+# Who a spend-cap suspension is attributed to. Its own actor, like the
+# schedule's: the /jobs row should say why the POV stopped, and a username
+# there reads as somebody having pressed a button.
+SPEND_ACTOR = "pov-spend-cap"
 
 
 def _log(db: Session, job_id: str, line: str) -> None:
@@ -350,6 +360,120 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
     return acted
 
 
+def _spend_config() -> tuple:
+    """``(action, warn_percent)`` as configured, both already normalised."""
+    from ..config import settings
+    from . import config_service, pov_spend
+    try:
+        action = (config_service.get("pov_spend_cap_action")
+                  or getattr(settings, "pov_spend_cap_action", ""))
+        percent = (config_service.get("pov_spend_warn_percent")
+                   or getattr(settings, "pov_spend_warn_percent", None))
+    except Exception:  # noqa: BLE001 — a sweep never fails on a config read
+        action, percent = "", None
+    return pov_spend.normalize_action(action), pov_spend.warn_percent(percent)
+
+
+def _accrue_spend(db: Session, env: PovEnvironment, raw: dict) -> None:
+    """Add this interval's estimated cost to the row. Never raises.
+
+    Called from inside the platform loop, with the environment dict that loop already
+    fetched — so the accrual costs no extra API call, and it cannot disagree with the
+    runstate recorded beside it.
+
+    The rate is a LIST-PRICE estimate and only exists for clouds with a price source. Where
+    there is none the clock still moves on, so a rate that appears later does not then bill
+    for the blind period.
+    """
+    from . import pov_cloud_cost, pov_spend
+
+    try:
+        rate = pov_cloud_cost.rate_usd_per_hour(raw, env.region or "", env.platform)
+        total, at, _added = pov_spend.accrue(
+            env.spend_estimate_usd, env.spend_accrued_at, rate,
+            datetime.now(timezone.utc))
+        env.spend_estimate_usd = total
+        env.spend_accrued_at = at.replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        logger.warning("POV %s: could not accrue spend", env.id, exc_info=True)
+
+
+def sweep_spend(db: Session, *, job_id: str = "") -> int:
+    """Act on any POV that has newly reached its warning threshold or its cap.
+
+    Runs AFTER the platform loop, on totals that loop has just accrued. Returns how many
+    rows it acted on.
+
+    **The cap suspends; it never destroys.** That is what lets this feature exist without
+    the auto-delete timer's two arming clocks and dry-run mode — the worst outcome is a POV
+    somebody starts again, and the default action is `warn` regardless. Like the schedule,
+    it only ever ENQUEUES a `pov_env_power` job, so the action has a /jobs row, Live Output
+    and a place in the failed-jobs panel.
+    """
+    from . import pov_env_service, pov_spend
+
+    action, percent = _spend_config()
+    now = datetime.now(timezone.utc)
+    acted = 0
+
+    for env in (db.query(PovEnvironment)
+                  .filter(PovEnvironment.status == pov_env_service.STATUS_ACTIVE)
+                  .all()):
+        try:
+            reached = pov_spend.state(env, warn_at_percent=percent)
+        except Exception:  # noqa: BLE001 — one bad row never stops the sweep
+            logger.warning("POV %s: could not evaluate its spend cap", env.id,
+                           exc_info=True)
+            continue
+        if not reached:
+            continue
+
+        spent = float(env.spend_estimate_usd or 0.0)
+        cap = float(env.spend_cap_usd or 0.0)
+        if reached == "warn":
+            # Latched before the log line, not after: a warning that failed to write its
+            # latch would repeat every ten minutes for the rest of the evaluation.
+            env.spend_warned_at = now.replace(tzinfo=None)
+            acted += 1
+            logger.info("POV %s: spend at %.0f%% of its cap", env.name,
+                        spent / cap * 100 if cap else 0)
+            _log(db, job_id,
+                 f"{env.name}: estimated ${spent:,.2f} of its ${cap:,.2f} cap "
+                 f"({percent}% threshold reached)")
+            continue
+
+        # Reached the cap. Latched whatever the action is — under `warn` the operator has
+        # been told once and does not need telling every pass.
+        env.spend_capped_at = now.replace(tzinfo=None)
+        acted += 1
+        if action != pov_spend.ACTION_SUSPEND:
+            logger.info("POV %s: over its spend cap, action is warn-only", env.name)
+            _log(db, job_id,
+                 f"{env.name}: estimated ${spent:,.2f} is OVER its ${cap:,.2f} cap. "
+                 f"Nothing was suspended — the action is set to warn.")
+            continue
+        if (env.runstate or "") == "stopped" or not pov_env_service.may_act_on(env):
+            _log(db, job_id, f"{env.name}: over its ${cap:,.2f} cap and already stopped")
+            continue
+        if _power_job_in_flight(db, env.id):
+            # Not latched in this case — the cap has NOT been acted on yet, and latching
+            # here would let a POV sail past it because something else was mid-flight.
+            env.spend_capped_at = None
+            _log(db, job_id,
+                 f"{env.name}: over its cap, but a power job is already running")
+            continue
+        job = job_service.create_job(
+            db, job_type="pov_env_power", created_by=SPEND_ACTOR,
+            workgroup=env.workgroup,
+            metadata={"environment_id": env.id, "runstate": "stopped"})
+        logger.info("POV %s: suspended at its spend cap (job %s)", env.name, job.id)
+        _log(db, job_id,
+             f"{env.name}: estimated ${spent:,.2f} reached its ${cap:,.2f} cap — "
+             f"suspending (job {job.id})")
+
+    db.commit()
+    return acted
+
 async def run_reconcile(job_id: str, meta: dict) -> None:
     """The job body: reconcile every configured lab platform."""
     db = SessionLocal()
@@ -416,6 +540,22 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
                 db, job_id, f"schedule: enqueued {scheduled} power action(s)")
         result["scheduled_power_actions"] = scheduled
 
+        # The spend cap, AFTER the platform loop and after the schedule. It acts on totals
+        # the loop has just accrued, and running it last means a POV that hits its cap in
+        # the same pass a schedule would have resumed it ends up stopped — the cap is the
+        # stronger statement of the two.
+        try:
+            capped = sweep_spend(db, job_id=job_id)
+        except Exception as exc:  # noqa: BLE001 — a sweep never fails the pass
+            logger.warning("POV reconcile: the spend sweep failed", exc_info=True)
+            job_service.append_job_log(db, job_id, f"spend sweep FAILED: {exc}")
+            db.rollback()
+            capped = 0
+        if capped:
+            job_service.append_job_log(
+                db, job_id, f"spend: acted on {capped} POV(s) at or near their cap")
+        result["spend_actions"] = capped
+
         job_service.set_completed(db, job_id, result)
     finally:
         db.close()
@@ -429,7 +569,10 @@ def describe(env: PovEnvironment) -> dict:
     what this module exists to stop, and replacing "never asked" with "asked 40 minutes
     ago, silently" would be a smaller version of the same lie.
     """
-    from . import pov_schedule
+    from . import pov_cloud_cost, pov_schedule, pov_spend
+    action, percent = _spend_config()
+    spend = pov_spend.describe(env, warn_at_percent=percent, action=action)
+    priced = pov_cloud_cost.priced(env.platform)
     try:
         schedule = pov_schedule.describe(env)
     except pov_schedule.ScheduleError:
@@ -447,4 +590,9 @@ def describe(env: PovEnvironment) -> dict:
         # page shows exactly one of the two — they answer the same question and a row
         # offering both would be a row where neither is clearly in charge.
         "schedule": schedule,
+        # The spend cap. `priced` is what the page gates its control on: a cloud with no
+        # price source would offer a cap that never accrues, which is worse than no cap.
+        "spend": spend,
+        "spend_priced": priced,
+        "spend_reason": "" if priced else pov_cloud_cost.no_price_reason(env.platform),
     }

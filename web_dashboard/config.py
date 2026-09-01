@@ -1240,6 +1240,24 @@ class Settings(BaseSettings):
     # Note resource_expiry_max_total_hours (30d) still caps the total lifetime — raise it
     # if your evaluations run longer than that.
     pov_expiry_default_hours: int = 0              # 0 = don't stamp new POVs
+
+    # ── The per-POV spend cap ────────────────────────────────────────────────
+    # The money answer to the question the auto-delete timer answers in time. Accrued from
+    # list prices every reconcile pass, never read off a bill — see services/pov_spend for
+    # why a billing API would report a runaway rather than stop one.
+    #
+    # 0 = don't stamp a cap on new POVs, the same "master switch alone changes nothing"
+    # brake `resource_expiry_default_hours` uses. A POV can always be given one by hand.
+    pov_spend_cap_default_usd: float = 0.0
+    # "warn" | "suspend". Defaults to warn, and deliberately: the figure is a list-price
+    # ESTIMATE, and one that suspended a live customer demo on its first outing would be
+    # the last time anybody trusted it. Suspending is reversible in one click, which is
+    # why this needs no dry-run and no arming clock of its own.
+    pov_spend_cap_action: str = "warn"
+    # Warn at this percentage of the cap. Clamped to 10-99 by pov_spend.warn_percent:
+    # below 10 every POV warns immediately and the warning stops being read, above 99 the
+    # warning and the cap arrive together.
+    pov_spend_warn_percent: int = 80
     resource_expiry_extend_hours: int = 24         # what one Extend click adds
     resource_expiry_max_total_hours: int = 720     # 30d ceiling, counted from created_at
     resource_expiry_warn_hours: int = 24           # "expiring soon" window

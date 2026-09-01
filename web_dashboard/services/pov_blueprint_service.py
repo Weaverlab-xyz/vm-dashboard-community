@@ -96,6 +96,21 @@ def _validate(db: Session, *, platform: str, template_id: str, name: str,
 
 
 
+
+def _spend_cap(value) -> float | None:
+    """The blueprint's spend cap, validated.
+
+    Validated at SAVE, like the schedule and the tenant ids beside it: a stored cap that
+    only failed when a POV was provisioned from it would move a form error into somebody
+    else's provision job, weeks later.
+    """
+    from . import pov_spend
+    try:
+        return pov_spend.validate_cap(value)
+    except pov_spend.SpendError as exc:
+        raise BlueprintError(str(exc)) from None
+
+
 def _schedule_fields(suspend_at: str, resume_at: str, tz_name: str, days: str) -> dict:
     """The four schedule columns, validated.
 
@@ -120,7 +135,8 @@ def create(db: Session, *, platform: str, name: str, template_id: str,
            workgroup: str = "", created_by: str = "",
            source_build_id: str = "", suspend_at_local: str = "",
            resume_at_local: str = "", schedule_timezone: str = "",
-           schedule_days: str = "") -> PovBlueprint:
+           schedule_days: str = "",
+           spend_cap_usd: float | None = None) -> PovBlueprint:
     platform, slug, tenants = _validate(
         db, platform=platform, template_id=template_id, name=name,
         pra_tenant_id=pra_tenant_id, ps_tenant_id=ps_tenant_id,
@@ -138,6 +154,7 @@ def create(db: Session, *, platform: str, name: str, template_id: str,
         rb_zone=(rb_zone or "").strip() or None,
         rb_asset=(rb_asset or "").strip() or None,
         expiry_hours=expiry_hours,
+        spend_cap_usd=_spend_cap(spend_cap_usd),
         **_schedule_fields(suspend_at_local, resume_at_local, schedule_timezone,
                            schedule_days),
         workgroup=(workgroup or "").strip() or None,
@@ -159,6 +176,8 @@ _UPDATABLE = (
     # The suspend schedule a POV from this blueprint starts with, for a platform
     # with no idle timer of its own.
     "suspend_at_local", "resume_at_local", "schedule_timezone", "schedule_days",
+    # The spend cap a POV from this blueprint starts with.
+    "spend_cap_usd",
 )
 _BLANKABLE = ("description", "project_id", "broker_vm_name", "template_name",
               "gateway_name", "rb_windows_vm_name", "rb_zone", "rb_asset", "workgroup",
@@ -336,6 +355,7 @@ def serialize(row: PovBlueprint) -> dict:
         "resume_at_local": row.resume_at_local or "",
         "schedule_timezone": row.schedule_timezone or "",
         "schedule_days": row.schedule_days or "",
+        "spend_cap_usd": row.spend_cap_usd or 0.0,
         "workgroup": row.workgroup or "",
         "created_by": row.created_by or "",
         "created_at": row.created_at.isoformat() if row.created_at else "",

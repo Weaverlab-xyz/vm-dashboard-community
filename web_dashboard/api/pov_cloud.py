@@ -104,5 +104,6 @@ async def overview(db: Session = Depends(get_db),
     # total that quietly excluded it would understate the bill by the part nobody is
     # watching.
     out["footprint"] = pov_cloud_cost.footprint(known + orphans)
-    out["estimate"] = pov_cloud_cost.estimate(known + orphans, out["region"])
+    out["estimate"] = pov_cloud_cost.estimate(known + orphans, out["region"],
+                                              cloud)
     return out

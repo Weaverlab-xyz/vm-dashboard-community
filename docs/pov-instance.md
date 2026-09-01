@@ -493,6 +493,72 @@ the same question, and a POV carrying both is one where neither is in charge.
 nothing else — the root volume, the public address and the network keep billing for the
 whole evaluation. A schedule cuts the largest line on the bill, not the bill.
 
+### The spend cap
+
+The auto-delete timer answers *how long may this POV live?* This answers the question an
+operator running POVs on their own cloud account actually loses sleep over: **how much may
+it cost?**
+
+A clock is a poor proxy for money. The same fortnight is twenty dollars or two thousand
+depending on what the template asked for, and on a cloud the difference only becomes
+visible on an invoice weeks later.
+
+Set a cap per POV from the **Spend** column, or carry one on a blueprint so every POV of a
+kind starts with it. `pov_spend_cap_default_usd` stamps one on new POVs; **0 is the
+default**, so turning nothing on changes nothing.
+
+#### It is accrued, not billed — and that is the point
+
+Every reconcile pass adds `rate now × time since the last pass` to a running total on the
+row, using list prices and the VM list that pass already fetched.
+
+Reading a real bill instead would be worse in three ways:
+
+- **A bill lags a day.** Cost Explorer, Azure Cost Management and a GCP BigQuery export all
+  report yesterday. A cap driven off one would *report* a runaway rather than stop it.
+  Accrual reacts within one sweep.
+- **A bill costs money to read.** Cost Explorer bills per request and is itself untaggable
+  — that line has reached 45% of an account in this project's own history.
+- **Accrual is the same everywhere.** It is arithmetic over what the dashboard already
+  knows, so it needs no billing export, no new API and no new permission.
+
+What you give up is accuracy. **It is a list-price estimate**: no Savings Plans,
+reservations, credits, free tier, data transfer or snapshots. It errs high, which is the
+safe direction for a cap, and everything on screen says so.
+
+**Storage accrues while the POV is suspended.** That is deliberate and it is what makes the
+cap honest — a POV left asleep for a month still pays for its disks, and a cap that counted
+only running compute would never notice.
+
+#### What happens at the cap
+
+| `pov_spend_cap_action` | At the warning threshold | At the cap |
+|---|---|---|
+| `warn` *(default)* | One warning in the sweep's job log | One warning; nothing is suspended |
+| `suspend` | One warning | Enqueues the same `pov_env_power` job the Suspend button does |
+
+**It suspends; it never destroys.** That is what lets this feature exist without the
+auto-delete timer's two arming clocks and dry-run mode — the worst outcome is a POV
+somebody starts again. The default is `warn` regardless, because the figure is an estimate
+and one that suspended a live customer demo on its first outing would be the last time
+anybody trusted it.
+
+Both the warning and the action fire **once**. Raising the cap clears both latches, so
+"give it another fifty dollars" works. The accrued total is deliberately *not* reset — it
+is what the POV has cost so far, and zeroing it on every edit would quietly turn the cap
+into "another $X from now".
+
+#### Where it works
+
+A cap needs a price source, and each cloud needs its own. **AWS is supported today**; the
+others show their footprint and say so rather than offering a cap that would accrue a
+confident zero and never act. Skytap has no per-VM figure at all — it bills the lab, and
+its own idle timer is the lever there.
+
+The AWS estimate needs `pricing:GetProducts`, which an EC2-scoped key does not have.
+Without it there is no rate, nothing accrues, and the page says which permission is
+missing.
+
 ### The cloud view, and orphans
 
 **POV → Cloud** (`/pov/cloud`), linked from the POV page when a provider is selected. Its

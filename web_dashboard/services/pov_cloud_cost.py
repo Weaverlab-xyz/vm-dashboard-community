@@ -69,6 +69,63 @@ _LOCATIONS = {
 }
 
 
+# The clouds a price can be looked up for. **Built, not planned** — the same discipline
+# `lab_platforms.CLOUD_PLATFORMS` follows, and for the same reason: a cloud listed here
+# without a working lookup would offer a spend cap that silently never accrues, which is
+# worse than no cap at all.
+#
+# Each cloud needs its own price client and they are not alike: AWS's Pricing API needs an
+# IAM permission, Azure's Retail Prices API is public but bills managed disks by SIZE TIER
+# rather than per GB, GCP's Cloud Billing Catalog needs its own API enabled, and OCI
+# publishes a price list with no auth at all. One at a time.
+PRICED_CLOUDS = ("aws",)
+
+
+def priced(cloud: str) -> bool:
+    """Whether a spend estimate — and therefore a spend cap — is possible on ``cloud``."""
+    return (cloud or "").strip().lower() in PRICED_CLOUDS
+
+
+def no_price_reason(cloud: str) -> str:
+    """Why there is no estimate, in words an operator can act on."""
+    label = (cloud or "this platform").strip() or "this platform"
+    if label == "skytap":
+        return ("Skytap bills the lab, not the VM, so the dashboard has no per-POV figure "
+                "to accrue. Its own idle timer is the lever there.")
+    return (f"No price source is wired up for {label} yet, so a spend estimate would be "
+            f"zero and a cap would never act. AWS is supported today.")
+
+
+def rate_usd_per_hour(environment: dict, region: str, cloud: str = "aws"):
+    """What this environment costs per hour, right now, at list price. None if unknown.
+
+    The accrual rate behind the spend cap — see ``pov_spend``. Compute counts only for VMs
+    that are RUNNING; storage counts for all of them, because a disk bills whether its
+    instance is up or not. That second half is the one that matters: without it a POV left
+    suspended for a month would accrue nothing and its cap would never trip, which would
+    contradict everything else this feature says about suspend not stopping the bill.
+
+    None rather than 0.0 when there is no price source. Zero is a real answer — an
+    environment with nothing in it — and a cap that read "unknown" as "free" would never
+    act on the clouds it cannot price.
+    """
+    if not priced(cloud) or region not in _LOCATIONS:
+        return None
+    gb_month = storage_gb_month(region)
+    if gb_month is None:
+        return None
+
+    hourly = 0.0
+    for vm in environment.get("vms") or []:
+        if (vm.get("runstate") or "") == "running":
+            rate = instance_hourly(region, vm.get("instance_type") or "",
+                                   vm.get("os_family") or "linux")
+            if rate is not None:
+                hourly += rate
+        hourly += int(vm.get("disk_gb") or 0) * gb_month / HOURS_PER_MONTH
+    return round(hourly, 6)
+
+
 def footprint(environments: list) -> dict:
     """What is running, in units nobody has to trust an estimate for.
 
@@ -183,7 +240,8 @@ def storage_gb_month(region: str):
     return price
 
 
-def estimate(environments: list, region: str) -> dict:
+def estimate(environments: list, region: str,
+             cloud: str = "aws") -> dict:
     """A list-price estimate for what these environments cost, or a reason there is none.
 
     Two figures, because they answer different questions:
@@ -198,6 +256,9 @@ def estimate(environments: list, region: str) -> dict:
     out = {"available": False, "reason": "", "currency": "USD",
            "running_hourly": 0.0, "monthly_if_left": 0.0, "storage_monthly": 0.0,
            "priced_vms": 0, "unpriced_vms": 0}
+    if not priced(cloud):
+        out["reason"] = no_price_reason(cloud)
+        return out
     if region not in _LOCATIONS:
         out["reason"] = (f"No list prices are published here for {region}, so only the "
                          f"footprint is shown.")

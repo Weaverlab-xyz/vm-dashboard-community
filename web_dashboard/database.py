@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, LargeBinary, ForeignKey, UniqueConstraint, text
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, LargeBinary, ForeignKey, UniqueConstraint, Float, text
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import NullPool, QueuePool
@@ -1832,6 +1832,32 @@ class PovEnvironment(Base):
     # acts on nothing, because an unbounded window has crossed every boundary there is.
     schedule_last_checked_at = Column(DateTime, nullable=True)
 
+
+    # The spend cap. NULL throughout = no cap, which is what every existing row backfills
+    # to — so enabling this on an estate selects nothing by construction rather than by a
+    # guard, exactly as `expires_at IS NULL` does.
+    #
+    # The auto-delete timer answers "how long may this POV live"; this answers the
+    # question an operator on their own cloud account actually loses sleep over. A clock is
+    # a poor proxy for money: the same fortnight is twenty dollars or two thousand
+    # depending on what the template asked for.
+    spend_cap_usd = Column(Float, nullable=True)
+    # Accrued, not billed. Every reconcile pass adds `rate now × time since the last pass`.
+    # A real bill lags a day and costs money to read, so a cap driven off one would report
+    # a runaway rather than stop it — see services/pov_spend for the whole argument. It is
+    # a LIST-PRICE estimate and everything user-facing says so.
+    spend_estimate_usd = Column(Float, nullable=True, default=0.0)
+    # When the accrual last ran. NULL = never measured, and the first pass records the time
+    # and adds nothing: an unbounded interval would bill this POV for every hour since the
+    # epoch. Same latch discipline as `schedule_last_checked_at`.
+    spend_accrued_at = Column(DateTime, nullable=True)
+    # Warn-once and act-once latches. Raising the cap clears BOTH, which is what makes
+    # "give it another fifty dollars" work rather than leaving a POV permanently flagged.
+    spend_warned_at = Column(DateTime, nullable=True)
+    # Set when the cap suspended this POV, so the sweep does not re-suspend it on every
+    # pass while an operator is deciding what to do.
+    spend_capped_at = Column(DateTime, nullable=True)
+
     # Slice 8: the auto-delete timer. NULL = never, exactly as elsewhere — so enabling
     # expiry on an existing estate selects zero rows.
     expires_at = Column(DateTime, nullable=True, index=True)
@@ -2125,6 +2151,10 @@ class PovBlueprint(Base):
     resume_at_local = Column(String(5), nullable=True)
     schedule_timezone = Column(String(64), nullable=True)
     schedule_days = Column(String(7), nullable=True)
+
+    # The spend cap a POV from this blueprint starts with. NULL = no
+    # cap, the same as everywhere else.
+    spend_cap_usd = Column(Float, nullable=True)
 
     # Which BeyondTrust tenants a POV from this blueprint is wired into. Same three-FK
     # shape and the same ondelete as PovEnvironment — see the note there about SQLite not
@@ -2446,6 +2476,15 @@ def init_db():
             "ALTER TABLE pov_blueprints ADD COLUMN resume_at_local VARCHAR(5)",
             "ALTER TABLE pov_blueprints ADD COLUMN schedule_timezone VARCHAR(64)",
             "ALTER TABLE pov_blueprints ADD COLUMN schedule_days VARCHAR(7)",
+            # The spend cap. Every one backfills to NULL, which reads as "no cap" —
+            # so enabling this on an existing estate accrues against nothing until
+            # somebody sets one.
+            "ALTER TABLE pov_environments ADD COLUMN spend_cap_usd FLOAT",
+            "ALTER TABLE pov_environments ADD COLUMN spend_estimate_usd FLOAT",
+            "ALTER TABLE pov_environments ADD COLUMN spend_accrued_at TIMESTAMP",
+            "ALTER TABLE pov_environments ADD COLUMN spend_warned_at TIMESTAMP",
+            "ALTER TABLE pov_environments ADD COLUMN spend_capped_at TIMESTAMP",
+            "ALTER TABLE pov_blueprints ADD COLUMN spend_cap_usd FLOAT",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.
