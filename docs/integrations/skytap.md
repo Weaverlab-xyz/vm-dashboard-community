@@ -270,7 +270,10 @@ way a POV fails.
 
 The build installs it. It publishes SSH on the broker VM, reads the login from Skytap's own
 [stored credentials](#capabilities), installs the runner and its systemd unit, and revokes
-the published service in a `finally`. Three things are worth knowing before you rely on it:
+the published service in a `finally`. If the VM carries more than one credential it tries
+each in turn — the first the guest accepts wins, and the **Runner** detail names it — so a
+box holding a stale login beside a good one builds rather than refusing. Three things are
+worth knowing before you rely on it:
 
 - **It reaches a NAT-ed high port, not the API host.** See the prerequisites table above.
   If your egress only allows HTTPS to `cloud.skytap.com`, clear **Install the metadata
@@ -466,6 +469,8 @@ rather than failing somewhere inside a job.
 | "the agent endpoint is `http://…`" | The audience is plaintext | The agent refuses to sign over plaintext, so the broker would never enrol. Terminate TLS and correct **Public base URL** |
 | A build fails with "does not satisfy the template contract" | The base template has no broker VM, or its broker is on a manual network | Read the contract report on the build row. Press **Discard** to reap the scratch environment, fix the base template, and build again |
 | The **Runner** column reads `failed` and names a firewall | The SSH install could not reach the published port | It dials a NAT-ed high port, not `cloud.skytap.com`. Either open that egress or clear **Install the metadata runner** and paste the install script onto the broker VM by hand — the template itself is fine |
+| The **Runner** column reads `failed` with "refused all N stored credentials" | Every login stored against the broker VM was rejected by its sshd | The detail names the usernames it tried. Correct the credential on that VM in Skytap and build again — SSH answered, so this is the login and not the route |
+| The **Runner** column reads `failed` with "the runner install exited …" | A login worked but the script did not finish | The runner installs as root, so check that the credential you left is an administrator with `sudo`. The template still bakes; paste the script in by hand |
 | The **Runner** column reads `skipped` | You cleared the checkbox, or no broker VM was resolved | Not a failure. Paste the install script from **POV → Templates** onto the broker VM |
 | A build row shows a **build env** that is still running | The build failed, or you asked to keep it | It is billing. Press **Discard** to reap it. A failed build keeps the id on purpose, so this always works |
 | Discard says the environment could not be deleted | Skytap refused the delete | The row stays visible with its id rather than being marked discarded — marking it would hide a running environment. Clear the cause and press Discard again |

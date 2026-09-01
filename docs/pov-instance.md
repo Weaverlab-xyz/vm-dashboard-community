@@ -482,10 +482,22 @@ is picked up on the next run with nothing to update.
 
 Skytap stores that as **free text** — whatever somebody typed in the box — so the dashboard
 parses it, and **refuses rather than guesses**. `administrator / Passw0rd`,
-`administrator:Passw0rd` and `username: … password: …` are understood; a sentence, a
-multi-line note, or two usable credentials on one VM are all refused, naming the VM. A bare
-space is not treated as a separator, because a password containing one would split in the
-wrong place.
+`administrator:Passw0rd` and `username: … password: …` are understood; a sentence or a
+multi-line note is refused, naming the VM. A bare space is not treated as a separator,
+because a password containing one would split in the wrong place.
+
+Two usable credentials on one VM are answered differently by the two callers, and the
+difference is whether the caller can *ask*:
+
+- **The Resource Broker install refuses.** It seals one credential into a run bundle the
+  agent uses over WinRM, so it never authenticates and never learns the outcome — order is
+  the only thing it could go on, and installing an RB as the wrong account is not a mistake
+  worth being clever about.
+- **A [template build](integrations/skytap.md#building-a-template) tries each in turn**,
+  because it opens the SSH connection itself. The first login the VM accepts wins, and the
+  build row records which one it was. If the guest answers and refuses them all, that
+  fails immediately rather than on the readiness ladder: a rejected password does not
+  become right in fifteen seconds.
 
 If a template's credential box cannot be parsed, fix the box — a wrong username comes back
 from WinRM as an authentication failure, which reads as a bad password and sends you to

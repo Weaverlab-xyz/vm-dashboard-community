@@ -399,8 +399,21 @@ def contract_ok(report: list[dict]) -> bool:
 
 # ── the prepare step ─────────────────────────────────────────────────────────
 
-async def _ssh_install(host: str, port: int, username: str, password: str) -> str:
-    """Install the runner over SSH. Returns a short summary line.
+async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
+                       sleep=None) -> str:
+    """Install the runner over SSH, trying each login in turn. Returns a summary line.
+
+    **Two loops, because two different failures wear the same costume.** A brand-new guest
+    answers TCP before sshd is ready, so *unreachable* has to be retried on a ladder — ten
+    attempts, fifteen seconds apart. A login sshd actively refused is not that: it will be
+    refused just as firmly in fifteen seconds, and the next login may not be. So the outer
+    loop is readiness and the inner one is identity, and a refusal moves straight to the
+    next login without spending any of the ladder. Nesting the ladder inside the logins
+    instead would multiply a seven-minute worst case by however many credentials the VM
+    happens to carry.
+
+    A guest that answers and refuses **every** login therefore fails at once. That is the
+    one thing a rejected password tells us for certain: waiting will not fix it.
 
     **``known_hosts=None``.** There is no host key to pin: this VM was created minutes ago
     by the same API call that told us where to reach it, and it is destroyed at the end of
@@ -417,41 +430,77 @@ async def _ssh_install(host: str, port: int, username: str, password: str) -> st
             "asyncssh is not installed, so the runner cannot be installed automatically. "
             "Use the install script from the builder page instead.") from exc
 
+    if not logins:
+        # candidates() cannot return an empty list, but a caller that hand-rolled one would
+        # otherwise spend the whole ladder discovering it had nothing to try.
+        raise TemplateBuildError(
+            "no usable login was found for the broker VM, so the runner cannot be "
+            "installed over SSH. Use the install script from the builder page instead.")
+
+    wait = sleep or asyncio.sleep
     script = render_install_script()
     last: Exception | None = None
     for attempt in range(_SSH_ATTEMPTS):
-        try:
-            async with asyncssh.connect(
-                    host, port=port, username=username, password=password,
-                    known_hosts=None, connect_timeout=_SSH_CONNECT_TIMEOUT_S) as conn:
-                # Piped to `sh -s` rather than written and executed: no file is left on a
-                # VM that is about to become a template, and nothing depends on a writable
-                # path the guest may not have.
-                result = await conn.run("sudo -n sh -s || sh -s", input=script,
-                                        check=False)
-                if result.exit_status != 0:
-                    stderr = (result.stderr or "").strip()[:400]
-                    raise TemplateBuildError(
-                        f"the runner install exited {result.exit_status} on the broker VM"
-                        f"{': ' + stderr if stderr else ''}. The template can still be "
-                        f"baked and the script pasted in by hand.")
-                check = await conn.run(
-                    "systemctl is-active dashboard-bootstrap-runner; "
-                    "docker --version 2>/dev/null || echo 'docker: MISSING'",
-                    check=False)
-                detail = " ".join((check.stdout or "").split())[:300]
-                return f"runner installed over SSH; {detail}" if detail else \
-                    "runner installed over SSH"
-        except TemplateBuildError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            # A brand-new guest answers TCP before sshd is ready, and a first boot can run
-            # long. Retry rather than fail on the first refusal.
-            last = exc
-            if attempt < _SSH_ATTEMPTS - 1:
-                logger.info("template build: SSH to %s:%s not ready (%s); retrying",
-                            host, port, exc)
-                await asyncio.sleep(_SSH_RETRY_WAIT_S)
+        refused: list[str] = []
+        for username, password in logins:
+            try:
+                async with asyncssh.connect(
+                        host, port=port, username=username, password=password,
+                        known_hosts=None,
+                        connect_timeout=_SSH_CONNECT_TIMEOUT_S) as conn:
+                    # Piped to `sh -s` rather than written and executed: no file is left on
+                    # a VM that is about to become a template, and nothing depends on a
+                    # writable path the guest may not have.
+                    result = await conn.run("sudo -n sh -s || sh -s", input=script,
+                                            check=False)
+                    if result.exit_status != 0:
+                        stderr = (result.stderr or "").strip()[:400]
+                        raise TemplateBuildError(
+                            f"the runner install exited {result.exit_status} on the broker "
+                            f"VM as {username}{': ' + stderr if stderr else ''}. The runner "
+                            f"installs as root, so a credential without sudo gets exactly "
+                            f"this far. The template can still be baked and the script "
+                            f"pasted in by hand.")
+                    check = await conn.run(
+                        "systemctl is-active dashboard-bootstrap-runner; "
+                        "docker --version 2>/dev/null || echo 'docker: MISSING'",
+                        check=False)
+                    detail = " ".join((check.stdout or "").split())[:300]
+                    # Naming the login that worked is the whole point of trying several: the
+                    # build row is where an SE finds out which one the VM accepted.
+                    return f"runner installed over SSH as {username}; {detail}" if detail \
+                        else f"runner installed over SSH as {username}"
+            except TemplateBuildError:
+                # This login worked and the install did not. Another login does not fix a
+                # script that ran and failed, and re-running it under one would re-apply a
+                # half-applied install.
+                raise
+            except asyncssh.PermissionDenied as exc:
+                # sshd was there and said no. Move to the next login immediately: this one
+                # will not start working later, and the ladder is not for this.
+                last = exc
+                refused.append(username)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                # Nothing answered. Trying the other logins against a port that is not
+                # listening only multiplies the wait, so start the whole set over.
+                last = exc
+                break
+        else:
+            # Every login was refused by a server that was there to refuse them.
+            if refused and len(refused) == len(logins):
+                many = (f"all {len(refused)} stored credentials" if len(refused) > 1
+                        else "the stored credential")
+                raise TemplateBuildError(
+                    f"the broker VM at {host}:{port} refused {many} "
+                    f"(tried: {', '.join(refused)}). SSH answered, so this is the login and "
+                    f"not the route — correct the credential on that VM in the lab platform "
+                    f"and build again, or install the runner by hand from the builder page.")
+
+        if attempt < _SSH_ATTEMPTS - 1:
+            logger.info("template build: SSH to %s:%s not ready (%s); retrying",
+                        host, port, last)
+            await wait(_SSH_RETRY_WAIT_S)
 
     raise TemplateBuildError(
         f"could not reach the broker VM over SSH at {host}:{port} after "
@@ -480,15 +529,17 @@ async def prepare_broker_vm(mod, env_id: str, vm: dict) -> str:
     published = await mod.publish_service(env_id, vm.get("id"), nic.get("id"), _SSH_PORT)
     try:
         entries = await mod.stored_credentials(env_id, vm.get("id"))
-        username, password = pov_credentials.pick(
+        # `candidates`, not `pick`: this is the one credential consumer that authenticates
+        # in process, so a VM carrying two logins is a question SSH answers rather than an
+        # ambiguity to refuse. See pov_credentials.candidates.
+        logins = pov_credentials.candidates(
             entries, vm_label=f"the broker VM {vm.get('name')!r}",
             # A build has no login field to fall back on, so the only remedy is on the
             # platform side. See pov_credentials.DEFAULT_REMEDY.
-            remedy=("Leave exactly one usable credential on that VM in the lab platform "
-                    "and build again, or install the runner by hand — the build carries "
-                    "no login of its own."))
+            remedy=("Add one on that VM in the lab platform and build again, or install "
+                    "the runner by hand — the build carries no login of its own."))
         return await _ssh_install(published["external_ip"],
-                                  int(published["external_port"]), username, password)
+                                  int(published["external_port"]), logins)
     finally:
         with contextlib.suppress(Exception):
             await mod.delete_published_service(env_id, vm.get("id"), nic.get("id"),

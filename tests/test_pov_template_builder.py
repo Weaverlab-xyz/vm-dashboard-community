@@ -34,6 +34,7 @@ Runs under pytest, or standalone:
     python tests/test_pov_template_builder.py
 """
 import asyncio
+import contextlib
 import os
 import subprocess
 import sys
@@ -261,8 +262,8 @@ def test_prepare_publishes_uses_and_revokes_the_service():
     saved = b._ssh_install
     seen = {}
 
-    async def _fake(host, port, username, password):
-        seen.update(host=host, port=port, username=username, password=password)
+    async def _fake(host, port, logins, **kw):
+        seen.update(host=host, port=port, logins=list(logins))
         return "installed"
 
     b._ssh_install = _fake
@@ -275,7 +276,7 @@ def test_prepare_publishes_uses_and_revokes_the_service():
     assert mod.published == [("env-1", "vm-2", "nic-3", 22)], mod.published
     assert mod.deleted == [("env-1", "vm-2", "nic-3", "svc-1")], mod.deleted
     assert seen == {"host": "203.0.113.9", "port": 40022,
-                    "username": "root", "password": "Passw0rd"}, seen
+                    "logins": [("root", "Passw0rd")]}, seen
 
 
 def test_the_published_service_is_revoked_even_when_the_install_raises():
@@ -297,6 +298,214 @@ def test_the_published_service_is_revoked_even_when_the_install_raises():
         b._ssh_install = saved
     assert mod.deleted == [("env-1", "vm-2", "nic-3", "svc-1")], \
         "the published service was not revoked after a failed install"
+
+
+def test_prepare_hands_every_usable_credential_to_the_install():
+    """A broker VM with two logins used to fail here rather than reach SSH at all."""
+    mod = _StubPlatform(credentials=[{"text": "root / Passw0rd"},
+                                     {"text": "administrator:Hunter2"}])
+    saved = b._ssh_install
+    seen = {}
+
+    async def _fake(host, port, logins, **kw):
+        seen["logins"] = list(logins)
+        return "installed"
+
+    b._ssh_install = _fake
+    try:
+        asyncio.run(b.prepare_broker_vm(mod, "env-1", _BROKER))
+    finally:
+        b._ssh_install = saved
+    assert seen["logins"] == [("root", "Passw0rd"),
+                              ("administrator", "Hunter2")], seen
+
+
+# ── _ssh_install: several logins, one readiness ladder ───────────────────────
+#
+# The loop has two axes and they cost wildly different amounts of time, so both are pinned
+# here. `asyncssh` is imported INSIDE `_ssh_install`, so swapping `sys.modules` is enough to
+# drive it — and it is the only way to exercise authentication without a real guest.
+
+class _Result:
+    def __init__(self, exit_status, stdout="", stderr=""):
+        self.exit_status = exit_status
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class _FakeConn:
+    def __init__(self, outcome):
+        self._outcome = outcome
+
+    async def run(self, command, input=None, check=False):
+        if command.startswith("sudo -n sh -s"):
+            if isinstance(self._outcome, int):
+                return _Result(self._outcome, "",
+                               "mkdir: /usr/local/sbin: Permission denied")
+            return _Result(0)
+        return _Result(0, "active\nDocker version 24.0.7")
+
+
+class _FakeConnect:
+    def __init__(self, outcome):
+        self._outcome = outcome
+
+    async def __aenter__(self):
+        if self._outcome == "denied":
+            raise _FakeSSH.PermissionDenied("Permission denied")
+        if self._outcome == "unreachable":
+            raise OSError("[Errno 111] Connect call failed")
+        return _FakeConn(self._outcome)
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSSH:
+    """Just enough of `asyncssh` for `_ssh_install`, keyed by username.
+
+    An outcome is "ok", "denied" (an authentication refusal), "unreachable" (no answer at
+    all), or an int exit status for an install that ran and failed.
+    """
+
+    class PermissionDenied(Exception):
+        pass
+
+    def __init__(self, outcomes):
+        self._outcomes = outcomes
+        self.attempts = []
+
+    def connect(self, host, *, port=None, username=None, password=None,
+                known_hosts=None, connect_timeout=None):
+        self.attempts.append(username)
+        return _FakeConnect(self._outcomes.get(username, "denied"))
+
+
+@contextlib.contextmanager
+def _fake_asyncssh(**outcomes):
+    fake = _FakeSSH(outcomes)
+    saved = sys.modules.get("asyncssh")
+    sys.modules["asyncssh"] = fake
+    try:
+        yield fake
+    finally:
+        if saved is None:
+            sys.modules.pop("asyncssh", None)
+        else:
+            sys.modules["asyncssh"] = saved
+
+
+def _recorder():
+    """A stand-in for `asyncio.sleep` that records instead of waiting. Every second this
+    records is a second a real build would have spent."""
+    waits = []
+
+    async def _sleep(seconds):
+        waits.append(seconds)
+
+    return waits, _sleep
+
+
+def test_the_second_login_is_tried_when_the_first_is_refused():
+    """The whole point: a VM carrying a stale credential and a good one now builds."""
+    waits, sleep = _recorder()
+    with _fake_asyncssh(stale="denied", root="ok") as ssh:
+        out = asyncio.run(b._ssh_install(
+            "203.0.113.9", 40022, [("stale", "Sekrit1"), ("root", "Sekrit2")],
+            sleep=sleep))
+    assert "runner installed over SSH as root" in out, out
+    assert ssh.attempts == ["stale", "root"], ssh.attempts
+    assert waits == [], "a refused login must not spend the readiness ladder"
+
+
+def test_the_first_working_login_wins_and_the_rest_are_never_tried():
+    """Two credentials that both work is not a decision — it is one connection."""
+    waits, sleep = _recorder()
+    with _fake_asyncssh(root="ok", administrator="ok") as ssh:
+        out = asyncio.run(b._ssh_install(
+            "203.0.113.9", 40022, [("root", "Sekrit1"), ("administrator", "Sekrit2")],
+            sleep=sleep))
+    assert ssh.attempts == ["root"], ssh.attempts
+    assert "as root" in out, out
+    assert waits == [], "a login that worked cost a wait"
+
+
+def test_every_login_refused_fails_at_once():
+    """A rejected password does not become right in fifteen seconds. Burning the ladder
+    twice over would turn a seven-minute worst case into fourteen for no new information."""
+    waits, sleep = _recorder()
+    with _fake_asyncssh(stale="denied", older="denied") as ssh:
+        try:
+            asyncio.run(b._ssh_install(
+                "203.0.113.9", 40022, [("stale", "Sekrit1"), ("older", "Sekrit2")],
+                sleep=sleep))
+        except b.TemplateBuildError as exc:
+            msg = str(exc)
+        else:
+            raise AssertionError("every login was refused and it did not fail")
+    assert ssh.attempts == ["stale", "older"], ssh.attempts
+    assert waits == [], f"the ladder was spent on a login that will never work: {waits}"
+    assert "all 2 stored credentials" in msg, msg
+    # The usernames are the useful part and the only safe part.
+    assert "tried: stale, older" in msg, msg
+    assert "Sekrit1" not in msg and "Sekrit2" not in msg, "the refusal leaked a password"
+
+
+def test_an_unreachable_host_still_retries_the_whole_set():
+    """The ladder is for a guest that answers TCP before sshd is ready. A port that is not
+    listening does not care who is knocking, so the other logins are not tried per pass."""
+    saved = b._SSH_ATTEMPTS
+    b._SSH_ATTEMPTS = 3
+    waits, sleep = _recorder()
+    try:
+        with _fake_asyncssh(root="unreachable", administrator="unreachable") as ssh:
+            try:
+                asyncio.run(b._ssh_install(
+                    "203.0.113.9", 40022,
+                    [("root", "Sekrit1"), ("administrator", "Sekrit2")], sleep=sleep))
+            except b.TemplateBuildError as exc:
+                msg = str(exc)
+            else:
+                raise AssertionError("an unreachable host must fail")
+    finally:
+        b._SSH_ATTEMPTS = saved
+    assert "could not reach the broker VM" in msg, msg
+    assert len(waits) == 2, f"expected attempts-1 waits, got {waits}"
+    assert ssh.attempts == ["root", "root", "root"], ssh.attempts
+
+
+def test_a_failed_install_does_not_fall_through_to_the_next_login():
+    """This login worked and the script did not. Re-running it under another would re-apply
+    a half-applied install, so the exit status is fatal — and it names the likely cause,
+    because the runner needs root and an unprivileged login gets exactly this far."""
+    waits, sleep = _recorder()
+    with _fake_asyncssh(appuser=1, root="ok") as ssh:
+        try:
+            asyncio.run(b._ssh_install(
+                "203.0.113.9", 40022, [("appuser", "Sekrit1"), ("root", "Sekrit2")],
+                sleep=sleep))
+        except b.TemplateBuildError as exc:
+            msg = str(exc)
+        else:
+            raise AssertionError("a non-zero install must fail the prepare")
+    assert ssh.attempts == ["appuser"], ssh.attempts
+    assert "exited 1" in msg and "as appuser" in msg, msg
+    assert "installs as root" in msg, msg
+    assert waits == [], "the ladder is not for a script that ran and failed"
+
+
+def test_no_logins_at_all_is_refused_without_spending_the_ladder():
+    """`candidates` cannot return an empty list, but a hand-rolled caller would otherwise
+    spend two and a half minutes discovering it had nothing to try."""
+    waits, sleep = _recorder()
+    with _fake_asyncssh():
+        try:
+            asyncio.run(b._ssh_install("203.0.113.9", 40022, [], sleep=sleep))
+        except b.TemplateBuildError as exc:
+            assert "no usable login" in str(exc), exc
+        else:
+            raise AssertionError("an empty login list must be refused")
+    assert waits == [], waits
 
 
 def test_the_published_service_is_revoked_when_the_credential_is_unusable():
