@@ -220,16 +220,36 @@ def test_the_platform_password_is_generated_once_and_remembered():
 
 
 def test_the_generated_password_satisfies_azures_complexity_rule():
-    """Three of four classes, and never containing the username."""
-    original, _fake = _with_fake_config()
-    try:
-        pw = az._platform_password("povenv-complexity")
-    finally:
-        _restore_config(original)
-    classes = sum([any(c.islower() for c in pw), any(c.isupper() for c in pw),
-                   any(c.isdigit() for c in pw)])
-    assert classes >= 3, f"only {classes} character classes in {len(pw)} characters"
-    assert az.ADMIN_USERNAME not in pw
+    """Azure needs three of four character classes, EVERY time.
+
+    Sampled rather than drawn once, and that is the point of this test rather than an
+    excess of caution. The first version of this generator picked uniformly from one
+    pool, so about one draw in twenty contained no digit — a single-draw assertion passed
+    locally, passed in review, and failed in CI. A test that exercises a random generator
+    once is testing the seed.
+
+    500 draws puts the chance of missing a 5%-per-draw defect at about 7e-12.
+    """
+    for _ in range(500):
+        pw = az._generate_admin_password()
+        classes = sum([any(c.islower() for c in pw), any(c.isupper() for c in pw),
+                       any(c.isdigit() for c in pw)])
+        assert classes >= 3, (
+            f"only {classes} character classes in {pw!r} — Azure refuses this at VM "
+            f"creation, and the operator cannot see the password to know why")
+        assert 12 <= len(pw) <= 123, f"Azure requires 12-123 characters, got {len(pw)}"
+        assert az.ADMIN_USERNAME not in pw
+
+
+def test_the_generated_password_avoids_symbols_and_ambiguous_characters():
+    """Symbols would satisfy Azure too, and are deliberately absent: the password travels
+    through an Ansible run and a WinRM session, where one is a quoting bug away from an
+    authentication failure that reads as a wrong password."""
+    seen = set()
+    for _ in range(200):
+        seen.update(az._generate_admin_password())
+    assert seen.isdisjoint(set("Il1O0")), "an ambiguous character got through"
+    assert all(c.isalnum() for c in seen), f"non-alphanumeric: {sorted(seen - set())}"
 
 
 def test_the_admin_username_is_one_azure_will_accept():

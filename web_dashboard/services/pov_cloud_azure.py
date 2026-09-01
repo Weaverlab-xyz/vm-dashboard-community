@@ -39,6 +39,8 @@ import base64
 import ipaddress
 import itertools
 import logging
+import secrets
+import string
 
 from . import azure_service, pov_cloud_env as env
 from .azure_service import AzureError
@@ -108,6 +110,41 @@ def _tags(env_id: str, name: str = "", role: str = "") -> dict:
     return tags
 
 
+# Azure rejects an admin password shorter than 12 or longer than 123, and one that does
+# not draw from at least THREE of: lowercase, uppercase, digit, symbol. 24 is comfortably
+# inside the range and long enough that the class rule is the only thing shaping it.
+_PW_LENGTH = 24
+
+# Symbols are deliberately absent, so three classes means lower + upper + digit. The
+# password travels through an Ansible run and a WinRM session on its way to the Resource
+# Broker install, and a symbol is one quoting bug away from an authentication failure that
+# reads as a wrong password. Il1O0 are absent too: this is read aloud sometimes.
+_PW_LOWER = [c for c in string.ascii_lowercase if c not in "l"]
+_PW_UPPER = [c for c in string.ascii_uppercase if c not in "IO"]
+_PW_DIGITS = [c for c in string.digits if c not in "10"]
+_PW_POOL = _PW_LOWER + _PW_UPPER + _PW_DIGITS
+
+
+def _generate_admin_password() -> str:
+    """A password Azure will accept, by construction rather than by luck.
+
+    **Not ``pov_share.generate_password``, and the difference is the whole point.** That
+    one draws 24 characters uniformly from one pool, which is right for a link password a
+    human reads out — but roughly one draw in twenty happens to contain no digit, and
+    Azure refuses it at VM creation. The failure would land in a provision job, on about
+    5% of Azure POVs, with an operator who cannot see the password to know why.
+
+    So one character of each required class is placed first and the rest filled from the
+    pool, then the whole thing is shuffled with ``SystemRandom`` so the guaranteed three
+    are not always in front.
+    """
+    chars = [secrets.choice(_PW_LOWER), secrets.choice(_PW_UPPER),
+             secrets.choice(_PW_DIGITS)]
+    chars += [secrets.choice(_PW_POOL) for _ in range(_PW_LENGTH - len(chars))]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
 def _platform_password(env_id: str) -> str:
     """This environment's admin password, generated once and remembered.
 
@@ -116,16 +153,15 @@ def _platform_password(env_id: str) -> str:
     build time — which incidentally gives an Azure POV a real platform login, and is why
     its ``stored_credentials`` capability is True where AWS's is False.
 
-    Generated with ``pov_share.generate_password``: 20 characters of mixed case and digits
-    with no ``Il1O0``. That satisfies Azure's "three of four character classes" rule
-    (lower, upper, digit) and survives being read down a phone line.
+    See :func:`_generate_admin_password` for why this does not reuse
+    ``pov_share.generate_password``.
     """
-    from . import config_service, pov_share
+    from . import config_service
     key = password_config_key(env_id)
     existing = config_service.get_opt(key)
     if existing:
         return existing
-    password = pov_share.generate_password()
+    password = _generate_admin_password()
     config_service.set(key, password)
     return password
 
