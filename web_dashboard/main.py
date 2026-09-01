@@ -882,7 +882,23 @@ app.include_router(setup.router)
 app.include_router(secrets.router)
 app.include_router(cloud_identity_api.router)
 app.include_router(storage.router)
-app.include_router(images.router)
+# The cloud consoles' API layer, gated by the SAME page group as their pages.
+#
+# It was not, and that was the hole under PR #676: `/aws` 404s on a POV instance while
+# `POST /api/aws/deploy` kept serving. Nothing could reach it while a POV held no cloud
+# credentials — but a POV instance may now hold one cloud's, for its lab platform, and an
+# ad-hoc deploy made here would resolve the GLOBAL BeyondTrust tenant singletons and
+# onboard a customer's VM into the demo tenant. That is the exact outcome
+# `services/feature_flags` draws the demo/pov line to prevent.
+#
+# `packer` and `images` are in for the same reason: they build and promote machine images
+# into those same clouds. A POV builds its VMs from the image CATALOG through the POV
+# template, which reads the table directly and needs none of these routes.
+#
+# The POV's own read-only view of its selected cloud is /pov/cloud — a POV-owned page, so
+# it stays available while these do not.
+app.include_router(images.router,
+                   dependencies=[_profile_page_gate("cloud_pages")])
 app.include_router(auth.router)
 app.include_router(regions_api.router)
 app.include_router(pra_api.router)
@@ -959,7 +975,8 @@ async def swagger_ui(request: Request):
     return templates.TemplateResponse("swagger.html", {"request": request})
 
 app.include_router(websocket.router)
-app.include_router(aws.router)
+app.include_router(aws.router,
+                   dependencies=[_profile_page_gate("cloud_pages")])
 app.include_router(cloud_databases.router)
 # Preview feature: the flag is owned by the Settings → Preview features card, and
 # the router 404s entirely while it is off (the handlers also self-gate with 403,
@@ -971,10 +988,14 @@ app.include_router(cloud_functions_api.router,
 # (503) whenever entitle_rest_secret is unset — see the router's _require_secret.
 app.include_router(entitle_rest_api.router,
                    dependencies=[_feature_gate("entitle_user_jit_enabled")])
-app.include_router(azure.router)
-app.include_router(gcp.router)
-app.include_router(oci.router)
-app.include_router(packer.router)
+app.include_router(azure.router,
+                   dependencies=[_profile_page_gate("cloud_pages")])
+app.include_router(gcp.router,
+                   dependencies=[_profile_page_gate("cloud_pages")])
+app.include_router(oci.router,
+                   dependencies=[_profile_page_gate("cloud_pages")])
+app.include_router(packer.router,
+                   dependencies=[_profile_page_gate("cloud_pages")])
 
 # MCP server — mounted as a sub-ASGI app so SSE streams pass through unmodified
 app.mount("/mcp", get_mcp_asgi_app())

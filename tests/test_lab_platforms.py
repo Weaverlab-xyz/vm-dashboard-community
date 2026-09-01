@@ -44,7 +44,7 @@ from web_dashboard.services.skytap_client import SkytapClient, SkytapCreds  # no
 _REQUIRED_CAPABILITY_KEYS = {
     "label", "templates", "runstate", "idle_suspend",
     "bootstrap_injection", "share_link", "stored_credentials",
-    "verify", "projects",
+    "verify", "projects", "scheduled_suspend",
 }
 
 # bootstrap_injection is one INTENT with different mechanisms, so it is an enum.
@@ -134,6 +134,82 @@ def test_configured_platforms_survives_a_broken_adapter():
         assert lp.configured_platforms() == []
     finally:
         skytap_service.configured = original
+
+
+# ── one cloud at a time ──────────────────────────────────────────────────────
+
+def _with_selected_cloud(value):
+    """Pin what `selected_cloud()` reads, without touching config.
+
+    Patching the function rather than writing an `app_config` row: the tests share a real
+    `vm_cli.db` AND the developer's `.env`, so a "cleared" key still resolves through
+    settings and a written one mutates real config.
+    """
+    original = lp.selected_cloud
+    lp.selected_cloud = lambda: value
+    return original
+
+
+def test_skytap_is_always_selectable():
+    original = _with_selected_cloud("")
+    try:
+        assert lp.selectable_platforms() == ["skytap"], (
+            "with no cloud selected a POV instance is exactly what it was before")
+        assert lp.selectable("skytap") is True
+    finally:
+        lp.selected_cloud = original
+
+
+def test_exactly_one_cloud_is_selectable_at_a_time():
+    original = _with_selected_cloud("aws")
+    try:
+        chosen = lp.selectable_platforms()
+        assert chosen == ["skytap", "aws"], chosen
+        clouds = [p for p in chosen if p in lp.CLOUD_PLATFORMS]
+        assert len(clouds) == 1, (
+            f"{clouds} — the POV instance is meant to hold one cloud's credentials, one "
+            f"cloud's quota and one cloud's bill")
+    finally:
+        lp.selected_cloud = original
+
+
+def test_an_unselected_cloud_is_refused_even_though_it_is_a_valid_platform():
+    """`selectable` and `valid` answer different questions, and the API keeps the two
+    failures apart: 'not the selected cloud' has a different remedy from 'no
+    credentials'."""
+    original = _with_selected_cloud("")
+    try:
+        assert lp.valid("aws") is True, "aws is a real platform"
+        assert lp.selectable("aws") is False, "…but not one this instance may use"
+    finally:
+        lp.selected_cloud = original
+
+
+def test_selected_cloud_ignores_a_name_that_has_no_adapter():
+    """A typo, or a cloud whose adapter has not been written, must resolve to 'no cloud'
+    rather than putting an option on the form that fails at import."""
+    for bad in ("", "  ", "azurre", "vmware"):
+        assert bad not in lp.CLOUD_PLATFORMS
+    assert "azure" not in lp.CLOUD_PLATFORMS, (
+        "azure has no adapter yet; listing it here would make it selectable")
+
+
+def test_every_cloud_platform_is_also_a_valid_platform():
+    for name in lp.CLOUD_PLATFORMS:
+        assert name in lp.VALID_PLATFORMS
+        assert name in lp._ADAPTER_MODULE
+
+
+def test_no_cloud_platform_claims_an_idle_timer():
+    """No public cloud has Skytap's `suspend_on_idle`. One claiming it would make
+    `pov_env_service` call `update_environment` with a setting nothing implements, and the
+    POV would run all month."""
+    for name in lp.CLOUD_PLATFORMS:
+        caps = lp.capabilities(name)
+        assert caps["idle_suspend"] is False, f"{name} claims a platform idle timer"
+        assert caps["scheduled_suspend"] is True, (
+            f"{name} has neither an idle timer nor a schedule, so nothing would ever "
+            f"stop it costing money overnight")
 
 
 # ── the Skytap adapter's mapping ─────────────────────────────────────────────

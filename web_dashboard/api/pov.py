@@ -257,20 +257,30 @@ def _platform_error(exc: Exception, what: str) -> HTTPException:
 
 @router.get("/platforms")
 async def list_platforms(current_user: User = Depends(get_current_user)):
-    """Every lab platform this build knows about, with what it can do.
+    """Every lab platform this instance may use, with what it can do.
 
     ``capabilities`` is served to the UI rather than kept server-side so a platform that
     cannot, say, produce a share link renders "PRA only" instead of a button that 502s.
+
+    **The list is the SELECTABLE platforms, not every platform this build knows.** A POV
+    instance runs Skytap plus at most one public cloud, and the create form is rendered
+    straight from this — so the one-at-a-time rule is applied once, in the registry, and
+    the form cannot offer a cloud that `provision` would then refuse.
     """
     configured = set(lab_platforms.configured_platforms())
     return {
         "platforms": [
             {"name": name,
              "configured": name in configured,
+             "cloud": name in lab_platforms.CLOUD_PLATFORMS,
              **lab_platforms.capabilities(name)}
-            for name in lab_platforms.VALID_PLATFORMS
+            for name in lab_platforms.selectable_platforms()
         ],
         "default": _DEFAULT_PLATFORM,
+        # What is built but not chosen, so Settings can say what the alternatives are
+        # without the POV page having to know the difference.
+        "cloud_platforms": list(lab_platforms.CLOUD_PLATFORMS),
+        "selected_cloud": lab_platforms.selected_cloud(),
     }
 
 
@@ -408,6 +418,22 @@ async def provision(payload: ProvisionRequest,
             status_code=400,
             detail="a template id is required — pick one, or choose a blueprint that "
                    "names one")
+
+    # One cloud at a time, enforced where a NEW environment is created and deliberately
+    # nowhere else. Reads, power and destroy all go through `_adapter`, which does not ask
+    # this — an operator who switches the instance from AWS to Azure must still be able to
+    # see, suspend and tear down the AWS POVs they already have, and a check in the shared
+    # helper would strand every one of them the moment the setting changed.
+    if not lab_platforms.selectable(payload.platform):
+        chosen = lab_platforms.selected_cloud()
+        raise HTTPException(
+            status_code=409,
+            detail=(f"this instance does not build POVs on {payload.platform}. "
+                    + (f"Its POV cloud provider is {chosen}."
+                       if chosen else
+                       "No POV cloud provider is selected.")
+                    + " Change it in Settings → Integrations → POV cloud provider — a POV "
+                      "instance holds one cloud's credentials at a time."))
 
     name, mod = _adapter(payload.platform)
 

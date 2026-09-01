@@ -2136,6 +2136,100 @@ class PovBlueprint(Base):
                         nullable=False)
 
 
+class PovCloudTemplate(Base):
+    """A POV template on a public cloud: the topology, declared rather than captured.
+
+    Skytap's template is a saved environment — disks and all — and creating from it is one
+    call. No public cloud has that, so this table **is** the template: a named list of VMs
+    to build, on a network to build them in. A cloud adapter's ``list_templates()`` reads
+    these rows, which is what lets one create form, one blueprint table and one provision
+    job serve both kinds of platform.
+
+    **Declared, not captured, on purpose.** Baking N machine images (AMI / Managed Image /
+    Machine Image / Custom Image) would be the faithful analogue, and it is slow, region-
+    locked, cloud-specific, and a standing storage bill for every template anyone ever
+    saves. A spec that references the image catalog costs nothing to keep and ports to the
+    next cloud unchanged. ``source_environment_id`` is here for the slice that adds baking
+    so that slice needs no migration — the convention every ``pov_*`` table has followed
+    since slice 1.
+
+    Not to be confused with :class:`PovBlueprint`, which is a saved set of *form answers*
+    and names a template. This is the template.
+    """
+    __tablename__ = "pov_cloud_templates"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # The cloud this template builds on. A template is deliberately NOT portable between
+    # clouds: an instance type and an image id are both cloud-specific, so `aws` and
+    # `azure` versions of "the same" POV are two rows, and the create form only ever
+    # offers the selected cloud's. Guessing a translation is how a build fails ten minutes
+    # in with a shape error nobody can read.
+    cloud = Column(String(16), nullable=False, index=True)
+    name = Column(String(255), nullable=False, index=True)   # operator-chosen slug
+    description = Column(Text, nullable=True)
+
+    # Where it builds. NULL = the instance's configured default region, resolved at
+    # provision. Most templates do not care, and one pinned to a region the account has no
+    # quota in is a failure minutes into a build rather than at the form.
+    region = Column(String(64), nullable=True)
+
+    # The environment's own private network, CIDR only. One network per POV rather than a
+    # shared one: two customers' evaluations must not share a broadcast domain, and a
+    # per-POV network is also what makes the tag-scoped teardown exact.
+    network_cidr = Column(String(64), nullable=True)
+
+    # Provenance for the bake slice. Only a link; nothing keys on it.
+    source_environment_id = Column(String(36), nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                        nullable=False)
+
+
+class PovCloudTemplateVM(Base):
+    """One VM in a cloud POV template.
+
+    A child table rather than a JSON column on the template, for the reason this file
+    gives wherever the choice comes up: there is no portable JSON filter across SQLite and
+    Postgres, and "which templates use this image?" is a question the bake slice and the
+    image registry will both want to ask.
+    """
+    __tablename__ = "pov_cloud_template_vms"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    template_id = Column(String(36), index=True, nullable=False)
+    name = Column(String(255), nullable=False)
+
+    # "broker" | "target". At most ONE broker per template: it is the VM the dashboard
+    # agent, the Gateway and the Resource Broker all land on, and the provision job builds
+    # it LAST so its enrolment code is minted against a boot that is about to happen
+    # rather than one that already timed out.
+    role = Column(String(16), nullable=False, default="target")
+
+    # "linux" | "windows". Required here, unlike PovEnvironmentVM where blank means "the
+    # platform would not say" — the person writing a template knows, and the wire-up sends
+    # a Windows VM down an entirely different path.
+    os_family = Column(String(16), nullable=False, default="linux")
+
+    # What to boot. Exactly one of these two is set, enforced by the service:
+    #   image_ref - a registered_images.id. The per-cloud id is resolved from that row's
+    #               `promotions` at provision time, so one template row survives a
+    #               re-promote and a template can be written before the image exists in
+    #               the target cloud.
+    #   image_id  - a raw cloud image id (ami-…, a gallery version, a GCE image name) for
+    #               when the catalog holds nothing and a literal is the honest answer.
+    image_ref = Column(String(36), nullable=True)
+    image_id = Column(String(255), nullable=True)
+
+    instance_type = Column(String(64), nullable=False)
+    disk_gb = Column(Integer, nullable=True)
+    # Render and build order. The broker's position is decided by `role`, not by this.
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 def init_db():
     """Initialize database — create all tables and run lightweight migrations.
 

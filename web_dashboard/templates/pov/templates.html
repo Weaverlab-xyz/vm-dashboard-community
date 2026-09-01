@@ -299,6 +299,150 @@
     </div>
   </section>
 
+  {# ── Cloud templates ──────────────────────────────────────────────────────
+     The topology a CLOUD POV is built from. No public cloud holds a template, so on a
+     cloud these rows ARE the template — which is why this section replaces the builder
+     above rather than sitting beside it, and why it is hidden entirely when no cloud
+     provider is selected. #}
+  <section x-show="cloudEnabled" x-cloak
+           class="bg-white rounded-lg shadow-sm border border-gray-200">
+    <div class="px-5 py-4 border-b border-gray-200 flex items-center justify-between gap-3">
+      <div>
+        <h2 class="text-lg font-medium text-gray-900">
+          Cloud templates <span class="text-sm font-normal text-gray-400"
+                                x-text="'· ' + (selectedCloud || '').toUpperCase()"></span>
+        </h2>
+        <p class="text-sm text-gray-500 mt-1">
+          What a POV on this cloud gets built from: a list of VMs, and the private network
+          they sit on. Nothing here is created until a POV names this template.
+        </p>
+      </div>
+      <button @click="newCloudTemplate()"
+              class="px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700">
+        New template
+      </button>
+    </div>
+
+    <div x-show="cloudError" x-cloak class="px-5 py-3 bg-red-50 border-b border-red-200">
+      <p class="text-sm text-red-800" x-text="cloudError"></p>
+    </div>
+
+    <div class="px-5 py-4">
+      <template x-if="!cloudTemplates.length && !cloudForm">
+        <p class="text-sm text-gray-500">
+          No cloud templates yet. A useful first one is two VMs — a Linux
+          <span class="font-medium">broker</span>, which carries the dashboard agent, the
+          Gateway and the Resource Broker, and one target to demonstrate against.
+        </p>
+      </template>
+
+      <div x-show="cloudTemplates.length" class="divide-y divide-gray-100">
+        <template x-for="t in cloudTemplates" :key="t.id">
+          <div class="py-3 flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-900" x-text="t.name"></p>
+              <p class="text-xs text-gray-500 mt-0.5" x-text="t.description || '—'"></p>
+              <p class="text-xs text-gray-400 mt-1">
+                <span x-text="t.vm_count + (t.vm_count === 1 ? ' VM' : ' VMs')"></span>
+                · <span x-text="t.region || 'default region'"></span>
+                · <span x-text="t.effective_network_cidr"></span>
+                <template x-if="t.broker_vm_name">
+                  <span> · broker <span class="font-mono" x-text="t.broker_vm_name"></span></span>
+                </template>
+                <template x-if="!t.broker_vm_name">
+                  <span class="text-amber-600"> · no broker VM — its POV will have no agent</span>
+                </template>
+              </p>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <button @click="editCloudTemplate(t)"
+                      class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Edit</button>
+              <button @click="deleteCloudTemplate(t)"
+                      class="text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50">Delete</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div x-show="cloudForm" x-cloak class="px-5 py-4 border-t border-gray-200 bg-gray-50">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+          <input type="text" x-model="cloudForm.name" placeholder="ps-eval"
+                 class="w-full rounded-md border-gray-300 text-sm font-mono">
+          <p class="text-xs text-gray-400 mt-1">Lowercase letters, digits and hyphens.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+          <input type="text" x-model="cloudForm.description"
+                 placeholder="Password Safe evaluation"
+                 class="w-full rounded-md border-gray-300 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Region</label>
+          <input type="text" x-model="cloudForm.region" placeholder="blank = the default"
+                 class="w-full rounded-md border-gray-300 text-sm font-mono">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Private network</label>
+          <input type="text" x-model="cloudForm.network_cidr"
+                 :placeholder="defaultCidr"
+                 class="w-full rounded-md border-gray-300 text-sm font-mono">
+          <p class="text-xs text-gray-400 mt-1">
+            Each POV gets its own. Nothing listens on it from outside.
+          </p>
+        </div>
+      </div>
+
+      <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-5 mb-2">VMs</p>
+      <div class="space-y-2">
+        <template x-for="(vm, i) in cloudForm.vms" :key="i">
+          <div class="grid grid-cols-12 gap-2 items-start">
+            <input type="text" x-model="vm.name" placeholder="name"
+                   class="col-span-2 rounded-md border-gray-300 text-sm font-mono">
+            <select x-model="vm.role" class="col-span-2 rounded-md border-gray-300 text-sm">
+              <option value="target">target</option>
+              <option value="broker">broker</option>
+            </select>
+            <select x-model="vm.os_family" class="col-span-2 rounded-md border-gray-300 text-sm">
+              <option value="linux">linux</option>
+              <option value="windows">windows</option>
+            </select>
+            <input type="text" x-model="vm.image_id" placeholder="ami-… or catalog id below"
+                   class="col-span-3 rounded-md border-gray-300 text-sm font-mono">
+            <input type="text" x-model="vm.instance_type" placeholder="t3.medium"
+                   class="col-span-2 rounded-md border-gray-300 text-sm font-mono">
+            <button @click="cloudForm.vms.splice(i, 1)"
+                    class="col-span-1 text-xs px-2 py-2 border border-gray-300 rounded
+                           hover:bg-white">Remove</button>
+          </div>
+        </template>
+      </div>
+      <button @click="addCloudVm()"
+              class="mt-2 text-xs px-2 py-1 border border-gray-300 rounded hover:bg-white">
+        Add a VM
+      </button>
+      <p class="text-xs text-gray-400 mt-2">
+        Exactly one VM may be the <span class="font-medium">broker</span>. Images are
+        resolved when a POV is built, not now — so a template can name a catalog image
+        that has not been promoted to this cloud yet.
+      </p>
+
+      <div class="mt-4 flex items-center gap-2">
+        <button @click="saveCloudTemplate()" :disabled="savingCloud"
+                class="px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700
+                       disabled:opacity-50">
+          <span x-text="savingCloud ? 'Saving…' : 'Save template'"></span>
+        </button>
+        <button @click="cloudForm = null; cloudError = ''"
+                class="px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-white">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </section>
+
   {# ── Blueprints ───────────────────────────────────────────────────────── #}
   <section class="bg-white rounded-lg shadow-sm border border-gray-200">
     <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
@@ -462,6 +606,13 @@ function templatesPage() {
     building: false,
     verifying: false,
     savingBp: false,
+    savingCloud: false,
+    cloudEnabled: false,
+    selectedCloud: '',
+    defaultCidr: '',
+    cloudTemplates: [],
+    cloudForm: null,
+    cloudError: '',
     notConfigured: false,
     error: '',
     showRunner: false,
@@ -560,6 +711,7 @@ function templatesPage() {
         this.blueprints = bps.blueprints || [];
         this.tenants = registry.tenants || [];
         this.tenantKinds = registry.kinds || [];
+        await this.loadCloudTemplates();
       } catch (e) {
         this.error = e.message;
       } finally {
@@ -581,6 +733,95 @@ function templatesPage() {
         } catch (e) { /* a transient read must not clear the page */ }
         this.schedulePoll();
       }, 5000);
+    },
+
+    // ── cloud templates ──────────────────────────────────────────────────
+    // On a cloud the dashboard holds the template, so this section is CRUD against our
+    // own tables rather than a read of somebody's platform. It is hidden entirely when
+    // no cloud provider is selected — an empty editor for a feature that is off reads as
+    // a broken feature.
+
+    blankCloudVm() {
+      return { name: '', role: 'target', os_family: 'linux',
+               image_ref: '', image_id: '', instance_type: '', disk_gb: 0 };
+    },
+
+    newCloudTemplate() {
+      this.cloudError = '';
+      this.cloudForm = { id: '', name: '', description: '', region: '',
+                         network_cidr: '', vms: [this.blankCloudVm()] };
+    },
+
+    editCloudTemplate(t) {
+      this.cloudError = '';
+      // A copy, never the row. Binding the list itself would edit the rendered table as
+      // the operator types and leave it wrong if they cancel.
+      this.cloudForm = {
+        id: t.id, name: t.name, description: t.description || '',
+        region: t.region || '', network_cidr: t.network_cidr || '',
+        vms: (t.vms || []).map(v => ({ ...v })),
+      };
+    },
+
+    addCloudVm() {
+      this.cloudForm.vms.push(this.blankCloudVm());
+    },
+
+    async loadCloudTemplates() {
+      try {
+        const body = await this.apiJson('/api/pov/cloud-templates');
+        this.selectedCloud = body.selected_cloud || '';
+        this.cloudEnabled = !!this.selectedCloud;
+        this.defaultCidr = body.default_network_cidr || '';
+        this.cloudTemplates = body.templates || [];
+      } catch (e) {
+        // Soft, like the platform read above: a failure here must not take the builds and
+        // blueprints down with it.
+        this.cloudEnabled = false;
+        this.cloudTemplates = [];
+      }
+    },
+
+    async saveCloudTemplate() {
+      this.savingCloud = true;
+      this.cloudError = '';
+      const f = this.cloudForm;
+      const payload = {
+        name: f.name, description: f.description, region: f.region,
+        network_cidr: f.network_cidr,
+        vms: f.vms.map(v => ({
+          name: v.name, role: v.role, os_family: v.os_family,
+          image_ref: v.image_ref || '', image_id: v.image_id || '',
+          instance_type: v.instance_type, disk_gb: Number(v.disk_gb) || 0,
+        })),
+      };
+      try {
+        if (f.id) {
+          await this.apiJson('/api/pov/cloud-templates/' + encodeURIComponent(f.id),
+                             { method: 'PUT', body: JSON.stringify(payload) });
+        } else {
+          await this.apiJson('/api/pov/cloud-templates',
+                             { method: 'POST', body: JSON.stringify(payload) });
+        }
+        this.cloudForm = null;
+        await this.loadCloudTemplates();
+      } catch (e) {
+        // Onto the section, not the page: every refusal from this endpoint names the
+        // field to fix, and it belongs beside the form that produced it.
+        this.cloudError = e.message;
+      } finally {
+        this.savingCloud = false;
+      }
+    },
+
+    async deleteCloudTemplate(t) {
+      if (!confirm(`Delete the cloud template "${t.name}"? POVs already built from it keep running.`)) return;
+      this.cloudError = '';
+      try {
+        await this.apiJson('/api/pov/cloud-templates/' + encodeURIComponent(t.id),
+                           { method: 'DELETE' });
+        await this.loadCloudTemplates();
+      } catch (e) { this.cloudError = e.message; }
     },
 
     async loadRunner() {

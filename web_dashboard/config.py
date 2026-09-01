@@ -43,6 +43,27 @@ class Settings(BaseSettings):
     skytap_api_token: str = ""          # secret; masked in Settings
     skytap_project_id: str = ""         # OPTIONAL — templates and environments are LISTED from this project and new ones CREATED in it; blank = everything the token can see
 
+    # Whether this POV instance may run POVs on a public cloud at all, and which one.
+    # Two keys rather than one, matching skytap_enabled beside skytap_*: the flag is what
+    # `feature_flags._POV_ONLY` masks on a demo instance and what an operator switches off
+    # without losing which cloud they had chosen.
+    pov_cloud_enabled: bool = False     # POV cloud lab platform (pov profile only)
+
+    # Which public cloud, if any, this POV instance may ALSO run POVs on. One of
+    # "aws" | "azure" | "gcp" | "oci", or blank for none. Blank is the default and keeps
+    # a POV instance exactly as it was.
+    #
+    # **One at a time, deliberately.** A POV instance is meant to be narrow: one cloud's
+    # credentials, one cloud's quota to watch, one cloud's bill to explain. The limit is
+    # enforced by lab_platforms.selectable_platforms(), which is what the create form and
+    # the provision endpoint both read — not by hiding the others in the UI.
+    #
+    # Setting this does NOT re-open the demo cloud consoles. /aws /azure /gcp /oci and
+    # their API routers stay 404 on a POV instance: their deploys resolve the GLOBAL
+    # BeyondTrust tenant singletons, which is the one thing the profile split exists to
+    # prevent. The POV's own read-only view of the selected cloud is /pov/cloud.
+    pov_cloud_platform: str = ""
+
     vmware_enabled: bool = True         # VMs router + /vms page
     # The three BeyondTrust products the dashboard drives are gated independently —
     # customers routinely license one or two, not all three. They replaced a single
