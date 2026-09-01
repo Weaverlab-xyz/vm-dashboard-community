@@ -232,19 +232,35 @@ def normalize(kind: str) -> str:
     return k
 
 
+# Entitle's API is REGIONAL. `api.entitle.io`, `api.us.entitle.io` and
+# `api.ca.entitle.io` are separate deployments serving different tenants — verified by
+# their CSP headers, which name `app.entitle.io`, `us.entitle.io` and `ca.entitle.io`
+# respectively. Listed here for the form's hint, not as an allowlist: BeyondTrust adds
+# regions and a closed list would refuse a real one.
+#
+# **Every one of them answers 200 to an unauthenticated probe**, which is what makes this
+# worth a constant and a paragraph. A tenant pointed at the wrong region does not fail at
+# registration or at verify — it fails later, looking like a tenant that holds none of
+# the customer's resources.
+KNOWN_ENTITLE_REGIONS = ("https://api.entitle.io/v1",
+                         "https://api.us.entitle.io/v1",
+                         "https://api.ca.entitle.io/v1")
+
+
 def default_base_url(kind: str) -> str:
-    """The URL for a kind whose URL is not a per-tenant fact, or ``""``.
+    """**This install's** Entitle region, or ``""`` for the kinds that have no default.
 
     PRA and Password Safe are per-customer appliances and tenants — the hostname IS the
-    customer, so there is nothing to default. **Entitle is one multi-tenant service behind
-    one API host**, so its URL has exactly one correct value and typing it per POV is
-    typing the same string until the day somebody typos it. The form prefills from here
-    and :func:`create` falls back to it, so an SE registering an Entitle tenant supplies a
-    name and a token and nothing else.
+    customer, so there is nothing to default.
 
-    Read through ``_cfg`` rather than hardcoded so an install that has already moved
-    ``entitle_api_url`` — a non-standard region — gets *its* value instead of this
-    module's opinion of it.
+    Entitle is multi-tenant, so its host is not per customer either. It is per **region**,
+    and this returns the region *this install* is configured for rather than a constant:
+    an SE running POVs is almost always running them in their own region, so prefilling it
+    saves the typing while leaving the field editable for the customer who is not.
+
+    What it deliberately is NOT is an assertion that the value is right. See
+    :data:`KNOWN_ENTITLE_REGIONS` — a wrong region is accepted by every host, so the form
+    states which one it filled in rather than presenting it as settled.
     """
     kind = normalize(kind)
     if kind != "entitle":
@@ -295,9 +311,10 @@ _SINGLETON_SPEC = {
         "options": {"api_account_name": "pscli_api_account_name"},
     },
     "entitle": {
-        # Entitle is multi-tenant behind one canonical API URL, so this one is the same
-        # value on every install and the token is what differs. No options: the machine
-        # identity is an instance-wide setting and stays one — see OPTION_KEYS.
+        # Entitle is multi-tenant behind a REGIONAL API URL, so this one is whatever
+        # region THIS install was configured for and the token is what usually differs.
+        # No options: the machine identity is an instance-wide setting and stays one —
+        # see OPTION_KEYS.
         "base_url": "entitle_api_url",
         "client_id": "",
         "secret": "entitle_api_token",
@@ -549,6 +566,9 @@ def create(db: Session, *, kind: str, name: str, created_by: str = "",
                                           BeyondTrustTenant.name == name).first():
         raise BTTenantError(f"a {LABELS[kind]} tenant named {name!r} already exists")
 
+    # A blank Entitle URL takes this install's region. The form always prefills, so blank
+    # here means an API caller omitted it entirely — and the install's own region is a
+    # better answer for that caller than a refusal. `update` refuses instead; see there.
     base_url = (base_url or "").strip() or default_base_url(kind)
     if not base_url:
         raise BTTenantError(f"a {LABELS[kind]} tenant needs its URL or appliance hostname")
@@ -599,11 +619,19 @@ def update(db: Session, tenant_id: str, **fields) -> dict:
         row.name = name
 
     if "base_url" in fields:
-        # Blank means "the default for this kind" where there is one, so clearing the
-        # field on an Entitle tenant restores the canonical URL rather than refusing.
-        base_url = str(fields["base_url"] or "").strip() or default_base_url(row.kind)
+        # Blank is a REFUSAL here, not "restore the default" — the opposite of what an
+        # earlier draft did, and the difference matters because Entitle's URL turned out
+        # to be regional. Substituting this install's region for a field somebody cleared
+        # is how a customer's tenant silently moves to another deployment, and every
+        # region answers 200 so nothing downstream would report it. `create` may still
+        # default a blank, because there the operator never had a value to clear.
+        base_url = str(fields["base_url"] or "").strip()
         if not base_url:
-            raise BTTenantError("a tenant needs its URL or appliance hostname")
+            raise BTTenantError(
+                "a tenant needs its URL or appliance hostname. For Entitle that is the "
+                "REGIONAL API base — " + ", ".join(KNOWN_ENTITLE_REGIONS) + " — and they "
+                "are different deployments, so a blank is not something this can fill in "
+                "for you.")
         row.base_url = base_url
     if "client_id" in fields:
         row.client_id = str(fields["client_id"] or "").strip()

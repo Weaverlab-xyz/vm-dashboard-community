@@ -1641,7 +1641,13 @@ class Settings(BaseSettings):
 
     # Entitle integration — shared API credentials (used by machine-identity
     # JIT, user-JIT, and resource registration below).
-    entitle_api_url: str = "https://api.entitle.io/v1"  # canonical Entitle API base — multi-tenant, identical for every tenant. Drives machine-identity JIT and (normalized to scheme+host) the entitleio/entitle provider endpoint.
+    # Entitle API base, and it is REGIONAL: api.entitle.io, api.us.entitle.io and
+    # api.ca.entitle.io are separate deployments, not aliases. Set the one your tenant
+    # lives in — every one of them answers 200 to an unauthenticated probe, so pointing
+    # at the wrong region does not fail here; it fails later, as a tenant that appears
+    # to hold none of your resources. Drives machine-identity JIT and (normalized to
+    # scheme+host) the entitleio/entitle provider endpoint.
+    entitle_api_url: str = "https://api.entitle.io/v1"
     entitle_api_token: str = ""                     # bearer token (Key Vault secret in prod)
 
     # Entitle resource registration — as the dashboard builds Linux VMs and

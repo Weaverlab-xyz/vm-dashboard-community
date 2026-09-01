@@ -351,9 +351,10 @@ def test_entitle_owner_and_workflow_are_required_because_the_wireup_refuses_with
 
 # ── the URL that is not a per-tenant fact ────────────────────────────────────
 
-def test_an_entitle_tenant_needs_no_url_because_there_is_only_one():
-    """Entitle is one multi-tenant service behind one API host. Asking an SE to type it
-    per POV is asking for a typo in a field with exactly one correct value."""
+def test_an_omitted_entitle_url_takes_this_installs_region():
+    """Not because there is one correct value — Entitle's API is regional — but because
+    the form always prefills, so a blank reaching `create` came from an API caller who
+    omitted it, and this install's own region beats refusing them."""
     db = d.SessionLocal()
     row = _mk(db, kind="entitle", base_url="", client_id="")
     assert row["base_url"] == t.default_base_url("entitle")
@@ -361,9 +362,33 @@ def test_an_entitle_tenant_needs_no_url_because_there_is_only_one():
     db.close()
 
 
+def test_the_regions_are_a_hint_and_not_an_allowlist():
+    """BeyondTrust adds regions. A closed list would refuse a real tenant, which is a much
+    worse failure than a hint that is one short."""
+    db = d.SessionLocal()
+    row = _mk(db, kind="entitle", base_url="https://api.newregion.entitle.io/v1",
+              client_id="")
+    assert row["base_url"] == "https://api.newregion.entitle.io/v1"
+    assert row["base_url"] not in t.KNOWN_ENTITLE_REGIONS
+    db.close()
+
+
+def test_the_known_regions_are_distinct_hosts_not_paths_on_one():
+    """`api.entitle.io`, `api.us.entitle.io` and `api.ca.entitle.io` are separate
+    deployments — their CSP headers name app./us./ca.entitle.io respectively. Pinned as a
+    reminder that this list is about HOSTS, so nobody 'tidies' it into one base with a
+    region query parameter."""
+    from urllib.parse import urlsplit
+    hosts = {urlsplit(u).netloc for u in t.KNOWN_ENTITLE_REGIONS}
+    assert len(hosts) == len(t.KNOWN_ENTITLE_REGIONS)
+    assert "api.us.entitle.io" in hosts
+
+
 def test_the_default_url_follows_the_configured_one_not_a_hardcoded_string():
-    """An install on a non-standard Entitle region has already moved `entitle_api_url`.
-    A constant here would send that install's calls to the wrong host."""
+    """The whole reason the prefill is safe. An install serves one Entitle region and has
+    already said which in `entitle_api_url`; a constant here would prefill every POV with
+    a host on somebody else's deployment, and every region answers 200 so nothing later
+    would report it."""
     config_service.set("entitle_api_url", "https://api.eu.entitle.io/v1")
     try:
         assert t.default_base_url("entitle") == "https://api.eu.entitle.io/v1"
@@ -386,12 +411,20 @@ def test_only_entitle_gets_a_default_url():
         db.close()
 
 
-def test_clearing_an_entitle_url_restores_the_default_rather_than_refusing():
+def test_clearing_an_entitle_url_is_refused_rather_than_silently_re_regioned():
+    """An earlier draft restored the default here, on the belief that Entitle had one API
+    host. It has one per REGION, so substituting this install's for a field somebody
+    cleared moves a customer's tenant to another deployment — and since every region
+    answers, nothing downstream would ever say so."""
     db = d.SessionLocal()
-    row = _mk(db, kind="entitle", base_url="https://api.eu.entitle.io/v1", client_id="")
-    after = t.update(db, row["id"], base_url="")
-    assert after["base_url"] == t.default_base_url("entitle")
-    db.close()
+    row = _mk(db, kind="entitle", base_url="https://api.us.entitle.io/v1", client_id="")
+    try:
+        t.update(db, row["id"], base_url="")
+        raise AssertionError("a cleared Entitle URL was silently re-regioned")
+    except t.BTTenantError as exc:
+        assert "REGIONAL" in str(exc) and "api.us.entitle.io" in str(exc)
+    finally:
+        db.close()
 
 
 # ── naming ───────────────────────────────────────────────────────────────────

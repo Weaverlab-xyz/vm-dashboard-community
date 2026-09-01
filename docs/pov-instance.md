@@ -701,14 +701,14 @@ having one answer and the singletons stop being able to express the question.
 
 The registry holds **one row per product, not per customer**, and a POV carries three
 independent references. That is not an accident of modelling: PRA and Password Safe are
-genuinely per-customer, while Entitle is multi-tenant behind one canonical API URL and is
+genuinely per-customer, while Entitle is multi-tenant behind a regional API URL and is
 usually the same tenant for every POV. One row holding all three would force a duplicate
 Entitle credential per customer, and duplicated credentials rotate apart.
 
 | | |
 |---|---|
 | **Name** | A slug — lowercase letters, digits, hyphens. See [below](#about-customer-data) |
-| **URL / hostname** | `tenant.beyondtrustcloud.com` for PRA, or the Password Safe URL. **Entitle prefills itself** — it is one multi-tenant service behind `https://api.entitle.io/v1`, identical on every install, so the field arrives filled and you only touch it on a non-standard region. Clearing it restores the default rather than refusing |
+| **URL / hostname** | `tenant.beyondtrustcloud.com` for PRA, or the Password Safe URL. **Entitle's is regional** — `api.entitle.io`, `api.us.entitle.io` and `api.ca.entitle.io` are separate deployments, not aliases. The field prefills with *this instance's* region and says so; check it against the customer's tenant, because every region answers a probe and a wrong one surfaces much later as a tenant holding none of their resources. Clearing it is refused rather than re-defaulted |
 | **OAuth client id** | PRA and Password Safe. Entitle authenticates with a bearer token and has no paired id |
 | **Client secret** | Encrypted with the same Fernet key as every other secret in this dashboard |
 | **…or a vault reference** | `aws_sm://`, `azure_kv://`, `gcp_sm://`, `bt_safe://` — for operators who want no credential in this database at all. One or the other, never both |
