@@ -106,94 +106,171 @@ not that — it spends nothing, builds nothing, reaches no tenant — and it doe
 the persona layer at all. The registry stays a pure read; the write lands in `api/pov.py`,
 behind the auth every other POV action already carries.
 
-## Slice 2 — the ephemeral accessor (not built)
+## Slice 2 — the ephemeral accessor
 
-The prospect ticks cards off themselves. That means an identity for somebody outside the
-account, which exists only as long as the POV does.
+Built. The prospect gets a login of their own; slice 3 gives them something to do with it.
 
 ### Identity
 
-Entitle's `create_actor` mints a real `User` row, so login, MFA, audit and sessions are the
-ones already here — plus one column that is the whole security model:
+Entitle's `create_actor` — or an SE pressing a button — mints a real `users` row, so login,
+the sign-in throttle, MFA and the audit trail are the ones already here rather than a
+second implementation of each. What makes it an accessor is one column:
 
 ```python
-accessor_env_id = Column(String(36), nullable=True, index=True)   # non-NULL ⇒ POV accessor
+accessor_env_id = Column(String(36), nullable=True, index=True)   # non-NULL ⇒ accessor
 ```
 
-and a `PovAccessor` table for the binding's detail (environment, user, Entitle request id,
-expiry). The env id is duplicated onto `User` deliberately: the guard below runs on every
-request and must not need a join.
+plus a `PovAccessor` table holding the binding and its provenance: which POV, who minted
+it, from where, and when it dies. The environment id is duplicated onto `User` deliberately
+— the guard below runs on every request and must not need a join.
 
-### The trap, stated before the code
+### The trap, and why the guard is where it is
 
-`User.effective_permissions_dict` returns `{}` for a user with no permissions, and
-`require_permission` treats an empty dict as **unrestricted** — backward compatibility with
-pre-OIDC users. So an accessor created with "no permissions" would have *every* permission.
+`User.effective_permissions_dict` returns `{}` for a user none of the three permission
+columns says anything about, and `require_permission` reads `{}` as **unrestricted** —
+deliberate backward compatibility for the users that predate those columns. So an accessor
+created "with no permissions" holds every permission in the dashboard.
 
-**Deny by default, in one reader.** `api/auth.get_current_user` is the single dependency
-every authenticated route resolves through — the same one-reader shape as
-`feature_flags.enabled`. It gains a check: an accessor reaching any path outside an
-**allowlist** (`/pov/access`, its own API, `/api/auth/me`, logout, `/static`) gets a 403.
-`require_admin` refuses an accessor unconditionally. Accessors are excluded from
-`/api/users`, from `entitle_rest.get_actors` and from `get_all_permissions`. Every one of
-those is a silent failure if missed, so every one gets a test.
+So the confinement is a **path allowlist** in `api/auth.get_current_user`, the one
+dependency every authenticated route resolves through — the same one-reader shape as
+`feature_flags.enabled`. An allowlist and not a denylist: a route added tomorrow is refused
+by default, which is the only direction this can fail safely in. Two entries today,
+`/api/pov/accessor/self` and `/api/auth/me`, and a test pins that it has not grown.
+
+Three surfaces resolve users *without* going through that dependency, so each is closed
+where it lives:
+
+| Surface | Why it matters | What it does now |
+|---|---|---|
+| `api/entitle_rest` | Grants dashboard permissions **up to administrator**, and resolves an actor by scanning users and matching a name. An accessor reaching that lookup is a direct escalation. | Every route filters `accessor_env_id IS NULL`, on the query rather than the response |
+| `api/websocket._authenticate` | Its own resolver, so the path allowlist does not reach it. Job Live Output is not for a prospect. | Refuses an accessor on both the JWT and the PAT branch |
+| `/api/users` | An admin `PATCH` setting `is_admin`, or clearing the binding, is two keystrokes to an operator account | Accessors are hidden from the list, and every mutation route — patch, deactivate, permanent delete, PAT mint — refuses one with a 409 naming the Access tab |
+
+`require_admin` also refuses an accessor outright. No admin route is in the allowlist, so
+that is unreachable today — which is the point: the day one is added by mistake, an
+accessor still does not become an administrator.
+
+The client-side half is **a convenience, not a control**. `/api/auth/me` reports
+`accessor_env_id`, the Alpine store keeps it, and `requireAuth()` sends an accessor to
+`/pov/access` rather than leaving them on a dashboard whose every call 403s. It reads
+`localStorage`, which the holder can edit, and it runs in their browser. The gate consults
+nothing the client sends.
 
 ### The Entitle side
 
-A new router serving Entitle's **Ephemeral Accounts** route set — the half
+`api/pov_accessor_rest.py` serves Entitle's **Ephemeral Accounts** route set — the half
 `api/entitle_rest.py` deliberately omits, because dashboard users are permanent accounts
 and these are the opposite case:
 
 ```
-GET  /get_assets            live POVs, identifier "pov:<env_id>"
-GET  /get_all_permissions
-POST /create_actor          mint the accessor, return its credentials
-POST /delete_actor          delete it
-POST /check_config
+GET  /api/pov/accessor/rest/get_assets            live POVs, "pov:<env_id>"
+GET  /api/pov/accessor/rest/get_all_permissions
+POST /api/pov/accessor/rest/create_actor          mint; returns the credentials
+POST /api/pov/accessor/rest/delete_actor          delete
+POST /api/pov/accessor/rest/check_config
 ```
 
-Reuse rather than reinvent:
+There is deliberately no `give_access`: in Ephemeral mode `create_actor` **is** the grant.
 
-* `api/entitle_rest._require_secret`'s pattern, with **its own secret** — an endpoint that
-  mints logins must not share a credential with one that grants permissions. Its prefix
-  joins `main._SETUP_503_PREFIXES`, for the reason the existing one is there.
-* `functions/fnworkloads/db_grant.py` is the working reference for this contract and carries
-  two hard-won details: in Ephemeral mode the identity arrives in `provisioning_data`, not
-  `actor`; and `delete_actor` must refuse any username without the ephemeral prefix, so
-  Entitle can never delete an operator's account.
-* In Ephemeral mode `create_actor` **is** the grant — there is no `give_access` — and it
-  returns the credentials Entitle hands the requester.
-* `entitle_registration_service.register_rest(..., ephemeral=True)` registers the adapter
-  against **this POV's own** Entitle tenant; `deregister` removes it at teardown. One
-  integration per POV, because the asset is the POV.
+Three things are copied from `functions/fnworkloads/db_grant.py`, each learned expensively
+there. The identity arrives in `provisioning_data`, not `actor` — reading only `actor` is
+what made every real ephemeral grant come back 400. `delete_actor` refuses any username
+without the `povguest_` prefix, checked on the name in the *request* before any lookup, so
+a row that disagreed could not talk it into deleting an operator's account. And
+`create_actor` returns the credentials, because handing them to the requester is the whole
+point of the call.
 
-**Known unknown:** `register_rest` already records that Entitle's Ephemeral-mode
-discriminator is unconfirmed against a live tenant. So slice 2 ships a manual path as well —
-an SE can mint an accessor from the POV page — and the Entitle path is the automation on
-top rather than the only way in.
+Its secret is its own (`pov_accessor_rest_secret`), fail-closed in the same shape as the
+standing adapter's: 503 when unset, one response for missing and wrong. An endpoint whose
+job is minting logins must not authenticate with a credential that already grants
+permissions.
+
+### The manual path, and why it exists
+
+`POST /api/pov/managed/{id}/accessors` mints one directly from the POV page's Access tab.
+That is not a convenience feature — it is what makes this slice shippable and testable with
+no Entitle tenant at all, and it is how the open question below gets answered.
+
+The password is in that response **and nowhere else**. There is no reveal endpoint, unlike
+the share link's: that password has to be re-readable because an SE reads it to a customer
+days later, while an accessor that lost its password is replaced, which is one click and
+leaves an audit line.
+
+### Lifetime
+
+An accessor keeps its own clock, on `pov_share`'s three-step rule — an explicit request,
+else the POV's own `expires_at`, else 14 days — and it is **clamped** so an accessor can
+never outlive the POV it can reach. Entitle owning expiry on its side is not the same as
+this instance knowing when to stop trusting a login: an integration that is removed,
+misconfigured, or simply never calls back would otherwise leave a working credential behind
+forever.
 
 ### Reaping
 
-`pov_accessor_service.teardown` runs in `run_env_destroy` **first, ahead of the share
-link**. The current ordering comment gives the share link that position because it is "the
-only artifact somebody outside the account can be holding"; an accessor is that too, and it
-is a credential into this dashboard rather than a door into a lab. It deletes the users and
-bindings, then deregisters the Entitle integration; it never raises.
+`pov_accessor_service.teardown` runs **first** in `run_env_destroy`, taking the position the
+share link used to hold. That position belongs to whatever a person outside the account can
+be holding, and an accessor is that — but it is a credential into *this dashboard* rather
+than a door into a lab, so its window is the one worth making shortest. Revoking **deletes**
+the user row rather than deactivating it: an inactive row is still a username every actor
+lookup in the codebase has to remember to skip, and the one that forgets is an escalation.
 
-`services/expiry_reaper` enqueues the identical `pov_env_destroy` job, so auto-delete is
-covered by the same hook with no second code path. A sweep on `main._pov_reconcile_loop`
-catches accessors whose expiry passed while the POV lives on.
+`expiry_reaper` enqueues the identical `pov_env_destroy` job, so the auto-delete timer is
+covered by the same hook with no second code path.
 
-## Slice 3 — the accessor page (not built)
+The backstop is a sweep on the POV reconcile pass, **outside** its platform loop: a fresh
+POV instance starts with the auto-delete timer off, and whether a prospect's login should
+still work has nothing to do with whether Skytap is reachable. It catches accessors past
+their expiry and accessors whose POV already reached `destroyed`.
 
-`GET /pov/access` — **no env id in the URL.** The accessor's own `accessor_env_id` decides
-which POV; an id in the path is an invitation to try someone else's.
+The use-case record is **not** removed with them. That distinction is the point: an
+accessor is a credential, and the checklist is the account of what the evaluation covered.
 
-A standalone template, not `base.html`: an accessor must never render the SE nav, and
-inheriting it would make that a CSS problem rather than a structural one.
+## Slice 2b — registering the adapter with Entitle (not built)
 
-It carries the checklist (ticked with `checked_by_kind='accessor'`, so the SE's page can
-tell who ran what), a note per card, the lab share link with its password revealed one row
-at a time, and a read-only list of what was wired — jump item names and hosts, managed
-account names, integrations. **No credentials, no tenant ids, no terraform state:** a
-projection written for this page, not `_serialize` with fields removed.
+Today an SE points an Entitle REST integration at the routes above **by hand**. That is
+deliberate, and it is also how the open question gets answered:
+`entitle_registration_service.register_rest` records that Entitle's Ephemeral-mode
+discriminator is unconfirmed against a live tenant. Registering by hand once tells you
+whether the integration comes back showing "Standing Accounts" in its Connection dropdown,
+which is the thing the automation has to get right.
+
+Two things have to change before it can be automated, and the first is not optional:
+
+* **`register_rest` takes no tenant context.** Every other `register_*` helper accepts an
+  `EntitleTenantCtx`; this one does not, so it registers against the **global Entitle
+  singleton**. Not a live bug — its only caller is `cloud_function_service`, behind
+  `cloud_functions_enabled`, which is `_DEMO_ONLY` and so correctly uses the singleton. But
+  a POV caller registering against the global tenant is precisely the silent cross-tenant
+  mistake the tenant registry exists to prevent, so this is the first thing 2b fixes.
+* **A lighter tenant context than `pov_wireup.entitle_context`.** That one refuses without
+  an agent token and an SSH key — both real prerequisites for the SSH *connector*, which
+  reaches a private target from inside the network. A REST adapter is called by Entitle over
+  public HTTPS and needs neither. Reusing it would block accessor registration on
+  prerequisites that do not apply, so the tenant resolution (owner id, workflow id) wants
+  extracting and the SSH-specific checks want layering on top.
+
+Then: `accessor_integration_id` / `accessor_tf_state` on the POV row, registration on
+demand, and `deregister` in the teardown ahead of the accessor rows themselves.
+
+## Slice 3 — giving the accessor something to do (not built)
+
+The page itself landed with slice 2, read-only: `GET /pov/access`, **no env id in the URL**
+(the binding decides which POV, so there is no id in a path to try someone else's), and a
+standalone template rather than `base.html` — an accessor must never render the SE nav, and
+inheriting it would make that a CSS question with an `x-show` for an answer.
+
+What is left is the writing:
+
+* **Ticking a card**, through the accessor's own path rather than the SE's — the env comes
+  from the session, never a parameter. It writes `checked_by_kind='accessor'`, the column
+  slice 1 shipped unused, so the SE's page can tell who ran what.
+* **A note per card**, surfaced on the SE's Use cases tab. This is what turns a tick into
+  evaluation evidence rather than a box.
+* **The lab share link and its password**, reusing `pov_share.reveal_password` — revealed
+  one row at a time on its own endpoint, never shipped with a list, which is a rule
+  `pov_share.describe` already keeps and that applies here unchanged.
+* **What was wired** — jump item names and hosts, managed account names, integrations.
+  **No credentials, no tenant ids, no terraform state:** a projection written for this
+  page, exactly as `pov_accessor_service.self_view` already is, and never `_serialize`
+  with fields removed. Building it by subtraction is how one of them comes back on the next
+  change to the serializer.

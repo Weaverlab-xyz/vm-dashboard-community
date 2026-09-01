@@ -686,7 +686,7 @@ Each card has **Mark done** and **Skip**, and the count rides on the row in the 
 land" and "we never got to it" are different things to walk into a renewal conversation
 with, and only one of them is fixed by running the demo. Every tick records who made it —
 which matters more once the customer can make their own, which is the
-[accessor](design/pov-use-cases.md#slice-2--the-ephemeral-accessor-not-built) slice.
+[accessor](design/pov-use-cases.md#slice-2--the-ephemeral-accessor) slice.
 
 ### Destroying a POV keeps this
 
@@ -698,6 +698,76 @@ out, which is the one time anybody reads it.
 
 The design note, including the accessor identity that is **not** kept, is in
 [design/pov-use-cases.md](design/pov-use-cases.md).
+
+---
+
+## Accessors: giving the customer a login
+
+**POV page → a POV's name → Access.**
+
+The share link below is a door into the *lab*. An accessor is a door into *this dashboard*:
+an ephemeral login, bound to one POV, that opens that POV's use-case checklist and nothing
+else. It exists so the evaluation continues when nobody from your side is on the call, and
+so the prospect's own view of what they have covered is theirs to keep.
+
+Three properties are not configurable, for the same reason the share link's three are not.
+
+### It can only ever reach its own POV
+
+Not "has few permissions" — **cannot reach anything else**. Every other route in the
+dashboard refuses it server-side, on an allowlist rather than a blocklist, so a page added
+next month is refused before anybody remembers to think about it. It is invisible on the
+Users page, it cannot be granted anything through the Entitle integration that grants
+dashboard permissions, it cannot open a job's Live Output, and it cannot be handed a
+personal access token. An admin cannot promote one by editing it, either: those routes
+refuse and point back here.
+
+### It expires, and never outlives the POV
+
+Fourteen days by default, and always shortened to the POV's own auto-delete date. Ask for
+longer than the environment has left and you get what the environment has left.
+
+Belt and braces, because the failure mode is a credential nobody associates with anything
+any more: destroying a POV removes its accessors **first**, ahead of the share link; the
+auto-delete timer goes through the same job, so a reaped POV takes its logins with it; and
+a sweep on the POV reconcile pass catches anything the other two missed — expired logins,
+and logins whose POV is already gone. That sweep does **not** depend on the auto-delete
+timer being on, because a fresh POV instance starts with it off.
+
+The use-case record is deliberately *not* removed with them. An accessor is a credential;
+the checklist is the account of what the evaluation covered.
+
+### The password is shown once
+
+There is no reveal button, unlike the share link's. That link's password has to be
+re-readable because you read it to a customer days later; an accessor that has lost its
+password is **replaced**, which is one click, leaves an audit line, and ends with a
+credential exactly one person ever saw. Minting and revoking are both audited, so "who
+could log in to this POV" is answerable afterwards.
+
+### Where they come from
+
+Two ways, and the Access tab shows which for every row.
+
+**By hand.** Fill in an email — a label, so you can tell two accessors apart; nothing is
+sent to it — and press **New accessor**. Give the customer the username and password on the
+spot. They sign in at the normal `/login` and land on their own page.
+
+**From Entitle.** This dashboard hosts an Entitle **Remote Adapter** in Ephemeral Accounts
+mode at `/api/pov/accessor/rest`, so a prospect can request access in Entitle and have the
+login minted, and removed, by the grant itself. Two things to know before you rely on it:
+
+* **You point Entitle at it by hand today.** Registering the integration automatically is a
+  later slice — see [design/pov-use-cases.md](design/pov-use-cases.md#slice-2b--registering-the-adapter-with-entitle-not-built)
+  for why, and for the one thing worth confirming when you set it up.
+* **It needs its own secret.** Set `pov_accessor_rest_secret` and give Entitle the same
+  value as a bearer token. Unset, the endpoint is **closed** (503), never open — and it is
+  deliberately not the same key as `entitle_rest_secret`: that one authenticates an
+  integration that grants dashboard permissions, and this one mints logins.
+
+The asset Entitle sees per POV is `pov:<environment id>`, and the account it mints is
+always named `povguest_…`. That prefix is load-bearing: the delete route refuses any name
+without it, so the integration can never be talked into removing one of your accounts.
 
 ---
 

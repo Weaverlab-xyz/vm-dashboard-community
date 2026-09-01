@@ -49,12 +49,34 @@ class UserTokenItem(BaseModel):
 
 # ── List users ─────────────────────────────────────────────────────────────────
 
+# POV accessors are not listed or edited here, and both halves matter.
+#
+# Not LISTED because this page is about the people who run this dashboard, and an accessor
+# is a prospect's ephemeral login that belongs to a POV: it is created from the POV's
+# Access tab, revoked there, and reaped with the environment. A list mixing the two invites
+# an admin to "tidy up" a login the POV is still using.
+#
+# Not EDITED because a PATCH here is an escalation path — `is_admin: true` on an accessor
+# row, or clearing `accessor_env_id`, turns a confined prospect into an operator with two
+# keystrokes and no audit line naming what happened. So every mutation route refuses one
+# and says where the real control is.
+_NOT_AN_ACCESSOR = User.accessor_env_id.is_(None)
+
+
+def _refuse_accessor(user: User) -> None:
+    if user is not None and user.accessor_env_id:
+        raise HTTPException(
+            status_code=409,
+            detail="This is a POV accessor login. It is managed from its POV's Access "
+                   "tab and removed when the POV is destroyed — edit or revoke it there.")
+
+
 @router.get("", response_model=List[UserResponse])
 async def list_users(
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    users = db.query(User).order_by(User.username).all()
+    users = db.query(User).filter(_NOT_AN_ACCESSOR).order_by(User.username).all()
     return [
         UserResponse(
             id=u.id,
@@ -120,6 +142,7 @@ async def update_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    _refuse_accessor(user)
     # Prevent admins from removing their own admin flag
     if user.id == admin.id and body.is_admin is False:
         raise HTTPException(status_code=400, detail="Cannot remove your own admin privilege")
@@ -169,6 +192,11 @@ async def deactivate_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # Refused rather than allowed-because-it-is-safe: deactivating here would stop the
+    # login while its PovAccessor row went on saying the POV has a live accessor, so the
+    # Access tab would show access that does not work. Revoke on that tab does both, and
+    # one writer for a lifecycle is the whole reason this stays refused.
+    _refuse_accessor(user)
     user.is_active = False
     db.commit()
     return {"detail": "User deactivated"}
@@ -188,6 +216,10 @@ async def delete_user_permanent(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # Same refusal as the deactivate above, plus a sharper one: deleting the row here
+    # leaves the PovAccessor binding pointing at a user that no longer exists, which is
+    # exactly the orphan `revoke` is written to avoid.
+    _refuse_accessor(user)
     db.delete(user)
     db.commit()
     return {"detail": "User permanently deleted"}
@@ -240,6 +272,11 @@ async def create_user_token(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # A PAT is a credential that outlives the browser session. An accessor is confined by
+    # a path allowlist that a PAT would still be subject to — but minting one for a
+    # prospect is a standing credential into this dashboard, which is the thing this whole
+    # feature is arranged not to create.
+    _refuse_accessor(user)
     from datetime import timedelta
     raw = _generate_raw()
     expires_at = (

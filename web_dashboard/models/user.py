@@ -28,6 +28,10 @@ class UserResponse(BaseModel):
     auth_provider: str = "local"
     mfa_required: bool = False
     permissions: Optional[dict] = None
+    # Set on a POV accessor: the one environment this login may reach. Present so the
+    # client can send them there instead of a dashboard that would refuse every call.
+    # It is not what confines them -- see api/auth._ACCESSOR_ALLOWED_PREFIXES.
+    accessor_env_id: str = ""
 
     class Config:
         from_attributes = True

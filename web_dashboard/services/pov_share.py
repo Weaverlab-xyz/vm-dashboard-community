@@ -74,8 +74,20 @@ def password_config_key(env_id: str) -> str:
     return _PW_FMT.format(env_id=env_id)
 
 
-def _generate_password() -> str:
+def generate_password() -> str:
+    """A password for something a person outside the account will be handed.
+
+    Public because ``pov_accessor_service`` mints one for the same audience under the same
+    constraint, and a second generator would mean a second alphabet and a second length to
+    keep in step -- with the difference only showing up on the call where somebody reads a
+    password out and it does not work.
+    """
     return "".join(secrets.choice(_PW_ALPHABET) for _ in range(_PW_LENGTH))
+
+
+# The old private spelling, kept so nothing in-tree has to change in the same commit that
+# widens the audience.
+_generate_password = generate_password
 
 
 def _now() -> datetime:

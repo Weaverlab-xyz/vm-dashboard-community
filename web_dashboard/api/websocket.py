@@ -46,10 +46,21 @@ def _authenticate(websocket: WebSocket, db: Session) -> Tuple[Optional[User], Op
 
     try:
         if token.startswith(_PAT_PREFIX):
-            return _get_user_from_pat(token, db), _WS_AUTH_SUBPROTOCOL
+            pat_user = _get_user_from_pat(token, db)
+            if pat_user.accessor_env_id:
+                logger.warning("websocket auth: refusing a POV accessor's token")
+                return None, None
+            return pat_user, _WS_AUTH_SUBPROTOCOL
         username = decode_token(token).username
         user = db.query(User).filter(User.username == username).first()
         if not user or not user.is_active:
+            return None, None
+        if user.accessor_env_id:
+            # A POV accessor. This resolver is deliberately NOT
+            # `api/auth.get_current_user`, so the path allowlist that confines an accessor
+            # everywhere else does not reach here — and job Live Output is the last thing
+            # a prospect should be able to tail.
+            logger.warning("websocket auth: refusing a POV accessor")
             return None, None
         return user, _WS_AUTH_SUBPROTOCOL
     except HTTPException:

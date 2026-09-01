@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ theme.title_prefix }}Your evaluation</title>
+  <link rel="icon" href="{{ theme.favicon }}">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  {# app.js is deliberately NOT loaded. It defines the auth store, window.API and
+     requireAuth — and requireAuth would redirect an accessor to this page, from this
+     page. This page needs a token and one fetch, which is less than the store costs to
+     reason about here. #}
+</head>
+{#
+  The accessor's page. A prospect's view of the one POV they were given a login for.
+
+  STANDALONE, not an extension of base.html, and that is structural rather than stylistic.
+  base.html includes _nav_links.html — every page in the dashboard, admin links included.
+  An accessor is refused on all of them server-side, so inheriting it would render twenty
+  links that all 403, and hiding them would make "what may this person see?" a CSS question
+  with a `x-show` for an answer. There is no nav here to get wrong.
+
+  The page never asks which POV it is showing. `GET /api/pov/accessor/self` resolves that
+  from the session's own binding, so there is no id in the URL to change and no ownership
+  check for a later edit to forget.
+
+  Read-only in this slice: ticking a card, leaving a note, the share link and the list of
+  what was wired all land next. The identity had to exist and be provable first, and what
+  proves it is a prospect logging in and seeing their own evaluation.
+#}
+<body class="bg-gray-50 min-h-screen">
+  <div x-data="accessorPage()" x-init="init()" class="max-w-5xl mx-auto px-4 py-10">
+
+    <div x-show="loading" class="py-16 text-center text-gray-400 text-sm">Loading…</div>
+
+    <div x-show="!loading && error"
+         class="bg-white rounded-xl shadow-sm border border-amber-200 p-6">
+      <p class="text-sm text-amber-800" x-text="error"></p>
+      <p class="text-xs text-gray-500 mt-2">
+        If this keeps happening, ask your contact for a new login.
+      </p>
+      <button @click="signOut()" class="mt-4 text-xs text-gray-500 hover:text-gray-700 underline">
+        Sign out
+      </button>
+    </div>
+
+    <template x-if="!loading && !error && env">
+      <div class="space-y-8">
+
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <p class="text-xs uppercase tracking-wide text-gray-400">Your evaluation</p>
+            <h1 class="text-2xl font-semibold text-gray-900 truncate" x-text="env.name"></h1>
+            <p class="text-sm text-gray-500 mt-1">
+              <span x-text="env.status"></span>
+              <template x-if="env.runstate">
+                <span><span class="text-gray-300 mx-1">·</span><span x-text="env.runstate"></span></span>
+              </template>
+            </p>
+          </div>
+          <div class="text-right shrink-0">
+            <p class="text-lg font-semibold text-gray-900">
+              <span x-text="summary.done"></span><span class="text-gray-400">/</span><span x-text="summary.total"></span>
+            </p>
+            <p class="text-xs text-gray-400">covered so far</p>
+            <button @click="signOut()"
+                    class="mt-2 text-xs text-gray-400 hover:text-gray-600 underline">Sign out</button>
+          </div>
+        </div>
+
+        <!-- Expiry, said plainly. A prospect finding out their access ended by it simply
+             not working is the avoidable version of this. -->
+        <div x-show="accessor.expires_at"
+             class="bg-white rounded-xl shadow-sm border border-gray-200 px-5 py-3">
+          <p class="text-sm text-gray-600">
+            This login stops working on
+            <span class="font-medium text-gray-900" x-text="accessor.expires_at"></span>.
+          </p>
+        </div>
+
+        <div>
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">What to try</h2>
+          <p class="text-sm text-gray-500 mt-1">
+            Grouped by the role each one is written for. The greyed-out ones are not part of
+            this evaluation.
+          </p>
+        </div>
+
+        <template x-for="g in groups" :key="g.persona">
+          <div x-show="inScope(g).length">
+            <h3 class="text-sm font-semibold text-gray-700 mb-3" x-text="g.label"></h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <template x-for="c in inScope(g)" :key="c.id">
+                <div class="bg-white rounded-xl shadow-sm border p-5"
+                     :class="c.progress.state === 'done' ? 'border-green-200' : 'border-gray-200'">
+                  <div class="flex items-start justify-between gap-2">
+                    <!-- No link, on any card. Every target on the SE's page is a dashboard
+                         screen an accessor is refused on, so an anchor here would be a
+                         promise the server will not keep. -->
+                    <p class="text-sm font-semibold text-gray-900" x-text="c.title"></p>
+                    <span class="text-xs text-gray-400 shrink-0" x-text="c.minutes + ' min'"></span>
+                  </div>
+                  <p class="text-sm text-gray-600 mt-2" x-text="c.summary"></p>
+                  <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between gap-2">
+                    <span class="text-xs"
+                          :class="c.progress.state === 'done' ? 'text-green-700' : 'text-gray-400'"
+                          x-text="c.progress.state === 'done' ? '✓ Covered'
+                                  : (c.progress.state === 'skipped' ? 'Skipped' : 'Not yet')"></span>
+                    <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                       class="text-xs text-gray-400 hover:text-blue-600">Guide →</a>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+      </div>
+    </template>
+  </div>
+
+  <script>
+    function accessorPage() {
+      return {
+        loading: true,
+        error: '',
+        env: null,
+        accessor: {},
+        groups: [],
+        summary: { done: 0, skipped: 0, total: 0, cards: 0 },
+
+        async init() {
+          const token = localStorage.getItem('vm_cli_token');
+          if (!token) { window.location.href = '/login'; return; }
+          try {
+            const res = await fetch('/api/pov/accessor/self', {
+              headers: { 'Authorization': 'Bearer ' + token },
+            });
+            if (res.status === 401) { this.signOut(); return; }
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              this.error = data.detail || 'This login could not be matched to an evaluation.';
+            } else {
+              this.env = data.environment;
+              this.accessor = data.accessor || {};
+              this.groups = (data.use_cases || {}).groups || [];
+              this.summary = (data.use_cases || {}).summary || this.summary;
+            }
+          } catch (e) {
+            this.error = 'Could not load your evaluation.';
+          }
+          this.loading = false;
+        },
+
+        // Out-of-scope cards are dropped here rather than greyed: on the SE's page they
+        // explain a scoping decision to somebody who made it, and to a prospect they would
+        // read as a list of things that do not work.
+        inScope(g) {
+          return (g.use_cases || []).filter(c => c.state !== 'out_of_scope');
+        },
+
+        signOut() {
+          ['vm_cli_token', 'vm_cli_username', 'vm_cli_workgroups', 'vm_cli_is_admin',
+           'vm_cli_accessor_env'].forEach(k => localStorage.removeItem(k));
+          window.location.href = '/login';
+        },
+      };
+    }
+  </script>
+</body>
+</html>
