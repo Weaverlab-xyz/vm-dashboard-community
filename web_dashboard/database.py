@@ -1858,6 +1858,16 @@ class PovEnvironment(Base):
     # pass while an operator is deciding what to do.
     spend_capped_at = Column(DateTime, nullable=True)
 
+    # The Password Safe functional accounts THIS dashboard minted for this POV, one per
+    # guest OS. NULL means "none minted" — either the tenant names existing accounts (a
+    # name there is used as-is and nothing is created) or the wire-up has not run.
+    #
+    # Recorded because deletion has to be exact: only an id written here is deleted at
+    # teardown, which is what keeps a cleanup from removing the functional account a
+    # customer's whole tenant uses. See services/pov_functional_account.
+    ps_linux_functional_account_id = Column(Integer, nullable=True)
+    ps_windows_functional_account_id = Column(Integer, nullable=True)
+
     # Slice 8: the auto-delete timer. NULL = never, exactly as elsewhere — so enabling
     # expiry on an existing estate selects zero rows.
     expires_at = Column(DateTime, nullable=True, index=True)
@@ -2472,6 +2482,12 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN schedule_timezone VARCHAR(64)",
             "ALTER TABLE pov_environments ADD COLUMN schedule_days VARCHAR(7)",
             "ALTER TABLE pov_environments ADD COLUMN schedule_last_checked_at TIMESTAMP",
+            # The two functional accounts a POV mints for itself. Backfill to NULL, which
+            # reads as "this dashboard created none" — correct for every POV wired before
+            # this landed, and what keeps the first teardown after it from deleting an
+            # account somebody typed on the tenant by hand.
+            "ALTER TABLE pov_environments ADD COLUMN ps_linux_functional_account_id INTEGER",
+            "ALTER TABLE pov_environments ADD COLUMN ps_windows_functional_account_id INTEGER",
             "ALTER TABLE pov_blueprints ADD COLUMN suspend_at_local VARCHAR(5)",
             "ALTER TABLE pov_blueprints ADD COLUMN resume_at_local VARCHAR(5)",
             "ALTER TABLE pov_blueprints ADD COLUMN schedule_timezone VARCHAR(64)",

@@ -93,6 +93,11 @@ async def list_tenants(kind: str = "", db: Session = Depends(get_db),
              "option_keys": list(bt_tenant_service.OPTION_KEYS.get(k, ())),
              "option_labels": {key: bt_tenant_service.OPTION_LABELS.get(key, key)
                                for key in bt_tenant_service.OPTION_KEYS.get(k, ())},
+             # Only for the keys that have one, so the UI renders nothing for the rest
+             # rather than an empty paragraph under every field.
+             "option_hints": {key: bt_tenant_service.OPTION_HINTS[key]
+                              for key in bt_tenant_service.OPTION_KEYS.get(k, ())
+                              if key in bt_tenant_service.OPTION_HINTS},
              "required_options": list(bt_tenant_service.REQUIRED_OPTIONS.get(k, ())),
              "verifiable": k in bt_tenant_service.VERIFIABLE_KINDS}
             for k in bt_tenant_service.VALID_KINDS

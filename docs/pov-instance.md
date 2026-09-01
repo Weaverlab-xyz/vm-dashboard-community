@@ -1058,6 +1058,42 @@ A guest whose OS has no functional account configured is skipped with that reaso
 of only Linux VMs has no use for a Windows one, and demanding it would block a wire-up
 that could have completed.
 
+#### Leave the functional accounts blank and each POV creates its own
+
+The two functional-account fields are **names of accounts, not labels**: a functional
+account is the identity Password Safe authenticates to the guest AS in order to rotate its
+managed account. A POV against a *customer's* Password Safe tenant usually has both
+already, because they are the first thing anyone builds during onboarding. A
+BeyondTrust-owned POV tenant on day one has neither, which is why blank means **create
+one** rather than "skip Password Safe".
+
+| The field | What happens |
+|---|---|
+| A name | That account is resolved and used as-is. Nothing is created, and **teardown never touches it** — it is the customer's |
+| Blank | This POV mints its own, from the login its guests of that OS already use, and teardown deletes exactly that one |
+
+**Nothing is stored.** The credential is read live from the lab platform per run — the same
+`stored_credentials` box the Resource Broker install reads ([There is no login field,
+on purpose](#there-is-no-login-field-on-purpose)) — used for the create call, and never written to this database. A credential that is
+fetched cannot go stale, and a POV whose template password changed picks up the new one on
+the next wire-up with nothing here to update.
+
+**The account is per-POV, and the guests must agree.** One functional account serves every
+managed system that names it, so before minting one the dashboard reads *every* guest of
+that OS and requires them to report the same login. Guests that disagree are a refusal
+naming which ones, because minting from one of them would rotate that guest and fail the
+others — days later, on a schedule, which is the same delayed failure the Resource Broker's
+application host exists to prevent.
+
+The account is created on Password Safe's built-in **Linux** and **Windows** platforms. If
+those platforms were renamed in the tenant, set
+`pov_ps_functional_account_platform_linux` / `..._windows` to their names there — or just
+create the account by hand and type its name on the tenant, which skips minting entirely.
+
+The API account on the tenant needs permission to create functional accounts. Without it
+the mint fails with that reason on the VM's own row, and the rest of the wire-up is
+unaffected.
+
 When the lab platform has a login for the VM, it is seeded as the managed account's
 initial credential, so the first rotation replaces a password somebody knows rather than
 one nobody does.
@@ -1551,7 +1587,27 @@ Broker column, then re-wire.
 
 **A VM shows as skipped with "the tenant names no <os> functional account".** Password
 Safe derives the managed system's platform from the functional account, so one is needed
-per guest OS. Set it on the Password Safe tenant.
+per guest OS. Either name one on the Password Safe tenant, or leave the field blank and let
+the POV create its own — see
+[Leave the functional accounts blank](#leave-the-functional-accounts-blank-and-each-pov-creates-its-own).
+
+**A VM shows as skipped with "this POV's <os> guests report N different logins".** A
+functional account is ONE credential used against every managed system that names it, so
+the dashboard will not mint one from guests that disagree — it would rotate the first guest
+and fail the rest on a schedule, days later. The message names which guests hold which
+group. Give them the same login, or create one functional account by hand in Password Safe
+and name it on the tenant.
+
+**A VM shows as skipped with "none of this POV's <os> guests offered a usable stored
+credential".** The lab platform's credential box is empty for those guests, or holds
+something the parser will not guess at — the same refusal `pov_credentials` raises for the
+Resource Broker install, and for the same reason: a wrong username comes back from the wire
+as an authentication failure, which reads as a bad password.
+
+**A VM shows as skipped with "the Password Safe platform 'Linux' could not be resolved".**
+The built-in platform was renamed in that tenant. Set
+`pov_ps_functional_account_platform_linux` (or `..._windows`) to its name there, or name an
+existing functional account on the tenant.
 
 **A VM shows as skipped with "did not report an OS".** The lab platform reported a blank
 `os_family`, and guessing would build the wrong kind of jump item. Power it on and refresh

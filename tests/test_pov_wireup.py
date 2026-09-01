@@ -46,8 +46,8 @@ from web_dashboard import database as d  # noqa: E402
 d.Base.metadata.create_all(bind=d.engine)
 
 from web_dashboard.services import (bt_tenant_service, job_service,  # noqa: E402
-                                    pov_env_service, pov_wireup as w,
-                                    terraform_pra_service)
+                                    pov_env_service, pov_functional_account,
+                                    pov_wireup as w, terraform_pra_service)
 
 
 def _name(prefix):
@@ -542,17 +542,34 @@ class _FakePS:
             raise RuntimeError(self.b["remove_raises"])
 
 
+async def _no_mint(*a, **kw):
+    """Every case in this file names its functional accounts on the tenant, so reaching
+    the minting path here means a test drifted into one it does not model — and the real
+    call would try the network. Fail loudly instead. The minting path has its own file,
+    tests/test_pov_functional_account.py."""
+    raise AssertionError(
+        "a test in test_pov_wireup reached the functional-account MINTING path; it "
+        "belongs in tests/test_pov_functional_account.py")
+
+
 def _install_ps(fake):
     original = {
         "api_wg": w.ps_api_service.get_workgroup_id,
         "api_fa": w.ps_api_service.get_functional_account,
         "reg": w.ps_resource_service.register_managed_system,
         "dereg": w.ps_resource_service.deregister,
+        "fa_pid": pov_functional_account.ps_api_service.get_platform_id,
+        "fa_create":
+            pov_functional_account.ps_api_service.create_functional_account_on_platform,
+        "fa_delete": pov_functional_account.ps_api_service.delete_functional_account,
     }
     w.ps_api_service.get_workgroup_id = fake.get_workgroup_id
     w.ps_api_service.get_functional_account = fake.get_functional_account
     w.ps_resource_service.register_managed_system = fake.register_managed_system
     w.ps_resource_service.deregister = fake.deregister
+    pov_functional_account.ps_api_service.get_platform_id = _no_mint
+    pov_functional_account.ps_api_service.create_functional_account_on_platform = _no_mint
+    pov_functional_account.ps_api_service.delete_functional_account = _no_mint
     return original
 
 
@@ -561,6 +578,11 @@ def _restore_ps(original):
     w.ps_api_service.get_functional_account = original["api_fa"]
     w.ps_resource_service.register_managed_system = original["reg"]
     w.ps_resource_service.deregister = original["dereg"]
+    pov_functional_account.ps_api_service.get_platform_id = original["fa_pid"]
+    pov_functional_account.ps_api_service.create_functional_account_on_platform = \
+        original["fa_create"]
+    pov_functional_account.ps_api_service.delete_functional_account = \
+        original["fa_delete"]
 
 
 def _ps_env(db, **opts):
@@ -649,15 +671,40 @@ def test_the_platform_id_comes_from_the_functional_account_not_from_here():
     assert fake.registered[1]["port"] == w.RDP_PORT
 
 
-def test_a_guest_with_no_functional_account_is_skipped_not_failed():
-    """A POV with only Linux guests has no use for a Windows functional account."""
+def test_a_family_with_no_guests_gets_no_functional_account_at_all():
+    """A POV with only Linux guests has no use for a Windows functional account — so the
+    tenant naming none is not a gap, and nothing is minted for one either. A Windows guest
+    with a blank field is a different case: the dashboard mints from that guest's own
+    login, which tests/test_pov_functional_account.py covers."""
     db = d.SessionLocal()
     env = _ps_env(db, windows_functional_account="")
+    _vm(db, env, name="web01", os_family="linux")
+    fake = _FakePS()
+    original = _install_ps(fake)
+    try:
+        # `_install_ps` makes every minting call an AssertionError, so this passing IS the
+        # assertion that no Windows account was reached for.
+        ps = asyncio.run(w.ps_context(db, env))
+    finally:
+        _restore_ps(original)
+    assert list(ps["accounts"]) == ["linux"]
+    assert ps["account_problems"] == {}
+    db.close()
+
+
+def test_a_guest_whose_family_has_no_account_is_skipped_not_failed():
+    """One VM's missing account must not fail the run, or cost the VMs that worked."""
+    db = d.SessionLocal()
+    env = _ps_env(db)
     vm = _vm(db, env, name="dc01", os_family="windows")
     fake = _FakePS()
     original = _install_ps(fake)
     try:
         ps = asyncio.run(w.ps_context(db, env))
+        # The shape `ps_context` produces for a family it could not resolve an account
+        # for, whatever the cause — built here rather than provoked, because every cause
+        # is modelled in tests/test_pov_functional_account.py.
+        ps["accounts"].pop("windows", None)
         line = asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
     finally:
         _restore_ps(original)

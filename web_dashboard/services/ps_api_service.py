@@ -361,17 +361,23 @@ async def _platform_id(client: httpx.AsyncClient, engine: str) -> int:
     return await _platform_id_by_name(client, platform_name)
 
 
-async def get_platform_id(name_or_id: str) -> int:
+async def get_platform_id(name_or_id: str, tenant=None) -> int:
     """Resolve a Password Safe platform by display name → id (a numeric value is
     passed through). Public helper for the cloud-DB onboarding, which points at
-    operator-installed custom-plugin platforms configured by name."""
+    operator-installed custom-plugin platforms configured by name.
+
+    ``tenant`` is the per-POV Password Safe tenant when there is one. It is not optional
+    in the way it looks: a platform id is only meaningful inside the tenant it was read
+    from, so resolving a name against the install's singleton and then using the id in a
+    customer's tenant picks whatever platform happens to hold that number there.
+    """
     val = (name_or_id or "").strip()
     if not val:
         raise PSApiError("platform name is empty")
     if val.isdigit():
         return int(val)
-    async with _client() as client:
-        await _sign_in(client)
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
         try:
             return await _platform_id_by_name(client, val)
         finally:
@@ -1022,7 +1028,7 @@ async def _find_functional_account(client, *, platform_id: int, account_name: st
 
 async def create_functional_account_on_platform(
     *, platform_id: int, account_name: str, display_name: str,
-    password: str, description: str = "",
+    password: str, description: str = "", tenant=None,
 ) -> int:
     """Create a functional account on an explicit platform id and return its id.
 
@@ -1039,9 +1045,15 @@ async def create_functional_account_on_platform(
     duplicate. Rather than fail the remedy forever — or mint a second account for the
     same database — the duplicate is resolved back to the account already there, by the
     same unique tuple. If no such account can be found the original error is raised: a
-    rejection that is NOT a duplicate must not be swallowed."""
-    async with _client() as client:
-        await _sign_in(client)
+    rejection that is NOT a duplicate must not be swallowed.
+
+    ``tenant`` names the Password Safe tenant to create it in, for the POV wire-up, which
+    mints one per POV in a customer's tenant. Defaulting to the install's singleton is
+    right for the cloud-DB caller and wrong for that one, and the failure is silent: the
+    account appears, in the demo tenant, and the POV's managed system then references an
+    id its own tenant does not have."""
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
         try:
             resp = await client.post("FunctionalAccounts", json={
                 "PlatformID": int(platform_id),
@@ -1071,12 +1083,16 @@ async def create_functional_account_on_platform(
             await _sign_out(client)
 
 
-async def delete_functional_account(account_id: int) -> None:
+async def delete_functional_account(account_id: int, tenant=None) -> None:
     """Delete a functional account. 404 means it is already gone — fine.
-    A 400/409 usually means a managed system still references it (the future
-    Ansible-onboarded managed system must be off-boarded first)."""
-    async with _client() as client:
-        await _sign_in(client)
+    A 400/409 usually means a managed system still references it (the POV teardown
+    off-boards its managed systems first for exactly this reason).
+
+    ``tenant`` names the tenant to delete it from. A delete pointed at the wrong tenant
+    is the worst version of this mistake: it either 404s and reports "already gone" for an
+    account that is still there, or it deletes an id that means something else."""
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
         try:
             resp = await client.delete(f"FunctionalAccounts/{int(account_id)}")
             if resp.status_code == 404:

@@ -114,6 +114,21 @@ OPTION_LABELS = {
     "ssh_sudo_user": "SSH sudo user",
 }
 
+# What a blank field MEANS, for the options where blank is a real choice rather than an
+# omission. Server-side and next to the labels, because the answer is a property of what
+# the code does with the value and a hint hardcoded in the template is one that stops being
+# true the next time this behaviour changes.
+#
+# The two functional accounts are the reason this exists: "Functional account (Linux)" with
+# no hint reads as a required field naming something that, on a fresh POV tenant, does not
+# exist yet — which is a question this form should answer rather than provoke.
+OPTION_HINTS = {
+    "linux_functional_account": "Leave blank and each POV creates its own, from the "
+                                "login its Linux guests already use.",
+    "windows_functional_account": "Leave blank and each POV creates its own, from the "
+                                  "login its Windows guests already use.",
+}
+
 # Options whose absence makes a tenant unusable rather than merely incomplete. Reported
 # by `serialize` so the gap is visible on the row instead of surfacing inside a job.
 REQUIRED_OPTIONS = {

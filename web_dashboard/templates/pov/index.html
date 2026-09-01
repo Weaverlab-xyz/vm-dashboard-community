@@ -743,6 +743,8 @@
               <label class="block text-xs font-medium text-gray-700 mb-1" x-text="optionLabel(tenantForm.kind, key)"></label>
               <input type="text" x-model="tenantForm.options[key]"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <p class="text-xs text-gray-400 mt-1" x-show="optionHint(tenantForm.kind, key)"
+                 x-text="optionHint(tenantForm.kind, key)"></p>
             </div>
           </template>
         </div>
@@ -968,6 +970,14 @@ function povPage() {
     optionLabel(kind, key) {
       const k = this.tenantKinds.find(x => x.kind === kind) || {};
       return (k.option_labels || {})[key] || key.replace(/_/g, ' ');
+    },
+
+    // What a blank field means, for the options where blank is a choice. From the server
+    // for the same reason the labels are: the answer belongs to the code that acts on the
+    // value. '' for a key with no hint, which x-show reads as "render nothing".
+    optionHint(kind, key) {
+      const k = this.tenantKinds.find(x => x.kind === kind) || {};
+      return (k.option_hints || {})[key] || '';
     },
 
     // "never checked" is not "checked and fine". The three states stay distinct.
