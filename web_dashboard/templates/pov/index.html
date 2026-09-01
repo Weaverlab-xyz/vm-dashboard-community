@@ -238,6 +238,7 @@
             <th class="px-4 py-2 text-left font-medium">Share</th>
             <th class="px-4 py-2 text-left font-medium">Expires</th>
             <th class="px-4 py-2 text-left font-medium">Sleeps</th>
+            <th class="px-4 py-2 text-left font-medium">Spend</th>
             <th class="px-4 py-2 text-left font-medium">Template</th>
             <th class="px-4 py-2 text-left font-medium">Created by</th>
             <th class="px-4 py-2 text-right font-medium">Actions</th>
@@ -506,6 +507,26 @@
                                : 'always on'"></p>
                     <button @click="setSchedule(e)" :disabled="!actionable(e)"
                             title="Suspend and resume this POV on a schedule"
+                            class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
+                  </div>
+                </template>
+              </td>
+              <td class="px-4 py-2">
+                <!-- The spend cap. Shown only where the dashboard can actually price the
+                     platform: a cap that never accrues is a worse promise than no cap. -->
+                <template x-if="!e.spend_priced">
+                  <p class="text-xs text-gray-300" :title="e.spend_reason">—</p>
+                </template>
+                <template x-if="e.spend_priced">
+                  <div class="space-y-0.5">
+                    <p class="text-xs whitespace-nowrap"
+                       :class="spendClass(e)"
+                       :title="(e.spend && e.spend.summary) || ''"
+                       x-text="e.spend && e.spend.capped
+                               ? ('$' + e.spend.spent_usd.toFixed(0) + ' / $' + e.spend.cap_usd.toFixed(0))
+                               : ('$' + ((e.spend && e.spend.spent_usd) || 0).toFixed(0))"></p>
+                    <button @click="setSpendCap(e)" :disabled="!actionable(e)"
+                            title="Cap this POV's estimated spend"
                             class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
                   </div>
                 </template>
@@ -1394,6 +1415,37 @@ function povPage() {
         this.notice = `${env.name}: ` + (data.schedule.scheduled
           ? data.schedule.summary
           : 'schedule removed — it now runs until somebody suspends it');
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    // Red once over the cap, amber past the warning threshold, plain otherwise. Grey when
+    // there is no cap at all — the figure is still worth showing, it just is not measured
+    // against anything.
+    spendClass(env) {
+      const s = env.spend || {};
+      if (!s.capped) return 'text-gray-400';
+      if (s.over) return 'text-red-600 font-medium';
+      if (s.percent >= s.warn_percent) return 'text-amber-600';
+      return 'text-gray-600';
+    },
+
+    // A prompt, matching setExpiry() and setSchedule() beside it: this page has no modal
+    // machinery, and a one-field form does not justify inventing some.
+    async setSpendCap(env) {
+      const s = env.spend || {};
+      const answer = window.prompt(
+        `Cap this POV's estimated spend at how many US dollars?\n` +
+        `It has accrued about $${(s.spent_usd || 0).toFixed(2)} so far. ` +
+        `Blank clears the cap.\n\n` +
+        `This is a LIST-PRICE estimate, not a bill — no discounts, credits or free tier.`,
+        s.cap_usd ? String(s.cap_usd) : '');
+      if (answer === null) return;
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/spend-cap`,
+                                     { cap_usd: answer.trim() ? Number(answer) : null });
+        this.notice = `${env.name}: ${data.spend.summary}`;
         await this.load();
       } catch (e) { this.error = e.message; }
     },

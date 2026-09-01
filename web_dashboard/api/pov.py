@@ -28,6 +28,7 @@
                                         — show the link's password, once, audited
   POST   /api/pov/managed/{id}/expiry   — extend, set or clear the auto-delete timer
   POST   /api/pov/managed/{id}/schedule — set or clear the suspend schedule
+  POST   /api/pov/managed/{id}/spend-cap — set or clear the spend cap
   GET    /api/pov/managed/{id}/use-cases
                                         — this POV's use-case catalog, resolved against the
                                           products it is actually wired into, with progress
@@ -61,10 +62,13 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
-from ..services import (bt_tenant_service, expiry_policy, expiry_reaper, job_service,
+from ..config import settings
+from ..services import (bt_tenant_service, config_service, expiry_policy,
+                        expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
-                        pov_resource_broker, pov_schedule, pov_share, pov_summary,
+                        pov_cloud_cost, pov_resource_broker, pov_schedule,
+                        pov_share, pov_spend, pov_summary,
                         pov_use_cases, pov_wireup)
 from .auth import get_current_user
 
@@ -513,6 +517,32 @@ async def provision(payload: ProvisionRequest,
             and env.expires_at is not None):
         env.expires_at = expiry_policy.expiry_from_now(
             expiry_policy.clamp_hours(blueprint.expiry_hours))
+
+    # The spend cap. NULL means no cap, exactly as NULL `expires_at` means never — so an
+    # instance that has not set a default stamps nothing, and turning the feature on later
+    # acts on nothing that already exists.
+    #
+    # Only on a cloud whose prices the dashboard can actually look up: a cap on an unpriced
+    # platform would accrue a confident zero and never act, which is a worse promise than
+    # no cap at all.
+    if pov_cloud_cost.priced(payload.platform):
+        default_cap = float(getattr(settings, "pov_spend_cap_default_usd", 0.0) or 0.0)
+        try:
+            configured_cap = float(
+                config_service.get("pov_spend_cap_default_usd") or default_cap)
+        except (TypeError, ValueError):
+            configured_cap = default_cap
+        chosen = (blueprint.spend_cap_usd
+                  if blueprint is not None and (blueprint.spend_cap_usd or 0) > 0
+                  else configured_cap)
+        try:
+            env.spend_cap_usd = pov_spend.validate_cap(chosen)
+        except pov_spend.SpendError:
+            # A stored default that cannot be read is not worth failing a provision over,
+            # and refusing silently would leave a POV with a cap nobody asked for.
+            logger.warning("POV %s: ignoring an unusable default spend cap %r",
+                           env.name, chosen)
+            env.spend_cap_usd = None
     db.add(env)
     db.commit()
 
@@ -1068,6 +1098,50 @@ async def set_schedule(env_id: str, payload: ScheduleRequest,
     logger.info("POV %s: schedule set by %s", env.name,
                 getattr(current_user, "username", "?"))
     return {"schedule": pov_schedule.describe(env)}
+
+
+class SpendCapRequest(BaseModel):
+    """A spend cap in US dollars. Blank or zero clears it."""
+    cap_usd: float | None = None
+
+
+@router.post("/managed/{env_id}/spend-cap")
+async def set_spend_cap(env_id: str, payload: SpendCapRequest,
+                        db: Session = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
+    """Set or clear this POV's estimated-spend cap.
+
+    **Raising the cap clears both latches**, so a POV that was warned — or suspended — at
+    the old figure gets a fresh warning and a fresh action at the new one. Without that,
+    "give it another fifty dollars" would leave the row permanently flagged and the cap
+    unable to fire again. The same rule the auto-delete timer follows when an expiry is
+    extended.
+
+    The accrued total is deliberately NOT reset. It is what this POV has cost so far, and
+    zeroing it on every edit would make the cap mean "another $X from now", which is a
+    different and much weaker promise than the one the page makes.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    if not pov_cloud_cost.priced(env.platform):
+        raise HTTPException(
+            status_code=409, detail=pov_cloud_cost.no_price_reason(env.platform))
+
+    try:
+        cap = pov_spend.validate_cap(payload.cap_usd)
+    except pov_spend.SpendError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    previous = float(env.spend_cap_usd or 0.0)
+    env.spend_cap_usd = cap
+    if cap is None or cap > previous:
+        env.spend_warned_at = None
+        env.spend_capped_at = None
+    db.commit()
+    logger.info("POV %s: spend cap set to %s by %s", env.name, cap,
+                getattr(current_user, "username", "?"))
+    return {"spend": pov_reconcile.describe(env).get("spend", {})}
 
 
 @router.get("/managed/{env_id}/use-cases")

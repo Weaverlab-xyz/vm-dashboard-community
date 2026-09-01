@@ -291,6 +291,7 @@ class BlueprintRequest(BaseModel):
     resume_at_local: str = ""
     schedule_timezone: str = ""
     schedule_days: str = ""
+    spend_cap_usd: float = 0.0
 
 
 @router.get("/blueprints")
@@ -322,7 +323,8 @@ async def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_
             suspend_at_local=payload.suspend_at_local,
             resume_at_local=payload.resume_at_local,
             schedule_timezone=payload.schedule_timezone,
-            schedule_days=payload.schedule_days)
+            schedule_days=payload.schedule_days,
+            spend_cap_usd=payload.spend_cap_usd)
     except pov_blueprint_service.BlueprintError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"blueprint": pov_blueprint_service.serialize(row)}
