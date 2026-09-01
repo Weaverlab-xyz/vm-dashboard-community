@@ -15,10 +15,13 @@
    pov_environments_enabled is in feature_flags._POV_ONLY, so this can only ever render
    on a POV instance and the position needs no further guard. #}
 {% if pov_environments_enabled %}
-{# `== '/pov'`, not `startswith('/pov')`: Templates below is its own page, and a prefix
-   test would light both links at once — which reads as "you are in two places". #}
+{# Not a bare `startswith('/pov')`: Templates below is its own page, and a prefix test
+   would light both links at once — which reads as "you are in two places". So: the list
+   page, or one POV's own page, and never the builder. A POV's detail page belongs to this
+   link because it IS this section; giving it no lit link would leave an SE who followed a
+   row into it with no indication of where they are. #}
 <a data-nav="pov" href="/pov" class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
-   {% if request.url.path == '/pov' %}{{ nav_active }}{% else %}{{ theme.weft }}{% endif %}">POV</a>
+   {% if request.url.path == '/pov' or (request.url.path.startswith('/pov/') and not request.url.path.startswith('/pov/templates')) %}{{ nav_active }}{% else %}{{ theme.weft }}{% endif %}">POV</a>
 {# The template builder. Admin-only, unlike POV itself: it writes to the lab platform
    account — baking templates and creating scratch environments that bill — while the POV
    page's own actions are scoped to a POV somebody already provisioned. #}

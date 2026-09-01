@@ -648,6 +648,59 @@ all, the job log says how many were left and where.
 
 ---
 
+## Use cases, per POV
+
+**POV page → a POV's name → Use cases.** Every POV gets a page of its own, and the reason
+it exists is this tab.
+
+The in-app [Use cases](personas/) catalog is instance-wide: it asks `feature_flags` whether
+a demo can run here, and on a POV instance the answer for most of it is "no, this profile
+masks that". Correct, and useless in front of a customer. This tab asks a different
+question — **can I run this on THIS POV?** — and the answer comes from the three tenant
+columns on the row, which is exactly where a Password-Safe-only evaluation differs from an
+all-three one.
+
+Every role and every card is always on the page. The product mix decides what each card
+**says**, never whether you can see it:
+
+| The card | What it means | What it offers |
+|---|---|---|
+| Live | This POV has the products, and the wire-up has run for them | A link to the tab that runs it |
+| Needs wiring | The tenant is set and the artifact is not | What to run, and a link to the Wired tab |
+| Not part of this POV | No tenant for that product on this row | Nothing — the fix is a decision about the evaluation, not a button |
+
+That last row is the one worth reading twice. It is **not** the same state as a demo-only
+feature being masked on this instance: nobody can turn it on from Settings, because there
+is nothing wrong. A POV scoped to Password Safe is a normal POV, and a page that greyed
+those cards out as unavailable would say the opposite.
+
+A card that names two products, on a POV missing one of them, reads "not part of this POV"
+rather than "needs wiring". "Run the wire-up" would send you to a button that skips the
+half you came for.
+
+### Ticking them off
+
+Each card has **Mark done** and **Skip**, and the count rides on the row in the POV list.
+
+`Skip` is a real answer rather than a way to hide a card: "we showed them and it did not
+land" and "we never got to it" are different things to walk into a renewal conversation
+with, and only one of them is fixed by running the demo. Every tick records who made it —
+which matters more once the customer can make their own, which is the
+[accessor](design/pov-use-cases.md#slice-2--the-ephemeral-accessor-not-built) slice.
+
+### Destroying a POV keeps this
+
+Everything else in a teardown is removed. This is not: the POV row itself is marked
+`destroyed` rather than deleted because it is the record of something that existed, and the
+use-case history is what that record contains. The destroy job logs the summary — *"use-case
+record kept: 9 of 14 run, 2 skipped"* — at the moment somebody is closing the evaluation
+out, which is the one time anybody reads it.
+
+The design note, including the accessor identity that is **not** kept, is in
+[design/pov-use-cases.md](design/pov-use-cases.md).
+
+---
+
 ## The customer-facing share link
 
 Everything above is something an SE touches. This is the one artifact a **customer** opens:

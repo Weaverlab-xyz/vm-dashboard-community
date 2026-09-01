@@ -223,6 +223,7 @@
             <th class="px-4 py-2 text-left font-medium">Broker</th>
             <th class="px-4 py-2 text-left font-medium">Gateway</th>
             <th class="px-4 py-2 text-left font-medium">Wired</th>
+            <th class="px-4 py-2 text-left font-medium">Use cases</th>
             <th class="px-4 py-2 text-left font-medium">Resource Broker</th>
             <th class="px-4 py-2 text-left font-medium">Tenants</th>
             <th class="px-4 py-2 text-left font-medium">Share</th>
@@ -236,7 +237,11 @@
           <template x-for="e in managed" :key="e.id">
             <tr>
               <td class="px-4 py-2">
-                <span class="font-medium text-gray-900" x-text="e.name"></span>
+                <!-- The way into this POV's own page. Deliberately the NAME rather than a
+                     column of its own: an extra "Open" column on a table already thirteen
+                     wide buys nothing, and the name is what an SE reaches for. -->
+                <a :href="'/pov/' + e.id"
+                   class="font-medium text-blue-700 hover:underline" x-text="e.name"></a>
                 <p x-show="e.error_message" class="text-xs text-red-600 mt-0.5" x-text="e.error_message"></p>
               </td>
               <td class="px-4 py-2">
@@ -340,6 +345,18 @@
                                 : 'Needs a Gateway and a PRA tenant first'"
                         class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
                         x-text="e.wired_count ? 're-wire' : 'wire'"></button>
+              </td>
+              <!-- Use cases. The denominator is what THIS POV can run, not the whole
+                   catalog: a POV wired into one product has most of it out of scope, and a
+                   denominator of everything would make a correctly scoped evaluation read
+                   as one going badly. -->
+              <td class="px-4 py-2">
+                <a :href="'/pov/' + e.id + '#use-cases'"
+                   class="text-xs whitespace-nowrap hover:underline"
+                   :class="(e.use_cases || {}).done ? 'text-gray-600' : 'text-gray-300'"
+                   x-text="((e.use_cases || {}).done || 0) + ' / ' + ((e.use_cases || {}).total || 0)"></a>
+                <p x-show="(e.use_cases || {}).skipped" class="text-xs text-gray-400"
+                   x-text="(e.use_cases || {}).skipped + ' skipped'"></p>
               </td>
               <td class="px-4 py-2">
                 <div x-show="editingRb !== e.id" class="space-y-0.5">

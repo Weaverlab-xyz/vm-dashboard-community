@@ -1454,6 +1454,28 @@ async def pov_templates_page(request: Request):
     return templates.TemplateResponse("pov/templates.html", {"request": request})
 
 
+# DECLARED AFTER /pov/templates, AND THAT IS LOAD-BEARING. Starlette matches routes in
+# declaration order, so a `{env_id}` route declared above the literal one would capture
+# "templates" as an environment id -- the builder page would 404 as "No such POV
+# environment" and nothing else would look wrong. tests/test_pov_use_cases pins the order.
+@app.get("/pov/{env_id}", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("pov_environments_enabled")])
+async def pov_detail_page(request: Request, env_id: str):
+    """One POV, in depth: its VMs, what is wired into it, its share link and its use cases.
+
+    The POV page is a table of rows and every slice so far has added a column to it. The
+    use-case checklist does not fit that shape -- it is per-role, per-product and stateful
+    -- so this is where a POV gets a page of its own instead of a wider row.
+
+    The id is passed to the template and NOT resolved here: every read on this page goes
+    through /api/pov/managed/{id}, which already 404s an unknown id behind the same gate.
+    Looking the row up twice would put a database call on an HTML route that has no other
+    reason to touch one.
+    """
+    return templates.TemplateResponse("pov/detail.html",
+                                      {"request": request, "env_id": env_id})
+
+
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)
 async def users_page(request: Request):
     return templates.TemplateResponse(

@@ -23,6 +23,13 @@
   POST   /api/pov/managed/{id}/share/reveal
                                         — show the link's password, once, audited
   POST   /api/pov/managed/{id}/expiry   — extend, set or clear the auto-delete timer
+  GET    /api/pov/managed/{id}/use-cases
+                                        — this POV's use-case catalog, resolved against the
+                                          products it is actually wired into, with progress
+  POST   /api/pov/managed/{id}/use-cases/{card_id}
+                                        — tick a card off (or mark it skipped)
+  DELETE /api/pov/managed/{id}/use-cases/{card_id}
+                                        — un-tick it
   DELETE /api/pov/managed/{id}          — destroy it and reap the platform side
 
 The BeyondTrust tenant registry a POV is wired into lives in ``api/bt_tenants.py``, under
@@ -52,7 +59,7 @@ from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, expiry_policy, expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
                         pov_gateway, pov_reconcile, pov_resource_broker, pov_share,
-                        pov_wireup)
+                        pov_use_cases, pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -162,8 +169,16 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
     out.update(pov_resource_broker.describe(_db_of(env), env))
-    out.update(pov_wireup.describe(_db_of(env), env))
+    # Kept rather than only spread, so the use-case summary below can be resolved from the
+    # numbers this row already paid for. Recomputing it would put a second per-VM query on
+    # the list endpoint for counts it is holding in a local variable.
+    wireup = pov_wireup.describe(_db_of(env), env)
+    out.update(wireup)
     out.update(pov_share.describe(_db_of(env), env))
+    # "7 of 14", on the row. `total` counts only what THIS POV can run -- a POV wired into
+    # one product has most of the catalog out of scope, and a denominator of everything
+    # would make a correctly scoped evaluation look like one going badly.
+    out["use_cases"] = pov_use_cases.summary_for(_db_of(env), env, wireup)
     if vms is not None:
         out["vms"] = [{
             "id": v.platform_vm_id,
@@ -921,6 +936,79 @@ async def set_expiry(env_id: str, payload: ExpiryRequest,
     db.refresh(env)
     return {"expiry": result["updated"][0] if result["updated"] else None,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+# ── use cases ────────────────────────────────────────────────────────────────
+#
+# The one place in the persona/use-case stack that WRITES. That is worth naming, because
+# services/personas opens by saying a card navigates and never starts work — a card that
+# POSTed a deploy would make "curation only" false. A tick is not that: it spends nothing,
+# builds nothing and touches no tenant. It also does not live in the persona layer at all;
+# the registry stays a pure read, and the write lands here, behind the same auth every
+# other POV action already carries.
+
+
+class UseCaseRequest(BaseModel):
+    # `done` by default, so the common case is an empty body.
+    state: str = "done"
+    note: str = ""
+
+
+def _env_or_404(db: Session, env_id: str) -> PovEnvironment:
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    return env
+
+
+@router.get("/managed/{env_id}/use-cases")
+async def list_use_cases(env_id: str, db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """This POV's catalog, every role and every card, with each card's own state.
+
+    Complete for every product mix. A POV wired into one product still gets all eight
+    groups and all their cards — the mix decides each card's state, never its presence,
+    which is the same promise /use-cases makes about the persona axis.
+    """
+    env = _env_or_404(db, env_id)
+    return pov_use_cases.describe(db, env)
+
+
+@router.post("/managed/{env_id}/use-cases/{card_id}")
+async def set_use_case(env_id: str, card_id: str, payload: UseCaseRequest,
+                       db: Session = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
+    """Tick a card off, or mark it skipped. Idempotent.
+
+    A 400 on an unknown card id rather than a stored row: ``services/personas`` is the
+    allowlist, and these rows deliberately outlive registry edits, so an unvalidated id
+    would outlive the typo that made it.
+    """
+    env = _env_or_404(db, env_id)
+    try:
+        progress = pov_use_cases.set_state(
+            db, env, card_id,
+            state=payload.state, note=payload.note,
+            by=getattr(current_user, "username", "") or "",
+            by_kind=pov_use_cases.KIND_SE)
+    except pov_use_cases.UseCaseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"card_id": card_id, "progress": progress,
+            "summary": pov_use_cases.summary_for(db, env)}
+
+
+@router.delete("/managed/{env_id}/use-cases/{card_id}")
+async def clear_use_case(env_id: str, card_id: str, db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """Un-tick a card. Removing a row nobody wrote is success, not a 404 — the button is a
+    toggle, and a double-click must not be an error."""
+    env = _env_or_404(db, env_id)
+    try:
+        removed = pov_use_cases.clear(db, env, card_id)
+    except pov_use_cases.UseCaseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"card_id": card_id, "cleared": removed,
+            "summary": pov_use_cases.summary_for(db, env)}
 
 
 @router.delete("/managed/{env_id}", status_code=202)
