@@ -63,6 +63,15 @@
           <option :value="p.name" x-text="p.label"></option>
         </template>
       </select>
+      <!-- The POV's read-only view of its cloud provider. A link from here rather than a
+           nav entry: the nav already overflows at 1280px with every integration on, and
+           this is a secondary view that only exists when a cloud is selected — which the
+           nav has no way to know. -->
+      <a x-show="cloudPlatform" x-cloak href="/pov/cloud"
+         :title="'What this instance has running on ' + cloudPlatform.toUpperCase() + ', including orphans'"
+         class="px-3 py-2 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">
+        Cloud
+      </a>
       <!-- Writes what the platform says back onto the rows. The table above already
            prefers this load's live read for display, so this is for the half a live read
            cannot do: persisting the runstate for everything else that reads these rows,
@@ -228,6 +237,7 @@
             <th class="px-4 py-2 text-left font-medium">Tenants</th>
             <th class="px-4 py-2 text-left font-medium">Share</th>
             <th class="px-4 py-2 text-left font-medium">Expires</th>
+            <th class="px-4 py-2 text-left font-medium">Sleeps</th>
             <th class="px-4 py-2 text-left font-medium">Template</th>
             <th class="px-4 py-2 text-left font-medium">Created by</th>
             <th class="px-4 py-2 text-right font-medium">Actions</th>
@@ -474,6 +484,28 @@
                             :title="e.expires_at
                                     ? 'Extend, move or clear this auto-delete timer'
                                     : 'This POV will never be auto-deleted'"
+                            class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
+                  </div>
+                </template>
+              </td>
+              <td class="px-4 py-2">
+                <!-- The suspend schedule, for a platform with no idle timer of its own.
+                     Exactly one of the two ever renders: they answer the same question,
+                     and a row offering both is one where neither is clearly in charge. -->
+                <template x-if="e.suspend_on_idle_seconds">
+                  <p class="text-xs text-gray-600 whitespace-nowrap"
+                     x-text="Math.round(e.suspend_on_idle_seconds / 60) + ' min idle'"></p>
+                </template>
+                <template x-if="!e.suspend_on_idle_seconds">
+                  <div class="space-y-0.5">
+                    <p class="text-xs whitespace-nowrap"
+                       :class="e.schedule && e.schedule.scheduled ? 'text-gray-600' : 'text-gray-300'"
+                       :title="(e.schedule && e.schedule.summary) || 'This POV runs until somebody suspends it'"
+                       x-text="e.schedule && e.schedule.scheduled
+                               ? (e.schedule.suspend_at_local + (e.schedule.resume_at_local ? '–' + e.schedule.resume_at_local : ''))
+                               : 'always on'"></p>
+                    <button @click="setSchedule(e)" :disabled="!actionable(e)"
+                            title="Suspend and resume this POV on a schedule"
                             class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
                   </div>
                 </template>
@@ -766,6 +798,7 @@ function povPage() {
     notice: '',
     notConfigured: false,
     platform: '',
+    cloudPlatform: '',
     platforms: [],
     managed: [],
     archive: [],
@@ -935,6 +968,7 @@ function povPage() {
         if (!res.ok) { this.error = 'Could not read the lab platform registry.'; this.loading = false; return; }
         const data = await res.json();
         this.platforms = data.platforms || [];
+        this.cloudPlatform = data.selected_cloud || '';
         this.platform = data.default || (this.platforms[0] || {}).name || '';
       } catch (e) {
         this.error = 'Could not reach the dashboard API.';
@@ -1321,6 +1355,47 @@ function povPage() {
       const left = new Date(env.expires_at + 'Z') - Date.now();
       if (left <= 0) return 'text-red-700';
       return left < 86400000 ? 'text-amber-700' : 'text-gray-600';
+    },
+
+    // The suspend schedule. Prompts rather than a modal, matching setExpiry() above: this
+    // page has no modal machinery, and inventing some for four fields an SE touches once
+    // per POV would be more surface than the feature is worth.
+    async setSchedule(env) {
+      const cur = env.schedule || {};
+      const suspend = window.prompt(
+        'Suspend this POV at what local time each day? 24-hour HH:MM.\n' +
+        'Leave blank to remove the schedule.',
+        cur.suspend_at_local || '19:00');
+      if (suspend === null) return;
+      let resume = '', tz = '', days = '';
+      if (suspend.trim()) {
+        resume = window.prompt(
+          'Resume it at what time? Blank means it stays down until you start it.',
+          cur.resume_at_local || '08:00');
+        if (resume === null) return;
+        tz = window.prompt(
+          'Which timezone? An IANA name, e.g. Europe/London. Blank means UTC.',
+          cur.schedule_timezone || 'UTC');
+        if (tz === null) return;
+        days = window.prompt(
+          'Which days? Seven characters of 0 or 1, Monday first.\n' +
+          '1111100 is Mon-Fri, 1111111 is every day.',
+          cur.schedule_days || '1111100');
+        if (days === null) return;
+      }
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/schedule`, {
+          suspend_at_local: suspend.trim(),
+          resume_at_local: (resume || '').trim(),
+          schedule_timezone: (tz || '').trim(),
+          schedule_days: (days || '').trim(),
+        });
+        this.notice = `${env.name}: ` + (data.schedule.scheduled
+          ? data.schedule.summary
+          : 'schedule removed — it now runs until somebody suspends it');
+        await this.load();
+      } catch (e) { this.error = e.message; }
     },
 
     async setExpiry(env) {

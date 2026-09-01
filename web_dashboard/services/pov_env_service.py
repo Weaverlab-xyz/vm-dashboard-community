@@ -78,6 +78,7 @@ async def run_env_provision(job_id: str, meta: dict) -> None:
     Steps, in the order they must happen:
 
       1. preflight — refuse before anything exists
+      1b. record the environment id, if the platform can predict it
       2. create, and PERSIST THE ID IMMEDIATELY
       3. name it and set the idle timer
       4. power on, and wait for it to settle
@@ -107,6 +108,26 @@ async def run_env_provision(job_id: str, meta: dict) -> None:
                   f"{env.platform} is not configured — add its credentials in "
                   f"Settings → Integrations, then destroy this row and try again.")
             return
+
+        # 1b. If the platform can say what the environment's id WILL be, record it now.
+        #
+        # Skytap cannot — it mints an id — so this is skipped there and step 2 stays the
+        # first moment an id exists. A cloud can: its environment is a tag derived from
+        # this POV's own name, so the id is knowable before a single resource exists. That
+        # matters because a cloud create is N API calls, not one, and a failure at VM three
+        # of five leaves real resources behind. With the id already on the row, Destroy and
+        # the reaper both find them; without it, the comment on step 2 — "failing without
+        # the id is how an orphan is created" — describes exactly what would happen.
+        predict = getattr(mod, "environment_id_for", None)
+        if predict is not None:
+            try:
+                env.platform_environment_id = predict(env.name)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001
+                _fail(db, env, job_id,
+                      f"could not derive an environment id from the name {env.name!r}: "
+                      f"{exc}")
+                return
 
         job_service.update_progress(db, job_id, 5, "Creating the environment…")
 

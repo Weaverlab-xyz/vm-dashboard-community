@@ -12,6 +12,12 @@
   PUT    /api/pov/blueprints/{id}       — edit one
   DELETE /api/pov/blueprints/{id}       — delete one
 
+  GET    /api/pov/cloud-templates       — the topology a CLOUD POV is built from
+  GET    /api/pov/cloud-templates/{id}  — one, with its VMs
+  POST   /api/pov/cloud-templates       — save one
+  PUT    /api/pov/cloud-templates/{id}  — edit one
+  DELETE /api/pov/cloud-templates/{id}  — delete one
+
 Its own module rather than more of ``api/pov.py``, which is already long, but the **same
 prefix and the same gate**: these are POV routes, and on a demo instance they 404 with the
 rest of the feature.
@@ -31,8 +37,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
-from ..database import PovTemplateBuild, User, get_db
-from ..services import (job_service, lab_platforms, pov_blueprint_service, pov_broker,
+from ..database import PovEnvironment, PovTemplateBuild, User, get_db
+from ..services import (job_service, lab_platforms, pov_blueprint_service,
+                        pov_broker, pov_cloud_env, pov_cloud_template_service,
                         pov_template_builder)
 from .auth import get_current_user, require_admin
 
@@ -278,6 +285,12 @@ class BlueprintRequest(BaseModel):
     expiry_hours: int = 0
     workgroup: str = ""
     source_build_id: str = ""
+    # The suspend schedule a POV from this blueprint starts with. Only meaningful
+    # on a platform with no idle timer of its own; validated on save.
+    suspend_at_local: str = ""
+    resume_at_local: str = ""
+    schedule_timezone: str = ""
+    schedule_days: str = ""
 
 
 @router.get("/blueprints")
@@ -305,7 +318,11 @@ async def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_
             expiry_hours=payload.expiry_hours or None,
             workgroup=payload.workgroup,
             created_by=getattr(current_user, "username", None),
-            source_build_id=payload.source_build_id)
+            source_build_id=payload.source_build_id,
+            suspend_at_local=payload.suspend_at_local,
+            resume_at_local=payload.resume_at_local,
+            schedule_timezone=payload.schedule_timezone,
+            schedule_days=payload.schedule_days)
     except pov_blueprint_service.BlueprintError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"blueprint": pov_blueprint_service.serialize(row)}
@@ -340,3 +357,143 @@ async def delete_blueprint(blueprint_id: str, db: Session = Depends(get_db),
     name = row.name
     pov_blueprint_service.delete(db, row)
     return {"deleted": name}
+
+
+# ── cloud templates ──────────────────────────────────────────────────────────
+#
+# The topology a cloud POV is built from. `/blueprints` above names a template and fills
+# in a create form; these rows ARE the template, because no public cloud holds one.
+#
+# Under `/cloud-templates` rather than `/templates`: `GET /api/pov/templates` is already
+# the platform catalogue read the create form uses, and on a cloud that read is served
+# FROM these rows. Two different things called templates under one prefix is the
+# ambiguity worth a word to avoid — the same reason builds are at `/builds`.
+
+
+class CloudTemplateVMRequest(BaseModel):
+    name: str
+    role: str = "target"
+    os_family: str = "linux"
+    image_ref: str = ""
+    image_id: str = ""
+    instance_type: str = ""
+    disk_gb: int = 0
+
+
+class CloudTemplateRequest(BaseModel):
+    cloud: str = ""
+    name: str
+    description: str = ""
+    region: str = ""
+    network_cidr: str = ""
+    workgroup: str = ""
+    vms: list[CloudTemplateVMRequest] = []
+
+
+def _cloud_or_selected(cloud: str) -> str:
+    """The cloud a request means, defaulting to the one this instance has selected.
+
+    A default rather than a required field: a POV instance runs one cloud, so making
+    every call name it would be asking the operator to repeat a setting back to the
+    dashboard. An explicit value still wins, and an unknown one is refused by the service.
+    """
+    return (cloud or "").strip().lower() or lab_platforms.selected_cloud()
+
+
+@router.get("/cloud-templates")
+async def list_cloud_templates(cloud: str = Query(""), db: Session = Depends(get_db),
+                               current_user: User = Depends(get_current_user)):
+    """The cloud templates on this instance.
+
+    Answers with the selected cloud and the built ones so the editor can render itself
+    without a second call — and so a page loaded on an instance with no cloud selected
+    can say that, rather than showing an empty list that looks like "none saved yet".
+    """
+    selected = lab_platforms.selected_cloud()
+    rows = pov_cloud_template_service.list_for(db, _cloud_or_selected(cloud))
+    return {
+        "selected_cloud": selected,
+        "clouds": list(lab_platforms.CLOUD_PLATFORMS),
+        "default_network_cidr": pov_cloud_env.DEFAULT_NETWORK_CIDR,
+        "roles": list(pov_cloud_template_service.VALID_ROLES),
+        "os_families": list(pov_cloud_template_service.VALID_OS_FAMILIES),
+        "templates": [pov_cloud_template_service.describe(db, r) for r in rows],
+    }
+
+
+@router.get("/cloud-templates/{template_id}")
+async def get_cloud_template(template_id: str, db: Session = Depends(get_db),
+                             current_user: User = Depends(get_current_user)):
+    row = pov_cloud_template_service.get(db, template_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such cloud template")
+    return {"template": pov_cloud_template_service.describe(db, row)}
+
+
+@router.post("/cloud-templates", status_code=201)
+async def create_cloud_template(payload: CloudTemplateRequest,
+                                db: Session = Depends(get_db),
+                                current_user: User = Depends(require_admin)):
+    """Save a cloud template.
+
+    Admin, like every other write in this module, and for the sharper of the two reasons
+    given there: a template is what other people's POVs get built from, so a bad one
+    spends the account's money in a shape nobody chose.
+    """
+    cloud = _cloud_or_selected(payload.cloud)
+    if not cloud:
+        raise HTTPException(
+            status_code=409,
+            detail=("no POV cloud provider is selected on this instance. Choose one in "
+                    "Settings → Integrations → POV cloud provider, then save this "
+                    "template."))
+    try:
+        row = pov_cloud_template_service.create(
+            db, cloud=cloud, name=payload.name, description=payload.description,
+            region=payload.region, network_cidr=payload.network_cidr,
+            workgroup=payload.workgroup,
+            created_by=getattr(current_user, "username", None),
+            vms=[v.model_dump() for v in payload.vms])
+    except pov_cloud_template_service.CloudTemplateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"template": pov_cloud_template_service.describe(db, row)}
+
+
+@router.put("/cloud-templates/{template_id}")
+async def update_cloud_template(template_id: str, payload: dict,
+                                db: Session = Depends(get_db),
+                                current_user: User = Depends(require_admin)):
+    """Partial update: only the keys present are touched.
+
+    A raw dict rather than a model, for the reason the blueprint editor gives above —
+    "present" and "blank" have to stay distinguishable, and clearing a field is a thing an
+    operator does. ``vms``, when present, replaces the whole list.
+    """
+    row = pov_cloud_template_service.get(db, template_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such cloud template")
+    try:
+        row = pov_cloud_template_service.update(db, row, payload or {})
+    except pov_cloud_template_service.CloudTemplateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"template": pov_cloud_template_service.describe(db, row)}
+
+
+@router.delete("/cloud-templates/{template_id}")
+async def delete_cloud_template(template_id: str, db: Session = Depends(get_db),
+                                current_user: User = Depends(require_admin)):
+    """Delete a template.
+
+    A live POV built from it is deliberately not a reason to refuse — see
+    ``pov_cloud_template_service.delete``. The count of POVs that named it is reported so
+    the answer is informed rather than blind.
+    """
+    row = pov_cloud_template_service.get(db, template_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such cloud template")
+    name = row.name
+    built = (db.query(PovEnvironment)
+               .filter(PovEnvironment.template_id == row.id,
+                       PovEnvironment.status != "destroyed").count())
+    pov_cloud_template_service.delete(db, row)
+    return {"deleted": name, "live_povs_built_from_it": built}

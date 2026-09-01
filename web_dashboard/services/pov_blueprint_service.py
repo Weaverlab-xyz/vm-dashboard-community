@@ -95,6 +95,22 @@ def _validate(db: Session, *, platform: str, template_id: str, name: str,
     return platform, slug, tenants
 
 
+
+def _schedule_fields(suspend_at: str, resume_at: str, tz_name: str, days: str) -> dict:
+    """The four schedule columns, validated.
+
+    Validated at SAVE, like the tenant ids above and for the same reason: a stored
+    schedule that only fails when the sweep reads it would move a form error into a
+    background job, three weeks later, against a POV that is already running.
+    """
+    from . import pov_schedule
+    try:
+        return pov_schedule.validate(suspend_at=suspend_at, resume_at=resume_at,
+                                     tz_name=tz_name, days=days)
+    except pov_schedule.ScheduleError as exc:
+        raise BlueprintError(str(exc)) from None
+
+
 def create(db: Session, *, platform: str, name: str, template_id: str,
            template_name: str = "", description: str = "", project_id: str = "",
            broker_vm_name: str = "", suspend_on_idle_seconds: int | None = None,
@@ -102,7 +118,9 @@ def create(db: Session, *, platform: str, name: str, template_id: str,
            gateway_name: str = "", rb_windows_vm_name: str = "", rb_zone: str = "",
            rb_asset: str = "", expiry_hours: int | None = None,
            workgroup: str = "", created_by: str = "",
-           source_build_id: str = "") -> PovBlueprint:
+           source_build_id: str = "", suspend_at_local: str = "",
+           resume_at_local: str = "", schedule_timezone: str = "",
+           schedule_days: str = "") -> PovBlueprint:
     platform, slug, tenants = _validate(
         db, platform=platform, template_id=template_id, name=name,
         pra_tenant_id=pra_tenant_id, ps_tenant_id=ps_tenant_id,
@@ -120,6 +138,8 @@ def create(db: Session, *, platform: str, name: str, template_id: str,
         rb_zone=(rb_zone or "").strip() or None,
         rb_asset=(rb_asset or "").strip() or None,
         expiry_hours=expiry_hours,
+        **_schedule_fields(suspend_at_local, resume_at_local, schedule_timezone,
+                           schedule_days),
         workgroup=(workgroup or "").strip() or None,
         created_by=created_by or None,
         **tenants,
@@ -136,13 +156,28 @@ _UPDATABLE = (
     "description", "template_id", "template_name", "project_id", "broker_vm_name",
     "suspend_on_idle_seconds", "gateway_name", "rb_windows_vm_name", "rb_zone",
     "rb_asset", "expiry_hours", "workgroup",
+    # The suspend schedule a POV from this blueprint starts with, for a platform
+    # with no idle timer of its own.
+    "suspend_at_local", "resume_at_local", "schedule_timezone", "schedule_days",
 )
 _BLANKABLE = ("description", "project_id", "broker_vm_name", "template_name",
-              "gateway_name", "rb_windows_vm_name", "rb_zone", "rb_asset", "workgroup")
+              "gateway_name", "rb_windows_vm_name", "rb_zone", "rb_asset", "workgroup",
+              "suspend_at_local", "resume_at_local", "schedule_timezone",
+              "schedule_days")
 
 
 def update(db: Session, row: PovBlueprint, payload: dict) -> PovBlueprint:
     """Apply a partial update. Only keys present in ``payload`` are touched."""
+    # The schedule is four fields that only mean anything together, so it is
+    # validated as a unit before the field-by-field loop below touches any of them.
+    if any(k in payload for k in ("suspend_at_local", "resume_at_local",
+                                  "schedule_timezone", "schedule_days")):
+        payload = dict(payload)
+        payload.update(_schedule_fields(
+            payload.get("suspend_at_local", row.suspend_at_local) or "",
+            payload.get("resume_at_local", row.resume_at_local) or "",
+            payload.get("schedule_timezone", row.schedule_timezone) or "",
+            payload.get("schedule_days", row.schedule_days) or ""))
     name = payload.get("name")
     platform, slug, tenants = _validate(
         db,
@@ -237,6 +272,23 @@ def prefill_environment(db: Session, row: PovBlueprint | None, env) -> list[str]
         filled.append("Gateway name")
         db.commit()
 
+    # The suspend schedule, copied onto the POV rather than returned as an `apply_to`
+    # override. It belongs here for the same reason the Gateway name does: it is
+    # configuration the POV carries, not a field of the provision REQUEST — nothing in
+    # `ProvisionRequest` names it, so there is no request value for a default to lose to.
+    #
+    # The evaluation latch is deliberately NOT copied. It is per-environment state, and a
+    # new POV must start with it NULL so its first sweep records the time and acts on
+    # nothing.
+    if row.suspend_at_local and not (env.suspend_at_local or "").strip():
+        env.suspend_at_local = row.suspend_at_local
+        env.resume_at_local = row.resume_at_local
+        env.schedule_timezone = row.schedule_timezone
+        env.schedule_days = row.schedule_days
+        env.schedule_last_checked_at = None
+        filled.append("Suspend schedule")
+        db.commit()
+
     # The Resource Broker's three non-secret fields live in the POV's metadata, behind the
     # service that owns them — writing metadata_dict from here would be a second writer for
     # keys pov_resource_broker names privately.
@@ -280,6 +332,10 @@ def serialize(row: PovBlueprint) -> dict:
         "rb_zone": row.rb_zone or "",
         "rb_asset": row.rb_asset or "",
         "expiry_hours": row.expiry_hours or 0,
+        "suspend_at_local": row.suspend_at_local or "",
+        "resume_at_local": row.resume_at_local or "",
+        "schedule_timezone": row.schedule_timezone or "",
+        "schedule_days": row.schedule_days or "",
         "workgroup": row.workgroup or "",
         "created_by": row.created_by or "",
         "created_at": row.created_at.isoformat() if row.created_at else "",

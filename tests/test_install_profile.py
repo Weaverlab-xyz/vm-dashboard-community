@@ -216,6 +216,47 @@ def test_the_nav_gates_the_cloud_links_on_the_same_name():
     storage_line = [ln for ln in nav.splitlines() if 'href="/storage"' in ln][0]
     assert "cloud_pages" not in storage_line
 
+def test_the_cloud_api_routers_carry_the_same_page_gate_as_their_pages():
+    """The half PR #676 missed.
+
+    `/aws` 404s on a POV instance while `POST /api/aws/deploy` kept serving, because only
+    the HTML routes carried the page group. Nothing could reach it while a POV held no
+    cloud credentials — but a POV may now hold one cloud's, for its lab platform, and a
+    deploy made through these routers resolves the GLOBAL BeyondTrust tenant singletons.
+
+    Source-parsed, like its siblings, so a fifth cloud cannot regress this one router at
+    a time.
+    """
+    src = _read(_MAIN)
+    ungated = []
+    for name in ("aws", "azure", "gcp", "oci", "images", "packer"):
+        marker = f"app.include_router({name}.router"
+        assert marker in src, f"{name}.router is no longer included; update this list"
+        clause = src.split(marker, 1)[1].split(")\n", 1)[0]
+        if '_profile_page_gate("cloud_pages")' not in clause:
+            ungated.append(name)
+    assert not ungated, (
+        f"cloud API routers with no profile gate: {ungated}. Their pages 404 on a POV "
+        f"instance and their endpoints must too, or the credentials a POV cloud platform "
+        f"needs also open an ad-hoc deploy path onto the demo tenant.")
+
+
+def test_credential_presence_stays_honest_while_the_tiles_do_not():
+    """`cloud_configured` answers "are there credentials" and must keep doing so — the POV
+    cloud adapter's own `configured()` reads it. It is `feature_map` that has to mask,
+    because that is what the dashboard tiles read, and a tile linking to /aws on an
+    instance where /aws 404s is the dead-endpoint shape this page group exists to fix."""
+    src = _read(os.path.join(_ROOT, "web_dashboard", "services", "feature_flags.py"))
+    body = src.split("def cloud_configured", 1)[1].split("\ndef ", 1)[0]
+    assert "profile_page_allowed" not in body, (
+        "cloud_configured now masks by profile; the POV cloud adapter asks it whether "
+        "credentials exist and would read 'no' on the one instance that has them")
+
+    fmap = src.split("def feature_map", 1)[1].split("\ndef ", 1)[0]
+    assert 'profile_page_allowed("cloud_pages")' in fmap, (
+        "feature_map does not mask the per-cloud tile flags, so a POV instance with its "
+        "lab platform's credentials would show cloud tiles linking to pages that 404")
+
 
 def test_the_background_warmers_respect_the_mask():
     """Worse than an ungated page: these make outbound calls on a timer. Reading the raw

@@ -27,6 +27,7 @@
   POST   /api/pov/managed/{id}/share/reveal
                                         — show the link's password, once, audited
   POST   /api/pov/managed/{id}/expiry   — extend, set or clear the auto-delete timer
+  POST   /api/pov/managed/{id}/schedule — set or clear the suspend schedule
   GET    /api/pov/managed/{id}/use-cases
                                         — this POV's use-case catalog, resolved against the
                                           products it is actually wired into, with progress
@@ -63,8 +64,8 @@ from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, expiry_policy, expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
-                        pov_resource_broker, pov_share, pov_summary, pov_use_cases,
-                        pov_wireup)
+                        pov_resource_broker, pov_schedule, pov_share, pov_summary,
+                        pov_use_cases, pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -257,20 +258,30 @@ def _platform_error(exc: Exception, what: str) -> HTTPException:
 
 @router.get("/platforms")
 async def list_platforms(current_user: User = Depends(get_current_user)):
-    """Every lab platform this build knows about, with what it can do.
+    """Every lab platform this instance may use, with what it can do.
 
     ``capabilities`` is served to the UI rather than kept server-side so a platform that
     cannot, say, produce a share link renders "PRA only" instead of a button that 502s.
+
+    **The list is the SELECTABLE platforms, not every platform this build knows.** A POV
+    instance runs Skytap plus at most one public cloud, and the create form is rendered
+    straight from this — so the one-at-a-time rule is applied once, in the registry, and
+    the form cannot offer a cloud that `provision` would then refuse.
     """
     configured = set(lab_platforms.configured_platforms())
     return {
         "platforms": [
             {"name": name,
              "configured": name in configured,
+             "cloud": name in lab_platforms.CLOUD_PLATFORMS,
              **lab_platforms.capabilities(name)}
-            for name in lab_platforms.VALID_PLATFORMS
+            for name in lab_platforms.selectable_platforms()
         ],
         "default": _DEFAULT_PLATFORM,
+        # What is built but not chosen, so Settings can say what the alternatives are
+        # without the POV page having to know the difference.
+        "cloud_platforms": list(lab_platforms.CLOUD_PLATFORMS),
+        "selected_cloud": lab_platforms.selected_cloud(),
     }
 
 
@@ -408,6 +419,22 @@ async def provision(payload: ProvisionRequest,
             status_code=400,
             detail="a template id is required — pick one, or choose a blueprint that "
                    "names one")
+
+    # One cloud at a time, enforced where a NEW environment is created and deliberately
+    # nowhere else. Reads, power and destroy all go through `_adapter`, which does not ask
+    # this — an operator who switches the instance from AWS to Azure must still be able to
+    # see, suspend and tear down the AWS POVs they already have, and a check in the shared
+    # helper would strand every one of them the moment the setting changed.
+    if not lab_platforms.selectable(payload.platform):
+        chosen = lab_platforms.selected_cloud()
+        raise HTTPException(
+            status_code=409,
+            detail=(f"this instance does not build POVs on {payload.platform}. "
+                    + (f"Its POV cloud provider is {chosen}."
+                       if chosen else
+                       "No POV cloud provider is selected.")
+                    + " Change it in Settings → Integrations → POV cloud provider — a POV "
+                      "instance holds one cloud's credentials at a time."))
 
     name, mod = _adapter(payload.platform)
 
@@ -988,6 +1015,59 @@ def _env_or_404(db: Session, env_id: str) -> PovEnvironment:
     if env is None:
         raise HTTPException(status_code=404, detail="No such POV environment")
     return env
+
+
+class ScheduleRequest(BaseModel):
+    """A suspend schedule. Every field blank clears it."""
+    suspend_at_local: str = ""
+    resume_at_local: str = ""
+    schedule_timezone: str = ""
+    schedule_days: str = ""
+
+
+@router.post("/managed/{env_id}/schedule")
+async def set_schedule(env_id: str, payload: ScheduleRequest,
+                       db: Session = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
+    """Set or clear this POV's suspend schedule.
+
+    Refused on a platform that has its own idle timer. Skytap's `suspend_on_idle` and this
+    answer the same question, and a POV carrying both would be one where neither is
+    clearly in charge — the platform would suspend on idle, the dashboard would resume on
+    a boundary, and the pair would fight quietly for the length of the evaluation.
+
+    Setting a schedule CLEARS the evaluation latch, so the first pass after it records the
+    time and acts on nothing. Without that, changing 19:00 to 22:00 at 20:00 would look
+    back over a window in which the old boundary had already passed.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    if lab_platforms.supports(env.platform, "idle_suspend"):
+        label = lab_platforms.capabilities(env.platform)["label"]
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{label} suspends an environment on its own idle timer, so a "
+                    f"dashboard schedule would fight it. Set the idle timeout instead."))
+    if not lab_platforms.supports(env.platform, "scheduled_suspend"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{env.platform} has no scheduled suspend.")
+
+    try:
+        fields = pov_schedule.validate(
+            suspend_at=payload.suspend_at_local, resume_at=payload.resume_at_local,
+            tz_name=payload.schedule_timezone, days=payload.schedule_days)
+    except pov_schedule.ScheduleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    for field, value in fields.items():
+        setattr(env, field, value)
+    env.schedule_last_checked_at = None
+    db.commit()
+    logger.info("POV %s: schedule set by %s", env.name,
+                getattr(current_user, "username", "?"))
+    return {"schedule": pov_schedule.describe(env)}
 
 
 @router.get("/managed/{env_id}/use-cases")

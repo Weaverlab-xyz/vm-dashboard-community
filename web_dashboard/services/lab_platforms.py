@@ -29,11 +29,23 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-VALID_PLATFORMS = ("skytap",)
+# The clouds that can act as a lab platform. Kept apart from VALID_PLATFORMS so callers
+# can ask "is this a public cloud?" without a literal tuple of their own — the exact habit
+# this module's docstring is about.
+#
+# **This tuple lists the clouds that are BUILT, not the clouds that are planned.** Azure,
+# GCP and OCI each need an adapter module and a CAPABILITIES row before their name may
+# appear here; adding a name early would make `pov_cloud_platform = "azure"` a selectable
+# option that fails at import time, which is the "half-added platform" the registry's own
+# test exists to catch.
+CLOUD_PLATFORMS = ("aws",)
+
+VALID_PLATFORMS = ("skytap",) + CLOUD_PLATFORMS
 
 # adapter module name, relative to this package.
 _ADAPTER_MODULE = {
     "skytap": "skytap_service",
+    "aws": "pov_aws_service",
 }
 
 # The functions an adapter must expose. Split by slice, deliberately: a contract that
@@ -59,6 +71,12 @@ WRITE_CONTRACT = (
     "delete_share",         # (env_id, share_id) -> None
     "stored_credentials",   # (env_id, vm_id) -> [{text, notes}]
     "delete_environment",   # (env_id) -> None
+    # OPTIONAL, and absent from Skytap on purpose. () -> str: what the environment
+    # id WILL be, given the POV name. A platform that mints its own id cannot
+    # answer; one whose "environment" is a tag this dashboard chooses can, and
+    # `run_env_provision` records it before the first create so a partial failure
+    # is still reapable. Callers must use getattr, never assume it.
+    "environment_id_for",   # (name) -> str
 )
 
 # The template-authoring slice. Separate from WRITE_CONTRACT rather than appended to it
@@ -81,7 +99,13 @@ AUTHOR_CONTRACT = (
 # `bootstrap_injection` is one INTENT with different mechanisms, which is why it is an enum
 # rather than a boolean:
 #   "metadata"    - the platform hands data to the guest and the guest fetches it
-#                   (Skytap: per-VM user_data, read at http://169.254.169.254/skytap)
+#                   (Skytap: per-VM user_data, read at http://169.254.169.254/skytap).
+#                   Injected AFTER power-on, into a VM that already exists.
+#   "cloud_init"  - the platform RUNS it, once, on first boot (EC2 user-data, Azure
+#                   customData, GCE metadata startup-script, OCI user_data). Read as a
+#                   weaker "metadata" at your peril: it must be supplied AT CREATE, which
+#                   is why a cloud POV builds its broker VM last rather than injecting
+#                   into one that is already up.
 #   "remote_exec" - the platform runs a script on the guest on our behalf
 #                   (CloudShare's execute-script call)
 #   None          - neither; the enroll code has to be baked into the template, which is
@@ -92,6 +116,7 @@ CAPABILITIES = {
         "templates": True,
         "runstate": True,
         "idle_suspend": True,          # suspend_on_idle, in seconds, per environment
+        "scheduled_suspend": False,    # it has its own timer; see the aws row below
         "bootstrap_injection": "metadata",
         "share_link": True,            # publish_sets: password + expiration_date
         "stored_credentials": True,    # …/vms/{id}/credentials
@@ -116,6 +141,54 @@ CAPABILITIES = {
         # network and install the metadata runner. A platform without it degrades to the
         # generate-and-paste path rather than failing — the builder asks before publishing.
         "published_services": True,    # …/interfaces/{id}/services
+    },
+    # AWS as a lab platform. Read this row against Skytap's above: almost every difference
+    # is a thing AWS does NOT have, and the point of the table is that each one degrades
+    # somewhere visible instead of failing inside a provision job.
+    "aws": {
+        "label": "AWS",
+        # The template is a dashboard-owned topology spec (`pov_cloud_templates`), not
+        # something the cloud holds. True because the FEATURE exists, which is what every
+        # caller is actually asking.
+        "templates": True,
+        "runstate": True,              # start / stop, via EC2. Not suspend: see below
+        # **No public cloud has an idle timer.** Skytap's `suspend_on_idle` is the single
+        # biggest lever on its spend and it has no analogue here, so the dashboard has to
+        # supply one — hence the key beside it.
+        "idle_suspend": False,
+        # The dashboard suspends and resumes this platform on a SCHEDULE, driven from the
+        # reconcile pass. A schedule rather than an inactivity timer because "idle" on a
+        # cloud has no honest definition from outside the guest: every candidate signal
+        # (PRA session, agent heartbeat, console hit) has a blind spot that either leaves
+        # a POV running all month or suspends one mid-demo.
+        "scheduled_suspend": True,
+        # EC2 user-data, run by cloud-init on FIRST boot. Read the enum value rather
+        # than folding it into "metadata": Skytap stores a payload for a guest that is
+        # already up to fetch, while this one is only ever delivered at RunInstances.
+        # `pov_broker` branches on exactly that difference — a cloud broker VM is CREATED
+        # with its bootstrap, after the targets, because the policy inside names their
+        # addresses.
+        "bootstrap_injection": "cloud_init",
+        # No publish sets, and nothing like them. A cloud POV's customer-facing front door
+        # is PRA — which makes PRA mandatory here where it is optional on Skytap. The POV
+        # page reads this and says "PRA only" rather than offering a Share button that
+        # cannot work.
+        "share_link": False,
+        # AWS holds no guest credentials. The platform login a Resource Broker install
+        # needs comes from the template's own key pair / Vault account instead.
+        "stored_credentials": False,
+        "verify": True,                # a cheap DescribeRegions; see the adapter
+        # An AWS account is not a project. The environment's scoping is its own VPC plus
+        # the povEnvironment tag, both created per POV, so there is nothing for the create
+        # form to ask.
+        "projects": False,
+        # Baking N AMIs off a running environment is a later slice, and a deliberate one:
+        # every baked template is a standing storage bill. Templates are edited in the
+        # dashboard today, which is a different thing from authoring one on the platform.
+        "template_authoring": False,
+        # No NAT-a-guest-port primitive, and no need for one: cloud-init installs the
+        # agent without anybody reaching in.
+        "published_services": False,
     },
 }
 
@@ -162,6 +235,51 @@ def supports(platform: str, capability: str) -> bool:
     surface "PRA only" in the UI, not raise a 500 from inside a provision job.
     """
     return bool(CAPABILITIES[normalize(platform)].get(capability))
+
+def selected_cloud() -> str:
+    """The one public cloud this instance may run POVs on, or "".
+
+    Read live rather than cached: it is a Settings row, and the create form has to reflect
+    a change without a restart. An unrecognised value resolves to "" rather than raising,
+    matching ``feature_flags.install_profile`` — a typo in one config row must not take
+    the POV page down, and falling back to "no cloud" can only ever subtract.
+    """
+    from . import config_service, feature_flags   # local: stay import-cheap
+    from ..config import settings
+    # The flag first. It is what the demo profile masks, so a demo instance answers "no
+    # cloud" here whatever is stored — and an operator who switches the feature off keeps
+    # their choice of cloud for when they switch it back on.
+    if not feature_flags.enabled("pov_cloud_enabled"):
+        return ""
+    raw = (config_service.get("pov_cloud_platform")
+           or getattr(settings, "pov_cloud_platform", "") or "")
+    raw = raw.strip().lower()
+    return raw if raw in CLOUD_PLATFORMS else ""
+
+
+def selectable_platforms() -> list[str]:
+    """The platforms a POV may be created on: Skytap, plus at most one cloud.
+
+    **This is where "one cloud at a time" is enforced**, and it is one list rather than a
+    check scattered over the form, the API and the job — a rule that lives in three places
+    is a rule that disagrees with itself. ``api/pov`` renders the platform selector from
+    this and refuses a provision on anything absent from it.
+
+    Deliberately NOT folded into :func:`configured_platforms`. "Not the selected cloud" and
+    "no credentials" are different failures with different remedies, and collapsing them
+    gives an operator who just added an Azure key a 409 that says the key is missing.
+    """
+    return [p for p in VALID_PLATFORMS
+            if p not in CLOUD_PLATFORMS or p == selected_cloud()]
+
+
+def selectable(platform: str) -> bool:
+    """Whether ``platform`` may be used for a new POV on this instance."""
+    try:
+        return normalize(platform) in selectable_platforms()
+    except LabPlatformError:
+        return False
+
 
 
 def configured_platforms() -> list[str]:

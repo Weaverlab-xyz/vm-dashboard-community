@@ -1187,6 +1187,48 @@ class SkytapFeatureConfig(BaseModel):
     skytap_project_id: str = ""
 
 
+class PovCloudFeatureConfig(BaseModel):
+    """The one public cloud a POV instance may also run POVs on.
+
+    Its own panel rather than re-opening the wizard's cloud steps, and the reason is the
+    guard in ``_apply_config``: those steps persist every non-secret field whether or not
+    it was filled in, so letting a POV instance through them would store
+    ``aws_region="us-east-2"`` for four clouds and make each read as half-configured. A
+    POV picks exactly one cloud, deliberately, on this panel.
+
+    The credential fields are the SAME config keys the demo wizard writes — ``aws_*``,
+    read by ``aws_service._aws_kwargs``. Not a parallel ``pov_aws_*`` namespace: that
+    would be a second place for a credential to live and a second thing to forget to
+    rotate, and on a POV instance there is no other writer to collide with.
+
+    **Selecting a cloud here does not re-open the cloud consoles.** ``/aws`` and
+    ``/api/aws/*`` stay 404 on a POV — their deploys resolve the global BeyondTrust
+    tenant singletons. The POV's view of its cloud is ``/pov/cloud``.
+
+    One cloud's fields per built adapter. Azure, GCP and OCI add theirs alongside when
+    their drivers land; until then ``pov_cloud_platform`` will not accept their names —
+    see ``lab_platforms.CLOUD_PLATFORMS``.
+    """
+    enabled: bool = False
+    # "" | "aws". Validated against the registry rather than a literal tuple here, so a
+    # name whose adapter does not exist cannot be stored.
+    pov_cloud_platform: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""     # encrypted at rest
+    aws_region: str = "us-east-2"
+
+    @field_validator("pov_cloud_platform")
+    @classmethod
+    def _known_cloud(cls, v: str) -> str:
+        from ..services import lab_platforms
+        value = (v or "").strip().lower()
+        if value and value not in lab_platforms.CLOUD_PLATFORMS:
+            raise ValueError(
+                f"{v!r} is not a POV cloud platform this build supports; choose one of "
+                f"{', '.join(lab_platforms.CLOUD_PLATFORMS)} or leave it blank")
+        return value
+
+
 class VSphereFeatureConfig(BaseModel):
     enabled: bool = False
     vsphere_host: str = ""
@@ -1604,6 +1646,10 @@ _FEATURE_MODELS = {
     # feature_flags._POV_ONLY, so the panel there refuses to enable rather than
     # storing a flag nothing reads.
     "skytap":       SkytapFeatureConfig,
+    # The one public cloud a POV instance may ALSO run POVs on. POV-only for
+    # the same reason Skytap is: a demo instance has no use for one, and this
+    # panel holds cloud credentials on the instance doing customer work.
+    "pov_cloud":    PovCloudFeatureConfig,
     # Keyed "remote_agents" so _feature_to_cfg_key derives the EXISTING flag name
     # `remote_agents_enabled` with no special-casing. Renaming this key would silently
     # start writing a different config key and the toggle would stop doing anything.
@@ -1657,6 +1703,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "pov_accessor_rest_secret",
     "proxmox_token_secret", "proxmox_password",
     "skytap_api_token",
+    "aws_secret_access_key",
     "vsphere_password",
     "hyperv_password",
     "nutanix_password",
@@ -1912,6 +1959,32 @@ async def test_skytap_connection(request: Request):
     from ..services import skytap_service
     ok, message = await skytap_service.verify()
     return {"ok": ok, "message": message}
+
+@router.post("/pov-cloud/test")
+async def test_pov_cloud_connection(request: Request):
+    """Prove the stored credentials of the selected POV cloud provider.
+
+    Answers **200 either way**, with the outcome in the body, for the reason the Skytap
+    probe above gives at length: a credential that does not work is an ANSWER, not a
+    transport failure, and an endpoint that raises here is one refactor away from somebody
+    writing ``detail=str(exc)`` and re-introducing a stack-trace exposure.
+
+    Routed through the lab-platform registry rather than importing a cloud adapter, so the
+    day Azure lands this endpoint needs no edit.
+    """
+    _require_admin(request)
+    from ..services import lab_platforms
+    chosen = lab_platforms.selected_cloud()
+    if not chosen:
+        return {"ok": False,
+                "message": ("No POV cloud provider is selected. Pick one above and save, "
+                            "then test.")}
+    if not lab_platforms.supports(chosen, "verify"):
+        return {"ok": False,
+                "message": f"The {chosen} adapter offers no credential check."}
+    ok, message = await lab_platforms.adapter(chosen).verify()
+    return {"ok": ok, "message": message}
+
 
 
 # ── Azure per-region config sets (multi-region, Follow-on 6 PR3) ──────────────

@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% block title %}POV Cloud{% endblock %}
+
+{#
+  The POV's read-only view of its cloud provider.
+
+  There is deliberately no deploy control on this page and no endpoint behind one. The
+  demo cloud consoles stay 404 on a POV instance because their deploys resolve the GLOBAL
+  BeyondTrust tenant singletons; everything a POV builds goes through /pov and /pov/templates,
+  which resolve tenants from the registry.
+
+  The section worth the page is Orphans. pov_reconcile can tell you a POV's environment has
+  gone; it cannot tell you the cloud is holding one no row remembers, and that is the
+  direction cost leaks in.
+#}
+
+{% block content %}
+<div x-data="povCloudPage()" x-init="init()" class="space-y-6">
+
+  <div class="flex items-start justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold text-gray-900">POV Cloud</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        What this instance has running on its cloud provider — including anything it has
+        stopped keeping track of.
+      </p>
+    </div>
+    <button @click="load()" :disabled="loading"
+            class="px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50
+                   disabled:opacity-50">Refresh</button>
+  </div>
+
+  <div x-show="data.reason" x-cloak class="rounded-md bg-amber-50 border border-amber-200 p-4">
+    <p class="text-sm text-amber-800" x-text="data.reason"></p>
+  </div>
+
+  <div x-show="error" x-cloak class="rounded-md bg-red-50 border border-red-200 p-4">
+    <p class="text-sm text-red-800" x-text="error"></p>
+  </div>
+
+  <template x-if="data.configured">
+    <div class="space-y-6">
+
+      {# ── Footprint ────────────────────────────────────────────────────── #}
+      <section class="bg-white rounded-lg shadow-sm border border-gray-200 px-5 py-4">
+        <div class="flex items-baseline justify-between gap-3">
+          <h2 class="text-lg font-medium text-gray-900">Footprint</h2>
+          <p class="text-xs text-gray-400"
+             x-text="(data.cloud || '').toUpperCase() + ' · ' + data.region"></p>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3">
+          <div>
+            <p class="text-2xl font-semibold text-gray-900" x-text="data.footprint.environments"></p>
+            <p class="text-xs text-gray-500">environments</p>
+          </div>
+          <div>
+            <p class="text-2xl font-semibold text-gray-900"
+               x-text="data.footprint.vms_running + ' / ' + data.footprint.vms"></p>
+            <p class="text-xs text-gray-500">VMs running</p>
+          </div>
+          <div>
+            <p class="text-2xl font-semibold text-gray-900"
+               x-text="data.footprint.disk_gb + ' GB'"></p>
+            <p class="text-xs text-gray-500">disk — billed while suspended</p>
+          </div>
+          <div>
+            <p class="text-2xl font-semibold"
+               :class="data.estimate.available ? 'text-gray-900' : 'text-gray-300'"
+               x-text="data.estimate.available
+                       ? ('$' + data.estimate.monthly_if_left.toFixed(0))
+                       : '—'"></p>
+            <p class="text-xs text-gray-500">est. / month at this power state</p>
+          </div>
+        </div>
+        <p x-show="data.footprint.instance_types.length" x-cloak
+           class="text-xs text-gray-400 mt-3"
+           x-text="'Shapes: ' + data.footprint.instance_types.join(', ')"></p>
+        <p x-show="data.estimate.reason" x-cloak class="text-xs text-gray-400 mt-2"
+           x-text="data.estimate.reason"></p>
+        <p x-show="data.estimate.available" x-cloak class="text-[11px] text-gray-400 mt-2">
+          On-demand <span class="font-medium">list price</span>, not a bill: no Savings
+          Plans, reservations, free tier, credits, data transfer or snapshots. Running now
+          costs about
+          <span class="font-medium" x-text="'$' + data.estimate.running_hourly.toFixed(3)"></span>
+          an hour; storage alone is
+          <span class="font-medium" x-text="'$' + data.estimate.storage_monthly.toFixed(2)"></span>
+          a month and keeps billing while everything is suspended.
+        </p>
+      </section>
+
+      {# ── Orphans, first: this is the section the page exists for ──────── #}
+      <section class="bg-white rounded-lg shadow-sm border rounded-lg"
+               :class="data.orphans.length ? 'border-red-300' : 'border-gray-200'">
+        <div class="px-5 py-4 border-b"
+             :class="data.orphans.length ? 'border-red-200 bg-red-50' : 'border-gray-200'">
+          <h2 class="text-lg font-medium"
+              :class="data.orphans.length ? 'text-red-800' : 'text-gray-900'">
+            Orphans <span class="text-sm font-normal" x-text="'· ' + data.orphans.length"></span>
+          </h2>
+          <p class="text-sm mt-1"
+             :class="data.orphans.length ? 'text-red-700' : 'text-gray-500'"
+             x-text="data.orphans.length
+                     ? 'Tagged as this dashboard\'s, but no live POV records them. They are billing.'
+                     : 'Nothing on the cloud is unaccounted for.'"></p>
+        </div>
+        <div x-show="data.orphans.length" x-cloak class="px-5 py-4 space-y-3">
+          <template x-for="o in data.orphans" :key="o.id">
+            <div class="flex items-start justify-between gap-4 border-b border-gray-100 pb-3">
+              <div>
+                <p class="text-sm font-mono text-gray-900" x-text="o.id"></p>
+                <p class="text-xs text-gray-500 mt-0.5"
+                   x-text="o.vm_count + ' VM(s) · ' + (o.runstate || 'unknown') + ' · ' + o.region"></p>
+              </div>
+              <p class="text-xs text-gray-400 max-w-md text-right">
+                Remove it in the <span x-text="(data.cloud || '').toUpperCase()"></span>
+                console by deleting everything tagged
+                <code class="text-[11px]" x-text="'povEnvironment=' + o.id"></code>.
+              </p>
+            </div>
+          </template>
+          <p class="text-xs text-gray-500">
+            This page will not delete them. A tag-scoped teardown driven from a read is
+            how the wrong environment gets destroyed; the Destroy button on a POV is the
+            one path that knows the order to tear things down in.
+          </p>
+        </div>
+      </section>
+
+      {# ── The POVs this dashboard is tracking ──────────────────────────── #}
+      <section class="bg-white rounded-lg shadow-sm border border-gray-200">
+        <div class="px-5 py-4 border-b border-gray-200">
+          <h2 class="text-lg font-medium text-gray-900">Tracked POVs</h2>
+        </div>
+        <div class="px-5 py-4">
+          <p x-show="!data.environments.length" x-cloak class="text-sm text-gray-500">
+            No POV environments on this cloud yet.
+          </p>
+          <template x-for="e in data.environments" :key="e.id">
+            <div class="flex items-start justify-between gap-4 py-3 border-b border-gray-100">
+              <div>
+                <a :href="'/pov/' + e.pov_id"
+                   class="text-sm font-medium text-blue-600 hover:underline"
+                   x-text="e.pov_name || e.id"></a>
+                <p class="text-xs text-gray-500 mt-0.5"
+                   x-text="e.vm_count + ' VM(s) · ' + (e.runstate || 'unknown') + ' · ' + e.region"></p>
+              </div>
+              <p class="text-xs text-gray-400 whitespace-nowrap"
+                 x-text="e.expires_at ? ('auto-deletes ' + e.expires_at.slice(0, 10)) : 'no timer'"></p>
+            </div>
+          </template>
+        </div>
+      </section>
+
+    </div>
+  </template>
+</div>
+
+<script>
+function povCloudPage() {
+  return {
+    loading: false,
+    error: '',
+    // Shaped like the endpoint's empty answer so the template can render before the first
+    // load resolves — an Alpine expression reading `.length` off undefined kills the whole
+    // page, not just the row.
+    data: {
+      cloud: '', configured: false, reason: '', region: '',
+      environments: [], orphans: [],
+      footprint: { environments: 0, vms: 0, vms_running: 0, disk_gb: 0, instance_types: [] },
+      estimate: { available: false, reason: '', running_hourly: 0, monthly_if_left: 0,
+                  storage_monthly: 0 },
+    },
+
+    async init() { await this.load(); },
+
+    // The JWT lives in localStorage and this app sets no cookie, so a bare fetch() is an
+    // ANONYMOUS request and comes back 401 whatever the integration behind it is doing.
+    // Same helper and same reasoning as pov/index.html and pov/templates.html — the whole
+    // POV page was 401'd for six calls once for exactly this.
+    async apiFetch(url, opts) {
+      const token = Alpine.store('auth').token;
+      const o = opts || {};
+      const res = await fetch(url, {
+        ...o,
+        headers: {
+          ...(o.headers || {}),
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+      });
+      if (res.status === 401) Alpine.store('auth').logout();
+      return res;
+    },
+
+    async load() {
+      this.loading = true;
+      this.error = '';
+      try {
+        const res = await this.apiFetch('/api/pov/cloud/overview');
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || `overview failed (${res.status})`);
+        this.data = body;
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.loading = false;
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

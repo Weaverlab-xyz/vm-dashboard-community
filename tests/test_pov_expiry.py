@@ -44,7 +44,7 @@ d.Base.metadata.create_all(bind=d.engine)
 
 from web_dashboard.services import (expiry_policy as pol,  # noqa: E402
                                     expiry_reaper as reaper, inventory_service,
-                                    pov_env_service)
+                                    lab_platforms, pov_env_service)
 
 _MIN = 60.0
 _HOUR = 3600.0
@@ -58,7 +58,8 @@ def _name(prefix):
 def _env(db, **kw):
     kw.setdefault("platform_environment_id", "sky-1")
     kw.setdefault("status", pov_env_service.STATUS_ACTIVE)
-    env = d.PovEnvironment(platform="skytap", name=_name("poc"), **kw)
+    kw.setdefault("platform", "skytap")
+    env = d.PovEnvironment(name=_name("poc"), **kw)
     db.add(env)
     db.commit()
     return env
@@ -375,6 +376,39 @@ def test_a_pov_row_defaults_to_no_timer():
     assert env.expires_at is None
     assert env.warned_stage_minutes is None
     db.close()
+
+def test_a_pov_on_a_CLOUD_is_reapable_exactly_like_one_on_skytap():
+    """The auto-delete timer needed no change for a cloud lab platform, and this is the
+    claim under that.
+
+    `inventory_service._pov_item` reports `cloud = row.platform`, so a cloud POV arrives
+    at the policy with `cloud="aws"` — a value that IS in `REAPABLE_VM_CLOUDS`, unlike
+    "skytap". If the pov branch had been written by widening the VM tests instead of
+    short-circuiting ahead of them, a cloud POV would take the VM path and be looked up as
+    a deploy job that does not exist.
+    """
+    now = datetime.utcnow().timestamp()
+    for cloud in ("skytap",) + tuple(lab_platforms.CLOUD_PLATFORMS):
+        item = _item(cloud=cloud, expires_at=_ago(hours=2))
+        capable, why = pol.ttl_capable(item)
+        assert capable, f"{cloud}: {why}"
+        target = pol.reap_target(item, now_ts=now, grace_min=30,
+                                 armed_at_ts=now - 10 * _HOUR)
+        assert target is not None and target["kind"] == "pov", \
+            f"a {cloud} POV past its expiry was not selected for reaping"
+
+
+def test_a_cloud_pov_reap_enqueues_the_same_destroy_job():
+    """One teardown path, whatever the platform. The reaper must never learn the order —
+    which for a cloud POV means terminating instances before unpicking the VPC they sit
+    in, and that lives in the adapter."""
+    db = d.SessionLocal()
+    env = _env(db, platform=lab_platforms.CLOUD_PLATFORMS[0])
+    job_id = reaper._reap_row(db, {"kind": "pov", "id": f"pov:{env.id}"})
+    job = db.query(d.Job).filter(d.Job.id == job_id).first()
+    assert job is not None and job.job_type == "pov_env_destroy", \
+        f"expected pov_env_destroy, got {job and job.job_type}"
+    assert job.metadata_dict.get("environment_id") == env.id
 
 
 if __name__ == "__main__":

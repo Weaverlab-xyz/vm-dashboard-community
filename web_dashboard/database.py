@@ -1810,6 +1810,28 @@ class PovEnvironment(Base):
     # which is worth being able to SEE before it is worth being able to edit.
     suspend_on_idle_seconds = Column(Integer, nullable=True)
 
+    # The dashboard-driven suspend schedule, for platforms that have no idle timer of
+    # their own (every public cloud). NULL throughout = no schedule, which is what every
+    # existing row backfills to and what a Skytap POV keeps forever.
+    #
+    # A schedule rather than an inactivity timer because "idle" on a cloud has no honest
+    # definition from outside the guest: every candidate signal — a PRA session, an agent
+    # heartbeat, a page view — has a blind spot that either leaves a POV running all month
+    # or suspends one mid-demo.
+    suspend_at_local = Column(String(5), nullable=True)     # "HH:MM"
+    resume_at_local = Column(String(5), nullable=True)      # "HH:MM"; NULL = never wake it
+    schedule_timezone = Column(String(64), nullable=True)   # IANA, e.g. Europe/London
+    # Seven characters, Monday first, '1' = the schedule applies that day.
+    schedule_days = Column(String(7), nullable=True)
+    # When the schedule was last evaluated for this row. **The schedule acts on a BOUNDARY
+    # CROSSED since this timestamp, never on "is it currently outside working hours?"** —
+    # which is what lets an SE start a POV by hand at 8pm for a demo and keep it, instead
+    # of having it suspended again by the next sweep four minutes later. It is also what
+    # makes a dashboard that was down for three hours do the right thing rather than the
+    # last three things. NULL means "never evaluated": the first pass records the time and
+    # acts on nothing, because an unbounded window has crossed every boundary there is.
+    schedule_last_checked_at = Column(DateTime, nullable=True)
+
     # Slice 8: the auto-delete timer. NULL = never, exactly as elsewhere — so enabling
     # expiry on an existing estate selects zero rows.
     expires_at = Column(DateTime, nullable=True, index=True)
@@ -2096,6 +2118,14 @@ class PovBlueprint(Base):
     broker_vm_name = Column(String(255), nullable=True)
     suspend_on_idle_seconds = Column(Integer, nullable=True)
 
+    # The suspend schedule a POV from this blueprint starts with. Same four fields as
+    # PovEnvironment, minus its evaluation latch — that is per-environment state, not part
+    # of a recipe.
+    suspend_at_local = Column(String(5), nullable=True)
+    resume_at_local = Column(String(5), nullable=True)
+    schedule_timezone = Column(String(64), nullable=True)
+    schedule_days = Column(String(7), nullable=True)
+
     # Which BeyondTrust tenants a POV from this blueprint is wired into. Same three-FK
     # shape and the same ondelete as PovEnvironment — see the note there about SQLite not
     # enforcing FKs, which is why bt_tenant_service validates every id it is handed.
@@ -2134,6 +2164,100 @@ class PovBlueprint(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
                         nullable=False)
+
+
+class PovCloudTemplate(Base):
+    """A POV template on a public cloud: the topology, declared rather than captured.
+
+    Skytap's template is a saved environment — disks and all — and creating from it is one
+    call. No public cloud has that, so this table **is** the template: a named list of VMs
+    to build, on a network to build them in. A cloud adapter's ``list_templates()`` reads
+    these rows, which is what lets one create form, one blueprint table and one provision
+    job serve both kinds of platform.
+
+    **Declared, not captured, on purpose.** Baking N machine images (AMI / Managed Image /
+    Machine Image / Custom Image) would be the faithful analogue, and it is slow, region-
+    locked, cloud-specific, and a standing storage bill for every template anyone ever
+    saves. A spec that references the image catalog costs nothing to keep and ports to the
+    next cloud unchanged. ``source_environment_id`` is here for the slice that adds baking
+    so that slice needs no migration — the convention every ``pov_*`` table has followed
+    since slice 1.
+
+    Not to be confused with :class:`PovBlueprint`, which is a saved set of *form answers*
+    and names a template. This is the template.
+    """
+    __tablename__ = "pov_cloud_templates"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # The cloud this template builds on. A template is deliberately NOT portable between
+    # clouds: an instance type and an image id are both cloud-specific, so `aws` and
+    # `azure` versions of "the same" POV are two rows, and the create form only ever
+    # offers the selected cloud's. Guessing a translation is how a build fails ten minutes
+    # in with a shape error nobody can read.
+    cloud = Column(String(16), nullable=False, index=True)
+    name = Column(String(255), nullable=False, index=True)   # operator-chosen slug
+    description = Column(Text, nullable=True)
+
+    # Where it builds. NULL = the instance's configured default region, resolved at
+    # provision. Most templates do not care, and one pinned to a region the account has no
+    # quota in is a failure minutes into a build rather than at the form.
+    region = Column(String(64), nullable=True)
+
+    # The environment's own private network, CIDR only. One network per POV rather than a
+    # shared one: two customers' evaluations must not share a broadcast domain, and a
+    # per-POV network is also what makes the tag-scoped teardown exact.
+    network_cidr = Column(String(64), nullable=True)
+
+    # Provenance for the bake slice. Only a link; nothing keys on it.
+    source_environment_id = Column(String(36), nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                        nullable=False)
+
+
+class PovCloudTemplateVM(Base):
+    """One VM in a cloud POV template.
+
+    A child table rather than a JSON column on the template, for the reason this file
+    gives wherever the choice comes up: there is no portable JSON filter across SQLite and
+    Postgres, and "which templates use this image?" is a question the bake slice and the
+    image registry will both want to ask.
+    """
+    __tablename__ = "pov_cloud_template_vms"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    template_id = Column(String(36), index=True, nullable=False)
+    name = Column(String(255), nullable=False)
+
+    # "broker" | "target". At most ONE broker per template: it is the VM the dashboard
+    # agent, the Gateway and the Resource Broker all land on, and the provision job builds
+    # it LAST so its enrolment code is minted against a boot that is about to happen
+    # rather than one that already timed out.
+    role = Column(String(16), nullable=False, default="target")
+
+    # "linux" | "windows". Required here, unlike PovEnvironmentVM where blank means "the
+    # platform would not say" — the person writing a template knows, and the wire-up sends
+    # a Windows VM down an entirely different path.
+    os_family = Column(String(16), nullable=False, default="linux")
+
+    # What to boot. Exactly one of these two is set, enforced by the service:
+    #   image_ref - a registered_images.id. The per-cloud id is resolved from that row's
+    #               `promotions` at provision time, so one template row survives a
+    #               re-promote and a template can be written before the image exists in
+    #               the target cloud.
+    #   image_id  - a raw cloud image id (ami-…, a gallery version, a GCE image name) for
+    #               when the catalog holds nothing and a literal is the honest answer.
+    image_ref = Column(String(36), nullable=True)
+    image_id = Column(String(255), nullable=True)
+
+    instance_type = Column(String(64), nullable=False)
+    disk_gb = Column(Integer, nullable=True)
+    # Render and build order. The broker's position is decided by `role`, not by this.
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 def init_db():
@@ -2309,6 +2433,19 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN rate_limited BOOLEAN",
             "ALTER TABLE pov_environments ADD COLUMN platform_missing BOOLEAN",
             "ALTER TABLE pov_environments ADD COLUMN suspend_on_idle_seconds INTEGER",
+            # The dashboard-driven suspend schedule. Every one backfills to NULL,
+            # which reads as "no schedule" — so enabling this on an existing estate
+            # suspends nothing until somebody sets one, by construction rather than
+            # by a guard. Same rule `expires_at IS NULL` follows.
+            "ALTER TABLE pov_environments ADD COLUMN suspend_at_local VARCHAR(5)",
+            "ALTER TABLE pov_environments ADD COLUMN resume_at_local VARCHAR(5)",
+            "ALTER TABLE pov_environments ADD COLUMN schedule_timezone VARCHAR(64)",
+            "ALTER TABLE pov_environments ADD COLUMN schedule_days VARCHAR(7)",
+            "ALTER TABLE pov_environments ADD COLUMN schedule_last_checked_at TIMESTAMP",
+            "ALTER TABLE pov_blueprints ADD COLUMN suspend_at_local VARCHAR(5)",
+            "ALTER TABLE pov_blueprints ADD COLUMN resume_at_local VARCHAR(5)",
+            "ALTER TABLE pov_blueprints ADD COLUMN schedule_timezone VARCHAR(64)",
+            "ALTER TABLE pov_blueprints ADD COLUMN schedule_days VARCHAR(7)",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.

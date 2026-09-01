@@ -197,6 +197,242 @@ left to paste. A field the POV already carries is never overwritten.
 
 ---
 
+## Running POVs on a public cloud
+
+Skytap is not the only place a POV can run. A POV instance may also select **one** public
+cloud, and build POVs on it through the same pages, the same blueprints, the same wire-up
+and the same auto-delete timer. Today that cloud is AWS.
+
+Turn it on in **Settings → Integrations → POV cloud provider**: pick the provider, paste
+its credentials, save, then **Test connection**. The POV page's platform selector gains it
+alongside Skytap.
+
+### One cloud at a time
+
+The limit is deliberate, and it is enforced in one place —
+`lab_platforms.selectable_platforms()`, which the create form renders from and the
+provision endpoint refuses against. A POV instance is meant to be narrow: one cloud's
+credentials to protect, one account's quota to watch, one bill to explain.
+
+Switching provider does **not** disturb POVs you already built. Reads, power and teardown
+never ask whether a platform is still selected — only *creating a new environment* does —
+so the POVs on your old provider stay visible, suspendable and destroyable until you are
+done with them.
+
+### Selecting a cloud does not open the cloud consoles
+
+`/aws`, `/azure`, `/gcp`, `/oci`, `/images` and their API routers stay unavailable on a POV
+instance, whatever credentials it holds. That is not an oversight to work around: those
+deploys resolve the **global** BeyondTrust tenant singletons, so a VM built there would
+onboard into the demo tenant rather than into this POV's — silently, because both paths
+"work". It is the same tenancy argument the whole demo/POV split rests on.
+
+Everything a POV builds goes through the POV pages, which resolve tenants from the
+registry. That is also what keeps every cloud resource inside the auto-delete timer's
+reach.
+
+### What a cloud template is
+
+Skytap hands you a template as a first-class object: one call against a template id and N
+VMs exist, powered and networked. No public cloud has that call. So on a cloud **the
+dashboard holds the template** — a named list of VMs plus the private network they sit on,
+authored at **POV → Templates**.
+
+| Field | What it does |
+|---|---|
+| Name | Lowercase slug. Shows in the create form and in job output |
+| Region | Blank uses the provider's configured default |
+| Private network | The CIDR this POV's own network gets. Blank uses `10.20.0.0/16` |
+| VMs | Name, role, OS family, image, instance type |
+
+Exactly one VM may carry the **broker** role. It is where the dashboard agent, the Gateway
+and the Resource Broker all land; two of them would mean two agents enrolled for one POV,
+each holding half the wire-up.
+
+A VM names either a **catalog image** (a row in the image registry, whose per-cloud id is
+resolved from its promotions) or a **literal image id**. Catalog images are resolved when
+the POV is built, not when the template is saved — so you can write a template before its
+image has been promoted to this cloud, and a re-promote is picked up without editing
+anything.
+
+Nothing in the template path talks to a cloud. Whether an AMI exists, whether the account
+has quota for the instance type, whether the region is enabled — those are answered by the
+provision job. Everything that *can* be checked without credentials is checked when you
+save, because the alternative is a template that stores cleanly and fails eleven minutes
+into a build with half a network already made.
+
+**Baking a real machine image is deliberately not offered.** It would be the faithful
+analogue of Skytap's instantiate → change → bake, and it is slow, region-locked,
+cloud-specific, and a standing storage bill for every template anyone ever saves. Build
+your images with the Packer and image-promote tooling, and let the template reference
+them.
+
+### What gets created, and what it costs
+
+One POV environment is one private network and its VMs:
+
+- a **VPC**, its own per POV, with a single subnet;
+- an **internet gateway** — and no NAT gateway. A NAT is roughly thirty dollars a month
+  standing before a byte moves, and a POV runs for weeks on your own bill. Instances take a
+  public address for egress instead;
+- a **security group** that allows the environment to talk to itself and accepts **nothing
+  inbound from outside it**. Every component the dashboard installs dials out: the agent
+  polls, the Gateway reaches the PRA appliance, the Resource Broker reaches Password Safe.
+  There is no SSH-from-the-internet rule to forget to remove;
+- the VMs the template names, each with a gp3 root volume and IMDSv2 required.
+
+Every one of them is tagged `povEnvironment=<environment id>` and
+`povManagedBy=vm-dashboard`, in the same API call that creates it.
+
+**Suspending a cloud POV does not stop the bill the way suspending a Skytap environment
+does.** Stopping an instance halts its compute charge and nothing else: the root volume,
+the public address and the network keep billing for the whole evaluation. Budget for that,
+and reap a POV when it is finished rather than leaving it suspended indefinitely — which
+is what the auto-delete timer is for.
+
+### The environment id is derived from the POV name
+
+A Skytap environment has an id the platform mints. A cloud environment does not exist as an
+object at all, so the dashboard chooses one: `povenv-<pov name>`, which is also the tag
+every resource carries. POV names are already unique among live POVs, so the id is too.
+
+That is worth knowing because it is what makes a **partial failure safe**. Creating a cloud
+environment is many API calls, not one, and a build can fail at VM three of five. The id is
+written to the POV row *before the first call*, so Destroy and the reaper both find
+everything that did get made. Tear the failed POV down from the POV page and build again.
+
+### The suspend schedule
+
+Skytap suspends an environment on its own idle timer. No public cloud has one, so on a
+cloud the dashboard supplies the timer — a **schedule**, set per POV from the *Sleeps*
+column, or carried on a blueprint so every POV of a kind starts with it.
+
+| Field | Meaning |
+|---|---|
+| Suspend at | Local time, 24-hour `HH:MM`. Blank removes the schedule |
+| Resume at | Blank means it stays down until somebody starts it |
+| Timezone | An IANA name. Blank means UTC — not the server's zone, which is an accident of its base image |
+| Days | Seven characters of `0`/`1`, Monday first. `1111100` is Mon–Fri |
+
+A schedule rather than an inactivity timer, because "idle" on a cloud has no honest
+definition from outside the guest. A PRA session says nothing about a customer clicking
+around a console; an agent heartbeat never stops. Every candidate signal has a blind spot
+that either leaves a POV running all month or suspends one mid-demo. Business hours are
+something you can state, predict, and explain on an invoice.
+
+**The rule is "has a boundary been crossed since the last check", not "should this be
+asleep right now".** That distinction is the whole design, and it shows up in three places
+you would otherwise file as bugs:
+
+- **A manual start outside hours survives.** Start a POV by hand at 20:00 for a call and it
+  stays up until tomorrow's suspend time. A state check would put it back to sleep on the
+  next sweep, four minutes later, and every sweep after that.
+- **The first pass after you set a schedule does nothing.** An unevaluated row has crossed
+  every boundary there has ever been, so the first pass records the time and acts on
+  nothing — the same rule the auto-delete timer's arming clock follows.
+- **An outage settles on the later boundary.** Down from 18:00 to 22:00 with a 19:00
+  suspend and a 21:00 resume, the POV ends up running. It does not replay both. A latch
+  older than 25 hours is re-armed rather than replayed at all.
+
+The sweep rides the reconcile pass, which already runs every ten minutes and already knows
+each POV's real runstate. It only ever **enqueues a `pov_env_power` job** — the same one
+the Suspend and Start buttons create — so a scheduled action has a `/jobs` row, a Live
+Output, a cancel, and a place in the failed-jobs panel. It is attributed to
+`pov-schedule`, not to whoever set the schedule, so the row says why the POV went to sleep
+at 19:00.
+
+Setting a schedule is refused on a platform that has its own idle timer. The two answer
+the same question, and a POV carrying both is one where neither is in charge.
+
+**Suspending a cloud POV is not free.** Stopping an instance halts its compute charge and
+nothing else — the root volume, the public address and the network keep billing for the
+whole evaluation. A schedule cuts the largest line on the bill, not the bill.
+
+### The cloud view, and orphans
+
+**POV → Cloud** (`/pov/cloud`), linked from the POV page when a provider is selected. Its
+own POV-owned page rather than re-opening `/aws`, and it shows without ever creating —
+there is no deploy control on it and no endpoint behind one.
+
+Three things:
+
+**Footprint.** Environments, VMs running out of VMs total, gigabytes of EBS, and the
+instance shapes in use. Read from the same describe the VM lists come from, so it cannot
+disagree with them. Stopped VMs and their disks are counted, because they are still
+billing.
+
+**Orphans — the reason the page exists.** `pov_reconcile` compares each POV row against
+the cloud and can tell you a row's environment has gone. It cannot tell you the reverse:
+that the cloud is holding an environment no live POV row remembers. That is the direction
+cost leaks — a provision that died before its row was written, a POV destroyed from the
+console leaving its network behind, a row deleted by hand. Every resource carries
+`povManagedBy=vm-dashboard`, so the question is answerable.
+
+A POV row that reached `destroyed` does not count as remembering one. If a teardown left
+something behind, the row says gone and the cloud says otherwise — and that is exactly the
+case somebody needs to be told about.
+
+**The page will not delete an orphan.** A tag-scoped teardown driven from a read is how
+the wrong environment gets destroyed; the Destroy button on a POV is the one path that
+knows the order to tear things down in. The page tells you the tag to select on in the
+cloud's own console.
+
+**An estimate, when the account will give one.** On-demand **list price** from the AWS
+Pricing API — not a bill. No Savings Plans, reservations, free tier, credits, data
+transfer or snapshots. It needs `pricing:GetProducts`, which an EC2-scoped key does not
+have; without it the page says so and shows the footprint alone. That is deliberate: a
+hardcoded price table goes stale silently and reports a number somebody plans around.
+
+The figure worth reading is **per month at the current power state**, which includes
+storage. It is the answer to "can I leave this up for the evaluation?".
+
+### The broker VM, on a cloud
+
+A POV's broker is the VM that carries the dashboard agent, the Gateway and the Password
+Safe Resource Broker. On Skytap the template ships it, the dashboard writes a payload into
+its `user_data`, and a runner inside the guest fetches and executes it. A cloud does the
+last part for you — cloud-init runs user-data — but only **on first boot**. Handing a
+payload to an instance that is already up does nothing at all, silently.
+
+So on a cloud the broker VM is **created by the Broker step, not by the build**, with its
+bootstrap already in user-data. That ordering is forced by the agent's policy, which
+grants the POV's target addresses one at a time — and those addresses do not exist until
+the targets do. The sequence is: build the targets → wait for them → read their addresses
+→ mint the enrolment code → create the broker VM carrying both.
+
+Two consequences worth knowing:
+
+- **An environment shows one fewer VM than its template until the broker lands.** That is
+  the honest reading of "the broker is not installed yet", rather than a VM sitting there
+  doing nothing.
+- **Pressing Broker again rebuilds the VM.** The old one is terminated first, which
+  destroys its agent-state volume with it. On Skytap a re-broker has to remember to delete
+  that volume — an agent that already enrolled never redeems a second code, so a surviving
+  volume gives a container that starts fine and 401s forever. Here it is clean by
+  construction.
+
+The broker VM's image must have **cloud-init and Docker**. Build it with the Packer
+tooling and reference it from the template.
+
+**The spent enrolment code stays in user-data.** A cloud's user-data can only be rewritten
+while the instance is stopped, so unlike the Skytap path there is nothing to clear once
+the code has been redeemed. The exposure is small — the code is single-use, fifteen
+minutes old by then, and IMDSv2 is required so reading it needs a token obtained from on
+the guest — but it is a real difference rather than an oversight.
+
+### What a cloud POV does not have
+
+Read these off the platform's capability row rather than discovering them:
+
+| Not available | Why, and what to use instead |
+|---|---|
+| **Share link** | No cloud has publish sets. The customer's front door is PRA, which makes PRA **required** for a cloud POV where it is optional on Skytap |
+| **Idle suspend** | No cloud has a platform idle timer. The dashboard supplies a scheduled suspend instead |
+| **Stored credentials** | AWS holds no guest login to read back. The platform login comes from your image and its Vault account |
+| **Published services** | No NAT-a-guest-port primitive, and none needed — access is PRA through this POV's own Gateway |
+
+---
+
 ## Keeping the view true
 
 A POV's `runstate` is a **remembered** value, and for most of this feature's life it was

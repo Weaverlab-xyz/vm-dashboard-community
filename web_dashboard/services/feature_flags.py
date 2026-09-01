@@ -60,6 +60,10 @@ _POV_ONLY = (
     # credentials would put customer-lab access on the instance that is deliberately
     # not the one doing customer work.
     "skytap_enabled",
+    # The public cloud a POV may run on. Same argument as Skytap above, with more
+    # force: this one puts a cloud CREDENTIAL on the instance, and a demo instance
+    # already has its own.
+    "pov_cloud_enabled",
 )
 
 _PROFILE_OF = {f: "demo" for f in _DEMO_ONLY}
@@ -158,6 +162,8 @@ def flags() -> dict:
         # POV environments. Masked off entirely on a demo instance — see _POV_ONLY.
         "pov_environments_enabled": enabled("pov_environments_enabled", settings.pov_environments_enabled),
         "skytap_enabled": enabled("skytap_enabled", settings.skytap_enabled),
+        "pov_cloud_enabled": enabled("pov_cloud_enabled",
+                                     settings.pov_cloud_enabled),
         "admission_control_enabled": enabled("admission_control_enabled", settings.admission_control_enabled),
         # Auto-delete timer — gates the Expires column on /inventory and the dashboard's
         # "expiring soon" warning. Deletion has its own second gate
@@ -213,12 +219,23 @@ def feature_map() -> dict:
     raw = flags()
     # AWS/Azure/GCP aren't gated by a feature flag — they're "configured" iff
     # credentials are present. The dashboard uses these to hide tiles on bare installs.
-    aws_configured = cloud_configured("aws")
-    azure_configured = cloud_configured("azure")
-    gcp_configured = cloud_configured("gcp")
+    #
+    # …and on a POV instance they must ALSO answer to the page group, because a POV may
+    # now hold one cloud's credentials for its lab platform. Without this, selecting a POV
+    # cloud provider would sprout AWS tiles on the POV dashboard linking to /aws — which
+    # still 404s, deliberately. That is the dead-tile shape `_PROFILE_PAGES` was added to
+    # fix, arriving by a different route.
+    #
+    # `cloud_configured` itself stays honest: it answers "are there credentials", which is
+    # exactly what the POV cloud adapter needs to know, and is a different question from
+    # "should this instance show a console".
+    consoles = profile_page_allowed("cloud_pages")
+    aws_configured = consoles and cloud_configured("aws")
+    azure_configured = consoles and cloud_configured("azure")
+    gcp_configured = consoles and cloud_configured("gcp")
     # OCI is "configured" iff the API-key signing quad (tenancy + user + key +
     # region) is present — mirrors the AWS/Azure/GCP credential-presence check.
-    oci_configured = cloud_configured("oci")
+    oci_configured = consoles and cloud_configured("oci")
     # Portainer needs both the toggle AND a URL — enabled-but-unconfigured should
     # hide the dashboard tile rather than show a permanently "unavailable" one.
     portainer_configured = raw["portainer_enabled"] and bool(
@@ -230,6 +247,7 @@ def feature_map() -> dict:
         "install_profile": install_profile(),
         "pov_environments": raw["pov_environments_enabled"],
         "skytap":          raw["skytap_enabled"],
+        "pov_cloud":       raw["pov_cloud_enabled"],
         "vmware":       raw["vmware_enabled"],
         # Named to match the Settings panel keys, so settings.html's flag map needs no
         # translation layer. There is deliberately no combined "beyondtrust" key: an
