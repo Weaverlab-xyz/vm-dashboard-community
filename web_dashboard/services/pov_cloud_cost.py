@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,7 @@ _LOCATIONS = {
 # IAM permission, Azure's Retail Prices API is public but bills managed disks by SIZE TIER
 # rather than per GB, GCP's Cloud Billing Catalog needs its own API enabled, and OCI
 # publishes a price list with no auth at all. One at a time.
-PRICED_CLOUDS = ("aws", "azure", "gcp")
+PRICED_CLOUDS = ("aws", "azure", "gcp", "oci")
 
 
 def priced(cloud: str) -> bool:
@@ -594,6 +595,175 @@ def _gcp_disk_gb_month(region: str):
     """USD per GB-month of pd-balanced, or None."""
     return _gcp_catalog(region)["disk"]
 
+# ── OCI: the public price list ───────────────────────────────────────────────
+#
+# The simplest of the four to fetch and the fussiest to match. One unauthenticated GET
+# returns the WHOLE list — a few hundred items, no pagination, no parameters, no region
+# dimension, because OCI prices uniformly across its commercial regions. Compare GCP,
+# where the same information is thousands of SKUs over several pages.
+#
+# Like GCE, OCI prices **OCPUs and memory separately** rather than pricing a shape, so a
+# rate is `ocpus × ocpu_rate + memory_gb × memory_rate`. The shape's own OCPU and memory
+# counts come from `pov_cloud_oci.parse_shape`, which is the same function that put them
+# on the instance — so the estimate can never be sized differently from the VM.
+#
+# The matching is fussy because the display names are not consistent, and both quirks were
+# found by reading the live list rather than by assuming:
+#
+#   "Compute - Standard - E4  - Memory"   <- two spaces, where E5's has one
+#   "Compute - Standard - A2 OCPU"        <- no dash at all, where the rest have one
+#
+# so names are whitespace-normalised and the dash is optional. The names are also anchored
+# at the START, because the list is full of near misses that must not match:
+# "Oracle Compute Cloud@Customer - Compute - Standard - E5", "Compute - Dense I/O - E4 -
+# OCPU", "OCI - Compute - GPU - E4" and a dozen VMware Solution entries.
+
+_OCI_PRICES_URL = "https://apexapps.oracle.com/pls/apex/cetools/api/v1/products/"
+_OCI_TIMEOUT_S = 30.0
+
+# `Compute - Standard - <FAMILY> - OCPU` / `- Memory`, with the dash optional.
+_OCI_COMPUTE_RE = re.compile(
+    r"^Compute - Standard - ([A-Z][A-Z0-9]*)\s*-?\s*(OCPU|Memory)$")
+
+# A block volume is TWO charges, not one: capacity, plus performance units per GB. Pricing
+# only the first would understate every POV's storage by two thirds.
+_OCI_CAPACITY = "Storage - Block Volume - Storage"
+_OCI_PERFORMANCE = "Storage - Block Volume - Performance Units"
+
+# Balanced is 10 VPUs per GB, and Balanced is what an OCI boot volume defaults to —
+# `pov_cloud_oci` sets no `vpus_per_gb`. Capacity + 10 × performance comes to the $0.0425
+# per GB-month Oracle publishes for Balanced, which is how this constant was checked.
+_OCI_BALANCED_VPUS = 10
+
+
+def _oci_usd(item: dict):
+    """The pay-as-you-go USD price of one price-list item, or None.
+
+    Zero is treated as no answer, not as free. The list carries a "Free 200GB" storage
+    entry and an Ampere A1 tier priced at 0 — real entries, but describing an allowance
+    rather than a rate, and accruing 0 for a POV that will eventually be billed is the one
+    direction an estimate behind a cap must not err.
+    """
+    for localisation in item.get("currencyCodeLocalizations") or []:
+        if localisation.get("currencyCode") != "USD":
+            continue
+        for price in localisation.get("prices") or []:
+            if price.get("model") != "PAY_AS_YOU_GO":
+                continue
+            value = float(price.get("value") or 0.0)
+            if value > 0:
+                return value
+    return None
+
+
+def _oci_catalog() -> dict:
+    """The whole price list, reduced to what this module needs.
+
+    ``{"ocpu": {"E4": usd_per_hour, ...}, "memory": {...}, "disk_gb_month": usd}``
+
+    Not keyed by region: the list has no region dimension. Memoised for six hours like
+    every other price here.
+    """
+    key = "oci:catalog"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+
+    try:
+        import httpx
+        resp = httpx.get(_OCI_PRICES_URL, timeout=_OCI_TIMEOUT_S)
+        resp.raise_for_status()
+        items = resp.json().get("items") or []
+    except Exception:  # noqa: BLE001
+        logger.info("POV cost: OCI price list read failed", exc_info=True)
+        return {"ocpu": {}, "memory": {}, "disk_gb_month": None}
+
+    index = oci_index(items)
+    # A read that found nothing is not cached: it would pin the failure for six hours,
+    # long enough that an operator who fixed their egress sees no change.
+    if index["ocpu"] or index["disk_gb_month"] is not None:
+        _prices[key] = (time.time(), index)
+    return index
+
+
+def oci_index(items: list) -> dict:
+    """Reduce the price list to what this module needs.
+
+    Split from the fetch so the matching can be exercised against real captured items with
+    no network — which matters more here than elsewhere, because the display names are
+    inconsistent enough that the matching is the part likely to be wrong.
+    """
+    index = {"ocpu": {}, "memory": {}, "disk_gb_month": None}
+    capacity, performance = None, None
+    for item in items:
+        # Whitespace-normalised, because the list is not consistent about it — "Compute -
+        # Standard - E4  - Memory" carries two spaces where E5's carries one.
+        name = re.sub(r"\s+", " ", item.get("displayName") or "").strip()
+        price = _oci_usd(item)
+        if price is None:
+            continue
+        match = _OCI_COMPUTE_RE.match(name)
+        if match:
+            family, kind = match.group(1), match.group(2)
+            index["ocpu" if kind == "OCPU" else "memory"].setdefault(family, price)
+        elif name == _OCI_CAPACITY:
+            capacity = price
+        elif name == _OCI_PERFORMANCE:
+            performance = price
+
+    if capacity is not None and performance is not None:
+        index["disk_gb_month"] = capacity + _OCI_BALANCED_VPUS * performance
+    return index
+
+
+def _oci_family(shape: str, catalog: dict) -> str:
+    """``VM.Standard.E4.Flex`` -> ``E4``. "" when the shape names no priced family.
+
+    Looked up in the CATALOGUE rather than pattern-matched. The first version checked the
+    segment against the display-name regex, which happily accepted "VM" — every shape
+    resolved to the first segment and nothing was ever priced. The list of families that
+    exist is the list the price list published, and nothing else.
+    """
+    for part in (shape or "").split("."):
+        token = part.strip().upper()
+        if token in catalog["ocpu"]:
+            return token
+    return ""
+
+
+def _oci_instance_hourly(region: str, instance_type: str, os_family: str):
+    """On-demand USD/hour for one OCI shape, or None.
+
+    ``region`` is accepted and ignored — the price list has no region dimension.
+
+    ``os_family`` likewise: OCI charges the same for the shape whatever runs on it, and a
+    Windows licence is a separate line keyed on the image. A Windows POV is therefore
+    under-estimated by its licence, which the docs say rather than this hiding.
+    """
+    from . import pov_cloud_oci
+    try:
+        shape, ocpus, memory_gb = pov_cloud_oci.parse_shape(instance_type)
+    except Exception:  # noqa: BLE001 — an unparseable shape is a template problem
+        return None
+    if ocpus is None:
+        # A fixed shape. The list prices these per shape rather than per OCPU, and this
+        # module models only the Flex families the POV templates actually use.
+        return None
+    catalog = _oci_catalog()
+    family = _oci_family(shape, catalog)
+    if not family:
+        return None
+    ocpu_rate = catalog["ocpu"].get(family)
+    memory_rate = catalog["memory"].get(family)
+    if ocpu_rate is None or memory_rate is None:
+        return None
+    return ocpus * ocpu_rate + (memory_gb or 0.0) * memory_rate
+
+
+def _oci_disk_gb_month(region: str):
+    """USD per GB-month of a Balanced block volume, or None."""
+    return _oci_catalog()["disk_gb_month"]
+
 def _estimate_sync(environments: list, region: str, cloud: str) -> dict:
     out = {"available": False, "reason": "", "currency": "USD",
            "running_hourly": 0.0, "monthly_if_left": 0.0, "storage_monthly": 0.0,
@@ -637,6 +807,8 @@ def _compute_hourly(cloud: str, region: str, vm: dict):
         return _azure_instance_hourly(region, itype, os_family)
     if cloud == "gcp":
         return _gcp_instance_hourly(region, itype, os_family)
+    if cloud == "oci":
+        return _oci_instance_hourly(region, itype, os_family)
     return instance_hourly(region, itype, os_family)
 
 
@@ -661,6 +833,11 @@ def _storage_hourly(cloud: str, region: str, vm: dict):
         # rather than by a size tier.
         gb_month = _gcp_disk_gb_month(region)
         return None if gb_month is None else disk_gb * gb_month / HOURS_PER_MONTH
+    if cloud == "oci":
+        # Per GB-month too, but assembled from TWO charges — capacity plus performance
+        # units. See `_oci_catalog`.
+        gb_month = _oci_disk_gb_month(region)
+        return None if gb_month is None else disk_gb * gb_month / HOURS_PER_MONTH
     gb_month = storage_gb_month(region)
     return None if gb_month is None else disk_gb * gb_month / HOURS_PER_MONTH
 
@@ -679,6 +856,10 @@ def _no_answer_reason(cloud: str, region: str) -> str:
         return ("GCP's billing catalogue returned nothing usable. It needs "
                 "`cloudbilling.googleapis.com` enabled on the project — the catalogue "
                 "itself is a public price list and needs no extra IAM role.")
+    if cloud == "oci":
+        return ("Oracle's public price list returned nothing for these shapes. It needs "
+                "no credentials at all, so this is usually a fixed (non-Flex) shape, or "
+                "one whose family the list does not price per OCPU.")
     return no_price_reason(cloud)
 
 
