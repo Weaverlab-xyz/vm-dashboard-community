@@ -85,6 +85,7 @@ _DRIVER_MODULE = {
     "aws": "pov_cloud_aws",
     "azure": "pov_cloud_azure",
     "gcp": "pov_cloud_gcp",
+    "oci": "pov_cloud_oci",
 }
 
 # The POV name rule, restated. Imported from nowhere on purpose: this module has to be
