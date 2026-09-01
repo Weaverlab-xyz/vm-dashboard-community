@@ -58,8 +58,8 @@ from sqlalchemy.orm import Session
 from ..database import PovEnvironment, PovEnvironmentVM, User, get_db
 from ..services import (bt_tenant_service, expiry_policy, expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
-                        pov_gateway, pov_reconcile, pov_resource_broker, pov_share,
-                        pov_use_cases, pov_wireup)
+                        pov_accessor_entitle, pov_gateway, pov_reconcile,
+                        pov_resource_broker, pov_share, pov_use_cases, pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     # one product has most of the catalog out of scope, and a denominator of everything
     # would make a correctly scoped evaluation look like one going badly.
     out["use_cases"] = pov_use_cases.summary_for(_db_of(env), env, wireup)
+    # No Request here, so the endpoint falls back to the configured public URL. That is
+    # the right answer for a list rendered for an operator: the URL Entitle would be given
+    # is the configured one, not whichever host this particular request arrived on.
+    out.update(pov_accessor_entitle.describe(_db_of(env), env))
     if vms is not None:
         out["vms"] = [{
             "id": v.platform_vm_id,

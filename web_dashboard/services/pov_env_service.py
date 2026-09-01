@@ -26,8 +26,9 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
-from . import (job_service, lab_platforms, pov_accessor_service, pov_broker,
-               pov_gateway, pov_resource_broker, pov_share, pov_use_cases, pov_wireup)
+from . import (job_service, lab_platforms, pov_accessor_entitle, pov_accessor_service,
+               pov_broker, pov_gateway, pov_resource_broker, pov_share, pov_use_cases,
+               pov_wireup)
 
 logger = logging.getLogger(__name__)
 
@@ -333,8 +334,15 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
         # the moment somebody is closing the evaluation out.
         job_service.append_job_log(db, job_id, pov_use_cases.destroy_note(db, env))
 
-        # The accessor logins first, ahead of everything, and they take the position the
-        # share link used to hold. That position belongs to whatever a person OUTSIDE the
+        # The Entitle integration that MINTS accessors goes before the accessors do, and
+        # that order is the point rather than housekeeping: while it is live, Entitle can
+        # mint a new accessor, so removing the logins first races a destroy against a
+        # grant and can leave one created after the step that removed them. Shut the tap,
+        # then drain. It never raises.
+        job_service.append_job_log(db, job_id, await pov_accessor_entitle.teardown(db, env))
+
+        # The accessor logins next, and they take the position the share link used to
+        # hold. That position belongs to whatever a person OUTSIDE the
         # account can be holding — and an accessor is that, but it is a credential into
         # THIS DASHBOARD rather than a door into a lab, so its window is the one worth
         # making shortest. Like the share teardown below, it never raises.

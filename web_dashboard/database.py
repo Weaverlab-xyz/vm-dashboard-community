@@ -1760,6 +1760,18 @@ class PovEnvironment(Base):
                                ForeignKey("beyondtrust_tenants.id", ondelete="SET NULL"),
                                index=True, nullable=True)
 
+    # The Entitle REST integration that mints this POV's accessors, registered against
+    # THIS POV's own Entitle tenant. One per POV rather than one per instance, because the
+    # asset is the POV: an instance-wide integration would have to name every customer's
+    # environment as an asset in one tenant, which is the cross-tenant shape the registry
+    # exists to prevent.
+    #
+    # The terraform state is what `deregister` destroys. Kept even when a destroy fails,
+    # for the same reason the per-VM wire-up states are: clearing it optimistically is how
+    # an integration in a customer's tenant becomes unreachable from here.
+    accessor_integration_id = Column(String(64), nullable=True)
+    accessor_tf_state = Column(Text, nullable=True)
+
     # Slice 7: the customer-facing share link. The platform's own publish set is the
     # source of truth for whether the URL still works; these three record what THIS
     # dashboard published, so it can revoke exactly that one later.
@@ -2159,6 +2171,9 @@ def init_db():
             # column's comment on why it is a deny marker rather than a permission.
             "ALTER TABLE users ADD COLUMN accessor_env_id VARCHAR(36)",
             "CREATE INDEX ix_users_accessor_env_id ON users(accessor_env_id)",
+            # The per-POV Entitle REST integration that mints accessors.
+            "ALTER TABLE pov_environments ADD COLUMN accessor_integration_id VARCHAR(64)",
+            "ALTER TABLE pov_environments ADD COLUMN accessor_tf_state TEXT",
             "ALTER TABLE oauth_group_mappings ADD COLUMN default_permissions TEXT",
             "ALTER TABLE jobs ADD COLUMN cloud_resource_id VARCHAR(255)",
             "ALTER TABLE hypervisor_vm_cache ADD COLUMN guest_os VARCHAR(64)",

@@ -815,6 +815,134 @@ def test_the_accessor_page_still_offers_no_link_into_the_dashboard():
     assert 'href="/pov' not in src and 'href="/api' not in src
 
 
+# ── slice 2b: registering the adapter with Entitle ───────────────────────────
+
+def test_register_rest_names_the_tenant_in_both_halves():
+    """The gap 2b exists to close, and it is two gaps that look like one.
+
+    Without a ctx, `register_rest` authenticates with the GLOBAL Entitle key AND writes the
+    global owner/workflow ids into the HCL. Threading it through only one of them is worse
+    than neither: you authenticate as one tenant and name another's ids.
+    """
+    ers_path = os.path.join(_SVC, "entitle_registration_service.py")
+    code = _code(ers_path, "register_rest")
+    assert "ctx=ctx" in code or "_apply_hcl_sync, hcl" in code
+    assert "_hcl_fields(ctx)" in code, \
+        "register_rest does not name the tenant's owner/workflow in the HCL"
+    assert code.rstrip().endswith("ctx)"), \
+        "register_rest does not apply with the tenant's key"
+
+    # And the generator actually passes them on, rather than accepting and dropping them.
+    gen = _code(ers_path, "_generate_rest_hcl")
+    assert "fields=fields" in gen, "_generate_rest_hcl drops the tenant fields"
+
+
+def test_the_rest_path_does_not_demand_the_ssh_connectors_prerequisites():
+    """An SSH connector reaches a private target from INSIDE the network, so it needs an
+    agent token and a key. A REST adapter is called by Entitle over public HTTPS and needs
+    neither — demanding them would block a registration on prerequisites that do not apply.
+    """
+    wireup = os.path.join(_SVC, "pov_wireup.py")
+    shared = _code(wireup, "entitle_tenant_ctx")
+    # It resolves the tenant and the two ids every integration needs, and refuses on
+    # nothing else.
+    assert "owner_id" in shared and "workflow_id" in shared
+    for refusal in ("names no agent token", "no Entitle SSH key", "names no SSH sudo user"):
+        assert refusal not in shared, \
+            f"the shared tenant context refuses with {refusal!r}, which is SSH-specific"
+
+    # And the SSH path still demands all three, layered on top rather than duplicated.
+    ssh = _code(wireup, "entitle_context")
+    assert "entitle_tenant_ctx" in ssh, "entitle_context re-resolves the tenant itself"
+    for refusal in ("names no agent token", "no Entitle SSH key", "names no SSH sudo user"):
+        assert refusal in ssh, f"the SSH path stopped refusing with {refusal!r}"
+
+
+def test_the_registration_is_refused_before_anything_is_created():
+    """A half-succeeded registration leaves an integration in a customer's tenant that this
+    dashboard has no state for and cannot remove."""
+    from web_dashboard.services import pov_accessor_entitle as pae
+    s = _setup()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == s["env_id"]).first()
+
+    # No Entitle tenant on this POV.
+    env.entitle_tenant_id = None
+    db.commit()
+    assert "Entitle tenant" in pae.blocker(db, env)
+
+    # Tenant, but the adapter is closed because its secret is unset.
+    env.entitle_tenant_id = "t-entitle"
+    db.commit()
+    config_service.set("pov_accessor_rest_secret", "")
+    assert "pov_accessor_rest_secret" in pae.blocker(db, env)
+
+    # Secret, but this instance does not know its own public URL.
+    config_service.set("pov_accessor_rest_secret", _REST_SECRET)
+    config_service.set("public_base_url", "")
+    assert "public URL" in pae.blocker(db, env)
+
+    # A URL, but plaintext — Entitle will not call it.
+    config_service.set("public_base_url", "http://dash.internal")
+    assert "HTTPS" in pae.blocker(db, env)
+
+    # All four satisfied.
+    config_service.set("public_base_url", "https://dash.example")
+    assert pae.blocker(db, env) == ""
+    assert pae.endpoint().startswith("https://dash.example/api/pov/accessor/rest")
+    db.close()
+
+
+def test_the_blocker_reaches_the_row_and_the_page_shows_it_instead_of_a_button():
+    from web_dashboard.services import pov_accessor_entitle as pae
+    s = _setup()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == s["env_id"]).first()
+    described = pae.describe(db, env)
+    db.close()
+    for key in ("accessor_registered", "accessor_endpoint", "accessor_blocker",
+                "accessor_integration_id"):
+        assert key in described, f"describe() omits {key}"
+
+    src = _markup(os.path.join(_TPL, "pov", "detail.html"))
+    assert 'x-text="env.accessor_blocker"' in src, "the page never shows the blocker"
+    panel = src.split("Let Entitle mint them", 1)[1].split("</div>", 30)[0]
+    assert 'x-show="!env.accessor_blocker"' in src, \
+        "the register button is not hidden when something blocks it"
+
+
+def test_the_integration_is_torn_down_before_the_logins_it_mints():
+    """While it is live, Entitle can mint a NEW accessor — so removing the logins first
+    races a destroy against a grant. Shut the tap, then drain."""
+    src = _read(os.path.join(_SVC, "pov_env_service.py"))
+    body = src.split("async def run_env_destroy(", 1)[1]
+    integration = body.index("pov_accessor_entitle.teardown")
+    logins = body.index("pov_accessor_service.teardown")
+    share = body.index("pov_share.teardown")
+    assert integration < logins < share, (
+        "destroy order is wrong: the Entitle integration must go before the accessor "
+        "logins, and both before the share link")
+
+
+def test_a_failed_deregistration_keeps_the_state_so_a_re_run_can_finish_it():
+    """Clearing it optimistically is how an integration in a customer's tenant becomes
+    unreachable from here — the rule the per-VM wire-up teardown already follows."""
+    code = _code(os.path.join(_SVC, "pov_accessor_entitle.py"), "teardown")
+    assert "accessor_tf_state = None" not in code, \
+        "teardown clears the terraform state on the failure path"
+    assert "WARNING" in code, "a failed teardown says nothing in the job log"
+
+
+def test_the_open_question_is_recorded_where_the_person_who_can_answer_it_looks():
+    """Entitle's Ephemeral-mode discriminator is unconfirmed. The operator registering the
+    integration is the one who can check, so the page says so, not only the design doc."""
+    svc = _read(os.path.join(_SVC, "pov_accessor_entitle.py"))
+    assert "unconfirmed" in svc.lower()
+    page = _markup(os.path.join(_TPL, "pov", "detail.html"))
+    assert "Ephemeral Accounts" in page, \
+        "the page does not ask the operator to confirm the connection mode"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

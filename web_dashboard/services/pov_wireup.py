@@ -231,11 +231,19 @@ def clear_entitle_key(env: PovEnvironment) -> None:
         logger.debug("POV %s: no Entitle SSH key to clear", env.id)
 
 
-async def entitle_context(db: Session, env: PovEnvironment) -> dict:
-    """Everything the Entitle half needs, or a refusal naming what is missing.
+async def entitle_tenant_ctx(db: Session, env: PovEnvironment) -> dict:
+    """This POV's Entitle tenant, and the two ids EVERY integration in it needs.
 
-    ``{}`` — not an error — when the POV has no Entitle tenant. The three halves of this
+    ``{}`` — not an error — when the POV has no Entitle tenant. The three halves of the
     wire-up are independent, and a POV without Entitle is a perfectly good POV.
+
+    Split out of :func:`entitle_context` because two different kinds of integration are
+    created against this tenant and they need different things. This is the part they
+    share: whose tenant, and the owner and workflow ids ``_common_attrs_hcl`` refuses
+    without. The SSH connector's extra prerequisites — an agent token, and a private key —
+    layer on top in ``entitle_context``; a REST adapter is called by Entitle over public
+    HTTPS and needs neither, so demanding them there would block a registration on
+    prerequisites that do not apply to it.
     """
     if not env.entitle_tenant_id:
         return {}
@@ -248,12 +256,44 @@ async def entitle_context(db: Session, env: PovEnvironment) -> dict:
     missing = [label for label, value in (
         ("an owner id", tenant.option("owner_id")),
         ("a workflow id", tenant.option("workflow_id")),
-        ("an SSH sudo user", tenant.option("ssh_sudo_user")),
     ) if not value]
     if missing:
         raise WireupError(
             f"the Entitle tenant {tenant.name!r} names {' and '.join(missing)}, which an "
             f"integration cannot be created without. Set them on the tenant.")
+
+    return {
+        "tenant": tenant,
+        "ctx": entitle_registration_service.tenant_ctx(
+            api_key=tenant.secret, endpoint=tenant.base_url,
+            owner_id=tenant.option("owner_id"),
+            workflow_id=tenant.option("workflow_id"),
+            agent_token_name=tenant.option("agent_token_name"),
+            ssh_sudo_user=tenant.option("ssh_sudo_user")),
+        "label": tenant.name,
+    }
+
+
+async def entitle_context(db: Session, env: PovEnvironment) -> dict:
+    """Everything the SSH half needs, or a refusal naming what is missing.
+
+    ``{}`` — not an error — when the POV has no Entitle tenant. The three halves of this
+    wire-up are independent, and a POV without Entitle is a perfectly good POV.
+
+    The tenant and its owner/workflow ids come from :func:`entitle_tenant_ctx`; what is
+    added here is what the **SSH ephemeral-accounts connector** specifically needs, and
+    neither is a general Entitle requirement.
+    """
+    base = await entitle_tenant_ctx(db, env)
+    if not base:
+        return {}
+    tenant = base["tenant"]
+
+    if not tenant.option("ssh_sudo_user"):
+        raise WireupError(
+            f"the Entitle tenant {tenant.name!r} names no SSH sudo user, which the "
+            f"ephemeral-accounts connector cannot mint an account without. Set it on the "
+            f"tenant.")
 
     agent = tenant.option("agent_token_name")
     if not agent:
@@ -274,11 +314,7 @@ async def entitle_context(db: Session, env: PovEnvironment) -> dict:
             "baked into this template's guests.")
 
     return {
-        "ctx": entitle_registration_service.tenant_ctx(
-            api_key=tenant.secret, endpoint=tenant.base_url,
-            owner_id=tenant.option("owner_id"),
-            workflow_id=tenant.option("workflow_id"),
-            agent_token_name=agent, ssh_sudo_user=tenant.option("ssh_sudo_user")),
+        "ctx": base["ctx"],
         "sudo_user": tenant.option("ssh_sudo_user"),
         "private_key": pem,
         "label": tenant.name,
