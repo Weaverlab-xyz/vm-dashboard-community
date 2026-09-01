@@ -556,13 +556,25 @@ A cap needs a price source, and each cloud needs its own.
 |---|---|---|
 | **AWS** | Pricing API | `pricing:GetProducts` — an EC2-scoped key does **not** have it. Without it nothing accrues and the page names the missing permission |
 | **Azure** | Retail Prices API | Nothing. It is public and unauthenticated, so a cap works the moment the provider is selected |
-| GCP, OCI | — | Not wired up yet. The footprint still shows; the cap is unavailable and says so |
+| **GCP** | Cloud Billing Catalog | `cloudbilling.googleapis.com` enabled on the project. No extra IAM role — the catalogue is a public price list |
+| OCI | — | Not wired up yet. The footprint still shows; the cap is unavailable and says so |
 
 Skytap has no per-VM figure at all — it bills the lab, and its own idle timer is the lever
 there.
 
 A cloud with no price source is never offered a cap. That is deliberate: one that accrued
 a confident zero and never acted would be a worse promise than no cap at all.
+
+**GCE does not price a machine type.** It prices vCPU and memory separately, so
+`n2-standard-4` is four units of *N2 Instance Core* plus sixteen of *N2 Instance Ram*. The
+estimate asks the Compute API what a shape contains, then the catalogue what a core and a
+gigabyte cost in that region. Preemptible and committed-use SKUs are excluded.
+
+Two consequences worth knowing on GCP. **A custom machine type has no estimate** — the
+catalogue prices families, and `custom-4-16384` belongs to none, so the cap is unavailable
+for a POV using one. And **a Windows licence is not counted**: unlike AWS and Azure, GCE
+licences a premium OS image as a separate SKU keyed on the image rather than the shape, so
+a Windows POV is under-estimated by its licence.
 
 **Azure bills a managed disk by size tier, not per gigabyte.** A 30 GB and a 32 GB Standard
 SSD are both an E4 and cost exactly the same; a 33 GB one is an E6 and costs roughly

@@ -379,6 +379,181 @@ def test_the_price_lookups_run_off_the_event_loop():
         assert "cloud_executor.run" in _code(path, fn), f"{fn} does its lookups on the loop"
 
 
+# ── GCP pricing: cores and memory, priced separately ─────────────────────────
+
+def _sku(description, group, price, region="us-central1", usage="OnDemand"):
+    """One Cloud Billing Catalog SKU, in the shape the real API returns."""
+    units = int(price)
+    return {
+        "description": description,
+        "category": {"resourceGroup": group, "usageType": usage},
+        "serviceRegions": [region],
+        "pricingInfo": [{"pricingExpression": {"tieredRates": [
+            {"unitPrice": {"units": str(units),
+                           "nanos": int(round((price - units) * 1e9))}}]}}],
+    }
+
+
+def _gcp_index(skus, region="us-central1"):
+    """Build the index the way `_gcp_catalog` does, without the HTTP or the cache."""
+    index = {"cpu": {}, "ram": {}, "disk": None}
+    for sku in skus:
+        cost._gcp_index_sku(index, sku, region)
+    return index
+
+
+def test_gcp_is_priced():
+    assert cost.priced("gcp") is True
+    assert cost._priceable("gcp", "us-central1") is True
+
+
+def test_a_machine_type_is_cores_plus_memory_not_one_sku():
+    """GCE does not price a machine type. `n2-standard-4` is four units of "N2 Instance
+    Core" plus sixteen of "N2 Instance Ram", so the shape's vCPU and memory have to come
+    from the Compute API before the catalogue can say anything."""
+    index = _gcp_index([
+        _sku("N2 Instance Core running in Americas", "CPU", 0.031611),
+        _sku("N2 Instance Ram running in Americas", "RAM", 0.004237),
+    ])
+    assert index["cpu"]["N2"] == 0.031611
+    assert index["ram"]["N2"] == 0.004237
+
+    original_c, original_s = cost._gcp_catalog, cost._gcp_machine_spec
+    cost._gcp_catalog = lambda region: index
+    cost._gcp_machine_spec = lambda region, mt: (4, 16.0)
+    try:
+        price = cost._gcp_instance_hourly("us-central1", "n2-standard-4", "linux")
+    finally:
+        cost._gcp_catalog, cost._gcp_machine_spec = original_c, original_s
+    assert round(price, 6) == round(4 * 0.031611 + 16.0 * 0.004237, 6)
+
+
+def test_n2d_is_never_read_as_n2():
+    """The family lives ONLY in the SKU description. A prefix match without the space
+    would price an N2D VM off N2 rates, which is a wrong number rather than no number —
+    the failure mode this whole module is arranged to avoid."""
+    index = _gcp_index([
+        _sku("N2D Instance Core running in Americas", "CPU", 0.027),
+        _sku("N2D Instance Ram running in Americas", "RAM", 0.0036),
+    ])
+    assert "N2" not in index["cpu"], "N2D was indexed as N2"
+    assert index["cpu"]["N2D"] == 0.027
+
+
+def test_preemptible_and_committed_skus_are_never_indexed():
+    """Preemptible is cheaper and would understate a cap; a commitment rate is not what an
+    un-discounted POV pays."""
+    index = _gcp_index([
+        _sku("N2 Instance Core running in Americas", "CPU", 0.007, usage="Preemptible"),
+        _sku("Commitment v1: N2 Cpu in Americas", "CPU", 0.019, usage="Commit1Yr"),
+    ])
+    assert index["cpu"] == {}, f"a discounted SKU was indexed: {index['cpu']}"
+
+
+def test_a_sku_from_another_region_is_never_indexed():
+    index = _gcp_index([
+        _sku("N2 Instance Core running in Europe", "CPU", 0.035, region="europe-west1"),
+    ])
+    assert index["cpu"] == {}, "a SKU from another region was priced as local"
+
+
+def test_the_disk_sku_is_the_one_the_driver_actually_creates():
+    """`pov_cloud_gcp` creates pd-balanced. The catalogue calls that "Balanced PD
+    Capacity", and matching the wrong description would price a different disk class."""
+    from web_dashboard.services import pov_cloud_gcp
+    assert pov_cloud_gcp._DISK_TYPE == "pd-balanced", (
+        f"the driver now creates {pov_cloud_gcp._DISK_TYPE} disks, but the catalogue "
+        f"match here still looks for Balanced PD Capacity")
+    index = _gcp_index([
+        _sku("SSD backed PD Capacity", "SSD", 0.170),
+        _sku("Balanced PD Capacity in Americas", "SSD", 0.100),
+    ])
+    assert index["disk"] == 0.100
+
+
+def test_a_zero_price_tier_is_skipped():
+    """Promotional and free tiers appear first in `tieredRates`."""
+    sku = _sku("N2 Instance Core running in Americas", "CPU", 0.031611)
+    sku["pricingInfo"][0]["pricingExpression"]["tieredRates"].insert(
+        0, {"unitPrice": {"units": "0", "nanos": 0}})
+    assert round(cost._gcp_sku_price(sku), 6) == 0.031611
+
+
+def test_a_custom_machine_type_has_no_price_rather_than_a_guess():
+    assert cost._gcp_instance_hourly("us-central1", "custom-4-16384", "linux") is None
+    assert cost._gcp_instance_hourly("us-central1", "", "linux") is None
+
+
+def test_a_family_the_catalogue_never_mentioned_has_no_price():
+    original_c, original_s = cost._gcp_catalog, cost._gcp_machine_spec
+    cost._gcp_catalog = lambda region: {"cpu": {}, "ram": {}, "disk": None}
+    cost._gcp_machine_spec = lambda region, mt: (4, 16.0)
+    try:
+        assert cost._gcp_instance_hourly("us-central1", "z9-standard-4", "linux") is None
+    finally:
+        cost._gcp_catalog, cost._gcp_machine_spec = original_c, original_s
+
+
+def test_the_catalogue_walk_is_bounded():
+    """There is no server-side filter, so this lists every Compute Engine SKU. A paging
+    bug on either side must not turn one price lookup into an unbounded download."""
+    assert cost._GCP_MAX_PAGES <= 10
+    body = _code(os.path.join("web_dashboard", "services", "pov_cloud_cost.py"),
+                 "_gcp_catalog")
+    assert "_GCP_MAX_PAGES" in body, "the catalogue walk has no page ceiling"
+    assert "nextPageToken" in body
+
+
+def test_an_empty_catalogue_is_not_cached_as_an_answer():
+    """Caching a failed read would pin it for six hours — long enough that an operator who
+    enables the billing API sees no change and concludes it did not help."""
+    body = _code(os.path.join("web_dashboard", "services", "pov_cloud_cost.py"),
+                 "_gcp_catalog")
+    guarded = body.split("except Exception", 1)[1]
+    # The GUARD itself, not merely a `return` — the tail of the function has one anyway,
+    # so searching for that alone passed with the guard deleted. Verified by deleting it.
+    assert 'if not index["cpu"]' in guarded, (
+        "a failed catalogue read is cached as an answer, pinning the failure for six "
+        "hours — long enough that an operator who enables the billing API sees no change "
+        "and concludes it did not help")
+    assert guarded.index("return index") < guarded.index("_prices[key]"), \
+        "the early return comes after the cache write, so it never runs"
+
+
+def test_a_gcp_environment_prices_compute_and_its_disks():
+    original_c, original_s = cost._gcp_catalog, cost._gcp_machine_spec
+    cost._gcp_catalog = lambda region: {"cpu": {"N2": 0.03}, "ram": {"N2": 0.004},
+                                        "disk": 0.10}
+    cost._gcp_machine_spec = lambda region, mt: (2, 8.0)
+    try:
+        running = _rate(_env([_vm("running", "n2-standard-2", 30)]), "us-central1", "gcp")
+        stopped = _rate(_env([_vm("stopped", "n2-standard-2", 30)]), "us-central1", "gcp")
+    finally:
+        cost._gcp_catalog, cost._gcp_machine_spec = original_c, original_s
+    disk_hourly = 30 * 0.10 / cost.HOURS_PER_MONTH
+    assert round(running, 6) == round(2 * 0.03 + 8.0 * 0.004 + disk_hourly, 6)
+    assert round(stopped, 6) == round(disk_hourly, 6), \
+        "a suspended GCP POV must still accrue its disk"
+
+
+def test_the_gcp_reason_names_the_api_to_enable():
+    """Unlike AWS's, GCP's catalogue needs no IAM role — but the API has to be on, and an
+    unenabled one answers 403, which reads like a permissions problem.
+
+    Asserted on the service name and the instruction separately, rather than on the whole
+    hostname. A dotted host in a membership test is the shape of a URL allow-list check,
+    and CodeQL's `py/incomplete-url-substring-sanitization` flags it — correctly in
+    general, since a substring is a weak way to validate a URL. It is not what this line
+    does, but the fix is to stop writing the shape rather than to suppress the query.
+    """
+    reason = cost._no_answer_reason("gcp", "us-central1")
+    assert "cloudbilling" in reason, "the reason does not name the API"
+    assert "enabled on the project" in reason, "the reason does not say what to do"
+    assert "IAM" in reason, (
+        "the reason should say no extra role is needed, or an operator goes looking for "
+        "a permission that does not exist")
+
+
 # ── the thresholds and their latches ─────────────────────────────────────────
 
 def test_nothing_happens_without_a_cap():
