@@ -3950,6 +3950,7 @@
               <option value="aws">AWS</option>
               <option value="azure">Azure</option>
               <option value="gcp">GCP</option>
+              <option value="oci">OCI</option>
             </select>
             <p class="text-xs text-gray-400 mt-1">
               <strong>One at a time.</strong> A POV instance holds one cloud's credentials,
@@ -4100,6 +4101,74 @@
                 on its project, and the Compute Engine API enabled. Each POV builds its
                 own VPC network, subnet and firewall rule named
                 <code>povenv-&lt;name&gt;-*</code>, plus its VMs.
+              </p>
+            </div>
+          </template>
+
+
+          <template x-if="panelCfg.pov_cloud_platform === 'oci'">
+            <div class="space-y-4">
+              <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">OCI credentials</p>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Tenancy OCID</label>
+                  <input type="text" x-model="panelCfg.oci_tenancy_ocid"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ocid1.tenancy.oc1..">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">User OCID</label>
+                  <input type="text" x-model="panelCfg.oci_user_ocid"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ocid1.user.oc1..">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Key fingerprint</label>
+                  <input type="text" x-model="panelCfg.oci_fingerprint"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="aa:bb:cc:dd:..">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Default region</label>
+                  <input type="text" x-model="panelCfg.oci_region"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="us-ashburn-1">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Compartment OCID</label>
+                <input type="text" x-model="panelCfg.oci_compartment_ocid"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="blank = the tenancy root">
+                <p class="text-xs text-gray-400 mt-1">
+                  Recorded on every POV built here, so a teardown weeks later aims at the
+                  compartment the environment actually went into. A POV does
+                  <strong>not</strong> get a compartment of its own — see the docs for why
+                  the obvious analogy to an Azure resource group is the wrong one.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">API signing private key (PEM)</label>
+                <textarea x-model="panelCfg.oci_private_key" rows="4"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          :placeholder="(panelCfg._secrets_set || []).includes('oci_private_key')
+                                        ? '•••••••• stored — leave blank to keep'
+                                        : 'Paste the private key PEM'"></textarea>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Key passphrase <span class="font-normal text-gray-400">(optional)</span></label>
+                <input type="password" x-model="panelCfg.oci_private_key_passphrase" autocomplete="new-password"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       :placeholder="(panelCfg._secrets_set || []).includes('oci_private_key_passphrase')
+                                     ? '•••••••• stored — leave blank to keep'
+                                     : 'Only if the key is encrypted'">
+              </div>
+              <p class="text-[11px] text-gray-400">
+                The user needs <span class="font-medium">manage</span> on instances,
+                VCNs, subnets, route tables, security lists and internet gateways in that
+                compartment. Most OCI shapes are Flex and need a size: a template's
+                instance type accepts <code>SHAPE</code>, <code>SHAPE:ocpus</code> or
+                <code>SHAPE:ocpus:memory_gb</code>.
               </p>
             </div>
           </template>

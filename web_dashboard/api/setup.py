@@ -1229,6 +1229,13 @@ class PovCloudFeatureConfig(BaseModel):
     gcp_project_id: str = ""
     gcp_service_account_json: str = ""  # encrypted at rest
     gcp_region: str = "us-central1"
+    oci_tenancy_ocid: str = ""
+    oci_user_ocid: str = ""
+    oci_fingerprint: str = ""
+    oci_private_key: str = ""            # encrypted at rest
+    oci_private_key_passphrase: str = ""  # encrypted at rest
+    oci_compartment_ocid: str = ""
+    oci_region: str = "us-ashburn-1"
 
     @field_validator("pov_cloud_platform")
     @classmethod
@@ -1719,6 +1726,8 @@ _SECRET_FEATURE_KEYS = frozenset({
     "aws_secret_access_key",
     "azure_client_secret",
     "gcp_service_account_json",
+    "oci_private_key",
+    "oci_private_key_passphrase",
     "vsphere_password",
     "hyperv_password",
     "nutanix_password",

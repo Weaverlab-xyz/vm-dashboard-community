@@ -79,14 +79,22 @@ def test_gcp_is_a_built_cloud_with_an_adapter_and_a_driver():
         assert callable(getattr(adapter, fn, None)), f"gcp adapter lacks {fn}"
 
 
-def test_gcp_is_the_only_cloud_that_claims_projects():
-    """A GCP project is a real boundary an environment is built INSIDE. AWS accounts and
-    Azure subscriptions are instance-wide settings, not a per-POV choice, so neither has
-    anything for the create form to ask."""
+def test_gcp_claims_projects_because_it_has_a_container_worth_recording():
+    """A GCP project is a real boundary an environment is built INSIDE, so the POV row
+    records which one and the teardown reads it back.
+
+    Named against the two clouds whose answer is NO and is a decision — an AWS account and
+    an Azure subscription are instance-wide settings, not a per-POV choice, so neither has
+    anything for the create form to ask. Deliberately not "GCP is the only one": OCI's
+    compartment is the same kind of boundary and claims it too, and a test asserting
+    exclusivity would have had to be edited by the commit that added it.
+    """
     assert lp.supports("gcp", "projects") is True
-    for other in (c for c in lp.CLOUD_PLATFORMS if c != "gcp"):
-        assert lp.supports(other, "projects") is False, f"{other} claims projects"
     assert isinstance(lp.adapter("gcp").configured_project_id(), str)
+    for scoped_instance_wide in ("aws", "azure"):
+        assert lp.supports(scoped_instance_wide, "projects") is False, (
+            f"{scoped_instance_wide} claims projects, but its account or subscription is "
+            f"an instance-wide setting rather than a per-POV choice")
 
 
 def test_gcp_has_no_platform_login_and_no_share_link():

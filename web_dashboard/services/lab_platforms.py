@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 # can ask "is this a public cloud?" without a literal tuple of their own — the exact habit
 # this module's docstring is about.
 #
-# **This tuple lists the clouds that are BUILT, not the clouds that are planned.** OCI
-# needs a driver module and a CAPABILITIES row before its name may appear here; adding a name early would make `pov_cloud_platform = "azure"` a selectable
+# **This tuple lists the clouds that are BUILT, not the clouds that are planned.** A
+# fifth needs a driver module and a CAPABILITIES row before its name may appear here; adding a name early would make `pov_cloud_platform = "azure"` a selectable
 # option that fails at import time, which is the "half-added platform" the registry's own
 # test exists to catch.
-CLOUD_PLATFORMS = ("aws", "azure", "gcp")
+CLOUD_PLATFORMS = ("aws", "azure", "gcp", "oci")
 
 VALID_PLATFORMS = ("skytap",) + CLOUD_PLATFORMS
 
@@ -47,6 +47,7 @@ _ADAPTER_MODULE = {
     "aws": "pov_aws_service",
     "azure": "pov_azure_service",
     "gcp": "pov_gcp_service",
+    "oci": "pov_oci_service",
 }
 
 # The functions an adapter must expose. Split by slice, deliberately: a contract that
@@ -233,6 +234,28 @@ CAPABILITIES = {
         # TRUE, alone among the clouds. `api/pov.provision` asks the adapter for the
         # configured project and records it on the row, and `pov_cloud_gcp` reads it back
         # rather than re-deriving it from current config.
+        "projects": True,
+        "template_authoring": False,
+        "published_services": False,
+    },
+    # OCI as a lab platform. Shaped like AWS — no environment object, so the teardown
+    # unpicks resource types — with the compartment recorded the way GCP records its
+    # project.
+    "oci": {
+        "label": "OCI",
+        "templates": True,
+        "runstate": True,
+        "idle_suspend": False,
+        "scheduled_suspend": True,
+        "bootstrap_injection": "cloud_init",
+        "share_link": False,
+        # False. OCI holds no guest login to read back; only Azure is forced to mint one.
+        "stored_credentials": False,
+        "verify": True,
+        # TRUE, as for GCP. A compartment is a real container an environment goes into,
+        # and recording which one is what lets a teardown weeks later aim at the right
+        # place. A compartment is NOT used AS the environment — see pov_cloud_oci on why
+        # the obvious analogy to an Azure resource group is the wrong one.
         "projects": True,
         "template_authoring": False,
         "published_services": False,
