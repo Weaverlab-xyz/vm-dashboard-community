@@ -282,6 +282,76 @@ def test_postgres_grant_is_per_role_admin_option():
     assert "ADMIN OPTION" in stmt and "CREATEROLE" not in stmt
 
 
+# ── the Account Discovery grant (MySQL only) ──────────────────────────────────
+#
+# CREATE USER confers no read of the account catalogue, so the rotation grant above
+# leaves a functional account that can change every password on the instance and cannot
+# ENUMERATE one -- Discovery returns MySQL 1142. This is the one grant the rotation
+# ladder does not cover, and it is deliberately a SECOND statement.
+
+def test_mysql_discovery_grant_reads_the_account_catalogue():
+    stmt = svc._fa_discovery_grant_statement("mysql", fa_db_user="bt-rotator")
+    assert stmt == "GRANT SELECT ON mysql.user TO 'bt-rotator'@'%';"
+    # A read, not DML: Cloud SQL restricts DML on mysql.user and UPDATE would not help.
+    assert "UPDATE" not in stmt and "SELECT" in stmt
+
+
+def test_mysql_discovery_grant_honours_the_rotators_host_qualifier():
+    stmt = svc._fa_discovery_grant_statement("mysql", fa_db_user="fa",
+                                             fa_host="10.0.0.5")
+    assert "'fa'@'10.0.0.5'" in stmt
+    # An empty host must not produce '' -- app@'' is a different, non-existent account.
+    assert "'fa'@'%'" in svc._fa_discovery_grant_statement("mysql", fa_db_user="fa",
+                                                           fa_host="")
+
+
+def test_only_mysql_needs_a_discovery_grant():
+    # pg_roles is world-readable; sys.server_principals is covered by the rotation grant
+    # (CustomerDbRootRole). Emitting a statement for either would be a no-op at best.
+    for engine in ("postgres", "sqlserver", "oracle", ""):
+        assert svc._fa_discovery_grant_statement(engine, fa_db_user="fa") == "", engine
+    assert svc._fa_discovery_grant_statement("mysql", fa_db_user="") == ""
+
+
+def test_the_discovery_grant_is_a_separate_statement_from_the_rotation_grant():
+    """The whole point of the split. Whether Cloud SQL even PERMITS SELECT on mysql.user
+    is still unconfirmed against a live instance, and packing the two into one executeSql
+    call would let that open question take the ROTATION grant down with it -- rotation is
+    the feature, Discovery is the convenience. Read the source: the ladder is one long
+    coroutine and calling it needs the whole onboarding fixture."""
+    path = os.path.join(_ROOT, "web_dashboard", "services", "cloud_database_service.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    rotation = src.index("f\"Password Safe rotation needs one grant on this database")
+    discovery = src.index("discovery_grant = ")
+    assert discovery > rotation, ("the discovery grant must be attempted AFTER the "
+                                 "rotation grant has been reported either way")
+    window = src[discovery:discovery + 1400]
+    # Its own _apply_fa_grant_gcp call, with its own purpose label so the failure does
+    # not report itself as a rotation failure.
+    assert "grant=discovery_grant" in window, window
+    assert 'purpose="account-discovery grant"' in window, window
+    # ... and its own fallback, which must say rotation is unaffected.
+    assert "Rotation and Verify are" in window, window
+    # Never on cloud-run: that channel enumerates accounts through the DB-Ops service.
+    assert 'channel == "data-api"' in window, window
+
+
+def test_the_discovery_grant_failure_does_not_fail_the_onboarding():
+    """_apply_fa_grant_gcp never raises, and the discovery call is not guarded by an
+    `applied` flag that anything later reads -- so a refused grant costs Discovery and
+    nothing else."""
+    _reset()
+    FAIL_EXECUTE.append(RuntimeError("1142 SELECT command denied"))
+    assert _apply(grant="GRANT SELECT ON mysql.user TO 'fa'@'%';",
+                  purpose="account-discovery grant") is False
+    # the staged admin credential still comes back out
+    assert _of("delete_secret"), LOGS
+    joined = " ".join(m for _j, m in LOGS)
+    assert "account-discovery grant" in joined, joined
+    assert "rotation grant" not in joined, "must not be reported as a rotation failure"
+
+
 def _tests():
     return [(n, f) for n, f in sorted(globals().items())
             if n.startswith("test_") and callable(f)]

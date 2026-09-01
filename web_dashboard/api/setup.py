@@ -812,8 +812,9 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_azure_plugin_passphrase: str = ""    # encrypted at rest
     # GCP cloud-DATABASE Password Safe onboarding (Cloud SQL plugins) — see config.py.
     # No jump host, no cert, no key material: the plugins reach a private-IP instance
-    # over the Cloud SQL Data API. Postgres + MySQL only; ships "off" until the
-    # plugin's data-api channel is implemented.
+    # over the Cloud SQL Data API. All three engines; every channel is now implemented
+    # plugin-side, but none has been exercised against a live instance, so it still
+    # ships "off".
     passwordsafe_gcp_db_registration_method: str = "off"  # "dataapi" (Cloud SQL Data API) | "off"
     clouddb_ps_platform_gcp_postgres: str = "GCP Cloud SQL PostgreSQL"
     clouddb_ps_platform_gcp_mysql: str = "GCP Cloud SQL MySQL"

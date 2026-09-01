@@ -12,13 +12,14 @@ Panel: **Settings → Integrations → Password Safe → Configure → Database 
 **Scope:** AWS, Azure and GCP. OCI databases provision and get a tunnel, but have no
 Password Safe onboarding path at all.
 
-> **GCP readiness is uneven, per channel.** SQL Server rides the **Cloud Run** channel,
-> which is built and unit-tested but has not yet been exercised against a live Cloud SQL
-> instance. PostgreSQL and MySQL ride the **Data API** channel, which is still a
-> plugin-side stub — a rotation returns *"the 'data-api' channel is not implemented in
-> this build"*. `passwordsafe_gcp_db_registration_method` therefore ships **`off`**.
-> §1.7 and §4 cover both, because everything up to the transport boundary is real on the
-> Data API path and the whole path should work on Cloud Run.
+> **On GCP every channel is now built, and none has been run against a live instance.**
+> The Data API channel covers verify, change managed account, change functional account
+> and discovery on PostgreSQL and MySQL — no action returns *"not implemented in this
+> build"* any more — and Cloud Run covers SQL Server.
+> `passwordsafe_gcp_db_registration_method` still ships **`off`**, because the reason is
+> no longer a missing implementation: it is that nobody has completed a live rotation yet.
+> **Run §5 in the order it gives** — *Verify Functional Account* first, then Discovery,
+> then Change Password — and read §6 before you retry a failed change.
 
 ---
 
@@ -325,7 +326,7 @@ has a counterpart on either GCP channel. What you create depends on the engine:
 |---|---|---|
 | PostgreSQL, MySQL | `data-api` | A rotator service account. No infrastructure at all |
 | SQL Server | `cloud-run` | Nothing by hand — name the broker service accounts and press **Deploy** (§below) |
-| SQL Server | `data-api` *(fallback)* | No infrastructure, but a **regional** Secret Manager version holding the functional account's password |
+| SQL Server | `data-api` *(fallback)* | No infrastructure, but a **regional** Secret Manager version holding the functional account's password, **in the instance's own region** |
 
 `cloud-run` is the recommended path for SQL Server and the default. `data-api` works too
 now, but it is a genuine trade rather than a free alternative: with no IAM database
@@ -343,6 +344,17 @@ yourself and put the **version resource name** in `clouddb_ps_gcp_fa_secret_vers
 ```
 projects/<project>/locations/<region>/secrets/<name>/versions/latest
 ```
+
+Three rules, all enforced at the click rather than at the first rotation:
+
+- It must be **regional**. The global form — `projects/<p>/secrets/<n>/versions/latest`,
+  which is what every Secret Manager quickstart produces and what the **Secrets page**
+  creates — is refused.
+- **Moving the secret does not help.** Google refuses a secret created through the global
+  endpoint even when it is stored in the right region, so create a new regional one.
+- `<region>` must be the **instance's** region. The Data API reads the secret through the
+  instance's own regional endpoint, and a mismatch fails at the first rotation with an
+  error that names neither region.
 
 **It must be regional.** The global `projects/<project>/secrets/…` form is what the
 plugin article's own example prints and what the dashboard's Secrets page creates, and
@@ -461,6 +473,17 @@ and the dashboard cannot issue it. The exact statement is printed on the provisi
   source of "worked in dev, 403 in production".
 - **MySQL:** `GRANT CREATE USER ON *.* TO '<fa>'@'%';`. Do **not** grant `UPDATE ON
   mysql.*` — Cloud SQL restricts DML on `mysql.user`.
+- **MySQL, for Account Discovery only:** `GRANT SELECT ON mysql.user TO '<fa>'@'%';`.
+  `CREATE USER` confers no read of the account catalogue, so a rotator that can change
+  every password on the instance still cannot *enumerate* the accounts — Discovery comes
+  back as MySQL 1142. The dashboard applies this itself as a **second, independent**
+  statement and reports it on the job if it cannot; rotation and Verify are unaffected
+  either way, so a refusal here costs you Discovery and nothing else. There is no
+  privilege-free substitute: `information_schema.USER_PRIVILEGES` is derived from
+  `mysql.user` and needs the same grant, and `performance_schema.accounts` sees only
+  accounts that have connected and reports the *client* host rather than the account's
+  host qualifier, which breaks the `user@host` round-trip that makes a discovered account
+  rotatable.
 - **SQL Server:** `ALTER SERVER ROLE CustomerDbRootRole ADD MEMBER [<fa>];`, which carries
   `ALTER ANY LOGIN`. `sysadmin` is unavailable on Cloud SQL and `ALTER ANY LOGIN` is
   exactly enough.
@@ -621,6 +644,19 @@ to prefer `reference` mode with self-rotation.
 5. **This is the actual plugin test:** run **Change Password** on that managed account, then
    **Verify Functional Account**. Everything before this point exercises *dashboard* code
    paths; only a credential change exercises your plugin.
+
+   **On GCP, run the actions in this order instead — it is cheaper and it fails faster:**
+
+   1. **Verify Functional Account** first. One call exercises token minting, the
+      `executeSql` endpoint path and `autoIamAuthn` together, and if the endpoint path is
+      wrong it fails with a 404 in about thirty seconds. Do not spend a rotation finding
+      that out.
+   2. **Discovery.** This confirms the `GRANT SELECT ON mysql.user` from §1.7, and it
+      confirms MySQL accounts come back as `user@host` rather than as bare names — the
+      plugin depends on that round-trip to make a discovered account rotatable at all.
+   3. **Change Password**, then **Verify Functional Account** again.
+
+   If step 3 reports a failure, go to §6 and **send the Error Details before retrying**.
 6. In `reference` mode, **decommission the database and confirm your functional account
    still exists.** Teardown deletes only accounts the dashboard minted, and this is the one
    check that proves it.
@@ -633,11 +669,22 @@ to prefer `reference` mode with self-rotation.
 
 ## 6. Reading a failure
 
-> **On GCP, one failure is the pass.** *"The 'data-api' channel is not implemented in
-> this build (scheduled for M3)"* means everything the dashboard is responsible for
-> worked: the address parsed, the functional-account composite parsed, the platform
-> bound, and the capability pre-flight passed. A parse error, a platform mismatch or an
-> "address is *n* characters" message is a real failure; that one is not.
+> **On GCP there is no longer a "successful failure" to look for.** The
+> *"the 'data-api' channel is not implemented in this build"* result — which used to be
+> the pass, because reaching it proved the address parsed, the composite parsed, the
+> platform bound and the pre-flight passed — is gone. Every action now either does the
+> work or reports a real cause.
+>
+> **Two GCP results to read carefully rather than retry.**
+>
+> - *"returned HTTP 200 with no results envelope"* on a **change** means the statement
+>   failed and the Data API omitted the results on error — that is the plugin's safe
+>   reading. Whether a *successful* DDL also omits the envelope is not yet confirmed
+>   against a live instance, so a change that WORKED could report this. **Send the full
+>   Error Details before retrying**: retrying a rotation Password Safe has already
+>   recorded is the expensive mistake here.
+> - *"Account discovery on MySQL needs to read the account catalogue"* is the missing
+>   `GRANT SELECT ON mysql.user` from §1.7, and affects Discovery only.
 
 **A failure leaves the database up — but not the job green.** If the *managed-user
 creation* fails, the run falls back to legacy admin-credential staging and appends a
@@ -662,6 +709,7 @@ whose only trace was a `Password Safe onboarding skipped (non-fatal)` log line.)
 | (AWS) `Index and length must refer to a location within the string` | the address's assumeRole segment is under 12 characters — the pre-fix `local` default; re-register, or fix the address in BeyondInsight (`NoAssumeRole` or a full role ARN) |
 | (AWS) rotation fails and the functional account's name has no `:` (a bare `EC2`, or an IAM username) | the account cannot be parsed at all — `<mode>:<dbLogin>` over a three-part password (§0). In `create` mode it is a pre-fix account: delete it and re-register. In `reference` mode it is **your** account: rename it in BeyondInsight and fix its password, then **Register in Password Safe**. New onboardings refuse an unparseable name up front, so this only reaches the plugin on systems registered before that guard |
 | (AWS) `Caught exception when trying to Send Command` | the parse succeeded — the failure is AWS-side: credentials (EC2 mode on an off-EC2 broker, §1.4), instance id, region, or SSM permissions |
+| (GCP) A `cloud-run` rotation times out on the first attempt after an idle period, and may already have applied the change | the GCP Cloud SQL plugins read the managed system's Timeout as **seconds** — the opposite unit to the AWS plugins reading the very same field. Password Safe defaults it to `30`, and a Direct-VPC cold start on Cloud Run is documented at "a minute or more". New GCP DB managed systems are registered with Timeout `180` (the plugin's own default); a system onboarded before that carries `30` — re-register it from the row's **Register in Password Safe** action, or raise Timeout to `180` in BeyondInsight. A plugin diagnostic printing `timeout 30000 msec` is that default after the plugin's own seconds-to-milliseconds conversion; it is **not** evidence that anything registered `30000` |
 | (AWS) Verify reports success within seconds but nothing changed | the plugins read the managed system's Timeout as **milliseconds** for their one retry of the SSM status poll, so at Password Safe's default of `30` a still-`InProgress` command falls through as success. New AWS DB managed systems are registered with Timeout `30000`; a system onboarded before that carries `30` — re-register it from the row's **Register in Password Safe** action, or raise Timeout to `30000` on the managed system in BeyondInsight |
 | `PSPLUGIN_CHANGE_FAILED: … must have admin option on role` / `CREATE USER denied` / `ALTER ANY LOGIN` | self-rotation is **off**, so Password Safe called the via-functional-account action against a server with no privileged login — turn on `clouddb_ps_self_rotation` (§0) |
 | `PSPLUGIN_CHANGE_FAILED: … password authentication failed for user psafe_…` (self-rotation) | Password Safe's stored current password drifted from the server |

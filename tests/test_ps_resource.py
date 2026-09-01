@@ -745,6 +745,124 @@ def test_dbgcp_uses_the_plugins_tighter_249_limit_not_password_safes_255():
         assert "249" in str(exc), exc
 
 
+def test_dbgcp_rejects_verifier_on_off_the_cloud_run_channel():
+    """'verifier=on' says the new password was pre-hashed on the Resource Broker so the
+    plaintext never reaches the wire. Only cloud-run can honour that -- the Cloud SQL
+    APIs take the password in the statement text. It used to parse on every channel and
+    do nothing on the control-plane ones, which reports a protection that is not
+    happening; the plugin refuses it now, and so does this."""
+    for channel in ("data-api", "admin-api"):
+        db = "-" if channel == "admin-api" else "appdb"
+        for value in ("on", "true", "ON"):
+            try:
+                ps._validate_dbgcp_dns_name(
+                    f"{channel};acme:us-central1:i;{db};-;-;verifier={value}")
+                raise AssertionError(f"verifier={value} accepted on {channel}")
+            except ps.PSResourceError as exc:
+                assert "cloud-run" in str(exc), exc
+    # 'off' promises nothing, so it stays legal everywhere -- including on the channels
+    # that could not honour 'on'.
+    ps._validate_dbgcp_dns_name("data-api;acme:us-central1:i;appdb;-;-;verifier=off")
+    ps._validate_dbgcp_dns_name("admin-api;acme:us-central1:i;-;-;-;verifier=off")
+    ps._validate_dbgcp_dns_name(
+        "cloud-run;acme:us-central1:i;appdb;https://svc.run.app;sslTRUE;verifier=on")
+
+
+def test_dbgcp_rejects_iam_false_on_the_data_api_channel():
+    """It used to parse and leave the address with no way to authenticate AT ALL:
+    executeSql has no plaintext-password field and fasecret= is SQL Server only. So it
+    onboarded cleanly and failed at the first rotation with an opaque Google 401 --
+    exactly the class of failure this validator exists to move forward in time."""
+    for value in ("false", "off", "0", "FALSE"):
+        try:
+            ps._validate_dbgcp_dns_name(
+                f"data-api;acme:us-central1:i;appdb;-;-;iam={value}")
+            raise AssertionError(f"iam={value} accepted on data-api")
+        except ps.PSResourceError as exc:
+            # The message has to name all three escapes, or the operator's only move is
+            # to flip it back to true and hope.
+            assert "iam=true" in str(exc) and "fasecret" in str(exc), exc
+            assert "cloud-run" in str(exc), exc
+    ps._validate_dbgcp_dns_name("data-api;acme:us-central1:i;appdb;-;-;iam=true")
+
+
+def test_dbgcp_fasecret_region_must_match_the_instances_region():
+    """Google reads the secret through the INSTANCE'S regional endpoint, so a secret in
+    the wrong region fails at the first rotation with an error naming neither region --
+    and the address already carries the instance's region in field 2, so there is
+    nothing to look up."""
+    good = ("data-api;acme:us-central1:i;master;-;-;"
+            "fasecret=projects/acme/locations/us-central1/secrets/s/versions/latest")
+    ps._validate_dbgcp_dns_name(good)          # must not raise
+    bad = good.replace("locations/us-central1", "locations/us-east1")
+    try:
+        ps._validate_dbgcp_dns_name(bad)
+        raise AssertionError("a cross-region fasecret was accepted")
+    except ps.PSResourceError as exc:
+        assert "us-east1" in str(exc) and "us-central1" in str(exc), exc
+
+
+def test_dbgcp_global_fasecret_says_moving_the_secret_will_not_help():
+    """The global form is what every Secret Manager quickstart produces, so a generic
+    "not a resource name" would send the operator to re-read the value rather than
+    re-create the secret. Google refuses a globally-created secret even when it is
+    stored in the right region, and the message has to say so."""
+    try:
+        ps._validate_dbgcp_dns_name(
+            "data-api;acme:us-central1:i;master;-;-;"
+            "fasecret=projects/acme/secrets/s/versions/latest")
+        raise AssertionError("global secret form accepted")
+    except ps.PSResourceError as exc:
+        text = str(exc)
+        assert "GLOBAL" in text or "global" in text, text
+        assert "does not help" in text, text
+
+
+def test_dbgcp_registers_a_timeout_in_seconds_not_milliseconds():
+    """Password Safe stores ONE timeout integer and each plugin decides its unit: the
+    AWS SSM plugins read milliseconds out of this field, the GCP Cloud SQL plugins read
+    seconds. Leaving it unset is not neutral -- Password Safe defaults it to 30, which
+    these plugins read as 30 SECONDS, and a Direct-VPC cold start on Cloud Run is
+    documented at a minute or more. So the first rotation after an idle period is the one
+    that times out, and a rotation that times out may already have applied the change."""
+    import asyncio
+    captured = {}
+
+    def _capture(hcl, tf_vars, tenant=None):
+        captured["hcl"] = hcl
+        return {"managed_system_id": "1", "managed_account_id": "2", "tf_state_json": None}
+
+    real = ps._apply_hcl_sync
+    ps._apply_hcl_sync = _capture
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="clouddb-pg", host_name="10.102.0.3", port=5432,
+            functional_account_id=42, platform_id=31, workgroup_id="55",
+            managed_account_name="psafe_x", method="dbgcp", dns_name=_DBGCP_DNS))
+    finally:
+        ps._apply_hcl_sync = real
+    assert ps._line("timeout", 180) in captured["hcl"], captured["hcl"]
+    assert ps._DBGCP_PLUGIN_TIMEOUT_SECONDS == 180
+    # The two constants must not be confusable: one is 180 seconds, the other 30000 ms.
+    assert ps._DBGCP_PLUGIN_TIMEOUT_SECONDS != ps._DBSSM_PLUGIN_TIMEOUT_MS
+    # And the shared generator's parameter must not be named after either unit -- that
+    # name is how one caller ends up passing the other one's number.
+    import inspect
+    assert "timeout_ms" not in inspect.signature(
+        ps._generate_managed_system_hcl).parameters
+
+
+def test_dbgcp_builder_never_emits_the_two_options_the_plugin_now_refuses():
+    """The other half of the pin: the validator refuses 'verifier=on' off cloud-run and
+    'iam=false' on data-api, and the emitter must not produce either. Read the source --
+    cloud_database_service pulls in the app."""
+    path = os.path.join(_ROOT, "web_dashboard", "services", "cloud_database_service.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "iam=false" not in src, "the data-api address has no way to authenticate"
+    assert "verifier=" not in src,         "the dashboard emits no verifier= option; 'on' is cloud-run only"
+
+
 def test_dbgcp_builder_chooses_iam_or_fasecret_but_never_both():
     """The other half of the pin: this module owns the grammar, cloud_database_service
     builds the string, and they used to disagree about SQL Server in both directions —
