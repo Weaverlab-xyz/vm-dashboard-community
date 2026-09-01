@@ -323,10 +323,25 @@ async def entitle_tenant_ctx(db: Session, env: PovEnvironment) -> dict:
             api_key=tenant.secret, endpoint=tenant.base_url,
             owner_id=tenant.option("owner_id"),
             workflow_id=tenant.option("workflow_id"),
-            agent_token_name=tenant.option("agent_token_name"),
+            agent_token_name=agent_token_name(env, tenant),
             ssh_sudo_user=tenant.option("ssh_sudo_user")),
         "label": tenant.name,
     }
+
+
+def agent_token_name(env: PovEnvironment, tenant) -> str:
+    """The Entitle agent a POV's integrations must name — **its own first**.
+
+    A tenant is per customer and a POV is not: two POVs for the same customer share one
+    Entitle tenant, and the tenant's ``agent_token_name`` can only ever name one agent.
+    Whichever POV installed second would create integrations pointed at the first one's
+    network, and nothing would error — Entitle creates the integration happily and the
+    SSH connector simply cannot reach the host. So an agent this dashboard installed *in
+    this environment* wins, and the tenant option stays what it was: the answer for an
+    agent an SE deployed by hand.
+    """
+    from . import pov_entitle_agent
+    return pov_entitle_agent.agent_token_name(env) or tenant.option("agent_token_name")
 
 
 async def entitle_context(db: Session, env: PovEnvironment) -> dict:
@@ -350,16 +365,18 @@ async def entitle_context(db: Session, env: PovEnvironment) -> dict:
             f"ephemeral-accounts connector cannot mint an account without. Set it on the "
             f"tenant.")
 
-    agent = tenant.option("agent_token_name")
+    agent = agent_token_name(env, tenant)
     if not agent:
-        # The one prerequisite this dashboard cannot satisfy. Said here, in front of the
-        # operator, rather than letting the terraform apply fail with the provider's
-        # version of it half a minute later.
+        # Said here, in front of the operator, rather than letting the terraform apply
+        # fail with the provider's version of it half a minute later. The remedy names
+        # the button first: this used to be the one prerequisite the dashboard could not
+        # satisfy, and an SE who reads only the old half of this sentence goes off to
+        # deploy Kubernetes by hand.
         raise WireupError(
-            f"the Entitle tenant {tenant.name!r} names no agent token. A POV's VMs are on "
-            f"a private network, and Entitle reaches a private target through an agent "
-            f"running inside it — which this dashboard does not install. Deploy the "
-            f"Entitle agent in the POV and name its token on the tenant.")
+            f"this POV has no Entitle agent, and the tenant {tenant.name!r} names none "
+            f"either. A POV's VMs are on a private network, and Entitle reaches a private "
+            f"target through an agent running inside it. Press Entitle agent on this POV "
+            f"to install one, or name an agent you deployed yourself on the tenant.")
 
     pem = config_service.get(entitle_key_config_key(env.id))
     if not pem:

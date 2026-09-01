@@ -76,12 +76,18 @@ OPTION_KEYS = {
     # already follows) — one account cannot serve both a Linux and a Windows target.
     "password_safe": ("api_account_name", "workgroup",
                       "linux_functional_account", "windows_functional_account"),
-    # The synthetic machine user Entitle's behalfOf policy needs, plus what a POV VM
-    # needs to become an SSH ephemeral-accounts integration. Owner and workflow are ids
-    # inside THAT tenant; the agent token names an Entitle agent running inside the POV's
-    # network, which the dashboard does not install — see docs/pov-instance.md.
-    "entitle": ("machine_identity_email", "owner_id", "workflow_id",
-                "agent_token_name", "ssh_sudo_user"),
+    # What a POV VM needs to become an SSH ephemeral-accounts integration. Owner and
+    # workflow are ids inside THAT tenant. The agent token names an Entitle agent running
+    # inside the POV's network, and here it is the MANUAL answer only — a POV that
+    # installed its own agent names that one instead, because a tenant is shared between
+    # POVs and an agent is not. See pov_wireup.agent_token_name.
+    #
+    # `machine_identity_email` was here and is deliberately gone: every reader of it —
+    # `cloud_identity_service`, `entitle_service`, `k8s_service` — reads the INSTANCE-wide
+    # `entitle_machine_identity_email`, never the tenant's copy. A field an operator fills
+    # in and nothing consumes is worse than an absent one, because it reads as configured.
+    # Re-add it here only together with a caller that does `tenant.option(...)`.
+    "entitle": ("owner_id", "workflow_id", "agent_token_name", "ssh_sudo_user"),
 }
 
 # Kinds whose credentials can be checked without side effects. PRA and Password Safe both
@@ -107,7 +113,6 @@ OPTION_LABELS = {
     "workgroup": "Workgroup",
     "linux_functional_account": "Functional account (Linux)",
     "windows_functional_account": "Functional account (Windows)",
-    "machine_identity_email": "Machine identity email",
     "owner_id": "Owner id",
     "workflow_id": "Workflow id",
     "agent_token_name": "Agent token name",
@@ -127,17 +132,31 @@ OPTION_HINTS = {
                                 "login its Linux guests already use.",
     "windows_functional_account": "Leave blank and each POV creates its own, from the "
                                   "login its Windows guests already use.",
+    # Same shape of answer, one product over. A POV that installed its own agent names
+    # that one whatever is typed here, so the honest reading of blank is "the POV's own",
+    # not "none" — and an SE who does not know that goes looking for an agent to deploy.
+    "agent_token_name": "Only for an agent you deployed yourself. A POV that installs "
+                        "its own names that one instead.",
 }
 
 # Options whose absence makes a tenant unusable rather than merely incomplete. Reported
 # by `serialize` so the gap is visible on the row instead of surfacing inside a job.
 REQUIRED_OPTIONS = {
-    "pra": ("jump_group_name", "jumpoint_name"),
+    # `jumpoint_name` is NOT required, though it is allowed. A POV's jump items route
+    # through the Gateway installed inside that environment (`env.gateway_name`, and
+    # `pov_wireup.gateway_name` explains at length why the appliance-wide one cannot
+    # work), so nothing in the POV path reads the tenant's copy. Requiring it made a
+    # correctly configured tenant report a gap for a field with no consumer.
+    "pra": ("jump_group_name",),
     # `workgroup` and the functional accounts are NOT required: a POV can carry a
     # Password Safe tenant for the Resource Broker's sake without ever onboarding its VMs,
     # and the per-VM path refuses with its own message when one is missing.
     "password_safe": ("api_account_name",),
-    "entitle": (),
+    # Both are refused by `pov_wireup.entitle_tenant_ctx` before ANY integration is
+    # created — the REST accessor adapter included, which needs no agent and no key. So
+    # an Entitle tenant without them is unusable rather than merely incomplete, and the
+    # row is where that should be visible.
+    "entitle": ("owner_id", "workflow_id"),
 }
 
 # Same constraint as a POV's name, and for the same reason: this is where a company name
@@ -213,6 +232,26 @@ def normalize(kind: str) -> str:
     return k
 
 
+def default_base_url(kind: str) -> str:
+    """The URL for a kind whose URL is not a per-tenant fact, or ``""``.
+
+    PRA and Password Safe are per-customer appliances and tenants — the hostname IS the
+    customer, so there is nothing to default. **Entitle is one multi-tenant service behind
+    one API host**, so its URL has exactly one correct value and typing it per POV is
+    typing the same string until the day somebody typos it. The form prefills from here
+    and :func:`create` falls back to it, so an SE registering an Entitle tenant supplies a
+    name and a token and nothing else.
+
+    Read through ``_cfg`` rather than hardcoded so an install that has already moved
+    ``entitle_api_url`` — a non-standard region — gets *its* value instead of this
+    module's opinion of it.
+    """
+    kind = normalize(kind)
+    if kind != "entitle":
+        return ""
+    return _cfg("entitle_api_url").strip()
+
+
 # ── secrets ───────────────────────────────────────────────────────────────────
 
 def _resolve_secret(row: BeyondTrustTenant) -> str:
@@ -257,11 +296,12 @@ _SINGLETON_SPEC = {
     },
     "entitle": {
         # Entitle is multi-tenant behind one canonical API URL, so this one is the same
-        # value on every install and the token is what differs.
+        # value on every install and the token is what differs. No options: the machine
+        # identity is an instance-wide setting and stays one — see OPTION_KEYS.
         "base_url": "entitle_api_url",
         "client_id": "",
         "secret": "entitle_api_token",
-        "options": {"machine_identity_email": "entitle_machine_identity_email"},
+        "options": {},
     },
 }
 
@@ -509,7 +549,7 @@ def create(db: Session, *, kind: str, name: str, created_by: str = "",
                                           BeyondTrustTenant.name == name).first():
         raise BTTenantError(f"a {LABELS[kind]} tenant named {name!r} already exists")
 
-    base_url = (base_url or "").strip()
+    base_url = (base_url or "").strip() or default_base_url(kind)
     if not base_url:
         raise BTTenantError(f"a {LABELS[kind]} tenant needs its URL or appliance hostname")
     if secret and secret_ref:
@@ -559,7 +599,9 @@ def update(db: Session, tenant_id: str, **fields) -> dict:
         row.name = name
 
     if "base_url" in fields:
-        base_url = str(fields["base_url"] or "").strip()
+        # Blank means "the default for this kind" where there is one, so clearing the
+        # field on an Entitle tenant restores the canonical URL rather than refusing.
+        base_url = str(fields["base_url"] or "").strip() or default_base_url(row.kind)
         if not base_url:
             raise BTTenantError("a tenant needs its URL or appliance hostname")
         row.base_url = base_url

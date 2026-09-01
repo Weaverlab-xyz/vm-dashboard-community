@@ -99,6 +99,11 @@ async def list_tenants(kind: str = "", db: Session = Depends(get_db),
                               for key in bt_tenant_service.OPTION_KEYS.get(k, ())
                               if key in bt_tenant_service.OPTION_HINTS},
              "required_options": list(bt_tenant_service.REQUIRED_OPTIONS.get(k, ())),
+             # "" for the kinds whose URL is the customer. Entitle's is one host for
+             # every tenant, so the form prefills it from here rather than asking an SE
+             # to retype a constant — and reads it from the server so an install on a
+             # non-standard Entitle region gets its own value, not a hardcoded one.
+             "default_base_url": bt_tenant_service.default_base_url(k),
              "verifiable": k in bt_tenant_service.VERIFIABLE_KINDS}
             for k in bt_tenant_service.VALID_KINDS
         ],

@@ -906,16 +906,20 @@ def test_a_pov_with_no_entitle_tenant_is_not_an_error():
     db.close()
 
 
-def test_a_tenant_with_no_agent_token_is_refused_naming_what_is_missing():
-    """The one prerequisite this dashboard does not install — an Entitle agent inside the
-    POV's network. Said in front of the operator rather than left to the provider."""
+def test_a_pov_with_no_agent_token_is_refused_naming_the_button():
+    """Entitle reaches a private target through an agent inside that network. This used to
+    be the one prerequisite the dashboard could not satisfy; now the remedy names the
+    button, because an SE who reads the old half of the sentence goes off to deploy
+    Kubernetes by hand."""
     db = d.SessionLocal()
     env = _ent_env(db, agent_token_name="")
     try:
         asyncio.run(w.entitle_context(db, env))
-        raise AssertionError("a tenant with no agent token was accepted")
+        raise AssertionError("a POV with no agent token was accepted")
     except w.WireupError as exc:
-        assert "agent" in str(exc) and "does not install" in str(exc)
+        assert "Entitle agent" in str(exc)
+        assert "does not install" not in str(exc), (
+            "the refusal still says the dashboard cannot install an agent")
     finally:
         db.close()
 
@@ -1233,8 +1237,13 @@ def test_the_agent_token_mint_is_deliberately_not_scrubbed():
     would turn a recoverable mint into a hard `400 Resource already exists`."""
     src = (pathlib.Path(_ROOT) / "web_dashboard" / "services"
            / "entitle_registration_service.py").read_text(encoding="utf-8")
-    mint = src.split("_agent_token_hcl(name)", 1)[1][:200]
-    assert "False" in mint, "the agent-token mint no longer opts out of scrubbing"
+    # The FUNCTION, not the first mention of the HCL builder. Splitting on the builder's
+    # name found its own `def` once the signature gained a second parameter, and the test
+    # went green against 200 characters that were never the mint.
+    mint = src.split("async def mint_agent_token", 1)[1].split(chr(10) + "async def ",
+                                                               1)[0]
+    apply_call = mint.split("_apply_hcl_sync", 1)[1]
+    assert "False" in apply_call, "the agent-token mint no longer opts out of scrubbing"
 
 
 # ── the job type ─────────────────────────────────────────────────────────────

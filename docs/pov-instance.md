@@ -708,12 +708,14 @@ Entitle credential per customer, and duplicated credentials rotate apart.
 | | |
 |---|---|
 | **Name** | A slug — lowercase letters, digits, hyphens. See [below](#about-customer-data) |
-| **URL / hostname** | `tenant.beyondtrustcloud.com` for PRA, the Password Safe URL, or the Entitle API base |
+| **URL / hostname** | `tenant.beyondtrustcloud.com` for PRA, or the Password Safe URL. **Entitle prefills itself** — it is one multi-tenant service behind `https://api.entitle.io/v1`, identical on every install, so the field arrives filled and you only touch it on a non-standard region. Clearing it restores the default rather than refusing |
 | **OAuth client id** | PRA and Password Safe. Entitle authenticates with a bearer token and has no paired id |
 | **Client secret** | Encrypted with the same Fernet key as every other secret in this dashboard |
 | **…or a vault reference** | `aws_sm://`, `azure_kv://`, `gcp_sm://`, `bt_safe://` — for operators who want no credential in this database at all. One or the other, never both |
 | **Jump Group / Gateway** | PRA only. Names *inside that appliance*, which is why they belong on the tenant and not in global settings. The stored option key is still `jumpoint_name`, matching the `bt_jumpoint_name` setting it seeds from — see [why the key looks wrong](#why-the-gateway-option-key-looks-wrong) |
 | **Password Safe run-as user** | Required by the `passwordsafe` Terraform provider block |
+| **Owner id / Workflow id** | Entitle only, and **both are required** — `pov_wireup` refuses before creating *any* integration without them, the REST accessor adapter included. They are ids inside that tenant, which is why they are not a global setting |
+| **Agent token name / SSH sudo user** | Entitle only, and only the SSH ephemeral-accounts connector needs them. The agent token is the manual answer: a POV that installs its own agent [names that one instead](#the-entitle-agent) |
 
 ### How a POV picks one
 
@@ -1110,20 +1112,61 @@ When the lab platform has a login for the VM, it is seeded as the managed accoun
 initial credential, so the first rotation replaces a password somebody knows rather than
 one nobody does.
 
-### Entitle needs an agent this dashboard does not install
+### The Entitle agent
 
-Worth reading before you plan a POV around it. Entitle's SSH connector reaches a **private**
-target through an **Entitle agent** running inside that network — a Kubernetes deployment,
-named on the tenant as its *agent token*. A POV's VMs are on a private network by
-construction, so every POV integration is a private one.
+Entitle's SSH connector reaches a **private** target through an **Entitle agent** running
+inside that network — a Kubernetes deployment, named on the integration as its *agent
+token*. A POV's VMs are on a private network by construction, so every POV integration is
+a private one, and for a long time the agent was the one prerequisite this dashboard could
+not satisfy.
 
-This dashboard installs a [Gateway](#the-pov-gateway) and a
-[Resource Broker](#the-resource-broker) inside a POV. It does **not** install an Entitle
-agent. So the agent is a prerequisite you deploy and then name on the tenant, and a POV
-whose Entitle tenant names none is skipped with exactly that reason rather than being
-registered against this instance's own Entitle tenant.
+It installs one now. **Tenants column → install agent**, beside the POV's Entitle tenant.
+It runs through the POV's broker agent as a Config-Management job, so there is nothing new
+on the wire and no agent image to rebuild — but the broker's `policy.yaml` has to carry
+the grant, so a POV brokered before this shipped needs **Broker** pressed once to rewrite
+it. The refusal says so.
 
-It also needs a **key**. Entitle's connector authenticates with an SSH private key, not
+What it does, on a **Linux** guest named on the POV (default `entitle`):
+
+1. mints an agent token **in this POV's own Entitle tenant**, not the instance's;
+2. installs single-node **k3s** (`--disable traefik --disable servicelb` — the agent is
+   outbound-only and a POV VM that suddenly answers on `:80` is a change nobody asked
+   for);
+3. `helm upgrade --install entitle-agent` from the BeyondTrust-published chart repo,
+   sized for one small VM;
+4. records the token name on the POV, which is what makes the SSH wire-up stop refusing.
+
+**The token is per POV, not per tenant, and that matters.** Two POVs for the same customer
+share one Entitle tenant, and the tenant's `agent_token_name` can name only one agent.
+Whichever POV was set up second would create integrations pointing at the *first* one's
+network — and nothing would error, because Entitle creates them happily and the connector
+simply cannot reach the host. So a POV's own agent always wins, and the tenant option
+stays what it was: the answer for an agent you deployed yourself.
+
+#### Sizing, and why the chart defaults do not fit
+
+Worth knowing before you pick a host. The chart asks for **three replicas at 1 CPU and 1
+GiB of *requests* each**, so on any VM you would give a POV the pods sit `Pending` forever
+and nothing says why except `kubectl describe`. The install overrides that to one replica
+at 250m/512Mi, and it turns off the Datadog log-shipping sidecar the chart runs even with
+`datadog.enabled=false` — that one is a *native* sidecar, which additionally needs
+Kubernetes 1.29+. Give the host **2 vCPU and 4 GB** and it is comfortable.
+
+Two things it needs from the network, both of which fail in a way the job output names:
+egress to `get.k3s.io` and `get.helm.sh` for the install, and to `ghcr.io` for the agent
+image. An `ImagePullBackOff` is the second one.
+
+**Not the broker VM.** The named host defaults to a VM called `entitle` and the guessed
+fallback deliberately excludes the broker: k3s brings its own containerd and its own
+iptables rules, and the broker is the one guest whose job is to keep alive the channel
+this install runs over. Nothing stops you naming it on purpose.
+
+**Teardown destroys the token**, and it has to. Entitle refuses to mint a name it already
+holds and cannot read an existing value back, so a survivor would wedge the next POV that
+derives the same name. A destroy that fails is reported on the job log with the name to
+retire by hand rather than blocking the POV's deletion.
+
+The SSH connector also needs a **key**. Entitle's connector authenticates with an SSH private key, not
 the password the lab platform holds — so this is the one credential in the whole POV
 wire-up that cannot be derived from something already there. Store the private half of the
 key baked into your template's Linux guests with **ssh key** on the POV row; it is
@@ -1132,15 +1175,20 @@ encrypted like every other secret here and cleared at teardown.
 Windows guests are skipped: the ephemeral-accounts app mints an account *over SSH*, which
 a Windows guest does not answer.
 
-Four things come from the tenant, because they are ids and names inside *that* Entitle
-tenant: the **owner id**, the **workflow id**, the **agent token name** and the **SSH sudo
-user**.
+Three things come from the tenant, because they are ids and names inside *that* Entitle
+tenant: the **owner id**, the **workflow id** and the **SSH sudo user**. The fourth, the
+**agent token name**, comes from the POV's own agent when it has one and falls back to the
+tenant when it does not.
 
 ### Teardown
 
 Destroying a POV removes the Entitle integrations **first**, then off-boards the managed
-systems, then removes the jump items — all before the Gateway, the broker agent and the
-environment itself.
+systems, then removes the jump items, then destroys the Entitle agent's token — all before
+the Gateway, the broker agent and the environment itself.
+
+The agent token goes *after* the integrations and not with them, because an integration
+names the agent it routes through: reversed, Entitle would be left holding integrations
+pointing at a token that no longer exists.
 
 Entitle goes first because an integration is standing *access*: of the three, it is the
 artifact whose lingering matters most. None of them stops the others — an integration or

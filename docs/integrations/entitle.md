@@ -61,7 +61,14 @@ How Entitle reaches the target determines whether an agent is needed:
 
 The agent is **shared**: one per VPC/network serves every private integration in it,
 referenced by `entitle_agent_token_name`. So you provision the agent **once per
-environment** (not per build). A registration for a private target fails (non-fatally)
+environment** (not per build).
+
+> **On a POV instance the agent is per POV, not per install.** A POV's VMs are on their own
+> private network, so the shared one above cannot reach them. The POV page installs a
+> single-node k3s on a Linux guest and Helm-installs the agent there, minting the token in
+> that POV's own Entitle tenant — see
+> [the POV instance guide](../pov-instance.md#the-entitle-agent). The keys on this page
+> describe the *instance-wide* agent used by managed clusters and stay untouched by it. A registration for a private target fails (non-fatally)
 with a clear message if no agent is configured. The Entitle agent is the *management*
 plane (it mints/revokes the ephemeral SSH account or DB role); the **PRA tunnel** the
 dashboard already brokers is the separate *access* path the user connects through.

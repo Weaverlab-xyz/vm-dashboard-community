@@ -419,6 +419,27 @@
                       <span x-text="tenantName(e, k.kind) || '—'"></span>
                     </p>
                   </template>
+                  <!-- The Entitle agent lives HERE rather than in a column of its own.
+                       It belongs to the Entitle wiring, it is only ever relevant to a POV
+                       that has an Entitle tenant, and this table is already fifteen
+                       columns wide on a 1280px screen. -->
+                  <template x-if="entitleTenantId(e)">
+                    <div class="pt-0.5">
+                      <p x-show="e.entitle_agent_token_name"
+                         class="text-[11px] text-green-700 whitespace-nowrap"
+                         x-text="'agent ' + e.entitle_agent_token_name"></p>
+                      <p x-show="!e.entitle_agent_token_name"
+                         class="text-[11px] text-amber-700">no agent</p>
+                      <button @click="installEntitleAgent(e)"
+                              :disabled="!actionable(e) || !e.broker_agent_id || busyAgent === e.id"
+                              :title="e.broker_agent_id
+                                      ? 'Install the Entitle agent on this POV's Linux host (k3s), and mint its token in this POV's tenant'
+                                      : 'Press Broker first — the install runs through the POV's broker agent'"
+                              class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+                              x-text="busyAgent === e.id ? 'installing…'
+                                      : (e.entitle_agent_token_name ? 're-install agent' : 'install agent')"></button>
+                    </div>
+                  </template>
                   <button @click="startEditTenants(e)" :disabled="!actionable(e)"
                           class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
                 </div>
@@ -703,7 +724,7 @@
         <div class="grid grid-cols-4 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">Product</label>
-            <select x-model="tenantForm.kind" @change="tenantForm.options = {}"
+            <select x-model="tenantForm.kind" @change="onTenantKindChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <template x-for="k in tenantKinds" :key="'new-' + k.kind">
                 <option :value="k.kind" x-text="k.label"></option>
@@ -718,8 +739,16 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">URL / hostname</label>
-            <input type="text" x-model="tenantForm.base_url" placeholder="tenant.beyondtrustcloud.com"
+            <input type="text" x-model="tenantForm.base_url"
+                   :placeholder="defaultBaseUrl(tenantForm.kind) || 'tenant.beyondtrustcloud.com'"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <!-- The appliance hostname IS the customer for PRA and Password Safe, so
+                 there is nothing to say about it. Entitle is one multi-tenant service
+                 behind one host, and an SE who does not know that will otherwise go
+                 looking for a per-customer URL that does not exist. -->
+            <p class="text-xs text-gray-400 mt-1" x-show="defaultBaseUrl(tenantForm.kind)">
+              The same for every tenant. Change it only for a non-standard region.
+            </p>
           </div>
           <div x-show="tenantForm.kind !== 'entitle'">
             <label class="block text-xs font-medium text-gray-700 mb-1">OAuth client id</label>
@@ -752,7 +781,8 @@
           <input type="checkbox" x-model="tenantForm.is_default"> Make this the default for its product
         </label>
         <button @click="createTenant()"
-                :disabled="!tenantForm.name || !tenantForm.base_url || savingTenant"
+                :disabled="!tenantForm.name || savingTenant ||
+                           (!tenantForm.base_url && !defaultBaseUrl(tenantForm.kind))"
                 class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
           <span x-text="savingTenant ? 'Saving…' : 'Register'"></span>
         </button>
@@ -961,6 +991,25 @@ function povPage() {
 
     optionKeysFor(kind) {
       return (this.tenantKinds.find(k => k.kind === kind) || {}).option_keys || [];
+    },
+
+    // "" for the kinds whose URL is the customer's own appliance. From the server, so
+    // an install on a non-standard Entitle region prefills ITS URL — a constant baked
+    // into this template would silently be the wrong one there.
+    defaultBaseUrl(kind) {
+      return (this.tenantKinds.find(k => k.kind === kind) || {}).default_base_url || '';
+    },
+
+    // Switching product resets the options — they are a different set per kind — and
+    // re-prefills the URL. A value the operator TYPED is kept: only a blank field or the
+    // previous kind's own default is replaced, so this cannot eat an appliance hostname
+    // somebody pasted before noticing the product picker was wrong.
+    onTenantKindChange() {
+      const typed = (this.tenantForm.base_url || '').trim();
+      const wasDefault = !typed || this.tenantKinds.some(
+        k => k.default_base_url && k.default_base_url === typed);
+      this.tenantForm.options = {};
+      if (wasDefault) this.tenantForm.base_url = this.defaultBaseUrl(this.tenantForm.kind);
     },
 
     // From the server, never derived from the key. `jumpoint_name` is a persisted
@@ -1213,6 +1262,11 @@ function povPage() {
         if (!this.tenantForm.kind && this.tenantKinds.length) {
           this.tenantForm.kind = this.tenantKinds[0].kind;
         }
+        // The kinds arrive after the form's initial state, so the first prefill happens
+        // here rather than in the initialiser.
+        if (!this.tenantForm.base_url) {
+          this.tenantForm.base_url = this.defaultBaseUrl(this.tenantForm.kind);
+        }
       } catch (e) { this.tenants = []; }
     },
 
@@ -1230,7 +1284,8 @@ function povPage() {
           is_default: this.tenantForm.is_default,
         });
         this.notice = `Registered ${this.tenantForm.name}.`;
-        this.tenantForm = { kind: this.tenantForm.kind, name: '', base_url: '',
+        this.tenantForm = { kind: this.tenantForm.kind, name: '',
+                            base_url: this.defaultBaseUrl(this.tenantForm.kind),
                             client_id: '', secret: '', secret_ref: '', options: {},
                             is_default: false };
         await this.loadTenants();
@@ -1368,6 +1423,39 @@ function povPage() {
           : `${env.name}: Resource Broker settings saved.`;
         await this.load();
       } catch (e) { this.error = e.message; }
+    },
+
+    // The POV whose Entitle agent is being installed, so the button can say so. A single
+    // id rather than a set: this is one click at a time and a set would outlive the row.
+    busyAgent: '',
+
+    // Which Entitle tenant this POV names, whatever the field is called. Read through the
+    // same tenantKinds list the column renders from, so a kind added server-side needs no
+    // markup here.
+    entitleTenantId(env) {
+      return (env || {}).entitle_tenant_id || '';
+    },
+
+    async installEntitleAgent(env) {
+      this.error = ''; this.notice = '';
+      // Named rather than implied. The host defaults to a VM called "entitle" and the
+      // refusal that follows names what it found, so a wrong guess costs one 409 rather
+      // than an install on the wrong guest.
+      const vm = window.prompt(
+        'Which Linux VM should host the Entitle agent? It installs single-node k3s there.',
+        env.entitle_agent_vm_name || 'entitle');
+      if (vm === null) return;
+      this.busyAgent = env.id;
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/entitle-agent`, {
+          vm_name: vm, install: true,
+        });
+        this.notice =
+          `${env.name}: installing the Entitle agent — watch job ${data.job_id}. ` +
+          `It installs k3s and pulls the agent image, so this takes minutes.`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+      finally { this.busyAgent = ''; }
     },
 
     async setEntitleKey(env) {

@@ -310,8 +310,87 @@ def test_a_missing_required_option_is_reported_not_hidden():
     """A tenant with valid credentials and no Jump Group is configured-but-unusable, and
     finding that out inside a provision job is finding it out too late."""
     db = d.SessionLocal()
+    row = _mk(db, kind="pra", options={"jumpoint_name": "gw"})
+    assert row["missing_options"] == ["jump_group_name"]
+    db.close()
+
+
+def test_an_option_no_caller_reads_is_not_required():
+    """`jumpoint_name` is allowed and unread: a POV's jump items route through the Gateway
+    installed INSIDE the environment, never the tenant's appliance-wide one. Requiring it
+    made a correctly configured tenant report a gap nothing would ever consume."""
+    db = d.SessionLocal()
     row = _mk(db, kind="pra", options={"jump_group_name": "POV"})
-    assert row["missing_options"] == ["jumpoint_name"]
+    assert row["missing_options"] == []
+    db.close()
+
+
+def test_the_entitle_options_are_only_ones_a_caller_reads():
+    """A field an operator fills in and nothing consumes reads as configured, which is
+    worse than an absent one. `machine_identity_email` was exactly that: every reader of
+    it takes the instance-wide setting, never the tenant's copy."""
+    assert "machine_identity_email" not in t.OPTION_KEYS["entitle"]
+    assert "machine_identity_email" not in t.OPTION_LABELS
+    src = pathlib.Path(_ROOT, "web_dashboard", "services", "pov_wireup.py").read_text(
+        encoding="utf-8")
+    for key in t.OPTION_KEYS["entitle"]:
+        assert f'option("{key}")' in src, (
+            f"the Entitle tenant option {key!r} is offered on the form but no caller in "
+            f"pov_wireup reads it")
+
+
+def test_entitle_owner_and_workflow_are_required_because_the_wireup_refuses_without_them():
+    """`pov_wireup.entitle_tenant_ctx` refuses before ANY integration is created — the
+    REST accessor adapter included, which needs neither an agent nor a key. So the gap
+    belongs on the row, not inside a job."""
+    db = d.SessionLocal()
+    row = _mk(db, kind="entitle", client_id="", options={"ssh_sudo_user": "btadmin"})
+    assert row["missing_options"] == ["owner_id", "workflow_id"]
+    db.close()
+
+
+# ── the URL that is not a per-tenant fact ────────────────────────────────────
+
+def test_an_entitle_tenant_needs_no_url_because_there_is_only_one():
+    """Entitle is one multi-tenant service behind one API host. Asking an SE to type it
+    per POV is asking for a typo in a field with exactly one correct value."""
+    db = d.SessionLocal()
+    row = _mk(db, kind="entitle", base_url="", client_id="")
+    assert row["base_url"] == t.default_base_url("entitle")
+    assert row["base_url"], "the Entitle default resolved empty"
+    db.close()
+
+
+def test_the_default_url_follows_the_configured_one_not_a_hardcoded_string():
+    """An install on a non-standard Entitle region has already moved `entitle_api_url`.
+    A constant here would send that install's calls to the wrong host."""
+    config_service.set("entitle_api_url", "https://api.eu.entitle.io/v1")
+    try:
+        assert t.default_base_url("entitle") == "https://api.eu.entitle.io/v1"
+    finally:
+        config_service.set("entitle_api_url", "")
+
+
+def test_only_entitle_gets_a_default_url():
+    """A PRA or Password Safe hostname IS the customer — defaulting one would point a
+    POV's jump items at whatever appliance this instance happens to know about."""
+    for kind in ("pra", "password_safe"):
+        assert t.default_base_url(kind) == ""
+    db = d.SessionLocal()
+    try:
+        _mk(db, kind="pra", base_url="")
+        raise AssertionError("a PRA tenant was accepted with no appliance hostname")
+    except t.BTTenantError as exc:
+        assert "URL or appliance hostname" in str(exc)
+    finally:
+        db.close()
+
+
+def test_clearing_an_entitle_url_restores_the_default_rather_than_refusing():
+    db = d.SessionLocal()
+    row = _mk(db, kind="entitle", base_url="https://api.eu.entitle.io/v1", client_id="")
+    after = t.update(db, row["id"], base_url="")
+    assert after["base_url"] == t.default_base_url("entitle")
     db.close()
 
 

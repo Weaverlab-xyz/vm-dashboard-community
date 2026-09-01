@@ -970,9 +970,9 @@ async def register_rancher(*, name: str, server_url: str, api_token: str,
 _AGENT_TOKEN_CONFIG_KEY = "entitle/agent-token"
 
 
-def _agent_token_hcl(name: str) -> str:
+def _agent_token_hcl(name: str, fields: Optional[dict] = None) -> str:
     label = _safe_name(name)
-    return _provider_header() + f"""
+    return _provider_header(fields=fields) + f"""
 resource "entitle_agent_token" {json.dumps(label)} {{
   name = {json.dumps(name)}
 }}
@@ -1034,13 +1034,20 @@ def _agent_token_from_state(tf_state_json: str) -> tuple:
     return token, name
 
 
-async def mint_agent_token(name: str) -> dict:
+async def mint_agent_token(name: str, ctx: Optional["EntitleTenantCtx"] = None) -> dict:
     """Mint a fresh Entitle Agent token via the provider. Returns ``{token, tf_state_json}``.
 
     The token value is returned only at creation — stash it immediately. Requires the
     provider key (``entitle_api_key`` / ``entitle_api_token``). Stash ``tf_state_json`` so
-    the token can later be destroyed/rotated via :func:`deregister`."""
-    if not _api_key():
+    the token can later be destroyed/rotated via :func:`deregister`.
+
+    ``ctx`` mints into **that** tenant instead of the configured one, for the POV path,
+    where the agent runs inside a customer's environment and its token has to exist in the
+    customer's tenant. ``None`` keeps the shared-agent behaviour every existing caller
+    has. Note the refusal it brings with it: ``_api_key_of`` rejects a context with no key
+    rather than falling back, because minting into this install's own tenant by accident
+    would look exactly like success."""
+    if not _api_key_of(ctx):
         raise EntitleRegistrationError(
             "entitle_api_key (or entitle_api_token) is not configured — cannot mint an agent token")
     try:
@@ -1048,8 +1055,9 @@ async def mint_agent_token(name: str) -> dict:
         # token's value only at creation, and `_agent_token_from_state` recovers it from
         # this state when the stored ref resolves empty. Redacting it here would turn a
         # recoverable mint into a hard `400 Resource already exists` on the next attempt.
-        res = await asyncio.to_thread(_apply_hcl_sync, _agent_token_hcl(name), {},
-                                      None, False)
+        res = await asyncio.to_thread(_apply_hcl_sync,
+                                      _agent_token_hcl(name, _hcl_fields(ctx)), {},
+                                      ctx, False)
     except EntitleRegistrationError as exc:
         # Entitle rejects a duplicate agent-token NAME. We always apply into an empty
         # workdir, so this means the tenant already holds that name while we hold no
