@@ -46,7 +46,7 @@ had not been turned on yet.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -256,6 +256,100 @@ async def reconcile(db: Session, platform: str, *, job_id: str = "") -> dict:
     return out
 
 
+# Who a scheduled power action is attributed to. Its own actor, not the operator who set
+# the schedule: the /jobs row should say why the POV suspended at 19:00, and a username
+# there reads as somebody having pressed a button.
+SCHEDULE_ACTOR = "pov-schedule"
+
+
+def _log(db: Session, job_id: str, line: str) -> None:
+    if job_id:
+        job_service.append_job_log(db, job_id, line)
+
+
+def _power_job_in_flight(db: Session, environment_id: str) -> bool:
+    """Whether a power job is already queued or running for this POV.
+
+    Scanned in Python rather than filtered in SQL because the environment id lives in the
+    job's JSON metadata, and there is no JSON filter portable across SQLite and Postgres —
+    the same constraint `database.py` cites for putting expiry on real columns. The set is
+    tiny: only ACTIVE power jobs, across all POVs.
+    """
+    rows = (db.query(Job)
+              .filter(Job.job_type == "pov_env_power",
+                      Job.status.in_(job_service.ACTIVE_STATUSES))
+              .all())
+    return any(r.metadata_dict.get("environment_id") == environment_id for r in rows)
+
+
+def sweep_schedules(db: Session, *, job_id: str = "") -> int:
+    """Act on any suspend schedule whose boundary has been crossed. Returns how many.
+
+    Rides this pass rather than a timer of its own, for the reason the accessor sweep
+    gives above: this is the loop that already knows every POV's real runstate, already
+    runs every ten minutes, and is already single-flight across gunicorn workers and
+    worker replicas. A second sweeper would be a second thing to arm and a second thing to
+    forget.
+
+    **It only ever enqueues a `pov_env_power` job** — the same one the Suspend and Start
+    buttons create. Calling a cloud SDK from inside the reconcile pass would put a
+    multi-minute power operation in front of every other row's read, and would make the
+    action invisible: as a job it has a row, a Live Output and a cancel, and its failure
+    reaches the dashboard's failed-jobs panel like any other.
+
+    Skipped entirely for a platform with an idle timer of its own. The capability table is
+    the arbiter, so a platform that grows one later stops being driven from here without
+    this function learning its name.
+    """
+    from . import pov_env_service, pov_schedule
+
+    now = datetime.now(timezone.utc)
+    acted = 0
+    rows = (db.query(PovEnvironment)
+              .filter(PovEnvironment.status == pov_env_service.STATUS_ACTIVE)
+              .all())
+    for env in rows:
+        if not pov_schedule.has_schedule(env):
+            continue
+        try:
+            if lab_platforms.supports(env.platform, "idle_suspend"):
+                continue
+            wanted = pov_schedule.due_action(env, now)
+        except Exception as exc:  # noqa: BLE001 — one bad row never stops the sweep
+            logger.warning("POV %s: could not evaluate its schedule", env.id,
+                           exc_info=True)
+            _log(db, job_id, f"{env.name}: schedule ignored ({exc})")
+            continue
+
+        # Stamped whatever happens, and BEFORE the enqueue. The latch is what bounds the
+        # next window; leaving it behind on the path that acts would make the same
+        # boundary fire again on every pass until the power job finished.
+        env.schedule_last_checked_at = now.replace(tzinfo=None)
+
+        if not wanted or (env.runstate or "") == wanted:
+            continue
+        if not pov_env_service.may_act_on(env):
+            continue
+        # Something is already changing this environment's power state — the operator
+        # pressed a button, or a previous crossing is still running. Two power jobs for
+        # one environment is how a resume and a suspend race to a coin flip.
+        if _power_job_in_flight(db, env.id):
+            _log(db, job_id,
+                 f"{env.name}: a power job is already running, schedule deferred")
+            continue
+
+        job = job_service.create_job(
+            db, job_type="pov_env_power", created_by=SCHEDULE_ACTOR,
+            workgroup=env.workgroup,
+            metadata={"environment_id": env.id, "runstate": wanted})
+        acted += 1
+        logger.info("POV %s: schedule -> %s (job %s)", env.name, wanted, job.id)
+        _log(db, job_id, f"{env.name}: schedule says {wanted} (job {job.id})")
+
+    db.commit()
+    return acted
+
+
 async def run_reconcile(job_id: str, meta: dict) -> None:
     """The job body: reconcile every configured lab platform."""
     db = SessionLocal()
@@ -305,6 +399,23 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
         result = {"platforms": summaries, "accessors_reaped": reaped}
         if failures:
             result["failures"] = failures
+
+        # The suspend schedule, AFTER the platform loop rather than before it. The
+        # decision is "has a boundary been crossed", which needs no platform read — but
+        # the skip on `runstate == wanted` is only right if the runstate above is fresh,
+        # so it runs once the loop has refreshed every row it could reach.
+        try:
+            scheduled = sweep_schedules(db, job_id=job_id)
+        except Exception as exc:  # noqa: BLE001 — a sweep never fails the pass
+            logger.warning("POV reconcile: the schedule sweep failed", exc_info=True)
+            job_service.append_job_log(db, job_id, f"schedule sweep FAILED: {exc}")
+            db.rollback()
+            scheduled = 0
+        if scheduled:
+            job_service.append_job_log(
+                db, job_id, f"schedule: enqueued {scheduled} power action(s)")
+        result["scheduled_power_actions"] = scheduled
+
         job_service.set_completed(db, job_id, result)
     finally:
         db.close()
@@ -318,10 +429,22 @@ def describe(env: PovEnvironment) -> dict:
     what this module exists to stop, and replacing "never asked" with "asked 40 minutes
     ago, silently" would be a smaller version of the same lie.
     """
+    from . import pov_schedule
+    try:
+        schedule = pov_schedule.describe(env)
+    except pov_schedule.ScheduleError:
+        # A stored schedule that no longer parses — a timezone the image dropped, say.
+        # Rendered as "none" rather than failing the row: the POV is running either way,
+        # and the sweep logs the same refusal against the row that owns it.
+        schedule = pov_schedule.describe(object())
     return {
         "platform_seen_at": (env.platform_seen_at.isoformat()
                              if env.platform_seen_at else ""),
         "rate_limited": bool(env.rate_limited),
         "platform_missing": bool(env.platform_missing),
         "suspend_on_idle_seconds": env.suspend_on_idle_seconds or 0,
+        # The dashboard-driven schedule, for a platform with no idle timer of its own. The
+        # page shows exactly one of the two — they answer the same question and a row
+        # offering both would be a row where neither is clearly in charge.
+        "schedule": schedule,
     }

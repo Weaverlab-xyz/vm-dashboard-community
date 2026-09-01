@@ -285,6 +285,12 @@ class BlueprintRequest(BaseModel):
     expiry_hours: int = 0
     workgroup: str = ""
     source_build_id: str = ""
+    # The suspend schedule a POV from this blueprint starts with. Only meaningful
+    # on a platform with no idle timer of its own; validated on save.
+    suspend_at_local: str = ""
+    resume_at_local: str = ""
+    schedule_timezone: str = ""
+    schedule_days: str = ""
 
 
 @router.get("/blueprints")
@@ -312,7 +318,11 @@ async def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_
             expiry_hours=payload.expiry_hours or None,
             workgroup=payload.workgroup,
             created_by=getattr(current_user, "username", None),
-            source_build_id=payload.source_build_id)
+            source_build_id=payload.source_build_id,
+            suspend_at_local=payload.suspend_at_local,
+            resume_at_local=payload.resume_at_local,
+            schedule_timezone=payload.schedule_timezone,
+            schedule_days=payload.schedule_days)
     except pov_blueprint_service.BlueprintError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"blueprint": pov_blueprint_service.serialize(row)}

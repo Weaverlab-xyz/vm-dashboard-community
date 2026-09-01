@@ -129,3 +129,9 @@ smbprotocol>=1.12.0
 
 # BeyondTrust Password Safe / Secrets Safe CLI (ps-cli)
 beyondtrust-bips-cli
+
+# IANA timezone database for `zoneinfo`. The POV suspend schedule stores a local time
+# plus an IANA zone, and resolves it with the stdlib — which reads the SYSTEM tzdb and has
+# none on Windows, so a schedule saved on a Debian container refuses to load on a
+# developer's host with "not a timezone this system knows". Pure data, no build step.
+tzdata>=2024.1

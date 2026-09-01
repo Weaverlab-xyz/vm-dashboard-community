@@ -1810,6 +1810,28 @@ class PovEnvironment(Base):
     # which is worth being able to SEE before it is worth being able to edit.
     suspend_on_idle_seconds = Column(Integer, nullable=True)
 
+    # The dashboard-driven suspend schedule, for platforms that have no idle timer of
+    # their own (every public cloud). NULL throughout = no schedule, which is what every
+    # existing row backfills to and what a Skytap POV keeps forever.
+    #
+    # A schedule rather than an inactivity timer because "idle" on a cloud has no honest
+    # definition from outside the guest: every candidate signal — a PRA session, an agent
+    # heartbeat, a page view — has a blind spot that either leaves a POV running all month
+    # or suspends one mid-demo.
+    suspend_at_local = Column(String(5), nullable=True)     # "HH:MM"
+    resume_at_local = Column(String(5), nullable=True)      # "HH:MM"; NULL = never wake it
+    schedule_timezone = Column(String(64), nullable=True)   # IANA, e.g. Europe/London
+    # Seven characters, Monday first, '1' = the schedule applies that day.
+    schedule_days = Column(String(7), nullable=True)
+    # When the schedule was last evaluated for this row. **The schedule acts on a BOUNDARY
+    # CROSSED since this timestamp, never on "is it currently outside working hours?"** —
+    # which is what lets an SE start a POV by hand at 8pm for a demo and keep it, instead
+    # of having it suspended again by the next sweep four minutes later. It is also what
+    # makes a dashboard that was down for three hours do the right thing rather than the
+    # last three things. NULL means "never evaluated": the first pass records the time and
+    # acts on nothing, because an unbounded window has crossed every boundary there is.
+    schedule_last_checked_at = Column(DateTime, nullable=True)
+
     # Slice 8: the auto-delete timer. NULL = never, exactly as elsewhere — so enabling
     # expiry on an existing estate selects zero rows.
     expires_at = Column(DateTime, nullable=True, index=True)
@@ -2095,6 +2117,14 @@ class PovBlueprint(Base):
 
     broker_vm_name = Column(String(255), nullable=True)
     suspend_on_idle_seconds = Column(Integer, nullable=True)
+
+    # The suspend schedule a POV from this blueprint starts with. Same four fields as
+    # PovEnvironment, minus its evaluation latch — that is per-environment state, not part
+    # of a recipe.
+    suspend_at_local = Column(String(5), nullable=True)
+    resume_at_local = Column(String(5), nullable=True)
+    schedule_timezone = Column(String(64), nullable=True)
+    schedule_days = Column(String(7), nullable=True)
 
     # Which BeyondTrust tenants a POV from this blueprint is wired into. Same three-FK
     # shape and the same ondelete as PovEnvironment — see the note there about SQLite not
@@ -2403,6 +2433,19 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN rate_limited BOOLEAN",
             "ALTER TABLE pov_environments ADD COLUMN platform_missing BOOLEAN",
             "ALTER TABLE pov_environments ADD COLUMN suspend_on_idle_seconds INTEGER",
+            # The dashboard-driven suspend schedule. Every one backfills to NULL,
+            # which reads as "no schedule" — so enabling this on an existing estate
+            # suspends nothing until somebody sets one, by construction rather than
+            # by a guard. Same rule `expires_at IS NULL` follows.
+            "ALTER TABLE pov_environments ADD COLUMN suspend_at_local VARCHAR(5)",
+            "ALTER TABLE pov_environments ADD COLUMN resume_at_local VARCHAR(5)",
+            "ALTER TABLE pov_environments ADD COLUMN schedule_timezone VARCHAR(64)",
+            "ALTER TABLE pov_environments ADD COLUMN schedule_days VARCHAR(7)",
+            "ALTER TABLE pov_environments ADD COLUMN schedule_last_checked_at TIMESTAMP",
+            "ALTER TABLE pov_blueprints ADD COLUMN suspend_at_local VARCHAR(5)",
+            "ALTER TABLE pov_blueprints ADD COLUMN resume_at_local VARCHAR(5)",
+            "ALTER TABLE pov_blueprints ADD COLUMN schedule_timezone VARCHAR(64)",
+            "ALTER TABLE pov_blueprints ADD COLUMN schedule_days VARCHAR(7)",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.
