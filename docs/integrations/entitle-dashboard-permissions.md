@@ -157,6 +157,16 @@ admin-set baseline or an Entra group permission is untouched by an Entitle revok
 by design. `get_all_permissions` shows only Entitle's grants — if the permission is
 not listed there, Entitle did not grant it and cannot remove it.
 
+**The audit log says "Failed to fetch the permissions" while accounts and resources
+sync fine.** The response shape, not the connection. Entitle validates
+`get_all_permissions` against `Get All Permission Response`, where both permission
+fields are **maps keyed by asset id** — `actors_permissions` is
+`map[asset_id] -> [{actor_id, role_code, direct_member}]` — even though the example
+in the OpenAPI definition renders them as arrays. An array fails validation on this
+one route only, and Entitle keeps whatever it last believed about who holds access.
+Every adapter here is keyed correctly; `tests/test_entitle_permissions_shape.py`
+keeps it that way.
+
 **A user cannot be found.** Actors resolve by username or email. A user created by
 OIDC auto-provisioning has a username derived from the email local-part, which may
 not be the identifier Entitle sends — map the actor to the email instead.

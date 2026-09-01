@@ -23,6 +23,7 @@ Stdlib only.
 """
 import time
 
+from fnruntime import entitle
 from fnruntime.contract import Context, Request, Response
 
 NAME = "entitle_webhook_echo"
@@ -130,9 +131,13 @@ def handle(req: Request, ctx: Context) -> Response:
     if path == "/get_actors":
         return Response(200, {"next": "", "data": {"actors": []}, "observed": observed})
     if path == "/get_all_permissions" or is_asset_permissions:
-        return Response(200, {"next": "", "data": {"actors_permissions": [],
-                                                   "assets_permissions": []},
-                              "observed": observed})
+        # The sample asset is mapped to an empty list rather than the map being left
+        # empty: this route exists to prove the contract end to end, and Entitle
+        # validates the SHAPE of this one hardest (fnruntime.entitle).
+        return Response(200, {
+            "next": "",
+            "data": entitle.permissions_data({_SAMPLE_ASSET["identifier"]: []}),
+            "observed": observed})
     if path == "/check_config":
         return Response(200, {"data": {"valid": True}, "observed": observed})
 

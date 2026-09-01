@@ -46,7 +46,7 @@ import string
 import urllib.error
 import urllib.request
 
-from fnruntime import logs, secretref
+from fnruntime import entitle, logs, secretref
 from fnruntime.contract import Context, Request, Response
 
 NAME = "portainer_access"
@@ -224,27 +224,25 @@ def _get_actors(req, ctx, config):
 
 def _get_all_permissions(req, ctx, config):
     if _dry_run() and not config["api_key"]:
-        return Response(200, {"next": "", "data": {"actors_permissions": [],
-                                                   "assets_permissions": []}})
+        return Response(200, {"next": "", "data": entitle.permissions_data()})
     users = {int(u.get("Id", -1)): str(u.get("Username") or "")
              for u in _users(config)
              if _rules.is_ephemeral_username(u.get("Username"))}
     teams = {int(t.get("Id", -1)): str(t.get("Name") or "") for t in _teams(config)}
-    actors_permissions = []
+    # Keyed by asset, and every team is a key whether or not anyone is in it — see
+    # fnruntime.entitle for why a list here fails Entitle's validation outright.
+    actors_permissions = {f"portainer:team:{tid}": [] for tid in teams}
     for row in _memberships(config):
         username = users.get(int(row.get("UserID", -1) or -1))
-        if not username:
+        team_id = int(row.get("TeamID", -1) or -1)
+        if not username or team_id not in teams:
             continue
-        actors_permissions.append({
+        actors_permissions[f"portainer:team:{team_id}"].append({
             "actor_id": username,
-            "role_code": teams.get(int(row.get("TeamID", -1) or -1), ""),
+            "role_code": teams[team_id],
             "direct_member": True,
         })
-    return Response(200, {"next": "", "data": {
-        "actors_permissions": actors_permissions,
-        "assets_permissions": [{"asset_id": f"portainer:team:{tid}", "role_code": name}
-                               for tid, name in teams.items()],
-    }})
+    return Response(200, {"next": "", "data": entitle.permissions_data(actors_permissions)})
 
 
 def _create_actor(req, ctx, config):

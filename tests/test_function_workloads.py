@@ -109,7 +109,11 @@ def test_entitle_echo_returns_the_contract_envelopes():
     assert "next" in assets and "assets" in assets["data"]
     assert assets["data"]["assets"][0]["role_options"], "no role for Entitle to offer"
     perms = _get("/get_all_permissions")
-    assert "actors_permissions" in perms["data"] and "assets_permissions" in perms["data"]
+    # Maps keyed by asset id, not lists: Entitle validates this one hardest, and a
+    # list fails with "Structure of Get All Permission Response is invalid".
+    # tests/test_entitle_permissions_shape.py pins it for every adapter at once.
+    assert isinstance(perms["data"]["actors_permissions"], dict)
+    assert isinstance(perms["data"]["assets_permissions"], dict)
 
 
 def test_entitle_echo_reports_which_contract_fields_arrived():

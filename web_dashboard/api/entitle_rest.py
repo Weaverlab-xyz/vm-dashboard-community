@@ -116,19 +116,25 @@ def get_all_permissions(db: Session = Depends(get_db)):
 
     Reporting the admin baseline or group-derived permissions here would invite
     Entitle to reconcile them away, revoking access it never granted.
+
+    **Keyed by asset id, not a list.** Entitle validates this response against its
+    ``Get All Permission Response`` schema, where ``actors_permissions`` is
+    ``map[asset_id] -> [{actor_id, role_code, direct_member}]``; a list is rejected
+    outright and the integration keeps whatever it last believed. Every served asset
+    is a key even with nobody on it, so an empty one reads as "nobody holds this"
+    rather than "not reported". ``assets_permissions`` is the asset-to-asset half —
+    which other assets confer access to this one — and dashboard scopes do not nest,
+    so it is empty; the role codes an asset offers belong in ``get_assets``.
     """
-    actors_permissions = [
-        {"actor_id": user.username, "role_code": role, "direct_member": True}
-        for user in db.query(User).filter(_NOT_AN_ACCESSOR).all()
-        for role in grants.held_by(user)
-    ]
-    assets_permissions = [
-        {"asset_id": f"{grants.ASSET_PREFIX}{scope}", "role_code": level}
-        for scope in PERMISSION_SCOPES for level in PERMISSION_LEVELS
-    ]
-    assets_permissions.append({"asset_id": grants.ADMIN_ASSET, "role_code": grants.ADMIN_ROLE})
+    actors_permissions = {grants.ADMIN_ASSET: []}
+    for scope in PERMISSION_SCOPES:
+        actors_permissions[f"{grants.ASSET_PREFIX}{scope}"] = []
+    for user in db.query(User).filter(_NOT_AN_ACCESSOR).all():
+        for asset_id, role in grants.held_by_asset(user):
+            actors_permissions.setdefault(asset_id, []).append(
+                {"actor_id": user.username, "role_code": role, "direct_member": True})
     return {"next": "", "data": {"actors_permissions": actors_permissions,
-                                 "assets_permissions": assets_permissions}}
+                                 "assets_permissions": {}}}
 
 
 # ── Write routes ─────────────────────────────────────────────────────────────

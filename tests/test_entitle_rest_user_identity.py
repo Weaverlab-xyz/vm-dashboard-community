@@ -286,8 +286,12 @@ def test_get_all_permissions_reports_only_entitles_own_grants():
     _give(client, scope="azure", role="write")
     data = client.get("/api/entitle/rest/get_all_permissions",
                       headers=_hdr()).json()["data"]
-    roles = {p["role_code"] for p in data["actors_permissions"]}
-    assert roles == {"write"}, roles
+    held = data["actors_permissions"]
+    assert {p["role_code"] for rows in held.values() for p in rows} == {"write"}, held
+    # Keyed by asset: the grant was on azure, so that asset carries it and every
+    # other scope is present and empty rather than missing.
+    assert [p["actor_id"] for p in held["dashboard:scope:azure"]] == ["alice"], held
+    assert held["dashboard:scope:aws"] == [], held
 
 
 if __name__ == "__main__":

@@ -117,6 +117,15 @@ give_access_path           /give_access
 revoke_access_path         /revoke_access
 ```
 
+`get_all_permissions` is the one response whose shape is not what the definition's
+example shows: both permission fields are **maps keyed by asset id**, not arrays
+(`actors_permissions` is `map[asset_id] -> [{actor_id, role_code, direct_member}]`,
+and `assets_permissions` is the asset-to-asset half, which is `{}` for every target
+here). An array is rejected with *Structure of "Get All Permission Response" is
+invalid* on that route alone — assets and actors keep syncing green, so the only
+symptom is one red line in Entitle's audit log. `fnruntime.entitle.permissions_data`
+builds it; use it rather than a literal.
+
 Authenticate with the function's shared secret as a custom header — Entitle's
 `headers` config takes `"Authorization": "Bearer <TOKEN>"` verbatim, which is
 exactly what the handler verifies. Get the value from **Functions → Endpoint**.

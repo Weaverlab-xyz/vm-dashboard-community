@@ -139,16 +139,28 @@ def get_assets(db: Session = Depends(get_db)):
 
 @router.get("/get_all_permissions", dependencies=[Depends(_require_secret)])
 def get_all_permissions(db: Session = Depends(get_db)):
-    """Who currently holds access to which POV — this integration's own grants only."""
-    rows = db.query(PovAccessor).filter(PovAccessor.revoked_at.is_(None)).all()
-    return {"next": "", "data": {
-        "actors_permissions": [
-            {"actor_id": r.username, "role_code": "accessor", "direct_member": True}
-            for r in rows],
-        "assets_permissions": [
-            {"asset_id": f"{_ASSET_PREFIX}{env.id}", "role_code": "accessor"}
-            for env in _live_povs(db)],
-    }}
+    """Who currently holds access to which POV — this integration's own grants only.
+
+    **Keyed by asset id**: Entitle validates this against ``Get All Permission
+    Response``, where ``actors_permissions`` is ``map[asset_id] -> [...]``, and a
+    list fails validation with the accessor sync still green. The key is also the
+    only place the binding appears — an accessor exists for ONE POV, and the flat
+    list said "this person is an accessor" without ever saying of what.
+
+    ``assets_permissions`` is the asset-to-asset half (which other assets grant
+    access to this one); POVs do not contain one another, so it is empty.
+    """
+    actors_permissions = {f"{_ASSET_PREFIX}{env.id}": [] for env in _live_povs(db)}
+    for row in db.query(PovAccessor).filter(PovAccessor.revoked_at.is_(None)).all():
+        # A POV that is being torn down is not in the asset list any more, so its
+        # accessors are not reported against an asset Entitle does not know.
+        held = actors_permissions.get(f"{_ASSET_PREFIX}{row.environment_id}")
+        if held is None:
+            continue
+        held.append({"actor_id": row.username, "role_code": "accessor",
+                     "direct_member": True})
+    return {"next": "", "data": {"actors_permissions": actors_permissions,
+                                 "assets_permissions": {}}}
 
 
 # ── Write routes ─────────────────────────────────────────────────────────────
