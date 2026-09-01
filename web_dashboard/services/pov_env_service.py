@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
 from . import (job_service, lab_platforms, pov_broker, pov_gateway,
-               pov_resource_broker, pov_share, pov_wireup)
+               pov_resource_broker, pov_share, pov_use_cases, pov_wireup)
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +326,12 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
         db.commit()
 
         problems: list[str] = []
+
+        # First, and it removes nothing: the use-case record is the account of what this
+        # POV was FOR, and the row it hangs off is kept rather than deleted for exactly
+        # that reason. The one thing the destroy owes it is the summary, in the log, at
+        # the moment somebody is closing the evaluation out.
+        job_service.append_job_log(db, job_id, pov_use_cases.destroy_note(db, env))
 
         # The share link first, ahead of everything. It is the only artifact a person
         # OUTSIDE the account can be holding, so the window where it still works is the

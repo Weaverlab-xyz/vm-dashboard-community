@@ -1,0 +1,461 @@
+{% extends "base.html" %}
+{% block title %}POV{% endblock %}
+
+{#
+  One POV, in depth.
+
+  /pov is a table, and every slice so far has widened a row: Broker, Gateway, Resource
+  Broker, Wired, Share, Expires. The use-case checklist does not fit that shape — it is
+  per-role, per-product and stateful — so this is where a POV stops being a row.
+
+  The Use cases tab is the reason the page exists, and its one rule is the same one
+  /use-cases keeps: **it never filters.** Every role and every card is always present. What
+  this POV is wired into decides each card's STATE, never whether you can see it — because
+  "we did not include Entitle in this evaluation" is a scoping decision worth reading, and
+  hiding those cards would make a Password-Safe-only POV look like a broken one.
+
+  Three states, and their words are deliberately not /use-cases's three:
+
+    ready         this POV has the products AND the wire-up has run for them
+    needs_wiring  the tenant is there and the artifact is not — actionable, so it says
+                  what to run and links to the tab with the button on it
+    out_of_scope  this POV has no tenant for that product — NO href and NO action link,
+                  because the fix is a decision about the evaluation, not a button
+
+  Nothing here hard-codes a persona key or a card id: the groups, their order, their copy
+  and every card's state arrive from /api/pov/managed/<id>/use-cases, which reads
+  services/personas through services/pov_use_cases. A key spelled in this file would let
+  the page and the registry disagree, invisibly.
+
+  The accessor tab — the prospect's own view of this checklist — is a later slice. It is
+  deliberately absent rather than stubbed: a dead tab is a promise the page cannot keep.
+#}
+
+{% block content %}
+<div x-data="povDetail('{{ env_id }}')" x-init="init()" class="space-y-6">
+
+  <div x-show="loading" class="py-12 text-center text-gray-400 text-sm">Loading…</div>
+
+  <div x-show="error" class="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+    <p class="text-sm text-red-700" x-text="error"></p>
+  </div>
+
+  <template x-if="!loading && env">
+    <div class="space-y-6">
+
+      <!-- Header -->
+      <div class="flex items-start justify-between gap-4">
+        <div class="min-w-0">
+          <a href="/pov" class="text-xs text-gray-400 hover:text-blue-600">← All POV environments</a>
+          <h1 class="text-2xl font-semibold text-gray-900 truncate" x-text="env.name"></h1>
+          <p class="text-sm text-gray-500 mt-1">
+            <span x-text="env.template_name || env.template_id || 'no template recorded'"></span>
+            <span class="text-gray-300 mx-1">·</span>
+            <span x-text="env.platform"></span>
+            <span class="text-gray-300 mx-1">·</span>
+            <span x-text="env.status"></span>
+          </p>
+        </div>
+        <div class="text-right shrink-0">
+          <p class="text-xs text-gray-400">Use cases</p>
+          <p class="text-lg font-semibold text-gray-900">
+            <span x-text="summary.done"></span><span class="text-gray-400">/</span><span x-text="summary.total"></span>
+          </p>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="border-b border-gray-200">
+        <nav class="-mb-px flex gap-6 overflow-x-auto">
+          <template x-for="t in tabs" :key="t.id">
+            <button @click="select(t.id)"
+                    :class="tab === t.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+                    class="whitespace-nowrap py-3 border-b-2 text-sm font-medium">
+              <span x-text="t.label"></span>
+            </button>
+          </template>
+        </nav>
+      </div>
+
+      <!-- ── Overview ─────────────────────────────────────────────────── -->
+      <div x-show="tab === 'overview'" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Products</h2>
+          <!-- The three tenants, which are what every card resolves against. Rendered from
+               the API's own products dict rather than from the three *_tenant_id fields, so
+               this panel and the card states can never disagree about the same POV. -->
+          <dl class="space-y-2 text-sm">
+            <template x-for="p in productRows" :key="p.key">
+              <div class="flex items-center justify-between">
+                <dt class="text-gray-600" x-text="p.label"></dt>
+                <dd class="text-xs">
+                  <span x-show="!p.tenant" class="text-gray-400">not in this POV</span>
+                  <span x-show="p.tenant && !p.wired" class="text-amber-700">tenant set, not wired</span>
+                  <span x-show="p.tenant && p.wired" class="text-green-700">wired</span>
+                </dd>
+              </div>
+            </template>
+          </dl>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Inside the environment</h2>
+          <dl class="space-y-2 text-sm">
+            <div class="flex items-center justify-between">
+              <dt class="text-gray-600">Gateway</dt>
+              <dd class="text-xs" :class="env.gateway_name ? 'text-green-700' : 'text-gray-400'"
+                  x-text="env.gateway_name || 'not installed'"></dd>
+            </div>
+            <div class="flex items-center justify-between">
+              <dt class="text-gray-600">Resource Broker</dt>
+              <dd class="text-xs" :class="env.ps_application_host_id ? 'text-green-700' : 'text-gray-400'"
+                  x-text="env.ps_application_host_id ? 'installed' : 'not installed'"></dd>
+            </div>
+            <div class="flex items-center justify-between">
+              <dt class="text-gray-600">Broker agent</dt>
+              <dd class="text-xs" :class="env.broker_agent_id ? 'text-green-700' : 'text-gray-400'"
+                  x-text="env.broker_agent_id ? 'enrolled' : 'none'"></dd>
+            </div>
+            <div class="flex items-center justify-between">
+              <dt class="text-gray-600">Expires</dt>
+              <dd class="text-xs text-gray-600" x-text="env.expires_at || 'never'"></dd>
+            </div>
+          </dl>
+          <p class="text-xs text-gray-400 mt-4">
+            Every action on this POV — provision, power, Gateway, Resource Broker, wire-up,
+            share, expiry — lives on <a href="/pov" class="underline hover:no-underline">the POV page</a>.
+            This page reads.
+          </p>
+        </div>
+      </div>
+
+      <!-- ── VMs ──────────────────────────────────────────────────────── -->
+      <div x-show="tab === 'vms'" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+              <tr>
+                <th class="text-left px-4 py-2 font-medium">VM</th>
+                <th class="text-left px-4 py-2 font-medium">OS</th>
+                <th class="text-left px-4 py-2 font-medium">Runstate</th>
+                <th class="text-left px-4 py-2 font-medium">Private address</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <template x-for="vm in (env.vms || [])" :key="vm.id">
+                <tr>
+                  <td class="px-4 py-2 text-gray-900" x-text="vm.name || vm.id"></td>
+                  <!-- Blank rather than a guess: the wire-up skips a VM with no OS
+                       reported, because an SSH jump to a Windows box fails in front of
+                       whoever clicked it. -->
+                  <td class="px-4 py-2 text-gray-600" x-text="vm.os_family || '—'"></td>
+                  <td class="px-4 py-2 text-gray-600" x-text="vm.runstate || '—'"></td>
+                  <td class="px-4 py-2 text-gray-600" x-text="vm.private_ip || '—'"></td>
+                </tr>
+              </template>
+              <tr x-show="!(env.vms || []).length">
+                <td colspan="4" class="px-4 py-6 text-center text-gray-400">
+                  No VMs read back from the platform yet.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── Wired ────────────────────────────────────────────────────── -->
+      <div x-show="tab === 'wired'" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+              <tr>
+                <th class="text-left px-4 py-2 font-medium">VM</th>
+                <th class="text-left px-4 py-2 font-medium">PRA jump item</th>
+                <th class="text-left px-4 py-2 font-medium">Password Safe</th>
+                <th class="text-left px-4 py-2 font-medium">Entitle</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <template x-for="vm in (env.vms || [])" :key="vm.id">
+                <tr :class="vm.wiring_error ? 'bg-amber-50' : ''">
+                  <td class="px-4 py-2 text-gray-900">
+                    <span x-text="vm.name || vm.id"></span>
+                    <p x-show="vm.wiring_error" class="text-xs text-amber-700 mt-0.5"
+                       x-text="vm.wiring_error"></p>
+                  </td>
+                  <td class="px-4 py-2 text-xs" :class="vm.pra_jump_id ? 'text-green-700' : 'text-gray-400'"
+                      x-text="vm.pra_jump_id ? 'created' : '—'"></td>
+                  <td class="px-4 py-2 text-xs" :class="vm.ps_managed_system_id ? 'text-green-700' : 'text-gray-400'"
+                      x-text="vm.ps_managed_system_id ? 'onboarded' : '—'"></td>
+                  <td class="px-4 py-2 text-xs" :class="vm.entitle_integration_id ? 'text-green-700' : 'text-gray-400'"
+                      x-text="vm.entitle_integration_id ? 'registered' : '—'"></td>
+                </tr>
+              </template>
+              <tr x-show="!(env.vms || []).length">
+                <td colspan="4" class="px-4 py-6 text-center text-gray-400">Nothing to wire yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-xs text-gray-400 px-4 py-3 border-t border-gray-100">
+          Run or re-run the wire-up from <a href="/pov" class="underline hover:no-underline">the POV page</a>.
+          Re-running is safe: a VM that already has an artifact is skipped.
+        </p>
+      </div>
+
+      <!-- ── Share ────────────────────────────────────────────────────── -->
+      <div x-show="tab === 'share'" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Customer link</h2>
+        <template x-if="env.share_url">
+          <div class="space-y-2">
+            <!-- Shown as text with a copy button, never as an anchor. A middle-click from
+                 here is an SE opening a session as the customer. -->
+            <div class="flex items-center gap-2">
+              <code class="text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 flex-1 truncate"
+                    x-text="env.share_url"></code>
+              <button @click="copy(env.share_url)"
+                      class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Copy</button>
+            </div>
+            <p class="text-xs" :class="env.share_expired ? 'text-amber-700' : 'text-gray-500'">
+              <span x-show="env.share_expired">Expired</span>
+              <span x-show="!env.share_expired">Expires</span>
+              <span x-text="env.share_expires_at"></span>
+            </p>
+            <p class="text-xs text-gray-400">
+              The link's password is revealed one POV at a time on
+              <a href="/pov" class="underline hover:no-underline">the POV page</a>, and is
+              never shipped with a list.
+            </p>
+          </div>
+        </template>
+        <p x-show="!env.share_url" class="text-sm text-gray-400">
+          No link published. Share this POV from
+          <a href="/pov" class="underline hover:no-underline">the POV page</a>.
+        </p>
+      </div>
+
+      <!-- ── Use cases ────────────────────────────────────────────────── -->
+      <div x-show="tab === 'use-cases'" class="space-y-8">
+
+        <div class="flex items-baseline justify-between">
+          <p class="text-sm text-gray-500">
+            Grouped by the role they are for. Every role is always here; what this POV is
+            wired into decides what each card says.
+          </p>
+          <p class="text-xs text-gray-400 shrink-0 ml-4">
+            <span x-text="summary.done"></span> run,
+            <span x-text="summary.skipped"></span> skipped,
+            <span x-text="summary.total"></span> in scope
+          </p>
+        </div>
+
+        <template x-for="g in groups" :key="g.persona">
+          <div>
+            <div class="flex items-baseline justify-between mb-3">
+              <div>
+                <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide" x-text="g.label"></h2>
+                <p class="text-xs text-gray-400 mt-0.5" x-text="g.blurb"></p>
+              </div>
+              <span class="text-xs text-gray-400 shrink-0 ml-4"
+                    x-text="inScope(g) + ' of ' + g.use_cases.length + ' in scope'"></span>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              <template x-for="c in g.use_cases" :key="c.id">
+                <div class="bg-white rounded-xl shadow-sm border p-5 flex flex-col"
+                     :class="c.progress.state === 'done' ? 'border-green-200'
+                             : (c.state === 'ready' ? 'border-gray-200' : 'border-gray-100')">
+
+                  <div class="flex items-start justify-between gap-2">
+                    <!-- Two elements rather than one conditional href: an <a> with no href
+                         is still focusable and still announces as a link, and the point of
+                         out_of_scope is that there is nowhere to go. -->
+                    <a x-show="c.state === 'ready'" :href="c.target"
+                       class="text-sm font-semibold text-blue-700 hover:underline" x-text="c.title"></a>
+                    <span x-show="c.state !== 'ready'"
+                          class="text-sm font-semibold text-gray-400" x-text="c.title"></span>
+                    <span class="text-xs text-gray-400 shrink-0" x-text="c.minutes + ' min'"></span>
+                  </div>
+
+                  <p class="text-sm mt-2 flex-1"
+                     :class="c.state === 'ready' ? 'text-gray-600' : 'text-gray-400'"
+                     x-text="c.summary"></p>
+
+                  <div class="mt-3 pt-3 border-t border-gray-50 space-y-2">
+                    <!-- needs_wiring is ACTIONABLE, so it says what to run and links to the
+                         tab with the button. out_of_scope is not: the fix is a tenant on the
+                         POV row, which is a decision about the evaluation rather than a
+                         click, so it gets no link at all. -->
+                    <p x-show="c.state === 'needs_wiring'" class="text-xs text-amber-700"
+                       :title="c.needs.join(', ')">
+                      Needs <span x-text="c.needs.join(', ')"></span> —
+                      <a :href="c.action_link" class="underline hover:no-underline">see what is wired</a>
+                    </p>
+                    <p x-show="c.state === 'out_of_scope'" class="text-xs text-gray-400"
+                       :title="c.needs.join(', ')">
+                      Not part of this POV — no
+                      <span x-text="c.needs.join(' or ')"></span> tenant
+                    </p>
+
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="flex items-center gap-2">
+                        <button @click="mark(c, c.progress.state === 'done' ? '' : 'done')"
+                                :disabled="busy === c.id"
+                                class="text-xs px-2 py-1 rounded border disabled:opacity-50"
+                                :class="c.progress.state === 'done'
+                                        ? 'border-green-300 bg-green-50 text-green-800'
+                                        : 'border-gray-300 text-gray-600 hover:bg-gray-50'"
+                                x-text="c.progress.state === 'done' ? '✓ Done' : 'Mark done'"></button>
+                        <button @click="mark(c, c.progress.state === 'skipped' ? '' : 'skipped')"
+                                :disabled="busy === c.id"
+                                class="text-xs px-2 py-1 rounded border disabled:opacity-50"
+                                :class="c.progress.state === 'skipped'
+                                        ? 'border-gray-400 bg-gray-100 text-gray-700'
+                                        : 'border-gray-200 text-gray-400 hover:bg-gray-50'"
+                                x-text="'Skip'"></button>
+                      </div>
+                      <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                         class="text-xs text-gray-400 hover:text-blue-600 shrink-0">Guide →</a>
+                    </div>
+
+                    <p x-show="c.progress.state" class="text-xs text-gray-400">
+                      <span x-text="c.progress.state === 'done' ? 'Run by' : 'Skipped by'"></span>
+                      <span x-text="c.progress.by || 'someone'"></span>
+                      <span x-show="c.progress.by_kind === 'accessor'" class="text-gray-400">(the customer)</span>
+                    </p>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+
+    </div>
+  </template>
+</div>
+
+<script>
+  function povDetail(envId) {
+    return {
+      envId: envId,
+      loading: true,
+      error: '',
+      busy: '',
+      env: null,
+      groups: [],
+      products: {},
+      summary: { done: 0, skipped: 0, total: 0, cards: 0 },
+      tab: 'overview',
+      tabs: [
+        { id: 'overview',  label: 'Overview' },
+        { id: 'vms',       label: 'VMs' },
+        { id: 'wired',     label: 'Wired' },
+        { id: 'share',     label: 'Share' },
+        { id: 'use-cases', label: 'Use cases' },
+      ],
+
+      async init() {
+        requireAuth();
+        // The deep link is the whole reason a card's target is a fragment: a ready card on
+        // this page links to /pov/<id>#wired, and landing on Overview instead would make
+        // every card on the page point at the same screen.
+        const hash = window.location.hash.slice(1);
+        if (this.tabs.some(t => t.id === hash)) this.tab = hash;
+        await Promise.all([this.loadEnv(), this.loadUseCases()]);
+        this.loading = false;
+      },
+
+      // Same reason every other page carries its own: /api/ authenticates off the
+      // Authorization header and the dashboard sets no cookie, so a bare fetch() is an
+      // anonymous request. A 401 is a dead session, not a page error.
+      async apiFetch(url, opts) {
+        const o = opts || {};
+        const token = Alpine.store('auth').token;
+        const res = await fetch(url, {
+          ...o,
+          headers: { ...(o.headers || {}), ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+        });
+        if (res.status === 401) Alpine.store('auth').logout();
+        return res;
+      },
+
+      async loadEnv() {
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}`);
+          if (!res.ok) {
+            this.error = res.status === 404
+              ? 'No such POV environment.'
+              : `Could not load this POV (${res.status}).`;
+            return;
+          }
+          this.env = (await res.json()).environment;
+        } catch (e) {
+          this.error = 'Could not load this POV.';
+        }
+      },
+
+      async loadUseCases() {
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/use-cases`);
+          if (!res.ok) return;
+          const data = await res.json();
+          this.groups = data.groups || [];
+          this.products = data.products || {};
+          this.summary = data.summary || this.summary;
+        } catch (e) {
+          // Left silent on purpose: the environment above is the page, and a checklist
+          // that failed to load must not replace it with an error.
+        }
+      },
+
+      select(id) {
+        this.tab = id;
+        // Written so a card's link is copyable and a reload lands where you were.
+        history.replaceState(null, '', `#${id}`);
+      },
+
+      get productRows() {
+        const p = this.products || {};
+        return [
+          { key: 'pra',           label: 'Privileged Remote Access', tenant: !!p.pra,           wired: !!p.wired },
+          { key: 'password_safe', label: 'Password Safe',            tenant: !!p.password_safe, wired: !!p.onboarded },
+          { key: 'entitle',       label: 'Entitle',                  tenant: !!p.entitle,       wired: !!p.entitle_wired },
+        ];
+      },
+
+      inScope(g) {
+        return g.use_cases.filter(c => c.state !== 'out_of_scope').length;
+      },
+
+      // An empty `state` un-ticks. One handler for both buttons so the toggle can never
+      // get into a state where a card is both done and skipped.
+      async mark(card, state) {
+        this.busy = card.id;
+        const url = `/api/pov/managed/${this.envId}/use-cases/${encodeURIComponent(card.id)}`;
+        try {
+          const res = state
+            ? await this.apiFetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ state: state }),
+              })
+            : await this.apiFetch(url, { method: 'DELETE' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not save (${res.status}).`; return; }
+          card.progress = data.progress || { state: '', note: '', by: '', by_kind: '', at: '' };
+          this.summary = data.summary || this.summary;
+        } catch (e) {
+          this.error = 'Could not save that.';
+        } finally {
+          this.busy = '';
+        }
+      },
+
+      copy(text) {
+        navigator.clipboard && navigator.clipboard.writeText(text);
+      },
+    };
+  }
+</script>
+{% endblock %}

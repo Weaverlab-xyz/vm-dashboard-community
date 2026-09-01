@@ -1855,6 +1855,52 @@ class PovEnvironmentVM(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class PovUseCaseProgress(Base):
+    """One use-case card, ticked off on one POV.
+
+    A POV runs for weeks across many sessions, so "which of these have we actually shown
+    them?" is state, not something to reconstruct from memory at the next call. The card
+    catalog itself stays in ``services/personas`` -- this table holds only what somebody
+    did with it.
+
+    **A row exists only for a card somebody touched.** Absence means "not started", so
+    adding a card to the registry needs no backfill and enabling this on an existing estate
+    selects zero rows -- the same reading ``expires_at`` has everywhere else here. It also
+    means a card RETIRED from the registry leaves a row behind, which is deliberate:
+    ``services/pov_use_cases`` simply does not render it, because deleting an SE's history
+    on a copy edit is a worse outcome than an invisible row.
+
+    ``note`` and ``checked_by_kind`` ship before anything writes them. The prospect-facing
+    accessor page is a later slice and will write both; putting the columns on the row now
+    means that slice needs no migration, exactly as ``PovEnvironment`` carried its wire-up
+    columns from slice 1.
+    """
+    __tablename__ = "pov_use_case_progress"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    environment_id = Column(String(36), index=True, nullable=False)
+    # services/personas.UseCase.id, validated against the registry before any write --
+    # see pov_use_cases.set_state. An unvalidated column here would be a free-text store.
+    card_id = Column(String(64), nullable=False)
+    # Which role's list it came from. Denormalised from the registry so a card that later
+    # moves between personas keeps the answer it was ticked under, which is what the SE
+    # actually remembers.
+    persona = Column(String(32), nullable=False)
+    # done | skipped. `skipped` is a real answer, not an absence: "we showed them and it
+    # did not land" and "we never got to it" are different things to walk into a renewal
+    # conversation with.
+    state = Column(String(16), nullable=False, default="done")
+    note = Column(Text, nullable=True)
+    checked_by = Column(String(100), nullable=True)
+    # se | accessor. The prospect's own ticks must be distinguishable from the SE's, or the
+    # evidence a POV produces is just a list of boxes with no author.
+    checked_by_kind = Column(String(16), nullable=False, default="se")
+    checked_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("environment_id", "card_id",
+                                       name="uq_pov_use_case_progress_env_card"),)
+
+
 class PovTemplateBuild(Base):
     """One run of the template builder: a lab-platform template this dashboard authored.
 
