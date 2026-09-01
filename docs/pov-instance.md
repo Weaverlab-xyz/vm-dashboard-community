@@ -348,6 +348,44 @@ the same question, and a POV carrying both is one where neither is in charge.
 nothing else — the root volume, the public address and the network keep billing for the
 whole evaluation. A schedule cuts the largest line on the bill, not the bill.
 
+### The cloud view, and orphans
+
+**POV → Cloud** (`/pov/cloud`), linked from the POV page when a provider is selected. Its
+own POV-owned page rather than re-opening `/aws`, and it shows without ever creating —
+there is no deploy control on it and no endpoint behind one.
+
+Three things:
+
+**Footprint.** Environments, VMs running out of VMs total, gigabytes of EBS, and the
+instance shapes in use. Read from the same describe the VM lists come from, so it cannot
+disagree with them. Stopped VMs and their disks are counted, because they are still
+billing.
+
+**Orphans — the reason the page exists.** `pov_reconcile` compares each POV row against
+the cloud and can tell you a row's environment has gone. It cannot tell you the reverse:
+that the cloud is holding an environment no live POV row remembers. That is the direction
+cost leaks — a provision that died before its row was written, a POV destroyed from the
+console leaving its network behind, a row deleted by hand. Every resource carries
+`povManagedBy=vm-dashboard`, so the question is answerable.
+
+A POV row that reached `destroyed` does not count as remembering one. If a teardown left
+something behind, the row says gone and the cloud says otherwise — and that is exactly the
+case somebody needs to be told about.
+
+**The page will not delete an orphan.** A tag-scoped teardown driven from a read is how
+the wrong environment gets destroyed; the Destroy button on a POV is the one path that
+knows the order to tear things down in. The page tells you the tag to select on in the
+cloud's own console.
+
+**An estimate, when the account will give one.** On-demand **list price** from the AWS
+Pricing API — not a bill. No Savings Plans, reservations, free tier, credits, data
+transfer or snapshots. It needs `pricing:GetProducts`, which an EC2-scoped key does not
+have; without it the page says so and shows the footprint alone. That is deliberate: a
+hardcoded price table goes stale silently and reports a number somebody plans around.
+
+The figure worth reading is **per month at the current power state**, which includes
+storage. It is the answer to "can I leave this up for the evaluation?".
+
 ### The broker VM, on a cloud
 
 A POV's broker is the VM that carries the dashboard agent, the Gateway and the Password

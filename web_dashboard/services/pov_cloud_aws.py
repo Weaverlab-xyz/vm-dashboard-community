@@ -232,7 +232,7 @@ async def create_vms(env_id: str, region: str, specs: list, network: dict) -> li
 
 # ── read ─────────────────────────────────────────────────────────────────────
 
-def _vm(inst: dict) -> dict:
+def _vm(inst: dict, sizes_by_instance: dict) -> dict:
     tags = {t["Key"]: t["Value"] for t in inst.get("Tags") or []}
     state = ((inst.get("State") or {}).get("Name") or "")
     platform = (inst.get("PlatformDetails") or inst.get("Platform") or "")
@@ -245,13 +245,26 @@ def _vm(inst: dict) -> dict:
         "runstate": _RUNSTATE.get(state, state),
         "private_ip": inst.get("PrivateIpAddress") or "",
         "role": tags.get(env.TAG_ROLE) or "target",
+        # What this VM costs to keep, in the only two units AWS charges for it: the shape
+        # it runs as, and the disk it keeps whether it runs or not. Reported from the same
+        # describe the runstate comes from, so the footprint on /pov/cloud can never
+        # disagree with the VM list beside it.
+        "instance_type": inst.get("InstanceType") or "",
+        # DescribeInstances reports each block device's volume ID, not its size — so the
+        # sizes come from a separate DescribeVolumes, scoped by the same environment tag
+        # the volumes were created with. Summing the instance's own mappings here would
+        # quietly total zero.
+        "disk_gb": sizes_by_instance.get(inst.get("InstanceId") or "", 0),
+        "launched_at": (inst["LaunchTime"].isoformat()
+                        if inst.get("LaunchTime") else ""),
         # No NAT-ed guest ports on a cloud: access is PRA, through the POV's own Gateway.
         "published_services": [],
     }
 
 
-def _environment(env_id: str, instances: list, region: str) -> dict:
-    vms = [_vm(i) for i in instances]
+def _environment(env_id: str, instances: list, region: str,
+                 sizes_by_instance: dict | None = None) -> dict:
+    vms = [_vm(i, sizes_by_instance or {}) for i in instances]
     states = {v["runstate"] for v in vms}
     if not states:
         runstate = ""
@@ -296,6 +309,33 @@ def _describe_sync(region: str, filters: list) -> list:
     return out
 
 
+def _volume_sizes_sync(region: str, filters: list) -> dict:
+    """``{instance_id: total attached GB}`` for one tag scope.
+
+    EBS is charged whether the instance is running or stopped, which makes it the line
+    that a suspended POV keeps paying — so the footprint has to include it or the page
+    would imply a stopped environment is free.
+    """
+    ec2 = aws_service._get_ec2(region)
+    out: dict = {}
+    token = None
+    while True:
+        kwargs = {"Filters": filters, "MaxResults": 500}
+        if token:
+            kwargs["NextToken"] = token
+        resp = ec2.describe_volumes(**kwargs)
+        for vol in resp.get("Volumes") or []:
+            size = int(vol.get("Size") or 0)
+            for att in vol.get("Attachments") or []:
+                iid = att.get("InstanceId") or ""
+                if iid:
+                    out[iid] = out.get(iid, 0) + size
+        token = resp.get("NextToken")
+        if not token:
+            break
+    return out
+
+
 async def read_environment(env_id: str, region: str):
     """The environment, or ``None`` when nothing carries its tag.
 
@@ -305,7 +345,8 @@ async def read_environment(env_id: str, region: str):
     instances = await aws_service._to_thread(_describe_sync, region, _env_filter(env_id))
     if not instances:
         return None
-    return _environment(env_id, instances, region)
+    sizes = await aws_service._to_thread(_volume_sizes_sync, region, _env_filter(env_id))
+    return _environment(env_id, instances, region, sizes)
 
 
 async def list_environments(region: str) -> list:
@@ -319,7 +360,11 @@ async def list_environments(region: str) -> list:
         env_id = tags.get(env.TAG_ENVIRONMENT) or ""
         if env_id:
             grouped.setdefault(env_id, []).append(inst)
-    return [_environment(eid, rows, region) for eid, rows in sorted(grouped.items())]
+    sizes = await aws_service._to_thread(
+        _volume_sizes_sync, region,
+        [{"Name": f"tag:{env.TAG_MANAGED_BY}", "Values": [env.MANAGED_BY]}])
+    return [_environment(eid, rows, region, sizes)
+            for eid, rows in sorted(grouped.items())]
 
 
 # ── the network, read back ───────────────────────────────────────────────────

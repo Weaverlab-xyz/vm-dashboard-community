@@ -63,6 +63,15 @@
           <option :value="p.name" x-text="p.label"></option>
         </template>
       </select>
+      <!-- The POV's read-only view of its cloud provider. A link from here rather than a
+           nav entry: the nav already overflows at 1280px with every integration on, and
+           this is a secondary view that only exists when a cloud is selected — which the
+           nav has no way to know. -->
+      <a x-show="cloudPlatform" x-cloak href="/pov/cloud"
+         :title="'What this instance has running on ' + cloudPlatform.toUpperCase() + ', including orphans'"
+         class="px-3 py-2 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">
+        Cloud
+      </a>
       <!-- Writes what the platform says back onto the rows. The table above already
            prefers this load's live read for display, so this is for the half a live read
            cannot do: persisting the runstate for everything else that reads these rows,
@@ -789,6 +798,7 @@ function povPage() {
     notice: '',
     notConfigured: false,
     platform: '',
+    cloudPlatform: '',
     platforms: [],
     managed: [],
     archive: [],
@@ -958,6 +968,7 @@ function povPage() {
         if (!res.ok) { this.error = 'Could not read the lab platform registry.'; this.loading = false; return; }
         const data = await res.json();
         this.platforms = data.platforms || [];
+        this.cloudPlatform = data.selected_cloud || '';
         this.platform = data.default || (this.platforms[0] || {}).name || '';
       } catch (e) {
         this.error = 'Could not reach the dashboard API.';

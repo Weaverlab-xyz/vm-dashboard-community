@@ -1102,6 +1102,13 @@ try:
     from .api import pov_templates as pov_templates_api  # noqa: E402
     app.include_router(pov_templates_api.router,
                        dependencies=[_feature_gate("pov_environments_enabled")])
+    # The POV's read-only view of its cloud provider. Same gate, and its own router
+    # rather than more of api/pov: it answers about the CLOUD rather than about a POV,
+    # including environments no POV row remembers, which is a different question from
+    # every other route under that prefix.
+    from .api import pov_cloud as pov_cloud_api  # noqa: E402
+    app.include_router(pov_cloud_api.router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
     # POV accessors: a prospect's ephemeral login into one POV.
     #
     # Three mounts and not one, because the auth models are three different things and
@@ -1512,6 +1519,24 @@ async def pov_access_page(request: Request):
     """
     return templates.TemplateResponse("pov/access.html", {"request": request})
 
+
+# A THIRD route declared before /pov/{env_id}, same reason as the two above: "cloud" is a
+# literal segment and the parameterised route would capture it.
+#
+# Its own POV-owned page rather than re-opening /aws on a POV instance. The demo cloud
+# consoles stay 404 here because their deploys resolve the GLOBAL BeyondTrust tenant
+# singletons; this one shows and never creates.
+@app.get("/pov/cloud", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("pov_environments_enabled")])
+async def pov_cloud_page(request: Request):
+    """What this POV instance has running on its cloud provider, and what is orphaned.
+
+    Read-only by construction: there is no deploy control here and no endpoint behind one.
+    The reason to render it at all is the orphan sweep — `pov_reconcile` can tell you a
+    POV's environment has gone, and cannot tell you the cloud is holding one no row
+    remembers, which is the direction cost leaks in.
+    """
+    return templates.TemplateResponse("pov/cloud.html", {"request": request})
 
 # DECLARED AFTER /pov/templates, AND THAT IS LOAD-BEARING. Starlette matches routes in
 # declaration order, so a `{env_id}` route declared above the literal one would capture

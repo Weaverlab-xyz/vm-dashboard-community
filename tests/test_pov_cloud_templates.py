@@ -344,7 +344,9 @@ def test_a_template_of_nothing_but_a_broker_is_refused_at_build():
     """It would build an environment with a broker and nothing to broker for."""
     import asyncio
     db = _session()
-    row = svc.create(db, cloud=_CLOUD, name="brokeronly",
+    # A region on the template, so the refusal is reached without `default_region()`
+    # asking config_service for one — this session holds the template tables only.
+    row = svc.create(db, cloud=_CLOUD, name="brokeronly", region="us-east-2",
                      vms=[_vm(name="broker", role="broker")])
     original = pov_cloud_env.load_template
     pov_cloud_env.load_template = lambda tid, cloud: (row, svc.vms_of(db, row.id))
@@ -382,6 +384,91 @@ def test_rebuilding_the_broker_is_scoped_to_one_environment():
     body = src.split("def _remove_vms_sync(", 1)[1].split("\nasync def ", 1)[0]
     assert "_env_filter(env_id)" in body, "the terminate is not scoped to the environment"
     assert "TAG_NAME" in body, "the terminate is not scoped to the VM name"
+
+# ── the footprint, and the orphan question the page exists for ───────────────
+
+def _env(env_id, vms):
+    return {"id": env_id, "vm_count": len(vms), "runstate": "running",
+            "region": "us-east-2", "vms": vms}
+
+
+def _cvm(runstate="running", disk=30, itype="t3.medium"):
+    return {"id": "i-1", "name": "x", "os_family": "linux", "runstate": runstate,
+            "private_ip": "10.20.0.5", "instance_type": itype, "disk_gb": disk,
+            "published_services": []}
+
+
+def test_the_footprint_counts_stopped_vms_and_their_disks():
+    """A suspended POV is not a free POV. Counting only running VMs would let the page
+    imply an environment costs nothing overnight, which is the single most expensive
+    misunderstanding this feature can create."""
+    from web_dashboard.services import pov_cloud_cost as cost
+    out = cost.footprint([_env("povenv-a", [_cvm(), _cvm("stopped"), _cvm("stopped")])])
+    assert out["vms"] == 3
+    assert out["vms_running"] == 1
+    assert out["disk_gb"] == 90, "stopped VMs' disks still bill and must still be counted"
+
+
+def test_the_footprint_lists_the_shapes_so_an_oversized_template_is_visible():
+    from web_dashboard.services import pov_cloud_cost as cost
+    out = cost.footprint([_env("povenv-a", [_cvm(itype="m5.4xlarge"), _cvm()])])
+    assert out["instance_types"] == ["m5.4xlarge", "t3.medium"]
+
+
+def test_an_estimate_is_refused_rather_than_guessed_when_there_is_no_price():
+    """A hardcoded price table goes stale silently and reports a number somebody plans
+    around. No answer, with the reason, is the smaller lie."""
+    from web_dashboard.services import pov_cloud_cost as cost
+    out = cost.estimate([_env("povenv-a", [_cvm()])], "moon-base-1")
+    assert out["available"] is False
+    assert "moon-base-1" in out["reason"]
+
+
+def test_the_overview_counts_orphans_in_the_footprint():
+    """An orphan costs exactly what a tracked POV costs. A total that excluded it would
+    understate the bill by the part nobody is watching — which is the part this page was
+    added to surface."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "pov_cloud.py"),
+               encoding="utf-8").read()
+    body = src.split("async def overview(", 1)[1]
+    assert "footprint(known + orphans)" in body, \
+        "the footprint excludes orphans, so the page understates what is billing"
+    assert "estimate(known + orphans" in body
+
+
+def test_a_destroyed_pov_row_does_not_hide_an_orphan():
+    """If the teardown left something behind, the row says `destroyed` and the cloud says
+    otherwise. Matching against destroyed rows would file that as a tracked environment —
+    exactly the case where somebody needs to be told."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "pov_cloud.py"),
+               encoding="utf-8").read()
+    body = src.split("async def overview(", 1)[1]
+    assert "STATUS_DESTROYED" in body, \
+        "the row lookup does not exclude destroyed POVs"
+
+
+def test_the_cloud_page_creates_nothing():
+    """A POV instance may hold cloud credentials now. The reason /aws stays 404 there is
+    that its deploys resolve the global BeyondTrust tenant, and a deploy control on this
+    page would reopen exactly that hole."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "pov_cloud.py"),
+               encoding="utf-8").read()
+    for verb in ("@router.post", "@router.delete", "@router.put", "@router.patch"):
+        assert verb not in src, f"the POV cloud view exposes {verb}"
+    page = open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "cloud.html"),
+                encoding="utf-8").read()
+    for banned in ("method: 'POST'", 'method: "POST"', "method: 'DELETE'"):
+        assert banned not in page, f"the POV cloud page issues a {banned}"
+
+
+def test_the_cloud_page_sends_its_bearer_token():
+    """The app sets no cookie and the JWT lives in localStorage, so a bare fetch() is an
+    ANONYMOUS request. The whole POV page was 401'd for six calls once, for this."""
+    page = open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "cloud.html"),
+                encoding="utf-8").read()
+    assert "Authorization" in page and "Bearer" in page
+    assert page.count("await fetch(") == 1, \
+        "more than one raw fetch on the page — one of them is not going through apiFetch"
 
 
 if __name__ == "__main__":
