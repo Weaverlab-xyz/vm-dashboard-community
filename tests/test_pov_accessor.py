@@ -102,7 +102,8 @@ try:
     from fastapi.testclient import TestClient
     from web_dashboard.database import (PovAccessor, PovEnvironment, SessionLocal, User,
                                         get_password_hash, init_db)
-    from web_dashboard.services import config_service, pov_accessor_service
+    from web_dashboard.services import (config_service, pov_accessor_service,
+                                        pov_share)
 except Exception as exc:  # pragma: no cover — app deps missing
     try:
         import pytest
@@ -520,16 +521,63 @@ def test_the_sweep_rides_the_reconcile_pass_outside_its_platform_loop():
         "platform is unconfigured"
 
 
-def test_the_password_is_returned_once_and_never_served_again():
+def test_the_login_password_is_returned_once_and_never_served_again():
+    """Two different secrets live near each other here, and only one is re-readable.
+
+    The accessor's LOGIN password is minted, handed over once and never stored in readable
+    form — an accessor that lost it is replaced. The LAB LINK's password is a different
+    thing entirely: `pov_share` stores it deliberately, because an SE reads it to a
+    customer days later, and the accessor is that customer. So a reveal route existing is
+    correct; a reveal route for the LOGIN password would not be.
+    """
     api = os.path.join(_API, "pov_accessor.py")
-    for route in ("list_accessors", "revoke_accessor"):
+    for route in ("list_accessors", "revoke_accessor", "accessor_self"):
         assert "password" not in _code(api, route), f"{route} can serve a password"
-    # Exactly one route may, and it is the one that created it.
+    # Exactly one route hands back a login password, and it is the one that created it.
     assert "password" in _code(api, "create_accessor")
-    assert "reveal" not in _code(api), \
-        "there is a reveal endpoint for an accessor password"
     assert "password" not in _code(_SERVICE, "describe_one"), \
         "the accessor projection carries a password"
+    # The one reveal route there is reads pov_share's stored link password, and nothing
+    # in the accessor service can reach a login password to serve.
+    reveal = _code(_SERVICE, "reveal_share_password")
+    assert "pov_share.reveal_password" in reveal
+    assert "hashed_password" not in reveal and "get_password_hash" not in reveal
+
+
+def test_revealing_the_lab_link_password_is_audited_like_the_operator_s_own():
+    """It is a second door onto a live credential, so "who has this link's password" has
+    to stay answerable — the reason api/pov.reveal_share_password is a POST and audited."""
+    reveal = _code(_SERVICE, "reveal_share_password")
+    assert "log_audit" in reveal, "an accessor can read the link password unaudited"
+    assert "pov_share_password_revealed" in reveal, \
+        "the audit action does not match the operator-side reveal, so the two cannot be " \
+        "read as one record"
+    src_api = _read(os.path.join(_API, "pov_accessor.py"))
+    assert '@self_router.post("/self/share/reveal")' in src_api, \
+        "the reveal is not a POST; a GET lands in history and is prefetchable"
+
+    # Behavioural, because the source check above passed while the function raised a
+    # NameError on every call — a reveal route that 500s is not an audited one.
+    from web_dashboard.database import AuditLog
+    s = _setup()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == s["env_id"]).first()
+    env.share_url = "https://lab.example/portal/xyz"
+    db.commit()
+    db.close()
+    config_service.set(pov_share.password_config_key(s["env_id"]), "L1nkPassword")
+
+    headers, data = _mint()
+    r = s["client"].post("/api/pov/accessor/self/share/reveal", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["password"] == "L1nkPassword"
+
+    db = SessionLocal()
+    entry = (db.query(AuditLog)
+               .filter(AuditLog.action == "pov_share_password_revealed",
+                       AuditLog.username == data["accessor"]["username"]).first())
+    db.close()
+    assert entry is not None, "the accessor read the link password with no audit entry"
 
 
 # ── routing, mounting and the page ───────────────────────────────────────────
@@ -590,6 +638,181 @@ def test_the_access_tab_exists_on_the_pov_page():
     block = src.split("tabs: [", 1)[1].split("],", 1)[0]
     assert "'access'" in block, "the POV page has no Access tab"
     assert "mintAccessor" in src and "revokeAccessor" in src
+
+
+# ── slice 3: what the accessor may do ────────────────────────────────────────
+
+def test_no_accessor_write_route_takes_an_environment_id():
+    """The property that makes "could they write to somebody else's POV?" unanswerable
+    rather than merely guarded. Every route under /self resolves the POV from the session,
+    so there is no ownership check that a later edit could forget."""
+    tree = ast.parse(_read(os.path.join(_API, "pov_accessor.py")))
+    checked = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        decorators = ast.unparse(ast.Module(body=[], type_ignores=[])) if False else \
+            " ".join(ast.unparse(d) for d in node.decorator_list)
+        if "self_router" not in decorators:
+            continue
+        checked += 1
+        args = [a.arg for a in node.args.args]
+        assert "env_id" not in args, f"{node.name} takes an environment id: {args}"
+        # And it gets its POV from one of the two session-resolving helpers, both of
+        # which read `accessor_env_id` and take no id from the caller.
+        body = ast.unparse(node)
+        assert any(h in body for h in ("_accessor_env", "env_for_writes", "self_view")), \
+            f"{node.name} resolves its POV some other way"
+    assert checked >= 4, f"only {checked} accessor routes were checked"
+
+
+def test_the_write_routes_needed_no_widening_of_the_allowlist():
+    """The allowlisted prefix is /self, and everything under it is env-from-session by
+    construction. A write placed anywhere else would have had to widen that list — which is
+    exactly the moment somebody should stop and think."""
+    block = _read(_AUTH).split("_ACCESSOR_ALLOWED_PREFIXES = (", 1)[1].split(")", 1)[0]
+    assert len([ln for ln in block.splitlines() if '"' in ln]) == 2, \
+        f"the accessor allowlist grew for slice 3: {block}"
+    assert "/api/pov/accessor/self" in block
+
+
+def test_an_accessor_can_tick_a_card_and_it_is_recorded_as_theirs():
+    s = _setup()
+    headers, _ = _mint()
+    card = "pov-security-who-has-access"
+    r = s["client"].post(f"/api/pov/accessor/self/use-cases/{card}",
+                         json={"state": "done"}, headers=headers)
+    assert r.status_code == 200, r.text
+    progress = r.json()["progress"]
+    assert progress["state"] == "done"
+    assert progress["by_kind"] == "accessor", \
+        "the customer's tick is indistinguishable from the SE's"
+    # And the SE sees it, marked as theirs.
+    se = s["client"].get(f"/api/pov/managed/{s['env_id']}/use-cases", headers=s["se"])
+    seen = [c for g in se.json()["groups"] for c in g["use_cases"] if c["id"] == card][0]
+    assert seen["progress"]["by_kind"] == "accessor"
+
+    # Un-ticking is a toggle, and doing it twice is not an error.
+    for expected in (True, False):
+        d = s["client"].delete(f"/api/pov/accessor/self/use-cases/{card}", headers=headers)
+        assert d.status_code == 200 and d.json()["cleared"] is expected
+
+
+def test_an_accessor_cannot_write_an_unknown_card():
+    s = _setup()
+    headers, _ = _mint()
+    r = s["client"].post("/api/pov/accessor/self/use-cases/not-a-card",
+                         json={"state": "done"}, headers=headers)
+    assert r.status_code == 400
+    # A demo card id is not a back door either — those name pages a POV cannot reach.
+    r = s["client"].post("/api/pov/accessor/self/use-cases/cloudops-three-layers",
+                         json={"state": "done"}, headers=headers)
+    assert r.status_code == 400
+
+
+def test_a_note_does_not_silently_mark_a_card_covered():
+    """A comment is not a verdict. Defaulting one would put a claim in the customer's mouth
+    because they typed in the box under it."""
+    s = _setup()
+    headers, _ = _mint()
+    card = "pov-security-teardown-proof"
+    r = s["client"].post(f"/api/pov/accessor/self/use-cases/{card}",
+                         json={"state": "", "note": "could not get to this"},
+                         headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["progress"]["state"] == "", "a note marked the card"
+    assert r.json()["progress"]["note"] == "could not get to this"
+    # And it counts as neither done nor skipped.
+    before = r.json()["summary"]
+    assert before["done"] == 0 and before["skipped"] == 0
+
+    src = _read(_ACCESS_PAGE)
+    body = src.split("async saveNote(", 1)[1].split("\n        },", 1)[0]
+    assert "|| 'done'" not in body, "the page defaults a note-only save to done"
+
+
+def test_an_operator_tick_does_not_erase_the_customers_note():
+    """THE data-loss regression. Two people write these rows; the SE's tick button sends a
+    state and no note, and a note written unconditionally would wipe the one piece of
+    evidence in this feature that cannot be reconstructed."""
+    s = _setup()
+    headers, _ = _mint()
+    card = "pov-cloudops-reap"
+    s["client"].post(f"/api/pov/accessor/self/use-cases/{card}",
+                     json={"state": "", "note": "this is what sold it for us"},
+                     headers=headers)
+
+    se = s["client"].post(f"/api/pov/managed/{s['env_id']}/use-cases/{card}",
+                          json={"state": "done"}, headers=s["se"])
+    assert se.status_code == 200, se.text
+    assert se.json()["progress"]["note"] == "this is what sold it for us", \
+        "the operator's tick erased the customer's note"
+    assert se.json()["progress"]["state"] == "done"
+
+    # And "" still clears deliberately.
+    cleared = s["client"].post(f"/api/pov/managed/{s['env_id']}/use-cases/{card}",
+                               json={"state": "done", "note": ""}, headers=s["se"])
+    assert cleared.json()["progress"]["note"] == ""
+
+
+def test_the_accessor_sees_the_lab_link_but_not_its_internal_id():
+    s = _setup()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == s["env_id"]).first()
+    env.share_url = "https://lab.example/portal/abc"
+    env.share_id = "publish-set-99"
+    db.commit()
+    db.close()
+
+    headers, _ = _mint()
+    body = s["client"].get("/api/pov/accessor/self", headers=headers).json()
+    assert body["share"]["url"] == "https://lab.example/portal/abc"
+    assert "publish-set-99" not in str(body), \
+        "the accessor is served the publish set's id, which is an id in the lab account"
+    assert "password" not in body["share"], "the page ships the link password with the HTML"
+
+
+def test_the_wired_view_names_kinds_of_access_never_artifact_ids():
+    """Built FOR this audience rather than by subtracting from _serialize: those per-VM ids
+    live inside a CUSTOMER'S appliance and are meaningful only to teardown."""
+    s = _setup()
+    db = SessionLocal()
+    from web_dashboard.database import PovEnvironmentVM
+    db.add(PovEnvironmentVM(environment_id=s["env_id"], platform_vm_id="vm-9",
+                            name="win-1", os_family="windows", private_ip="10.9.9.9",
+                            pra_jump_id="JUMP-SECRET-ID",
+                            ps_managed_account_id="ACCT-SECRET-ID",
+                            entitle_integration_id="INT-SECRET-ID",
+                            wiring_error="an operator-facing failure"))
+    db.commit()
+    db.close()
+
+    headers, _ = _mint()
+    body = s["client"].get("/api/pov/accessor/self", headers=headers).json()
+    vm = [v for v in body["wired"] if v["name"] == "win-1"][0]
+    assert vm["brokered_session"] and vm["vaulted_credential"] and vm["requestable_access"]
+    blob = str(body)
+    for leaked in ("JUMP-SECRET-ID", "ACCT-SECRET-ID", "INT-SECRET-ID",
+                   "an operator-facing failure"):
+        assert leaked not in blob, f"the accessor view leaks {leaked!r}"
+
+
+def test_the_accessor_page_renders_the_note_as_text_not_html():
+    """It is prose typed by somebody outside the account, and it is rendered back on the
+    operator's page."""
+    for path in (_ACCESS_PAGE, os.path.join(_TPL, "pov", "detail.html")):
+        src = _markup(path)
+        assert "x-html" not in src, f"{os.path.basename(path)} uses x-html"
+    detail = _markup(os.path.join(_TPL, "pov", "detail.html"))
+    assert 'x-text="c.progress.note"' in detail, \
+        "the operator's page does not show the customer's note"
+
+
+def test_the_accessor_page_still_offers_no_link_into_the_dashboard():
+    """Every card target on the operator's page is a screen an accessor is refused on."""
+    src = _markup(_ACCESS_PAGE)
+    assert not re.search(r'<a[^>]*:href="c\.target"', src)
+    assert 'href="/pov' not in src and 'href="/api' not in src
 
 
 if __name__ == "__main__":

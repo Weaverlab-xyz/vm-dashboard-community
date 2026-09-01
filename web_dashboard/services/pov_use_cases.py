@@ -46,7 +46,14 @@ class UseCaseError(Exception):
 # What a progress row may say. `skipped` is a real answer rather than an absence: "we ran
 # it and it did not land" and "we never got to it" are different things to take into a
 # renewal conversation, and only one of them is recoverable by running the demo.
-VALID_STATES = ("done", "skipped")
+#
+# The empty string is the third, and it arrived with the customer's notes: somebody typing
+# "couldn't get this working" on a card they have not marked is exactly the feedback this
+# feature exists to capture, and making them claim they covered it first would be a lie the
+# UI put in their mouth. So a row may hold a comment and no verdict. `_summarize` counts
+# `done` and `skipped` by name, so such a row is neither, which is the truth.
+STATE_NONE = ""
+VALID_STATES = ("done", "skipped", STATE_NONE)
 
 # Who ticked it. The SE today; the prospect once the accessor page lands. Recorded on every
 # write because a checklist with no author is not evidence of anything.
@@ -169,7 +176,7 @@ def summary_for(db: Session, env: PovEnvironment, wireup: dict | None = None) ->
 # ── writes ───────────────────────────────────────────────────────────────────
 
 def set_state(db: Session, env: PovEnvironment, card_id: str, *,
-              state: str = "done", note: str = "", by: str = "",
+              state: str = "done", note: str | None = None, by: str = "",
               by_kind: str = KIND_SE) -> dict:
     """Tick a card off (or mark it skipped). Idempotent, last writer recorded.
 
@@ -177,6 +184,18 @@ def set_state(db: Session, env: PovEnvironment, card_id: str, *,
     a progress table that accepts any string a client sends becomes a free-text store
     nobody can render, and these rows deliberately outlive registry edits — so the mistake
     would outlive it too.
+
+    ``note`` has three values and they are three different intentions:
+
+        None   leave whatever note is there alone   (the default)
+        ""     clear it
+        text   replace it
+
+    That distinction is load-bearing now that two people write these rows. The SE's tick
+    button sends a state and no note; the prospect's note is on the same row. With ``note``
+    defaulting to ``""`` and written unconditionally, an SE ticking a card the customer had
+    just commented on would silently erase the comment — the one piece of evidence in this
+    feature that cannot be reconstructed.
     """
     persona_key, card = personas.find_pov_card(card_id)
     if card is None:
@@ -200,7 +219,8 @@ def set_state(db: Session, env: PovEnvironment, card_id: str, *,
     # correction can happen.
     row.persona = persona_key
     row.state = state
-    row.note = ((note or "").strip()[:NOTE_MAX]) or None
+    if note is not None:
+        row.note = (note.strip()[:NOTE_MAX]) or None
     row.checked_by = (by or "")[:100] or None
     row.checked_by_kind = by_kind
     row.checked_at = _now()

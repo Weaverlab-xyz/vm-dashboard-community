@@ -745,6 +745,25 @@ password is **replaced**, which is one click, leaves an audit line, and ends wit
 credential exactly one person ever saw. Minting and revoking are both audited, so "who
 could log in to this POV" is answerable afterwards.
 
+### What they can do with it
+
+They land on their own page — their POV's name, the lab link, what is set up on each
+machine, and the checklist.
+
+**They tick cards off themselves**, and every tick is recorded as theirs, so your Use cases
+tab distinguishes "we showed them" from "they did it". **They can leave a note on any
+card**, and those come back to you on the same tab, marked as the customer's. A note is not
+a verdict: somebody writing "couldn't get this working" on a card they have not marked
+leaves exactly that, and the card stays unmarked.
+
+Your ticks and theirs live on the same row, and neither erases the other's note.
+
+They also get the lab link and, on request, its password — revealed one press at a time and
+audited, the same as when you reveal it. What they do **not** get is anything that is an
+identifier inside your appliances: no jump item ids, no managed account ids, no integration
+ids, no tenant names, and none of the wiring errors written for you. That list is a
+projection built for them, not your view with fields removed.
+
 ### Where they come from
 
 Two ways, and the Access tab shows which for every row.

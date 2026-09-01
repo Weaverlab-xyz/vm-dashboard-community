@@ -25,9 +25,14 @@
   from the session's own binding, so there is no id in the URL to change and no ownership
   check for a later edit to forget.
 
-  Read-only in this slice: ticking a card, leaving a note, the share link and the list of
-  what was wired all land next. The identity had to exist and be provable first, and what
-  proves it is a prospect logging in and seeing their own evaluation.
+  Everything here writes through /api/pov/accessor/self/*, and not one of those routes
+  takes an environment id: they resolve the POV from the session's own binding. "Could this
+  person tick a card on somebody else's POV?" is not a check that could be forgotten — there
+  is no parameter to forget to check.
+
+  The cards carry no links. Every target on the SE's version of this checklist is a
+  dashboard screen an accessor is refused on, so an anchor here would be a promise the
+  server will not keep.
 #}
 <body class="bg-gray-50 min-h-screen">
   <div x-data="accessorPage()" x-init="init()" class="max-w-5xl mx-auto px-4 py-10">
@@ -79,6 +84,78 @@
           </p>
         </div>
 
+        <!-- The way in. Shown as text with a copy button rather than as an anchor, the
+             same as on the SE's page: this opens a session onto the lab, and a stray
+             middle-click is not how anybody should arrive there. -->
+        <div x-show="share.url" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Your environment</h2>
+          <div class="mt-3 flex items-center gap-2">
+            <code class="text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 flex-1 truncate"
+                  x-text="share.url"></code>
+            <button @click="copy(share.url)"
+                    class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Copy</button>
+          </div>
+          <div class="mt-2 flex items-center gap-2" x-show="share.has_password">
+            <!-- Revealed on request, one press, never shipped with the page: a secret that
+                 arrives with the HTML is a secret in every cache and every screenshot. -->
+            <button x-show="!sharePassword" @click="revealShare()" :disabled="revealing"
+                    class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+                    x-text="revealing ? 'Revealing…' : 'Show password'"></button>
+            <template x-if="sharePassword">
+              <div class="flex items-center gap-2 flex-1">
+                <code class="text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 flex-1 truncate"
+                      x-text="sharePassword"></code>
+                <button @click="copy(sharePassword)"
+                        class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Copy</button>
+              </div>
+            </template>
+          </div>
+          <p class="text-xs mt-2" :class="share.expired ? 'text-amber-700' : 'text-gray-400'">
+            <span x-show="share.expired">This link has expired — ask your contact to re-share it.</span>
+            <span x-show="!share.expired && share.expires_at">
+              The link works until <span x-text="share.expires_at"></span>.
+            </span>
+          </p>
+        </div>
+
+        <!-- What is set up in there. Kinds of access, never the identifiers of them: the
+             ids belong to objects in an appliance the customer does not administer. -->
+        <div x-show="wired.length" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide px-5 pt-5">What is set up</h2>
+          <div class="overflow-x-auto mt-3">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                <tr>
+                  <th class="text-left px-5 py-2 font-medium">Machine</th>
+                  <th class="text-left px-4 py-2 font-medium">Address</th>
+                  <th class="text-left px-4 py-2 font-medium">Access</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                <template x-for="vm in wired" :key="vm.name">
+                  <tr>
+                    <td class="px-5 py-2 text-gray-900">
+                      <span x-text="vm.name"></span>
+                      <span x-show="vm.os_family" class="ml-2 text-xs text-gray-400" x-text="vm.os_family"></span>
+                    </td>
+                    <td class="px-4 py-2 text-gray-600" x-text="vm.private_ip || '—'"></td>
+                    <td class="px-4 py-2">
+                      <span x-show="vm.brokered_session"
+                            class="text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-800 mr-1">brokered session</span>
+                      <span x-show="vm.vaulted_credential"
+                            class="text-[11px] px-1.5 py-0.5 rounded bg-green-50 text-green-800 mr-1">vaulted credential</span>
+                      <span x-show="vm.requestable_access"
+                            class="text-[11px] px-1.5 py-0.5 rounded bg-violet-50 text-violet-800">access on request</span>
+                      <span x-show="!vm.brokered_session && !vm.vaulted_credential && !vm.requestable_access"
+                            class="text-xs text-gray-400">—</span>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <div>
           <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">What to try</h2>
           <p class="text-sm text-gray-500 mt-1">
@@ -102,13 +179,37 @@
                     <span class="text-xs text-gray-400 shrink-0" x-text="c.minutes + ' min'"></span>
                   </div>
                   <p class="text-sm text-gray-600 mt-2" x-text="c.summary"></p>
-                  <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between gap-2">
-                    <span class="text-xs"
-                          :class="c.progress.state === 'done' ? 'text-green-700' : 'text-gray-400'"
-                          x-text="c.progress.state === 'done' ? '✓ Covered'
-                                  : (c.progress.state === 'skipped' ? 'Skipped' : 'Not yet')"></span>
-                    <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
-                       class="text-xs text-gray-400 hover:text-blue-600">Guide →</a>
+                  <div class="mt-3 pt-3 border-t border-gray-50 space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="flex items-center gap-2">
+                        <button @click="mark(c, c.progress.state === 'done' ? '' : 'done')"
+                                :disabled="busy === c.id"
+                                class="text-xs px-2 py-1 rounded border disabled:opacity-50"
+                                :class="c.progress.state === 'done'
+                                        ? 'border-green-300 bg-green-50 text-green-800'
+                                        : 'border-gray-300 text-gray-600 hover:bg-gray-50'"
+                                x-text="c.progress.state === 'done' ? '✓ Covered' : 'Mark covered'"></button>
+                        <button @click="mark(c, c.progress.state === 'skipped' ? '' : 'skipped')"
+                                :disabled="busy === c.id"
+                                class="text-xs px-2 py-1 rounded border disabled:opacity-50"
+                                :class="c.progress.state === 'skipped'
+                                        ? 'border-gray-400 bg-gray-100 text-gray-700'
+                                        : 'border-gray-200 text-gray-400 hover:bg-gray-50'">Not for us</button>
+                      </div>
+                      <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                         class="text-xs text-gray-400 hover:text-blue-600">Guide →</a>
+                    </div>
+
+                    <!-- Saved on blur rather than behind a Save button: a comment somebody
+                         typed and navigated away from is the one this feature most wants
+                         to keep. -->
+                    <textarea x-model="c.progress.note" @blur="saveNote(c)" rows="2"
+                              placeholder="How did this go? Your notes come back to your contact."
+                              class="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs text-gray-700 focus:border-gray-400 focus:outline-none"></textarea>
+
+                    <p x-show="c.progress.by_kind === 'se'" class="text-xs text-gray-400">
+                      Marked by your contact.
+                    </p>
                   </div>
                 </div>
               </template>
@@ -129,6 +230,12 @@
         accessor: {},
         groups: [],
         summary: { done: 0, skipped: 0, total: 0, cards: 0 },
+        share: {},
+        wired: [],
+        sharePassword: '',
+        revealing: false,
+        busy: '',
+        saveError: '',
 
         async init() {
           const token = localStorage.getItem('vm_cli_token');
@@ -146,6 +253,8 @@
               this.accessor = data.accessor || {};
               this.groups = (data.use_cases || {}).groups || [];
               this.summary = (data.use_cases || {}).summary || this.summary;
+              this.share = data.share || {};
+              this.wired = data.wired || [];
             }
           } catch (e) {
             this.error = 'Could not load your evaluation.';
@@ -158,6 +267,74 @@
         // read as a list of things that do not work.
         inScope(g) {
           return (g.use_cases || []).filter(c => c.state !== 'out_of_scope');
+        },
+
+        async post(path, body) {
+          const token = localStorage.getItem('vm_cli_token');
+          const res = await fetch(path, {
+            method: body === undefined ? 'DELETE' : 'POST',
+            headers: {
+              'Authorization': 'Bearer ' + token,
+              ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          });
+          if (res.status === 401) { this.signOut(); return null; }
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `${res.status}`);
+          return data;
+        },
+
+        // An empty `state` un-ticks. One handler for both buttons, so a card can never end
+        // up both covered and skipped.
+        async mark(card, state) {
+          this.busy = card.id;
+          const url = `/api/pov/accessor/self/use-cases/${encodeURIComponent(card.id)}`;
+          try {
+            const data = state
+              ? await this.post(url, { state: state })
+              : await this.post(url);
+            if (!data) return;
+            card.progress = data.progress
+              || { state: '', note: card.progress.note, by: '', by_kind: '', at: '' };
+            this.summary = data.summary || this.summary;
+          } catch (e) {
+            this.saveError = 'Could not save that.';
+          } finally {
+            this.busy = '';
+          }
+        },
+
+        // Sent without a state, so a note never changes whether the card is covered — and
+        // the server leaves the note alone when the field is absent, which is what stops
+        // the two writers on this row from overwriting each other.
+        async saveNote(card) {
+          try {
+            const data = await this.post(
+              `/api/pov/accessor/self/use-cases/${encodeURIComponent(card.id)}`,
+              // No state of its own: a comment is not a verdict, and defaulting one here
+              // would mark a card covered because somebody typed in the box under it.
+              { state: card.progress.state || '', note: card.progress.note || '' });
+            if (data) this.summary = data.summary || this.summary;
+          } catch (e) {
+            this.saveError = 'Could not save that note.';
+          }
+        },
+
+        async revealShare() {
+          this.revealing = true;
+          try {
+            const data = await this.post('/api/pov/accessor/self/share/reveal', {});
+            if (data) this.sharePassword = data.password || '';
+          } catch (e) {
+            this.saveError = 'Could not show the password.';
+          } finally {
+            this.revealing = false;
+          }
+        },
+
+        copy(text) {
+          navigator.clipboard && navigator.clipboard.writeText(text);
         },
 
         signOut() {

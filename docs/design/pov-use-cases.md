@@ -252,25 +252,58 @@ Two things have to change before it can be automated, and the first is not optio
 Then: `accessor_integration_id` / `accessor_tf_state` on the POV row, registration on
 demand, and `deregister` in the teardown ahead of the accessor rows themselves.
 
-## Slice 3 — giving the accessor something to do (not built)
+## Slice 3 — the accessor writes
 
-The page itself landed with slice 2, read-only: `GET /pov/access`, **no env id in the URL**
-(the binding decides which POV, so there is no id in a path to try someone else's), and a
-standalone template rather than `base.html` — an accessor must never render the SE nav, and
-inheriting it would make that a CSS question with an `x-show` for an answer.
+Built. `GET /pov/access` takes **no env id in the URL**, and neither does anything under
+`/api/pov/accessor/self/*`: every one of them resolves the POV from
+`current_user.accessor_env_id`. "Could an accessor write to somebody else's POV?" is not
+guarded here — there is no parameter to guard.
 
-What is left is the writing:
+That is also why the write routes needed **no change to the allowlist**. The allowlisted
+prefix is `/self`, and everything under it is env-from-session by construction; a write
+placed anywhere else would have had to widen that list, which is exactly the moment
+somebody should stop and think.
 
-* **Ticking a card**, through the accessor's own path rather than the SE's — the env comes
-  from the session, never a parameter. It writes `checked_by_kind='accessor'`, the column
-  slice 1 shipped unused, so the SE's page can tell who ran what.
-* **A note per card**, surfaced on the SE's Use cases tab. This is what turns a tick into
-  evaluation evidence rather than a box.
-* **The lab share link and its password**, reusing `pov_share.reveal_password` — revealed
-  one row at a time on its own endpoint, never shipped with a list, which is a rule
-  `pov_share.describe` already keeps and that applies here unchanged.
-* **What was wired** — jump item names and hosts, managed account names, integrations.
-  **No credentials, no tenant ids, no terraform state:** a projection written for this
-  page, exactly as `pov_accessor_service.self_view` already is, and never `_serialize`
-  with fields removed. Building it by subtraction is how one of them comes back on the next
-  change to the serializer.
+### A comment is not a verdict
+
+`PovUseCaseProgress.state` gained a third value, the empty string. Somebody typing
+"couldn't get this working" on a card they have not marked is exactly the feedback the
+feature exists to capture, and making them claim they covered it first would be a lie the
+UI put in their mouth. `_summarize` counts `done` and `skipped` by name, so a note-only row
+is neither — which is the truth.
+
+### Two writers on one row
+
+`set_state`'s `note` became tri-state, and this is the sharpest bug the slice could have
+shipped:
+
+```
+None   leave whatever note is there alone   (the default)
+""     clear it
+text   replace it
+```
+
+The SE's tick button sends a state and no note. With `note` defaulting to `""` and written
+unconditionally — which is what slice 1 did, correctly, when only one party wrote these
+rows — an operator ticking a card the customer had just commented on would silently erase
+the comment. That is the one piece of evidence in this feature that cannot be
+reconstructed, and it is a regression test rather than a note here.
+
+Every tick records `checked_by_kind`, the column slice 1 shipped unused, so the operator's
+page can say whose it was. "We showed them" and "they did it themselves" are not the same
+claim to take into a renewal conversation.
+
+### What the accessor may see
+
+Two projections, both written **for** this audience:
+
+| | |
+|---|---|
+| `share_view` | The lab link and its expiry. Drops `share_id` — the publish set's own id, which exists so this dashboard can revoke exactly that one later and means nothing to a customer. No password: revealing it is its own POST, audited under the same action as the operator's own reveal, because it is a second door onto a live credential |
+| `wired_view` | Per VM: what it is, where it is on their own lab network, and **which kinds** of access exist — a brokered session, a vaulted credential, access on request. Never `pra_jump_id`, `ps_managed_system_id`, `entitle_integration_id` or `wiring_error`: those are ids inside a *customer's own* appliance, meaningful only to teardown, and an error message written for an operator |
+
+Naming what goes in, rather than subtracting from `api/pov._serialize`, is the point.
+Subtraction is how one of them comes back on the next edit to the serializer.
+
+The customer's note is rendered back on the operator's page with `x-text`, never `x-html`:
+it is prose typed by somebody outside the account.

@@ -951,7 +951,10 @@ async def set_expiry(env_id: str, payload: ExpiryRequest,
 class UseCaseRequest(BaseModel):
     # `done` by default, so the common case is an empty body.
     state: str = "done"
-    note: str = ""
+    # None means "leave the note alone", which is what an absent field has to mean now that
+    # the customer writes notes on these rows too: an SE pressing Done sends no note, and
+    # treating that as "" would erase what the customer had just written. "" still clears.
+    note: str | None = None
 
 
 def _env_or_404(db: Session, env_id: str) -> PovEnvironment:

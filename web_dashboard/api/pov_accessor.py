@@ -4,17 +4,24 @@
   POST   /api/pov/managed/{id}/accessors        mint one; credentials ONCE (SE)
   DELETE /api/pov/managed/{id}/accessors/{aid}  revoke one                (SE)
   GET    /api/pov/accessor/self                 the accessor's own POV    (accessor)
+  POST   /api/pov/accessor/self/use-cases/{cid}  tick a card / leave a note (accessor)
+  DELETE /api/pov/accessor/self/use-cases/{cid}  un-tick it                (accessor)
+  POST   /api/pov/accessor/self/share/reveal     the lab link's password   (accessor)
 
 Two routers in one module because they are two halves of one feature, and one file is
 where the relationship between them stays visible. Their AUTH is what differs, and sharply:
 
 * the SE routes sit on the POV router's gate and take an environment id in the path, like
   every other ``/api/pov/managed`` route;
-* ``/self`` takes **no environment id at all.** It resolves the POV from
-  ``current_user.accessor_env_id``, so there is no parameter to tamper with and therefore
-  no ownership check for a future edit to forget. It is the only route in
-  ``api/auth._ACCESSOR_ALLOWED_PREFIXES``, and that list is an allowlist precisely so this
-  stays the only one without anybody having to remember.
+* **nothing under ``/self`` takes an environment id at all.** Every one of them resolves
+  the POV from ``current_user.accessor_env_id``, so there is no parameter to tamper with
+  and therefore no ownership check for a future edit to forget. "Could an accessor write to
+  somebody else's POV?" is not guarded here, it is unanswerable.
+
+  That is also why the accessor's WRITE routes needed no change to
+  ``api/auth._ACCESSOR_ALLOWED_PREFIXES``: the allowlisted prefix is ``/self``, and every
+  route under it is env-from-session by construction. A write placed anywhere else would
+  have had to widen that list, which is exactly the moment somebody should stop and think.
 
 Entitle's own calls arrive at ``api/pov_accessor_rest.py`` instead — no session, a shared
 secret, and a different set of things to be careful about.
@@ -26,7 +33,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, User, get_db
-from ..services import pov_accessor_service, pov_env_service
+from ..services import pov_accessor_service, pov_env_service, pov_use_cases
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -126,3 +133,76 @@ async def accessor_self(db: Session = Depends(get_db),
         return pov_accessor_service.self_view(db, current_user)
     except pov_accessor_service.AccessorError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class SelfUseCaseRequest(BaseModel):
+    """The customer's own tick, and what they thought of it.
+
+    ``note`` is None when the field is absent, which means "leave whatever is there alone"
+    — see ``pov_use_cases.set_state``. Two people write these rows now, and a tick that
+    silently erased the other one's comment would destroy the only thing in this feature
+    that cannot be reconstructed.
+    """
+    state: str = "done"
+    note: str | None = None
+
+
+def _accessor_env(db: Session, user: User) -> PovEnvironment:
+    try:
+        return pov_accessor_service.env_for_writes(db, user)
+    except pov_accessor_service.AccessorError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@self_router.post("/self/use-cases/{card_id}")
+async def set_self_use_case(card_id: str, payload: SelfUseCaseRequest,
+                            db: Session = Depends(get_db),
+                            current_user: User = Depends(get_current_user)):
+    """The customer ticks a card off, and optionally says how it went.
+
+    Written with ``by_kind='accessor'`` — the column slice 1 shipped unused — so the SE's
+    page can tell whose tick it was. That distinction is the difference between a checklist
+    and evidence: "we showed them" and "they did it themselves" are not the same claim to
+    take into a renewal conversation.
+    """
+    env = _accessor_env(db, current_user)
+    try:
+        progress = pov_use_cases.set_state(
+            db, env, card_id,
+            state=payload.state, note=payload.note,
+            by=getattr(current_user, "username", "") or "",
+            by_kind=pov_use_cases.KIND_ACCESSOR)
+    except pov_use_cases.UseCaseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"card_id": card_id, "progress": progress,
+            "summary": pov_use_cases.summary_for(db, env)}
+
+
+@self_router.delete("/self/use-cases/{card_id}")
+async def clear_self_use_case(card_id: str, db: Session = Depends(get_db),
+                              current_user: User = Depends(get_current_user)):
+    """Un-tick. Removing a row nobody wrote is success — the button is a toggle."""
+    env = _accessor_env(db, current_user)
+    try:
+        removed = pov_use_cases.clear(db, env, card_id)
+    except pov_use_cases.UseCaseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"card_id": card_id, "cleared": removed,
+            "summary": pov_use_cases.summary_for(db, env)}
+
+
+@self_router.post("/self/share/reveal")
+async def reveal_self_share_password(db: Session = Depends(get_db),
+                                     current_user: User = Depends(get_current_user)):
+    """The lab link's password.
+
+    POST rather than GET, and audited, for the same reasons the SE's own reveal is: a GET
+    lands in referrers and browser history and is prefetchable, and this is the one route
+    on the accessor's side that hands back a live credential.
+    """
+    env = _accessor_env(db, current_user)
+    try:
+        password = pov_accessor_service.reveal_share_password(db, env, current_user)
+    except pov_accessor_service.AccessorError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"password": password}
