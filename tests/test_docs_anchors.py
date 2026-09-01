@@ -72,6 +72,25 @@ def _ids_by_doc():
             for rel, p in _docs()}
 
 
+
+# ``[...](...)`` inside a code span is not a link in either renderer, and a doc that
+# quotes a regex — `[a-z]([-_a-z0-9]*)?` — contains one by accident. Scanning raw text
+# reported that as a link to a file named after the character class, which is a false
+# positive no author can fix except by not documenting the regex.
+_FENCED = re.compile(r"^```.*?^```", re.S | re.M)
+_INLINE_CODE = re.compile(r"`[^`\n]*`")
+
+
+def _strip_code(text: str) -> str:
+    """Markdown with its code spans and fenced blocks removed.
+
+    Deliberately narrow: it drops only what the renderers would show verbatim, so every
+    real link is still checked. The alternative — a smarter link regex — would have to
+    re-implement markdown's escaping rules to know the difference.
+    """
+    return _INLINE_CODE.sub("", _FENCED.sub("", text))
+
+
 def _links():
     """(source, href, target_relpath, fragment) for every intra-repo link.
 
@@ -85,7 +104,7 @@ def _links():
     in the product.
     """
     for rel, p in _docs():
-        for href in _LINK.findall(open(p, encoding="utf-8").read()):
+        for href in _LINK.findall(_strip_code(open(p, encoding="utf-8").read())):
             if href.startswith(("http://", "https://", "mailto:", "/")):
                 continue
             path, _, frag = href.partition("#")

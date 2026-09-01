@@ -41,19 +41,29 @@ def _body(fn: str) -> str:
 
 
 def _code(fn: str) -> str:
-    """A function body with its comments stripped.
+    """A function's executable source: no comments, and no docstring either.
 
-    Needed because this driver's comments NAME the calls it deliberately does not make —
-    "deallocate, never begin_power_off" — and an assertion scanning raw source would read
-    the warning as the bug it warns about, and then pass again on the day somebody
-    actually made it.
+    Parsed and unparsed through `ast` rather than filtered line by line. The first version
+    stripped `#` comments only, and these drivers *document* the calls they deliberately
+    do not make — "stop, not suspend", "user-data, not startup-script" — so three
+    assertions read a docstring's warning as the bug it warns about. A prose-only test is
+    worse than no test: it fails on correct code and goes green the day somebody deletes
+    the comment.
     """
-    kept = []
-    for line in _body(fn).splitlines():
-        bare = line.split("#", 1)[0]
-        if bare.strip():
-            kept.append(bare)
-    return "\n".join(kept)
+    import ast
+    tree = ast.parse(_SRC)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == fn:
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body = body[1:]
+            # Quotes normalised to double, because `ast.unparse` emits single ones and an
+            # assertion written in the source's own style would silently never match.
+            out = "\n".join(ast.unparse(stmt) for stmt in body)
+            return out.replace("'", '"')
+    raise AssertionError(f"no function named {fn} in the module under test")
 
 
 # ── the registry entry ───────────────────────────────────────────────────────
@@ -123,8 +133,10 @@ def test_only_the_broker_receives_custom_data():
     shared `vm_specs` puts the payload only on the broker; this pins that the driver does
     not go looking for it anywhere else."""
     body = _code("_create_vms_sync")
-    assert body.count("user_data") == 1, \
-        "the driver reads user_data more than once — one of them is not the broker's"
+    assert '"broker"' not in body, (
+        "the driver decides for itself which VM is the broker instead of taking the "
+        "payload the shared vm_specs already put on the spec")
+    assert "user_data" in body, "the driver never reads the bootstrap at all"
 
 
 # ── the resource group is the environment ────────────────────────────────────

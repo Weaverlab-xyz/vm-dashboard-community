@@ -84,6 +84,7 @@ RUNSTATE_POLL_S = 10
 _DRIVER_MODULE = {
     "aws": "pov_cloud_aws",
     "azure": "pov_cloud_azure",
+    "gcp": "pov_cloud_gcp",
 }
 
 # The POV name rule, restated. Imported from nowhere on purpose: this module has to be
@@ -290,6 +291,31 @@ def recorded_region(env_id: str, cloud: str) -> str:
         db.close()
     return driver(cloud).default_region()
 
+
+def recorded_project(env_id: str, cloud: str) -> str:
+    """The project a POV was built in, from the row that recorded it. "" if unknown.
+
+    The sibling of :func:`recorded_region`, and it exists for the sharper half of the same
+    reason. A region read from current config aims a teardown at the wrong place; a
+    PROJECT read from current config aims it at somebody else's estate. ``expiry_reaper``
+    states the rule outright — a destroy aimed at the wrong project is the worst version
+    of this bug — which is why this reads the row and the caller falls back to the default
+    only when there is no row to read.
+    """
+    from ..database import PovEnvironment, SessionLocal
+
+    db = SessionLocal()
+    try:
+        row = (db.query(PovEnvironment)
+                 .filter(PovEnvironment.platform == cloud,
+                         PovEnvironment.platform_environment_id == env_id)
+                 .first())
+        return (row.project_id or "") if row is not None else ""
+    except Exception:  # noqa: BLE001 - a read must not die on a bad row
+        logger.warning("could not read the recorded project for %s", env_id, exc_info=True)
+        return ""
+    finally:
+        db.close()
 
 def known_regions(cloud: str) -> list:
     """Regions worth listing environments in: the default, plus any a POV row names.
