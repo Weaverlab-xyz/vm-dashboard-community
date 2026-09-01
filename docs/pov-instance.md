@@ -557,13 +557,25 @@ A cap needs a price source, and each cloud needs its own.
 | **AWS** | Pricing API | `pricing:GetProducts` — an EC2-scoped key does **not** have it. Without it nothing accrues and the page names the missing permission |
 | **Azure** | Retail Prices API | Nothing. It is public and unauthenticated, so a cap works the moment the provider is selected |
 | **GCP** | Cloud Billing Catalog | `cloudbilling.googleapis.com` enabled on the project. No extra IAM role — the catalogue is a public price list |
-| OCI | — | Not wired up yet. The footprint still shows; the cap is unavailable and says so |
+| **OCI** | Public price list | Nothing. One unauthenticated GET returns the whole list |
+
+**Every cloud a POV can be built on can now be priced**, so a spend cap works wherever a
+POV works. Skytap stays unpriced: it bills the lab rather than the VM, and its own idle
+timer is the lever there.
 
 Skytap has no per-VM figure at all — it bills the lab, and its own idle timer is the lever
 there.
 
 A cloud with no price source is never offered a cap. That is deliberate: one that accrued
 a confident zero and never acted would be a worse promise than no cap at all.
+
+**OCI prices OCPUs and memory separately too**, like GCE — so a rate is
+`ocpus × rate + memory_gb × rate`, with the counts coming from the same `parse_shape` that
+sized the instance. Two OCI-specific notes: a **fixed (non-Flex) shape has no estimate**,
+because the list prices those per shape rather than per OCPU; and a **block volume is two
+charges**, capacity plus performance units, so pricing only the first would understate
+every POV's storage by two thirds. The sum comes to the $0.0425 per GB-month Oracle
+publishes for Balanced, which is what a POV boot volume defaults to.
 
 **GCE does not price a machine type.** It prices vCPU and memory separately, so
 `n2-standard-4` is four units of *N2 Instance Core* plus sixteen of *N2 Instance Ram*. The

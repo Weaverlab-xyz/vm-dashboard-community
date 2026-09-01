@@ -554,6 +554,170 @@ def test_the_gcp_reason_names_the_api_to_enable():
         "a permission that does not exist")
 
 
+# ── OCI pricing: real display names, quirks and all ──────────────────────────
+#
+# The fixtures below are copied VERBATIM from the live price list, including its
+# inconsistencies, because those inconsistencies are the whole difficulty. Invented
+# fixtures would have been tidy and would have proved nothing.
+
+def _oci_item(display_name, usd, part="B00000"):
+    return {"partNumber": part, "displayName": display_name,
+            "currencyCodeLocalizations": [
+                {"currencyCode": "GBP", "prices": [
+                    {"model": "PAY_AS_YOU_GO", "value": 99.0}]},
+                {"currencyCode": "USD", "prices": [
+                    {"model": "PAY_AS_YOU_GO", "value": usd}]}]}
+
+
+# Real names. Note "E4  - Memory" carries TWO spaces and "A2 OCPU" carries no dash — both
+# copied from the published list, both of which a naive matcher misses.
+_OCI_REAL = [
+    _oci_item("Compute - Standard - E4 - OCPU", 0.025),
+    _oci_item("Compute - Standard - E4  - Memory", 0.0015),
+    _oci_item("Compute - Standard - E5 - OCPU", 0.03),
+    _oci_item("Compute - Standard - E5 - Memory", 0.002),
+    _oci_item("Compute - Standard - A2 OCPU", 0.014),
+    _oci_item("Compute - Standard - A2 Memory", 0.002),
+    _oci_item("Storage - Block Volume - Storage", 0.0255),
+    _oci_item("Storage - Block Volume - Performance Units", 0.0017),
+    # Decoys, all real entries that must NOT match.
+    _oci_item("Storage - Block Volume - Free 200GB", 0),
+    _oci_item("Compute - Standard - A1 - OCPU", 0),
+    _oci_item("Oracle Compute Cloud@Customer - Compute - Standard - E5", 0.03),
+    _oci_item("Compute - Dense I/O - E4 - OCPU", 0.025),
+    _oci_item("OCI - Compute - GPU - E4", 3.05),
+    _oci_item("Oracle Cloud VMware Solution - BM.Standard.E5.48 - Hourly Commit", 16.66),
+]
+
+
+def test_oci_is_priced_and_needs_no_credentials():
+    """The price list is public and unparameterised — one GET returns all of it, with no
+    pagination and no region dimension."""
+    assert cost.priced("oci") is True
+    body = _code(os.path.join("web_dashboard", "services", "pov_cloud_cost.py"),
+                 "_oci_catalog")
+    assert "httpx.get" in body
+    for banned in ("credential", "_oci_config", "_aws_kwargs", "token", "pageToken"):
+        assert banned not in body.lower(), f"the OCI price lookup reaches for {banned}"
+
+
+def test_the_inconsistent_display_names_are_all_matched():
+    """Two real quirks: "E4  - Memory" has two spaces where E5's has one, and "A2 OCPU"
+    has no dash at all. A matcher written from the tidy example misses both."""
+    index = cost.oci_index(_OCI_REAL)
+    assert index["ocpu"] == {"E4": 0.025, "E5": 0.03, "A2": 0.014}, index["ocpu"]
+    assert index["memory"] == {"E4": 0.0015, "E5": 0.002, "A2": 0.002}, index["memory"]
+
+
+def test_the_near_misses_in_the_list_are_never_matched():
+    """The list carries Dense I/O, GPU, VMware Solution and Cloud@Customer entries for the
+    same families. Matching one would price a POV off an unrelated product."""
+    index = cost.oci_index(_OCI_REAL)
+    assert "GPU" not in index["ocpu"] and "BM" not in index["ocpu"]
+    # Cloud@Customer's E5 must not overwrite the real E5 rate.
+    assert index["ocpu"]["E5"] == 0.03
+
+
+def test_a_zero_price_is_not_read_as_free():
+    """The list carries a "Free 200GB" storage entry and a zero-priced A1 tier. They are
+    allowances, not rates — accruing 0 for a POV that will be billed is the one direction
+    an estimate behind a cap must not err."""
+    index = cost.oci_index(_OCI_REAL)
+    assert "A1" not in index["ocpu"], "the zero-priced A1 tier was taken as a rate"
+    assert cost._oci_usd(_oci_item("x", 0)) is None
+
+
+def test_the_usd_price_is_taken_and_not_the_first_currency():
+    """Every item carries dozens of currency localisations, USD among them rather than
+    first. Taking `prices[0]` would bill a POV in whatever came back at the front."""
+    assert cost._oci_usd(_oci_item("x", 0.025)) == 0.025
+
+
+def test_a_block_volume_is_capacity_plus_performance_units():
+    """Two charges, not one. Pricing only the capacity would understate every POV's
+    storage by two thirds — and the sum is the $0.0425/GB-month Oracle publishes for
+    Balanced, which is how the VPU constant was checked."""
+    index = cost.oci_index(_OCI_REAL)
+    assert round(index["disk_gb_month"], 6) == round(0.0255 + 10 * 0.0017, 6)
+    assert round(index["disk_gb_month"], 4) == 0.0425, "the published Balanced rate"
+    assert cost._OCI_BALANCED_VPUS == 10
+
+
+def test_the_family_comes_from_the_catalogue_not_from_a_pattern():
+    """The first version matched the shape segment against the display-name regex, which
+    happily accepted "VM" — so every shape resolved to its first segment and nothing was
+    ever priced. Only the families the list published exist."""
+    index = cost.oci_index(_OCI_REAL)
+    assert cost._oci_family("VM.Standard.E4.Flex", index) == "E4"
+    assert cost._oci_family("VM.Standard.E5.Flex", index) == "E5"
+    assert cost._oci_family("BM.GPU4.8", index) == "", "a GPU shape was given a family"
+    assert cost._oci_family("VM.Standard2.2", index) == ""
+
+
+def test_a_shape_is_ocpus_times_rate_plus_memory_times_rate():
+    """Like GCE and unlike AWS or Azure, OCI prices OCPUs and memory separately. The
+    counts come from `pov_cloud_oci.parse_shape` — the same function that sized the
+    instance, so an estimate can never be sized differently from the VM."""
+    original = cost._oci_catalog
+    cost._oci_catalog = lambda: cost.oci_index(_OCI_REAL)
+    try:
+        # The Flex default is 2 OCPUs and 16 GB.
+        assert round(cost._oci_instance_hourly("us-ashburn-1", "VM.Standard.E4.Flex",
+                                               "linux"), 6) == round(
+            2 * 0.025 + 16 * 0.0015, 6)
+        assert round(cost._oci_instance_hourly("us-ashburn-1",
+                                               "VM.Standard.E4.Flex:4:32",
+                                               "linux"), 6) == round(
+            4 * 0.025 + 32 * 0.0015, 6)
+        # A fixed shape is priced per shape by the list, which this does not model.
+        assert cost._oci_instance_hourly("us-ashburn-1", "VM.Standard2.2", "linux") is None
+    finally:
+        cost._oci_catalog = original
+
+
+def test_an_oci_environment_prices_compute_and_its_disks():
+    original = cost._oci_catalog
+    cost._oci_catalog = lambda: cost.oci_index(_OCI_REAL)
+    try:
+        running = _rate(_env([_vm("running", "VM.Standard.E4.Flex:4:32", 50)]),
+                        "us-ashburn-1", "oci")
+        stopped = _rate(_env([_vm("stopped", "VM.Standard.E4.Flex:4:32", 50)]),
+                        "us-ashburn-1", "oci")
+    finally:
+        cost._oci_catalog = original
+    disk_hourly = 50 * 0.0425 / cost.HOURS_PER_MONTH
+    assert round(running, 6) == round(4 * 0.025 + 32 * 0.0015 + disk_hourly, 6)
+    assert round(stopped, 6) == round(disk_hourly, 6), \
+        "a suspended OCI POV must still accrue its disk"
+
+
+def test_the_boot_volume_is_still_the_one_this_price_assumes():
+    """`_OCI_BALANCED_VPUS` is 10 because `pov_cloud_oci` sets no `vpus_per_gb`, so its
+    boot volumes default to Balanced. Setting one in the driver would silently make this
+    price wrong rather than absent."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "services", "pov_cloud_oci.py"),
+               encoding="utf-8").read()
+    assert "vpus_per_gb" not in src, (
+        "the OCI driver now sets a VPU count, so its boot volumes are no longer Balanced "
+        "and _OCI_BALANCED_VPUS needs revisiting")
+
+
+def test_an_empty_oci_read_is_not_cached_as_an_answer():
+    body = _code(os.path.join("web_dashboard", "services", "pov_cloud_cost.py"),
+                 "_oci_catalog")
+    assert 'if index["ocpu"] or index["disk_gb_month"] is not None' in body, (
+        "a failed price-list read is cached as an answer, pinning it for six hours")
+
+
+def test_every_cloud_is_priced_now():
+    """The four drivers each have a price source, so a spend cap works wherever a POV can
+    be built. Skytap remains unpriced — it bills the lab, not the VM."""
+    from web_dashboard.services import lab_platforms as lp
+    for cloud in lp.CLOUD_PLATFORMS:
+        assert cost.priced(cloud), f"{cloud} has no price source"
+    assert not cost.priced("skytap")
+
+
 # ── the thresholds and their latches ─────────────────────────────────────────
 
 def test_nothing_happens_without_a_cap():
