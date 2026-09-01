@@ -194,18 +194,25 @@ def resolve_image(row, cloud: str, region: str) -> str:
         db.close()
 
 
-def vm_specs(template_row, vm_rows, cloud: str, region: str, *, bootstrap: str = "") -> list:
+def vm_specs(template_row, vm_rows, cloud: str, region: str, *,
+             roles: tuple = ("target",), bootstrap: str = "") -> list:
     """Turn template rows into the flat dicts a driver builds from.
 
-    The broker VM carries ``user_data``; nothing else does. On a cloud the platform RUNS
-    that payload on first boot, so — unlike Skytap, where it is injected afterwards into a
-    VM already up — it has to be here, at create. A cloud boot is a bounded couple of
-    minutes, comfortably inside the enrolment code's life, which is what makes handing it
-    over this early safe at all.
+    ``roles`` selects which of them. The default excludes the broker, and that is the
+    ordering constraint this whole path is arranged around: **the agent's policy grants
+    the POV's target addresses, and those do not exist until the targets do.** So the
+    targets are built first, read back, and only then is the broker created — with the
+    finished policy and a fresh enrolment code already in its user-data.
+
+    That is also why a cloud broker cannot use ``inject_bootstrap``. Cloud-init runs
+    user-data on FIRST boot; handing it to an instance that is already up does nothing at
+    all, silently. The payload has to be there at ``RunInstances``.
     """
     specs = []
     for row in vm_rows:
         role = (row.role or "target").strip().lower()
+        if role not in roles:
+            continue
         specs.append({
             "name": row.name,
             "role": role,
@@ -370,7 +377,16 @@ async def create_environment(cloud: str, template_id: str, name: str, *,
             f"template {row.name!r} declares more than one broker VM; exactly one VM "
             f"carries the dashboard agent, the Gateway and the Resource Broker")
 
-    specs = vm_specs(row, vm_rows, cloud, region, bootstrap=bootstrap)
+    # Targets only. The broker VM is created later, by `create_broker_vm`, because its
+    # user-data has to carry a policy naming the targets' addresses — which do not exist
+    # until the targets do. An environment therefore shows one fewer VM than its template
+    # until the broker lands, which is the honest reading of "the broker is not installed
+    # yet" rather than a VM sitting there doing nothing.
+    specs = vm_specs(row, vm_rows, cloud, region)
+    if not specs:
+        raise CloudEnvError(
+            f"template {row.name!r} declares only a broker VM. A POV needs at least one "
+            f"target for the broker to reach, or there is nothing to demonstrate.")
 
     logger.info("POV %s: creating network in %s (%s)", env_id, region, cidr)
     network = await mod.create_network(env_id, region, cidr, subnet_cidr(cidr))
@@ -382,6 +398,42 @@ async def create_environment(cloud: str, template_id: str, name: str, *,
         "id": env_id, "name": name, "runstate": "", "region": region,
         "vm_count": len(specs), "vms": [], "url": "",
     }
+
+
+
+async def create_broker_vm(cloud: str, env_id: str, template_id: str,
+                           bootstrap: str) -> dict:
+    """Build (or rebuild) this environment's broker VM, with its bootstrap in user-data.
+
+    Separate from ``create_environment`` because of the ordering the policy forces — see
+    :func:`vm_specs`. Called by ``pov_broker`` once the targets are up and their addresses
+    are known.
+
+    **Rebuilding is a terminate and a fresh launch, deliberately.** On Skytap a re-broker
+    has to remember to delete the agent's state volume, because an agent that already
+    enrolled never redeems a second code and a surviving volume gives a container that
+    starts fine and 401s forever. Here the volume dies with the instance, so "press Broker
+    again" is clean by construction rather than by remembering.
+    """
+    mod = driver(cloud)
+    row, vm_rows = load_template(template_id, cloud)
+    region = recorded_region(env_id, cloud)
+    specs = vm_specs(row, vm_rows, cloud, region, roles=("broker",),
+                     bootstrap=bootstrap)
+    if not specs:
+        raise CloudEnvError(
+            f"template {row.name!r} declares no broker VM, so there is nowhere for the "
+            f"agent to run. Edit the template and mark one VM as the broker.")
+
+    network = await mod.read_network(env_id, region)
+    if not network:
+        raise CloudEnvError(
+            f"the network for {env_id} could not be read back, so a broker VM cannot be "
+            f"placed in it. Check the environment still exists in {region}.")
+
+    await mod.remove_vms(env_id, region, [specs[0]["name"]])
+    created = await mod.create_vms(env_id, region, specs, network)
+    return created[0] if created else {}
 
 
 async def list_environments(cloud: str) -> list:

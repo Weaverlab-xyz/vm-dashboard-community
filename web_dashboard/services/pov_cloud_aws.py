@@ -322,6 +322,65 @@ async def list_environments(region: str) -> list:
     return [_environment(eid, rows, region) for eid, rows in sorted(grouped.items())]
 
 
+# ── the network, read back ───────────────────────────────────────────────────
+
+def _read_network_sync(env_id: str, region: str) -> dict:
+    """The subnet and security group an environment was built with.
+
+    Read back from the tags rather than remembered on the POV row. The row would be a
+    second record of something AWS already knows, and one that goes stale the moment
+    anybody changes the environment by hand — while the tag is the same thing the teardown
+    selects on, so if this finds it the teardown will too.
+    """
+    ec2 = aws_service._get_ec2(region)
+    filters = _env_filter(env_id)
+    subnets = ec2.describe_subnets(Filters=filters).get("Subnets") or []
+    groups = ec2.describe_security_groups(Filters=filters).get("SecurityGroups") or []
+    if not subnets or not groups:
+        return {}
+    return {"subnet_id": subnets[0]["SubnetId"],
+            "security_group_id": groups[0]["GroupId"],
+            "vpc_id": subnets[0].get("VpcId") or ""}
+
+
+async def read_network(env_id: str, region: str) -> dict:
+    return await aws_service._to_thread(_read_network_sync, env_id, region)
+
+
+def _remove_vms_sync(env_id: str, region: str, names: list) -> list:
+    """Terminate named instances in one environment, and wait for them to go.
+
+    Scoped by BOTH the environment tag and the name. The name alone is not a key — two
+    POVs can each have a `broker` — and this is called to make room for a replacement, so
+    selecting one environment's instance while claiming to select another's would delete a
+    live customer's agent host.
+    """
+    ec2 = aws_service._get_ec2(region)
+    wanted = {(n or "").strip().lower() for n in names if (n or "").strip()}
+    if not wanted:
+        return []
+    ids = []
+    for inst in _describe_sync(region, _env_filter(env_id)):
+        tags = {t["Key"]: t["Value"] for t in inst.get("Tags") or []}
+        if (tags.get(env.TAG_NAME) or "").strip().lower() in wanted:
+            ids.append(inst["InstanceId"])
+    if not ids:
+        return []
+    ec2.terminate_instances(InstanceIds=ids)
+    # Waited out, not fired and forgotten: the replacement launches into the same subnet
+    # and security group, and a name that still resolves to a dying instance is how a
+    # read-back picks the wrong one.
+    ec2.get_waiter("instance_terminated").wait(
+        InstanceIds=ids, WaiterConfig={"Delay": 10, "MaxAttempts": 60})
+    return ids
+
+
+async def remove_vms(env_id: str, region: str, names: list) -> list:
+    removed = await aws_service._to_thread(_remove_vms_sync, env_id, region, names)
+    if removed:
+        logger.info("POV %s: replaced %s", env_id, ", ".join(removed))
+    return removed
+
 # ── power ────────────────────────────────────────────────────────────────────
 
 def _power_sync(env_id: str, region: str, action: str) -> int:

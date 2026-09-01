@@ -477,15 +477,15 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
             job_service.update_progress(db, job_id, pct, msg)
 
     mechanism = lab_platforms.capabilities(env.platform).get("bootstrap_injection")
-    if mechanism != "metadata":
+    if mechanism not in ("metadata", "cloud_init"):
         # Degrade by saying so. `remote_exec` is a real mechanism this slice has not
         # written, and `None` means the enrol has to be baked into the template — both are
         # answers, and neither is this code path silently doing nothing.
         how = mechanism or "no mechanism at all"
         raise BrokerError(
             f"{env.platform} delivers bootstrap data by {how}, and the broker install "
-            f"here is written against the 'metadata' mechanism. This platform needs its "
-            f"own broker path.")
+            f"here is written against the 'metadata' and 'cloud_init' mechanisms. This "
+            f"platform needs its own broker path.")
 
     dashboard_url = dashboard_agent_url()
     if not dashboard_url:
@@ -506,7 +506,11 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     from . import pov_env_service
     await pov_env_service.refresh_vms(db, env)
 
-    vm = select_broker_vm(db, env)
+    # On `metadata` the broker VM already exists and is what we inject into. On
+    # `cloud_init` it does NOT exist yet — and must not, because the policy about to be
+    # rendered names the TARGETS' addresses, which only exist once the targets are up.
+    # See pov_cloud_env.vm_specs for the ordering this imposes.
+    vm = select_broker_vm(db, env) if mechanism == "metadata" else None
     targets = _broker_targets(db, env)
     if not targets:
         raise BrokerError(
@@ -526,13 +530,31 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
         policy_yaml=render_policy(targets,
                                   pov_resource_broker.windows_targets(db, env)))
 
-    _progress(50, f"Injecting the bootstrap onto {vm.name or vm.platform_vm_id}…")
     mod = lab_platforms.adapter(env.platform)
-    try:
-        await mod.inject_bootstrap(env.platform_environment_id, vm.platform_vm_id, payload)
-    except Exception as exc:  # noqa: BLE001
-        raise BrokerError(
-            f"could not hand the bootstrap to {vm.name or vm.platform_vm_id}: {exc}") from exc
+    if mechanism == "metadata":
+        _progress(50, f"Injecting the bootstrap onto {vm.name or vm.platform_vm_id}…")
+        try:
+            await mod.inject_bootstrap(env.platform_environment_id, vm.platform_vm_id,
+                                       payload)
+        except Exception as exc:  # noqa: BLE001
+            raise BrokerError(
+                f"could not hand the bootstrap to {vm.name or vm.platform_vm_id}: "
+                f"{exc}") from exc
+    else:
+        # cloud_init: the VM is CREATED with the payload. Any previous broker instance is
+        # terminated first, which also destroys its agent state volume — so a re-broker is
+        # clean by construction rather than by remembering to delete it.
+        _progress(50, f"Building the broker VM {broker_vm_name(env)}…")
+        try:
+            await mod.create_broker_vm(env.platform_environment_id, env.template_id,
+                                       payload)
+        except Exception as exc:  # noqa: BLE001
+            raise BrokerError(
+                f"could not build the broker VM for {env.name}: {exc}") from exc
+        # Read it back so the row below names a VM that exists, and so the POV page shows
+        # it alongside the targets.
+        await pov_env_service.refresh_vms(db, env)
+        vm = select_broker_vm(db, env)
 
     # Persist BEFORE the wait. A crash here must leave the next run re-issuing this row's
     # code rather than minting a second agent for the same POV.
@@ -553,22 +575,49 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     ok = await _wait_for_enrolment(db, agent.id, timeout_s=enroll_timeout_seconds(),
                                    sleep=sleep, on_tick=_tick)
     if not ok:
+        minutes = int(enroll_timeout_seconds() / 60)
+        where = vm.name or vm.platform_vm_id
+        if mechanism == "metadata":
+            raise BrokerError(
+                f"the bootstrap was written to {where} but no agent enrolled within "
+                f"{minutes} minutes. Nothing executes user_data for you — check that VM "
+                f"has the metadata runner from the template contract, that it is on an "
+                f"automatic network, and that it can reach {dashboard_url}. Press Broker "
+                f"again to re-issue the code.")
         raise BrokerError(
-            f"the bootstrap was written to {vm.name or vm.platform_vm_id} but no agent "
-            f"enrolled within {int(enroll_timeout_seconds() / 60)} minutes. Nothing "
-            f"executes user_data for you — check that VM has the metadata runner from the "
-            f"template contract, that it is on an automatic network, and that it can "
-            f"reach {dashboard_url}. Press Broker again to re-issue the code.")
+            f"the broker VM {where} was built with its bootstrap in user-data but no "
+            f"agent enrolled within {minutes} minutes. Cloud-init runs it on first boot, "
+            f"so check the VM's console output, that its image HAS cloud-init and Docker, "
+            f"and that it can reach {dashboard_url} outbound. Press Broker again to "
+            f"rebuild it with a fresh code.")
 
     # Redeemed, so the payload is now a spent secret sitting where anyone with read access
     # to the environment can see it. Clearing it also stops a reboot re-running a
     # bootstrap whose code is gone. Best-effort: the agent is enrolled either way, and
     # failing here would report a working broker as broken.
-    try:
-        await mod.inject_bootstrap(env.platform_environment_id, vm.platform_vm_id, "")
-    except Exception:  # noqa: BLE001
-        logger.warning("POV %s: could not clear the spent bootstrap payload", env.id,
-                       exc_info=True)
+    #
+    # **Only on `metadata`.** A cloud's user-data can only be rewritten while the instance
+    # is STOPPED, so there is nothing to clear here without a stop/start of a VM that has
+    # just come up. The exposure is smaller than it looks: the code is single-use and
+    # fifteen minutes old by now, and the instance requires IMDSv2, so reading it needs a
+    # token obtained from on the guest. It is written down in docs/pov-instance.md rather
+    # than quietly accepted.
+    if mechanism == "metadata":
+        try:
+            await mod.inject_bootstrap(env.platform_environment_id, vm.platform_vm_id, "")
+        except Exception:  # noqa: BLE001
+            logger.warning("POV %s: could not clear the spent bootstrap payload", env.id,
+                           exc_info=True)
+
+    if mechanism == "cloud_init":
+        # One more read now the broker VM has finished booting. Without it the row keeps
+        # the aggregate runstate from the moment the instance was still `pending` — which
+        # reads as "busy" on the POV page until the next reconcile up to ten minutes
+        # later, and gates the power buttons on a value that is already wrong.
+        try:
+            await pov_env_service.refresh_vms(db, env)
+        except Exception:  # noqa: BLE001
+            logger.warning("POV %s: post-enrolment VM read failed", env.id, exc_info=True)
 
     record_broker_error(db, env, "")
     return f"Broker agent {agent.name} enrolled on {vm.name or vm.platform_vm_id}."

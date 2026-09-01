@@ -80,6 +80,17 @@ def environment_id_for(name: str) -> str:
     return pov_cloud_env.env_id_for(name)
 
 
+async def create_broker_vm(env_id: str, template_id: str, bootstrap: str) -> dict:
+    """Build or rebuild the broker VM, with its bootstrap already in user-data.
+
+    Not `inject_bootstrap`. Cloud-init runs user-data on FIRST boot, so handing a payload
+    to a running instance does nothing at all — silently, which is the worst way for this
+    to fail. `bootstrap_injection` is "cloud_init" rather than "metadata" precisely so
+    `pov_broker` takes this path instead.
+    """
+    return await pov_cloud_env.create_broker_vm(CLOUD, env_id, template_id, bootstrap)
+
+
 async def set_runstate(env_id: str, runstate: str) -> dict:
     return await pov_cloud_env.set_runstate(CLOUD, env_id, runstate)
 

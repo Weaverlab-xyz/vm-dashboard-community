@@ -48,7 +48,10 @@ _REQUIRED_CAPABILITY_KEYS = {
 }
 
 # bootstrap_injection is one INTENT with different mechanisms, so it is an enum.
-_INJECTION_MECHANISMS = {"metadata", "remote_exec", None}
+# "cloud_init" is NOT a synonym for "metadata": that one stores a payload for a guest
+# that is already up to fetch, this one is only ever delivered at instance creation.
+# `pov_broker` branches on the difference, which is what earns it a value.
+_INJECTION_MECHANISMS = {"metadata", "cloud_init", "remote_exec", None}
 
 
 # ── the registry ─────────────────────────────────────────────────────────────

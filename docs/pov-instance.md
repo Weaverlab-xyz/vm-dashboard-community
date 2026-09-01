@@ -348,6 +348,40 @@ the same question, and a POV carrying both is one where neither is in charge.
 nothing else — the root volume, the public address and the network keep billing for the
 whole evaluation. A schedule cuts the largest line on the bill, not the bill.
 
+### The broker VM, on a cloud
+
+A POV's broker is the VM that carries the dashboard agent, the Gateway and the Password
+Safe Resource Broker. On Skytap the template ships it, the dashboard writes a payload into
+its `user_data`, and a runner inside the guest fetches and executes it. A cloud does the
+last part for you — cloud-init runs user-data — but only **on first boot**. Handing a
+payload to an instance that is already up does nothing at all, silently.
+
+So on a cloud the broker VM is **created by the Broker step, not by the build**, with its
+bootstrap already in user-data. That ordering is forced by the agent's policy, which
+grants the POV's target addresses one at a time — and those addresses do not exist until
+the targets do. The sequence is: build the targets → wait for them → read their addresses
+→ mint the enrolment code → create the broker VM carrying both.
+
+Two consequences worth knowing:
+
+- **An environment shows one fewer VM than its template until the broker lands.** That is
+  the honest reading of "the broker is not installed yet", rather than a VM sitting there
+  doing nothing.
+- **Pressing Broker again rebuilds the VM.** The old one is terminated first, which
+  destroys its agent-state volume with it. On Skytap a re-broker has to remember to delete
+  that volume — an agent that already enrolled never redeems a second code, so a surviving
+  volume gives a container that starts fine and 401s forever. Here it is clean by
+  construction.
+
+The broker VM's image must have **cloud-init and Docker**. Build it with the Packer
+tooling and reference it from the template.
+
+**The spent enrolment code stays in user-data.** A cloud's user-data can only be rewritten
+while the instance is stopped, so unlike the Skytap path there is nothing to clear once
+the code has been redeemed. The exposure is small — the code is single-use, fifteen
+minutes old by then, and IMDSv2 is required so reading it needs a token obtained from on
+the guest — but it is a real difference rather than an oversight.
+
 ### What a cloud POV does not have
 
 Read these off the platform's capability row rather than discovering them:
@@ -358,7 +392,6 @@ Read these off the platform's capability row rather than discovering them:
 | **Idle suspend** | No cloud has a platform idle timer. The dashboard supplies a scheduled suspend instead |
 | **Stored credentials** | AWS holds no guest login to read back. The platform login comes from your image and its Vault account |
 | **Published services** | No NAT-a-guest-port primitive, and none needed — access is PRA through this POV's own Gateway |
-| **The broker agent** | Not yet. A cloud runs its bootstrap on first boot rather than accepting an injection afterwards, so it needs its own broker path; until that lands the Broker button refuses by name |
 
 ---
 

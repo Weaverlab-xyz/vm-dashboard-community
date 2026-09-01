@@ -162,15 +162,13 @@ CAPABILITIES = {
         # (PRA session, agent heartbeat, console hit) has a blind spot that either leaves
         # a POV running all month or suspends one mid-demo.
         "scheduled_suspend": True,
-        # **Deliberately None, not "cloud_init", until the broker slice lands.** EC2 does
-        # have user-data and cloud-init does run it — but only on FIRST boot, so the
-        # enrolment code has to be minted before `create_environment`, not injected into a
-        # VM that is already up the way `inject_bootstrap` does on Skytap. Declaring the
-        # mechanism this adapter cannot yet honour would make `pov_broker` take the
-        # metadata path and hand a payload to a function that would silently do nothing.
-        # None makes it refuse by name instead — "this platform needs its own broker
-        # path" — which is true, and is the next slice.
-        "bootstrap_injection": None,
+        # EC2 user-data, run by cloud-init on FIRST boot. Read the enum value rather
+        # than folding it into "metadata": Skytap stores a payload for a guest that is
+        # already up to fetch, while this one is only ever delivered at RunInstances.
+        # `pov_broker` branches on exactly that difference — a cloud broker VM is CREATED
+        # with its bootstrap, after the targets, because the policy inside names their
+        # addresses.
+        "bootstrap_injection": "cloud_init",
         # No publish sets, and nothing like them. A cloud POV's customer-facing front door
         # is PRA — which makes PRA mandatory here where it is optional on Skytap. The POV
         # page reads this and says "PRA only" rather than offering a Share button that

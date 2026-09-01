@@ -298,6 +298,91 @@ def test_nothing_in_the_template_path_reaches_a_cloud():
             f"pov_cloud_template_service reaches {banned}; saving a template must not "
             f"need credentials")
 
+# ── the broker VM is built last, and that ordering is the feature ────────────
+
+class _TplRow:
+    name = "t"
+
+
+def _vm_rows(*specs):
+    class R:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+    return [R(name=s.get("name"), role=s.get("role", "target"),
+              os_family="linux", image_id="ami-0abc", image_ref="",
+              instance_type="t3.medium", disk_gb=30) for s in specs]
+
+
+def test_the_initial_create_leaves_the_broker_vm_out():
+    """The policy the broker boots with names the TARGETS' addresses, and those do not
+    exist until the targets do. Including the broker here would mean either a policy that
+    grants nothing or a second boot to fix it."""
+    rows = _vm_rows({"name": "broker", "role": "broker"}, {"name": "web01"})
+    specs = pov_cloud_env.vm_specs(_TplRow(), rows, _CLOUD, "us-east-2")
+    assert [s["name"] for s in specs] == ["web01"]
+
+
+def test_the_broker_pass_builds_only_the_broker_and_carries_the_payload():
+    rows = _vm_rows({"name": "broker", "role": "broker"}, {"name": "web01"})
+    specs = pov_cloud_env.vm_specs(_TplRow(), rows, _CLOUD, "us-east-2",
+                                   roles=("broker",), bootstrap="PAYLOAD")
+    assert [s["name"] for s in specs] == ["broker"]
+    assert specs[0]["user_data"] == "PAYLOAD"
+
+
+def test_no_target_ever_receives_the_bootstrap():
+    """A target with the enrolment code in its user-data would enrol a second agent for
+    the POV, each holding half the wire-up."""
+    rows = _vm_rows({"name": "broker", "role": "broker"}, {"name": "web01"})
+    specs = pov_cloud_env.vm_specs(_TplRow(), rows, _CLOUD, "us-east-2",
+                                   roles=("target", "broker"), bootstrap="PAYLOAD")
+    for spec in specs:
+        assert (spec["user_data"] == "PAYLOAD") == (spec["role"] == "broker"), spec
+
+
+def test_a_template_of_nothing_but_a_broker_is_refused_at_build():
+    """It would build an environment with a broker and nothing to broker for."""
+    import asyncio
+    db = _session()
+    row = svc.create(db, cloud=_CLOUD, name="brokeronly",
+                     vms=[_vm(name="broker", role="broker")])
+    original = pov_cloud_env.load_template
+    pov_cloud_env.load_template = lambda tid, cloud: (row, svc.vms_of(db, row.id))
+    try:
+        asyncio.run(pov_cloud_env.create_environment(_CLOUD, row.id, "some-pov"))
+    except pov_cloud_env.CloudEnvError as exc:
+        assert "target" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("an all-broker template built an environment")
+    finally:
+        pov_cloud_env.load_template = original
+
+
+def test_the_broker_install_branches_on_the_mechanism_and_never_injects_on_a_cloud():
+    """Cloud-init runs user-data on FIRST boot. Handing a payload to an instance that is
+    already up does nothing at all, silently — which is why `cloud_init` is its own enum
+    value rather than a second name for `metadata`."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "services", "pov_broker.py"),
+               encoding="utf-8").read()
+    body = src.split("async def ensure_broker(", 1)[1].split("\nasync def ", 1)[0]
+    assert 'mechanism == "metadata"' in body, "ensure_broker does not branch"
+    assert "create_broker_vm(" in body, "the cloud path never builds a broker VM"
+    inject_at = body.index("inject_bootstrap")
+    branch_at = body.index('if mechanism == "metadata":')
+    assert branch_at < inject_at, (
+        "inject_bootstrap is reached before the mechanism branch, so a cloud POV would "
+        "be handed a payload nothing executes")
+
+
+def test_rebuilding_the_broker_is_scoped_to_one_environment():
+    """Two POVs can each have a VM called `broker`. Selecting by name alone would
+    terminate a live customer's agent host to make room for somebody else's."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "services", "pov_cloud_aws.py"),
+               encoding="utf-8").read()
+    body = src.split("def _remove_vms_sync(", 1)[1].split("\nasync def ", 1)[0]
+    assert "_env_filter(env_id)" in body, "the terminate is not scoped to the environment"
+    assert "TAG_NAME" in body, "the terminate is not scoped to the VM name"
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items())
