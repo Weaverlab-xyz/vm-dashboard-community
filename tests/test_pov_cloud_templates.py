@@ -435,8 +435,11 @@ def test_the_footprint_lists_the_shapes_so_an_oversized_template_is_visible():
 def test_an_estimate_is_refused_rather_than_guessed_when_there_is_no_price():
     """A hardcoded price table goes stale silently and reports a number somebody plans
     around. No answer, with the reason, is the smaller lie."""
+    import asyncio
     from web_dashboard.services import pov_cloud_cost as cost
-    out = cost.estimate([_env("povenv-a", [_cvm()])], "moon-base-1")
+    # Async since the price lookups moved onto the cloud executors — a memoised read on
+    # every pass but the first, which is real HTTP and must not block the worker's loop.
+    out = asyncio.run(cost.estimate([_env("povenv-a", [_cvm()])], "moon-base-1"))
     assert out["available"] is False
     assert "moon-base-1" in out["reason"]
 

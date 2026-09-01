@@ -550,14 +550,26 @@ into "another $X from now".
 
 #### Where it works
 
-A cap needs a price source, and each cloud needs its own. **AWS is supported today**; the
-others show their footprint and say so rather than offering a cap that would accrue a
-confident zero and never act. Skytap has no per-VM figure at all — it bills the lab, and
-its own idle timer is the lever there.
+A cap needs a price source, and each cloud needs its own.
 
-The AWS estimate needs `pricing:GetProducts`, which an EC2-scoped key does not have.
-Without it there is no rate, nothing accrues, and the page says which permission is
-missing.
+| Cloud | Price source | Needs |
+|---|---|---|
+| **AWS** | Pricing API | `pricing:GetProducts` — an EC2-scoped key does **not** have it. Without it nothing accrues and the page names the missing permission |
+| **Azure** | Retail Prices API | Nothing. It is public and unauthenticated, so a cap works the moment the provider is selected |
+| GCP, OCI | — | Not wired up yet. The footprint still shows; the cap is unavailable and says so |
+
+Skytap has no per-VM figure at all — it bills the lab, and its own idle timer is the lever
+there.
+
+A cloud with no price source is never offered a cap. That is deliberate: one that accrued
+a confident zero and never acted would be a worse promise than no cap at all.
+
+**Azure bills a managed disk by size tier, not per gigabyte.** A 30 GB and a 32 GB Standard
+SSD are both an E4 and cost exactly the same; a 33 GB one is an E6 and costs roughly
+double. The estimate rounds up into the tier Azure would actually charge, rather than
+multiplying a per-GB figure that would be wrong in both directions. Spot and Low Priority
+SKUs are excluded — they are cheaper, and understating is the one direction an estimate
+behind a cap must not err.
 
 ### The cloud view, and orphans
 
