@@ -9,20 +9,32 @@ document.addEventListener('alpine:init', () => {
         username: localStorage.getItem('vm_cli_username') || null,
         workgroups: JSON.parse(localStorage.getItem('vm_cli_workgroups') || '[]'),
         isAdmin: localStorage.getItem('vm_cli_is_admin') === 'true',
+        // A POV accessor: a prospect's ephemeral login, bound to one POV environment.
+        // Held here ONLY so requireAuth can send them to their own page instead of a
+        // dashboard that would refuse every call on it. It is not what confines them —
+        // localStorage is editable by whoever holds it, and the real control is the path
+        // allowlist in api/auth.get_current_user, which consults nothing the client sends.
+        accessorEnvId: localStorage.getItem('vm_cli_accessor_env') || '',
+
+        get isAccessor() {
+            return !!this.accessorEnvId;
+        },
 
         get isLoggedIn() {
             return !!this.token;
         },
 
-        login(token, username, workgroups, isAdmin = false) {
+        login(token, username, workgroups, isAdmin = false, accessorEnvId = '') {
             this.token = token;
             this.username = username;
             this.workgroups = workgroups;
             this.isAdmin = isAdmin;
+            this.accessorEnvId = accessorEnvId || '';
             localStorage.setItem('vm_cli_token', token);
             localStorage.setItem('vm_cli_username', username);
             localStorage.setItem('vm_cli_workgroups', JSON.stringify(workgroups));
             localStorage.setItem('vm_cli_is_admin', isAdmin ? 'true' : 'false');
+            localStorage.setItem('vm_cli_accessor_env', accessorEnvId || '');
         },
 
         logout() {
@@ -30,10 +42,12 @@ document.addEventListener('alpine:init', () => {
             this.username = null;
             this.workgroups = [];
             this.isAdmin = false;
+            this.accessorEnvId = '';
             localStorage.removeItem('vm_cli_token');
             localStorage.removeItem('vm_cli_username');
             localStorage.removeItem('vm_cli_workgroups');
             localStorage.removeItem('vm_cli_is_admin');
+            localStorage.removeItem('vm_cli_accessor_env');
             window.location.href = '/login';
         },
 
@@ -362,9 +376,24 @@ function utcStamp(isoStr) {
     return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
 }
 
+// The accessor's own page. One constant, so the redirect below and the page itself can
+// never disagree about where an accessor lives.
+const ACCESSOR_HOME = '/pov/access';
+
 function requireAuth() {
-    if (!Alpine.store('auth').isLoggedIn) {
+    const auth = Alpine.store('auth');
+    if (!auth.isLoggedIn) {
         window.location.href = '/login';
+        return;
+    }
+    // A POV accessor on any other page would render a shell whose every API call comes
+    // back 403 — technically safe and completely baffling. Send them home instead.
+    //
+    // A CONVENIENCE, not a control. It reads localStorage, which the holder can edit, and
+    // it runs in their browser. Nothing here is load-bearing: api/auth.get_current_user
+    // refuses an accessor on every path but its own, server-side, whatever this does.
+    if (auth.isAccessor && window.location.pathname !== ACCESSOR_HOME) {
+        window.location.href = ACCESSOR_HOME;
     }
 }
 

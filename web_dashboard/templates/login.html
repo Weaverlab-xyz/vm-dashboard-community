@@ -156,6 +156,10 @@
               .then(u => {
                 localStorage.setItem('vm_cli_workgroups', JSON.stringify(u.workgroups || []));
                 localStorage.setItem('vm_cli_is_admin', u.is_admin ? 'true' : 'false');
+                // Always written, never merely left alone: an accessor is a local account
+                // so this is always "", and NOT clearing it would carry a stale binding
+                // over from a previous session in the same browser.
+                localStorage.setItem('vm_cli_accessor_env', u.accessor_env_id || '');
               })
               .finally(() => { window.location.href = '/'; });
           } catch {
@@ -288,14 +292,23 @@
           localStorage.setItem('vm_cli_token', data.access_token);
           localStorage.setItem('vm_cli_username', data.username);
           localStorage.setItem('vm_cli_workgroups', JSON.stringify(data.workgroups));
-          // Fetch profile to get is_admin flag (not in the login response)
+          // Fetch profile to get is_admin and the POV-accessor binding (neither is in the
+          // login response). A POV accessor may only reach its own POV's page — every
+          // other route refuses it server-side — so landing it on the dashboard would
+          // show a shell whose every call comes back 403.
+          let home = '/';
           try {
             const me = await fetch('/api/auth/me', {
               headers: { 'Authorization': 'Bearer ' + data.access_token }
             }).then(r => r.json());
             localStorage.setItem('vm_cli_is_admin', me.is_admin ? 'true' : 'false');
-          } catch { localStorage.setItem('vm_cli_is_admin', 'false'); }
-          window.location.href = '/';
+            localStorage.setItem('vm_cli_accessor_env', me.accessor_env_id || '');
+            if (me.accessor_env_id) home = '/pov/access';
+          } catch {
+            localStorage.setItem('vm_cli_is_admin', 'false');
+            localStorage.setItem('vm_cli_accessor_env', '');
+          }
+          window.location.href = home;
         },
       };
     }

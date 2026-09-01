@@ -83,12 +83,24 @@ def get_assets():
     return {"next": "", "data": {"assets": assets}}
 
 
+# POV accessors are excluded from every route in this file, and it is a security
+# boundary rather than tidiness. An accessor is a prospect's ephemeral login into ONE
+# POV; this integration grants permissions on the DASHBOARD, up to and including
+# administrator. `_apply` resolves an actor by scanning users and matching a name, so an
+# accessor reaching that lookup is a direct escalation path from "can tick a checklist"
+# to "is an admin". The filter goes on the query, not on the response, so nothing here
+# can leak one back into the actor set by taking a different route through the data.
+_NOT_AN_ACCESSOR = User.accessor_env_id.is_(None)
+
+
 @router.get("/get_actors", dependencies=[Depends(_require_secret)])
 def get_actors(db: Session = Depends(get_db)):
     """Every dashboard user — local and OIDC alike, which is the point: the Entra
-    -group path could only ever see Entra users."""
+    -group path could only ever see Entra users.
+
+    POV accessors are not among them; see _NOT_AN_ACCESSOR above."""
     actors = []
-    for user in db.query(User).filter(User.is_active.is_(True)).all():
+    for user in db.query(User).filter(User.is_active.is_(True), _NOT_AN_ACCESSOR).all():
         actors.append({
             "identifier": user.username,
             "name": user.username,
@@ -107,7 +119,7 @@ def get_all_permissions(db: Session = Depends(get_db)):
     """
     actors_permissions = [
         {"actor_id": user.username, "role_code": role, "direct_member": True}
-        for user in db.query(User).all()
+        for user in db.query(User).filter(_NOT_AN_ACCESSOR).all()
         for role in grants.held_by(user)
     ]
     assets_permissions = [
@@ -139,7 +151,7 @@ def _apply(db: Session, payload: dict, *, grant: bool) -> dict:
             detail=f"unknown role_code {role!r} (expected one of {PERMISSION_LEVELS})")
 
     identifier = str(payload.get("actor_identifier") or "").strip()
-    user = next((u for u in db.query(User).all()
+    user = next((u for u in db.query(User).filter(_NOT_AN_ACCESSOR).all()
                  if grants.matches_actor(u, identifier)), None)
     if not user:
         raise HTTPException(status_code=404, detail=f"unknown actor {identifier!r}")
@@ -177,5 +189,5 @@ def check_config(db: Session = Depends(get_db)):
         "valid": True,
         "scopes": list(PERMISSION_SCOPES),
         "levels": list(PERMISSION_LEVELS),
-        "users": db.query(User).count(),
+        "users": db.query(User).filter(_NOT_AN_ACCESSOR).count(),
     }}

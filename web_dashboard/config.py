@@ -1790,6 +1790,16 @@ class Settings(BaseSettings):
     entitle_rest_secret: str = ""            # encrypted at rest
     entitle_resource_ids_json: str = "{}"
 
+    # POV accessors — a prospect's ephemeral login into ONE POV environment. Its own
+    # secret rather than entitle_rest_secret above, deliberately: that one authenticates
+    # an integration that grants DASHBOARD permissions, and this one mints logins. Sharing
+    # a key would make a leak of either a leak of both, on the instance that does customer
+    # work. Unset → the endpoint is closed (503), never open.
+    pov_accessor_rest_secret: str = ""       # encrypted at rest
+    # How long a minted accessor lasts when nothing else says. Always clamped to the POV's
+    # own expiry, so this is a ceiling on a short-lived thing rather than a lifetime.
+    pov_accessor_ttl_days: int = 14
+
     class Config:
         env_file = os.path.join(os.path.dirname(__file__), ".env")
         env_file_encoding = "utf-8"

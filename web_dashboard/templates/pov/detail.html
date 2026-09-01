@@ -27,8 +27,12 @@
   services/personas through services/pov_use_cases. A key spelled in this file would let
   the page and the registry disagree, invisibly.
 
-  The accessor tab — the prospect's own view of this checklist — is a later slice. It is
-  deliberately absent rather than stubbed: a dead tab is a promise the page cannot keep.
+  The Access tab is where a prospect gets in. An accessor is an ephemeral login bound to
+  this one POV: it can reach /pov/access and nothing else, it is refused everywhere else in
+  the dashboard server-side, and it is deleted when the POV is destroyed. The minted
+  password is shown ONCE, here, in the response that created it — there is no reveal
+  endpoint, unlike the share link's, because an accessor that lost its password is replaced
+  rather than re-read.
 #}
 
 {% block content %}
@@ -331,6 +335,108 @@
         </template>
       </div>
 
+      <!-- ── Access ───────────────────────────────────────────────────── -->
+      <div x-show="tab === 'access'" class="space-y-6">
+
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Give the customer a login</h2>
+          <p class="text-sm text-gray-500 mt-1">
+            An accessor can open this POV's checklist and nothing else in the dashboard.
+            It is deleted when this POV is destroyed, and it expires on its own before then.
+          </p>
+
+          <div class="mt-4 grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <input type="email" x-model="accessorForm.email" placeholder="their email (a label)"
+                   class="sm:col-span-2 border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <input type="text" x-model="accessorForm.full_name" placeholder="name (optional)"
+                   class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <input type="number" min="1" max="90" x-model="accessorForm.days" placeholder="days"
+                   class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <!-- Said next to the field rather than after the fact: an SE typing 30 on a POV
+               with a week left should know before they press the button. -->
+          <p class="text-xs text-gray-400 mt-2">
+            Left blank it lasts 14 days, and it is always shortened to this POV's own expiry.
+            The email is a label so you can tell accessors apart — nothing is sent to it.
+          </p>
+          <button @click="mintAccessor()" :disabled="minting"
+                  class="mt-3 px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                  x-text="minting ? 'Creating…' : 'New accessor'"></button>
+        </div>
+
+        <!-- Shown once. There is no endpoint that can serve this password again. -->
+        <div x-show="minted" x-transition
+             class="bg-green-50 border border-green-200 rounded-xl p-5">
+          <p class="text-sm font-medium text-green-900">
+            Give these to the customer now — the password is not stored and cannot be shown again.
+          </p>
+          <div class="mt-3 space-y-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-green-800 w-20 shrink-0">Username</span>
+              <code class="text-xs bg-white border border-green-200 rounded px-2 py-1 flex-1 truncate"
+                    x-text="minted && minted.username"></code>
+              <button @click="copy(minted.username)"
+                      class="text-xs px-2 py-1 border border-green-300 rounded hover:bg-white">Copy</button>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-green-800 w-20 shrink-0">Password</span>
+              <code class="text-xs bg-white border border-green-200 rounded px-2 py-1 flex-1 truncate"
+                    x-text="minted && minted.password"></code>
+              <button @click="copy(minted.password)"
+                      class="text-xs px-2 py-1 border border-green-300 rounded hover:bg-white">Copy</button>
+            </div>
+            <p class="text-xs text-green-800">
+              They sign in at <code x-text="origin + '/login'"></code> and land on their own page.
+            </p>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                <tr>
+                  <th class="text-left px-4 py-2 font-medium">Login</th>
+                  <th class="text-left px-4 py-2 font-medium">For</th>
+                  <th class="text-left px-4 py-2 font-medium">Created by</th>
+                  <th class="text-left px-4 py-2 font-medium">Expires</th>
+                  <th class="text-right px-4 py-2 font-medium"></th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                <template x-for="a in accessors" :key="a.id">
+                  <tr :class="a.expired ? 'bg-gray-50' : ''">
+                    <td class="px-4 py-2">
+                      <code class="text-xs text-gray-900" x-text="a.username"></code>
+                      <!-- Where it came from, because "Entitle made this one" and "I made
+                           this one" have different answers to "who approved it?". -->
+                      <span class="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600"
+                            x-text="a.source"></span>
+                    </td>
+                    <td class="px-4 py-2 text-gray-600" x-text="a.email || a.full_name || '—'"></td>
+                    <td class="px-4 py-2 text-gray-600" x-text="a.created_by || '—'"></td>
+                    <td class="px-4 py-2 text-xs"
+                        :class="a.expired ? 'text-amber-700' : 'text-gray-600'">
+                      <span x-text="a.expires_at || 'never'"></span>
+                      <span x-show="a.expired"> (expired)</span>
+                    </td>
+                    <td class="px-4 py-2 text-right">
+                      <button @click="revokeAccessor(a)"
+                              class="text-xs text-red-600 underline hover:no-underline">revoke</button>
+                    </td>
+                  </tr>
+                </template>
+                <tr x-show="!accessors.length">
+                  <td colspan="5" class="px-4 py-6 text-center text-gray-400">
+                    Nobody outside your account can reach this POV.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
     </div>
   </template>
 </div>
@@ -346,6 +452,13 @@
       groups: [],
       products: {},
       summary: { done: 0, skipped: 0, total: 0, cards: 0 },
+      accessors: [],
+      accessorForm: { email: '', full_name: '', days: null },
+      minting: false,
+      // The one password this page ever holds, and only until the next render of anything
+      // else. Never fetched, never re-fetched: it exists in the create response and
+      // nowhere on the server in readable form.
+      minted: null,
       tab: 'overview',
       tabs: [
         { id: 'overview',  label: 'Overview' },
@@ -353,6 +466,7 @@
         { id: 'wired',     label: 'Wired' },
         { id: 'share',     label: 'Share' },
         { id: 'use-cases', label: 'Use cases' },
+        { id: 'access',    label: 'Access' },
       ],
 
       async init() {
@@ -362,7 +476,7 @@
         // every card on the page point at the same screen.
         const hash = window.location.hash.slice(1);
         if (this.tabs.some(t => t.id === hash)) this.tab = hash;
-        await Promise.all([this.loadEnv(), this.loadUseCases()]);
+        await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadAccessors()]);
         this.loading = false;
       },
 
@@ -409,6 +523,57 @@
         }
       },
 
+      async loadAccessors() {
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/accessors`);
+          if (!res.ok) return;
+          this.accessors = (await res.json()).accessors || [];
+        } catch (e) {
+          // Silent, like loadUseCases: the environment is the page, and a list that
+          // failed to load must not replace it with an error.
+        }
+      },
+
+      async mintAccessor() {
+        this.minting = true;
+        this.minted = null;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/accessors`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: this.accessorForm.email,
+              full_name: this.accessorForm.full_name,
+              days: this.accessorForm.days ? Number(this.accessorForm.days) : null,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not create (${res.status}).`; return; }
+          this.minted = { username: data.accessor.username, password: data.password };
+          this.accessors = data.accessors || [];
+          this.accessorForm = { email: '', full_name: '', days: null };
+        } catch (e) {
+          this.error = 'Could not create that accessor.';
+        } finally {
+          this.minting = false;
+        }
+      },
+
+      async revokeAccessor(a) {
+        if (!confirm(`Revoke ${a.username}? Their login stops working immediately.`)) return;
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/accessors/${encodeURIComponent(a.id)}`,
+            { method: 'DELETE' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not revoke (${res.status}).`; return; }
+          this.accessors = data.accessors || [];
+          if (this.minted && this.minted.username === a.username) this.minted = null;
+        } catch (e) {
+          this.error = 'Could not revoke that accessor.';
+        }
+      },
+
       select(id) {
         this.tab = id;
         // Written so a card's link is copyable and a reload lands where you were.
@@ -450,6 +615,10 @@
         } finally {
           this.busy = '';
         }
+      },
+
+      get origin() {
+        return window.location.origin;
       },
 
       copy(text) {

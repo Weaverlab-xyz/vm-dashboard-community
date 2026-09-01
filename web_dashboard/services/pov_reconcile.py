@@ -265,6 +265,30 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
                                       {"skipped": "POV environments are not enabled"})
             return
 
+        # The accessor sweep runs FIRST and OUTSIDE the platform loop, and both halves of
+        # that are deliberate. It is the backstop for the two ways an accessor's teardown
+        # never runs — Entitle not calling delete_actor, and a POV that reached `destroyed`
+        # without this module being asked — and whether a prospect's login should still
+        # work has nothing to do with whether Skytap is reachable, which is what every
+        # branch inside that loop turns on. It rides this pass rather than the expiry sweep
+        # because a fresh POV instance starts with the auto-delete timer OFF
+        # (docs/pov-instance.md), and a login must not outlive its POV because an unrelated
+        # feature was never enabled.
+        # Imported here, like config_service and pov_env_service elsewhere in this file:
+        # the sweep is one call on one path, and a module-level import would put the whole
+        # accessor stack in front of every reader of this one.
+        from . import pov_accessor_service
+        try:
+            reaped = pov_accessor_service.sweep(db)
+        except Exception as exc:  # noqa: BLE001 — a sweep never fails the pass
+            logger.warning("POV reconcile: the accessor sweep failed", exc_info=True)
+            job_service.append_job_log(db, job_id, f"accessor sweep FAILED: {exc}")
+            db.rollback()
+            reaped = 0
+        if reaped:
+            job_service.append_job_log(
+                db, job_id, f"revoked {reaped} expired or orphaned accessor login(s)")
+
         summaries, failures = [], []
         for platform in lab_platforms.VALID_PLATFORMS:
             try:
@@ -278,7 +302,7 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
                 db.rollback()
                 job_service.append_job_log(db, job_id, f"{platform} FAILED: {exc}")
 
-        result = {"platforms": summaries}
+        result = {"platforms": summaries, "accessors_reaped": reaped}
         if failures:
             result["failures"] = failures
         job_service.set_completed(db, job_id, result)

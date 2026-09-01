@@ -1654,6 +1654,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "clouddb_ps_ssm_plugin_private_key", "clouddb_ps_ssm_plugin_passphrase",
     "portainer_pat", "portainer_admin_password",
     "entitle_api_token", "entitle_api_key", "entitle_rest_secret",
+    "pov_accessor_rest_secret",
     "proxmox_token_secret", "proxmox_password",
     "skytap_api_token",
     "vsphere_password",

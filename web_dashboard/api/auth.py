@@ -119,21 +119,70 @@ def decode_token(token: str) -> TokenData:
         )
 
 
+# ── POV accessors ─────────────────────────────────────────────────────────────
+#
+# An accessor is a prospect's ephemeral login, bound to one POV environment. It is a real
+# `users` row, so everything that resolves a user finds it — and that is the danger this
+# block exists to remove.
+#
+# **An accessor cannot be confined with permissions.** `effective_permissions_dict` returns
+# {} for a user none of the three permission columns says anything about, and
+# `require_permission` below reads {} as UNRESTRICTED — deliberate backward compatibility
+# for the users that predate those columns. So "an accessor with no permissions" holds
+# every permission in the dashboard.
+#
+# So the confinement is a path ALLOWLIST, applied in `get_current_user`, which is the one
+# dependency every authenticated route resolves through. An allowlist and not a denylist:
+# a route added tomorrow is refused by default, which is the only direction this can fail
+# safely in.
+#
+# Two paths deliberately do NOT resolve through here, and each is handled where it lives:
+# `api/websocket._authenticate` (its own resolver — it rejects accessors outright) and
+# `api/pov_accessor_rest` (Entitle's shared secret, no session at all).
+_ACCESSOR_ALLOWED_PREFIXES = (
+    # The accessor's own view of its own POV. It takes no environment id — the binding
+    # comes from the session — so there is no parameter to tamper with.
+    "/api/pov/accessor/self",
+    # Who am I. The client needs it to know where to send them.
+    "/api/auth/me",
+)
+
+
+def _accessor_may_reach(path: str) -> bool:
+    return any((path or "").startswith(p) for p in _ACCESSOR_ALLOWED_PREFIXES)
+
+
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
 async def get_current_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    """FastAPI dependency: accept either a JWT or a vmcli_ PAT."""
+    """FastAPI dependency: accept either a JWT or a vmcli_ PAT.
+
+    Also the one place a POV accessor is confined — see the block above for why that
+    cannot be done with permissions. ``request`` is safe to take here: no WebSocket route
+    resolves this dependency (``api/websocket`` has its own resolver), and every HTTP
+    route has one.
+    """
     if token.startswith(_PAT_PREFIX):
-        return _get_user_from_pat(token, db)
-    token_data = decode_token(token)
-    user = db.query(User).filter(User.username == token_data.username).first()
-    if not user or not user.is_active:
+        user = _get_user_from_pat(token, db)
+    else:
+        token_data = decode_token(token)
+        user = db.query(User).filter(User.username == token_data.username).first()
+        if not user or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found or inactive",
+            )
+
+    if user.accessor_env_id and not _accessor_may_reach(request.url.path):
+        # 403 and not 404: the credential is valid, and pretending the route does not
+        # exist would send a confused prospect to their contact with the wrong symptom.
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This login can only reach its own POV environment.",
         )
     return user
 
@@ -146,6 +195,12 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     Entra group) counts. Pre-Phase-0 admin-set users keep working —
     their persistent ``is_admin`` flag wins regardless of group claim.
     """
+    # Belt and braces over the allowlist above. No admin route is in it today, so this is
+    # unreachable — which is the point: the day one is added by mistake, an accessor still
+    # does not become an administrator. `is_effective_admin` ORs three sources, and this
+    # refuses regardless of what any of them says.
+    if current_user.accessor_env_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     if not current_user.is_effective_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
@@ -821,7 +876,13 @@ async def oauth_oidc_callback(
 
 @router.get("/me", response_model=UserResponse)
 async def me(current_user: User = Depends(get_current_user)):
-    """Return the currently authenticated user's profile."""
+    """The caller's own profile.
+
+    Carries ``accessor_env_id`` so the client can send an accessor to its POV instead of a
+    dashboard whose every call it would be refused. That redirect is a CONVENIENCE, not a
+    control — it is driven from localStorage, which the holder can edit. The control is the
+    allowlist above, and it does not consult anything the client sends.
+    """
     return UserResponse(
         id=current_user.id,
         username=current_user.username,
@@ -841,4 +902,7 @@ async def me(current_user: User = Depends(get_current_user)):
         # nav entries / action buttons, so it must reflect what
         # require_permission would actually allow.
         permissions=current_user.effective_permissions_dict or None,
+        # "" rather than None for a normal user, so the client tests one falsy value
+        # instead of learning the difference between absent and null.
+        accessor_env_id=current_user.accessor_env_id or "",
     )

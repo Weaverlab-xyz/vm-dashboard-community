@@ -683,7 +683,11 @@ _SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/ap
 # /api/entitle/rest is here for the same reason: Entitle calls it as a machine
 # client and would read a 302-to-HTML as an integration failure rather than as
 # "this dashboard has not finished its first-run setup".
-_SETUP_503_PREFIXES = ("/api/agent", "/api/entitle/rest")
+_SETUP_503_PREFIXES = ("/api/agent", "/api/entitle/rest",
+                       # Entitle's ephemeral adapter for POV accessors, here for exactly
+                       # the same reason as its standing sibling: a machine client reads a
+                       # redirect to an HTML wizard as an integration failure.
+                       "/api/pov/accessor/rest")
 
 @app.middleware("http")
 async def setup_guard(request: Request, call_next):
@@ -1077,6 +1081,23 @@ try:
     from .api import pov_templates as pov_templates_api  # noqa: E402
     app.include_router(pov_templates_api.router,
                        dependencies=[_feature_gate("pov_environments_enabled")])
+    # POV accessors: a prospect's ephemeral login into one POV.
+    #
+    # Three mounts and not one, because the auth models are three different things and
+    # collapsing them would hide that. The SE routes and the accessor's own /self route
+    # carry a session; the REST adapter carries Entitle's shared secret and no session at
+    # all. All three keep the POV gate — an accessor is a POV artifact, so on a demo
+    # instance they 404 like the rest of the feature.
+    from .api import pov_accessor as pov_accessor_api  # noqa: E402
+    from .api import pov_accessor_rest as pov_accessor_rest_api  # noqa: E402
+    app.include_router(pov_accessor_api.router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
+    app.include_router(pov_accessor_api.self_router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
+    # Additionally closed (503) whenever pov_accessor_rest_secret is unset — see the
+    # router's _require_secret. Never open because it is unconfigured.
+    app.include_router(pov_accessor_rest_api.router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
 except ImportError as exc:
     logger.warning("API router 'pov' not loaded: %s", exc)
 
@@ -1452,6 +1473,23 @@ async def pov_templates_page(request: Request):
     platform account, which a demo instance does not have.
     """
     return templates.TemplateResponse("pov/templates.html", {"request": request})
+
+
+# ALSO DECLARED BEFORE /pov/{env_id}, for the reason spelled out below it. "access" is a
+# literal segment, and the parameterised route would otherwise capture it — an accessor's
+# own page would 404 as "No such POV environment", which is both wrong and the most
+# alarming possible message for the one audience outside the account.
+@app.get("/pov/access", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("pov_environments_enabled")])
+async def pov_access_page(request: Request):
+    """The POV accessor's page: a prospect's view of the one POV they were given.
+
+    Standalone, not part of the dashboard shell — see the template. It carries no server
+    -side auth for the same reason no HTML route here does: the token lives in the browser
+    and every read on the page goes through /api/pov/accessor/self, which resolves the POV
+    from the session's own binding and is the only route a POV accessor may reach.
+    """
+    return templates.TemplateResponse("pov/access.html", {"request": request})
 
 
 # DECLARED AFTER /pov/templates, AND THAT IS LOAD-BEARING. Starlette matches routes in

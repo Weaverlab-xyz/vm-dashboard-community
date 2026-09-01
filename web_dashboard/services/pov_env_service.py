@@ -26,8 +26,8 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
-from . import (job_service, lab_platforms, pov_broker, pov_gateway,
-               pov_resource_broker, pov_share, pov_use_cases, pov_wireup)
+from . import (job_service, lab_platforms, pov_accessor_service, pov_broker,
+               pov_gateway, pov_resource_broker, pov_share, pov_use_cases, pov_wireup)
 
 logger = logging.getLogger(__name__)
 
@@ -333,11 +333,14 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
         # the moment somebody is closing the evaluation out.
         job_service.append_job_log(db, job_id, pov_use_cases.destroy_note(db, env))
 
-        # The share link first, ahead of everything. It is the only artifact a person
-        # OUTSIDE the account can be holding, so the window where it still works is the
-        # one worth making shortest — and unlike every step below it, revoking is
-        # instant and cannot fail in a way that matters (see pov_share.teardown, which
-        # never raises).
+        # The accessor logins first, ahead of everything, and they take the position the
+        # share link used to hold. That position belongs to whatever a person OUTSIDE the
+        # account can be holding — and an accessor is that, but it is a credential into
+        # THIS DASHBOARD rather than a door into a lab, so its window is the one worth
+        # making shortest. Like the share teardown below, it never raises.
+        job_service.append_job_log(db, job_id, pov_accessor_service.teardown(db, env))
+
+        # The share link next. Same argument, one step less sharp.
         job_service.append_job_log(db, job_id, await pov_share.teardown(db, env))
 
         # The PRA jump items next, and they are the only teardown step that reaches a

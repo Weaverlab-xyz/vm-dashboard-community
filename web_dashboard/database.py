@@ -119,6 +119,23 @@ class User(Base):
     # gradual change rather than a cutover.
     jit_permissions = Column(Text, nullable=True)
 
+    # Non-NULL means this account is a POV ACCESSOR: a prospect's ephemeral login, bound
+    # to exactly one POV environment and deleted when that POV is reaped. See
+    # services/pov_accessor_service and PovAccessor below.
+    #
+    # It is a DENY marker, not a permission. The three columns above all GRANT, and
+    # `effective_permissions_dict` returns {} when none of them says anything -- which
+    # `require_permission` reads as UNRESTRICTED, for backward compatibility with the
+    # pre-OIDC users that predate them. So an accessor created "with no permissions" would
+    # hold every permission in the dashboard. The guard is therefore in
+    # `api/auth.get_current_user` -- the one dependency every authenticated route resolves
+    # through -- as a path ALLOWLIST, and it fires on this column being set rather than on
+    # anything in the permission map.
+    #
+    # Duplicated from PovAccessor.environment_id deliberately: that guard runs on every
+    # request and must not need a join.
+    accessor_env_id = Column(String(36), nullable=True, index=True)
+
     fido2_credentials = relationship("Fido2Credential", back_populates="user", cascade="all, delete-orphan")
     personal_access_tokens = relationship("PersonalAccessToken", back_populates="user", cascade="all, delete-orphan")
 
@@ -1901,6 +1918,52 @@ class PovUseCaseProgress(Base):
                                        name="uq_pov_use_case_progress_env_card"),)
 
 
+class PovAccessor(Base):
+    """One prospect's ephemeral login into one POV.
+
+    The POV feature's first principal that is not somebody in the account. Everything else
+    a POV publishes is a door into the LAB -- a share link, a jump item -- and this is a
+    door into the DASHBOARD, which is why it is the artifact teardown removes first.
+
+    The account itself is a row in ``users`` carrying ``accessor_env_id``, so login, MFA,
+    the sign-in throttle and audit are the ones already here rather than a second
+    implementation of each. This table is the binding and its provenance: which POV, who
+    or what created it, when it dies.
+
+    **Revoking DELETES the user row** and stamps ``revoked_at`` here. Deactivating instead
+    would leave a username in ``users`` that every actor lookup in the codebase has to
+    remember to skip -- and one that forgets is an escalation, not a cosmetic bug.
+    """
+    __tablename__ = "pov_accessors"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    environment_id = Column(String(36), index=True, nullable=False)
+    # The users row while it exists. Kept after revoke as the record of what was deleted;
+    # NOT a ForeignKey, because the row it names is deliberately gone by then.
+    user_id = Column(String(36), index=True, nullable=True)
+    username = Column(String(100), nullable=False)
+    email = Column(String(200), nullable=True)
+    full_name = Column(String(200), nullable=True)
+
+    # "manual" (an SE minted it from the POV page) | "entitle" (create_actor did).
+    source = Column(String(16), nullable=False, default="manual")
+    # What Entitle called it, when Entitle made it. Ephemeral mode owns expiry on its side
+    # and calls delete_actor; these let a delete_actor find the row it means.
+    entitle_request_id = Column(String(64), nullable=True)
+    entitle_actor_id = Column(String(128), nullable=True, index=True)
+
+    # This dashboard's own clock, and it is not optional. Entitle owning expiry is not the
+    # same as this instance knowing when to stop trusting a login: an integration that is
+    # removed, misconfigured or simply never calls back would otherwise leave a working
+    # credential behind forever. Clamped so an accessor can never outlive its POV.
+    expires_at = Column(DateTime, index=True, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoke_reason = Column(String(255), nullable=True)
+
+
 class PovTemplateBuild(Base):
     """One run of the template builder: a lab-platform template this dashboard authored.
 
@@ -2092,6 +2155,10 @@ def init_db():
             "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0",
             "ALTER TABLE users ADD COLUMN permissions TEXT",
             "ALTER TABLE users ADD COLUMN session_permissions TEXT",
+            # POV accessors: a prospect's ephemeral login, bound to one POV. See the
+            # column's comment on why it is a deny marker rather than a permission.
+            "ALTER TABLE users ADD COLUMN accessor_env_id VARCHAR(36)",
+            "CREATE INDEX ix_users_accessor_env_id ON users(accessor_env_id)",
             "ALTER TABLE oauth_group_mappings ADD COLUMN default_permissions TEXT",
             "ALTER TABLE jobs ADD COLUMN cloud_resource_id VARCHAR(255)",
             "ALTER TABLE hypervisor_vm_cache ADD COLUMN guest_os VARCHAR(64)",
