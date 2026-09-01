@@ -78,7 +78,7 @@ _LOCATIONS = {
 # IAM permission, Azure's Retail Prices API is public but bills managed disks by SIZE TIER
 # rather than per GB, GCP's Cloud Billing Catalog needs its own API enabled, and OCI
 # publishes a price list with no auth at all. One at a time.
-PRICED_CLOUDS = ("aws", "azure")
+PRICED_CLOUDS = ("aws", "azure", "gcp")
 
 
 def priced(cloud: str) -> bool:
@@ -121,6 +121,8 @@ def _priceable(cloud: str, region: str) -> bool:
         return False
     if cloud == "aws":
         return region in _LOCATIONS
+    # Azure and GCP both key on the region id itself, so every region is in scope and a
+    # cap works the day a new one opens.
     return bool(region)
 
 
@@ -402,6 +404,196 @@ def _azure_disk_monthly(region: str, disk_gb: int):
             return price
     return None
 
+# ── GCP: the Cloud Billing Catalog ───────────────────────────────────────────
+#
+# The most involved of the four, because **GCE does not price a machine type.** It prices
+# vCPU and memory separately, so `n2-standard-4` is four units of "N2 Instance Core" plus
+# sixteen of "N2 Instance Ram". Two lookups are needed to answer one question:
+#
+#   1. the shape's vCPU and memory, from the Compute API — the catalogue does not know
+#      what `n2-standard-4` contains;
+#   2. the per-core and per-GB rates for that family and region, from the catalogue.
+#
+# **The catalogue cannot be filtered server-side.** There is no query for "N2 cores in
+# us-central1" — the only call is "list every Compute Engine SKU", a few thousand of them
+# over two or three pages. So it is fetched once, reduced immediately to a small index of
+# the entries this needs, and memoised for six hours like every other price here. The full
+# response is never kept.
+#
+# It needs `cloudbilling.googleapis.com` enabled on the project. Unlike AWS's Pricing API
+# it needs no special IAM role — the catalogue is a public price list — but an unenabled
+# API answers 403, so the reason says which one to turn on.
+
+_GCP_CATALOG = "https://cloudbilling.googleapis.com/v1/services/{svc}/skus"
+# Compute Engine's service id. A constant of the API, not of this project.
+_GCP_COMPUTE_SERVICE = "6F81-5844-456A"
+_GCP_TIMEOUT_S = 30.0
+_GCP_PAGE_SIZE = 5000
+# A guard, not a tuning knob: the catalogue is ~2-3 pages at that size, and a paging bug
+# on either side must not turn one price lookup into an unbounded download.
+_GCP_MAX_PAGES = 8
+
+# `pov_cloud_gcp` creates pd-balanced disks. The catalogue calls that "Balanced PD
+# Capacity"; matching on the description is the only way, since the resource group is the
+# generic "SSD".
+_GCP_DISK_DESCRIPTION = "balanced pd capacity"
+
+
+def _gcp_sku_price(sku: dict):
+    """The on-demand unit price out of one catalogue SKU, or None.
+
+    A price is `units` + `nanos`, both optional, and a promotional tier can be zero. The
+    first tier with a non-zero price is the on-demand rate.
+    """
+    for info in sku.get("pricingInfo") or []:
+        for tier in ((info.get("pricingExpression") or {})
+                     .get("tieredRates") or []):
+            price = tier.get("unitPrice") or {}
+            value = float(price.get("units") or 0) + float(price.get("nanos") or 0) / 1e9
+            if value > 0:
+                return value
+    return None
+
+
+def _gcp_catalog(region: str) -> dict:
+    """A small index of the Compute Engine SKUs this module needs, for one region.
+
+    ``{"cpu": {"N2": usd_per_core_hour, ...}, "ram": {...}, "disk": usd_per_gb_month}``
+
+    Reduced as it is read rather than after: the full catalogue is megabytes of JSON and
+    all but a few dozen entries are irrelevant here.
+    """
+    key = f"gcp:catalog:{region}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+
+    index = {"cpu": {}, "ram": {}, "disk": None}
+    try:
+        from . import gcp_service
+        session = gcp_service._authed_session()
+    except Exception:  # noqa: BLE001
+        logger.info("POV cost: no GCP credentials for the billing catalogue",
+                    exc_info=True)
+        return index
+
+    url = _GCP_CATALOG.format(svc=_GCP_COMPUTE_SERVICE)
+    params = {"currencyCode": "USD", "pageSize": _GCP_PAGE_SIZE}
+    try:
+        for _page in range(_GCP_MAX_PAGES):
+            resp = session.get(url, params=params, timeout=_GCP_TIMEOUT_S)
+            resp.raise_for_status()
+            body = resp.json()
+            for sku in body.get("skus") or []:
+                _gcp_index_sku(index, sku, region)
+            token = body.get("nextPageToken")
+            if not token:
+                break
+            params = dict(params, pageToken=token)
+    except Exception:  # noqa: BLE001
+        logger.info("POV cost: GCP billing catalogue read failed", exc_info=True)
+        # A partial index is still worth caching only if it found something; an empty one
+        # would pin the failure for six hours.
+        if not index["cpu"] and index["disk"] is None:
+            return index
+
+    _prices[key] = (time.time(), index)
+    return index
+
+
+def _gcp_index_sku(index: dict, sku: dict, region: str) -> None:
+    """Fold one catalogue SKU into the index, if it is one this module can use."""
+    category = sku.get("category") or {}
+    if category.get("usageType") != "OnDemand":
+        # Preemptible and Spot are cheaper and would understate a cap — the one direction
+        # an estimate behind a cap must not err. Commit1Yr/3Yr likewise are not what an
+        # un-discounted POV pays.
+        return
+    if region not in (sku.get("serviceRegions") or []):
+        return
+    price = _gcp_sku_price(sku)
+    if price is None:
+        return
+
+    description = (sku.get("description") or "")
+    lowered = description.lower()
+    group = category.get("resourceGroup") or ""
+
+    if group == "CPU" and " instance core running" in lowered:
+        # The family lives ONLY in the description — "N2 Instance Core running in
+        # Americas". Split on the space so "N2D" can never be read as "N2".
+        family = description.split(" ", 1)[0].upper()
+        index["cpu"].setdefault(family, price)
+    elif group == "RAM" and " instance ram running" in lowered:
+        family = description.split(" ", 1)[0].upper()
+        index["ram"].setdefault(family, price)
+    elif index["disk"] is None and _GCP_DISK_DESCRIPTION in lowered:
+        index["disk"] = price
+
+
+def _gcp_machine_spec(region: str, machine_type: str):
+    """``(vcpus, memory_gb)`` for a machine type, or None.
+
+    The catalogue prices cores and memory, not shapes, so this is the half that says how
+    many of each. Asked of the Compute API rather than parsed out of the name: `e2-medium`
+    has two vCPUs and 4 GB and says neither, and a custom type says both but in a third
+    format again.
+    """
+    key = f"gcp:shape:{region}:{machine_type}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    try:
+        from google.cloud import compute_v1
+        from . import gcp_service, pov_cloud_gcp
+        project = pov_cloud_gcp.configured_project_id()
+        if not project:
+            return None
+        zone = pov_cloud_gcp._zone_sync(project, region)
+        found = compute_v1.MachineTypesClient(
+            credentials=gcp_service._gcp_creds()).get(
+                project=project, zone=zone, machine_type=machine_type)
+    except Exception:  # noqa: BLE001
+        logger.info("POV cost: no GCP machine spec for %s in %s", machine_type, region,
+                    exc_info=True)
+        return None
+    spec = (int(found.guest_cpus or 0), float(found.memory_mb or 0) / 1024.0)
+    if spec[0] <= 0:
+        return None
+    _prices[key] = (time.time(), spec)
+    return spec
+
+
+def _gcp_instance_hourly(region: str, machine_type: str, os_family: str):
+    """On-demand USD/hour for one GCE machine type, or None.
+
+    ``os_family`` is accepted and ignored: unlike AWS and Azure, GCE prices the machine
+    and licences a premium OS image SEPARATELY, so a Windows VM's licence is a different
+    SKU keyed on the image rather than on the shape. Counting it would need the image's
+    own SKU; omitting it means a Windows POV is under-estimated by its licence, which is
+    stated on the page rather than hidden here.
+    """
+    if not machine_type:
+        return None
+    family = machine_type.split("-", 1)[0].upper()
+    if not family or family == "CUSTOM":
+        return None
+    spec = _gcp_machine_spec(region, machine_type)
+    if spec is None:
+        return None
+    catalog = _gcp_catalog(region)
+    cpu_rate = catalog["cpu"].get(family)
+    ram_rate = catalog["ram"].get(family)
+    if cpu_rate is None or ram_rate is None:
+        return None
+    vcpus, memory_gb = spec
+    return vcpus * cpu_rate + memory_gb * ram_rate
+
+
+def _gcp_disk_gb_month(region: str):
+    """USD per GB-month of pd-balanced, or None."""
+    return _gcp_catalog(region)["disk"]
+
 def _estimate_sync(environments: list, region: str, cloud: str) -> dict:
     out = {"available": False, "reason": "", "currency": "USD",
            "running_hourly": 0.0, "monthly_if_left": 0.0, "storage_monthly": 0.0,
@@ -443,6 +635,8 @@ def _compute_hourly(cloud: str, region: str, vm: dict):
     os_family = vm.get("os_family") or "linux"
     if cloud == "azure":
         return _azure_instance_hourly(region, itype, os_family)
+    if cloud == "gcp":
+        return _gcp_instance_hourly(region, itype, os_family)
     return instance_hourly(region, itype, os_family)
 
 
@@ -462,6 +656,11 @@ def _storage_hourly(cloud: str, region: str, vm: dict):
         # would be tiered as though its total were a single disk, which understates.
         monthly = _azure_disk_monthly(region, disk_gb)
         return None if monthly is None else monthly / HOURS_PER_MONTH
+    if cloud == "gcp":
+        # Per GB-month, like AWS and unlike Azure — GCE charges pd-balanced by capacity
+        # rather than by a size tier.
+        gb_month = _gcp_disk_gb_month(region)
+        return None if gb_month is None else disk_gb * gb_month / HOURS_PER_MONTH
     gb_month = storage_gb_month(region)
     return None if gb_month is None else disk_gb * gb_month / HOURS_PER_MONTH
 
@@ -476,6 +675,10 @@ def _no_answer_reason(cloud: str, region: str) -> str:
         return (f"Azure published no retail price for these VM sizes in {region}. The "
                 f"lookup needs no credentials, so this usually means the size or region "
                 f"name is not one the catalogue carries.")
+    if cloud == "gcp":
+        return ("GCP's billing catalogue returned nothing usable. It needs "
+                "`cloudbilling.googleapis.com` enabled on the project — the catalogue "
+                "itself is a public price list and needs no extra IAM role.")
     return no_price_reason(cloud)
 
 
