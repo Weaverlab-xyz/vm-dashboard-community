@@ -448,12 +448,31 @@ curl -H "Authorization: Bearer $(gcloud auth print-identity-token --audiences=<s
 It reports the contract path, the versions it can serve, its region, and how many
 instances are in its allowlist.
 
-**The v1 contract is not implemented yet.** `/v1/credential-op` returns **501** and logs
-the request it was sent. The shape is defined by the plugin and is not in this repository;
-guessing it would produce a service that deploys cleanly and fails every rotation, after
-possibly having applied the change. Point one managed system at the service, click
-*Verify Managed Account*, and read the real request out of Cloud Logging
-(`jsonPayload.msg="dbops_contract_capture"`).
+**The v1 contract is implemented**, from the plugin repo's own
+`docs/PLAN-CloudRunSqlServer.md` §2 and §4. `/v1/credential-op` serves `verify`, `change`,
+`change-self` and `list-accounts`, answers in the plan's response envelope, and maps each
+database failure onto its status/code table — so a wrong password comes back as
+**401 `DB_AUTH_FAILED`** (a legitimate Verify "false") rather than as a generic failure.
+
+Three things to know before the first rotation:
+
+- **The plugin must send `privateIp`.** This service holds no `roles/cloudsql.*` at all by
+  design, so it cannot resolve the address from the instance connection name itself. A
+  request without it is a 400 that says so.
+- **`passwordFormat: "prehashed"` is refused** with 422. The `HASHED` form skips
+  `CHECK_POLICY`, and a wrong salt length produces an `ALTER` that *succeeds* while leaving
+  a login nobody can authenticate as — after Password Safe has recorded the new password.
+- **Two details are inferred from the specification, not observed.** Which credential
+  `change-self` authenticates as, and the `statementKind` names beyond the one example
+  value. To settle them, turn request capture on for one rotation:
+
+  ```
+  gcloud run services update <service> --region <region> --set-env-vars FN_DBOPS_CAPTURE=1
+  ```
+
+  then read `jsonPayload.msg="dbops_contract_capture"` in Cloud Logging. Capture defaults
+  **off** — on, it would write a redacted request body into the log on every rotation
+  forever — and a redeploy from the dashboard resets it.
 
 **Deploying it yourself is still supported.** Use the plugin repo's `ps-dbops-sqlserver`
 Terraform module and put its stable custom audience in `clouddb_ps_gcp_dbops_audience` —

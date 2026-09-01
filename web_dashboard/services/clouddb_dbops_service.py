@@ -203,7 +203,14 @@ def _environment(db: Session, region: str) -> dict:
         # they are in different trust domains on purpose.
         "FN_DBOPS_ALLOWED_INVOKERS": ",".join(
             m.split(":", 1)[1] for m in invoker_members() if ":" in m),
-        "FN_DBOPS_CAPTURE": "1",
+        # OFF, now that the contract is implemented. It was on while capturing the
+        # real request was the point of the build; leaving it on would write a request
+        # body -- redacted, but still -- into Cloud Logging on every rotation forever,
+        # which is the opposite of this channel's whole argument. Turn it on for as
+        # long as it takes to compare one real request against the parser:
+        #   gcloud run services update <svc> --set-env-vars FN_DBOPS_CAPTURE=1
+        # and expect a redeploy from here to put it back.
+        "FN_DBOPS_CAPTURE": "0",
     }
 
 
