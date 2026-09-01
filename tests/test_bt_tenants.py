@@ -373,6 +373,25 @@ def test_the_regions_are_a_hint_and_not_an_allowlist():
     db.close()
 
 
+def test_every_declaration_of_the_default_region_agrees():
+    """Three places name it: `config.Settings`, `EntitleFeatureConfig` (what the Settings
+    panel loads) and the panel's own JS prefill. They are in three languages in three
+    files, so nothing but a test keeps them together — and disagreeing means the panel
+    offers one region while the app runs in another, which no error would ever report."""
+    from web_dashboard.api.setup import EntitleFeatureConfig
+    from web_dashboard.config import Settings
+
+    default = Settings.model_fields["entitle_api_url"].default
+    assert default in t.KNOWN_ENTITLE_REGIONS, (
+        f"the shipped default {default!r} is not one of the known regions")
+    assert EntitleFeatureConfig.model_fields["entitle_api_url"].default == default
+
+    panel = pathlib.Path(_ROOT, "web_dashboard", "templates", "settings.html").read_text(
+        encoding="utf-8")
+    assert f"this.panelCfg.entitle_api_url = '{default}'" in panel, (
+        "the Settings panel prefills a different Entitle region than the app defaults to")
+
+
 def test_the_known_regions_are_distinct_hosts_not_paths_on_one():
     """`api.entitle.io`, `api.us.entitle.io` and `api.ca.entitle.io` are separate
     deployments — their CSP headers name app./us./ca.entitle.io respectively. Pinned as a

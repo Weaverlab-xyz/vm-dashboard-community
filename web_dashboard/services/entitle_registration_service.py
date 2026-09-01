@@ -27,7 +27,7 @@ Required settings (config_service / .env):
   entitle_owner_id           UUID of the Entitle user who owns created integrations
   entitle_workflow_id        UUID of the default approval workflow for created integrations
 Optional:
-  entitle_endpoint           API base (default https://api.entitle.io)
+  entitle_endpoint           API base; blank derives it from the REGIONAL entitle_api_url
   entitle_agent_token_name   name of an Entitle Agent token for private connectivity
   entitle_allowed_durations  comma list of seconds (default "3600,43200,86400")
 

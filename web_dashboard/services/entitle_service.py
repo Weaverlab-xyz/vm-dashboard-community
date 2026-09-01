@@ -8,7 +8,7 @@ cloud-credential elevations for its own privileged operations. See
 docs/design/cloud-identity-jit.md §6.1 (prod repo).
 
 Configuration (read from config_service first, then settings.*):
-  entitle_api_url    e.g. https://api.entitle.io/v1
+  entitle_api_url    REGIONAL, e.g. https://api.us.entitle.io/v1
   entitle_api_token  bearer token for the Entitle workspace
 """
 from __future__ import annotations

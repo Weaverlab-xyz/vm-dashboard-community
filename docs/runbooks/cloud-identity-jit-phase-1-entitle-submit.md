@@ -37,7 +37,7 @@ tenant.
 - Set the following via the `/settings` UI (or directly in
   `app_config`):
   - `entitle_api_url` = your Entitle base URL (no trailing slash;
-    e.g. `https://api.entitle.io`)
+    regional, e.g. `https://api.us.entitle.io`)
   - `entitle_api_token` = the bearer token (store via `/secrets`
     or KV reference)
   - `entitle_machine_identity_email` = the synthetic user's email

@@ -149,7 +149,7 @@ opt in. Clusters differ: they are registered on demand after the fact
 
 | Field | Notes |
 |---|---|
-| API URL / API Token | Shared Entitle tenant credentials (also used by the other two tracks). The **API URL** is **regional** — `https://api.entitle.io/v1`, `https://api.us.entitle.io/v1` and `https://api.ca.entitle.io/v1` are separate deployments, not aliases — and drives both machine-identity JIT and, normalized to scheme+host, the Terraform provider endpoint. Set the region your tenant is in. Every region answers an unauthenticated request, so a wrong one is not rejected here: it surfaces later as a tenant that appears to hold none of your resources. |
+| API URL / API Token | Shared Entitle tenant credentials (also used by the other two tracks). The **API URL** is **regional** — `https://api.us.entitle.io/v1` (the shipped default), `https://api.entitle.io/v1` and `https://api.ca.entitle.io/v1` are separate deployments, not aliases — and drives both machine-identity JIT and, normalized to scheme+host, the Terraform provider endpoint. Set the region your tenant is in. Every region answers an unauthenticated request, so a wrong one is not rejected here: it surfaces later as a tenant that appears to hold none of your resources. |
 | Terraform Provider API Key | `entitleio/entitle` provider key (`ENTITLE_API_KEY`); falls back to the API Token. |
 | Registration enabled | Master capability switch for this track. |
 | `entitle_owner_id` / `entitle_workflow_id` | **Required** — Entitle user UUID that owns created integrations + the default approval workflow UUID. |

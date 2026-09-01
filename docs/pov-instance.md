@@ -708,7 +708,7 @@ Entitle credential per customer, and duplicated credentials rotate apart.
 | | |
 |---|---|
 | **Name** | A slug — lowercase letters, digits, hyphens. See [below](#about-customer-data) |
-| **URL / hostname** | `tenant.beyondtrustcloud.com` for PRA, or the Password Safe URL. **Entitle's is regional** — `api.entitle.io`, `api.us.entitle.io` and `api.ca.entitle.io` are separate deployments, not aliases. The field prefills with *this instance's* region and says so; check it against the customer's tenant, because every region answers a probe and a wrong one surfaces much later as a tenant holding none of their resources. Clearing it is refused rather than re-defaulted |
+| **URL / hostname** | `tenant.beyondtrustcloud.com` for PRA, or the Password Safe URL. **Entitle's is regional** — `api.us.entitle.io` (the shipped default), `api.entitle.io` and `api.ca.entitle.io` are separate deployments, not aliases. The field prefills with *this instance's* region and says so; check it against the customer's tenant, because every region answers a probe and a wrong one surfaces much later as a tenant holding none of their resources. Clearing it is refused rather than re-defaulted |
 | **OAuth client id** | PRA and Password Safe. Entitle authenticates with a bearer token and has no paired id |
 | **Client secret** | Encrypted with the same Fernet key as every other secret in this dashboard |
 | **…or a vault reference** | `aws_sm://`, `azure_kv://`, `gcp_sm://`, `bt_safe://` — for operators who want no credential in this database at all. One or the other, never both |

@@ -242,8 +242,10 @@ def normalize(kind: str) -> str:
 # worth a constant and a paragraph. A tenant pointed at the wrong region does not fail at
 # registration or at verify — it fails later, looking like a tenant that holds none of
 # the customer's resources.
-KNOWN_ENTITLE_REGIONS = ("https://api.entitle.io/v1",
-                         "https://api.us.entitle.io/v1",
+# Ordered with the shipped default first, so the form's hint reads as "this one, or
+# these" rather than as an unordered set the operator has to match against the field.
+KNOWN_ENTITLE_REGIONS = ("https://api.us.entitle.io/v1",
+                         "https://api.entitle.io/v1",
                          "https://api.ca.entitle.io/v1")
 
 

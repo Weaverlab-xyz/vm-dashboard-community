@@ -1647,7 +1647,14 @@ class Settings(BaseSettings):
     # at the wrong region does not fail here; it fails later, as a tenant that appears
     # to hold none of your resources. Drives machine-identity JIT and (normalized to
     # scheme+host) the entitleio/entitle provider endpoint.
-    entitle_api_url: str = "https://api.entitle.io/v1"
+    #
+    # The default is the US region because that is where this project's own tenant is.
+    # It is a DEFAULT and not a discovery: an install in another region must set this,
+    # and nothing will complain if it does not. NB the entitleio/entitle provider's own
+    # built-in default is the unprefixed api.entitle.io, so the two disagree — which is
+    # harmless only because _provider_endpoint derives the endpoint from this value
+    # rather than letting the provider fall back. See entitle_registration_service.
+    entitle_api_url: str = "https://api.us.entitle.io/v1"
     entitle_api_token: str = ""                     # bearer token (Key Vault secret in prod)
 
     # Entitle resource registration — as the dashboard builds Linux VMs and
@@ -1656,7 +1663,11 @@ class Settings(BaseSettings):
     # Terraform provider. OFF by default = no registration calls.
     entitle_registration_enabled: bool = False
     entitle_api_key: str = ""                       # entitleio/entitle TF provider key (ENTITLE_API_KEY); falls back to entitle_api_token
-    entitle_endpoint: str = ""                       # API base; blank → provider default (https://api.entitle.io)
+    # API base for the TF provider. Blank does NOT mean the provider's own built-in
+    # default (the unprefixed https://api.entitle.io) — _provider_endpoint derives it
+    # from entitle_api_url first, which is the regional one. Only a blank entitle_api_url
+    # would reach the provider's default, and that would be the wrong region for us.
+    entitle_endpoint: str = ""
     entitle_owner_id: str = ""                       # REQUIRED: UUID of the Entitle user owning created integrations
     entitle_workflow_id: str = ""                    # REQUIRED: UUID of the default approval workflow for created integrations
     entitle_agent_token_name: str = ""               # Entitle Agent token NAME/identifier for private targets (the token VALUE is supplied to the agent cluster via ESO — see docs/design/entitle-resource-registration.md)
