@@ -513,6 +513,51 @@ def test_the_register_action_warns_that_the_tunnel_is_rebrokered():
     assert "re-brokered" in body and "drop" in body
 
 
+# ── the Azure jump VM's plugin prep ───────────────────────────────────────────
+# Prep runs under `set -e` on a SHARED VM, so every command in it is a gate on the
+# onboarding that triggered it. It used to install all three DB clients regardless of
+# engine, which put an external Microsoft apt repo, a GPG key and an EULA on the
+# critical path of a PostgreSQL registration — and aborted before the key material was
+# staged when any of that stumbled.
+
+def test_azure_prep_installs_only_this_engines_client():
+    CONF.clear()
+    pg = " ".join(svc._azure_jump_prep_commands("postgres"))
+    assert "postgresql-client" in pg
+    assert "mssql-tools18" not in pg and "mysql-client" not in pg
+    ms = " ".join(svc._azure_jump_prep_commands("mysql"))
+    assert "mysql-client" in ms and "postgresql-client" not in ms
+    ss = " ".join(svc._azure_jump_prep_commands("sqlserver"))
+    assert "mssql-tools18" in ss and "postgresql-client" not in ss
+
+
+def test_azure_prep_without_an_engine_keeps_all_three():
+    """The cloud-init head start bakes all three in; an unnamed engine matches it."""
+    CONF.clear()
+    every = " ".join(svc._azure_jump_prep_commands())
+    for client in ("postgresql-client", "mysql-client", "mssql-tools18"):
+        assert client in every
+
+
+def test_azure_prep_still_stages_the_plugin_key_material():
+    """The client install is the head start; the key drop is the part a rotation
+    cannot do without. Narrowing the former must not drop the latter."""
+    CONF.clear()
+    CONF["clouddb_ps_azure_plugin_private_key"] = "-----BEGIN RSA PRIVATE KEY-----"
+    CONF["clouddb_ps_azure_plugin_passphrase"] = "s3cret"
+    cmds = " ".join(svc._azure_jump_prep_commands("postgres"))
+    assert "/root/psplugin/private.pem" in cmds
+    assert "/root/psplugin/passphrase.txt" in cmds
+
+
+def test_run_detail_never_ends_at_the_colon():
+    """A remote-command failure with no output still has to say something: the job
+    detail page shows `error_message` and nothing else."""
+    assert svc._run_detail({"stderr": "", "stdout": ""})
+    assert svc._run_detail({"stderr": "", "stdout": "  boom  "}) == "boom"
+    assert svc._run_detail({"stderr": "real cause", "stdout": "noise"}) == "real cause"
+
+
 _TESTS = [(n, f) for n, f in sorted(globals().items())
           if n.startswith("test_") and callable(f)]
 

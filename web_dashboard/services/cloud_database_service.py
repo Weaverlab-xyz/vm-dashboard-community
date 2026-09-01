@@ -1326,10 +1326,9 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
     if prep:
         prep_res = await aws_service.ssm_send_command(region, host_id, prep, timeout=120)
         if prep_res.get("status") != "Success" or int(prep_res.get("response_code", -1)) != 0:
-            detail = (prep_res.get("stderr") or prep_res.get("stdout") or "")[:400]
             raise CloudDatabaseError(
                 f"jump-host plugin prep failed (status={prep_res.get('status')}, "
-                f"rc={prep_res.get('response_code')}): {detail}")
+                f"rc={prep_res.get('response_code')}): {_run_detail(prep_res)}")
         logger.info("clouddb: staged plugin key material on %s db_id=%s", host_id, row.id)
     else:
         logger.warning("clouddb: clouddb_ps_ssm_plugin_private_key / "
@@ -1342,15 +1341,25 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
         managed_user=managed_user, managed_password=managed_pw, client_image=image)
     result = await aws_service.ssm_send_command(region, host_id, cmds, timeout=300)
     if result.get("status") != "Success" or int(result.get("response_code", -1)) != 0:
-        detail = (result.get("stderr") or result.get("stdout") or "")[:400]
         raise CloudDatabaseError(
             f"managed-user creation on the jump host failed "
-            f"(status={result.get('status')}, rc={result.get('response_code')}): {detail}")
+            f"(status={result.get('status')}, rc={result.get('response_code')}): "
+            f"{_run_detail(result)}")
     logger.info("clouddb: managed DB user %r created (or reset to this run's password) "
                 "via SSM on %s db_id=%s", managed_user, host_id, row.id)
     return {"managed_user": managed_user, "managed_pw": managed_pw, "jump_host_id": host_id,
             "region": region, "db_name": db_name, "admin_username": admin_username,
             "client_image": image, "port": port}
+
+
+def _run_detail(res: dict) -> str:
+    """The reportable tail of an ssm_send_command / vm_run_command result.
+
+    Never returns "", because a failure message that ends at the colon is the one
+    shape an operator cannot act on or even search for — it says a remote script
+    failed and then declines to say anything else."""
+    return ((res.get("stderr") or res.get("stdout") or "").strip()[:400]
+            or "the remote command returned no output")
 
 
 def _plugin_key_drop_commands(kdir: str, private_key: str, passphrase: str) -> list:
@@ -1391,21 +1400,36 @@ def _ssm_jump_prep_commands() -> list:
         kdir.rstrip("/"), priv, _cfg("clouddb_ps_ssm_plugin_passphrase"))
 
 
-def _azure_jump_prep_commands() -> list:
-    """Shell commands (run as root on the jump VM over Azure Run Command) that make
-    it plugin-ready: ensure the native DB clients are installed — idempotent, so an
-    already-prepped or fresh (cloud-init) VM is a fast no-op, and a reused VM the
-    head start missed gets them — and drop the plugin RSA key material to
-    /root/psplugin so the "{engine} Azure Run Command Plugin" can decrypt the
-    RSA-wrapped login password."""
-    cmds = [
-        "command -v psql >/dev/null 2>&1 || { apt-get update && apt-get install -y postgresql-client; }",
-        "command -v mysql >/dev/null 2>&1 || { apt-get update && apt-get install -y mysql-client; }",
+_AZURE_CLIENT_INSTALL = {
+    "postgres": ["command -v psql >/dev/null 2>&1 || "
+                 "{ apt-get update && apt-get install -y postgresql-client; }"],
+    "mysql": ["command -v mysql >/dev/null 2>&1 || "
+              "{ apt-get update && apt-get install -y mysql-client; }"],
+    "sqlserver": [
         "[ -x /opt/mssql-tools18/bin/sqlcmd ] || { "
         "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc -o /etc/apt/trusted.gpg.d/microsoft.asc; "
         "curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list -o /etc/apt/sources.list.d/mssql-release.list; "
-        "apt-get update; ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev; }",
-    ]
+        "apt-get update; ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev; }"],
+}
+
+
+def _azure_jump_prep_commands(engine: str = "") -> list:
+    """Shell commands (run as root on the jump VM over Azure Run Command) that make
+    it plugin-ready: ensure the native DB client THIS engine's plugin invokes is
+    installed — idempotent, so an already-prepped or fresh (cloud-init) VM is a fast
+    no-op, and a reused VM the head start missed gets it — and drop the plugin RSA
+    key material to /root/psplugin so the "{engine} Azure Run Command Plugin" can
+    decrypt the RSA-wrapped login password.
+
+    Only this engine's client, because the script runs under ``set -e`` on a SHARED
+    VM: installing all three made a PostgreSQL onboarding depend on the SQL Server
+    toolchain — an external Microsoft apt repo, a GPG key and an EULA — and a
+    stumble anywhere in that leg aborted the run before the key material was even
+    staged. No engine named (no caller does that today) keeps the old all-three
+    behaviour, matching the fresh-VM cloud-init head start."""
+    cmds = list(_AZURE_CLIENT_INSTALL.get(engine) or
+                [c for e in ("postgres", "mysql", "sqlserver")
+                 for c in _AZURE_CLIENT_INSTALL[e]])
     priv = config_service.get("clouddb_ps_azure_plugin_private_key") or ""
     if priv:
         cmds += _plugin_key_drop_commands(
@@ -1451,23 +1475,22 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
     port = row.port or sql.default_port(engine)
     # Make the jump VM plugin-ready (clients + key material). Longer timeout: a first
     # run on a VM the cloud-init head start missed installs packages.
-    prep = _azure_jump_prep_commands()
+    prep = _azure_jump_prep_commands(engine)
     prep_res = await azure_service.vm_run_command(rg, host, prep, timeout=600)
     if prep_res.get("status") != "Success":
-        detail = (prep_res.get("stderr") or prep_res.get("stdout") or "")[:400]
         raise CloudDatabaseError(
             f"jump-VM plugin prep failed (status={prep_res.get('status')}, "
-            f"rc={prep_res.get('response_code')}): {detail}")
+            f"rc={prep_res.get('response_code')}): {_run_detail(prep_res)}")
     cmds = sql.onboard_commands(
         engine, host=row.private_host, port=port,
         database=db_name, admin_user=admin_username, admin_password=admin_password,
         managed_user=managed_user, managed_password=managed_pw, client_image=image)
     result = await azure_service.vm_run_command(rg, host, cmds, timeout=300)
     if result.get("status") != "Success" or int(result.get("response_code", -1)) != 0:
-        detail = (result.get("stderr") or result.get("stdout") or "")[:400]
         raise CloudDatabaseError(
             f"managed-user creation on the jump VM failed "
-            f"(status={result.get('status')}, rc={result.get('response_code')}): {detail}")
+            f"(status={result.get('status')}, rc={result.get('response_code')}): "
+            f"{_run_detail(result)}")
     logger.info("clouddb: managed DB user %r created via Azure Run Command on %s db_id=%s",
                 managed_user, host, row.id)
     return {"managed_user": managed_user, "managed_pw": managed_pw, "jump_vm_name": host,

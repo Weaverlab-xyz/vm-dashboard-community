@@ -1672,10 +1672,47 @@ async def stop_vm_jumpoint(rg: str, name: str) -> None:
 
 _RUN_CMD_MARKER = "__PSRC__"
 
+# Azure hands back the guest's output in one of two shapes, and which one arrives is
+# decided by the GUEST OS rather than by the SDK call:
+#
+#   Windows (RunPowerShellScript) → two statuses, coded ComponentStatus/StdOut/succeeded
+#                                   and ComponentStatus/StdErr/succeeded;
+#   Linux   (RunShellScript)      → ONE status, coded ProvisioningState/succeeded (or
+#                                   /failed), with BOTH streams packed into its single
+#                                   message: "<verdict>\n[stdout]\n…\n[stderr]\n…".
+#
+# The clouddb jump VM is Ubuntu, so only the second shape ever reaches this module.
+# Reading only the first is what made every Azure Password Safe cloud-DB onboarding
+# fail identically with "status=Failed, rc=-1" and nothing after the colon: the exit
+# marker AND the real error were both sitting in a message nobody parsed, so a run
+# that had actually succeeded was indistinguishable from one that never started.
+_STDOUT_SECTION = "[stdout]"
+_STDERR_SECTION = "[stderr]"
+
+
+def _split_packed_message(msg: str) -> tuple:
+    """Split a Linux Run Command status message into (stdout, stderr).
+
+    The verdict line ahead of ``[stdout]`` is kept on stderr rather than dropped: on a
+    failed script it is the only place the guest's exit status appears ("failed to
+    execute command: command terminated with exit status=100"), and on an
+    extension-level failure — the script never ran at all — it is the entire diagnosis."""
+    head, sep, rest = msg.partition(_STDOUT_SECTION)
+    verdict = head.strip()
+    if verdict.lower().startswith("enable succeeded"):
+        verdict = ""          # the happy-path preamble carries no information
+    if not sep:
+        return "", verdict or msg.strip()
+    out, sep2, err = rest.partition(_STDERR_SECTION)
+    err = err.strip() if sep2 else ""
+    return out.strip(), "\n".join(part for part in (verdict, err) if part)
+
 
 def _parse_run_command_output(result) -> tuple:
-    """Pull (stdout, stderr) out of a RunCommandResult's InstanceViewStatus list."""
-    stdout = stderr = ""
+    """Pull (stdout, stderr) out of a RunCommandResult's InstanceViewStatus list.
+
+    Handles both shapes described above; the per-stream one wins when present."""
+    stdout = stderr = packed = ""
     for st in (getattr(result, "value", None) or []):
         code = (getattr(st, "code", "") or "").lower()
         msg = getattr(st, "message", "") or ""
@@ -1683,26 +1720,44 @@ def _parse_run_command_output(result) -> tuple:
             stdout = msg
         elif "stderr" in code:
             stderr = msg
+        elif msg:
+            packed = msg
+    if not (stdout or stderr) and packed:
+        return _split_packed_message(packed)
     return stdout, stderr
 
 
 def _run_command_script(commands: list) -> list:
     """Wrap the caller's commands so the in-guest shell surfaces the real exit code
     despite Azure reporting ARM-level success even when the script fails: ``set -e``
-    aborts on the first failure (marker never prints → response_code stays -1); on
-    full success the trailing marker prints the exit status."""
-    return ["set -e"] + list(commands) + [f'echo "{_RUN_CMD_MARKER}=$?"']
+    aborts on the first failure, and an EXIT trap prints the marker with that status.
+
+    The marker is printed from a trap rather than as a trailing line precisely so a
+    failure still reports a REAL exit code. A trailing ``echo`` only ever runs when
+    everything succeeded, which left every in-guest failure sharing one uninformative
+    rc of -1. Trap-printed, the marker is also the last thing on stdout either way,
+    so it survives Run Command truncating output to the last 4 KB."""
+    return (["set -e", f"""trap 'rc=$?; echo "{_RUN_CMD_MARKER}=$rc"' EXIT"""]
+            + list(commands))
 
 
 def _finalize_run_result(stdout: str, stderr: str) -> dict:
     """Turn parsed (stdout, stderr) into the ssm_send_command-shaped result: pull the
     exit-code marker out of stdout so callers get a real {status, response_code} and
-    treat both clouds identically."""
+    treat both clouds identically.
+
+    Falls back to the exit status in Azure's own verdict line when the marker is
+    missing — an older guest without the trap, or output truncated past it — so a
+    caller's error message names a cause instead of the catch-all -1."""
     response_code = -1
     m = re.search(rf"{_RUN_CMD_MARKER}=(\d+)", stdout or "")
     if m:
         response_code = int(m.group(1))
         stdout = stdout.replace(m.group(0), "").rstrip()
+    else:
+        verdict = re.search(r"exit status=(\d+)", stderr or "")
+        if verdict:
+            response_code = int(verdict.group(1))
     return {
         "status": "Success" if response_code == 0 else "Failed",
         "response_code": response_code,
