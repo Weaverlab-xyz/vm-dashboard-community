@@ -27,8 +27,8 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
 from . import (job_service, lab_platforms, pov_accessor_entitle, pov_accessor_service,
-               pov_broker, pov_gateway, pov_resource_broker, pov_share, pov_use_cases,
-               pov_wireup)
+               pov_broker, pov_entitle_agent, pov_gateway, pov_resource_broker, pov_share,
+               pov_use_cases, pov_wireup)
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +394,22 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
                            exc_info=True)
             job_service.append_job_log(
                 db, job_id, f"WARNING: could not clear the Resource Broker state ({exc}).")
+
+        # The Entitle agent's token next, and it goes here rather than with the wire-up
+        # above for a reason worth stating: the integrations must be gone BEFORE the agent
+        # they route through, or Entitle is left holding integrations that name a dead
+        # agent. Destroying the token is also the step that keeps the NAME free — Entitle
+        # refuses to mint a name it already holds and cannot read the value back, so a
+        # survivor wedges the next POV that derives the same one.
+        try:
+            job_service.append_job_log(
+                db, job_id, await pov_entitle_agent.teardown(db, env))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: entitle agent teardown failed", env.id, exc_info=True)
+            job_service.append_job_log(
+                db, job_id,
+                f"WARNING: could not clear the Entitle agent state ({exc}). Check the "
+                f"tenant for a leftover agent token.")
 
         # The Gateway before the broker that runs it, and both before the platform.
         # Reversed, the removal job would be queued on an agent that has just been

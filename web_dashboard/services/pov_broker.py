@@ -129,6 +129,11 @@ ANSIBLE_VM_IMAGE = "chrweav/ansible-winrm:latest"
 # choice, and a run refused for the port would read as a firewall.
 ANSIBLE_PORTS = (5985, 5986)
 
+# SSH, for a Linux target — the Entitle agent host. A separate constant rather than a
+# third entry in ANSIBLE_PORTS: these are granted per target, and a Windows guest has no
+# business being reachable on 22 by a playbook just because a Linux one in the same POV is.
+ANSIBLE_SSH_PORTS = (22,)
+
 # How often the enrolment wait looks. Sixty seconds of margin below the code's TTL so the
 # last poll still has a code to redeem.
 ENROLL_POLL_SECONDS = 15.0
@@ -236,7 +241,8 @@ def _broker_targets(db: Session, env: PovEnvironment) -> list[str]:
 
 # ── rendering ────────────────────────────────────────────────────────────────
 
-def render_policy(targets: list[str], ansible_targets: list[str] | None = None) -> str:
+def render_policy(targets: list[str], ansible_targets: list[str] | None = None,
+                  ansible_ssh_targets: list[str] | None = None) -> str:
     """The agent's ``policy.yaml``, generated from this POV's addresses.
 
     Generated files here are held to a higher bar than usual because **this file fails
@@ -247,6 +253,12 @@ def render_policy(targets: list[str], ansible_targets: list[str] | None = None) 
     """
     ports = ", ".join(str(p) for p in BROKER_PORTS)
     ansible_targets = [t for t in (ansible_targets or []) if t]
+    # Kept as a SEPARATE list rather than merged, because the two carry different ports:
+    # a Windows guest is granted WinRM and a Linux one is granted SSH. Merging them and
+    # emitting the union would hand every host in the POV both, which is a widening
+    # nobody asked for on the day somebody adds a third kind of target.
+    ansible_ssh_targets = [t for t in (ansible_ssh_targets or [])
+                           if t and t not in ansible_targets]
     # ASCII only, deliberately. This file is written by a shell heredoc on a guest whose
     # locale nobody chose and parsed by an agent that already has to be told about UTF-16
     # and BOMs; a non-ASCII byte in a comment is a needless way to find that out.
@@ -278,13 +290,15 @@ def render_policy(targets: list[str], ansible_targets: list[str] | None = None) 
         "  privileged: true",
     ]
 
-    # Config Management, for the Resource Broker install. Its own target list, NOT the
-    # discovery one above — widening a port probe must never widen what may have a
-    # playbook applied to it as root. An empty list means "nothing may be configured",
-    # which is the correct fail-closed reading and what the agent does with it.
+    # Config Management, for the Resource Broker install (WinRM) and the Entitle agent
+    # install (SSH). Its own target list, NOT the discovery one above — widening a port
+    # probe must never widen what may have a playbook applied to it as root. An empty list
+    # means "nothing may be configured", which is the correct fail-closed reading and what
+    # the agent does with it.
     lines.append("ansible:")
-    if ansible_targets:
+    if ansible_targets or ansible_ssh_targets:
         ansible_ports = ", ".join(str(p) for p in ANSIBLE_PORTS)
+        ssh_ports = ", ".join(str(p) for p in ANSIBLE_SSH_PORTS)
         lines += [
             "  enabled: true",
             f"  vm_image: {ANSIBLE_VM_IMAGE}",
@@ -293,13 +307,16 @@ def render_policy(targets: list[str], ansible_targets: list[str] | None = None) 
         for ip in ansible_targets:
             lines.append(f"    - cidr: {ip}/32")
             lines.append(f"      ports: [{ansible_ports}]")
+        for ip in ansible_ssh_targets:
+            lines.append(f"    - cidr: {ip}/32")
+            lines.append(f"      ports: [{ssh_ports}]")
     else:
         # Rendered disabled rather than omitted, so an operator reading the file on the
-        # broker VM sees that the feature exists and that this POV has no Windows guest
-        # for it — rather than wondering whether the dashboard forgot.
+        # broker VM sees that the feature exists and that this POV has no guest for it —
+        # rather than wondering whether the dashboard forgot.
         lines += [
             "  enabled: false",
-            "  # No Windows VM in this POV, so nothing may have a playbook applied to it.",
+            "  # No VM in this POV may have a playbook applied to it.",
         ]
 
     lines.append("")
@@ -522,13 +539,15 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     agent, code = _mint_code(db, env)
 
     # The Config-Management grant is scoped to this POV's Windows guests — or to the one
-    # named Resource Broker host, once somebody has named it. Computed here rather than
-    # inside render_policy so that function stays pure and testable.
-    from . import pov_resource_broker
+    # named Resource Broker host, once somebody has named it — plus its Linux guests, or
+    # the one named Entitle agent host. Computed here rather than inside render_policy so
+    # that function stays pure and testable.
+    from . import pov_entitle_agent, pov_resource_broker
     payload = render_bootstrap(
         env_name=env.name, dashboard_url=dashboard_url, enroll_code=code,
         policy_yaml=render_policy(targets,
-                                  pov_resource_broker.windows_targets(db, env)))
+                                  pov_resource_broker.windows_targets(db, env),
+                                  pov_entitle_agent.linux_targets(db, env)))
 
     mod = lab_platforms.adapter(env.platform)
     if mechanism == "metadata":

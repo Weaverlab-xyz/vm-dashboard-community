@@ -61,7 +61,14 @@ How Entitle reaches the target determines whether an agent is needed:
 
 The agent is **shared**: one per VPC/network serves every private integration in it,
 referenced by `entitle_agent_token_name`. So you provision the agent **once per
-environment** (not per build). A registration for a private target fails (non-fatally)
+environment** (not per build).
+
+> **On a POV instance the agent is per POV, not per install.** A POV's VMs are on their own
+> private network, so the shared one above cannot reach them. The POV page installs a
+> single-node k3s on a Linux guest and Helm-installs the agent there, minting the token in
+> that POV's own Entitle tenant — see
+> [the POV instance guide](../pov-instance.md#the-entitle-agent). The keys on this page
+> describe the *instance-wide* agent used by managed clusters and stay untouched by it. A registration for a private target fails (non-fatally)
 with a clear message if no agent is configured. The Entitle agent is the *management*
 plane (it mints/revokes the ephemeral SSH account or DB role); the **PRA tunnel** the
 dashboard already brokers is the separate *access* path the user connects through.
@@ -142,7 +149,7 @@ opt in. Clusters differ: they are registered on demand after the fact
 
 | Field | Notes |
 |---|---|
-| API URL / API Token | Shared Entitle tenant credentials (also used by the other two tracks). The **API URL** is pre-filled with the canonical `https://api.entitle.io/v1` (identical for every tenant) and drives both machine-identity JIT and — normalized to scheme+host — the Terraform provider endpoint. Leave it unless you're on a non-standard Entitle region. |
+| API URL / API Token | Shared Entitle tenant credentials (also used by the other two tracks). The **API URL** is **regional** — `https://api.us.entitle.io/v1` (the shipped default), `https://api.entitle.io/v1` and `https://api.ca.entitle.io/v1` are separate deployments, not aliases — and drives both machine-identity JIT and, normalized to scheme+host, the Terraform provider endpoint. Set the region your tenant is in. Every region answers an unauthenticated request, so a wrong one is not rejected here: it surfaces later as a tenant that appears to hold none of your resources. |
 | Terraform Provider API Key | `entitleio/entitle` provider key (`ENTITLE_API_KEY`); falls back to the API Token. |
 | Registration enabled | Master capability switch for this track. |
 | `entitle_owner_id` / `entitle_workflow_id` | **Required** — Entitle user UUID that owns created integrations + the default approval workflow UUID. |

@@ -99,6 +99,14 @@ async def list_tenants(kind: str = "", db: Session = Depends(get_db),
                               for key in bt_tenant_service.OPTION_KEYS.get(k, ())
                               if key in bt_tenant_service.OPTION_HINTS},
              "required_options": list(bt_tenant_service.REQUIRED_OPTIONS.get(k, ())),
+             # "" for the kinds whose URL is the customer. Entitle's is REGIONAL, so
+             # this is the region THIS install runs in — a prefill, not an assertion that
+             # it is right for the customer, which is why `known_regions` travels with it
+             # so the form can say so. Both from the server: a list of Entitle regions
+             # hardcoded in the template goes stale the week BeyondTrust adds one.
+             "default_base_url": bt_tenant_service.default_base_url(k),
+             "known_regions": (list(bt_tenant_service.KNOWN_ENTITLE_REGIONS)
+                               if k == "entitle" else []),
              "verifiable": k in bt_tenant_service.VERIFIABLE_KINDS}
             for k in bt_tenant_service.VALID_KINDS
         ],

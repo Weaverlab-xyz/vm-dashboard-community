@@ -310,9 +310,160 @@ def test_a_missing_required_option_is_reported_not_hidden():
     """A tenant with valid credentials and no Jump Group is configured-but-unusable, and
     finding that out inside a provision job is finding it out too late."""
     db = d.SessionLocal()
-    row = _mk(db, kind="pra", options={"jump_group_name": "POV"})
-    assert row["missing_options"] == ["jumpoint_name"]
+    row = _mk(db, kind="pra", options={"jumpoint_name": "gw"})
+    assert row["missing_options"] == ["jump_group_name"]
     db.close()
+
+
+def test_an_option_no_caller_reads_is_not_required():
+    """`jumpoint_name` is allowed and unread: a POV's jump items route through the Gateway
+    installed INSIDE the environment, never the tenant's appliance-wide one. Requiring it
+    made a correctly configured tenant report a gap nothing would ever consume."""
+    db = d.SessionLocal()
+    row = _mk(db, kind="pra", options={"jump_group_name": "POV"})
+    assert row["missing_options"] == []
+    db.close()
+
+
+def test_the_entitle_options_are_only_ones_a_caller_reads():
+    """A field an operator fills in and nothing consumes reads as configured, which is
+    worse than an absent one. `machine_identity_email` was exactly that: every reader of
+    it takes the instance-wide setting, never the tenant's copy."""
+    assert "machine_identity_email" not in t.OPTION_KEYS["entitle"]
+    assert "machine_identity_email" not in t.OPTION_LABELS
+    src = pathlib.Path(_ROOT, "web_dashboard", "services", "pov_wireup.py").read_text(
+        encoding="utf-8")
+    for key in t.OPTION_KEYS["entitle"]:
+        assert f'option("{key}")' in src, (
+            f"the Entitle tenant option {key!r} is offered on the form but no caller in "
+            f"pov_wireup reads it")
+
+
+def test_entitle_owner_and_workflow_are_required_because_the_wireup_refuses_without_them():
+    """`pov_wireup.entitle_tenant_ctx` refuses before ANY integration is created — the
+    REST accessor adapter included, which needs neither an agent nor a key. So the gap
+    belongs on the row, not inside a job."""
+    db = d.SessionLocal()
+    row = _mk(db, kind="entitle", client_id="", options={"ssh_sudo_user": "btadmin"})
+    assert row["missing_options"] == ["owner_id", "workflow_id"]
+    db.close()
+
+
+# ── the URL that is not a per-tenant fact ────────────────────────────────────
+
+def test_an_omitted_entitle_url_takes_this_installs_region():
+    """Not because there is one correct value — Entitle's API is regional — but because
+    the form always prefills, so a blank reaching `create` came from an API caller who
+    omitted it, and this install's own region beats refusing them."""
+    db = d.SessionLocal()
+    row = _mk(db, kind="entitle", base_url="", client_id="")
+    assert row["base_url"] == t.default_base_url("entitle")
+    assert row["base_url"], "the Entitle default resolved empty"
+    db.close()
+
+
+def test_the_regions_are_a_hint_and_not_an_allowlist():
+    """BeyondTrust adds regions. A closed list would refuse a real tenant, which is a much
+    worse failure than a hint that is one short."""
+    db = d.SessionLocal()
+    row = _mk(db, kind="entitle", base_url="https://api.newregion.entitle.io/v1",
+              client_id="")
+    assert row["base_url"] == "https://api.newregion.entitle.io/v1"
+    assert row["base_url"] not in t.KNOWN_ENTITLE_REGIONS
+    db.close()
+
+
+def test_every_declaration_of_the_default_region_agrees():
+    """Three places name it: `config.Settings`, `EntitleFeatureConfig` (what the Settings
+    panel loads) and the panel's own JS prefill. They are in three languages in three
+    files, so nothing but a test keeps them together — and disagreeing means the panel
+    offers one region while the app runs in another, which no error would ever report."""
+    from web_dashboard.api.setup import EntitleFeatureConfig
+    from web_dashboard.config import Settings
+
+    default = Settings.model_fields["entitle_api_url"].default
+    assert default in t.KNOWN_ENTITLE_REGIONS, (
+        f"the shipped default {default!r} is not one of the known regions")
+    assert EntitleFeatureConfig.model_fields["entitle_api_url"].default == default
+
+    panel = pathlib.Path(_ROOT, "web_dashboard", "templates", "settings.html").read_text(
+        encoding="utf-8")
+    assert f"this.panelCfg.entitle_api_url = '{default}'" in panel, (
+        "the Settings panel prefills a different Entitle region than the app defaults to")
+
+
+def test_the_known_regions_are_distinct_hosts_led_by_the_shipped_default():
+    """Two properties in one place, because they are the same fact seen twice.
+
+    The regions are separate deployments — their CSP headers name app./us./ca.entitle.io
+    respectively — so this list is about HOSTS, and nobody may 'tidy' it into one base
+    with a region query parameter. And it is ordered with the shipped default first, which
+    is what lets the form's hint read as "this one, or these".
+
+    Compared as whole hosts rather than searched for as substrings: `"api.us.entitle.io"
+    in something` is true of `api.us.entitle.io.evil.test` too, which is a habit worth not
+    having even in a test — and CodeQL flags it, correctly.
+    """
+    from urllib.parse import urlsplit
+
+    from web_dashboard.config import Settings
+
+    hosts = [urlsplit(u).netloc for u in t.KNOWN_ENTITLE_REGIONS]
+    assert len(set(hosts)) == len(hosts), "two 'regions' resolve to the same host"
+    assert all(hosts), "a region entry has no host at all"
+    assert hosts[0] == urlsplit(
+        Settings.model_fields["entitle_api_url"].default).netloc, (
+        "KNOWN_ENTITLE_REGIONS no longer leads with the shipped default")
+
+
+def test_the_default_url_follows_the_configured_one_not_a_hardcoded_string():
+    """The whole reason the prefill is safe. An install serves one Entitle region and has
+    already said which in `entitle_api_url`; a constant here would prefill every POV with
+    a host on somebody else's deployment, and every region answers 200 so nothing later
+    would report it."""
+    config_service.set("entitle_api_url", "https://api.eu.entitle.io/v1")
+    try:
+        assert t.default_base_url("entitle") == "https://api.eu.entitle.io/v1"
+    finally:
+        config_service.set("entitle_api_url", "")
+
+
+def test_only_entitle_gets_a_default_url():
+    """A PRA or Password Safe hostname IS the customer — defaulting one would point a
+    POV's jump items at whatever appliance this instance happens to know about."""
+    for kind in ("pra", "password_safe"):
+        assert t.default_base_url(kind) == ""
+    db = d.SessionLocal()
+    try:
+        _mk(db, kind="pra", base_url="")
+        raise AssertionError("a PRA tenant was accepted with no appliance hostname")
+    except t.BTTenantError as exc:
+        assert "URL or appliance hostname" in str(exc)
+    finally:
+        db.close()
+
+
+def test_clearing_an_entitle_url_is_refused_rather_than_silently_re_regioned():
+    """An earlier draft restored the default here, on the belief that Entitle had one API
+    host. It has one per REGION, so substituting this install's for a field somebody
+    cleared moves a customer's tenant to another deployment — and since every region
+    answers, nothing downstream would ever say so."""
+    db = d.SessionLocal()
+    row = _mk(db, kind="entitle", base_url="https://api.us.entitle.io/v1", client_id="")
+    try:
+        t.update(db, row["id"], base_url="")
+        raise AssertionError("a cleared Entitle URL was silently re-regioned")
+    except t.BTTenantError as exc:
+        msg = str(exc)
+        assert "REGIONAL" in msg
+        # The whole rendered list, not one host spotted inside the sentence. Stronger —
+        # it catches a refusal that names only some regions — and it does not leave a
+        # bare hostname substring check in the file for anyone to copy somewhere it
+        # would matter.
+        assert ", ".join(t.KNOWN_ENTITLE_REGIONS) in msg, (
+            f"the refusal does not name the regions: {msg}")
+    finally:
+        db.close()
 
 
 # ── naming ───────────────────────────────────────────────────────────────────

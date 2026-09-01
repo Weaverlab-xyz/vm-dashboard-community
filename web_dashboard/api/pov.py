@@ -17,6 +17,7 @@
   POST   /api/pov/managed/{id}/gateway  — configure and install the POV's BeyondTrust Gateway
   GET    /api/pov/managed/{id}/gateway  — what PRA says about it, live
   POST   /api/pov/managed/{id}/resource-broker
+  POST   /api/pov/managed/{id}/entitle-agent
                                         — configure and install the Password Safe Resource Broker
   POST   /api/pov/managed/{id}/wireup   — PRA jump item, Password Safe managed system and
                                           Entitle integration per VM
@@ -67,8 +68,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
-                        pov_cloud_cost, pov_resource_broker, pov_schedule,
-                        pov_share, pov_spend, pov_summary,
+                        pov_cloud_cost, pov_entitle_agent, pov_resource_broker,
+                        pov_schedule, pov_share, pov_spend, pov_summary,
                         pov_use_cases, pov_wireup)
 from .auth import get_current_user
 
@@ -179,6 +180,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
     out.update(pov_resource_broker.describe(_db_of(env), env))
+    out.update(pov_entitle_agent.describe(_db_of(env), env))
     # Kept rather than only spread, so the use-case summary below can be resolved from the
     # numbers this row already paid for. Recomputing it would put a second per-VM query on
     # the list endpoint for counts it is holding in a local variable.
@@ -797,6 +799,49 @@ async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
     except pov_resource_broker.ResourceBrokerError as exc:
         # 409 with the remedy passed through — every refusal this raises is something the
         # operator does next: stage an installer, name a zone, press Broker.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job_id": job.id,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class EntitleAgentRequest(BaseModel):
+    """Configure and install this POV's Entitle agent.
+
+    ``vm_name`` names the Linux guest it goes on. There is no token field and there cannot
+    be one: the agent token is **minted in this POV's own Entitle tenant** when the install
+    is queued, because Entitle returns a token's value only at creation and a value an
+    operator pasted is a value this dashboard could never destroy at teardown.
+    """
+    vm_name: str | None = None
+    install: bool = True
+
+
+@router.post("/managed/{env_id}/entitle-agent", status_code=202)
+async def entitle_agent(env_id: str, payload: EntitleAgentRequest,
+                        db: Session = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
+    """Set the Entitle agent's host and queue its install on the broker agent.
+
+    The SSH login is **not** a field here, for the same reason the Resource Broker's is
+    not: it comes from the lab platform's own stored credentials, read per run.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+
+    pov_entitle_agent.configure(db, env, vm_name=payload.vm_name)
+    if not payload.install:
+        return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+    try:
+        job = await pov_entitle_agent.queue(
+            db, env, created_by=getattr(current_user, "username", None))
+    except pov_entitle_agent.EntitleAgentError as exc:
+        # 409 with the remedy passed through — every refusal this raises is something the
+        # operator does next: press Broker, name a tenant, name a Linux host.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job.id,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}

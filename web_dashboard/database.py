@@ -1616,7 +1616,7 @@ class BeyondTrustTenant(Base):
 
     **One row per product, not per customer.** ``PovEnvironment`` carries three separate
     FKs because the three are genuinely independent: a POV needs its own PRA appliance and
-    its own Password Safe tenant, but Entitle is multi-tenant behind one canonical API URL
+    its own Password Safe tenant, but Entitle is multi-tenant behind a REGIONAL API URL
     and is usually shared across every POV. A single row holding all three would force a
     duplicate Entitle credential per customer, and duplicated credentials rotate apart.
 

@@ -254,7 +254,9 @@ The v1 draft had a `cloud_identity_service.get_credential()` that
 returned a new SDK-ready credential. That was wrong — there is no new
 credential; the baseline credential's privilege simply changes.
 
-**Endpoint:** `POST https://api.entitle.io/public/v1/accessRequests`,
+**Endpoint:** `POST <entitle_api_url host>/public/v1/accessRequests` — the host is
+**regional** (`api.us.entitle.io` by default; `api.entitle.io` and `api.ca.entitle.io`
+are other deployments),
 bearer-token auth. Required fields per the Entitle reference:
 
 - `duration` (number) — the requested TTL. Bounded by the workflow's
@@ -664,7 +666,7 @@ not silently use over-privileged baseline creds.
   `setIamPolicy` calls to add and later remove bindings. Not
   Condition-based. Sweeper required, matching AWS.
 - ~~**Entitle access-request REST shape.**~~ **Resolved (v2.2):**
-  `POST https://api.entitle.io/public/v1/accessRequests` with body
+  `POST <entitle_api_url host>/public/v1/accessRequests` (regional host) with body
   `{duration, justification, target: {bundle|role}, behalfOf:
   {synthetic-user}}`. Bearer-token auth. The `behalfOf` field is
   Entitle's native mechanism for the machine-identity pattern; no
