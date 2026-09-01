@@ -7,8 +7,9 @@ the properties worth pinning are the ones whose failure is silent:
   * DDL quoting is per-engine and complete (T-SQL doubles ', MySQL binds parameters)
   * a MySQL account with no host qualifier is REFUSED, never defaulted
   * self-rotation uses USER(), not the parsed name
-  * the unimplemented contract answers 501 and names the versions it serves — it
-    does not fall through to an operation
+  * the v1 contract parser refuses every malformed shape rather than half-filling an
+    operation, and maps each database failure onto the plan's own status/code table
+  * no credential reaches a response body or a log line, structurally
 
 Stdlib only — runs with nothing installed.
 """
@@ -41,6 +42,32 @@ def _req(method="POST", path="/v1/credential-op", body=None, headers=None):
 
 def _ctx():
     return Context.from_env(workload="ps_dbops")
+
+
+# One valid envelope per operation, per plan §2. Built as fixtures because most of
+# these tests are about ONE field being wrong, and repeating the other nine obscures it.
+_OP = {
+    "contractVersion": 1,
+    "requestId": "b7f0",
+    "engine": "sqlserver",
+    "operation": "verify",
+    "instanceConnectionName": "proj:us-central1:mssql-core-01",
+    "privateIp": "10.20.0.7",
+    "port": 1433,
+    "database": "master",
+    "loginUser": "bt_rotator",
+    "loginPassword": "rot-pw",
+    "timeoutSeconds": 120,
+}
+_CHANGE = dict(_OP, operation="change", targetUser="app_login", newPassword="new-pw")
+_SELF = dict(_OP, operation="change-self", targetUser="app_login",
+             loginUser="app_login", loginPassword="old-pw",
+             newPassword="new-pw", currentPassword="old-pw")
+
+
+def _without(payload, *keys):
+    """``payload`` minus ``keys`` — the shape of a request missing a required field."""
+    return {k: v for k, v in payload.items() if k not in keys}
 
 
 def _raises(fn, *args, **kwargs):
@@ -186,33 +213,324 @@ def test_postgres_connect_names_the_reason_rather_than_crashing():
     assert "data-api" in message, message
 
 
-# ── Routing and the unimplemented contract ────────────────────────────────────
+# ── Routing and the v1 contract ───────────────────────────────────────────────
 
 def test_health_probe_touches_no_database_and_reports_the_contract():
     _reset_env(FN_DBOPS_ALLOWED_INSTANCES="proj:us-east1:db-a")
     resp = ps_dbops.handle(_req(method="GET", path="/"), _ctx())
     assert resp.status == 200, resp
     assert resp.body["supported_contract_versions"] == [1], resp.body
-    assert resp.body["contract_implemented"] is False, resp.body
+    assert resp.body["contract_implemented"] is True, resp.body
+    assert resp.body["operations"] == list(ps_dbops._OPERATIONS), resp.body
     assert resp.body["allowed_instances"] == 1, resp.body
 
 
-def test_credential_op_answers_501_with_the_versions_it_serves():
+def test_an_unserved_contract_version_is_501_not_400():
+    """A version this build does not serve is not a malformed request — the address's
+    ver= option exists precisely so one service can be asked for another one, and 501
+    naming what it CAN serve is what makes that usable."""
     _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
-    resp = ps_dbops.handle(_req(body={"anything": 1}), _ctx())
+    resp = ps_dbops.handle(_req(body=dict(_OP, contractVersion=7)), _ctx())
     assert resp.status == 501, resp
     assert resp.body["supported_contract_versions"] == [1], resp.body
+    assert resp.body["success"] is False, resp.body
 
 
-def test_the_seam_never_falls_through_to_an_operation():
-    """The one behaviour that must not regress when the parser is written: an
-    unrecognised request must not reach _run with a half-filled dict."""
+def test_a_garbage_contract_version_is_400_not_501():
+    """501 says "ask a different service"; this request is simply malformed."""
     _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    resp = ps_dbops.handle(_req(body=dict(_OP, contractVersion="nonsense")), _ctx())
+    assert resp.status == 400, resp
+    assert resp.body["code"] == "BAD_REQUEST", resp.body
+
+
+def test_the_parser_never_half_fills_an_operation():
+    """The behaviour that mattered while this was a seam and still matters now: every
+    malformed shape has to raise, not return a dict with holes in it that _run then
+    dereferences into a rotation."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    bad = (
+        {},                                                     # empty body
+        dict(_OP, operation="drop-database"),                   # unknown operation
+        dict(_OP, operation=""),                                # no operation
+        dict(_OP, engine="oracle"),                             # unknown engine
+        _without(_OP, "instanceConnectionName"),                # no target
+        dict(_OP, instanceConnectionName="not-a-connection"),   # malformed target
+        _without(_OP, "privateIp"),                             # unresolvable address
+        _without(_OP, "loginPassword"),                         # no credential
+        dict(_OP, port="eighty"),                               # non-integer port
+        _without(_CHANGE, "targetUser"),                        # nothing to change
+        _without(_CHANGE, "newPassword"),                       # nothing to change it to
+        _without(_SELF, "currentPassword"),                     # no OLD_PASSWORD
+    )
+    for payload in bad:
+        try:
+            ps_dbops._parse_credential_op(payload, 1)
+        except ps_dbops.DbOpsError:
+            continue
+        raise AssertionError(f"parser accepted {payload!r}")
+
+
+def test_postgres_is_refused_by_name_at_parse_time():
+    """Not "no module named pg8000" three layers down: postgres has its own channel
+    that needs no service at all, and the message says so."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    message = _raises(ps_dbops._parse_credential_op, dict(_OP, engine="postgres"), 1)
+    assert "data-api" in message, message
+
+
+def test_verify_authenticates_as_loginuser_not_targetuser():
+    """Plan §4: verify is "open a connection as loginUser" and the connection IS the
+    proof. Reading targetUser here would test the wrong credential and report a pass
+    for an account nobody checked."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    parsed = ps_dbops._parse_credential_op(
+        dict(_OP, loginUser="bt_rotator", loginPassword="rot-pw",
+             targetUser="app_login"), 1)
+    assert parsed["as_user"] == "bt_rotator", parsed
+    assert parsed["as_password"] == "rot-pw", parsed
+
+
+def test_change_self_defaults_the_login_to_the_target_and_refuses_a_mismatch():
+    """ALTER LOGIN ... OLD_PASSWORD only works when the SESSION is that login, so the
+    authenticating identity defaults to the target with its current password — and a
+    request naming a different one is refused here rather than sent, because SQL Server
+    answers it with a permission error and a permission error on a self-rotation is the
+    most misleading failure this service could return."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    parsed = ps_dbops._parse_credential_op(_without(_SELF, "loginUser",
+                                                    "loginPassword"), 1)
+    assert parsed["as_user"] == parsed["principal"] == "app_login", parsed
+    assert parsed["as_password"] == "old-pw", parsed
+    assert parsed["old_password"] == "old-pw", parsed
+    message = _raises(ps_dbops._parse_credential_op,
+                      dict(_SELF, loginUser="someone_else"), 1)
+    assert "change" in message, message
+
+
+def test_change_carries_no_old_password():
+    """The OLD_PASSWORD form is what makes change-self work without ALTER ANY LOGIN.
+    Leaking it into a plain change would add a precondition the operation does not
+    have, and fail a rotation whenever Password Safe's stored value has drifted."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    parsed = ps_dbops._parse_credential_op(dict(_CHANGE, currentPassword="old-pw"), 1)
+    assert parsed["old_password"] == "", parsed
+
+
+def test_prehashed_is_422_not_400_and_the_hashed_form_is_not_built():
+    """A well-formed request whose COMBINATION is refused. The plan ships the verifier
+    flag off because a wrong salt length produces an ALTER that succeeds while leaving
+    a login nobody can authenticate as — after Password Safe has recorded the new
+    password as authoritative. So there is no flag here at all."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    resp = ps_dbops.handle(_req(body=dict(_CHANGE, passwordFormat="prehashed")), _ctx())
+    assert resp.status == 422, resp
+    assert resp.body["code"] == "UNSUPPORTED_COMBINATION", resp.body
+    # And the statement form itself does not exist -- checked against the builders
+    # rather than the whole module, whose prose explains why it does not.
+    import inspect
+    for fn in (ps_dbops.change_password_statements, ps_dbops.list_accounts_statement,
+               ps_dbops.server_version_statement):
+        assert "HASHED" not in inspect.getsource(fn), fn.__name__
+
+
+def test_the_allowlist_still_gates_the_parsed_request():
+    """The parser is now the first thing that touches the target, so the fail-closed
+    boundary has to live inside it — not only in the operations it hands off to."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="proj:us-east1:other")
+    message = _raises(ps_dbops._parse_credential_op, _OP, 1)
+    assert "allowlist" in message, message
+
+
+def test_timeout_seconds_is_clamped_not_trusted():
+    assert ps_dbops.connect_timeout(0) == ps_dbops._CONNECT_TIMEOUT
+    assert ps_dbops.connect_timeout("nonsense") == ps_dbops._CONNECT_TIMEOUT
+    assert ps_dbops.connect_timeout(120) == 120
+    assert ps_dbops.connect_timeout(1) == ps_dbops._MIN_TIMEOUT
+    assert ps_dbops.connect_timeout(86400) == ps_dbops._MAX_TIMEOUT
+
+
+# ── The plan's status/code table ──────────────────────────────────────────────
+
+def test_a_rejected_credential_is_401_not_a_generic_failure():
+    """Plan §2 calls this "a legitimate Verify 'false', not an infrastructure failure".
+    Collapsing it into a 500 would make every wrong password look like a broken VPC."""
+    exc = Exception("Login failed for user 'app_login'.")
+    exc.number = 18456
+    status, code, _ = ps_dbops._classify(exc)
+    assert (status, code) == (401, "DB_AUTH_FAILED")
+
+
+def test_each_documented_failure_maps_to_its_own_code():
+    for number, expected in ((15007, (404, "PRINCIPAL_NOT_FOUND")),
+                             (1396, (404, "PRINCIPAL_NOT_FOUND")),
+                             (1142, (403, "DB_PERMISSION_DENIED")),
+                             (15118, (409, "POLICY_REJECTED")),
+                             (1819, (409, "POLICY_REJECTED")),
+                             (1045, (401, "DB_AUTH_FAILED"))):
+        exc = Exception("boom")
+        exc.number = number
+        status, code, _ = ps_dbops._classify(exc)
+        assert (status, code) == expected, (number, status, code)
+
+
+def test_sql_servers_ambiguous_15151_says_it_is_ambiguous():
+    """SQL Server reports "does not exist or you do not have permission" as ONE error
+    and refuses to distinguish them, so that an unprivileged caller cannot enumerate
+    logins. Picking 403 silently would send an operator hunting a missing login."""
+    exc = Exception("Cannot alter the login 'app_login', because it does not exist "
+                    "or you do not have permission.")
+    exc.number = 15151
+    status, code, detail = ps_dbops._classify(exc)
+    assert (status, code) == (403, "DB_PERMISSION_DENIED")
+    assert "does not distinguish" in detail, detail
+    assert "CustomerDbRootRole" in detail, detail
+
+
+def test_a_timeout_is_504_and_an_unreachable_instance_is_502():
+    assert ps_dbops._classify(Exception("Login timeout expired"))[0] == 504
+    assert ps_dbops._classify(OSError("connection refused"))[0] == 502
+    assert ps_dbops._classify(Exception("getaddrinfo failed"))[0] == 502
+
+
+def test_an_unmapped_failure_does_not_borrow_a_documented_code():
+    """Forcing an unrecognised error into the table would send the plugin down a branch
+    the failure does not justify. An unknown code degrades to "it failed", which is the
+    only true statement available."""
+    status, code, _ = ps_dbops._classify(Exception("something entirely new"))
+    assert status == 500 and code == "DB_ERROR", (status, code)
+
+
+def test_the_error_number_is_read_from_whichever_attribute_the_driver_used():
+    for attr in ("number", "msg_no", "errno", "code"):
+        exc = Exception("boom")
+        setattr(exc, attr, 18456)
+        assert ps_dbops._error_number(exc) == 18456, attr
+    # pymysql puts it in args[0]
+    assert ps_dbops._error_number(Exception(1045, "Access denied")) == 1045
+    assert ps_dbops._error_number(Exception("no number here")) == 0
+
+
+# ── Nothing credential-shaped leaves this service ─────────────────────────────
+
+def test_a_driver_error_that_echoes_the_password_is_scrubbed():
+    """Structural, not best-effort (plan §8). The drivers are third-party and an error
+    message embedding the value it rejected is exactly the thing discovered after a
+    month of it being in Cloud Logging. The passwords are known here, so this is a
+    substring replace rather than a pattern guess."""
+    detail = ps_dbops._scrub("password 'Sup3rSecret!' was rejected",
+                             ["Sup3rSecret!", ""])
+    assert "Sup3rSecret" not in detail, detail
+    assert "***" in detail, detail
+    # A short value is left alone: replacing "abc" everywhere would corrupt the very
+    # message an operator needs, and a 3-character password is not the risk here.
+    assert ps_dbops._scrub("error at abc", ["abc"]) == "error at abc"
+
+
+def test_no_response_body_carries_a_credential():
+    """Every refusal path, not just the happy one. A parse-time refusal has no
+    statement to report, so it carries no statementKind — but it must still never echo
+    a password back at the caller."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    for body in (dict(_CHANGE, passwordFormat="prehashed"),
+                 _without(_CHANGE, "targetUser"),
+                 dict(_CHANGE, instanceConnectionName="nope"),
+                 dict(_SELF, loginUser="someone_else")):
+        rendered = json.dumps(ps_dbops.handle(_req(body=body), _ctx()).body)
+        assert "new-pw" not in rendered, rendered
+        assert "rot-pw" not in rendered, rendered
+        assert "old-pw" not in rendered, rendered
+
+
+def test_a_change_reports_the_statement_kind_and_never_the_statement():
+    """statementKind is what makes a failure diagnosable without putting the statement
+    -- which carries the new password -- in a response body or a log line."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    calls = {}
+
+    def _fake_change(target, **kw):
+        calls.update(kw)
+        return 1
+
+    real = ps_dbops.change_password
+    ps_dbops.change_password = _fake_change
     try:
-        ps_dbops._parse_credential_op({}, 1)
-    except ps_dbops.ContractNotImplemented:
-        return
-    raise AssertionError("_parse_credential_op returned instead of raising")
+        resp = ps_dbops.handle(_req(body=_CHANGE), _ctx())
+    finally:
+        ps_dbops.change_password = real
+    assert resp.status == 200, resp
+    assert resp.body["success"] is True, resp.body
+    assert resp.body["code"] == "OK", resp.body
+    assert resp.body["statementKind"] == "ALTER_LOGIN", resp.body
+    assert resp.body["statementsExecuted"] == 1, resp.body
+    # The operation really was handed the parsed identities, not the target's own.
+    assert calls["as_user"] == "bt_rotator" and calls["principal"] == "app_login", calls
+    assert "new-pw" not in json.dumps(resp.body), resp.body
+
+
+def test_a_driver_failure_becomes_the_plans_code_not_a_stack_trace():
+    """An unclassified driver exception escaping would be rendered by the runtime as a
+    500 with a traceback, and a traceback out of a credential-handling path is the one
+    thing the plan's security section rules out."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+
+    def _boom(target, **kw):
+        exc = Exception("Login failed for user 'bt_rotator'.")
+        exc.number = 18456
+        raise exc
+
+    real = ps_dbops.change_password
+    ps_dbops.change_password = _boom
+    try:
+        resp = ps_dbops.handle(_req(body=_CHANGE), _ctx())
+    finally:
+        ps_dbops.change_password = real
+    assert resp.status == 401, resp
+    assert resp.body["code"] == "DB_AUTH_FAILED", resp.body
+    assert resp.body["success"] is False, resp.body
+    assert resp.body["statementKind"] == "ALTER_LOGIN", resp.body
+
+
+def test_a_verify_returns_the_server_version():
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    real = ps_dbops.verify_credential
+    ps_dbops.verify_credential = lambda target, **kw: "Microsoft SQL Server 2022"
+    try:
+        resp = ps_dbops.handle(_req(body=_OP), _ctx())
+    finally:
+        ps_dbops.verify_credential = real
+    assert resp.status == 200, resp
+    assert resp.body["serverVersion"] == "Microsoft SQL Server 2022", resp.body
+    assert resp.body["statementKind"] == "CONNECT", resp.body
+
+
+def test_list_accounts_returns_names_the_plugin_can_rotate():
+    """On MySQL an account IS user@host — returning bare names would hand back
+    accounts that cannot be rotated, which is the round-trip the plugin depends on."""
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    assert "sys.sql_logins" in ps_dbops.list_accounts_statement("sqlserver")
+    assert "##%" in ps_dbops.list_accounts_statement("sqlserver"), \
+        "internal ##MS_*## logins are not rotatable accounts"
+    assert "cloudsqlsa" in ps_dbops.list_accounts_statement("sqlserver"), \
+        "Google's own management login is not a rotatable account"
+    assert "mysql.user" in ps_dbops.list_accounts_statement("mysql")
+    assert "host" in ps_dbops.list_accounts_statement("mysql")
+
+
+def test_every_response_carries_the_plans_envelope():
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    resp = ps_dbops.handle(_req(body=dict(_OP, operation="nope")), _ctx())
+    for key in ("contractVersion", "requestId", "success", "code", "detail",
+                "elapsedMs"):
+        assert key in resp.body, (key, resp.body)
+    assert resp.body["contractVersion"] == 1, resp.body
+
+
+def test_the_request_id_is_echoed_for_log_correlation():
+    _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*")
+    resp = ps_dbops.handle(_req(body=dict(_OP, requestId="b7f0abc", operation="nope")),
+                           _ctx())
+    assert resp.body["requestId"] == "b7f0abc", resp.body
 
 
 def test_contract_version_is_read_from_the_body_not_assumed():
@@ -235,9 +553,11 @@ def test_wrong_method_and_wrong_path_are_distinguishable():
 
 
 def test_the_contract_path_is_overridable():
-    """DbOpsPath is a broker setting, so the service has to be able to follow it."""
+    """DbOpsPath is a broker setting, so the service has to be able to follow it. The
+    body is deliberately empty: what is under test is which path is SERVED, and a 400
+    from the parser proves the request reached it."""
     _reset_env(FN_DBOPS_ALLOWED_INSTANCES="*", FN_DBOPS_PATH="/custom/op")
-    assert ps_dbops.handle(_req(path="/custom/op"), _ctx()).status == 501
+    assert ps_dbops.handle(_req(path="/custom/op"), _ctx()).status == 400
     assert ps_dbops.handle(_req(path="/v1/credential-op"), _ctx()).status == 404
 
 

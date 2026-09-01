@@ -149,30 +149,100 @@ out until someone reconciles by hand. One warm instance per region removes that 
 throttling stays at the default: the instance staying *alive* is what keeps the network
 interface attached; it needs no CPU between requests.
 
-## 5. The contract is the one open seam
+## 5. The contract, implemented from the plugin repo's specification
 
-The request and response shape of `POST /v1/credential-op` version 1 lives in the plugin,
-not in this repository. `ps_dbops._parse_credential_op` is therefore **deliberately
-unimplemented**: a plausible parser would produce a service that deploys cleanly, passes
-its own tests, and fails every real rotation — after possibly having applied the change.
+`POST /v1/credential-op` version 1 is implemented. The source is the plugin repository's
+own `docs/PLAN-CloudRunSqlServer.md` — §2 for the envelope and the status/code table, §4
+for the statement each operation runs — which states it implements `IDbOpsClient` as
+already declared plugin-side in `Shared/Services/Transports.cs`. That is a written
+specification from the other side of the wire, which is what the seam was waiting for; it
+is not the same thing as a captured request, and the difference is recorded below.
 
-So the service ships instrumented. `FN_DBOPS_CAPTURE` (on by default) logs the redacted
-request — headers minus `Authorization`, which is *dropped* rather than masked, and a body
-through `logs.redact` — and `/v1/credential-op` answers **501** naming the versions it can
-serve, which is what makes the address's `ver=` option usable rather than guesswork. Point
-one managed system at the service, click *Verify Managed Account*, and read the real
-request out of Cloud Logging (`jsonPayload.msg="dbops_contract_capture"`). That also proves
-the front door, the invoker binding, the audience and VPC reachability before any handler
-logic exists.
+Four operations: `verify`, `change`, `change-self`, `list-accounts`.
 
-Everything the seam calls once it is filled in is **implemented and tested**:
+| Field | Handling |
+|---|---|
+| `contractVersion` | 1. An unserved integer is **501** naming what this build serves — that is what makes the address's `ver=` option usable. Garbage is **400**, because that is a malformed request, not a different service |
+| `operation` | Hyphenated per the plan; `change_self`/`changeself`/`discover` and friends are accepted and **logged**, so an alias papering over a real contract difference is still visible |
+| `engine` | `sqlserver` and `mysql`. The plan's service is SQL Server only; this one also serves MySQL because `clouddb_ps_gcp_channel` can be forced to `cloud-run` for every engine. `postgres` is refused by name |
+| `privateIp` | **Required.** See below |
+| `timeoutSeconds` | Bounds the login attempt, clamped to 5–300. The plugin is the party that knows how long it will wait |
+| `passwordFormat` | `plaintext` only. `prehashed` is **422**, and the `HASHED` statement form is not built at all — see below |
+
+**`privateIp` is required, and that is an IAM consequence rather than an omission.** The
+plan keeps this service account deliberately tiny — none of `roles/cloudsql.client`,
+`roles/cloudsql.instanceUser` or `roles/cloudsql.admin` — so there is no `instances.get`
+available here and the address cannot be resolved from `instanceConnectionName`. The
+plugin sends it (it did not always; that was one of two wire-contract gaps the plugin
+author fixed). The 400 says all of this, because "privateIp is required" on its own reads
+like a field somebody could make optional.
+
+**`prehashed` is refused rather than flagged off.** The plan ships its verifier flag off
+and gives the reason: a wrong salt length or SHA-512 framing produces an `ALTER` that
+*succeeds* while leaving a login nobody can authenticate as — **after** Password Safe has
+recorded the new password as authoritative. A flag whose only correct setting is "off" is
+worse than an honest refusal, so the statement form does not exist in this module.
+
+**Two things the specification does not settle, both marked `ASSUMPTION` in the code:**
+
+1. **Which credential `change-self` authenticates as.** §4's statement is
+   `ALTER LOGIN [target] … OLD_PASSWORD = N'old'`, and `OLD_PASSWORD` only lets a login
+   change *its own* password — so the authenticating identity defaults to `targetUser`
+   with `currentPassword`, and a request naming a different `loginUser` is refused here
+   rather than sent. SQL Server would answer that with a permission error, and a
+   permission error on a self-rotation is the most misleading failure this service could
+   return.
+2. **The `statementKind` vocabulary.** The plan gives one example value, `ALTER_LOGIN`.
+   `CONNECT`, `ALTER_USER` and `LIST_LOGINS` are this module's, so a plugin that switches
+   on that field is unproven.
+
+`FN_DBOPS_CAPTURE` now defaults **off** — leaving it on would write a redacted request body
+into Cloud Logging on every rotation forever, which is the opposite of this channel's whole
+argument. Turn it on for exactly as long as it takes to compare one real request against
+the parser:
+
+```
+gcloud run services update <service> --region <region> --set-env-vars FN_DBOPS_CAPTURE=1
+```
+
+and read it back with `jsonPayload.msg="dbops_contract_capture"`. A redeploy from the
+dashboard puts it back to off.
+
+Everything below the parser was already implemented and tested and still is:
 `change_password_statements` (change, self-change with `OLD_PASSWORD`/`USER()`, per-engine
-quoting), `_connect`, `_execute`, `change_password`, `verify_credential`, `check_instance`.
-`_run` takes the parsed dict and routes it. See `tests/test_ps_dbops_workload.py`.
+quoting), `_connect`, `_execute`, `change_password`, `verify_credential`, `check_instance`,
+plus `list_accounts` and `server_version_statement` added with the contract. See
+`tests/test_ps_dbops_workload.py`.
 
-One thing the capture will settle that has an IAM consequence: whether the plugin sends a
-resolved host/port or expects the service to resolve `project:region:instance` itself. If
-the latter, the service account needs `sqladmin.instances.get` (`roles/cloudsql.viewer`) —
+### Failure mapping
+
+The plugin switches on `code`, so a wrong mapping does not mislabel a failure — it sends
+the plugin down the wrong branch. `401 DB_AUTH_FAILED` in particular is, in the plan's own
+words, *a legitimate Verify "false", not an infrastructure failure*.
+
+One case is genuinely undecidable and is reported as such: SQL Server **15151** is
+*"Cannot alter the login 'x', because it does not exist or you do not have permission"* —
+one error for two causes, deliberately, so an unprivileged caller cannot enumerate logins
+by probing. It maps to `403` and the `detail` says the other reading is possible and names
+the `CustomerDbRootRole` grant, because of the two that is the one an operator can act on.
+
+An unrecognised driver error becomes `500 DB_ERROR` rather than borrowing a documented
+code. An unknown `code` degrades to "it failed", which is the only true statement
+available; a borrowed one is an instruction to the plugin.
+
+Nothing credential-shaped leaves the service. `detail` is scrubbed of every password in
+the request before it is returned or logged — structurally, by substring replacement of
+values this module already holds, not by pattern-matching hopefully. The response reports
+`statementKind`, never the statement, which on a change carries the new password. And the
+broad `except` around the operations is deliberate: an unclassified driver exception
+escaping would be rendered as a 500 **with a traceback**, out of a credential-handling
+path.
+
+### The old open question, now closed
+
+Whether the plugin sends a resolved host or expects the service to resolve
+`project:region:instance` itself: it sends one. Had it been the other way, the service
+account would have needed `sqladmin.instances.get` (`roles/cloudsql.viewer`) —
 which does not contradict the docs' claim that it needs none of `cloudsql.client`,
 `instanceUser` or `admin`, but is a fourth role nobody has mentioned.
 
