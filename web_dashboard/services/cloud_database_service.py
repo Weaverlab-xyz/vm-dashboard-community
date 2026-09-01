@@ -1292,13 +1292,31 @@ def _gcp_channel(engine: str) -> str:
     """The plugin channel to drive for ``engine`` on GCP.
 
     ``clouddb_ps_gcp_channel`` is ``auto`` (per-engine default above) or an explicit
-    channel. admin-api is deliberately not offered: it needs ``cloudsql.users.update``,
-    which among predefined roles lives only in the very broad ``roles/cloudsql.admin``,
-    and it cannot see principals created inside the database."""
+    channel.
+
+    ``admin-api`` is a third channel the plugin implements and ``ps_resource_service``
+    validates, but the dashboard does not EMIT it, and that is a considered choice
+    rather than a gap: it needs ``cloudsql.users.update``, which among predefined roles
+    lives only in the very broad ``roles/cloudsql.admin`` (against
+    ``roles/cloudsql.instanceUser`` for data-api), it performs no database login at all
+    so Verify proves only the GCP identity, and it reaches only the instance's user
+    REGISTRY — a principal created inside the database with ``CREATE ROLE`` can be
+    invisible to it.
+
+    An unrecognised value is logged rather than silently swapped for the default. A
+    channel name that parses everywhere else in the stack and then quietly does not
+    apply is how an operator concludes a setting is broken."""
     choice = (_cfg("clouddb_ps_gcp_channel") or "auto").strip().lower()
     if choice in _GCP_CHANNELS:
         return choice
-    return _GCP_CHANNEL_DEFAULTS.get(engine, "data-api")
+    default = _GCP_CHANNEL_DEFAULTS.get(engine, "data-api")
+    if choice and choice != "auto":
+        logger.warning(
+            "clouddb: clouddb_ps_gcp_channel=%r is not a channel the dashboard can "
+            "build an address for (%s) — using %r for engine %r. 'admin-api' is a valid "
+            "plugin channel but is not emitted here; see _gcp_channel.",
+            choice, "/".join(_GCP_CHANNELS), default, engine)
+    return default
 
 
 def _ps_ineligible_reason(row: CloudDatabase) -> Optional[str]:
@@ -1609,6 +1627,35 @@ def _fa_grant_statement(engine: str, *, fa_db_user: str, managed_user: str,
     return ""
 
 
+def _fa_discovery_grant_statement(engine: str, *, fa_db_user: str,
+                                  fa_host: str = "%") -> str:
+    """The extra grant ACCOUNT DISCOVERY needs on MySQL, or ``""``.
+
+    ``CREATE USER`` confers no read of the account catalogue, so a functional account
+    that can rotate every account on the instance still cannot ENUMERATE them: Discovery
+    comes back as MySQL 1142. This is the one grant the rotation ladder does not already
+    cover, and it is read-only — it adds "and can list account names" to "a compromised
+    rotation identity can change passwords and nothing else", which is the weakest
+    widening available.
+
+    There is no privilege-free substitute. ``information_schema.USER_PRIVILEGES`` is
+    derived from ``mysql.user`` and shows other principals' rows only to a caller that
+    already has SELECT on it, and ``performance_schema.accounts`` sees only accounts that
+    have CONNECTED and reports the client's connection host rather than the account's
+    host qualifier — which breaks the ``user@host`` round-trip that makes a discovered
+    account rotatable in the first place.
+
+    PostgreSQL needs nothing: ``pg_roles`` is world-readable. SQL Server needs nothing
+    either — ``sys.server_principals`` is readable by any login for its own rows and by
+    ``CustomerDbRootRole`` for all of them, which the rotation grant already joins.
+    """
+    if engine != "mysql" or not fa_db_user:
+        return ""
+    # Do NOT reach for UPDATE ON mysql.* as a shortcut: Cloud SQL restricts DML on
+    # mysql.user, and it would not help — this is a read.
+    return f"GRANT SELECT ON mysql.user TO '{fa_db_user}'@'{fa_host or '%'}';"
+
+
 def _iam_db_auth(engine: str, channel: str) -> bool:
     """Whether this (engine, channel) authenticates the DATABASE session with an IAM
     token rather than a stored password.
@@ -1722,7 +1769,7 @@ def _grant_secret_id(row_id: str) -> str:
 async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, job_id: str,
                               engine: str, project: str, instance: str, region: str,
                               database: str, admin_username: str, admin_password: str,
-                              grant: str) -> bool:
+                              grant: str, purpose: str = "rotation grant") -> bool:
     """Issue the functional account's GRANT ourselves, as the built-in admin, over the
     Data API. Returns whether it was applied.
 
@@ -1763,11 +1810,11 @@ async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, job_id: str,
     except Exception as exc:  # noqa: BLE001
         # The statement, not the exception, is what the operator needs: this is the one
         # step whose manual fallback is a single line they can paste.
-        logger.warning("clouddb: could not apply the PS rotation grant on %s db_id=%s: %s",
-                       instance, row.id, exc)
+        logger.warning("clouddb: could not apply the PS %s on %s db_id=%s: %s",
+                       purpose, instance, row.id, exc)
         job_service.append_job_log(
             db, job_id,
-            f"Could not apply the Password Safe rotation grant automatically ({exc}) — "
+            f"Could not apply the Password Safe {purpose} automatically ({exc}) — "
             f"run it as an admin on {database}: {grant}")
         return False
     finally:
@@ -1776,10 +1823,10 @@ async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, job_id: str,
 
     job_service.append_job_log(
         db, job_id,
-        f"Applied the Password Safe rotation grant as {admin_username} on "
+        f"Applied the Password Safe {purpose} as {admin_username} on "
         f"{database}: {grant}")
-    logger.info("clouddb: applied PS rotation grant on %s db_id=%s engine=%s",
-                instance, row.id, engine)
+    logger.info("clouddb: applied PS %s on %s db_id=%s engine=%s",
+                purpose, instance, row.id, engine)
     return True
 
 
@@ -1921,6 +1968,31 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
                 db, job_id,
                 f"Password Safe rotation needs one grant on this database, which the "
                 f"dashboard could not issue itself — run it as an admin: {grant}")
+
+    # 4b. ACCOUNT DISCOVERY on MySQL needs a SECOND grant, and it is issued as a second
+    #     statement rather than appended to the one above. Deliberately: whether Cloud
+    #     SQL permits SELECT on mysql.user at all is still unconfirmed against a live
+    #     instance, and packing the two into one call would let that open question take
+    #     the ROTATION grant down with it. Rotation is the feature; Discovery is the
+    #     convenience. So this runs last, its failure is reported as its own remedy, and
+    #     onboarding continues either way.
+    #     Nothing to do when the functional account is the built-in admin, which already
+    #     reads the catalogue, and nothing to do off data-api — cloud-run enumerates
+    #     accounts through the DB-Ops service as its own login.
+    discovery_grant = "" if fa_is_admin else _fa_discovery_grant_statement(
+        engine, fa_db_user=fa_db_user, fa_host="%")
+    if discovery_grant and fa_db_user and channel == "data-api":
+        if not await _apply_fa_grant_gcp(
+                db, row=row, job_id=job_id, engine=engine, project=project,
+                instance=instance, region=region, database=db_name,
+                admin_username=admin_username, admin_password=admin_password,
+                grant=discovery_grant, purpose="account-discovery grant"):
+            job_service.append_job_log(
+                db, job_id,
+                f"Account Discovery on this MySQL instance needs one further grant, "
+                f"which the dashboard could not issue itself. Rotation and Verify are "
+                f"unaffected and work without it; Discovery returns MySQL 1142 until it "
+                f"is applied — run it as an admin: {discovery_grant}")
 
     # 5. data-api + SQL Server only: the address's fasecret= option. With no IAM
     #    database authentication the Data API has to be handed the functional account's
@@ -2341,6 +2413,12 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             # change passwords and nothing else. information_schema is readable by every
             # principal, and ALTER USER is schema-independent, so nothing is lost.
             # Postgres needs none of this: it grants CONNECT to PUBLIC by default.
+            #
+            # What this does NOT fix is Discovery. MySQL permits fully-qualified
+            # cross-database reads, so "SELECT ... FROM mysql.user" works from any
+            # default database — the blocker there is purely the missing SELECT grant
+            # (see _fa_discovery_grant_statement), never field 3. If Discovery comes
+            # back empty or 1142, do not come and change this line.
             control_db = ("information_schema" if engine == "mysql"
                           else ctx["db_name"] or "")
             addr = [channel, conn_name, control_db, "-", "-"]

@@ -1715,9 +1715,12 @@
                   authentication; that channel needs a small Cloud Run service you deploy yourself, and the dashboard only needs its audience below.
                 </p>
                 <p class="text-xs text-amber-600">
-                  Channel readiness is uneven. <strong>Cloud Run is built</strong> (SQL Server only) but has not yet been exercised against a live
-                  Cloud SQL instance. <strong>The Data API channel is still a stub</strong> &mdash; a PostgreSQL or MySQL rotation reports
-                  &ldquo;not implemented in this build&rdquo; rather than succeeding.
+                  <strong>Every channel is now implemented plugin-side</strong> &mdash; the Data API covers verify, change managed account, change
+                  functional account and discovery on PostgreSQL and MySQL, and no action reports &ldquo;not implemented in this build&rdquo; any
+                  more. But <strong>none of them has been exercised against a live Cloud SQL instance</strong>, which is why this still ships off.
+                  On <strong>MySQL</strong>, Account Discovery additionally needs <code class="bg-gray-100 px-1 rounded">GRANT SELECT ON mysql.user</code>
+                  for the rotator; the dashboard applies it during onboarding and reports the statement on the job if it cannot. Rotation and Verify
+                  work without it.
                 </p>
                 <!-- x-init default is load-bearing: an unset string config key reads back
                      as "" from /api/setup/feature, not as the model default. -->

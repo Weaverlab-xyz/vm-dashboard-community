@@ -560,8 +560,9 @@ into Password Safe** for credential rotation (via the `{engine} SSM Custom Plugi
 `{engine} Azure Run Command Plugin` or `GCP Cloud SQL {engine}` plugin, and the shared
 `PRA Vault Username Password` plugin). GCP needs no jump host on either of its channels:
 PostgreSQL and MySQL go over Google's control plane (the Cloud SQL Data API), and SQL
-Server through a small Cloud Run service you deploy. It ships off — the Cloud Run channel
-is built but not yet live-tested, and the Data API channel is still a plugin-side stub. That whole feature — base provisioning, per-cloud
+Server through a small Cloud Run service you deploy. It ships off — every channel is
+implemented plugin-side now, but none has been exercised against a live Cloud SQL
+instance. That whole feature — base provisioning, per-cloud
 prerequisites, and the Password Safe onboarding — is documented separately in
 **[Databases](../databases.md)**. The tunnel half needs
 [Privileged Remote Access](privileged-remote-access.md).

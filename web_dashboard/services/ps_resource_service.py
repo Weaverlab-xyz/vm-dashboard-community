@@ -393,7 +393,40 @@ _DBGCP_CONTROL_PLANE = frozenset({"admin-api", "data-api"})
 _DBGCP_OPTION_KEYS = frozenset({"host", "fasecret", "iam", "ver", "verifier"})
 # Options the plugin accepts only on one channel; anywhere else it raises.
 _DBGCP_OPTION_CHANNEL = {"fasecret": "data-api", "ver": "cloud-run"}
+# Two options are legal everywhere as a KEY but not in every VALUE, and both used to
+# parse on any channel and quietly do nothing on the control-plane ones. The SILENCE is
+# the defect in both cases:
+#
+# * "verifier=on" claims the new password was pre-hashed on the Resource Broker so the
+#   plaintext never reaches the wire. Only cloud-run can honour that; accepting it on
+#   data-api/admin-api told an operator their password was protected when it was not.
+#   "verifier=off" stays legal everywhere, because it promises nothing.
+# * "iam=false" on data-api leaves the address with NO way to authenticate: executeSql
+#   has no plaintext-password field and fasecret= is SQL Server only. It onboarded
+#   cleanly and then failed with an opaque Google 401 at the first rotation.
+#
+# The plugin refuses both at pre-flight now, so refuse them here — at the click, where
+# the operator is still looking at the thing that produced the address.
+_DBGCP_VERIFIER_ON = frozenset({"on", "true", "yes", "1"})
+_DBGCP_IAM_FALSE = frozenset({"off", "false", "no", "0"})
 _DBGCP_SSL_FLAGS = frozenset({"ssltrue", "sslfalse"})
+
+# The managed system's ``timeout``, in SECONDS — the opposite unit to the one the AWS
+# SSM plugins read out of the very same field (_DBSSM_PLUGIN_TIMEOUT_MS above). Password
+# Safe stores one integer and each plugin decides what it means, so the unit is a
+# per-plugin fact and not a property of the field.
+#
+# Leaving it unset is not neutral: Password Safe defaults the field to 30, which these
+# plugins read as 30 seconds. That is survivable on data-api, whose own statement
+# timeout is a non-configurable 30 seconds anyway, but it is too short for cloud-run —
+# a Direct-VPC cold start on Cloud Run is documented at "a minute or more", so the first
+# rotation after an idle period is the one that times out, and a rotation that times out
+# may already have applied the change. 180 is the plugin's own default and covers both.
+#
+# (The 30 an operator sees in a plugin diagnostic as "timeout 30000 msec" is this
+# default, printed after the plugin's own seconds-to-milliseconds conversion. It is not
+# evidence that anything registered 30000, and it is not a millisecond convention.)
+_DBGCP_PLUGIN_TIMEOUT_SECONDS = 180
 # project:region:instance — three non-empty segments, and no ';' smuggled through.
 _DBGCP_CONNECTION_NAME = re.compile(r"^[^:;]+:[^:;]+:[^:;]+$")
 
@@ -410,7 +443,56 @@ _DBGCP_CONNECTION_NAME = re.compile(r"^[^:;]+:[^:;]+:[^:;]+$")
 # error days after the address was written, so it is checked HERE instead. See
 # gcp_service._write_regional_secret_sync, which produces exactly this shape.
 _DBGCP_FA_SECRET = re.compile(
-    r"^projects/[^/;]+/locations/[^/;]+/secrets/[^/;]+/versions/[^/;]+$")
+    r"^projects/[^/;]+/locations/([^/;]+)/secrets/[^/;]+/versions/[^/;]+$")
+# The global form specifically, so it gets its own message. It is what every Secret
+# Manager quickstart produces, so "not a resource name" would be actively misleading —
+# and moving the secret does NOT help, because Google refuses it on the endpoint it was
+# created through: "A secret created using Secret Manager's global endpoint are not
+# supported even if it's stored in the same region."
+_DBGCP_FA_SECRET_GLOBAL = re.compile(
+    r"^projects/[^/;]+/secrets/[^/;]+(/versions/[^/;]+)?$")
+
+
+def _validate_dbgcp_fa_secret(value: str, connection_name: str) -> None:
+    """Raise unless ``value`` is a regional Secret Manager version IN THE INSTANCE'S
+    REGION.
+
+    Two checks, because Google enforces two rules and reports neither usefully at the
+    time it matters. The shape must be regional (above), and the region must be the
+    instance's own — the Data API reads the secret through the instance's regional
+    endpoint, so a us-central1 instance cannot be handed a us-east1 secret. Checking the
+    region here turns a first-rotation failure into an onboarding-time refusal, and the
+    address already carries the instance's region in field 2, so there is nothing to
+    look up."""
+    match = _DBGCP_FA_SECRET.match(value)
+    if not match:
+        if _DBGCP_FA_SECRET_GLOBAL.match(value):
+            raise PSResourceError(
+                f"fasecret={value!r} is a GLOBAL Secret Manager secret, and the Cloud SQL "
+                f"Data API accepts only a REGIONAL one — "
+                f"'projects/<project>/locations/<region>/secrets/<name>/versions/<v>'. "
+                f"This is the form every Secret Manager quickstart produces, and MOVING "
+                f"the secret does not help: Google refuses a secret created through the "
+                f"global endpoint even when it is stored in the right region. Create a "
+                f"new regional secret instead (gcp_service.write_regional_secret), not "
+                f"one from the Secrets page.")
+        raise PSResourceError(
+            f"fasecret={value!r} is not a REGIONAL Secret Manager version. "
+            f"The Cloud SQL Data API accepts only "
+            f"'projects/<project>/locations/<region>/secrets/<name>/versions/<v>' "
+            f"and rejects anything else with \"does not match the expected format\". "
+            f"Stage it with a regional secret (gcp_service.write_regional_secret), not "
+            f"the Secrets page.")
+    secret_region = (match.group(1) or "").strip().lower()
+    parts = (connection_name or "").split(":")
+    instance_region = (parts[1] if len(parts) > 2 else "").strip().lower()
+    if instance_region and secret_region and secret_region != instance_region:
+        raise PSResourceError(
+            f"fasecret= names a secret in {secret_region!r} but the instance is in "
+            f"{instance_region!r}. The Data API reads the secret through the INSTANCE'S "
+            f"regional endpoint, so it must live in the instance's own region — a "
+            f"mismatch is refused at the first rotation, days after this address was "
+            f"written, by an error that names neither region.")
 
 
 def _validate_dbgcp_dns_name(dns_name: str) -> None:
@@ -508,15 +590,26 @@ def _validate_dbgcp_dns_name(dns_name: str) -> None:
         if not value.strip():
             raise PSResourceError(
                 f"the {key!r} option in managed system address {addr!r} has no value")
-        if key == "fasecret" and not _DBGCP_FA_SECRET.match(value.strip()):
+        value = value.strip()
+        if key == "verifier" and value.lower() in _DBGCP_VERIFIER_ON and channel != "cloud-run":
             raise PSResourceError(
-                f"fasecret={value.strip()!r} is not a REGIONAL Secret Manager version. "
-                f"The Cloud SQL Data API accepts only "
-                f"'projects/<project>/locations/<region>/secrets/<name>/versions/<v>' "
-                f"and rejects the global 'projects/<project>/secrets/…' form — which is "
-                f"what the plugin article's example prints — with \"does not match the "
-                f"expected format\". Stage it with a regional secret "
-                f"(gcp_service.write_regional_secret), not the Secrets page.")
+                f"'verifier=on' applies only to the 'cloud-run' channel, but {addr!r} is a "
+                f"{channel!r} address. The option says the new password is pre-hashed on "
+                f"the Resource Broker so the plaintext never reaches the wire, and only "
+                f"cloud-run can honour that — the Cloud SQL APIs take the password in the "
+                f"statement text. Accepting it here would report a protection that is not "
+                f"happening. Drop it, or use 'verifier=off', which is legal everywhere.")
+        if key == "iam" and value.lower() in _DBGCP_IAM_FALSE and channel == "data-api":
+            raise PSResourceError(
+                f"'iam=false' on the 'data-api' channel leaves {addr!r} with no way to "
+                f"authenticate a database session at all: executeSql has no "
+                f"plaintext-password field, and 'fasecret=' — the only other credential "
+                f"the Data API can read — applies to SQL Server. Such an address onboards "
+                f"cleanly and fails at the first rotation with an opaque Google 401. Use "
+                f"'iam=true' on PostgreSQL/MySQL, 'fasecret=' on SQL Server, or the "
+                f"'cloud-run' channel, which carries a real login.")
+        if key == "fasecret":
+            _validate_dbgcp_fa_secret(value, fields[1])
 
     # The two ways the Data API can authenticate a DATABASE session, and they are
     # alternatives: iam= says "mint an OAuth token per connection", fasecret= says "read
@@ -624,7 +717,7 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
                                  dns_name: str = "", emit_private_key: bool = True,
                                  dss_auto_management: bool = True,
                                  use_own_credentials: bool = False,
-                                 timeout_ms: int = 0) -> str:
+                                 timeout_value: int = 0) -> str:
     """HCL onboarding a VM as a managed system + its account. Two shapes via ``method``:
 
     * ``ssh`` (default) — traditional managed system keyed by host_name/ip on an SSH
@@ -664,10 +757,14 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
         _line("functional_account_id", int(functional_account_id)),
         _line("auto_management_flag", "true"),
     ]
-    if timeout_ms and int(timeout_ms) > 0:
-        # Read by the plugin as a Thread.Sleep in milliseconds, not by Password Safe as
-        # a socket timeout — a custom-plugin platform never opens the connection itself.
-        sys_lines.append(_line("timeout", int(timeout_ms)))
+    if timeout_value and int(timeout_value) > 0:
+        # Read by the PLUGIN, not by Password Safe as a socket timeout — a custom-plugin
+        # platform never opens the connection itself. Deliberately unit-less here,
+        # because the two plugin families disagree: the AWS SSM plugins read
+        # milliseconds (_DBSSM_PLUGIN_TIMEOUT_MS) and the GCP Cloud SQL plugins read
+        # seconds (_DBGCP_PLUGIN_TIMEOUT_SECONDS). Naming this parameter after either
+        # unit is how one caller ends up passing the other one's number.
+        sys_lines.append(_line("timeout", int(timeout_value)))
     if method not in _PLUGIN_METHODS:
         sys_lines.append(_line("remote_client_type", '"ssh"'))
         sys_lines.append(_line("ssh_key_enforcement_mode", int(ssh_key_enforcement_mode)))
@@ -965,7 +1062,7 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             application_host_id=application_host_id,
             method="dbssm", dns_name=dns_name, emit_private_key=False,
             dss_auto_management=False, use_own_credentials=use_own_credentials,
-            timeout_ms=_DBSSM_PLUGIN_TIMEOUT_MS)
+            timeout_value=_DBSSM_PLUGIN_TIMEOUT_MS)
     elif method == "dbazure":
         # Cloud-DB via the "{engine} Azure Run Command Plugin": Password Safe reaches
         # the private Azure DB by running the DB client on a jump VM over Azure VM Run
@@ -1003,7 +1100,8 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="dbgcp", dns_name=dns_name, emit_private_key=False,
-            dss_auto_management=False, use_own_credentials=use_own_credentials)
+            dss_auto_management=False, use_own_credentials=use_own_credentials,
+            timeout_value=_DBGCP_PLUGIN_TIMEOUT_SECONDS)
     elif method == "pravault":
         # "PRA Vault *" plugins: Password Safe PATCHes the rotated credential into a
         # PRA Vault account via the PRA Config API. The managed account name is the

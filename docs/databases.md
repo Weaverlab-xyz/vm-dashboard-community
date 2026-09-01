@@ -697,22 +697,36 @@ AWS keys above):
 
 ### GCP — `dbgcp` (Cloud SQL Data API)
 
-> **Channel readiness is uneven, and it decides what actually works.**
+> **Every channel is built. None has been exercised against a live instance.**
 >
 > | Channel | Engines here | State |
 > |---|---|---|
-> | `cloud-run` | sqlserver | **Built.** Plugin transport and the Cloud Run service both implemented and unit-tested, **not yet exercised against a live Cloud SQL instance**. |
-> | `data-api` | postgres, mysql | Interface-complete, **not wired to GCP** — returns *"not implemented in this build"*. |
-> | `admin-api` | — | Same, and not offered: it needs `cloudsql.users.update`, which among predefined roles lives only in the very broad `roles/cloudsql.admin`. |
+> | `data-api` | postgres, mysql | **Built** — verify, change managed account, change functional account and discovery. No action returns "not implemented in this build" any more. |
+> | `cloud-run` | sqlserver | **Built.** Plugin transport and the Cloud Run service both implemented and unit-tested. |
+> | `admin-api` | — | **Built plugin-side, and accepted by `ps_resource_service`, but the dashboard does not emit it.** It needs `cloudsql.users.update`, which among predefined roles lives only in the very broad `roles/cloudsql.admin` (against `roles/cloudsql.instanceUser` for `data-api`); it performs no database login at all, so its Verify proves only the GCP identity; and it reaches only the instance's user *registry*, so a principal created inside the database with `CREATE ROLE` can be invisible to it. Setting `clouddb_ps_gcp_channel=admin-api` logs a warning and falls back to the per-engine default. |
 >
-> So today a **SQL Server** rotation should genuinely work once you deploy the service,
-> while a **PostgreSQL or MySQL** rotation returns the not-implemented message.
-> `passwordsafe_gcp_db_registration_method` ships **`off`** either way.
+> `passwordsafe_gcp_db_registration_method` therefore still ships **`off`**: the reason is
+> no longer a missing implementation, it is that the first live run has not happened.
+> `docs/runbooks/clouddb-password-safe-plugin-setup.md` §7 has the order to run it in —
+> **Verify Functional Account first**, because it exercises token minting, the endpoint
+> path and `autoIamAuthn` in one call and fails in thirty seconds if the endpoint path is
+> wrong.
 >
-> The not-implemented message is still a useful result on the Data API path: reaching it
-> proves the address parsed, the functional account parsed, the platform bound and the
-> capability pre-flight passed. A parse error or a platform mismatch is a real failure;
-> that one is not.
+> Two open questions are worth knowing before the first rotation, both one `--log-http`
+> away and neither blocking:
+>
+> - **Does a successful DDL return a `results` envelope?** The plugin takes the safe
+>   reading (absent envelope = failure), so if a successful `ALTER` also omits it, a
+>   rotation that WORKED can be reported as failed. If a change reports failure, send the
+>   full Error Details before retrying — "the ALTER failed" and "the ALTER worked but the
+>   envelope was empty" are different bugs.
+> - **Does `executeSql` statement text reach Cloud Audit Logs?** The change path sends
+>   `ALTER … IDENTIFIED BY '<plaintext>'`. If `sqlStatement` is recorded, every rotation
+>   writes a live credential into Cloud Logging — long-retained and readable under
+>   `roles/logging.viewer`, a broader access model than the database itself. All
+>   pre-hashed-verifier flags ship off, so there is no fallback; the mitigations are a log
+>   exclusion or a Data Access audit-log exemption for `cloudsql.googleapis.com`. One
+>   canary statement and one log query settle it.
 
 Unlike the other two clouds there is **no jump host** on either channel, and the
 dashboard does its own onboarding work without one either: the dedicated managed user is
@@ -808,6 +822,34 @@ fragment is rejected — and field 5 is the real TLS choice for the service→da
 
 On SQL Server the database is `master`: that is the admin session catalog, and the
 statements are server-level (`ALTER LOGIN`).
+
+**Two options the plugin used to accept and quietly ignore are now refused, and
+`ps_resource_service` refuses them too** — the dashboard emits neither, so this matters
+only for a hand-written or imported address:
+
+| Option | Refused where | Why silence was the defect |
+|---|---|---|
+| `verifier=on` | anywhere but `cloud-run` | It says the new password was pre-hashed on the Resource Broker so the plaintext never reaches the wire. The Cloud SQL APIs take the password in the statement text, so accepting it on a control-plane channel reported a protection that was not happening. `verifier=off` stays legal everywhere — it promises nothing. |
+| `iam=false` | on `data-api` | It left the address with no way to authenticate at all: `executeSql` has no plaintext-password field, and `fasecret=` is SQL Server only. It onboarded cleanly and failed at the first rotation with an opaque Google 401. |
+
+`fasecret=` is checked against **three** rules rather than one: regional shape, *not* the
+global form (which no amount of moving the secret fixes — Google refuses a secret created
+through the global endpoint even when it is stored in the right region), and a region that
+matches **field 2's**. The Data API reads the secret through the instance's own regional
+endpoint, so a us-central1 instance cannot be handed a us-east1 secret.
+
+**MySQL Account Discovery needs one grant beyond the rotation ladder:**
+`GRANT SELECT ON mysql.user TO '<rotator>'@'%';`. `CREATE USER` confers no read of the
+account catalogue, so without it Discovery returns MySQL 1142 while rotation and Verify
+work normally. The dashboard applies it as a **second, independent** statement during
+onboarding — deliberately not appended to the rotation grant, because whether Cloud SQL
+permits it at all is not yet confirmed against a live instance, and one call would let
+that open question take the rotation grant down with it. A failure is reported on the job
+with the statement to paste.
+
+**Sizing.** The Data API caps a request at 0.5 MB, a response at 10 MB and **10
+concurrent queries per instance**, and enforces its own non-configurable 30-second
+statement timeout. Stagger bulk rotations that all target one instance.
 
 The functional account is `ADC:<dbUser>` (or `IMP:`/`SA:`) with a three-segment password
 `{key|-}:{impersonate|-}:{dbPassword|-}`. What goes in the third segment is the sharpest

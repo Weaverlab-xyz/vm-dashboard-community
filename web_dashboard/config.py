@@ -672,20 +672,29 @@ class Settings(BaseSettings):
     # ships a ps-dbops-sqlserver Terraform module); the dashboard only needs its
     # stable custom audience, below.
     #
-    # Ships "off". Channel readiness is uneven: cloud-run is built (SQL Server only,
-    # not yet exercised against a live instance) while data-api is still a stub that
-    # reports "not implemented in this build". The three plugins are a one-time
-    # MANUAL upload (see docs); the platform names below are how the dashboard finds
-    # them.
+    # Ships "off", and the reason is no longer channel readiness. Every channel is
+    # implemented plugin-side now — data-api covers verify, change managed account,
+    # change functional account and discovery on PostgreSQL and MySQL, cloud-run covers
+    # SQL Server, and no action returns "not implemented in this build" any more — but
+    # NONE of them has been exercised against a live Cloud SQL instance. "off" is the
+    # honest default until one has. The three plugins are also a one-time MANUAL upload
+    # (see docs); the platform names below are how the dashboard finds them.
     passwordsafe_gcp_db_registration_method: str = "off"  # dataapi | off
     clouddb_ps_platform_gcp_postgres: str = "GCP Cloud SQL PostgreSQL"
     clouddb_ps_platform_gcp_mysql: str = "GCP Cloud SQL MySQL"
     clouddb_ps_platform_gcp_sqlserver: str = "GCP Cloud SQL SQL Server"
     # "auto" takes the plugin's own recommended channel per engine (data-api for
     # postgres/mysql, cloud-run for sqlserver); an explicit value overrides it for
-    # every engine. admin-api is deliberately not offered — it needs
-    # cloudsql.users.update, which among predefined roles lives only in the very broad
-    # roles/cloudsql.admin, and it cannot see principals created inside the database.
+    # every engine.
+    #
+    # admin-api is a third channel the plugin implements and ps_resource_service
+    # accepts, but the dashboard does not EMIT it: it needs cloudsql.users.update, which
+    # among predefined roles lives only in the very broad roles/cloudsql.admin (against
+    # roles/cloudsql.instanceUser for data-api), it performs no database login at all so
+    # its Verify proves only the GCP identity, and it reaches only the instance's user
+    # REGISTRY — a principal created inside the database with CREATE ROLE can be
+    # invisible to it. Setting it here logs a warning and falls back to the per-engine
+    # default rather than silently pretending.
     clouddb_ps_gcp_channel: str = "auto"  # auto | data-api | cloud-run
     # GCP counterparts of clouddb_ps_functional_account_* — read only when
     # clouddb_ps_functional_account_mode is "reference", which is the RECOMMENDED mode
