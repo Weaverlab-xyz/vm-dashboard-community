@@ -264,6 +264,19 @@ def test_every_resource_carries_the_environment_tag():
         "POV VPC from the customer's own")
 
 
+def test_a_pov_resource_also_carries_the_estate_wide_managed_by_tag():
+    """`/costs` sums `managed-by=vm-dashboard` as the dashboard scope. A billable
+    dashboard-created resource missing it is invisible there — the bug behind the SSM
+    interface endpoints that tests/test_managed_by_tag_values was written about. It
+    matters here because a community user can point a demo instance and a POV instance at
+    one account, and only the demo one has a cost page."""
+    tags = pov_cloud_env.base_tags("povenv-x")
+    assert tags.get("managed-by") == "vm-dashboard"
+    assert pov_cloud_env.TAG_MANAGED_BY != "managed-by", (
+        "the POV selector and the estate-wide tag must stay separate keys, or a "
+        "tag-scoped POV teardown would select a demo instance's VMs")
+
+
 # ── image resolution happens late, and refuses a region mismatch ─────────────
 
 class _Row:
@@ -469,6 +482,21 @@ def test_the_cloud_page_sends_its_bearer_token():
     assert "Authorization" in page and "Bearer" in page
     assert page.count("await fetch(") == 1, \
         "more than one raw fetch on the page — one of them is not going through apiFetch"
+
+def test_a_network_with_no_instances_left_is_still_found():
+    """The orphan the page most needs to show: a teardown that terminated the VMs and then
+    failed on the VPC. Grouping environments from the instances alone would render that
+    state invisible — and it is the one where somebody has to go and finish the job."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "services", "pov_cloud_aws.py"),
+               encoding="utf-8").read()
+    listing = src.split("async def list_environments(", 1)[1].split("\ndef ", 1)[0]
+    assert "_network_env_ids_sync" in listing, (
+        "list_environments groups on instances only, so an environment whose VMs are gone "
+        "but whose network survives never appears")
+    read = src.split("async def read_environment(", 1)[1].split("\nasync def ", 1)[0]
+    assert "_network_env_ids_sync" in read, (
+        "read_environment answers None when the instances are gone, which would let the "
+        "reconcile flag a POV as missing while its VPC is still billing")
 
 
 if __name__ == "__main__":

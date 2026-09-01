@@ -342,30 +342,55 @@ async def read_environment(env_id: str, region: str):
     ``None`` rather than a refusal: the caller distinguishes "gone" from "broken", and
     ``pov_reconcile`` only marks an environment missing on two independent signals.
     """
-    instances = await aws_service._to_thread(_describe_sync, region, _env_filter(env_id))
+    filters = _env_filter(env_id)
+    instances = await aws_service._to_thread(_describe_sync, region, filters)
     if not instances:
-        return None
-    sizes = await aws_service._to_thread(_volume_sizes_sync, region, _env_filter(env_id))
+        # No instances is not the same as gone. A teardown that terminated the VMs and
+        # then failed on the VPC leaves a real, findable environment — and answering None
+        # here would let `pov_reconcile` flag the POV as missing from the platform while
+        # its network is still sitting there.
+        if not await aws_service._to_thread(_network_env_ids_sync, region, filters):
+            return None
+        return _environment(env_id, [], region, {})
+    sizes = await aws_service._to_thread(_volume_sizes_sync, region, filters)
     return _environment(env_id, instances, region, sizes)
 
 
 async def list_environments(region: str) -> list:
-    """Every POV environment this credential can see in one region, tag-grouped."""
-    instances = await aws_service._to_thread(
-        _describe_sync, region,
-        [{"Name": f"tag:{env.TAG_MANAGED_BY}", "Values": [env.MANAGED_BY]}])
+    """Every POV environment this credential can see in one region, tag-grouped.
+
+    Grouped from the INSTANCES, and then from the tagged VPCs as well — because an
+    environment whose instances are all gone but whose network survives is precisely the
+    orphan /pov/cloud exists to surface, and grouping on instances alone would render it
+    invisible. That state is reachable: a teardown that terminated the instances and then
+    failed on the VPC leaves exactly this.
+    """
+    managed = [{"Name": f"tag:{env.TAG_MANAGED_BY}", "Values": [env.MANAGED_BY]}]
+    instances = await aws_service._to_thread(_describe_sync, region, managed)
     grouped: dict = {}
     for inst in instances:
         tags = {t["Key"]: t["Value"] for t in inst.get("Tags") or []}
         env_id = tags.get(env.TAG_ENVIRONMENT) or ""
         if env_id:
             grouped.setdefault(env_id, []).append(inst)
-    sizes = await aws_service._to_thread(
-        _volume_sizes_sync, region,
-        [{"Name": f"tag:{env.TAG_MANAGED_BY}", "Values": [env.MANAGED_BY]}])
+
+    for env_id in await aws_service._to_thread(_network_env_ids_sync, region, managed):
+        grouped.setdefault(env_id, [])
+
+    sizes = await aws_service._to_thread(_volume_sizes_sync, region, managed)
     return [_environment(eid, rows, region, sizes)
             for eid, rows in sorted(grouped.items())]
 
+
+def _network_env_ids_sync(region: str, filters: list) -> list:
+    """Environment ids that still have a VPC, whatever happened to their instances."""
+    ec2 = aws_service._get_ec2(region)
+    out = set()
+    for vpc in ec2.describe_vpcs(Filters=filters).get("Vpcs") or []:
+        tags = {t["Key"]: t["Value"] for t in vpc.get("Tags") or []}
+        if tags.get(env.TAG_ENVIRONMENT):
+            out.add(tags[env.TAG_ENVIRONMENT])
+    return sorted(out)
 
 # ── the network, read back ───────────────────────────────────────────────────
 

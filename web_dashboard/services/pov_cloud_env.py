@@ -54,6 +54,14 @@ TAG_ROLE = "povRole"
 TAG_NAME = "Name"
 MANAGED_BY = "vm-dashboard"
 
+# The estate-wide tag every other dashboard-provisioned resource carries. Written IN
+# ADDITION to `povManagedBy`, never instead of it: this one is what `/costs` sums as the
+# "dashboard" scope, and a billable dashboard-created resource missing it is invisible
+# there — the bug behind the SSM interface endpoints, which `tests/test_managed_by_tag_values`
+# was written about. `povManagedBy` stays the SELECTOR, because a teardown filtered on the
+# estate-wide tag would select a demo instance's VMs too.
+TAG_ESTATE = "managed-by"
+
 ENV_ID_PREFIX = "povenv-"
 
 # The environment's private network when a template does not name one. A /16 split into
@@ -126,7 +134,8 @@ def is_env_id(value: str) -> bool:
 
 def base_tags(env_id: str) -> dict:
     """The tags every resource in ``env_id`` carries."""
-    return {TAG_ENVIRONMENT: env_id, TAG_MANAGED_BY: MANAGED_BY}
+    return {TAG_ENVIRONMENT: env_id, TAG_MANAGED_BY: MANAGED_BY,
+            TAG_ESTATE: MANAGED_BY}
 
 
 def subnet_cidr(network_cidr: str) -> str:
