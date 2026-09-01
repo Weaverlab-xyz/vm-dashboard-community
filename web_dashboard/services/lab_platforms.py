@@ -33,12 +33,12 @@ logger = logging.getLogger(__name__)
 # can ask "is this a public cloud?" without a literal tuple of their own — the exact habit
 # this module's docstring is about.
 #
-# **This tuple lists the clouds that are BUILT, not the clouds that are planned.** Azure,
-# GCP and OCI each need an adapter module and a CAPABILITIES row before their name may
+# **This tuple lists the clouds that are BUILT, not the clouds that are planned.** GCP
+# and OCI each need a driver module and a CAPABILITIES row before their name may
 # appear here; adding a name early would make `pov_cloud_platform = "azure"` a selectable
 # option that fails at import time, which is the "half-added platform" the registry's own
 # test exists to catch.
-CLOUD_PLATFORMS = ("aws",)
+CLOUD_PLATFORMS = ("aws", "azure")
 
 VALID_PLATFORMS = ("skytap",) + CLOUD_PLATFORMS
 
@@ -46,6 +46,7 @@ VALID_PLATFORMS = ("skytap",) + CLOUD_PLATFORMS
 _ADAPTER_MODULE = {
     "skytap": "skytap_service",
     "aws": "pov_aws_service",
+    "azure": "pov_azure_service",
 }
 
 # The functions an adapter must expose. Split by slice, deliberately: a contract that
@@ -188,6 +189,30 @@ CAPABILITIES = {
         "template_authoring": False,
         # No NAT-a-guest-port primitive, and no need for one: cloud-init installs the
         # agent without anybody reaching in.
+        "published_services": False,
+    },
+    # Azure as a lab platform. Read this row against "aws" above: the only capability that
+    # differs is `stored_credentials`, and it differs because Azure FORCED it — `os_profile`
+    # requires an admin account at VM creation, for Linux as well as Windows, so a POV
+    # built here has a platform login whether anybody wanted one or not.
+    "azure": {
+        "label": "Azure",
+        "templates": True,
+        "runstate": True,
+        "idle_suspend": False,
+        "scheduled_suspend": True,
+        "bootstrap_injection": "cloud_init",
+        "share_link": False,
+        # True, unlike AWS. The generated admin credential is stored per environment and
+        # returned in the contract's `[{text, notes}]` shape, so `pov_credentials` parses
+        # it and the Resource Broker install has the login it needs.
+        "stored_credentials": True,
+        "verify": True,
+        # An Azure subscription is not a project, and the environment's scoping is the
+        # resource group this creates per POV — so there is nothing for the create form
+        # to ask.
+        "projects": False,
+        "template_authoring": False,
         "published_services": False,
     },
 }

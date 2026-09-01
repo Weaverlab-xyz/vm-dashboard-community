@@ -189,12 +189,22 @@ def test_an_unselected_cloud_is_refused_even_though_it_is_a_valid_platform():
 
 
 def test_selected_cloud_ignores_a_name_that_has_no_adapter():
-    """A typo, or a cloud whose adapter has not been written, must resolve to 'no cloud'
-    rather than putting an option on the form that fails at import."""
-    for bad in ("", "  ", "azurre", "vmware"):
+    """A typo, or a cloud whose driver has not been written, must resolve to 'no cloud'
+    rather than putting an option on the form that fails at import.
+
+    Pins the RULE, not today's membership: `CLOUD_PLATFORMS` grows as drivers land, and a
+    test naming the next one would have to be edited by the commit that adds it — which
+    is the edit most likely to be made without reading what it was protecting.
+    """
+    for bad in ("", "  ", "azurre", "vmware", "digitalocean"):
         assert bad not in lp.CLOUD_PLATFORMS
-    assert "azure" not in lp.CLOUD_PLATFORMS, (
-        "azure has no adapter yet; listing it here would make it selectable")
+        assert lp.selectable(bad) is False
+
+    from web_dashboard.services import pov_cloud_env
+    for name in lp.CLOUD_PLATFORMS:
+        assert name in pov_cloud_env._DRIVER_MODULE, (
+            f"{name} is selectable but has no POV cloud driver, so choosing it would "
+            f"fail at provision rather than at the form")
 
 
 def test_every_cloud_platform_is_also_a_valid_platform():
@@ -213,6 +223,34 @@ def test_no_cloud_platform_claims_an_idle_timer():
         assert caps["scheduled_suspend"] is True, (
             f"{name} has neither an idle timer nor a schedule, so nothing would ever "
             f"stop it costing money overnight")
+
+
+
+def test_a_platform_that_claims_stored_credentials_actually_has_them():
+    """The sibling of the `verify` pairing above, and it guards a sharper edge.
+
+    `pov_resource_broker` reads this capability and only then calls the adapter — so a
+    platform claiming True without the function raises an AttributeError from inside a
+    provision job, minutes in, against an environment that already exists. Claiming False
+    while having one is the quieter half: the Resource Broker install would ask an
+    operator to paste a credential the dashboard already holds.
+    """
+    for name in lp.VALID_PLATFORMS:
+        fn = getattr(lp.adapter(name), "stored_credentials", None)
+        claims = lp.supports(name, "stored_credentials")
+        assert claims == callable(fn), (
+            f"{name}: capabilities say stored_credentials={claims} but the adapter "
+            f"{'has' if callable(fn) else 'has no'} stored_credentials()")
+
+
+def test_no_cloud_offers_a_share_link():
+    """No cloud has publish sets, and `pov_share` refuses on the capability rather than
+    on a platform name — so a cloud claiming True would put a Share button in front of an
+    operator that fails inside the job behind it."""
+    for name in lp.CLOUD_PLATFORMS:
+        assert lp.supports(name, "share_link") is False, (
+            f"{name} claims a share link; a cloud POV's customer-facing access is PRA")
+        assert not callable(getattr(lp.adapter(name), "create_share", None))
 
 
 # ── the Skytap adapter's mapping ─────────────────────────────────────────────

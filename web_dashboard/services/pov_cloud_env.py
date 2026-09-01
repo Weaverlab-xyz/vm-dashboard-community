@@ -83,6 +83,7 @@ RUNSTATE_POLL_S = 10
 
 _DRIVER_MODULE = {
     "aws": "pov_cloud_aws",
+    "azure": "pov_cloud_azure",
 }
 
 # The POV name rule, restated. Imported from nowhere on purpose: this module has to be
@@ -446,7 +447,22 @@ async def create_broker_vm(cloud: str, env_id: str, template_id: str,
 
 
 async def list_environments(cloud: str) -> list:
+    """Every POV environment this cloud's credentials can see.
+
+    Asked once or once per region, depending on what the provider's listing is scoped to.
+    A driver setting ``LISTS_ALL_REGIONS`` has a subscription-wide catalogue — Azure's
+    resource groups — and asking it per region would return the same environments N times.
+    One that does not (EC2's DescribeInstances is regional) is asked for each region the
+    dashboard has reason to look in.
+
+    The per-region path is the weaker of the two: it can only look where a POV row has
+    already been recorded, so an orphan in some other region stays invisible. That is why
+    the flag exists rather than a uniform loop — where a provider CAN answer globally, the
+    orphan sweep should be complete.
+    """
     mod = driver(cloud)
+    if getattr(mod, "LISTS_ALL_REGIONS", False):
+        return await mod.list_environments("")
     out = []
     for region in known_regions(cloud):
         try:
