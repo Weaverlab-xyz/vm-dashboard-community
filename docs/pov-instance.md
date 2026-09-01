@@ -814,6 +814,37 @@ without it, so the integration can never be talked into removing one of your acc
 
 ---
 
+## What a POV leaves behind
+
+**POV page → Past POVs**, or the **Summary** tab on any POV.
+
+Destroying a POV removes the environment, the logins, the jump items and the integrations.
+It does not remove the account of what the evaluation covered — that row is marked
+`destroyed` rather than deleted precisely because it is the record of something that
+existed, and the checklist is that record's contents.
+
+Until now nothing could reach it. The table of POVs filters destroyed ones out, which is
+right for a list of things you can act on, so a finished evaluation appeared nowhere. **Past
+POVs** is the way back: name, when it started, what it was wired into, how much was covered,
+and whether the customer worked it themselves. Clicking one opens its Summary.
+
+### The summary, and one distinction in it
+
+The Summary tab is the same on a live POV and a finished one: coverage overall and per role,
+every card somebody ticked or skipped, and **what was said** — the customer's own notes,
+marked as theirs.
+
+One thing it is careful about. *"A login was issued"* and *"they used it"* are different
+facts, and only the second is evidence. The page says **the customer worked the checklist
+themselves** only when a card was actually ticked by them; the Past POVs table reports the
+two separately, so a login nobody opened reads as exactly that.
+
+**Copy as Markdown** puts the whole thing on the clipboard — for a renewal note, a CRM, or an
+internal write-up. It is copied rather than downloaded because that is where it is going
+anyway.
+
+---
+
 ## The customer-facing share link
 
 Everything above is something an SE touches. This is the one artifact a **customer** opens:

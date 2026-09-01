@@ -348,3 +348,83 @@ Subtraction is how one of them comes back on the next edit to the serializer.
 
 The customer's note is rendered back on the operator's page with `x-text`, never `x-html`:
 it is prose typed by somebody outside the account.
+
+## Slice 4 — the page an SE actually clicks
+
+Built, and it is the one that closes the complaint this document opens with.
+
+Slices 1 to 3 built the per-POV checklist and put it a click deeper, on the POV's own page.
+The nav's **Use cases** page was left exactly as it was — on purpose, with a test pinning
+that it must not change — so it went on opening to twenty-six greyed-out cards saying "Not
+available on a POV instance". The wall survived four merges because the fix had been built
+somewhere else.
+
+So on a POV instance that page now **leads with a POV**: pick one from the selector, get its
+checklist. Measured on the same instance, that is 26 masked cards leading the page before and
+25 runnable ones after.
+
+The instance-wide catalog keeps its place underneath and is **collapsed, never filtered**.
+Every group and every card is still rendered, the toggle says what is behind it, and the page
+says why it is all still there. The distance between *collapsed* and *removed* is the whole
+argument this page rests on — a persona or a profile may reorder and emphasise, never
+subtract — so both halves are pinned: the groups assignment may not `.filter(`, and the
+collapse may not use `x-if`, which would take them out of the DOM. That is filtering with
+extra steps. A demo instance opens on exactly what it opened on before.
+
+No backend. The lead reads `/api/pov/managed` and the same `/api/pov/managed/{id}/use-cases`
+the POV's own page reads, so the two cannot disagree about what a POV can run, and every way
+that read can fail — a demo instance 404s the router, an expired session 401s — is a
+non-event rather than an error on a page whose main content loaded fine. It performs no
+writes: ticking a card off stays on the POV's own page, where every other action on that POV
+already lives.
+
+## Slice 5 — what a POV leaves behind
+
+Built. The record was never the problem: `run_env_destroy` marks the row `destroyed` rather
+than deleting it, and `pov_use_cases.destroy_note` deliberately keeps the checklist as that
+record's contents. What was missing is that **nothing could reach it**. `api/pov.list_managed`
+filters destroyed rows out — right for a list of things you can act on — so a finished
+evaluation appeared nowhere and you needed its raw uuid to see it again. Evidence that
+survived teardown with no way back to it is the same as losing it at the moment somebody
+wants it, which is a renewal conversation weeks later.
+
+### Two questions, two shapes
+
+`services/pov_summary` answers them separately because they are separately asked:
+
+| | |
+|---|---|
+| `archive(db, limit)` | "Which evaluations have we run?" A light row per POV, and deliberately **not** `_serialize`: that builds five describes per row — gateway, resource broker, wire-up, share, accessors — each asking a question about a *living* environment, every one meaningless and a wasted query for a POV that is gone. Coverage comes from one aggregate over the progress rows rather than resolving the whole catalog per row. It says when it truncated, because a list silently cut is one an SE trusts and should not |
+| `build(db, env)` | "What happened in that one?" The whole account: coverage, per role, every card somebody touched, and what they said |
+
+`/api/pov/managed/archive` is declared **before** `/managed/{env_id}` — the third time this
+repo has met that trap, and pinned for the third time. Below it, "archive" is captured as an
+environment id and the endpoint answers "No such POV environment".
+
+`/summary` has no status filter, deliberately: it is the endpoint written for after a POV is
+over, and filtering the finished ones out would leave it describing only the evaluations
+whose story is not finished being told.
+
+### The claim the data supports
+
+**"They took part" means they ticked something.** A login issued and a login used are two
+different facts, and only the second is evidence. `took_part` is computed from progress rows
+carrying `checked_by_kind='accessor'` — never from the existence of a `PovAccessor` — and the
+archive table reports the two separately: *"2 ticked by them"* against *"1 login, unused"*.
+Conflating them would put a claim in a renewal conversation that the data does not support.
+
+Only cards somebody touched are in the summary. A summary listing every untouched card would
+be the catalog again, and the catalog is not what happened. Roles with nothing in scope are
+dropped from the breakdown for the same reason — a Password-Safe-only evaluation has several,
+and "0 of 0" against each is noise in a document read once.
+
+### Nothing here writes or reaches the network
+
+A summary that made platform calls would fail for exactly the POVs it exists to describe,
+whose environment is gone. Products are read off the row — the only thing that *can* work for
+a destroyed POV, and the honest question for a live one, since what an evaluation covered was
+decided when its tenants were chosen.
+
+The take-away is **copied, not downloaded**: what an SE does with this is paste it into a
+renewal note or a CRM, and a file on disk is one more step to the same place. The markdown is
+built in the browser from what the page already loaded.
