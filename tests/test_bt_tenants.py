@@ -392,15 +392,28 @@ def test_every_declaration_of_the_default_region_agrees():
         "the Settings panel prefills a different Entitle region than the app defaults to")
 
 
-def test_the_known_regions_are_distinct_hosts_not_paths_on_one():
-    """`api.entitle.io`, `api.us.entitle.io` and `api.ca.entitle.io` are separate
-    deployments — their CSP headers name app./us./ca.entitle.io respectively. Pinned as a
-    reminder that this list is about HOSTS, so nobody 'tidies' it into one base with a
-    region query parameter."""
+def test_the_known_regions_are_distinct_hosts_led_by_the_shipped_default():
+    """Two properties in one place, because they are the same fact seen twice.
+
+    The regions are separate deployments — their CSP headers name app./us./ca.entitle.io
+    respectively — so this list is about HOSTS, and nobody may 'tidy' it into one base
+    with a region query parameter. And it is ordered with the shipped default first, which
+    is what lets the form's hint read as "this one, or these".
+
+    Compared as whole hosts rather than searched for as substrings: `"api.us.entitle.io"
+    in something` is true of `api.us.entitle.io.evil.test` too, which is a habit worth not
+    having even in a test — and CodeQL flags it, correctly.
+    """
     from urllib.parse import urlsplit
-    hosts = {urlsplit(u).netloc for u in t.KNOWN_ENTITLE_REGIONS}
-    assert len(hosts) == len(t.KNOWN_ENTITLE_REGIONS)
-    assert "api.us.entitle.io" in hosts
+
+    from web_dashboard.config import Settings
+
+    hosts = [urlsplit(u).netloc for u in t.KNOWN_ENTITLE_REGIONS]
+    assert len(set(hosts)) == len(hosts), "two 'regions' resolve to the same host"
+    assert all(hosts), "a region entry has no host at all"
+    assert hosts[0] == urlsplit(
+        Settings.model_fields["entitle_api_url"].default).netloc, (
+        "KNOWN_ENTITLE_REGIONS no longer leads with the shipped default")
 
 
 def test_the_default_url_follows_the_configured_one_not_a_hardcoded_string():
@@ -441,7 +454,14 @@ def test_clearing_an_entitle_url_is_refused_rather_than_silently_re_regioned():
         t.update(db, row["id"], base_url="")
         raise AssertionError("a cleared Entitle URL was silently re-regioned")
     except t.BTTenantError as exc:
-        assert "REGIONAL" in str(exc) and "api.us.entitle.io" in str(exc)
+        msg = str(exc)
+        assert "REGIONAL" in msg
+        # The whole rendered list, not one host spotted inside the sentence. Stronger —
+        # it catches a refusal that names only some regions — and it does not leave a
+        # bare hostname substring check in the file for anyone to copy somewhere it
+        # would matter.
+        assert ", ".join(t.KNOWN_ENTITLE_REGIONS) in msg, (
+            f"the refusal does not name the regions: {msg}")
     finally:
         db.close()
 
