@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from fnruntime import logs, secretref
+from fnruntime import entitle, logs, secretref
 from fnruntime.contract import Context, Request, Response
 
 NAME = "azure_role_grant"
@@ -221,11 +221,13 @@ def _get_all_permissions(req, ctx, config):
     scope would report ones a human made and invite Entitle to reconcile them away.
     """
     if _dry_run():
-        return Response(200, {"next": "", "data": {"actors_permissions": [],
-                                                   "assets_permissions": []}})
-    actors_permissions = []
+        return Response(200, {"next": "", "data": entitle.permissions_data()})
+    actors_permissions = {}
     roles = _rules.parse_list(config["roles"])
     for scope in _rules.parse_list(config["scopes"]):
+        # Every configured scope is a key, held or not: an asset missing from the map
+        # tells Entitle nothing, an asset mapped to [] tells it nobody holds this.
+        held = actors_permissions.setdefault(_rules.asset_for(scope, roles)["identifier"], [])
         for principal in _principals(config):
             for role_code in roles:
                 try:
@@ -236,16 +238,9 @@ def _get_all_permissions(req, ctx, config):
                 found = _arm(config, "GET", _rules.assignment_path(scope, name),
                              ok_missing=True)
                 if found:
-                    actors_permissions.append({
-                        "actor_id": principal["identifier"],
-                        "role_code": role_code, "direct_member": True})
-    assets_permissions = [
-        {"asset_id": f"azure:scope:{scope}", "role_code": role_code}
-        for scope in _rules.parse_list(config["scopes"]) for role_code in roles
-    ]
-    return Response(200, {"next": "", "data": {
-        "actors_permissions": actors_permissions,
-        "assets_permissions": assets_permissions}})
+                    held.append({"actor_id": principal["identifier"],
+                                 "role_code": role_code, "direct_member": True})
+    return Response(200, {"next": "", "data": entitle.permissions_data(actors_permissions)})
 
 
 def _resolve_request(config: dict, payload: dict) -> tuple:

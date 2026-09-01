@@ -233,7 +233,8 @@ def test_permissions_report_only_assignments_this_adapter_made():
     _env()
     _grant(role="reader")
     data = _call("GET", "/get_all_permissions").body["data"]
-    assert [p["role_code"] for p in data["actors_permissions"]] == ["reader"]
+    held = data["actors_permissions"][f"azure:scope:{SCOPE}"]
+    assert [p["role_code"] for p in held] == ["reader"]
 
 
 def test_check_config_reports_each_missing_piece():

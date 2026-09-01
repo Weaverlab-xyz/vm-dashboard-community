@@ -38,7 +38,7 @@ import os
 import secrets
 import string
 
-from fnruntime import logs, secretref
+from fnruntime import entitle, logs, secretref
 from fnruntime.contract import Context, Request, Response
 
 NAME = "db_grant"
@@ -454,33 +454,27 @@ def _permissions_body(targets: dict) -> dict:
     Entitle reconciles against this, so an adapter that lies here produces drift it
     can never correct — which is why each actor is attributed only to the databases
     it actually holds a grant in, read per database rather than inferred from the
-    name.
+    name. The map is keyed by asset for exactly that reason (see fnruntime.entitle),
+    and an account holding grants in two databases is therefore listed under BOTH:
+    de-duplicating across assets, as the flat-list version had to, would have
+    reported the second grant as absent.
     """
-    actors_permissions = []
-    seen = set()
+    actors_permissions = {}
     for identifier, target in targets.items():
-        for actor in _list_actors_in(target):
-            if actor["identifier"] in seen:
-                continue
-            seen.add(actor["identifier"])
-            # The role an account holds is not recoverable from its name, and
-            # reading it back per engine is a separate piece of work; report
-            # membership without a role rather than inventing one Entitle would
-            # then act on.
-            actors_permissions.append({"actor_id": actor["identifier"],
-                                       "role_code": "", "direct_member": True})
-    return {
-        "actors_permissions": actors_permissions,
-        "assets_permissions": [{"asset_id": identifier, "role_code": code}
-                               for identifier in targets for code in _ROLE_CODES],
-    }
+        # The role an account holds is not recoverable from its name, and reading it
+        # back per engine is a separate piece of work; report membership without a
+        # role rather than inventing one Entitle would then act on.
+        actors_permissions[identifier] = [
+            {"actor_id": actor["identifier"], "role_code": "", "direct_member": True}
+            for actor in _list_actors_in(target)
+        ]
+    return entitle.permissions_data(actors_permissions)
 
 
 def _get_all_permissions(req, ctx, targets):
     """Who currently holds what, across every database served."""
     if _dry_run():
-        return Response(200, {"next": "", "data": {"actors_permissions": [],
-                                                   "assets_permissions": []}})
+        return Response(200, {"next": "", "data": entitle.permissions_data()})
     return Response(200, {"next": "", "data": _permissions_body(targets)})
 
 
@@ -496,8 +490,7 @@ def _get_asset_permissions(req, ctx, targets):
     if refusal:
         return refusal
     if _dry_run():
-        return Response(200, {"next": "", "data": {"actors_permissions": [],
-                                                   "assets_permissions": []}})
+        return Response(200, {"next": "", "data": entitle.permissions_data()})
     scoped = {_asset_identifier(target): target}
     return Response(200, {"next": "", "data": _permissions_body(scoped)})
 

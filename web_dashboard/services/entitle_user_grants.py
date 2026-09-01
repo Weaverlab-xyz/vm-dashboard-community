@@ -116,15 +116,27 @@ def revoke(user, scope: str, level: str) -> bool:
     return True
 
 
-def held_by(user) -> list:
-    """``[(role_code, ...)]`` Entitle currently holds for this user — ITS OWN grants
-    only. Reporting the baseline or group-derived sets would invite Entitle to
-    reconcile away access it never granted."""
+def held_by_asset(user) -> list:
+    """``[(asset_id, role_code)]`` Entitle currently holds for this user — ITS OWN
+    grants only. Reporting the baseline or group-derived sets would invite Entitle to
+    reconcile away access it never granted.
+
+    Paired, not two lists: ``get_all_permissions`` reports permissions keyed by the
+    asset they are on, and a role code on its own ("write") names no asset — which is
+    what the flat version returned, and it was unusable there for exactly that
+    reason.
+    """
     out = []
     for scope, value in user.jit_permissions_dict.items():
         if scope == "is_admin":
             if value:
-                out.append(ADMIN_ROLE)
+                out.append((ADMIN_ASSET, ADMIN_ROLE))
             continue
-        out.extend(value or [])
+        out.extend((f"{ASSET_PREFIX}{scope}", level) for level in (value or []))
     return out
+
+
+def held_by(user) -> list:
+    """Just the role codes of :func:`held_by_asset`, for callers that only ask
+    whether Entitle granted anything."""
+    return [role for _asset, role in held_by_asset(user)]
