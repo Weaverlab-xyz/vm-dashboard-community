@@ -456,6 +456,26 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
         db.close()
 
 
+def power_job_in_flight(db: Session, environment_id: str) -> bool:
+    """Whether a power job is already queued or running for this POV.
+
+    Scanned in Python rather than filtered in SQL because the environment id lives in the
+    job's JSON metadata, and there is no JSON filter portable across SQLite and Postgres —
+    the same constraint `database.py` cites for putting expiry on real columns. The set is
+    tiny: only ACTIVE power jobs, across all POVs.
+
+    Lives here rather than in one of its callers because there are two now — the reconcile
+    sweeps and the accessor's Wake button — and "is something already changing this POV's
+    power state?" is a lifecycle question, next to `may_act_on`.
+    """
+    from ..database import Job
+    rows = (db.query(Job)
+              .filter(Job.job_type == "pov_env_power",
+                      Job.status.in_(job_service.ACTIVE_STATUSES))
+              .all())
+    return any(r.metadata_dict.get("environment_id") == environment_id for r in rows)
+
+
 def may_act_on(env: PovEnvironment) -> tuple[bool, str]:
     """Whether a power/destroy request may proceed, and why not when it may not.
 

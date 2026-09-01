@@ -819,7 +819,7 @@ def test_a_deferred_suspension_does_not_latch():
     """If a power job is already in flight the cap has NOT been acted on. Latching there
     would let a POV sail past its cap because something unrelated was mid-flight."""
     body = _code(_RECONCILE, "sweep_spend")
-    deferred = body.split("_power_job_in_flight", 1)[1].split("continue", 1)[0]
+    deferred = body.split("power_job_in_flight", 1)[1].split("continue", 1)[0]
     assert "spend_capped_at = None" in deferred, \
         "the cap latches even when the suspension was deferred"
 

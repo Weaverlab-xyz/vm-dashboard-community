@@ -277,21 +277,6 @@ def _log(db: Session, job_id: str, line: str) -> None:
         job_service.append_job_log(db, job_id, line)
 
 
-def _power_job_in_flight(db: Session, environment_id: str) -> bool:
-    """Whether a power job is already queued or running for this POV.
-
-    Scanned in Python rather than filtered in SQL because the environment id lives in the
-    job's JSON metadata, and there is no JSON filter portable across SQLite and Postgres —
-    the same constraint `database.py` cites for putting expiry on real columns. The set is
-    tiny: only ACTIVE power jobs, across all POVs.
-    """
-    rows = (db.query(Job)
-              .filter(Job.job_type == "pov_env_power",
-                      Job.status.in_(job_service.ACTIVE_STATUSES))
-              .all())
-    return any(r.metadata_dict.get("environment_id") == environment_id for r in rows)
-
-
 def sweep_schedules(db: Session, *, job_id: str = "") -> int:
     """Act on any suspend schedule whose boundary has been crossed. Returns how many.
 
@@ -343,7 +328,7 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
         # Something is already changing this environment's power state — the operator
         # pressed a button, or a previous crossing is still running. Two power jobs for
         # one environment is how a resume and a suspend race to a coin flip.
-        if _power_job_in_flight(db, env.id):
+        if pov_env_service.power_job_in_flight(db, env.id):
             _log(db, job_id,
                  f"{env.name}: a power job is already running, schedule deferred")
             continue
@@ -457,7 +442,7 @@ def sweep_spend(db: Session, *, job_id: str = "") -> int:
         if (env.runstate or "") == "stopped" or not pov_env_service.may_act_on(env):
             _log(db, job_id, f"{env.name}: over its ${cap:,.2f} cap and already stopped")
             continue
-        if _power_job_in_flight(db, env.id):
+        if pov_env_service.power_job_in_flight(db, env.id):
             # Not latched in this case — the cap has NOT been acted on yet, and latching
             # here would let a POV sail past it because something else was mid-flight.
             env.spend_capped_at = None

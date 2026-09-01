@@ -489,6 +489,34 @@ at 19:00.
 Setting a schedule is refused on a platform that has its own idle timer. The two answer
 the same question, and a POV carrying both is one where neither is in charge.
 
+#### The customer can wake it
+
+A schedule without a customer-reachable resume is a broken demo: the POV sleeps at 19:00
+and the prospect trying it at nine the next morning finds a dead environment and an SE to
+email. So the accessor page carries a **Start it** button.
+
+It is **start only**. There is no suspend and no destroy on that page, and the endpoint
+takes no environment id — it resolves the POV from the accessor's own session, the same
+way every other write on that page does, so "could they stop somebody else's POV?" is
+unanswerable rather than merely guarded. The job it enqueues is the one the SE's Start
+button creates, attributed to `pov-accessor` so the `/jobs` row says a prospect pressed it.
+
+The button renders from state the API serves rather than probing, so it only appears when
+pressing it will work. When it does not, the page says why in a sentence the prospect can
+act on:
+
+| State | What they see |
+|---|---|
+| Suspended, under its cap | **Start it** |
+| Already starting | "Give it a few minutes" — a second job would race the first |
+| Still provisioning, or being destroyed | The lifecycle reason |
+| **Over its spend cap** | "Ask your contact to raise it" |
+
+That last one matters. The spend cap **latches** once it has acted, so the sweep will not
+re-suspend — which means a prospect who woke a capped POV would leave it running past its
+cap indefinitely, and the account owner's one cost control would be the one anybody could
+undo.
+
 **Suspending a cloud POV is not free.** Stopping an instance halts its compute charge and
 nothing else — the root volume, the public address and the network keep billing for the
 whole evaluation. A schedule cuts the largest line on the bill, not the bill.
