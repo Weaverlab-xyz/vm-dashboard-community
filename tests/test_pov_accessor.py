@@ -847,14 +847,19 @@ def test_the_rest_path_does_not_demand_the_ssh_connectors_prerequisites():
     # It resolves the tenant and the two ids every integration needs, and refuses on
     # nothing else.
     assert "owner_id" in shared and "workflow_id" in shared
-    for refusal in ("names no agent token", "no Entitle SSH key", "names no SSH sudo user"):
+    # Matched on a phrase from each refusal rather than the whole sentence, because
+    # the wording is prose that gets improved. "has no Entitle agent" replaced "names
+    # no agent token" when the dashboard learned to install one, and a test that knew
+    # only the old spelling reported that the SSH path had stopped refusing at all.
+    ssh_only = ("has no Entitle agent", "no Entitle SSH key", "names no SSH sudo user")
+    for refusal in ssh_only:
         assert refusal not in shared, \
             f"the shared tenant context refuses with {refusal!r}, which is SSH-specific"
 
     # And the SSH path still demands all three, layered on top rather than duplicated.
     ssh = _code(wireup, "entitle_context")
     assert "entitle_tenant_ctx" in ssh, "entitle_context re-resolves the tenant itself"
-    for refusal in ("names no agent token", "no Entitle SSH key", "names no SSH sudo user"):
+    for refusal in ssh_only:
         assert refusal in ssh, f"the SSH path stopped refusing with {refusal!r}"
 
 
