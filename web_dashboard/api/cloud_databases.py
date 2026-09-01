@@ -31,12 +31,14 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import CloudDatabase, User, get_db
-from ..services import (aws_service, cache_service, cloud_database_service,
-                        cloud_db_adapter_service, cloud_function_service,
-                        clouddb_dbops_service, config_service, job_service,
-                        ps_api_service, ps_database_catalog, region_catalog)
+from ..services import (aws_service, azure_service, cache_service,
+                        cloud_database_service, cloud_db_adapter_service,
+                        cloud_function_service, clouddb_dbops_service,
+                        config_service, job_service, ps_api_service,
+                        ps_database_catalog, region_catalog)
 from ..services.aws_service import AWSError
-from ..services.region_config import deployable_regions, resolve_region
+from ..services.region_config import (REGION_CONFIG_CLOUDS, deployable_regions,
+                                      resolve_region)
 from .auth import require_permission
 
 logger = logging.getLogger(__name__)
@@ -149,9 +151,17 @@ async def _pra_pickers() -> dict:
 
 def _resolve_db_region(cloud: str, region: Optional[str]) -> str:
     """Validate + default-resolve a provision-form region through the shared region
-    catalog (blank → configured default; malformed → HTTP 400)."""
+    catalog (blank → configured default; malformed → HTTP 400).
+
+    Normalised on the way out, which ``region_catalog.resolve`` does NOT do for the
+    blank case — there it hands back the raw ``azure_location`` / ``aws_region``
+    config value, so an operator who typed "West US 2" had this route echoing exactly
+    that back as the form's region, and the row recording it. Everything downstream
+    (the per-region config sets, the DB-Ops service registry, the adapter's region
+    check) keys on the canonical id, so canonicalise once, here.
+    """
     try:
-        return region_catalog.resolve(cloud, region)
+        return region_catalog.normalize(cloud, region_catalog.resolve(cloud, region))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -159,16 +169,136 @@ def _resolve_db_region(cloud: str, region: Optional[str]) -> str:
 def _region_choices(cloud: str, resolved_region: str) -> list[str]:
     """Region ids for the provision-form dropdown, with ``resolved_region`` (the
     configured default or the just-picked region) guaranteed present and first
-    (order-preserving, de-duplicated). Draws from the shared ``region_catalog`` so
-    the DB form mirrors the k8s form; the catalog is a convenience list, not an
-    allow-list, so a custom region still shows up (it's forced in first)."""
+    (order-preserving, de-duplicated).
+
+    For every cloud that carries per-region config sets this is
+    ``region_config.deployable_regions`` — the configured default plus each region
+    with a config set of its own — and NOT the full ``region_catalog``. The catalog
+    is what an operator may *configure*; offering it here invites a provision into a
+    region with no DB subnet, subnet group or security group of its own, where
+    ``resolve_region`` falls each of those back to the flat keys and the database is
+    handed the DEFAULT region's network. On Azure that surfaces ~90s into the apply as
+    ``VnetWithDifferentLocationNotSupported``, on a job that should never have been
+    created; on GCP it succeeds and then ``pair_adapter`` (which already demands a
+    config set) cannot place the Entitle adapter beside it. Same rule as the k8s,
+    Cloud Functions and gateway pickers — see ``region_config.deployable_regions``.
+
+    OCI keeps the catalog: it has no per-region config sets, and an Autonomous DB on
+    the free tier is a public endpoint that uses no regional network of ours.
+    """
+    c = (cloud or "").strip().lower()
+    pool = deployable_regions(c) if c in REGION_CONFIG_CLOUDS else region_catalog.region_ids(c)
     seen, out = set(), []
-    for r in [resolved_region, *region_catalog.region_ids(cloud)]:
+    for r in [resolved_region, *pool]:
         r = (r or "").strip()
         if r and r not in seen:
             seen.add(r)
             out.append(r)
     return out
+
+
+async def _reject_cross_region_network(engine: str, cloud: str, region: str,
+                                       opts: dict) -> None:
+    """400 when the network a provision would attach to does not live in ``region``.
+
+    Two checks, cheapest first:
+
+    1. **The region must have a per-region config set** (or be the configured
+       default). Without one, every network field falls back to the flat config keys
+       — i.e. the default region's subnet — so "the region I picked" and "the region
+       it lands in" silently differ. Needs no cloud API, so it always runs.
+    2. **The resolved ids must confirm as in-region.** Catches the subtler case the
+       first check misses: a region set that exists but leaves the *DB* subnet blank
+       (or carries an id copied from another region), which falls back to the default
+       region's network exactly as if there were no set at all.
+
+    Runs at REQUEST time, before ``provision`` writes the CloudDatabase row, mints the
+    admin credential and creates the job — same reasoning as the VM path's
+    ``api/azure._reject_cross_region_network``. Check 2 **fails open** for the same
+    reason it does there: an id we could not resolve (no creds, no Reader on the
+    VNet's resource group, a throttled RDS call) must not block an otherwise valid
+    provision. Terraform still refuses a real mismatch, just later and more cryptically.
+    """
+    cloud = (cloud or "").strip().lower()
+    if cloud not in REGION_CONFIG_CLOUDS:
+        return                      # OCI: no per-region sets, no regional network
+    want = region_catalog.normalize(cloud, region)
+
+    if want and want not in deployable_regions(cloud):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{region} has no per-region configuration on {cloud}. A private "
+                    f"database needs a subnet (and on AWS a DB subnet group and "
+                    f"security group) in its OWN region; without a config set those "
+                    f"fall back to the default region's, and the deploy fails at "
+                    f"apply time. Add a config set for {want} under Settings → "
+                    f"Multi-region — or re-run the sandbox setup script in {want}, "
+                    f"which populates one — then try again."),
+        )
+
+    ids = cloud_database_service.regional_network_ids(
+        engine=engine, cloud=cloud, region=want, opts=opts)
+    if not ids:
+        return
+
+    if cloud == "azure":
+        # A subnet's ARM id embeds the VNet's resource group but not its region, so
+        # this is a lookup rather than a parse — and that is exactly why an id
+        # inherited from another region reads as plausible in the settings panel.
+        subnet = ids.get("delegated_subnet_id") or ids.get("subnet_id") or ""
+        if not subnet:
+            return
+        actual = (await azure_service.resource_locations([subnet])).get(subnet) or ""
+        if actual and region_catalog.normalize("azure", actual) != want:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"The {engine} subnet resolved for {want} — "
+                        f"'{subnet.rsplit('/', 1)[-1]}' — is in {actual}. Azure VNets "
+                        f"are regional, so a database in {want} cannot use it (the "
+                        f"apply fails with VnetWithDifferentLocationNotSupported). "
+                        f"Set {want}'s own DB subnet under Settings → Multi-region, "
+                        f"or provision into {actual}."),
+            )
+        return
+
+    # AWS: a DB subnet group and a security group are named/ided within ONE region, so
+    # "does this region know it?" is the whole check. Reuses the same per-region
+    # options payload (and cache entry) the provision form's pickers are drawn from.
+    async def _fetch():
+        return await aws_service.get_db_options(want)
+
+    try:
+        aws_opts, _ = await cache_service.get_or_refresh(
+            cache_service.key_param("aws_db_options", region=want),
+            cache_service.TTL["aws_db_options"], _fetch)
+    except Exception as exc:                                       # fail open
+        logger.warning("clouddb: AWS in-region network check skipped for %s: %s",
+                       want, exc)
+        return
+
+    group = ids.get("db_subnet_group_name") or ""
+    known_groups = {str(g.get("name", "")).lower()
+                    for g in aws_opts.get("db_subnet_groups", []) if g.get("name")}
+    if group and known_groups and group.lower() not in known_groups:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No DB subnet group named '{group}' exists in {want} — that is "
+                    f"the default region's group, resolved because {want} has none of "
+                    f"its own. Set {want}'s db_subnet_group_name under Settings → "
+                    f"Multi-region, or pick a group from this region's list."),
+        )
+
+    known_sgs = {str(sg.get("id", "")) for sg in aws_opts.get("security_groups", [])
+                 if sg.get("id")}
+    stray = [sg for sg in (ids.get("vpc_security_group_ids") or []) if sg not in known_sgs]
+    if known_sgs and stray:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Security group {stray[0]} does not exist in {want}. Security "
+                    f"groups belong to one VPC in one region; set {want}'s "
+                    f"db_security_group_id under Settings → Multi-region, or pick a "
+                    f"group from this region's list."),
+        )
 
 
 @router.post("")
@@ -195,18 +325,28 @@ async def provision_database(
         "oci_subnet_ocid": payload.oci_subnet_ocid,
     }.items() if v is not None}
 
+    # Canonical region from here on (the row, the job and the tf `location`/`region`
+    # var all take this one), then refuse a network that isn't in it — both before
+    # anything is created. See _reject_cross_region_network. Blank still 400s rather
+    # than defaulting: which region a database lives in is a deliberate choice, and
+    # provision() has always demanded one.
+    if not (payload.region or "").strip():
+        raise HTTPException(status_code=400, detail="region is required")
+    region = _resolve_db_region(payload.cloud, payload.region)
+    await _reject_cross_region_network(payload.engine, payload.cloud, region, opts)
+
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
     admission_service.enforce(
         "clouddb:provision",
-        request={"region": payload.region, "engine": payload.engine,
+        request={"region": region, "engine": payload.engine,
                  "cloud": payload.cloud, "name": payload.name,
                  "instance_type": payload.instance_class or payload.tier or payload.sku_name or ""},
         actor=current_user, db=db,
     )
     try:
         result = cloud_database_service.provision(
-            db, engine=payload.engine, cloud=payload.cloud, region=payload.region,
+            db, engine=payload.engine, cloud=payload.cloud, region=region,
             name=payload.name, created_by=current_user.username,
             master_username=payload.master_username,
             vault_account_group_id=payload.vault_account_group_id,

@@ -10,7 +10,14 @@ set -Eeuo pipefail
 # never strands resources.
 SANDBOX_TAG_KEY="managed-by"
 SANDBOX_TAG_VALUE="dashboard-sandbox"
-SANDBOX_NAME_PREFIX="dashboard-sandbox"
+# Overridable per run, because a second REGION needs a second sandbox: nothing the
+# setup scripts create is region-scoped by name (RG, VNet, VPC, cluster, …), and
+# re-running with a different region against the same prefix quietly reuses the
+# first region's network — see the location guard in setup-azure.sh. Pair it with
+# SANDBOX_STATE_DIR, which is keyed on cloud alone and would otherwise be shared.
+# The TAG deliberately does not follow: rollback enumerates by tag, and one
+# `managed-by` value should still find every region's resources.
+SANDBOX_NAME_PREFIX="${SANDBOX_NAME_PREFIX:-dashboard-sandbox}"
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 _now() { date -u +"%H:%M:%S"; }

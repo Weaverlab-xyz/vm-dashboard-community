@@ -524,6 +524,61 @@ def _build_tf_variables(
     raise NotImplementedError(f"{engine}/{cloud} Terraform variables not implemented")
 
 
+# The Terraform variables that name a REGION-SCOPED network resource, per cloud.
+# Only AWS and Azure appear: GCP's ``private_network`` is a *global* VPC (Cloud SQL
+# takes its private IP from a global private-services-access range, so any region
+# works), and OCI's Autonomous DB free tier is a public endpoint with no network of
+# ours. Those two clouds therefore cannot be cross-region, and have nothing to check.
+_REGIONAL_NETWORK_VARS: dict[str, tuple[str, ...]] = {
+    "azure": ("delegated_subnet_id", "subnet_id"),
+    "aws": ("db_subnet_group_name", "vpc_security_group_ids"),
+}
+
+
+def regional_network_ids(*, engine: str, cloud: str, region: str,
+                         opts: Optional[dict] = None) -> dict:
+    """The region-scoped network resources a provision would attach to, as
+    ``{terraform var: value}`` with blanks dropped (lists stay lists).
+
+    Answers "which subnet / DB subnet group / security groups is this database about
+    to land on?" so a caller can confirm they really live in ``region`` *before* any
+    row, credential or job exists. That check matters because
+    :func:`region_config.resolve_region` falls every field back to the flat config
+    keys: a region with no config set of its own — or with the DB subnet field left
+    blank — silently resolves to the DEFAULT region's subnet, and Azure only says so
+    ~90 seconds into the apply ("VnetWithDifferentLocationNotSupported").
+
+    Built by running the real :func:`_build_tf_variables` and picking the network keys
+    out of it, so the resolution order (opts override → region entry → flat key) has
+    exactly ONE implementation and the guard can never drift from what the apply does.
+    The placeholder identity/secret arguments below feed no network variable.
+
+    Returns ``{}`` for a cloud with nothing to check or an unimplemented combo — the
+    caller's job here is to validate a network, not the engine/cloud matrix.
+    """
+    keys = _REGIONAL_NETWORK_VARS.get((cloud or "").strip().lower())
+    if not keys:
+        return {}
+    try:
+        tf = _build_tf_variables(
+            engine=engine, cloud=cloud, region=region,
+            db_id="0" * 36, db_name="probe", master_username="probe",
+            master_password="probe", opts=dict(opts or {}),
+        )
+    except (NotImplementedError, CloudDatabaseError, ValueError):
+        return {}
+    out: dict = {}
+    for key in keys:
+        val = tf.get(key)
+        if isinstance(val, (list, tuple)):
+            items = [str(v).strip() for v in val if v and str(v).strip()]
+            if items:
+                out[key] = items
+        elif val and str(val).strip():
+            out[key] = str(val).strip()
+    return out
+
+
 def provision(
     db: Session, *, engine: str, cloud: str, region: str, name: str,
     created_by: str, master_username: str = "dbadmin",
