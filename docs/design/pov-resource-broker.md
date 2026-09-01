@@ -255,9 +255,19 @@ So the adapter has to **parse**, and parsing is where this goes wrong quietly. T
 * **Refuse rather than guess.** A `text` the parser cannot split into exactly one pair is
   an error naming the VM, not a best effort. A wrong username sends a WinRM auth failure
   back, which reads as a bad password and sends an SE to reset one.
-* **Refuse on ambiguity too.** More than one entry, or one entry yielding more than one
-  plausible pair, is a refusal — the fallback in the table above is what an operator
-  reaches for when their template's credential box does not parse.
+* **Refuse on ambiguity where nothing can resolve it.** More than one entry, or one entry
+  yielding more than one plausible pair, is a refusal *for this path* — the fallback in the
+  table above is what an operator reaches for when their template's credential box does not
+  parse. The reason is specific to the consumer rather than to credentials in general: this
+  one seals a single credential into a run bundle the agent uses, so it never authenticates
+  and a position in a list is the only thing it could go on.
+
+  The template builder's SSH install is the exception, and it is an exception on exactly
+  that axis: it authenticates in process, so it takes the whole list (`candidates` rather
+  than `pick`) and tries each until one is accepted. Ambiguity a round trip can settle is
+  not ambiguity. It still refuses when *none* parse, in the same words, and it fails at once
+  when the guest answers and rejects them all — the retry ladder there is for a guest whose
+  sshd is not up yet, and a rejected password is not that.
 * **Never log the `text`.** It contains the password by definition. The parsed username is
   fine to name in a job log; nothing else from that field is.
 

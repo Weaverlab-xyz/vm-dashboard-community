@@ -18,9 +18,13 @@ back from WinRM as an authentication failure, which reads as a bad password and 
 to reset one that was fine. A refusal naming the VM and quoting nothing costs one message;
 a guess costs an afternoon.
 
-**Refuse on ambiguity too.** Two credential entries, or one that yields two plausible
-pairs, is not an invitation to pick. The operator-supplied fallback exists for exactly
-this, and for a platform whose capability table says ``stored_credentials: False``.
+**Refuse on ambiguity only where nothing can resolve it.** ``pick`` returns one pair and
+refuses when the entries offer two, because its caller seals that one credential into a run
+bundle the *agent* uses over WinRM: it never authenticates, so a position in a list is the
+only thing it could go on, and installing a Resource Broker as the wrong account is not a
+mistake worth being clever about. ``candidates`` exists for the caller that *can* try — the
+SSH runner install in ``pov_template_builder`` — where which entry was meant is a question
+one round trip answers.
 
 **Never put the text in an error, a log line or a job message.** It contains the password
 by definition. Only the *parsed username* is safe to name, and only after parsing
@@ -112,11 +116,44 @@ def parse(text: str) -> tuple[str, str]:
         "a password. Expected something like 'administrator / Passw0rd'")
 
 
+def _usable(entries: list) -> tuple[list[tuple[str, str]], list[str]]:
+    """Every entry that parses, and the reasons the rest did not.
+
+    An entry that will not parse is not a failure by itself: a credential box often holds a
+    note beside the login, and refusing because the note is not a login would refuse the
+    common case. It becomes a failure only when nothing else parsed either — which is why
+    the reasons come back here rather than being raised.
+    """
+    usable: list[tuple[str, str]] = []
+    problems: list[str] = []
+    for entry in entries or []:
+        text = (entry or {}).get("text") if isinstance(entry, dict) else None
+        try:
+            usable.append(parse(text or ""))
+        except CredentialParseError as exc:
+            problems.append(str(exc))
+    return usable, problems
+
+
+def _none_usable(problems: list[str], vm_label: str, remedy: str) -> CredentialParseError:
+    """The refusal both public functions raise when nothing parsed, in one wording: the
+    reader's next move is the same whether the caller could have tried two logins or not."""
+    detail = f" ({problems[0]})" if problems else ""
+    return CredentialParseError(
+        f"{vm_label} has no stored credential this dashboard can use{detail}. Add one "
+        f"on the VM in the lab platform. {remedy}")
+
+
 # The default remedy names the POV's own login field, which is where a caller that HAS one
 # sends the reader. A template build has no such field — its row carries a broker VM name
 # and nothing to log in with — so it passes its own. Advice you cannot follow is worse than
 # no advice: it sends an SE looking for a control that does not exist.
 DEFAULT_REMEDY = "Leave one on the VM, or set the login on the POV by hand."
+
+# A bound on how many logins a caller will throw at one host. Past a handful the box holds
+# notes that happen to parse rather than credentials, and every extra one is a real
+# authentication attempt against a real guest.
+MAX_CANDIDATES = 4
 
 
 def pick(entries: list, *, vm_label: str = "the VM",
@@ -131,23 +168,33 @@ def pick(entries: list, *, vm_label: str = "the VM",
     ``remedy`` is the sentence that tells the reader what to DO about either refusal; see
     ``DEFAULT_REMEDY``.
     """
-    usable = []
-    problems = []
-    for entry in entries or []:
-        text = (entry or {}).get("text") if isinstance(entry, dict) else None
-        try:
-            usable.append(parse(text or ""))
-        except CredentialParseError as exc:
-            problems.append(str(exc))
-
+    usable, problems = _usable(entries)
     if not usable:
-        detail = f" ({problems[0]})" if problems else ""
-        raise CredentialParseError(
-            f"{vm_label} has no stored credential this dashboard can use{detail}. Add one "
-            f"on the VM in the lab platform. {remedy}")
+        raise _none_usable(problems, vm_label, remedy)
     if len(usable) > 1:
         # Names how many, never which — the count is diagnostic, the contents are not.
         raise CredentialParseError(
             f"{vm_label} has {len(usable)} usable stored credentials and there is no way "
             f"to tell which is meant. {remedy}")
     return usable[0]
+
+
+def candidates(entries: list, *, vm_label: str = "the VM",
+               remedy: str = DEFAULT_REMEDY) -> list[tuple[str, str]]:
+    """Every usable credential in ``entries``, in the order the platform returned them.
+
+    For a caller that can TRY a login and be told it was wrong. ``pick`` refuses on more
+    than one because it cannot — it hands its credential to something else to use, so order
+    is the only thing it could go on. An SSH install authenticates in process, so the same
+    ambiguity is a question the wire answers in one round trip, and the caller finds out
+    which login won instead of guessing.
+
+    Raises :class:`CredentialParseError` only when NONE are usable: the same refusal
+    ``pick`` raises, in the same words, because the reader's next move is the same.
+    """
+    usable, problems = _usable(entries)
+    if not usable:
+        raise _none_usable(problems, vm_label, remedy)
+    # Truncation is silent on purpose. The caller's job is to install a runner, not to audit
+    # a credential box, and it has no way to tell a fifth login from a fifth note.
+    return usable[:MAX_CANDIDATES]

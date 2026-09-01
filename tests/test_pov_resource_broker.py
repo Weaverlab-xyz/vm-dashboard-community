@@ -133,7 +133,11 @@ def test_the_refusal_never_quotes_the_text():
 
 
 def test_two_usable_credentials_are_refused_not_ordered():
-    """Which one an SE meant is not something a position in a list can answer."""
+    """Which one an SE meant is not something a position in a list can answer — and *this*
+    caller cannot ask. `platform_login` seals one credential into a run bundle the agent
+    uses over WinRM, so it never authenticates and never learns the outcome; order is the
+    only thing it could go on. The template build, which does authenticate, uses
+    `candidates` instead. Do not turn this into ordering."""
     try:
         pov_credentials.pick([{"text": "a / b"}, {"text": "c / d"}], vm_label="rb01")
         raise AssertionError("it picked one")
@@ -161,6 +165,47 @@ def test_an_unparseable_entry_beside_a_good_one_is_treated_as_a_note():
         [{"text": "this VM is the RB host"}, {"text": "administrator / Passw0rd"}],
         vm_label="rb01")
     assert got == ("administrator", "Passw0rd")
+
+
+# ── candidates(): the caller that can try ────────────────────────────────────
+
+def test_candidates_returns_every_usable_pair_in_platform_order():
+    """The template build authenticates in process, so two logins are two things to try
+    rather than an ambiguity to refuse. The order is the platform's, because that is the
+    only order there is — but nothing depends on it being right, only on it being tried."""
+    got = pov_credentials.candidates(
+        [{"text": "administrator / Passw0rd"}, {"text": "root:Hunter2"}], vm_label="rb01")
+    assert got == [("administrator", "Passw0rd"), ("root", "Hunter2")], got
+
+
+def test_candidates_ignores_an_unparseable_entry_beside_a_good_one():
+    """Same rule as `pick`: a note in the box is not a credential and not a failure."""
+    got = pov_credentials.candidates(
+        [{"text": "this VM is the RB host"}, {"text": "administrator / Passw0rd"}],
+        vm_label="rb01")
+    assert got == [("administrator", "Passw0rd")], got
+
+
+def test_candidates_refuses_in_the_same_words_when_none_are_usable():
+    """`pick` and `candidates` share this refusal deliberately — the reader's next move is
+    the same either way, and `docs/pov-instance.md` quotes the sentence in troubleshooting."""
+    for fn in (pov_credentials.pick, pov_credentials.candidates):
+        try:
+            fn([{"text": "not a login"}], vm_label="rb01", remedy="Fix the box.")
+            raise AssertionError(f"{fn.__name__} did not refuse")
+        except pov_credentials.CredentialParseError as exc:
+            assert "no stored credential this dashboard can use" in str(exc), exc
+            assert "rb01" in str(exc) and "Fix the box." in str(exc), exc
+
+
+def test_candidates_is_bounded():
+    """Past a handful the box holds notes that happen to parse, and every extra entry is a
+    real authentication attempt against a real guest."""
+    over = pov_credentials.MAX_CANDIDATES + 3
+    got = pov_credentials.candidates(
+        [{"text": f"user{i} / pass{i}"} for i in range(over)], vm_label="rb01")
+    assert len(got) == pov_credentials.MAX_CANDIDATES, got
+    assert got[0] == ("user0", "pass0"), got
 
 
 # ── the installer arguments ──────────────────────────────────────────────────
