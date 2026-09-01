@@ -12,6 +12,12 @@ Three properties, each of which would be invisible if it broke:
     points at Settings. `masked` is not: api/setup.patch_feature_config refuses that enable
     with a 409 naming the profile, so a Settings link would send the operator to a switch
     that cannot move -- and a target would be a live link to a page this profile 404s.
+  * **On a POV instance it LEADS with a POV, and still subtracts nothing.** The catalog
+    asks feature_flags, which is an instance-wide answer, so on a POV instance most of it
+    was greyed out -- correct, and useless in front of a customer. The POV lead goes on
+    top; the catalog is COLLAPSED underneath, never filtered, and a demo instance renders
+    exactly what it did before. The distance between "collapsed" and "removed" is the whole
+    argument, so both halves are pinned.
 
 Runs under pytest, or standalone:
     python tests/test_use_cases_page.py
@@ -207,6 +213,104 @@ def test_a_masked_card_never_carries_a_target_on_either_profile():
                         assert c["needs"], f"{c['id']} is unready but names nothing"
     finally:
         ff.install_profile = real
+
+
+# ── the POV lead ─────────────────────────────────────────────────────────────
+
+def test_a_demo_instance_renders_what_it_always_did():
+    """The lead is additive. Everything new is behind `isPov`, and the catalog opens by
+    default anywhere that is not a POV instance."""
+    src = _read(_PAGE)
+    for gated in ('x-show="loaded && isPov"',):
+        assert gated in src, f"the POV lead is not gated on the profile ({gated})"
+    body = src.split("this.showCatalog = ", 1)[1].split(";", 1)[0]
+    assert "!this.isPov" in body, \
+        "the catalog does not open by default on a demo instance"
+
+
+def test_the_catalog_is_collapsed_not_filtered():
+    """The distinction this whole page rests on. Collapsing changes what leads; filtering
+    would make the persona/profile layer able to remove something, which is the one thing
+    services/personas exists to forbid."""
+    src = _read(_PAGE)
+    assign = src.split("this.groups =", 1)[1].split(";", 1)[0]
+    assert ".filter(" not in assign, "the catalog groups are filtered"
+    # Every group still renders — behind x-show, which keeps it in the DOM.
+    block = src.split('<template x-for="g in groups"', 1)[1][:200]
+    assert 'x-show="showCatalog"' in block, "the catalog is not collapsible"
+    assert "x-if" not in block, \
+        "the catalog uses x-if, which REMOVES the groups from the DOM rather than hiding " \
+        "them — that is filtering with extra steps"
+
+
+def test_the_collapse_says_what_is_behind_it():
+    """A closed section with no explanation reads as something missing."""
+    src = _read(_PAGE)
+    assert "showCatalog = !showCatalog" in src, "there is no way to open the catalog"
+    assert "Everything this dashboard can demo" in src, \
+        "the collapsed section is unlabelled"
+    assert "nothing is hidden from you" in src, \
+        "the page does not say why the whole catalog is still there"
+
+
+def test_the_pov_lead_reuses_the_per_pov_endpoint():
+    """No new backend: the lead reads exactly what the POV's own page reads, so the two
+    can never disagree about what that POV can run."""
+    src = _read(_PAGE)
+    assert "/api/pov/managed/${this.povId}/use-cases" in src, \
+        "the lead does not read the per-POV catalog"
+    assert "/api/pov/managed" in src
+
+
+def test_the_pov_fetch_carries_the_token_and_fails_silently():
+    """/api/pov needs auth, unlike the two public endpoints beside it — and every way it
+    can fail (a demo instance 404s the router, an expired session 401s) is a non-event on
+    a page whose main content loaded fine."""
+    src = _read(_PAGE)
+    fetcher = src.split("async apiFetch(url)", 1)[1].split("\n      },", 1)[0]
+    assert "Authorization" in fetcher, "the POV fetch is anonymous and would 401"
+    loader = src.split("async loadPovs()", 1)[1].split("\n      },", 1)[0]
+    assert "if (!res.ok) return;" in loader, \
+        "a failed POV read is turned into a page error"
+    assert "this.error" not in loader, \
+        "a POV instance with no POVs, or a demo instance, would show an error"
+
+
+def test_the_lead_never_offers_an_action():
+    """Everything that CHANGES a POV lives on the POV's own page, which is also where every
+    other action on it lives. This page reads."""
+    src = _read(_PAGE)
+    for verb in ("method: 'POST'", "method: 'DELETE'", "mark(", "mintAccessor"):
+        assert verb not in src, f"the use-cases page performs a write ({verb})"
+
+
+def test_a_destroyed_pov_is_not_offered():
+    src = _read(_PAGE)
+    loader = src.split("async loadPovs()", 1)[1].split("\n      },", 1)[0]
+    assert "destroyed" in loader, "the picker offers POVs that have been reaped"
+
+
+def test_the_remembered_pov_survives_a_browser_that_refuses_storage():
+    """localStorage throws on the READ in a browser with site data blocked, not only on
+    the write — and this page must render for somebody who has that set."""
+    src = _read(_PAGE)
+    for fragment in ("getItem('vm_cli_use_cases_pov')", "setItem('vm_cli_use_cases_pov'"):
+        assert fragment in src, f"the picker does not remember its POV ({fragment})"
+    for line in src.splitlines():
+        if "getItem('vm_cli_use_cases_pov')" in line or \
+                "setItem('vm_cli_use_cases_pov'" in line:
+            assert line.strip().startswith("try {") and "catch" in line, \
+                f"an unguarded localStorage call: {line.strip()[:70]}"
+
+
+def test_the_lead_still_hard_codes_no_persona_key():
+    """The same rule the catalog below it keeps."""
+    from web_dashboard.services import personas as P
+    src = _read(_PAGE)
+    lead = src.split("For one POV", 1)[1].split("Everything this dashboard can demo", 1)[0]
+    for key in P.VALID_PERSONAS:
+        assert f"'{key}'" not in lead and f'"{key}"' not in lead, \
+            f"the POV lead names the persona key {key!r}"
 
 
 # ── the dashboard band ───────────────────────────────────────────────────────

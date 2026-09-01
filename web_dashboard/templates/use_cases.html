@@ -9,6 +9,18 @@
   choosing no focus must not subtract anything, and this page is where an SE who has not
   picked a role goes to find out what there is. A persona reorders it; it never filters it.
 
+  ON A POV INSTANCE IT LEADS WITH A POV. The catalog below asks feature_flags whether a
+  demo can run here, which is an instance-wide answer — and on a POV instance the answer
+  for most of it is "this profile masks that", so this page was 26 grey cards saying so.
+  Correct, and useless in front of a customer. So the POV a person picks goes first, with
+  its cards resolved against the products THAT evaluation is wired into (see
+  services/pov_use_cases), and the instance-wide catalog keeps its place underneath.
+
+  Underneath, not instead of. Every group is still rendered and every card is still in the
+  DOM on both profiles — the section is COLLAPSED on a POV instance, not filtered, and it
+  opens with one click. Reordering and emphasis are what this layer may do; subtracting is
+  not, and the difference has to survive somebody skim-reading this file.
+
   Nothing here hard-codes a persona key — the groups, their order and their copy all arrive
   from /api/persona/catalog, which reads services/personas.py. A key spelled in this file
   would let the page and the registry disagree, and the disagreement would be invisible.
@@ -33,8 +45,116 @@
     <p class="text-sm text-red-700" x-text="error"></p>
   </div>
 
+  <!-- ── The POV lead. POV instances only; a demo instance never reaches this markup
+       because povs stays empty (the /api/pov router 404s there). ───────────────── -->
+  <div x-show="loaded && isPov" class="mb-10">
+
+    <div class="flex items-baseline justify-between gap-4 mb-3">
+      <div>
+        <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+          For one POV
+        </h2>
+        <p class="text-xs text-gray-400 mt-0.5">
+          What this evaluation can demonstrate, and what has been covered so far.
+        </p>
+      </div>
+      <select x-show="povs.length" x-model="povId" @change="loadPov()"
+              class="border border-gray-300 rounded-lg px-3 py-2 text-sm shrink-0">
+        <template x-for="p in povs" :key="p.id">
+          <option :value="p.id" x-text="p.name"></option>
+        </template>
+      </select>
+    </div>
+
+    <div x-show="!povs.length" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <p class="text-sm text-gray-500">
+        No POV environments yet. Create one on the
+        <a href="/pov" class="text-blue-700 hover:underline">POV page</a> and its checklist
+        appears here.
+      </p>
+    </div>
+
+    <template x-if="povs.length && povSummary">
+      <div class="mb-4 flex items-baseline justify-between gap-4">
+        <p class="text-xs text-gray-400">
+          <span x-text="povSummary.done"></span> of
+          <span x-text="povSummary.total"></span> covered<span
+            x-show="povSummary.skipped"> · <span x-text="povSummary.skipped"></span> skipped</span>
+        </p>
+        <!-- The one place to DO anything about it. Ticking a card off lives on the POV's
+             own page, which is also where every action on that POV lives; this page reads. -->
+        <a :href="'/pov/' + povId + '#use-cases'"
+           class="text-xs text-blue-600 hover:underline shrink-0">Open this POV →</a>
+      </div>
+    </template>
+
+    <template x-for="g in povGroups" :key="'pov-' + g.persona">
+      <div class="mb-8" x-show="inScope(g).length">
+        <div class="flex items-baseline justify-between mb-3">
+          <div>
+            <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+              <span x-text="g.label"></span>
+              <span x-show="g.persona === active"
+                    class="ml-2 text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+                your focus
+              </span>
+            </h3>
+            <p class="text-xs text-gray-400 mt-0.5" x-text="g.blurb"></p>
+          </div>
+          <span class="text-xs text-gray-400 shrink-0 ml-4"
+                x-text="inScope(g).length + ' in scope'"></span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <template x-for="c in inScope(g)" :key="c.id">
+            <div class="bg-white rounded-xl shadow-sm border p-5 flex flex-col"
+                 :class="c.progress && c.progress.state === 'done' ? 'border-green-200'
+                         : (c.state === 'ready' ? 'border-gray-200' : 'border-gray-100')">
+              <div class="flex items-start justify-between gap-2">
+                <a x-show="c.state === 'ready'" :href="c.target"
+                   class="text-sm font-semibold text-blue-700 hover:underline" x-text="c.title"></a>
+                <span x-show="c.state !== 'ready'"
+                      class="text-sm font-semibold text-gray-400" x-text="c.title"></span>
+                <span class="text-xs text-gray-400 shrink-0" x-text="c.minutes + ' min'"></span>
+              </div>
+              <p class="text-sm mt-2 flex-1"
+                 :class="c.state === 'ready' ? 'text-gray-600' : 'text-gray-400'"
+                 x-text="c.summary"></p>
+              <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between gap-2">
+                <span class="text-xs"
+                      :class="c.progress && c.progress.state === 'done' ? 'text-green-700' : 'text-gray-400'"
+                      x-text="c.progress && c.progress.state === 'done' ? '✓ covered'
+                              : (c.progress && c.progress.state === 'skipped' ? 'skipped'
+                              : (c.state === 'needs_wiring' ? 'needs wiring' : 'not yet'))"></span>
+                <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                   class="text-xs text-gray-400 hover:text-blue-600 shrink-0">Guide →</a>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- ── The instance-wide catalog. Present on both profiles and never filtered; on a
+       POV instance it starts collapsed because most of it is masked there and the POV
+       above is what somebody came for. Collapsed is not hidden: every group and every
+       card is rendered, and the toggle says how many. ───────────────────────────── -->
+  <div x-show="loaded && isPov" class="mb-4 border-t border-gray-200 pt-6">
+    <button @click="showCatalog = !showCatalog"
+            class="text-sm font-semibold text-gray-700 uppercase tracking-wide hover:text-gray-900">
+      <span x-text="showCatalog ? '▾' : '▸'"></span>
+      Everything this dashboard can demo
+    </button>
+    <p class="text-xs text-gray-400 mt-1">
+      The whole catalog, across every role. Most of it runs on a demo estate rather than a
+      customer POV, so on this instance most of it cannot run — it is here in full so that
+      nothing is hidden from you, not because you can run it.
+    </p>
+  </div>
+
   <template x-for="g in groups" :key="g.persona">
-    <div class="mb-8">
+    <div class="mb-8" x-show="showCatalog">
       <div class="flex items-baseline justify-between mb-3">
         <div>
           <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
@@ -114,6 +234,17 @@
       active: '',
       profile: '',
       groups: [],
+      // The POV lead. Empty on a demo instance, where /api/pov 404s — so this page needs
+      // no profile branch of its own beyond the one that decides whether to ASK.
+      povs: [],
+      povId: '',
+      povGroups: [],
+      povSummary: null,
+      showCatalog: true,
+
+      get isPov() {
+        return this.profile === 'pov';
+      },
 
       async init() {
         requireAuth();
@@ -128,6 +259,9 @@
           ]);
           this.active = act.persona || '';
           this.profile = act.install_profile || '';
+          // Collapsed only where most of the catalog is masked. A demo instance opens on
+          // exactly what it opened on before this change.
+          this.showCatalog = !this.isPov;
           const all = (cat.personas || []);
           // The active persona's group first; everything else keeps its declared order.
           // Not a filter — every group is always present, which is what makes the neutral
@@ -137,7 +271,62 @@
         } catch (e) {
           this.error = 'Could not load the use-case catalog.';
         }
+        if (this.isPov) await this.loadPovs();
         this.loaded = true;
+      },
+
+      // /api/pov needs the Authorization header, unlike the two public endpoints above:
+      // the dashboard sets no cookie, so a bare fetch() is an anonymous request.
+      async apiFetch(url) {
+        const token = Alpine.store('auth').token;
+        return fetch(url, {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        });
+      },
+
+      async loadPovs() {
+        try {
+          const res = await this.apiFetch('/api/pov/managed');
+          // Every failure is the same non-event: a demo instance 404s this router, an
+          // unauthenticated caller gets a 401, and neither is worth an error on a page
+          // whose main content loaded fine.
+          if (!res.ok) return;
+          this.povs = ((await res.json()).environments || [])
+            .filter(e => e.status !== 'destroyed');
+          if (!this.povs.length) return;
+          // Remember which POV an SE was working on — they live in one for weeks. Wrapped
+          // because a browser with site data blocked throws on the read itself.
+          let remembered = '';
+          try { remembered = localStorage.getItem('vm_cli_use_cases_pov') || ''; } catch (e) {}
+          const known = this.povs.some(p => p.id === remembered);
+          this.povId = known ? remembered : this.povs[0].id;
+          await this.loadPov();
+        } catch (e) {
+          // Same non-event.
+        }
+      },
+
+      async loadPov() {
+        if (!this.povId) return;
+        try { localStorage.setItem('vm_cli_use_cases_pov', this.povId); } catch (e) {}
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.povId}/use-cases`);
+          if (!res.ok) { this.povGroups = []; this.povSummary = null; return; }
+          const data = await res.json();
+          this.povGroups = data.groups || [];
+          this.povSummary = data.summary || null;
+        } catch (e) {
+          this.povGroups = [];
+          this.povSummary = null;
+        }
+      },
+
+      // Out-of-scope cards are dropped from the POV lead rather than greyed. This page
+      // already carries a full explanation of everything it cannot run — the section below
+      // it — and repeating it here would rebuild the wall of grey this lead exists to
+      // replace. The card is still on the POV's own page, stated rather than dropped.
+      inScope(g) {
+        return (g.use_cases || []).filter(c => c.state !== 'out_of_scope');
       },
     };
   }

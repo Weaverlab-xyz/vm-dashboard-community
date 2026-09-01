@@ -650,15 +650,20 @@ all, the job log says how many were left and where.
 
 ## Use cases, per POV
 
-**POV page → a POV's name → Use cases.** Every POV gets a page of its own, and the reason
-it exists is this tab.
+**Use cases in the nav, or POV page → a POV's name → Use cases.** Both lead to the same
+checklist; the first picks the POV for you, the second is where you act on it.
 
 The in-app [Use cases](personas/) catalog is instance-wide: it asks `feature_flags` whether
 a demo can run here, and on a POV instance the answer for most of it is "no, this profile
-masks that". Correct, and useless in front of a customer. This tab asks a different
-question — **can I run this on THIS POV?** — and the answer comes from the three tenant
-columns on the row, which is exactly where a Password-Safe-only evaluation differs from an
-all-three one.
+masks that". Correct, and useless in front of a customer — it was twenty-six greyed-out
+cards saying so. So **on a POV instance that page leads with a POV**: pick one from the
+selector and you get its checklist, asking a different question — **can I run this on THIS
+POV?** — whose answer comes from the three tenant columns on the row, which is exactly where
+a Password-Safe-only evaluation differs from an all-three one.
+
+The instance-wide catalog is still there, underneath, collapsed behind one click. Collapsed
+and not removed: nothing on this page is ever hidden from you, and a demo instance opens
+exactly as it always did.
 
 Every role and every card is always on the page. The product mix decides what each card
 **says**, never whether you can see it:
