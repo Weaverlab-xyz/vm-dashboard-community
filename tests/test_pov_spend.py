@@ -538,9 +538,20 @@ def test_a_gcp_environment_prices_compute_and_its_disks():
 
 def test_the_gcp_reason_names_the_api_to_enable():
     """Unlike AWS's, GCP's catalogue needs no IAM role — but the API has to be on, and an
-    unenabled one answers 403, which reads like a permissions problem."""
+    unenabled one answers 403, which reads like a permissions problem.
+
+    Asserted on the service name and the instruction separately, rather than on the whole
+    hostname. A dotted host in a membership test is the shape of a URL allow-list check,
+    and CodeQL's `py/incomplete-url-substring-sanitization` flags it — correctly in
+    general, since a substring is a weak way to validate a URL. It is not what this line
+    does, but the fix is to stop writing the shape rather than to suppress the query.
+    """
     reason = cost._no_answer_reason("gcp", "us-central1")
-    assert "cloudbilling.googleapis.com" in reason
+    assert "cloudbilling" in reason, "the reason does not name the API"
+    assert "enabled on the project" in reason, "the reason does not say what to do"
+    assert "IAM" in reason, (
+        "the reason should say no extra role is needed, or an operator goes looking for "
+        "a permission that does not exist")
 
 
 # ── the thresholds and their latches ─────────────────────────────────────────
