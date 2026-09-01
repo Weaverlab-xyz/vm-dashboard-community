@@ -59,8 +59,8 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM
 from . import (bt_tenant_service, config_service, entitle_registration_service,
-               job_service, pov_gateway, ps_api_service, ps_resource_service,
-               terraform_pra_service)
+               job_service, pov_functional_account, pov_gateway, ps_api_service,
+               ps_resource_service, terraform_pra_service)
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def gateway_name(env: PovEnvironment) -> str:
 
 # ── the Password Safe tenant ─────────────────────────────────────────────────
 
-async def ps_context(db: Session, env: PovEnvironment) -> dict:
+async def ps_context(db: Session, env: PovEnvironment, *, mint: bool = True) -> dict:
     """Everything the Password Safe half needs, or a refusal naming what is missing.
 
     Resolved once per run rather than per VM: a missing workgroup is not something the
@@ -140,6 +140,13 @@ async def ps_context(db: Session, env: PovEnvironment) -> dict:
     Returns ``{}`` — not an error — when the POV has no Password Safe tenant at all. The
     two halves of this wire-up are independent, and a POV wired into PRA alone is a
     perfectly good POV.
+
+    ``mint=False`` resolves the functional accounts and never creates one. **Teardown
+    must pass it.** Teardown calls this only to get the tenant credentials it off-boards
+    with, and a creating read there would mint an account seconds before deleting
+    everything — worse, it would read credentials from guests already on their way out,
+    so it would usually fail and mask the teardown's real outcome with a refusal about
+    provisioning.
     """
     if not env.ps_tenant_id:
         return {}
@@ -183,22 +190,70 @@ async def ps_context(db: Session, env: PovEnvironment) -> dict:
     # Both are optional here and refused per VM instead: a POV with only Linux guests has
     # no use for a Windows functional account, and demanding one would block a wire-up
     # that could have completed.
-    accounts = {}
+    #
+    # A NAME on the tenant is the customer's own account: resolved, used as-is, and never
+    # touched at teardown. A BLANK one means this dashboard mints a per-POV account from
+    # the guests' own login — the only honest answer for a POV tenant where neither
+    # account exists yet, and the reason this half used to skip every VM on a fresh one.
+    # See services/pov_functional_account.
+    #
+    # A per-family mint failure is COLLECTED rather than raised, for the same reason the
+    # whole half is optional: a POV whose Linux guests agree and whose Windows guests do
+    # not should still onboard its Linux VMs, with each Windows VM saying why it did not.
+    # Raising here would cost both.
+    accounts, problems = {}, {}
     for family, option in (("linux", "linux_functional_account"),
                            ("windows", "windows_functional_account")):
         name = tenant.option(option)
-        if not name:
+        if name:
+            try:
+                accounts[family] = await ps_api_service.get_functional_account(name, api)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("POV %s: functional account %r lookup failed", env.id,
+                               name, exc_info=True)
+                raise WireupError(
+                    f"could not resolve the {family} functional account {name!r} in "
+                    f"Password Safe tenant {tenant.name!r} "
+                    f"({type(exc).__name__}).") from None
+            continue
+        # Teardown needs the tenant credentials, not the accounts: `cleanup` reads the
+        # minted ids off the row itself. So resolve nothing here — a resolve that failed
+        # transiently would make `ensure` forget the id, and a forgotten id is an account
+        # left in a customer's tenant that nothing can find again.
+        if not mint:
+            continue
+        # No guests of this family means nothing to mint FOR and nothing that would use
+        # it — the ordinary shape of a Linux-only POV, not a problem to report. Minting
+        # anyway would leave an unused credential in a customer's tenant.
+        if not pov_functional_account.guests_of(db, env, family):
             continue
         try:
-            accounts[family] = await ps_api_service.get_functional_account(name, api)
+            accounts[family] = await pov_functional_account.ensure(
+                db, env, family, api=api)
+        except pov_functional_account.FunctionalAccountError as exc:
+            problems[family] = str(exc)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("POV %s: functional account %r lookup failed", env.id, name,
-                           exc_info=True)
-            raise WireupError(
-                f"could not resolve the {family} functional account {name!r} in Password "
-                f"Safe tenant {tenant.name!r} ({type(exc).__name__}).") from None
+            logger.warning("POV %s: minting the %s functional account failed", env.id,
+                           family, exc_info=True)
+            problems[family] = (f"the {family} functional account could not be created "
+                                f"({type(exc).__name__}) — see the dashboard log.")
 
-    return {"tf": tf, "workgroup_id": workgroup_id, "accounts": accounts,
+    return {"tf": tf,
+            # The REST credentials, kept alongside the terraform ones because the
+            # functional-account calls are REST and terraform has no resource for them.
+            # Carried rather than re-derived: re-resolving the tenant at teardown is how a
+            # delete ends up pointed at the install's own Password Safe.
+            "api": api,
+            "workgroup_id": workgroup_id, "accounts": accounts,
+            # Why a family has no account, when the reason is more specific than "none was
+            # named". Read by `onboard_vm` so the VM's skip line carries it.
+            "account_problems": problems,
+            # The families whose account this run CREATED in the tenant, so the job log can
+            # say so. An account minted in a customer's Password Safe is a side effect, and
+            # a side effect nobody can see in the run that caused it is the shape this
+            # codebase treats as a bug.
+            "minted": {fam: acct["id"] for fam, acct in accounts.items()
+                       if acct.get("created")},
             "application_host_id": int(env.ps_application_host_id),
             "label": tenant.name}
 
@@ -461,6 +516,13 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
     family = (vm.os_family or "").strip().lower()
     account = (ps.get("accounts") or {}).get(family)
     if account is None:
+        # The mint attempt's own reason when there was one: it is specific and actionable
+        # ("your guests report two different logins") where the generic line is neither.
+        # A fallback rather than a replacement — the tenant may name an account this
+        # dashboard was never asked to create.
+        problem = (ps.get("account_problems") or {}).get(family)
+        if problem:
+            return f"{vm.name}: skipped Password Safe — {problem}"
         return (f"{vm.name}: skipped Password Safe — the tenant names no {family} "
                 f"functional account, and the managed system's platform is derived from "
                 f"one.")
@@ -628,6 +690,17 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
                 db, job_id,
                 f"Onboarding them into Password Safe tenant {ps['label']} through "
                 f"Resource Broker {ps['application_host_id']}.")
+            for family, fa_id in sorted((ps.get("minted") or {}).items()):
+                job_service.append_job_log(
+                    db, job_id,
+                    f"Created a {family} functional account (id {fa_id}) in that tenant "
+                    f"from this POV's {family} guests' own login. It is removed when this "
+                    f"POV is torn down.")
+            for family, problem in sorted((ps.get("account_problems") or {}).items()):
+                # Once here as well as per VM: with eight guests the same line eight times
+                # buries it, and this is the reason a whole OS was skipped.
+                job_service.append_job_log(
+                    db, job_id, f"No {family} functional account: {problem}")
         elif ps_note:
             job_service.append_job_log(
                 db, job_id, f"Skipping the Password Safe half: {ps_note}")
@@ -796,6 +869,17 @@ async def _teardown_entitle(db: Session, env: PovEnvironment, rows: list) -> str
     return f"Removed {removed} Entitle integration(s) from tenant {ent['label']}."
 
 
+def _and_accounts(minted: bool) -> str:
+    """The clause naming this POV's own functional accounts, when there are any.
+
+    Appended to the two teardown refusals that return before the cleanup runs: an
+    unresolvable tenant leaves the accounts behind as surely as it leaves the managed
+    systems, and a message accounting for only half of what is still over there sends an
+    SE looking for half.
+    """
+    return " and the functional account(s) this POV created" if minted else ""
+
+
 async def _teardown_password_safe(db: Session, env: PovEnvironment, rows: list) -> str:
     """Off-board every managed system this POV created. Returns a line, never raises.
 
@@ -804,17 +888,25 @@ async def _teardown_password_safe(db: Session, env: PovEnvironment, rows: list) 
     stopping the jump-item removal over it would leave something worse behind.
     """
     onboarded = [r for r in rows if r.ps_registration_tf_state]
-    if not onboarded:
+    # A POV can have functional accounts to clean up and no managed systems left — a
+    # wire-up that minted them and then failed on every register is exactly that shape,
+    # and returning early there is how the accounts get left behind.
+    minted = any(pov_functional_account.recorded_id(env, fam)
+                 for fam in pov_functional_account.FAMILIES)
+    if not onboarded and not minted:
         return ""
     try:
-        ps = await ps_context(db, env)
+        # `mint=False`: this is a teardown. A creating read here would mint an account
+        # seconds before deleting everything, from guests already being destroyed.
+        ps = await ps_context(db, env, mint=False)
     except (WireupError, bt_tenant_service.BTTenantError) as exc:
         return (f"Could not resolve this POV's Password Safe tenant ({exc}), so "
-                f"{len(onboarded)} managed system(s) were left in place — remove them by "
-                f"hand.")
+                f"{len(onboarded)} managed system(s){_and_accounts(minted)} were left in "
+                f"place — remove them by hand.")
     if not ps:
         return (f"This POV names no Password Safe tenant, so {len(onboarded)} managed "
-                f"system(s) could not be off-boarded — remove them by hand.")
+                f"system(s){_and_accounts(minted)} could not be off-boarded — remove them "
+                f"by hand.")
 
     removed = problems = 0
     for vm in onboarded:
@@ -832,10 +924,30 @@ async def _teardown_password_safe(db: Session, env: PovEnvironment, rows: list) 
         removed += 1
     db.commit()
 
+    # The functional accounts this POV minted for itself, and only those — an account
+    # NAMED on the tenant is the customer's. Last, because Password Safe refuses to delete
+    # one a managed system still references, so anything that failed above correctly keeps
+    # its account alive rather than orphaning a system whose credential just vanished.
+    fa_line = ""
+    if minted and not problems:
+        try:
+            fa_line = await pov_functional_account.cleanup(db, env, api=ps.get("api"))
+        except Exception as exc:  # noqa: BLE001
+            # `cleanup` does not raise; this catches the way it could stop being true.
+            logger.warning("POV %s: cleaning up minted functional accounts failed",
+                           env.id, exc_info=True)
+            fa_line = (f"The functional account(s) this POV created could not be removed "
+                       f"({type(exc).__name__}) — remove them by hand.")
+    elif minted:
+        fa_line = ("The functional account(s) this POV created were left in place, "
+                   "because a managed system that references one is still there.")
+
     if problems:
-        return (f"Off-boarded {removed} managed system(s); {problems} could not be and "
+        line = (f"Off-boarded {removed} managed system(s); {problems} could not be and "
                 f"are still in tenant {ps['label']} — remove them by hand.")
-    return f"Off-boarded {removed} managed system(s) from tenant {ps['label']}."
+    else:
+        line = f"Off-boarded {removed} managed system(s) from tenant {ps['label']}."
+    return f"{line} {fa_line}".strip()
 
 
 # ── what the UI shows ────────────────────────────────────────────────────────
