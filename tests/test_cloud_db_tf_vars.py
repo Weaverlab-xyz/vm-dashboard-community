@@ -417,6 +417,102 @@ def test_gcp_db_uses_non_default_region_network():
         CONF.clear()
 
 
+# ── regional_network_ids (the request-time cross-region guard's input) ───────
+#
+# api/cloud_databases._reject_cross_region_network asks this what network a provision
+# would attach to, then confirms it really lives in the requested region. These pin the
+# contract it depends on: same resolution as _build_tf_variables (no second
+# implementation to drift), and — critically — that an unconfigured region really does
+# hand back the DEFAULT region's subnet, which is the failure the guard exists to catch.
+
+_AZ_MYSQL_SUBNETS = {
+    "flat": "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/"
+            "virtualNetworks/sandbox-vnet/subnets/db-mysql-subnet",
+    "westus2": "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/"
+               "virtualNetworks/sandbox-vnet-westus2/subnets/db-mysql-subnet",
+}
+
+
+def test_regional_ids_azure_mysql_unconfigured_region_yields_default_region_subnet():
+    # No azure_region_configs at all: westus2 resolves to the flat key, i.e. the
+    # centralus subnet — Azure then fails the apply with
+    # VnetWithDifferentLocationNotSupported ~90s in. The guard catches it here instead.
+    CONF.clear()
+    CONF.update({
+        "azure_location": "centralus",
+        "azure_db_mysql_subnet_id": _AZ_MYSQL_SUBNETS["flat"],
+    })
+    try:
+        ids = svc.regional_network_ids(engine="mysql", cloud="azure", region="westus2")
+        assert ids == {"delegated_subnet_id": _AZ_MYSQL_SUBNETS["flat"]}
+    finally:
+        CONF.clear()
+
+
+def test_regional_ids_azure_mysql_configured_region_yields_its_own_subnet():
+    import json
+    CONF.clear()
+    CONF.update({
+        "azure_location": "centralus",
+        "azure_db_mysql_subnet_id": _AZ_MYSQL_SUBNETS["flat"],
+        "azure_region_configs": json.dumps({
+            "westus2": {"db_mysql_subnet_id": _AZ_MYSQL_SUBNETS["westus2"]}}),
+    })
+    try:
+        ids = svc.regional_network_ids(engine="mysql", cloud="azure", region="westus2")
+        assert ids == {"delegated_subnet_id": _AZ_MYSQL_SUBNETS["westus2"]}
+    finally:
+        CONF.clear()
+
+
+def test_regional_ids_azure_sqlserver_reports_the_private_endpoint_subnet():
+    # Azure SQL DB uses `subnet_id` (a plain PE subnet), not `delegated_subnet_id`.
+    CONF.clear()
+    CONF["azure_db_sqlserver_subnet_id"] = "/subscriptions/s/rg/x/subnets/db-sql-subnet"
+    try:
+        ids = svc.regional_network_ids(engine="sqlserver", cloud="azure", region="westus2")
+        assert ids == {"subnet_id": "/subscriptions/s/rg/x/subnets/db-sql-subnet"}
+    finally:
+        CONF.clear()
+
+
+def test_regional_ids_aws_reports_subnet_group_and_security_groups():
+    CONF.clear()
+    CONF["aws_db_subnet_group_name"] = "sandbox-db-subnets"
+    try:
+        ids = svc.regional_network_ids(
+            engine="postgres", cloud="aws", region="us-west-2",
+            opts={"vpc_security_group_ids": ["sg-1", "sg-2"]})
+        assert ids == {"db_subnet_group_name": "sandbox-db-subnets",
+                       "vpc_security_group_ids": ["sg-1", "sg-2"]}
+    finally:
+        CONF.clear()
+
+
+def test_regional_ids_drops_blank_values():
+    # Nothing configured → nothing to check (the modules fall back to cloud defaults).
+    CONF.clear()
+    assert svc.regional_network_ids(engine="postgres", cloud="aws", region="us-west-2") == {}
+
+
+def test_regional_ids_empty_for_clouds_with_no_regional_network():
+    # GCP's private_network is a GLOBAL VPC and OCI's free-tier ADB is a public
+    # endpoint, so neither can be cross-region and neither has anything to check.
+    CONF.clear()
+    CONF.update({"gcp_project": "proj-x", "gcp_network": "net-default"})
+    try:
+        assert svc.regional_network_ids(engine="postgres", cloud="gcp", region="europe-west1") == {}
+        assert svc.regional_network_ids(engine="oracle", cloud="oci", region="us-phoenix-1") == {}
+    finally:
+        CONF.clear()
+
+
+def test_regional_ids_returns_empty_for_an_unimplemented_combo():
+    # Validating a NETWORK is not the place to reject an engine/cloud pair — provision()
+    # already does that, with a better message.
+    assert svc.regional_network_ids(engine="mongodb", cloud="aws", region="us-west-2") == {}
+
+
 # ── guard ────────────────────────────────────────────────────────────────────
 
 def test_unsupported_combo_raises_not_implemented():

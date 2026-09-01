@@ -514,6 +514,14 @@
                 <option :value="r" x-text="r"></option>
               </template>
             </select>
+            <!-- Only regions with a per-region config set are listed (OCI excepted —
+                 it has none, and a free-tier Autonomous DB uses no network of ours).
+                 Anywhere else, the subnet falls back to the default region's and the
+                 apply fails. See api/cloud_databases._region_choices. -->
+            <p x-show="form.cloud !== 'oci'" x-cloak class="mt-1 text-xs text-gray-500">
+              Configured regions only — a private database needs its own subnet there.
+              Add one under Settings &rarr; Multi-region.
+            </p>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>

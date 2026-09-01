@@ -382,6 +382,21 @@ All six are per-region: running the sandbox in a second location emits
 database's own region before falling back to them. The flat keys stay the default
 region's copy, so a single-region install behaves exactly as before.
 
+> **That fallback is why the form only offers configured regions.** A region with no
+> config set — or one whose `db_*` field is blank — resolves the subnet back to the flat
+> key, i.e. the **default region's** subnet, while `location` is the region you picked.
+> Azure refuses that pairing ~90 seconds into the apply
+> (`VnetWithDifferentLocationNotSupported`), AWS a little sooner (`DBSubnetGroupNotFound`),
+> and neither error names the setting at fault. So the provision form's Region picker
+> lists `deployable_regions` — the configured default plus each region with a config set
+> — and `POST /api/databases` refuses an unconfigured region, or a resolved subnet the
+> cloud confirms is elsewhere, **before** it writes a row or creates a job. The
+> confirmation step fails **open**: if the dashboard's service principal lacks *Reader*
+> on the VNet's resource group the lookup returns nothing and the request proceeds, so
+> seeing the Terraform error instead of the 400 points at that grant. Add regions under
+> **Settings → Multi-region**, or re-run the sandbox script in the region. (OCI is
+> exempt — it has no per-region sets and a free-tier ADB uses no network of ours.)
+
 **Checklist:** run `setup-azure.sh` → import the six `azure_db_*` keys + RG/location +
 `azure_jumpoint_subnet_id` → set `azure_aci_docker_deploy_key` + PRA keys → provision.
 
@@ -1003,6 +1018,15 @@ with no recorded catalog to scope grants to. Full detail in
   pre-create one in the public subnet.
 - **SQL Server: can't create a database at provision.** By design — RDS/Cloud SQL SQL
   Server connect to `master`; create app databases afterward through the tunnel.
+- **Azure: `VnetWithDifferentLocationNotSupported` at apply** ("the virtual network …
+  coming from a different location *X* is not supported. Requested resource location is
+  *Y*"). The region was right and the **subnet** was the default region's: *Y* has no
+  per-region config set, or its set leaves `db_subnet_id` / `db_mysql_subnet_id` /
+  `db_sqlserver_subnet_id` blank, so it fell back to the flat key. Fill *Y*'s DB subnet
+  under **Settings → Multi-region** (or re-run `setup-azure.sh` in *Y*). The provision
+  route now rejects this up front — unless the dashboard's service principal lacks
+  *Reader* on the VNet's resource group, in which case the check fails open and you get
+  this apply error instead. The AWS twin is `DBSubnetGroupNotFoundFault`.
 - **Azure/GCP: provision fails at `terraform apply` for a region.** Region/engine/SKU
   capability is **not** validated up front; a region that lacks Flexible Server / MySQL
   8.4 / the SKU fails at apply. Pick a supported region (and matching `azure_db_*` /

@@ -54,6 +54,29 @@ section "Azure sandbox in subscription $SUBSCRIPTION_ID, location $LOCATION"
 
 TAGS="${SANDBOX_TAG_KEY}=${SANDBOX_TAG_VALUE}"
 
+# ── 0. One sandbox per region ─────────────────────────────────────────────────
+# `az group create` and `az network vnet create` are idempotent PUTs that do NOT
+# relocate anything: re-running this script with a different AZURE_LOCATION against
+# the SAME name prefix silently reuses the FIRST region's resource group and VNet,
+# and then emits azure_region.<new location>.* config keys pointing at the OLD
+# region's subnets. The dashboard resolves those faithfully and hands Terraform a
+# subnet from somewhere else, which Azure rejects ~90 seconds into the apply with
+# `VnetWithDifferentLocationNotSupported`. Nothing in that chain mentions this
+# script, so refuse here — every name below is prefix-scoped, not region-scoped, so
+# a second region needs its own prefix (and its own state dir).
+_norm_location() { printf '%s' "${1// /}" | tr '[:upper:]' '[:lower:]'; }
+EXISTING_RG_LOCATION="$(az group show -n "$RG" --query location -o tsv 2>/dev/null || true)"
+if [[ -n "$EXISTING_RG_LOCATION" ]] \
+   && [[ "$(_norm_location "$EXISTING_RG_LOCATION")" != "$(_norm_location "$LOCATION")" ]]; then
+  die "Resource group $RG already exists in $EXISTING_RG_LOCATION, but AZURE_LOCATION is $LOCATION.
+     Azure will not move it, so this run would build $LOCATION's config out of
+     $EXISTING_RG_LOCATION's VNet and every database/VM deployed there would fail.
+     Give the second region its own sandbox:
+       SANDBOX_NAME_PREFIX=sandbox-$LOCATION SANDBOX_STATE_DIR=\$HOME/.sandbox-$LOCATION \\
+         AZURE_LOCATION=$LOCATION $0
+     (or re-run with AZURE_LOCATION=$EXISTING_RG_LOCATION to update this one)."
+fi
+
 # ── 1. Resource Group ─────────────────────────────────────────────────────────
 section "Resource group"
 az group create -n "$RG" -l "$LOCATION" --tags "$TAGS" >/dev/null

@@ -30,6 +30,37 @@ Write-Section "Azure sandbox in subscription $SubscriptionId, location $Location
 
 $Tags = "$($Script:SandboxTagKey)=$($Script:SandboxTagValue)"
 
+# ── 0. One sandbox per region ─────────────────────────────────────────────────
+# `az group create` and `az network vnet create` are idempotent PUTs that do NOT
+# relocate anything: re-running this script with a different AZURE_LOCATION against
+# the SAME name prefix silently reuses the FIRST region's resource group and VNet,
+# and then emits azure_region.<new location>.* config keys pointing at the OLD
+# region's subnets. The dashboard resolves those faithfully and hands Terraform a
+# subnet from somewhere else, which Azure rejects ~90 seconds into the apply with
+# `VnetWithDifferentLocationNotSupported`. Nothing in that chain mentions this
+# script, so refuse here — every name below is prefix-scoped, not region-scoped, so
+# a second region needs its own prefix (and its own state dir).
+# Absent is the normal first-run answer, so swallow the lookup's failure rather than
+# letting $ErrorActionPreference='Stop' turn "no resource group yet" into an abort.
+$ExistingRgLocation = $null
+try { $ExistingRgLocation = (az group show -n $Rg --query location -o tsv 2>$null) } catch { }
+if ($ExistingRgLocation) {
+    $ExistingRgLocation = $ExistingRgLocation.Trim()
+    $normalise = { param($r) ($r -replace '\s', '').ToLowerInvariant() }
+    if ((& $normalise $ExistingRgLocation) -ne (& $normalise $Location)) {
+        Write-Die @"
+Resource group $Rg already exists in $ExistingRgLocation, but AZURE_LOCATION is $Location.
+     Azure will not move it, so this run would build $Location's config out of
+     $ExistingRgLocation's VNet and every database/VM deployed there would fail.
+     Give the second region its own sandbox:
+       `$env:SANDBOX_NAME_PREFIX = 'sandbox-$Location'
+       `$env:SANDBOX_STATE_DIR   = "`$HOME\.sandbox-$Location"
+       `$env:AZURE_LOCATION      = '$Location';  .\Setup-AzureSandbox.ps1
+     (or re-run with AZURE_LOCATION=$ExistingRgLocation to update this one).
+"@
+    }
+}
+
 # ── 1. Resource Group ─────────────────────────────────────────────────────────
 Write-Section 'Resource group'
 az group create -n $Rg -l $Location --tags $Tags | Out-Null
