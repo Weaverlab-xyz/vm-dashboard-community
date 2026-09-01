@@ -3,6 +3,9 @@
   GET    /api/pov/managed/{id}/accessors        the POV's live accessors  (SE)
   POST   /api/pov/managed/{id}/accessors        mint one; credentials ONCE (SE)
   DELETE /api/pov/managed/{id}/accessors/{aid}  revoke one                (SE)
+  GET    /api/pov/managed/{id}/accessor-integration    is Entitle wired up? (SE)
+  POST   /api/pov/managed/{id}/accessor-integration    register it          (SE)
+  DELETE /api/pov/managed/{id}/accessor-integration    remove it            (SE)
   GET    /api/pov/accessor/self                 the accessor's own POV    (accessor)
   POST   /api/pov/accessor/self/use-cases/{cid}  tick a card / leave a note (accessor)
   DELETE /api/pov/accessor/self/use-cases/{cid}  un-tick it                (accessor)
@@ -32,8 +35,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from fastapi import Request
+
 from ..database import PovEnvironment, User, get_db
-from ..services import pov_accessor_service, pov_env_service, pov_use_cases
+from ..services import (pov_accessor_entitle, pov_accessor_service, pov_env_service,
+                        pov_use_cases)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -113,6 +119,63 @@ async def revoke_accessor(env_id: str, accessor_id: str, db: Session = Depends(g
     pov_accessor_service.revoke(db, row, reason="revoked by an operator",
                                 by=getattr(current_user, "username", "") or "")
     return {"revoked": accessor_id, **pov_accessor_service.describe(db, env)}
+
+
+# ── the Entitle integration that mints them ──────────────────────────────────
+#
+# The SE routes above mint an accessor by hand. These three tell this POV's OWN Entitle
+# tenant about the adapter, so a prospect can request one there instead. Both paths exist
+# on purpose: the manual one works with no Entitle at all, and it is what confirms the
+# open question in services/pov_accessor_entitle before anybody depends on the automated
+# one.
+
+
+@router.get("/managed/{env_id}/accessor-integration")
+async def accessor_integration(env_id: str, request: Request,
+                               db: Session = Depends(get_db),
+                               current_user: User = Depends(get_current_user)):
+    """Whether this POV's adapter is registered, and what stops it if not.
+
+    The blocker is reported rather than raised so the page can put the reason beside a
+    disabled button, instead of offering one that fails.
+    """
+    env = _env_or_404(db, env_id)
+    return pov_accessor_entitle.describe(db, env, request)
+
+
+@router.post("/managed/{env_id}/accessor-integration")
+async def register_accessor_integration(env_id: str, request: Request,
+                                        db: Session = Depends(get_db),
+                                        current_user: User = Depends(get_current_user)):
+    """Register the adapter in this POV's own Entitle tenant.
+
+    Not a 202: this is one terraform apply against one integration and the caller is a
+    person waiting to see whether it worked. A job row would report success before the
+    integration existed.
+    """
+    env = _env_or_404(db, env_id)
+    try:
+        return await pov_accessor_entitle.register(
+            db, env, by=getattr(current_user, "username", "") or "", request=request)
+    except pov_accessor_entitle.AccessorEntitleError as exc:
+        # 409 rather than 400: every refusal here is a state the operator can change —
+        # a tenant to choose, a secret to set, a public URL to configure.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.delete("/managed/{env_id}/accessor-integration")
+async def remove_accessor_integration(env_id: str, request: Request,
+                                      db: Session = Depends(get_db),
+                                      current_user: User = Depends(get_current_user)):
+    """Remove it. Existing accessors keep working — they are logins here, not grants
+    there — which is why this and revoking an accessor are separate buttons."""
+    env = _env_or_404(db, env_id)
+    try:
+        await pov_accessor_entitle.deregister(
+            db, env, by=getattr(current_user, "username", "") or "")
+    except pov_accessor_entitle.AccessorEntitleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return pov_accessor_entitle.describe(db, env, request)
 
 
 # ── the accessor's own view ──────────────────────────────────────────────────

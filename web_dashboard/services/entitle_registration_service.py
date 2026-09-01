@@ -848,9 +848,10 @@ def _rest_connection_json_hcl(*, base_url: str, ephemeral: bool,
 
 
 def _generate_rest_hcl(*, name: str, base_url: str, private: bool,
-                       ephemeral: bool, auth_header: str) -> str:
+                       ephemeral: bool, auth_header: str,
+                       fields: Optional[dict] = None) -> str:
     label = _safe_name(name)
-    header = _provider_header('variable "rest_secret" { sensitive = true }\n')
+    header = _provider_header('variable "rest_secret" { sensitive = true }\n', fields)
     conn = _rest_connection_json_hcl(base_url=base_url, ephemeral=ephemeral,
                                      auth_header=auth_header)
     # allow_creating_accounts follows `ephemeral` directly. Note this is where the
@@ -860,7 +861,7 @@ def _generate_rest_hcl(*, name: str, base_url: str, private: bool,
 resource "entitle_integration" {json.dumps(label)} {{
   name        = {json.dumps(name[:50])}
   application = {{ name = {json.dumps(_rest_app_slug())} }}
-{conn}{_common_attrs_hcl(private, allow_creating_accounts=ephemeral)}}}
+{conn}{_common_attrs_hcl(private, allow_creating_accounts=ephemeral, fields=fields)}}}
 
 output "integration_id" {{
   value = entitle_integration.{label}.id
@@ -870,7 +871,8 @@ output "integration_id" {{
 
 async def register_rest(*, name: str, base_url: str, shared_secret: str,
                         private: bool = False, ephemeral: bool = True,
-                        auth_header: str = "Authorization") -> dict:
+                        auth_header: str = "Authorization",
+                        ctx: Optional["EntitleTenantCtx"] = None) -> dict:
     """Register a Cloud Functions adapter as an Entitle REST integration.
 
     ``base_url`` is the function's endpoint with no route on it — the adapter routes
@@ -896,16 +898,29 @@ async def register_rest(*, name: str, base_url: str, shared_secret: str,
         "Standing Accounts" in that dropdown, the discriminator is real and belongs
         here — check the integration's Settings after the first registration.
 
+    ``ctx`` names the tenant this integration is created in, exactly as it does for
+    :func:`register_ssh_host`. **Without it every REST registration lands in the global
+    singleton tenant** — the API key from ``_api_key()`` AND the owner/workflow ids from
+    ``_cfg`` — which is correct for the one demo-only caller this had (a Cloud Functions
+    adapter on an instance where the singleton IS the tenant) and is the silent
+    cross-tenant mistake the POV tenant registry exists to prevent the moment a POV calls
+    it. It is threaded through BOTH halves for that reason: ``_hcl_fields(ctx)`` decides
+    whose owner and workflow the HCL names, and ``ctx`` decides which key applies it. One
+    without the other authenticates as one tenant and writes another's ids.
+
     Returns ``{integration_id, tf_state_json}``; stash the state so ``deregister``
-    can remove it.
+    can remove it — and pass it the SAME ctx, or the destroy authenticates fine, removes
+    nothing, and reports success.
     """
     if not shared_secret:
         raise EntitleRegistrationError(
             "REST registration needs the adapter's shared secret — without it "
             "every call Entitle makes would be rejected by the function")
     hcl = _generate_rest_hcl(name=name, base_url=base_url, private=private,
-                             ephemeral=ephemeral, auth_header=auth_header)
-    return await asyncio.to_thread(_apply_hcl_sync, hcl, {"rest_secret": shared_secret})
+                             ephemeral=ephemeral, auth_header=auth_header,
+                             fields=_hcl_fields(ctx))
+    return await asyncio.to_thread(_apply_hcl_sync, hcl,
+                                   {"rest_secret": shared_secret}, ctx)
 
 
 async def register_kubernetes(*, name: str, private: bool = True,

@@ -774,15 +774,34 @@ spot. They sign in at the normal `/login` and land on their own page.
 
 **From Entitle.** This dashboard hosts an Entitle **Remote Adapter** in Ephemeral Accounts
 mode at `/api/pov/accessor/rest`, so a prospect can request access in Entitle and have the
-login minted, and removed, by the grant itself. Two things to know before you rely on it:
+login minted, and removed, by the grant itself. **Register with Entitle** on the Access tab
+creates that integration in *this POV's own* Entitle tenant — not the instance's, and not
+one shared between customers: the asset is the POV.
 
-* **You point Entitle at it by hand today.** Registering the integration automatically is a
-  later slice — see [design/pov-use-cases.md](design/pov-use-cases.md#slice-2b--registering-the-adapter-with-entitle-not-built)
-  for why, and for the one thing worth confirming when you set it up.
-* **It needs its own secret.** Set `pov_accessor_rest_secret` and give Entitle the same
-  value as a bearer token. Unset, the endpoint is **closed** (503), never open — and it is
-  deliberately not the same key as `entitle_rest_secret`: that one authenticates an
-  integration that grants dashboard permissions, and this one mints logins.
+Four things have to be true first, and the button is replaced by the reason when one is not:
+
+| | |
+|---|---|
+| This POV names an Entitle tenant | There is nowhere to register it |
+| `pov_accessor_rest_secret` is set | Unset, the adapter answers **503** to everything, so the integration would be created and then reject every call Entitle made to it |
+| This instance knows its own public URL | Entitle calls the adapter from its own cloud |
+| That URL is HTTPS | Entitle will not call a plaintext endpoint |
+
+The secret is deliberately **not** `entitle_rest_secret`: that one authenticates an
+integration that grants dashboard permissions, and this one mints logins. Give Entitle the
+same value as a bearer token.
+
+⚠️  **Check the connection mode once.** Whether Entitle infers Ephemeral Accounts from the
+route set, as this assumes, is unconfirmed against a live tenant. After your first
+registration, open the integration in Entitle and confirm its **Connection** setting says an
+Ephemeral option — if it says Standing, tell us, because the discriminator is real and
+belongs in the registration. Minting an accessor by hand does not depend on this at all,
+which is why that path exists.
+
+Removing the integration does **not** revoke logins that already exist: those are accounts
+here, not grants there. Destroying the POV removes the integration first and the logins
+immediately after — in that order, because a live integration can mint a new accessor while
+the destroy is running.
 
 The asset Entitle sees per POV is `pov:<environment id>`, and the account it mints is
 always named `povguest_…`. That prefix is load-bearing: the delete route refuses any name

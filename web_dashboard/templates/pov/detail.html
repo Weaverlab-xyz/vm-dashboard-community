@@ -350,6 +350,56 @@
       <!-- ── Access ───────────────────────────────────────────────────── -->
       <div x-show="tab === 'access'" class="space-y-6">
 
+        <!-- Two ways in, and the order on the page is the order of dependence: the manual
+             mint below works with no Entitle at all, and this is the automation on top of
+             it. A blocker is shown INSTEAD of the button, never beside a live one — the
+             registration writes into a customer's Entitle tenant, and a button that fails
+             there costs more than a sentence explaining why it is not offered. -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Let Entitle mint them</h2>
+              <p class="text-sm text-gray-500 mt-1">
+                Registers this POV as a requestable asset in
+                <span class="font-medium">its own</span> Entitle tenant, so a prospect asks
+                there and the login is created — and removed — by the grant itself.
+              </p>
+            </div>
+            <span class="text-xs shrink-0 px-2 py-0.5 rounded-full"
+                  :class="env.accessor_registered ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                  x-text="env.accessor_registered ? 'registered' : 'not registered'"></span>
+          </div>
+
+          <p x-show="env.accessor_blocker" class="text-xs text-amber-700 mt-3"
+             x-text="env.accessor_blocker"></p>
+
+          <div x-show="!env.accessor_blocker" class="mt-3 space-y-2">
+            <p class="text-xs text-gray-400">
+              Entitle will call
+              <code class="text-[11px]" x-text="env.accessor_endpoint"></code>
+            </p>
+            <div class="flex items-center gap-2">
+              <button @click="registerIntegration()" :disabled="registering"
+                      class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+                      x-text="registering ? 'Registering…'
+                              : (env.accessor_registered ? 'Re-register' : 'Register with Entitle')"></button>
+              <button x-show="env.accessor_registered" @click="removeIntegration()"
+                      :disabled="registering"
+                      class="px-3 py-2 rounded-lg text-sm text-red-600 hover:bg-red-50 disabled:opacity-50">
+                Remove
+              </button>
+            </div>
+            <!-- Said here rather than only in the docs, because it is the one thing about
+                 this integration nobody has confirmed and the person who can is the one
+                 looking at this screen. -->
+            <p x-show="env.accessor_registered" class="text-xs text-gray-400">
+              Worth checking once: open the integration in Entitle and confirm its
+              <span class="font-medium">Connection</span> setting says Ephemeral Accounts.
+              Removing it here does not revoke logins that already exist.
+            </p>
+          </div>
+        </div>
+
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Give the customer a login</h2>
           <p class="text-sm text-gray-500 mt-1">
@@ -470,6 +520,7 @@
       accessors: [],
       accessorForm: { email: '', full_name: '', days: null },
       minting: false,
+      registering: false,
       // The one password this page ever holds, and only until the next render of anything
       // else. Never fetched, never re-fetched: it exists in the create response and
       // nowhere on the server in readable form.
@@ -546,6 +597,37 @@
         } catch (e) {
           // Silent, like loadUseCases: the environment is the page, and a list that
           // failed to load must not replace it with an error.
+        }
+      },
+
+      async registerIntegration() {
+        this.registering = true;
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/accessor-integration`, { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not register (${res.status}).`; return; }
+          Object.assign(this.env, data);
+        } catch (e) {
+          this.error = 'Could not register the integration.';
+        } finally {
+          this.registering = false;
+        }
+      },
+
+      async removeIntegration() {
+        if (!confirm("Remove this POV's Entitle integration? Logins that already exist keep working.")) return;
+        this.registering = true;
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/accessor-integration`, { method: 'DELETE' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not remove (${res.status}).`; return; }
+          Object.assign(this.env, data);
+        } catch (e) {
+          this.error = 'Could not remove the integration.';
+        } finally {
+          this.registering = false;
         }
       },
 

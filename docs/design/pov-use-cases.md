@@ -225,32 +225,73 @@ their expiry and accessors whose POV already reached `destroyed`.
 The use-case record is **not** removed with them. That distinction is the point: an
 accessor is a credential, and the checklist is the account of what the evaluation covered.
 
-## Slice 2b — registering the adapter with Entitle (not built)
+## Slice 2b — registering the adapter with Entitle
 
-Today an SE points an Entitle REST integration at the routes above **by hand**. That is
-deliberate, and it is also how the open question gets answered:
-`entitle_registration_service.register_rest` records that Entitle's Ephemeral-mode
-discriminator is unconfirmed against a live tenant. Registering by hand once tells you
-whether the integration comes back showing "Standing Accounts" in its Connection dropdown,
-which is the thing the automation has to get right.
+Built. **POV page → Access → Register with Entitle** creates the REST integration in
+*this POV's own* Entitle tenant, so a prospect requests access there and the login is
+minted, and removed, by the grant itself.
 
-Two things have to change before it can be automated, and the first is not optional:
+### The gap it had to close first, which was two gaps
 
-* **`register_rest` takes no tenant context.** Every other `register_*` helper accepts an
-  `EntitleTenantCtx`; this one does not, so it registers against the **global Entitle
-  singleton**. Not a live bug — its only caller is `cloud_function_service`, behind
-  `cloud_functions_enabled`, which is `_DEMO_ONLY` and so correctly uses the singleton. But
-  a POV caller registering against the global tenant is precisely the silent cross-tenant
-  mistake the tenant registry exists to prevent, so this is the first thing 2b fixes.
-* **A lighter tenant context than `pov_wireup.entitle_context`.** That one refuses without
-  an agent token and an SSH key — both real prerequisites for the SSH *connector*, which
-  reaches a private target from inside the network. A REST adapter is called by Entitle over
-  public HTTPS and needs neither. Reusing it would block accessor registration on
-  prerequisites that do not apply, so the tenant resolution (owner id, workflow id) wants
-  extracting and the SSH-specific checks want layering on top.
+`register_rest` took no tenant context. Without one it authenticates with the **global**
+Entitle key *and* writes the **global** owner and workflow ids into the HCL — two separate
+readers of the singleton, and threading the context through only one of them is worse than
+neither: you authenticate as one tenant and name another's ids. So `ctx` now reaches both
+`_hcl_fields(ctx)` (whose ids the HCL names) and `_apply_hcl_sync` (whose key applies it),
+and a test pins both halves.
 
-Then: `accessor_integration_id` / `accessor_tf_state` on the POV row, registration on
-demand, and `deregister` in the teardown ahead of the accessor rows themselves.
+This was never a live bug. The one caller was `cloud_function_service`, behind
+`cloud_functions_enabled`, which is `_DEMO_ONLY` — on a demo instance the singleton *is*
+the tenant, and that path is unchanged: with no `ctx` the fallback is exactly what it was.
+
+### A lighter tenant context
+
+`pov_wireup.entitle_context` refused without an agent token and an SSH key. Both are real
+prerequisites for the **SSH ephemeral-accounts connector**, which reaches a private target
+from inside the network — and neither applies to a REST adapter, which Entitle calls over
+public HTTPS. Reusing it would have blocked accessor registration on prerequisites that do
+not exist for it.
+
+So `entitle_tenant_ctx` is the part every integration in a tenant shares — whose tenant, and
+the owner and workflow ids `_common_attrs_hcl` refuses without — and `entitle_context` layers
+the SSH-specific three (agent token, sudo user, private key) on top rather than duplicating
+the resolution.
+
+### Everything is checked before anything is created
+
+A registration that half-succeeds leaves an integration in a customer's Entitle tenant that
+this dashboard has no state for and therefore cannot remove. So each prerequisite is a
+refusal with the remedy in it, reported on the row as `accessor_blocker` and shown on the
+page **instead of** the button rather than beside a live one:
+
+| Missing | Why it is fatal rather than a warning |
+|---|---|
+| An Entitle tenant on this POV | There is nowhere to register it |
+| `pov_accessor_rest_secret` | The adapter answers 503 to everything, so the integration would be created and then reject every call Entitle made — which looks like an Entitle fault and is not |
+| This instance's public URL | Entitle calls the adapter from its own cloud |
+| HTTPS on that URL | Entitle will not call a plaintext endpoint — the same refusal, for the same reason, the broker enrolment makes about the agent endpoint |
+
+### Teardown: the tap before the drain
+
+`pov_accessor_entitle.teardown` runs **before** `pov_accessor_service.teardown`, and that
+order is the point rather than housekeeping. While the integration is live Entitle can mint
+a **new** accessor, so removing the logins first races a destroy against a grant and can
+leave one created after the step that removed them. The destroy order is now: the
+integration, the logins it mints, the share link, then the customer's appliance objects.
+
+A failed deregistration **keeps** the terraform state so a re-run can finish it — the rule
+the per-VM wire-up teardown already follows. An integration left in a customer's tenant is
+untidy; one this dashboard can no longer find is worse, and it is standing access.
+
+### The open question, still open
+
+Entitle's Ephemeral-mode discriminator is **unconfirmed against a live tenant**:
+`register_rest` assumes the API infers the mode from `allow_creating_accounts` and the route
+key set. The person who can settle it is the operator who just pressed Register, so the page
+asks them — open the integration in Entitle and check its **Connection** setting says
+Ephemeral Accounts. If it says Standing, the discriminator is real and belongs in
+`register_rest`. Until somebody has looked, the SE-driven mint is the path that does not
+depend on the answer, and it is why that path exists.
 
 ## Slice 3 — the accessor writes
 
