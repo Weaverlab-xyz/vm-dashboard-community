@@ -78,7 +78,7 @@ _LOCATIONS = {
 # IAM permission, Azure's Retail Prices API is public but bills managed disks by SIZE TIER
 # rather than per GB, GCP's Cloud Billing Catalog needs its own API enabled, and OCI
 # publishes a price list with no auth at all. One at a time.
-PRICED_CLOUDS = ("aws",)
+PRICED_CLOUDS = ("aws", "azure")
 
 
 def priced(cloud: str) -> bool:
@@ -96,7 +96,51 @@ def no_price_reason(cloud: str) -> str:
             f"zero and a cap would never act. AWS is supported today.")
 
 
-def rate_usd_per_hour(environment: dict, region: str, cloud: str = "aws"):
+def hourly_for_vm(cloud: str, region: str, vm: dict) -> float:
+    """What one VM costs per hour: its compute if running, plus its disk always.
+
+    Missing prices contribute nothing rather than raising. The caller decides whether the
+    whole environment is unpriceable; one shape the catalogue has never heard of should
+    not blank the other four VMs.
+    """
+    hourly = 0.0
+    if (vm.get("runstate") or "") == "running":
+        hourly += _compute_hourly(cloud, region, vm) or 0.0
+    hourly += _storage_hourly(cloud, region, vm) or 0.0
+    return hourly
+
+
+def _priceable(cloud: str, region: str) -> bool:
+    """Whether a price lookup can even be attempted for this cloud and region.
+
+    Separate from ``priced``: that answers "is there a client at all", this answers "will
+    it have anything to say about here". AWS's Pricing API needs a region NAME this module
+    holds a map of; Azure's takes the region id directly, so every region is in scope.
+    """
+    if not priced(cloud):
+        return False
+    if cloud == "aws":
+        return region in _LOCATIONS
+    return bool(region)
+
+
+def _rate_sync(environment: dict, region: str, cloud: str):
+    hourly = 0.0
+    priced_any = False
+    for vm in environment.get("vms") or []:
+        value = hourly_for_vm(cloud, region, vm)
+        if value:
+            priced_any = True
+        hourly += value
+    # An environment with VMs but no price for any of them is UNKNOWN, not free. Reporting
+    # 0.0 there would let a cap sit at zero for the length of an evaluation and never act,
+    # which is the failure `rate_usd_per_hour` returns None to avoid.
+    if (environment.get("vms") or []) and not priced_any:
+        return None
+    return round(hourly, 6)
+
+
+async def rate_usd_per_hour(environment: dict, region: str, cloud: str = "aws"):
     """What this environment costs per hour, right now, at list price. None if unknown.
 
     The accrual rate behind the spend cap — see ``pov_spend``. Compute counts only for VMs
@@ -105,25 +149,19 @@ def rate_usd_per_hour(environment: dict, region: str, cloud: str = "aws"):
     suspended for a month would accrue nothing and its cap would never trip, which would
     contradict everything else this feature says about suspend not stopping the bill.
 
-    None rather than 0.0 when there is no price source. Zero is a real answer — an
-    environment with nothing in it — and a cap that read "unknown" as "free" would never
-    act on the clouds it cannot price.
+    **Async, and the lookups run on their cloud's own executor.** They are memoised for six
+    hours, so this is a dict read on all but the first pass after a restart — but that
+    first pass makes a real HTTP call per distinct shape, and doing it inline would block
+    the worker's event loop and every other job queued behind it.
     """
-    if not priced(cloud) or region not in _LOCATIONS:
+    if not _priceable(cloud, region):
         return None
-    gb_month = storage_gb_month(region)
-    if gb_month is None:
+    from . import cloud_executor
+    try:
+        return await cloud_executor.run(cloud, _rate_sync, environment, region, cloud)
+    except Exception:  # noqa: BLE001
+        logger.info("POV cost: no rate for %s in %s", cloud, region, exc_info=True)
         return None
-
-    hourly = 0.0
-    for vm in environment.get("vms") or []:
-        if (vm.get("runstate") or "") == "running":
-            rate = instance_hourly(region, vm.get("instance_type") or "",
-                                   vm.get("os_family") or "linux")
-            if rate is not None:
-                hourly += rate
-        hourly += int(vm.get("disk_gb") or 0) * gb_month / HOURS_PER_MONTH
-    return round(hourly, 6)
 
 
 def footprint(environments: list) -> dict:
@@ -240,8 +278,208 @@ def storage_gb_month(region: str):
     return price
 
 
-def estimate(environments: list, region: str,
-             cloud: str = "aws") -> dict:
+# ── Azure: the Retail Prices API ─────────────────────────────────────────────
+#
+# **Public and unauthenticated**, which is the whole reason Azure is the second cloud to
+# get a price source rather than the last. AWS's Pricing API needs an IAM permission an
+# EC2-scoped key does not have; this one needs nothing but egress, so a spend cap works on
+# Azure the moment the provider is selected.
+#
+# It has one wrinkle AWS does not, and it is the reason storage is modelled per DISK here
+# rather than per GB: **Azure bills a managed disk by SIZE TIER.** A 30 GB and a 32 GB
+# Standard SSD are both an E4 and cost exactly the same; a 33 GB one is an E6 and costs
+# roughly double. Multiplying a per-GB figure would be wrong in both directions.
+
+_AZURE_PRICES_URL = "https://prices.azure.com/api/retail/prices"
+_AZURE_TIMEOUT_S = 15.0
+
+# Standard SSD (E-series) tiers, as (largest GiB the tier holds, sku name). The BOUNDARIES
+# are product structure and change about never; the PRICES still come from the API. A disk
+# larger than the last tier has no answer rather than a guessed one.
+#
+# `pov_cloud_azure` creates StandardSSD_LRS, so this is the only family that needs mapping.
+_AZURE_SSD_TIERS = (
+    (4, "E1 LRS"), (8, "E2 LRS"), (16, "E3 LRS"), (32, "E4 LRS"), (64, "E6 LRS"),
+    (128, "E10 LRS"), (256, "E15 LRS"), (512, "E20 LRS"), (1024, "E30 LRS"),
+    (2048, "E40 LRS"), (4096, "E50 LRS"), (8192, "E60 LRS"), (16384, "E70 LRS"),
+    (32767, "E80 LRS"),
+)
+
+
+def azure_disk_sku(disk_gb: int) -> str:
+    """The Standard SSD tier a disk of this size lands in, or "".
+
+    Rounded UP, because that is how Azure charges: a 33 GB disk is billed as a 64 GiB E6.
+    Zero and negative sizes have no tier, and neither does anything past the largest.
+    """
+    size = int(disk_gb or 0)
+    if size <= 0:
+        return ""
+    for ceiling, sku in _AZURE_SSD_TIERS:
+        if size <= ceiling:
+            return sku
+    return ""
+
+
+def _azure_query(filter_expr: str) -> list:
+    """One page of the Retail Prices API, or []. Never raises.
+
+    One page is enough by construction: every filter here names a single SKU in a single
+    region. Paginating would only ever fetch reservation terms this does not read.
+    """
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx is a hard dependency elsewhere
+        return []
+    try:
+        resp = httpx.get(_AZURE_PRICES_URL, timeout=_AZURE_TIMEOUT_S,
+                         params={"currencyCode": "USD", "$filter": filter_expr})
+        resp.raise_for_status()
+        return resp.json().get("Items") or []
+    except Exception:  # noqa: BLE001
+        logger.info("POV cost: Azure retail price query failed", exc_info=True)
+        return []
+
+
+def _azure_instance_hourly(region: str, instance_type: str, os_family: str):
+    """On-demand USD/hour for one Azure VM size, or None.
+
+    Three things are filtered out in Python rather than in the OData query, because the
+    API has no field for any of them:
+
+      * **Spot and Low Priority**, which are cheaper and would understate a cap;
+      * the **wrong OS** — a Windows SKU carries the licence and costs more, and the two
+        differ only by a substring of `productName`;
+      * anything not billed by the hour.
+    """
+    if not instance_type:
+        return None
+    key = f"azure:vm:{region}:{instance_type}:{os_family}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    items = _azure_query(
+        f"serviceName eq 'Virtual Machines' and armRegionName eq '{region}' "
+        f"and armSkuName eq '{instance_type}' and priceType eq 'Consumption'")
+    want_windows = os_family == "windows"
+    best = None
+    for item in items:
+        meter = (item.get("meterName") or "").lower()
+        product = (item.get("productName") or "").lower()
+        if "spot" in meter or "low priority" in meter:
+            continue
+        if ("windows" in product) != want_windows:
+            continue
+        if "hour" not in (item.get("unitOfMeasure") or "").lower():
+            continue
+        price = float(item.get("retailPrice") or 0.0)
+        if price > 0 and (best is None or price < best):
+            best = price
+    if best is not None:
+        _prices[key] = (time.time(), best)
+    return best
+
+
+def _azure_disk_monthly(region: str, disk_gb: int):
+    """USD/month for one Standard SSD managed disk of this size, or None."""
+    sku = azure_disk_sku(disk_gb)
+    if not sku:
+        return None
+    key = f"azure:disk:{region}:{sku}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    items = _azure_query(
+        f"serviceName eq 'Storage' and armRegionName eq '{region}' "
+        f"and skuName eq '{sku}' and priceType eq 'Consumption'")
+    for item in items:
+        product = (item.get("productName") or "").lower()
+        if "standard ssd" not in product or "managed disk" not in product:
+            continue
+        price = float(item.get("retailPrice") or 0.0)
+        if price > 0:
+            _prices[key] = (time.time(), price)
+            return price
+    return None
+
+def _estimate_sync(environments: list, region: str, cloud: str) -> dict:
+    out = {"available": False, "reason": "", "currency": "USD",
+           "running_hourly": 0.0, "monthly_if_left": 0.0, "storage_monthly": 0.0,
+           "priced_vms": 0, "unpriced_vms": 0}
+
+    compute_hourly, storage_hourly = 0.0, 0.0
+    for e in environments:
+        for vm in e.get("vms") or []:
+            # Split rather than taken from `hourly_for_vm`, because the two answer
+            # different questions on the page: "what is it costing right now" excludes the
+            # disks of a suspended VM, and "what will a month cost" includes them.
+            running = (vm.get("runstate") or "") == "running"
+            compute = _compute_hourly(cloud, region, vm) if running else None
+            storage = _storage_hourly(cloud, region, vm)
+            if compute is None and storage is None:
+                out["unpriced_vms"] += 1
+                continue
+            out["priced_vms"] += 1
+            compute_hourly += compute or 0.0
+            storage_hourly += storage or 0.0
+
+    if not out["priced_vms"] and (out["unpriced_vms"] or environments):
+        out["reason"] = _no_answer_reason(cloud, region)
+        return out
+
+    out["available"] = True
+    out["running_hourly"] = round(compute_hourly, 4)
+    out["storage_monthly"] = round(storage_hourly * HOURS_PER_MONTH, 2)
+    out["monthly_if_left"] = round(
+        (compute_hourly + storage_hourly) * HOURS_PER_MONTH, 2)
+    if out["unpriced_vms"]:
+        out["reason"] = (f"{out['unpriced_vms']} VM(s) had no published price and are "
+                         f"not counted.")
+    return out
+
+
+def _compute_hourly(cloud: str, region: str, vm: dict):
+    itype = vm.get("instance_type") or ""
+    os_family = vm.get("os_family") or "linux"
+    if cloud == "azure":
+        return _azure_instance_hourly(region, itype, os_family)
+    return instance_hourly(region, itype, os_family)
+
+
+def _storage_hourly(cloud: str, region: str, vm: dict):
+    """One VM's disk cost per hour, or None. Per-cloud because the MODELS differ.
+
+    AWS bills EBS by the GB-month, so this is a multiplication. Azure bills a managed disk
+    by size tier — a 30 GB and a 32 GB Standard SSD cost the same, a 33 GB one costs
+    roughly double — so it is a lookup of the tier the disk rounds up into.
+    """
+    disk_gb = int(vm.get("disk_gb") or 0)
+    if disk_gb <= 0:
+        return 0.0
+    if cloud == "azure":
+        # `disk_gb` is the SUM of a VM's disks, and tiering a sum is only exact when there
+        # is one — which is what `pov_cloud_azure` creates. A VM given data disks by hand
+        # would be tiered as though its total were a single disk, which understates.
+        monthly = _azure_disk_monthly(region, disk_gb)
+        return None if monthly is None else monthly / HOURS_PER_MONTH
+    gb_month = storage_gb_month(region)
+    return None if gb_month is None else disk_gb * gb_month / HOURS_PER_MONTH
+
+
+def _no_answer_reason(cloud: str, region: str) -> str:
+    if cloud == "aws":
+        return ("AWS did not answer a price lookup. The estimate needs the "
+                "`pricing:GetProducts` permission, which an EC2-scoped key does not have "
+                "— add it to see costs here, or read them in the account's own billing "
+                "console.")
+    if cloud == "azure":
+        return (f"Azure published no retail price for these VM sizes in {region}. The "
+                f"lookup needs no credentials, so this usually means the size or region "
+                f"name is not one the catalogue carries.")
+    return no_price_reason(cloud)
+
+
+async def estimate(environments: list, region: str, cloud: str = "aws") -> dict:
     """A list-price estimate for what these environments cost, or a reason there is none.
 
     Two figures, because they answer different questions:
@@ -252,44 +490,20 @@ def estimate(environments: list, region: str,
 
     The second is the one worth reading. A POV suspended overnight is not free, and an
     operator asking "can I leave this up for the evaluation?" is asking exactly this.
+
+    Async for the reason ``rate_usd_per_hour`` is: the lookups are memoised, but the first
+    call after a restart is real HTTP and belongs on the cloud's own executor rather than
+    on the loop serving the page.
     """
-    out = {"available": False, "reason": "", "currency": "USD",
-           "running_hourly": 0.0, "monthly_if_left": 0.0, "storage_monthly": 0.0,
-           "priced_vms": 0, "unpriced_vms": 0}
     if not priced(cloud):
-        out["reason"] = no_price_reason(cloud)
-        return out
-    if region not in _LOCATIONS:
-        out["reason"] = (f"No list prices are published here for {region}, so only the "
-                         f"footprint is shown.")
-        return out
-
-    gb_month = storage_gb_month(region)
-    if gb_month is None:
-        out["reason"] = ("AWS did not answer a price lookup. The estimate needs the "
-                         "`pricing:GetProducts` permission, which an EC2-scoped key does "
-                         "not have — add it to see costs here, or read them in the "
-                         "account's own billing console.")
-        return out
-
-    hourly = 0.0
-    for e in environments:
-        for vm in e.get("vms") or []:
-            rate = instance_hourly(region, vm.get("instance_type") or "",
-                                   vm.get("os_family") or "linux")
-            if rate is None:
-                out["unpriced_vms"] += 1
-                continue
-            out["priced_vms"] += 1
-            if (vm.get("runstate") or "") == "running":
-                hourly += rate
-
-    disk_gb = footprint(environments)["disk_gb"]
-    out["available"] = True
-    out["running_hourly"] = round(hourly, 4)
-    out["storage_monthly"] = round(disk_gb * gb_month, 2)
-    out["monthly_if_left"] = round(hourly * HOURS_PER_MONTH + disk_gb * gb_month, 2)
-    if out["unpriced_vms"]:
-        out["reason"] = (f"{out['unpriced_vms']} VM(s) had no published price and are "
-                         f"not counted.")
-    return out
+        return {"available": False, "reason": no_price_reason(cloud), "currency": "USD",
+                "running_hourly": 0.0, "monthly_if_left": 0.0, "storage_monthly": 0.0,
+                "priced_vms": 0, "unpriced_vms": 0}
+    if not _priceable(cloud, region):
+        return {"available": False, "currency": "USD",
+                "reason": (f"No list prices are published here for {region}, so only the "
+                           f"footprint is shown."),
+                "running_hourly": 0.0, "monthly_if_left": 0.0, "storage_monthly": 0.0,
+                "priced_vms": 0, "unpriced_vms": 0}
+    from . import cloud_executor
+    return await cloud_executor.run(cloud, _estimate_sync, environments, region, cloud)

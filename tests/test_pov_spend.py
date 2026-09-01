@@ -21,6 +21,7 @@ Pure policy: no database, no clock, no cloud.
 Runs under pytest, or standalone:
     python tests/test_pov_spend.py
 """
+import asyncio
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -143,6 +144,10 @@ def _vm(runstate="running", itype="t3.medium", disk=100):
             "os_family": "linux"}
 
 
+def _rate(env, region, cloud):
+    return asyncio.run(cost.rate_usd_per_hour(env, region, cloud))
+
+
 def test_storage_accrues_while_every_vm_is_suspended():
     """The point of the whole feature. Compute stops when a POV is suspended and the disks
     do not — so a rate that counted only running instances would let a POV sleep for a
@@ -150,8 +155,7 @@ def test_storage_accrues_while_every_vm_is_suspended():
     original = cost.storage_gb_month
     cost.storage_gb_month = lambda region: 0.08
     try:
-        rate = cost.rate_usd_per_hour(_env([_vm("stopped"), _vm("stopped")]),
-                                      "us-east-2", "aws")
+        rate = _rate(_env([_vm("stopped"), _vm("stopped")]), "us-east-2", "aws")
     finally:
         cost.storage_gb_month = original
     assert rate is not None and rate > 0, "a suspended POV accrues nothing"
@@ -164,22 +168,32 @@ def test_compute_counts_only_for_running_vms():
     cost.storage_gb_month = lambda region: 0.0
     cost.instance_hourly = lambda region, itype, os_family="linux": 1.0
     try:
-        both = cost.rate_usd_per_hour(_env([_vm("running"), _vm("running")]),
-                                      "us-east-2", "aws")
-        one = cost.rate_usd_per_hour(_env([_vm("running"), _vm("stopped")]),
-                                     "us-east-2", "aws")
+        both = _rate(_env([_vm("running"), _vm("running")]), "us-east-2", "aws")
+        one = _rate(_env([_vm("running"), _vm("stopped")]), "us-east-2", "aws")
     finally:
         cost.storage_gb_month, cost.instance_hourly = original_s, original_i
     assert both == 2.0 and one == 1.0
 
 
 def test_an_unpriced_cloud_returns_none_rather_than_zero():
-    for cloud in ("skytap", "azure", "gcp", "oci"):
+    for cloud in ("skytap", "gcp", "oci"):
         if cost.priced(cloud):
             continue
-        assert cost.rate_usd_per_hour(_env([_vm()]), "us-east-2", cloud) is None, (
+        assert _rate(_env([_vm()]), "us-east-2", cloud) is None, (
             f"{cloud} reports a rate but has no price source, so a cap there would "
             f"accrue a confident zero and never act")
+
+
+def test_a_priced_cloud_that_answers_nothing_is_unknown_not_free():
+    """An environment with VMs and no price for any of them must read as UNKNOWN. A
+    confident 0.0 would let a cap sit at zero for a whole evaluation and never act."""
+    original_s, original_i = cost.storage_gb_month, cost.instance_hourly
+    cost.storage_gb_month = lambda region: None
+    cost.instance_hourly = lambda region, itype, os_family="linux": None
+    try:
+        assert _rate(_env([_vm("running")]), "us-east-2", "aws") is None
+    finally:
+        cost.storage_gb_month, cost.instance_hourly = original_s, original_i
 
 
 def test_the_priced_clouds_are_the_built_ones_not_the_planned_ones():
@@ -191,6 +205,178 @@ def test_the_priced_clouds_are_the_built_ones_not_the_planned_ones():
     assert cost.no_price_reason("gcp"), "an unpriced cloud has no reason to show"
     assert "Skytap" in cost.no_price_reason("skytap"), \
         "Skytap's reason should say it bills the lab, not the VM"
+
+
+# ── Azure pricing: tiers, and the SKUs that must not be picked ───────────────
+
+def _with_azure_items(items):
+    """Stand in for the Retail Prices API. No network, no auth, no cache carry-over."""
+    original = cost._azure_query
+    cost._prices.clear()
+    cost._azure_query = lambda f: items
+    return original
+
+
+def _restore_azure(original):
+    cost._azure_query = original
+    cost._prices.clear()
+
+
+def test_azure_is_priced_and_needs_no_credentials():
+    """The Retail Prices API is public. That is the whole reason Azure is the second cloud
+    to get a price source rather than the last — AWS's needs an IAM permission an
+    EC2-scoped key does not have."""
+    assert cost.priced("azure") is True
+    body = _code(os.path.join("web_dashboard", "services", "pov_cloud_cost.py"),
+                 "_azure_query")
+    assert "httpx.get" in body
+    for banned in ("credential", "_oci_config", "_aws_kwargs", "_ensure_creds", "token"):
+        assert banned not in body.lower(), f"the Azure price lookup reaches for {banned}"
+
+
+def test_a_disk_is_billed_by_the_tier_it_rounds_up_into():
+    """Azure bills a managed disk by SIZE TIER, not per GB. A 30 GB and a 32 GB Standard
+    SSD cost exactly the same; a 33 GB one costs roughly double. Multiplying a per-GB
+    figure would be wrong in both directions."""
+    assert cost.azure_disk_sku(30) == "E4 LRS", "a 30 GB disk is billed as a 32 GiB E4"
+    assert cost.azure_disk_sku(32) == "E4 LRS"
+    assert cost.azure_disk_sku(33) == "E6 LRS", "33 GB rounds UP to the next tier"
+    assert cost.azure_disk_sku(1) == "E1 LRS"
+    assert cost.azure_disk_sku(1024) == "E30 LRS"
+
+
+def test_a_disk_with_no_tier_has_no_price_rather_than_a_guess():
+    assert cost.azure_disk_sku(0) == ""
+    assert cost.azure_disk_sku(-5) == ""
+    assert cost.azure_disk_sku(99_999_999) == "", "a disk past the last tier was guessed"
+
+
+def test_the_tiers_are_ordered_and_never_duplicated():
+    ceilings = [c for c, _sku in cost._AZURE_SSD_TIERS]
+    assert ceilings == sorted(ceilings), (
+        "the tier table is out of order, so a small disk could match a large tier")
+    assert len(set(ceilings)) == len(ceilings), "a duplicate ceiling makes one tier dead"
+
+
+def test_a_spot_price_is_never_taken():
+    """Spot and Low Priority are cheaper and would understate a cap — the one direction an
+    estimate behind a cap must not err."""
+    original = _with_azure_items([
+        {"meterName": "D2s v3 Spot", "productName": "Virtual Machines Dsv3 Series",
+         "unitOfMeasure": "1 Hour", "retailPrice": 0.01},
+        {"meterName": "D2s v3", "productName": "Virtual Machines Dsv3 Series",
+         "unitOfMeasure": "1 Hour", "retailPrice": 0.10},
+    ])
+    try:
+        assert cost._azure_instance_hourly("eastus", "Standard_D2s_v3", "linux") == 0.10
+    finally:
+        _restore_azure(original)
+
+
+def test_a_low_priority_price_is_never_taken():
+    original = _with_azure_items([
+        {"meterName": "D2s v3 Low Priority",
+         "productName": "Virtual Machines Dsv3 Series",
+         "unitOfMeasure": "1 Hour", "retailPrice": 0.02},
+        {"meterName": "D2s v3", "productName": "Virtual Machines Dsv3 Series",
+         "unitOfMeasure": "1 Hour", "retailPrice": 0.10},
+    ])
+    try:
+        assert cost._azure_instance_hourly("eastus", "Standard_D2s_v3", "linux") == 0.10
+    finally:
+        _restore_azure(original)
+
+
+def test_windows_and_linux_are_told_apart_by_the_product_name():
+    """A Windows SKU carries the licence and costs more. The two differ only by a
+    substring of `productName`, so taking the cheaper one would bill a Windows POV at
+    Linux rates."""
+    items = [
+        {"meterName": "D2s v3", "productName": "Virtual Machines Dsv3 Series",
+         "unitOfMeasure": "1 Hour", "retailPrice": 0.10},
+        {"meterName": "D2s v3", "productName": "Virtual Machines Dsv3 Series Windows",
+         "unitOfMeasure": "1 Hour", "retailPrice": 0.28},
+    ]
+    original = _with_azure_items(items)
+    try:
+        assert cost._azure_instance_hourly("eastus", "Standard_D2s_v3", "linux") == 0.10
+        cost._prices.clear()
+        assert cost._azure_instance_hourly("eastus", "Standard_D2s_v3", "windows") == 0.28
+    finally:
+        _restore_azure(original)
+
+
+def test_a_price_that_is_not_per_hour_is_ignored():
+    original = _with_azure_items([
+        {"meterName": "D2s v3", "productName": "Virtual Machines Dsv3 Series",
+         "unitOfMeasure": "1 Month", "retailPrice": 70.0},
+    ])
+    try:
+        assert cost._azure_instance_hourly("eastus", "Standard_D2s_v3", "linux") is None
+    finally:
+        _restore_azure(original)
+
+
+def test_a_disk_price_must_be_a_standard_ssd_managed_disk():
+    """The same skuName appears against other products in the catalogue."""
+    original = _with_azure_items([
+        {"productName": "Premium SSD Managed Disks", "retailPrice": 9.99},
+        {"productName": "Standard SSD Managed Disks", "retailPrice": 2.40},
+    ])
+    try:
+        assert cost._azure_disk_monthly("eastus", 30) == 2.40
+    finally:
+        _restore_azure(original)
+
+
+def test_an_azure_environment_prices_compute_and_its_disks():
+    original = _with_azure_items([
+        {"meterName": "D2s v3", "productName": "Virtual Machines Dsv3 Series",
+         "unitOfMeasure": "1 Hour", "retailPrice": 0.10},
+    ])
+    disk_original = cost._azure_disk_monthly
+    cost._azure_disk_monthly = lambda region, gb: 2.40
+    try:
+        running = _rate(_env([_vm("running", "Standard_D2s_v3", 30)]), "eastus", "azure")
+        stopped = _rate(_env([_vm("stopped", "Standard_D2s_v3", 30)]), "eastus", "azure")
+    finally:
+        cost._azure_disk_monthly = disk_original
+        _restore_azure(original)
+    disk_hourly = 2.40 / cost.HOURS_PER_MONTH
+    assert round(running, 6) == round(0.10 + disk_hourly, 6)
+    assert round(stopped, 6) == round(disk_hourly, 6), \
+        "a suspended Azure POV must still accrue its disk"
+
+
+def test_the_price_table_matches_the_disk_the_azure_driver_actually_creates():
+    """A cross-module invariant with no other guard. The E-series tiers priced here are
+    Standard SSD; if the driver were changed to Premium the lookup would keep answering,
+    with a number roughly a third of the real one — an estimate quietly wrong in the
+    direction a cap must not err."""
+    from web_dashboard.services import pov_cloud_azure
+    assert pov_cloud_azure._DISK_SKU == "StandardSSD_LRS", (
+        f"the driver now creates {pov_cloud_azure._DISK_SKU} disks, but the price table "
+        f"here still prices Standard SSD (E-series) tiers")
+    assert all(sku.startswith("E") for _c, sku in cost._AZURE_SSD_TIERS)
+
+
+def test_azure_needs_no_region_name_map_the_way_aws_does():
+    """AWS's Pricing API wants a human region NAME this module keeps a map of, so an
+    unmapped region has no answer. Azure's takes the region id directly, so every region
+    is in scope and a cap works the day a new one opens."""
+    assert cost._priceable("azure", "some-new-region-1") is True
+    assert cost._priceable("aws", "some-new-region-1") is False
+
+
+def test_the_price_lookups_run_off_the_event_loop():
+    """Memoised for six hours, so this is a dict read on all but the first pass after a
+    restart — but that first pass is real HTTP per distinct shape, and doing it inline
+    would block the worker's loop and every job queued behind it."""
+    path = os.path.join("web_dashboard", "services", "pov_cloud_cost.py")
+    src = open(os.path.join(_ROOT, path), encoding="utf-8").read()
+    for fn in ("rate_usd_per_hour", "estimate"):
+        assert f"async def {fn}(" in src, f"{fn} is not async"
+        assert "cloud_executor.run" in _code(path, fn), f"{fn} does its lookups on the loop"
 
 
 # ── the thresholds and their latches ─────────────────────────────────────────

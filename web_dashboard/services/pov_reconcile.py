@@ -247,7 +247,7 @@ async def reconcile(db: Session, platform: str, *, job_id: str = "") -> dict:
         # The spend accrual, from the read this pass ALREADY made. No extra platform call
         # and no billing API: the live environment dict carries every VM's shape, disk and
         # runstate, which is all a list-price rate needs. See services/pov_spend.
-        _accrue_spend(db, env, raw)
+        await _accrue_spend(db, env, raw)
 
         if changed:
             out["updated"] += 1
@@ -374,7 +374,8 @@ def _spend_config() -> tuple:
     return pov_spend.normalize_action(action), pov_spend.warn_percent(percent)
 
 
-def _accrue_spend(db: Session, env: PovEnvironment, raw: dict) -> None:
+async def _accrue_spend(db: Session, env: PovEnvironment,
+                        raw: dict) -> None:
     """Add this interval's estimated cost to the row. Never raises.
 
     Called from inside the platform loop, with the environment dict that loop already
@@ -388,7 +389,8 @@ def _accrue_spend(db: Session, env: PovEnvironment, raw: dict) -> None:
     from . import pov_cloud_cost, pov_spend
 
     try:
-        rate = pov_cloud_cost.rate_usd_per_hour(raw, env.region or "", env.platform)
+        rate = await pov_cloud_cost.rate_usd_per_hour(raw, env.region or "",
+                                                     env.platform)
         total, at, _added = pov_spend.accrue(
             env.spend_estimate_usd, env.spend_accrued_at, rate,
             datetime.now(timezone.utc))
