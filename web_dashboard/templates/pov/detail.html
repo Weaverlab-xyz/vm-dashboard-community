@@ -327,6 +327,18 @@
                       <span x-text="c.progress.by || 'someone'"></span>
                       <span x-show="c.progress.by_kind === 'accessor'" class="text-gray-400">(the customer)</span>
                     </p>
+
+                    <!-- The customer's own words, and the reason this feature is worth more
+                         than a row of ticks. Rendered with x-text, never x-html: it is text
+                         somebody outside the account typed. -->
+                    <div x-show="c.progress.note"
+                         class="text-xs rounded-lg px-2 py-1.5"
+                         :class="c.progress.by_kind === 'accessor'
+                                 ? 'bg-violet-50 text-violet-900' : 'bg-gray-50 text-gray-600'">
+                      <p class="italic" x-text="c.progress.note"></p>
+                      <p x-show="c.progress.by_kind === 'accessor'"
+                         class="mt-0.5 not-italic text-violet-700/70">— the customer</p>
+                    </div>
                   </div>
                 </div>
               </template>
@@ -343,6 +355,9 @@
           <p class="text-sm text-gray-500 mt-1">
             An accessor can open this POV's checklist and nothing else in the dashboard.
             It is deleted when this POV is destroyed, and it expires on its own before then.
+            What they tick and anything they write comes back to the
+            <button @click="select('use-cases')" class="underline hover:no-underline">Use cases</button>
+            tab, marked as theirs.
           </p>
 
           <div class="mt-4 grid grid-cols-1 sm:grid-cols-4 gap-3">

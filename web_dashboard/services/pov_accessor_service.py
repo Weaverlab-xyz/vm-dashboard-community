@@ -34,7 +34,8 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from ..database import PovAccessor, PovEnvironment, User, get_password_hash
+from ..database import (PovAccessor, PovEnvironment, PovEnvironmentVM, User,
+                        get_password_hash)
 from . import config_service, job_service, pov_share, pov_use_cases
 
 logger = logging.getLogger(__name__)
@@ -372,6 +373,79 @@ def sweep(db: Session) -> int:
 
 # ── the accessor's own view ──────────────────────────────────────────────────
 
+# ── what the accessor is allowed to see of the POV ───────────────────────────
+
+def wired_view(db: Session, env: PovEnvironment) -> list:
+    """What was set up on each VM, for the person about to try it.
+
+    A projection built FOR this audience, never ``api/pov._serialize`` with fields taken
+    out. Those per-VM rows carry `pra_jump_id`, `ps_managed_system_id`,
+    `ps_managed_account_id`, `entitle_integration_id` and their terraform state — ids of
+    objects inside a CUSTOMER'S OWN PRA appliance and Password Safe tenant, meaningful only
+    to teardown, and a `wiring_error` written for an operator. Subtracting them one by one
+    is how one comes back on the next edit to the serializer; naming what goes IN cannot
+    fail that way.
+
+    So each VM reports what a prospect actually needs: what it is, where it is on their own
+    lab network, and WHICH KINDS of access exist for it — never the identifiers of those
+    artifacts.
+    """
+    rows = (db.query(PovEnvironmentVM)
+              .filter(PovEnvironmentVM.environment_id == env.id)
+              .order_by(PovEnvironmentVM.name).all())
+    return [{
+        "name": vm.name or vm.platform_vm_id,
+        "os_family": vm.os_family or "",
+        # Their own lab's private network, which the share link already puts them on. Not a
+        # credential and not an id in anybody's appliance.
+        "private_ip": vm.private_ip or "",
+        "brokered_session": bool(vm.pra_jump_id),
+        "vaulted_credential": bool(vm.ps_managed_account_id or vm.ps_managed_system_id),
+        "requestable_access": bool(vm.entitle_integration_id),
+    } for vm in rows]
+
+
+def share_view(db: Session, env: PovEnvironment) -> dict:
+    """The lab link, for the person it was published for.
+
+    ``pov_share.describe`` also returns ``share_id`` — the publish set's own id, which
+    exists so this dashboard can revoke exactly that one later. It means nothing to a
+    customer and it is an id in the account's lab platform, so it is dropped here rather
+    than passed through.
+
+    The password is not here either, and for the same reason it is absent from
+    ``pov_share.describe``: a secret that ships with a page is a secret in every browser
+    cache and every screenshot of it. Revealing it is its own endpoint.
+    """
+    state = pov_share.describe(db, env)
+    return {
+        "url": state["share_url"],
+        "expires_at": state["share_expires_at"],
+        "expired": state["share_expired"],
+        "has_password": state["has_share_password"],
+    }
+
+
+def reveal_share_password(db: Session, env: PovEnvironment, user) -> str:
+    """The lab link's password, for an accessor. Audited, like the SE's own reveal.
+
+    The customer is who the link was published for, so this is not a widening of who may
+    read it — but it IS a second door onto a live credential, and "who has this link's
+    password" has to stay answerable after the fact. Same reasoning, and the same audit
+    action shape, as ``api/pov.reveal_share_password``.
+    """
+    password = pov_share.reveal_password(env)
+    if not password:
+        raise AccessorError(
+            "there is no stored password for this link. Ask your contact to re-share the "
+            "environment, which produces a new link and a new password.")
+    job_service.log_audit(
+        db, getattr(user, "username", "") or "accessor",
+        "pov_share_password_revealed", target_vm=env.name,
+        details={"environment_id": env.id, "by_kind": pov_use_cases.KIND_ACCESSOR})
+    return password
+
+
 def self_view(db: Session, user) -> dict:
     """What ``GET /api/pov/accessor/self`` serves.
 
@@ -400,4 +474,21 @@ def self_view(db: Session, user) -> dict:
         },
         "accessor": describe_one(row) if row else {},
         "use_cases": pov_use_cases.describe(db, env),
+        "share": share_view(db, env),
+        "wired": wired_view(db, env),
     }
+
+
+def env_for_writes(db: Session, user) -> PovEnvironment:
+    """The POV an accessor may write to, from the session and nowhere else.
+
+    Every accessor write goes through here rather than taking an id, which is what makes
+    "could they tick a card on somebody else's POV?" unanswerable rather than merely
+    guarded. A refused write is an accessor whose POV is gone, and it says so.
+    """
+    env = environment_of(db, user)
+    if env is None:
+        raise AccessorError(
+            "this login is not attached to a POV environment any more — it has probably "
+            "been reaped. Ask your contact for a new one.")
+    return env
