@@ -582,14 +582,17 @@ that rollback enumerates by. Most users need neither.
 
 Changing only the region **is not enough**, and this is the one customisation that
 bites. Nothing the scripts create is region-scoped by *name* — the resource group,
-VNet/VPC, NSGs and clusters are all `${SANDBOX_NAME_PREFIX}-…` — and the cloud APIs
-they call are idempotent PUTs that will not relocate an existing resource. So
-`AZURE_LOCATION=westus2` on its own reuses the centralus resource group and VNet,
-then writes `azure_region.westus2.*` config keys pointing at **centralus** subnets.
-The dashboard resolves them faithfully and the deploy fails at apply
-(`VnetWithDifferentLocationNotSupported`, or `DBSubnetGroupNotFound` on AWS).
-`setup-azure.sh` refuses this outright; give each region its own prefix and state
-dir instead:
+VNet/VPC, NSGs and clusters are all `${SANDBOX_NAME_PREFIX}-…`. So
+`AZURE_LOCATION=westus2` on its own does not describe a second sandbox; it describes
+the *first* one, in a different place. Azure refuses outright:
+
+```
+ERROR: (InvalidResourceGroupLocation) Invalid resource group location 'westus2'.
+The Resource group already exists in location 'centralus'.
+```
+
+`setup-azure.sh` now says this before the first write, and names the fix — give each
+region its own prefix and state dir:
 
 ```bash
 SANDBOX_NAME_PREFIX=sandbox-westus2 \
@@ -607,6 +610,16 @@ Both runs import into the **same** dashboard: the flat keys stay the first (defa
 region's and the second run merges its ids in under `azure_region.westus2.*`. Roll a
 region back by re-exporting the same prefix and state dir before running
 `rollback.sh`.
+
+> **Do not hand-fill a second region's config set from the first one's ids.** It is
+> the tempting shortcut when the sandbox refuses, and it is worse than having no
+> entry at all: an ARM id (or a `db-subnet-group` name) records the *resource group*,
+> not the region, so centralus ids pasted into `westus2` look completely plausible in
+> Settings → Multi-region and fail 90 seconds into `terraform apply` with
+> `VnetWithDifferentLocationNotSupported`. Run the sandbox in the region and let it
+> emit `azure_region.westus2.*` itself. The dashboard now verifies this on the
+> Databases provision path and rejects the mismatch up front, but only where it holds
+> *Reader* on the VNet's resource group — the check fails open without it.
 
 ## Caveats
 

@@ -8,10 +8,10 @@ $Script:SandboxTagKey     = 'managed-by'
 $Script:SandboxTagValue   = 'dashboard-sandbox'
 # Overridable per run, because a second REGION needs a second sandbox: nothing the
 # setup scripts create is region-scoped by name (RG, VNet, VPC, cluster, …), and
-# re-running with a different region against the same prefix quietly reuses the
-# first region's network — see the location guard in Setup-AzureSandbox.ps1. Pair it
-# with SANDBOX_STATE_DIR, which is keyed on cloud alone and would otherwise be
-# shared. The TAG deliberately does not follow: rollback enumerates by tag, and one
+# re-running with a different region against the same prefix is not a second
+# sandbox — see the location guard in Setup-AzureSandbox.ps1. Pair it with
+# SANDBOX_STATE_DIR, which is keyed on cloud alone and would otherwise be shared.
+# The TAG deliberately does not follow: rollback enumerates by tag, and one
 # `managed-by` value should still find every region's resources.
 $Script:SandboxNamePrefix = if ($env:SANDBOX_NAME_PREFIX) { $env:SANDBOX_NAME_PREFIX } else { 'dashboard-sandbox' }
 

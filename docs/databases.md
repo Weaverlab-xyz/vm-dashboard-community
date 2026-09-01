@@ -385,6 +385,9 @@ region's copy, so a single-region install behaves exactly as before.
 > **That fallback is why the form only offers configured regions.** A region with no
 > config set — or one whose `db_*` field is blank — resolves the subnet back to the flat
 > key, i.e. the **default region's** subnet, while `location` is the region you picked.
+> Hand-filling the second region's set from the first one's ids gets you to the same
+> place by a shorter road: an ARM id names the *resource group*, not the region, so
+> centralus ids pasted into `westus2` look entirely plausible in the panel.
 > Azure refuses that pairing ~90 seconds into the apply
 > (`VnetWithDifferentLocationNotSupported`), AWS a little sooner (`DBSubnetGroupNotFound`),
 > and neither error names the setting at fault. So the provision form's Region picker
@@ -1020,10 +1023,12 @@ with no recorded catalog to scope grants to. Full detail in
   Server connect to `master`; create app databases afterward through the tunnel.
 - **Azure: `VnetWithDifferentLocationNotSupported` at apply** ("the virtual network …
   coming from a different location *X* is not supported. Requested resource location is
-  *Y*"). The region was right and the **subnet** was the default region's: *Y* has no
-  per-region config set, or its set leaves `db_subnet_id` / `db_mysql_subnet_id` /
-  `db_sqlserver_subnet_id` blank, so it fell back to the flat key. Fill *Y*'s DB subnet
-  under **Settings → Multi-region** (or re-run `setup-azure.sh` in *Y*). The provision
+  *Y*"). The region was right and the **subnet** was in *X*: either *Y* has no per-region
+  config set (or leaves `db_subnet_id` / `db_mysql_subnet_id` / `db_sqlserver_subnet_id`
+  blank), so it fell back to the flat key — or *Y*'s set was hand-filled with *X*'s ids,
+  which look identical apart from the VNet name. The fix is a real subnet in *Y*: run
+  the sandbox there (`SANDBOX_NAME_PREFIX=sandbox-Y … setup-azure.sh` — a second region
+  is a second sandbox, see [CLOUD_SANDBOX.md](CLOUD_SANDBOX.md)) and import. The provision
   route now rejects this up front — unless the dashboard's service principal lacks
   *Reader* on the VNet's resource group, in which case the check fails open and you get
   this apply error instead. The AWS twin is `DBSubnetGroupNotFoundFault`.
