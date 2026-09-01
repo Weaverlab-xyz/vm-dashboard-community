@@ -1226,6 +1226,9 @@ class PovCloudFeatureConfig(BaseModel):
     azure_tenant_id: str = ""
     azure_subscription_id: str = ""
     azure_location: str = "centralus"
+    gcp_project_id: str = ""
+    gcp_service_account_json: str = ""  # encrypted at rest
+    gcp_region: str = "us-central1"
 
     @field_validator("pov_cloud_platform")
     @classmethod
@@ -1715,6 +1718,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "skytap_api_token",
     "aws_secret_access_key",
     "azure_client_secret",
+    "gcp_service_account_json",
     "vsphere_password",
     "hyperv_password",
     "nutanix_password",

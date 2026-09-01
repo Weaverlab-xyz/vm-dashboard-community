@@ -33,12 +33,11 @@ logger = logging.getLogger(__name__)
 # can ask "is this a public cloud?" without a literal tuple of their own — the exact habit
 # this module's docstring is about.
 #
-# **This tuple lists the clouds that are BUILT, not the clouds that are planned.** GCP
-# and OCI each need a driver module and a CAPABILITIES row before their name may
-# appear here; adding a name early would make `pov_cloud_platform = "azure"` a selectable
+# **This tuple lists the clouds that are BUILT, not the clouds that are planned.** OCI
+# needs a driver module and a CAPABILITIES row before its name may appear here; adding a name early would make `pov_cloud_platform = "azure"` a selectable
 # option that fails at import time, which is the "half-added platform" the registry's own
 # test exists to catch.
-CLOUD_PLATFORMS = ("aws", "azure")
+CLOUD_PLATFORMS = ("aws", "azure", "gcp")
 
 VALID_PLATFORMS = ("skytap",) + CLOUD_PLATFORMS
 
@@ -47,6 +46,7 @@ _ADAPTER_MODULE = {
     "skytap": "skytap_service",
     "aws": "pov_aws_service",
     "azure": "pov_azure_service",
+    "gcp": "pov_gcp_service",
 }
 
 # The functions an adapter must expose. Split by slice, deliberately: a contract that
@@ -212,6 +212,28 @@ CAPABILITIES = {
         # resource group this creates per POV — so there is nothing for the create form
         # to ask.
         "projects": False,
+        "template_authoring": False,
+        "published_services": False,
+    },
+    # GCP as a lab platform. The only capability that differs from both siblings is
+    # `projects`: a GCP project is a real boundary an environment is built INSIDE, and
+    # recording which one is what lets a teardown weeks later aim at the right place.
+    "gcp": {
+        "label": "GCP",
+        "templates": True,
+        "runstate": True,
+        "idle_suspend": False,
+        "scheduled_suspend": True,
+        "bootstrap_injection": "cloud_init",
+        "share_link": False,
+        # False, like AWS. GCE holds no guest login to read back — unlike Azure, which is
+        # forced to mint one at VM creation.
+        "stored_credentials": False,
+        "verify": True,
+        # TRUE, alone among the clouds. `api/pov.provision` asks the adapter for the
+        # configured project and records it on the row, and `pov_cloud_gcp` reads it back
+        # rather than re-deriving it from current config.
+        "projects": True,
         "template_authoring": False,
         "published_services": False,
     },
