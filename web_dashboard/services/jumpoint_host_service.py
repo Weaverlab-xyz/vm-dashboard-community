@@ -511,8 +511,7 @@ async def find_gateway_host_id(cloud: str, region: str, name: str) -> str:
             return name if found else ""
         if cloud == "azure":
             from . import azure_service
-            from .region_config import resolve_region
-            rg = resolve_region("azure", _azure_gateway_location(region))["resource_group"]
+            rg = azure_host_resource_group(region)
             return name if await azure_service.get_vm(rg, name) else ""
         from . import aws_service
         hosts = await aws_service.find_instances_by_tag(
@@ -569,10 +568,9 @@ async def live_gateway_hosts(cloud: str, targets) -> dict:
         # group covers every gateway in it. Both kinds carry managed-by=vm-dashboard, so
         # its managed-only filter keeps them.
         from . import azure_service
-        from .region_config import resolve_region
         out: dict = {}
         for region, names in by_region.items():
-            rg = resolve_region("azure", _azure_gateway_location(region))["resource_group"]
+            rg = azure_host_resource_group(region)
             if not rg:
                 raise GatewayHostError("Azure resource group is not configured.")
             found = {vm.get("name"): vm for vm in await azure_service.describe_vms(rg)}
@@ -660,9 +658,7 @@ async def teardown_gateway(cloud: str, region: str, name: str, zone: str = "") -
         await gcp_service.stop_gce_jumpoint(_gcp_project(), zone or _gcp_jumpoint_zone(region), name)
     elif cloud == "azure":
         from . import azure_service
-        from .region_config import resolve_region
-        location = _azure_gateway_location(region)
-        await azure_service.stop_vm_jumpoint(resolve_region("azure", location)["resource_group"], name)
+        await azure_service.stop_vm_jumpoint(azure_host_resource_group(region), name)
     else:
         from . import aws_service
         cluster = _aws_region_cfg(region)["ecs_cluster"]
@@ -1057,6 +1053,28 @@ def _azure_gateway_location(region: str) -> str:
     return region_catalog.normalize("azure", region) or _cfg("azure_location")
 
 
+def azure_host_resource_group(region: str) -> str:
+    """The resource group the Azure gateway VM serving ``region`` lives in.
+
+    Public, and the only correct way for an outside caller to ADDRESS one of these
+    VMs, because the managed gateway's NAME is region-agnostic (``clouddb-jumpoint``
+    in every region): a caller that pairs that name with the flat
+    ``azure_resource_group`` reaches a real, healthy, IDENTICALLY-NAMED VM in the
+    default region. Nothing fails at the call — Run Command runs, on the wrong VM, in
+    a VNet with no link to this region's private DNS zones — and the only symptom is
+    the target's hostname not resolving, which names neither region. (Live 2026-09-02,
+    fixed in #726: a westus2 Azure MySQL onboarding failed with "Unknown MySQL server
+    host" because the DB client ran on the centralus jump VM.)
+
+    The one reader of "which resource group is this gateway in", so the ensure path
+    that creates the VM, the lookups, the teardown and an addressing caller cannot
+    drift apart — and so ``_azure_gateway_location``'s normalisation is applied
+    everywhere rather than only where someone remembered it.
+    """
+    from .region_config import resolve_region
+    return resolve_region("azure", _azure_gateway_location(region))["resource_group"]
+
+
 async def _ensure_jumpoint_host_azure(region: str, name: str = "",
                                       placement: Optional[dict] = None) -> Optional[str]:
     """Ensure an Azure VM Gateway is up (idempotent on name); return its name.
@@ -1065,7 +1083,7 @@ async def _ensure_jumpoint_host_azure(region: str, name: str = "",
     from .region_config import resolve_region
     location = _azure_gateway_location(region)
     rc = resolve_region("azure", location)
-    rg = rc["resource_group"]
+    rg = azure_host_resource_group(location)
     subnet = rc["jumpoint_subnet_id"] or _cfg("azure_aci_subnet_id")
     requested = bool(name)
     name = name or managed_host_name("azure")
