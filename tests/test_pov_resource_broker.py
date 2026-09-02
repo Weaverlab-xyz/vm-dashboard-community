@@ -523,6 +523,61 @@ def test_teardown_is_a_no_op_on_a_pov_that_never_had_one():
     db.close()
 
 
+# -- the asset picker on both pages -------------------------------------------
+#
+# `rb_asset` is a storage KEY, and two pages write it: the POV page's RB editor and the
+# blueprint form. The blueprint form used to be a free-text box, so a name that matched
+# nothing in storage saved fine and only surfaced at Install time as "no Resource Broker
+# installer is staged" -- a preflight refusal that reads like an upload was never done.
+# Both are now the same picker, fed by the same call and the same extension filter.
+#
+# Neither half is covered by tests/test_templates_parse.py: its x-for check only looks at
+# helpers CALLED as functions, and `x-for="a in winAssets"` is a plain property. An
+# undeclared one is not an error in Alpine -- it is an empty dropdown, which looks exactly
+# like a storage backend with nothing staged in it.
+
+_POV_PAGES = ("index.html", "templates.html")
+
+
+def _pov_template(name: str) -> str:
+    path = os.path.join(_ROOT, "web_dashboard", "templates", "pov", name)
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_both_pov_pages_pick_the_rb_asset_rather_than_typing_it():
+    for name in _POV_PAGES:
+        src = _pov_template(name)
+        assert 'x-for="a in winAssets"' in src, f"{name}: no RB asset picker"
+        # Declared on the component, or the picker is silently always empty.
+        assert "winAssets: []" in src, f"{name}: winAssets undeclared"
+        assert "loadWinAssets()" in src, f"{name}: nothing fills winAssets"
+
+
+def test_both_pages_filter_to_what_the_preflight_will_accept():
+    """The filter must not offer a file `preflight` would then refuse.
+
+    `asset_type` is the authority -- these extensions are the ones it calls a winpkg, and
+    anything else reaches the RB panel only to be told it is "not a Windows installer".
+    """
+    for ext in (".exe", ".msi"):
+        assert ansible_local_service.asset_type("Bootstrapper" + ext) == "winpkg"
+    for name in _POV_PAGES:
+        assert r"/\.(exe|msi)$/i" in _pov_template(name), f"{name}: wrong asset filter"
+
+
+def test_the_staging_hint_points_at_a_route_that_exists():
+    """Both pages tell an SE to upload the installer somewhere. It was `/config-management`
+    for a while, which 404s -- the page is served at `/config-mgmt`."""
+    with open(os.path.join(_ROOT, "web_dashboard", "main.py"), encoding="utf-8") as fh:
+        main_src = fh.read()
+    assert '@app.get("/config-mgmt"' in main_src
+    for name in _POV_PAGES:
+        src = _pov_template(name)
+        assert 'href="/config-mgmt"' in src, f"{name}: no staging hint"
+        assert "/config-management" not in src, f"{name}: dead upload link"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
