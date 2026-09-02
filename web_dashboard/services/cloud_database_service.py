@@ -1418,24 +1418,33 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
     db_name = connection_db_name(row, tf_variables)
     managed_user = _managed_user_name(row.id)
     managed_pw = sql.generate_password()
-    image = _cfg(f"clouddb_db_client_image_{engine}") or sql.default_client_image(engine)
+    image = sql.resolve_client_image(
+        engine, _cfg(f"clouddb_db_client_image_{engine}"))
     port = row.port or sql.default_port(engine)
     # Make the jump host plugin-ready. A separate SSM call from the onboard batch, as
     # on Azure, so a staging failure is distinguishable from a managed-user failure.
-    # Short timeout: unlike Azure this installs nothing.
-    prep = _ssm_jump_prep_commands()
-    if prep:
-        prep_res = await aws_service.ssm_send_command(region, host_id, prep, timeout=120)
-        if prep_res.get("status") != "Success" or int(prep_res.get("response_code", -1)) != 0:
-            raise CloudDatabaseError(
-                f"jump-host plugin prep failed (status={prep_res.get('status')}, "
-                f"rc={prep_res.get('response_code')}): {_run_detail(prep_res)}")
-        logger.info("clouddb: staged plugin key material on %s db_id=%s", host_id, row.id)
-    else:
+    # The warning is driven by the CONFIG, not by an empty command list: prep is no
+    # longer key material alone (SQL Server installs the native client), so "nothing
+    # to send" and "no key material to send" stopped being the same condition.
+    if not (_cfg("clouddb_ps_ssm_plugin_private_key")
+            and _cfg("clouddb_ps_ssm_key_directory")):
         logger.warning("clouddb: clouddb_ps_ssm_plugin_private_key / "
                        "clouddb_ps_ssm_key_directory is blank — NOT staging plugin key "
                        "material on the jump host; the first AWS rotation will fail to "
                        "decrypt unless you placed it there by hand")
+    prep = _ssm_jump_prep_commands(engine, image)
+    if prep:
+        # Longer timeout when the engine's client is a package install (SQL Server
+        # pulls Microsoft's RHEL feed); the key drop alone is five instant commands.
+        prep_timeout = 600 if (not image and _SSM_CLIENT_INSTALL.get(engine)) else 120
+        prep_res = await aws_service.ssm_send_command(region, host_id, prep,
+                                                     timeout=prep_timeout)
+        if prep_res.get("status") != "Success" or int(prep_res.get("response_code", -1)) != 0:
+            raise CloudDatabaseError(
+                f"jump-host plugin prep failed (status={prep_res.get('status')}, "
+                f"rc={prep_res.get('response_code')}): {_run_detail(prep_res)}")
+        logger.info("clouddb: prepped jump host %s db_id=%s (engine=%s)",
+                    host_id, row.id, engine)
     cmds = sql.onboard_commands(
         engine, host=row.private_host, port=port,
         database=db_name, admin_user=admin_username, admin_password=admin_password,
@@ -1481,24 +1490,66 @@ def _plugin_key_drop_commands(kdir: str, private_key: str, passphrase: str) -> l
     ]
 
 
-def _ssm_jump_prep_commands() -> list:
+# The one DB client the shared Gateway host needs installed, for the one engine with
+# no client image to run: there is no sqlcmd container (see
+# cloud_db_sql_service._ENGINE), so SQL Server onboarding invokes the native binary.
+# PostgreSQL and MySQL still run postgres:16 / mysql:8.4 as a ``docker run`` and
+# install nothing — this host is shared with the gateway workload, so it gets a
+# package only where a container cannot do the job.
+#
+# dnf, not apt: the host is the ECS-optimized AL2023 AMI
+# (jumpoint_host_service), so it takes Microsoft's RHEL 9 feed rather than the Ubuntu
+# one the Azure jump VM uses. The path is cloud_db_sql_service.SQLCMD_PATH — spelled
+# out here, as in _AZURE_CLIENT_INSTALL, because this dict is built at import time and
+# this module imports that one function-locally.
+_SSM_CLIENT_INSTALL = {
+    "sqlserver": [
+        "[ -x /opt/mssql-tools18/bin/sqlcmd ] || { "
+        "rpm --import https://packages.microsoft.com/keys/microsoft.asc; "
+        "curl -fsSL https://packages.microsoft.com/config/rhel/9/prod.repo "
+        "-o /etc/yum.repos.d/mssql-release.repo; "
+        "ACCEPT_EULA=Y dnf install -y mssql-tools18; }",
+    ],
+}
+
+
+def _ssm_jump_prep_commands(engine: str = "", client_image: str = "") -> list:
     """Commands (run as root on the shared Gateway host over SSM) that make it ready
     for the "{engine} SSM Custom Plugin": drop the plugin RSA key material where the
-    plugin reads it. The AWS counterpart of :func:`_azure_jump_prep_commands`.
+    plugin reads it, and install the native DB client when this engine has no client
+    image to run. The AWS counterpart of :func:`_azure_jump_prep_commands`.
 
-    Unlike Azure this installs no DB clients. The dashboard's own managed-user creation
-    runs the client as a ``docker run``, and the ECS gateway host is shared with the
-    gateway workload, so what the plugin needs on its own PATH is the operator's call
-    rather than something to guess at here.
+    ``client_image`` is the effective image for ``engine``: a non-empty one means the
+    container path is in use, so nothing is installed.
 
-    Returns ``[]`` when there is nothing to stage; the caller logs that, because an
-    absent drop is a failure that only ever surfaces at the first rotation."""
+    Key material FIRST, install second, verification last. Azure's prep learned the
+    hard way that a client install ahead of the key drop puts an external Microsoft
+    repo on the critical path of the one step a rotation cannot do without; and the
+    verification tail is what makes a failed install loud — AWS-RunShellScript reports
+    the script's last exit code, so a mid-script stumble would otherwise be masked and
+    only surface as the managed-user step's "sqlcmd: not found".
+
+    Returns ``[]`` when there is nothing to do; the caller logs an absent key drop,
+    because that is a failure which only ever surfaces at the first rotation."""
+    cmds: list = []
     priv = _cfg("clouddb_ps_ssm_plugin_private_key")
     kdir = _cfg("clouddb_ps_ssm_key_directory")
-    if not priv or not kdir:
-        return []
-    return _plugin_key_drop_commands(
-        kdir.rstrip("/"), priv, _cfg("clouddb_ps_ssm_plugin_passphrase"))
+    if priv and kdir:
+        cmds += _plugin_key_drop_commands(
+            kdir.rstrip("/"), priv, _cfg("clouddb_ps_ssm_plugin_passphrase"))
+    if not client_image and _SSM_CLIENT_INSTALL.get(engine):
+        cmds += _SSM_CLIENT_INSTALL[engine]
+        # Names the remedy, because this string is the whole of what the operator sees
+        # (jobs surface error_message only).
+        cmds.append(
+            "[ -x /opt/mssql-tools18/bin/sqlcmd ] || { echo 'sqlcmd 18 is not "
+            "installed at /opt/mssql-tools18/bin/sqlcmd on the shared gateway host "
+            "and the mssql-tools18 install above failed (check the host can reach "
+            "packages.microsoft.com); "
+            "alternatively set clouddb_db_client_image_sqlserver to a mirrored image "
+            "carrying sqlcmd 18 at that path to use the container client instead' "
+            ">&2; exit 1; }")
+    return cmds
 
 
 _AZURE_CLIENT_INSTALL = {
@@ -1527,7 +1578,13 @@ def _azure_jump_prep_commands(engine: str = "") -> list:
     toolchain — an external Microsoft apt repo, a GPG key and an EULA — and a
     stumble anywhere in that leg aborted the run before the key material was even
     staged. No engine named (no caller does that today) keeps the old all-three
-    behaviour, matching the fresh-VM cloud-init head start."""
+    behaviour, matching the fresh-VM cloud-init head start.
+
+    For SQL Server the install is no longer just a head start for the plugin: the
+    onboarding's OWN managed-user step invokes this same
+    /opt/mssql-tools18/bin/sqlcmd (there is no sqlcmd container image to run — see
+    cloud_db_sql_service._ENGINE), so this leg failing now fails the registration
+    outright rather than deferring the pain to the first rotation."""
     cmds = list(_AZURE_CLIENT_INSTALL.get(engine) or
                 [c for e in ("postgres", "mysql", "sqlserver")
                  for c in _AZURE_CLIENT_INSTALL[e]])
@@ -1582,7 +1639,8 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
     db_name = connection_db_name(row, tf_variables)
     managed_user = _managed_user_name(row.id)
     managed_pw = sql.generate_password()
-    image = _cfg(f"clouddb_db_client_image_{engine}") or sql.default_client_image(engine)
+    image = sql.resolve_client_image(
+        engine, _cfg(f"clouddb_db_client_image_{engine}"))
     port = row.port or sql.default_port(engine)
     # Make the jump VM plugin-ready (clients + key material). Longer timeout: a first
     # run on a VM the cloud-init head start missed installs packages.

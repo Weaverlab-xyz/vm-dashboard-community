@@ -568,9 +568,13 @@ config keys to match what you uploaded.
 
 ### AWS — `dbssm` (AWS Systems Manager)
 
-The dashboard creates the managed user by running the DB client (`psql` / `mysql` /
-`sqlcmd`, as a `docker run`) on the shared **ECS gateway host over AWS SSM
-`SendCommand`** — the only dashboard component with line-of-sight to the private DB. It
+The dashboard creates the managed user by running the DB client on the shared **ECS
+gateway host over AWS SSM `SendCommand`** — the only dashboard component with
+line-of-sight to the private DB. `psql` / `mysql` run as a `docker run`
+(`postgres:16` / `mysql:8.4`); `sqlcmd` runs **natively** from
+`/opt/mssql-tools18/bin/sqlcmd`, which the onboarding's prep step installs from
+Microsoft's RHEL 9 feed (there is no sqlcmd container image — `mssql-tools18` is a
+package name, not a registry repository). It
 registers the DB on the **`{engine} SSM Custom Plugin`** platform (v24.2.x). The plugin
 indexes the managed-system address at fixed **per-engine** positions — mssql has no
 database segment, and mysql alone carries a trailing ssl flag:
@@ -611,9 +615,10 @@ field delimiter) — dashboard-generated credentials never do.
   (`Beekeeper-UsernamePasswordPRAVault.docx` + the per-engine SSM guides).
 - Prep the **jump host** for the SSM DB plugin: the DB client binary at the path the
   plugin invokes, plus the RSA key pair (`private.pem` + `passphrase.txt`) in the
-  `ssm-user` home for credential decryption. *(The dashboard's own managed-user creation
-  uses a `docker run` client image and does not need this — this is for the plugin's
-  ongoing rotation.)*
+  `ssm-user` home for credential decryption. *(For PostgreSQL/MySQL the dashboard's own
+  managed-user creation uses a `docker run` client image and does not need this — that
+  half is for the plugin's ongoing rotation. For SQL Server the dashboard installs
+  `mssql-tools18` on the host itself, because it runs that binary too.)*
 - Create a **PRA Configuration-API account** (OAuth client) with **Vault Account
   Management** permission (or leave the PRA Config-API fields blank to reuse the SRA/PRA
   credentials).
@@ -632,7 +637,7 @@ field delimiter) — dashboard-generated credentials never do.
 | `clouddb_ps_pravault_platform` | `PRA Vault Username Password` | PRA Vault plugin platform |
 | `clouddb_ps_pravault_functional_account` | — | `reference` mode: the operator-created account on the PRA Vault platform |
 | `clouddb_ps_workgroup` | — | Workgroup; blank → `passwordsafe_workgroup` |
-| `clouddb_db_client_image_postgres` / `_mysql` / `_sqlserver` | `postgres:16` / `mysql:8.4` / `mcr.microsoft.com/mssql-tools18` | DB-client images on the jump host |
+| `clouddb_db_client_image_postgres` / `_mysql` / `_sqlserver` | `postgres:16` / `mysql:8.4` / — | DB-client images run on the jump host. **SQL Server is blank on purpose**: Microsoft publishes no sqlcmd image (`mcr.microsoft.com/mssql-tools18` is the *package* name and does not exist as a repository), so SQL Server uses the jump host's own `/opt/mssql-tools18/bin/sqlcmd`, which the jump-host prep installs and the rotation plugin already invokes. Set it only to force a mirrored image, and only one carrying sqlcmd 18 at that path |
 | `clouddb_ps_ssm_iam_username` | — | Informational only — the plugin never sees it; the mode is selected by the key pair below |
 | `clouddb_ps_ssm_access_key_id` / `_secret_access_key` | — | `create` mode only: **both set → IAM mode**, either blank → EC2 role mode |
 | `clouddb_ps_ssm_account_suffix` | `NoAssumeRole` | The address's `assumeRole` segment: the placeholder or a cross-account AssumeRole ARN. **≥ 12 chars** — shorter crashes the plugin, so a short persisted value is coerced on read |

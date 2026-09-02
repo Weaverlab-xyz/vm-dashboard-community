@@ -1625,9 +1625,15 @@
                   <label class="block text-sm font-medium text-gray-700 mb-1">sqlcmd Client Image</label>
                   <input type="text" x-model="panelCfg.clouddb_db_client_image_sqlserver"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="mcr.microsoft.com/mssql-tools18">
+                         placeholder="(blank — native sqlcmd)">
                 </div>
               </div>
+              <p class="text-xs text-gray-400">
+                Leave the sqlcmd image <strong>blank</strong>: Microsoft publishes no sqlcmd container, so SQL Server
+                runs the jump host's own <code class="bg-gray-100 px-1 rounded">/opt/mssql-tools18/bin/sqlcmd</code>
+                (installed by the jump-host prep, and the same binary the rotation plugin invokes). Only set it to use a
+                mirrored image instead, and only one carrying sqlcmd 18 at that path.
+              </p>
 
               <!-- Azure (Run Command plugins) -->
               <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">

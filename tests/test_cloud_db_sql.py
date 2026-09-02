@@ -46,7 +46,46 @@ def test_defaults():
     assert sql.default_port("mysql") == 3306
     assert sql.default_port("sqlserver") == 1433
     assert sql.default_client_image("postgres").startswith("postgres")
-    assert "mssql-tools" in sql.default_client_image("sqlserver")
+    assert sql.default_client_image("mysql").startswith("mysql")
+    # SQL Server has NO default image, on purpose — see
+    # test_sqlserver_runs_the_native_sqlcmd_because_no_such_image_exists.
+    assert sql.default_client_image("sqlserver") == ""
+
+
+def test_postgres_and_mysql_still_run_the_container_client_verbatim():
+    """The two engines that are PROVEN live stay byte-for-byte what they were.
+
+    PostgreSQL on Azure rotates end-to-end today (a Forced Reset on the "PostgreSQL
+    Azure Run Command Plugin", 2026-09-02, functional account minted at build time),
+    and postgres:16 / mysql:8.4 are real images — so the SQL Server client fix, which
+    moved that engine off `docker run` entirely and touched the shared image resolver,
+    must not have shifted a character here. Exact strings, not substrings, because the
+    failure mode being guarded is a well-meaning refactor of the sibling builder.
+    """
+    pg = sql.onboard_commands("postgres", **_COMMON)[0]
+    assert pg == (
+        "docker run --rm -e PGPASSWORD='Admin-Pw_123' postgres:16 psql "
+        '"host=db.abc.us-east-1.rds.amazonaws.com port=5432 dbname=appdb '
+        'user=dbadmin sslmode=require" -v ON_ERROR_STOP=1 '
+        '-c "DO \'BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '
+        "''psafe_ab12cd34'') THEN ALTER ROLE \"psafe_ab12cd34\" WITH LOGIN PASSWORD "
+        "''Managed-Pw_9''; ELSE CREATE ROLE \"psafe_ab12cd34\" WITH LOGIN PASSWORD "
+        "''Managed-Pw_9''; END IF; END';\"")
+
+    my = sql.onboard_commands("mysql", **{**_COMMON, "port": 3306})[0]
+    assert my == (
+        "docker run --rm -e MYSQL_PWD='Admin-Pw_123' mysql:8.4 mysql "
+        "--host=db.abc.us-east-1.rds.amazonaws.com --port=3306 --user=dbadmin "
+        "--ssl-mode=REQUIRED --batch "
+        "-e \"CREATE USER IF NOT EXISTS 'psafe_ab12cd34'@'%' IDENTIFIED BY "
+        "'Managed-Pw_9'; ALTER USER 'psafe_ab12cd34'@'%' IDENTIFIED BY "
+        "'Managed-Pw_9';\"")
+
+    # And the resolver hands these two a real image no matter what it is given —
+    # they have no native mode to fall back to, so "" would break them outright.
+    for engine in ("postgres", "mysql"):
+        for configured in ("", "   ", "mcr.microsoft.com/mssql-tools18"):
+            assert sql.resolve_client_image(engine, configured) != ""
 
 
 def test_postgres_onboard_creates_only_managed_role():
@@ -105,8 +144,83 @@ def test_sqlserver_onboard_targets_master_with_tunnel_flags():
     assert "CREATE LOGIN [psafe_ab12cd34] WITH PASSWORD = 'Managed-Pw_9';" in c
     assert "SQLCMDPASSWORD='Admin-Pw_123'" in c
     assert "sqlcmd" in c and "-d master" in c
-    assert "-N t -C" in c          # encryption mandatory + trust cert (no CA in the image)
+    assert "-N t -C" in c          # encryption mandatory + trust cert (no CA on the host)
     assert "ALTER ANY LOGIN" not in c
+
+
+def test_sqlserver_runs_the_native_sqlcmd_because_no_such_image_exists():
+    """The SQL Server client is NOT a container, and this is why.
+
+    `mcr.microsoft.com/mssql-tools18` was this builder's default image from the
+    original commit until 2026-09-02, and no such repository has ever existed in MCR:
+    `mssql-tools18` is the apt/dnf PACKAGE name (which is how both clouds' jump-host
+    prep installs it), MCR publishes `mssql-tools` — sqlcmd 17, a different binary
+    path, and `-N` there takes no argument — and nothing else. So every SQL Server
+    registration failed identically on both clouds, with docker exiting 125
+    ("Unable to find image ... locally / not found") before a byte reached the
+    database. Observed live on Azure 2026-09-02.
+
+    A regression that hands sqlserver a default image must fail here, not at a
+    customer's registration.
+    """
+    c = sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0]
+    assert "docker" not in c
+    assert c.startswith("SQLCMDPASSWORD='Admin-Pw_123' /opt/mssql-tools18/bin/sqlcmd ")
+    # Same binary, same path, as the jump-host prep installs and the rotation plugins
+    # invoke — the whole point of going native rather than mirroring an image.
+    assert sql.SQLCMD_PATH == "/opt/mssql-tools18/bin/sqlcmd"
+    assert "mssql-tools18:" not in c and "mcr.microsoft.com" not in c
+
+    # Teardown too: a drop that cannot run leaves the login behind forever.
+    t = sql.teardown_commands("sqlserver", host="h", port=1433, database="",
+                              admin_user="dbadmin", admin_password="Admin-Pw_123",
+                              managed_user="psafe_ab12cd34")[0]
+    assert "docker" not in t and sql.SQLCMD_PATH in t
+
+
+def test_a_saved_phantom_image_is_dropped_rather_than_run():
+    """Changing the field default does not fix a LIVE instance on its own.
+
+    The settings panel writes an `app_config` row when the panel is saved, and a row
+    written by an older instance outlives the default it was seeded from — so an
+    instance that ever saved the Password Safe panel still holds
+    `mcr.microsoft.com/mssql-tools18` and would keep handing it to `docker run`, with
+    the fix inert exactly where it is needed. Read-side, any tag or digest of that
+    phantom repository resolves to "" (native).
+    """
+    for configured in ("mcr.microsoft.com/mssql-tools18",
+                       "mcr.microsoft.com/mssql-tools18:latest",
+                       "mcr.microsoft.com/mssql-tools18@sha256:abc",
+                       "  mcr.microsoft.com/mssql-tools18  ", ""):
+        assert sql.resolve_client_image("sqlserver", configured) == ""
+    c = sql.onboard_commands("sqlserver", **{
+        **_COMMON, "port": 1433, "client_image": "mcr.microsoft.com/mssql-tools18"})[0]
+    assert "docker" not in c and c.startswith("SQLCMDPASSWORD=")
+
+    # A real mirror is NOT collateral damage, and the other engines keep their images.
+    assert sql.resolve_client_image("sqlserver", "myreg/mssql-tools18:18") == \
+        "myreg/mssql-tools18:18"
+    assert sql.resolve_client_image("postgres") == "postgres:16"
+    assert sql.resolve_client_image("mysql", "myreg/mysql:8.4") == "myreg/mysql:8.4"
+
+
+def test_a_configured_sqlserver_image_goes_back_through_docker_with_an_entrypoint():
+    """The mirrored-registry escape hatch, and the flag that makes it work.
+
+    --entrypoint is mandatory: the only MCR image carrying sqlcmd 18 at SQLCMD_PATH is
+    mcr.microsoft.com/mssql/server, whose ENTRYPOINT is launch_sqlservr.sh, so the
+    pre-2026-09-02 form (`docker run IMAGE /opt/.../sqlcmd -S …`) would hand the whole
+    command line to the SQL Server launcher and never run sqlcmd at all.
+    """
+    c = sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433,
+                                             "client_image": "myreg/mssql:2022"})[0]
+    assert c.startswith("docker run --rm -e SQLCMDPASSWORD='Admin-Pw_123' "
+                        "--entrypoint /opt/mssql-tools18/bin/sqlcmd myreg/mssql:2022 -S ")
+    # The binary is the entrypoint, so it must NOT also appear as the first argument.
+    assert c.count(sql.SQLCMD_PATH) == 1
+    # Identical SQL and connection flags on either path.
+    assert "-N t -C" in c and "-d master" in c
+    assert "CREATE LOGIN [psafe_ab12cd34] WITH PASSWORD = 'Managed-Pw_9';" in c
 
 
 def test_client_connections_encrypt_but_do_not_verify():
@@ -125,10 +239,10 @@ def test_client_connections_encrypt_but_do_not_verify():
 
     ENCRYPT-BUT-DO-NOT-VERIFY is the deliberate choice, not an oversight. sslmode=
     require / --ssl-mode=REQUIRED / sqlcmd -N t -C all encrypt without checking the
-    certificate. The verifying modes would need each cloud's root CA inside the
-    client container, and the stock postgres:16 / mysql:8.4 / mssql-tools18 images
-    do not carry the Azure, RDS or Cloud SQL roots — so a verify-full here would
-    fail closed on every cloud. If a CA bundle is ever mounted onto the jump host,
+    certificate. The verifying modes would need each cloud's root CA reachable by the
+    client, and neither the stock postgres:16 / mysql:8.4 images nor the jump host
+    running sqlcmd carry the Azure, RDS or Cloud SQL roots — so a verify-full here
+    would fail closed on every cloud. If a CA bundle is ever staged on the jump host,
     tighten these three flags together and update this test.
 
     A regression that flips any of them back to a disabling value must fail here.
@@ -175,7 +289,7 @@ def test_onboard_never_pins_tls_onto_the_managed_account_itself():
     This is the one TLS mistake in this module that would actually break tunneling,
     and it is deliberately NOT the same thing as the connection flags pinned by
     test_client_connections_encrypt_but_do_not_verify. Those flags govern one
-    throwaway `docker run psql/mysql/sqlcmd` that creates the user and exits. A
+    throwaway psql/mysql/sqlcmd invocation that creates the user and exits. A
     REQUIRE clause governs the ACCOUNT, permanently, for every later login —
     including the tunnel's.
 

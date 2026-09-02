@@ -785,7 +785,7 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_import_platform_map: str = ""
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
-    clouddb_db_client_image_sqlserver: str = "mcr.microsoft.com/mssql-tools18"
+    clouddb_db_client_image_sqlserver: str = ""      # blank → native sqlcmd on the jump host
     clouddb_ps_ssm_iam_username: str = ""           # informational; mode = key-pair presence
     clouddb_ps_ssm_access_key_id: str = ""          # both set → IAM mode; either blank → EC2
     clouddb_ps_ssm_secret_access_key: str = ""      # encrypted at rest

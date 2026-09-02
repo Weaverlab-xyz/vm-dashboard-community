@@ -539,8 +539,13 @@ of that runs — the service connects with a database login, so there is nothing
 | **Plugin Private Key (PEM)** | the **full** `private.pem`, BEGIN/END lines included | `clouddb_ps_azure_plugin_private_key` |
 | **Plugin Key Passphrase** | the passphrase for that key | `clouddb_ps_azure_plugin_passphrase` |
 
-The client-image fields (`postgres:16`, `mysql:8.4`, `mcr.microsoft.com/mssql-tools18`) are
+The client-image fields (`postgres:16`, `mysql:8.4`, and **blank** for SQL Server) are
 shared with AWS and only used by the dashboard's own managed-user creation. Leave them blank.
+SQL Server has no image because none exists — `mcr.microsoft.com/mssql-tools18` is the apt/dnf
+package name, not a registry repository — so its managed-user step runs the jump host's native
+`/opt/mssql-tools18/bin/sqlcmd`, installed by the jump-host prep on both clouds. Filling the
+SQL Server field in forces the container path back on and requires an image carrying sqlcmd 18
+at that same path.
 
 **Address the plugin receives** — eight `;`-separated fields:
 

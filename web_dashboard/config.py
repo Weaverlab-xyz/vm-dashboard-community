@@ -564,9 +564,14 @@ class Settings(BaseSettings):
     clouddb_ps_import_max_systems: int = 500       # cap on candidates returned
     clouddb_ps_import_platform_map: str = ""       # JSON {"Percona Server": "mysql"} overrides
     # DB-client container images run on the jump host (override for a mirrored registry).
+    # SQL Server is blank ON PURPOSE: no sqlcmd image exists (mcr.microsoft.com/
+    # mssql-tools18 is a PACKAGE name, not a repository — `docker run` exits 125), so
+    # the jump host's natively installed /opt/mssql-tools18/bin/sqlcmd is used instead.
+    # Setting it forces the container path back on, and the image must carry sqlcmd 18
+    # at that path (e.g. a mirror of mcr.microsoft.com/mssql/server:2022-latest).
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
-    clouddb_db_client_image_sqlserver: str = "mcr.microsoft.com/mssql-tools18"
+    clouddb_db_client_image_sqlserver: str = ""
     # AWS credentials packed into the Password Safe functional account for SSM
     # SendCommand. The plugin parses username "<EC2|IAM>:<dbAdminUser>" and password
     # "<AKID>:<secret>:<dbAdminPassword>" (always three parts). The mode is selected by

@@ -1133,11 +1133,16 @@ def test_ssm_prep_drops_the_key_material_with_tight_permissions():
 def test_ssm_prep_is_a_no_op_without_a_key_or_a_directory():
     # Not an error: an operator who staged the files by hand should not be forced to
     # paste the key here. The caller logs it, so it is visible either way.
+    # (postgres/mysql only — sqlserver always has a client to install, below.)
+    for engine in ("postgres", "mysql"):
+        _reset()
+        assert svc._ssm_jump_prep_commands(engine) == []
+        _reset(clouddb_ps_ssm_plugin_private_key="pem")           # no directory
+        assert svc._ssm_jump_prep_commands(engine) == []
+        _reset(clouddb_ps_ssm_key_directory="/home/ssm-user")     # no key
+        assert svc._ssm_jump_prep_commands(engine) == []
+    # And with no engine named at all, as the pre-2026-09-02 signature was called.
     _reset()
-    assert svc._ssm_jump_prep_commands() == []
-    _reset(clouddb_ps_ssm_plugin_private_key="pem")           # no directory
-    assert svc._ssm_jump_prep_commands() == []
-    _reset(clouddb_ps_ssm_key_directory="/home/ssm-user")     # no key
     assert svc._ssm_jump_prep_commands() == []
 
 
@@ -1167,16 +1172,82 @@ def test_the_two_clouds_use_separate_key_pairs():
     assert "/home/ssm-user/private.pem" in aws
 
 
-def test_azure_prep_still_installs_clients_and_aws_prep_does_not():
-    # Deliberate asymmetry: the dashboard's own managed-user creation runs the client as
-    # a docker run, and the ECS gateway host is shared with the gateway workload, so what
-    # the SSM plugin needs on its PATH is the operator's call.
+def test_azure_prep_installs_every_client_and_aws_prep_only_installs_sqlcmd():
+    """Deliberate asymmetry. Azure's jump VM is the dashboard's own, and its Run
+    Command plugins invoke the native client for all three engines. The ECS gateway
+    host is shared with the gateway workload, and postgres:16 / mysql:8.4 are real
+    images it can just run — so it gets a package for the ONE engine where no client
+    image exists at all (see cloud_db_sql_service._ENGINE)."""
     _reset(clouddb_ps_azure_plugin_private_key="k",
            clouddb_ps_ssm_plugin_private_key="k", clouddb_ps_ssm_key_directory="/d")
     azure = "\n".join(svc._azure_jump_prep_commands())
-    aws = "\n".join(svc._ssm_jump_prep_commands())
     assert "postgresql-client" in azure and "mssql-tools18" in azure
-    assert "apt-get" not in aws
+    for engine in ("postgres", "mysql"):
+        aws = "\n".join(svc._ssm_jump_prep_commands(engine))
+        assert "install" not in aws, f"{engine}: nothing to install on the ECS host"
+    aws_ms = "\n".join(svc._ssm_jump_prep_commands("sqlserver"))
+    # dnf, not apt: the gateway host is the ECS-optimized AL2023 AMI, so it takes
+    # Microsoft's RHEL 9 feed rather than the Ubuntu list the Azure VM uses.
+    assert "dnf install -y mssql-tools18" in aws_ms and "apt-get" not in aws_ms
+    assert "/config/rhel/9/prod.repo" in aws_ms
+
+
+def test_ssm_prep_stages_the_key_before_installing_and_verifies_the_install():
+    """Order and the tail command are both load-bearing.
+
+    Key material first: Azure's prep learned live that a client install ahead of the
+    drop puts an external Microsoft repo on the critical path of the one thing a
+    rotation cannot do without. Verification last: AWS-RunShellScript reports the
+    script's LAST exit code, so without a tail check a failed install would report
+    prep as Success and resurface as the managed-user step's "sqlcmd: not found"."""
+    _reset(clouddb_ps_ssm_plugin_private_key="pem", clouddb_ps_ssm_key_directory="/d")
+    cmds = svc._ssm_jump_prep_commands("sqlserver")
+    joined = "\n".join(cmds)
+    assert joined.index("private.pem") < joined.index("mssql-tools18")
+    assert cmds[-1].startswith("[ -x /opt/mssql-tools18/bin/sqlcmd ]")
+    assert "exit 1" in cmds[-1]
+    # The failure text is the whole of what an operator sees (jobs surface
+    # error_message only), so it has to name the remedy.
+    assert "clouddb_db_client_image_sqlserver" in cmds[-1]
+
+
+def test_a_configured_sqlserver_image_means_the_ecs_host_installs_nothing():
+    """The container escape hatch and the package install are alternatives, not both:
+    an operator who mirrored an image did so to keep packages OFF the shared host."""
+    _reset(clouddb_ps_ssm_plugin_private_key="pem", clouddb_ps_ssm_key_directory="/d")
+    cmds = svc._ssm_jump_prep_commands("sqlserver", "myreg/mssql:2022")
+    joined = "\n".join(cmds)
+    assert "mssql-tools18" not in joined and "dnf" not in joined
+    assert "private.pem" in joined      # key material still staged
+
+
+def test_the_sqlserver_client_fix_leaves_postgres_and_mysql_prep_untouched():
+    """PostgreSQL on Azure is PROVEN live — a managed account on the "PostgreSQL Azure
+    Run Command Plugin" rotating on its own (a Forced Reset entry in Password Safe's
+    password history, 2026-09-02), with the functional account minted at build time.
+
+    The SQL Server client fix reaches into shared code (the prep builder took an engine
+    and an image; the image resolver is common to all three engines), so this pins the
+    other two engines' prep to EXACTLY the key drop and nothing else — the whole of
+    what it was before. Not a substring check: byte equality with the drop builder,
+    which the fix did not touch.
+    """
+    _reset(clouddb_ps_ssm_plugin_private_key="pem",
+           clouddb_ps_ssm_key_directory="/home/ssm-user",
+           clouddb_ps_ssm_plugin_passphrase="pw")
+    expected = svc._plugin_key_drop_commands("/home/ssm-user", "pem", "pw")
+    for engine in ("postgres", "mysql"):
+        # Both how the caller calls it (resolved image) and with the image omitted.
+        assert svc._ssm_jump_prep_commands(engine, f"{engine}:16") == expected
+        assert svc._ssm_jump_prep_commands(engine) == expected
+
+    # Azure: this engine's client install, then the key drop, and no SQL Server leg.
+    _reset(clouddb_ps_azure_plugin_private_key="pem",
+           clouddb_ps_azure_plugin_passphrase="pw")
+    azure_pg = svc._azure_jump_prep_commands("postgres")
+    assert azure_pg == (svc._AZURE_CLIENT_INSTALL["postgres"]
+                        + svc._plugin_key_drop_commands("/root/psplugin", "pem", "pw"))
+    assert "mssql" not in "\n".join(azure_pg) and "sqlcmd" not in "\n".join(azure_pg)
 
 
 # ── the teardown record must survive a later failure ─────────────────────────
