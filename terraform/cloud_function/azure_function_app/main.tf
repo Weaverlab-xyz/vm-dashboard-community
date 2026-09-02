@@ -116,6 +116,26 @@ variable "environment" {
   description = "Extra NON-SECRET app settings for the handler"
 }
 
+# The dashboard sizes every function the same way on all three clouds, so this
+# variable has to EXIST here even though Azure expresses it differently: there is no
+# per-function timeout argument, only host.json's `functionTimeout`, which an app
+# setting overrides. Leaving it undeclared is not a no-op — terraform fails the whole
+# apply with "Value for undeclared variable" before it creates anything.
+#
+# Memory is deliberately NOT a variable: on an App Service plan it is a property of
+# the plan SKU (var.sku_name), not of the app, so the service does not pass memory_mb
+# to this module at all.
+variable "timeout_seconds" {
+  type        = number
+  default     = 60
+  description = "Max execution time per invocation, written to AzureFunctionsJobHost__functionTimeout. Note an HTTP-triggered function is still capped at 230s by the Azure front door, whatever this says; and a Consumption (Y1) plan caps it at 600s."
+
+  validation {
+    condition     = var.timeout_seconds > 0
+    error_message = "timeout_seconds must be positive."
+  }
+}
+
 # ── Networking (optional) ─────────────────────────────────────────────────────
 
 variable "subnet_id" {
@@ -130,6 +150,10 @@ locals {
   kv_enabled = length(trimspace(var.shared_secret_kv_uri)) > 0
   kv_rg      = var.key_vault_resource_group != "" ? var.key_vault_resource_group : var.resource_group_name
 
+  # host.json takes HH:MM:SS, not seconds. floor() because format's %d refuses a
+  # fractional number, and HCL division is float division.
+  function_timeout = format("%02d:%02d:%02d", floor(var.timeout_seconds / 3600), floor((var.timeout_seconds % 3600) / 60), var.timeout_seconds % 60)
+
   base_settings = {
     FUNCTIONS_WORKER_RUNTIME = "python"
     # Pinned explicitly: the v2 programming model silently registers ZERO
@@ -138,6 +162,11 @@ locals {
     FUNCTIONS_EXTENSION_VERSION = "~4"
     AzureWebJobsFeatureFlags    = "EnableWorkerIndexing"
     WEBSITE_RUN_FROM_PACKAGE    = var.package_sas_url
+
+    # Overrides host.json's functionTimeout without republishing the package, which
+    # is the only way to set it from Terraform — the double underscore is the
+    # documented app-setting spelling of a nested host.json key.
+    AzureFunctionsJobHost__functionTimeout = local.function_timeout
 
     FN_SHARED_SECRET = local.kv_enabled ? var.shared_secret_kv_uri : var.shared_secret
     FN_WORKLOAD      = var.workload
