@@ -520,7 +520,11 @@ def test_no_pra_vault_account_means_no_link_and_the_secret_stays():
 def test_register_is_idempotent_for_an_already_registered_cluster():
     rec = Recorder()
     _install_stubs(rec, cfg=_prior_state(rotated=True))
-    out, _db = _run_register(rec, _row(ps_token_account_id="201"))
+    # A FULLY registered cluster: both managed accounts and the link. Leaving
+    # ps_pra_vault_account_id unset here would be the missing-subscriber state, which the
+    # repair path is now supposed to act on (see the reconcile tests below).
+    out, _db = _run_register(rec, _row(ps_token_account_id="201",
+                                       ps_pra_vault_account_id="202"))
     assert out["already_registered"] is True
     assert "register_managed_system" not in rec.events
     assert "rbac" in rec.events, "re-applying the (idempotent) RBAC is the useful half"
@@ -622,17 +626,90 @@ def test_an_unconfirmed_relink_fails_the_register():
         raise AssertionError("an unconfirmed relink must fail the job")
 
 
-def test_an_already_registered_cluster_with_no_pra_vault_account_says_so():
-    """Nothing to link to, and a re-register cannot create one — the PRA Vault account is
-    only registered on a first registration. Say that rather than implying the re-run
-    repaired something."""
+def test_a_re_register_creates_a_subscriber_the_first_run_could_not():
+    """The state a cluster is in when its PRA k8s tunnel was registered AFTER its token:
+    step 3 is gated on there being a PRA Vault account to write into, so the subscriber
+    was never created and rotations reach nothing. This used to be unrepairable — the
+    advice was to off-board the registration and register again, destroying and
+    re-creating two managed systems (on a cluster where every issued token is bound to
+    the ServiceAccount's uid) to add one missing reference. Nothing about the subscriber
+    needs a first registration, so the repair creates it and links it."""
     rec = Recorder()
     _install_stubs(rec, linked_now=False)
     out, _db = _run_register(rec, _row(ps_token_account_id="201",
-                                       ps_pra_vault_account_id=None))
+                                       ps_pra_vault_account_id=None,
+                                       pra_vault_account_id="77"))
+    assert out["already_registered"] is True
+    assert "register_managed_system" in rec.events, "the subscriber was never created"
+    registered = [e for e in rec.events
+                  if isinstance(e, tuple) and e[0] == "registered"]
+    assert len(registered) == 1 and registered[0][1]["method"] == "pravault", (
+        "the repair must create ONLY the PRA Vault subscriber — the token's own managed "
+        f"system already exists; got {[r[1].get('method') for r in registered]}")
+    # A fresh subscriber cannot be linked already, so the status read is skipped: a
+    # transient failure on it would otherwise abandon the account it just created.
+    assert "sync_status" not in rec.events
+    assert out["pra_synced"] is True and out["relinked"] is True
+    linked = [e for e in rec.events if isinstance(e, tuple) and e[0] == "linked"]
+    assert linked == [("linked", 201, 201)], (
+        f"parent must stay the ServiceAccount token account; got {linked}")
+    assert any("created the missing PRA Vault Token account" in w
+               for w in out["warnings"])
+
+
+def test_the_repair_seeds_the_subscriber_with_a_placeholder_not_a_checkout():
+    """A bearer token is 800-1,200 characters and the create API caps Password at 128, so
+    checking the live token out of Password Safe to seed the subscriber would spend a
+    credential request on a value that is dropped anyway. The link is what puts the real
+    credential there."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False)
+    _out, _db = _run_register(rec, _row(ps_token_account_id="201",
+                                        ps_pra_vault_account_id=None,
+                                        pra_vault_account_id="77"))
+    assert "checkout" not in rec.events
+    registered = [e for e in rec.events if isinstance(e, tuple) and e[0] == "registered"]
+    assert not registered[0][1].get("initial_password")
+
+
+def test_the_repair_links_before_it_refills_the_placeholder():
+    """Same argument as step 4 vs step 5 on a first registration: rotating before the
+    pair is linked leaves PRA holding a value that was just revoked (LongLived) and that
+    nothing will refresh."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False)           # no prior state → the refill rotates
+    out, _db = _run_register(rec, _row(ps_token_account_id="201",
+                                       ps_pra_vault_account_id=None,
+                                       pra_vault_account_id="77"))
+    assert out["rotated"] is True
+    assert rec.index("link") < rec.index("rotate")
+
+
+def test_a_cluster_with_nothing_in_pra_to_sync_to_says_what_to_do_first():
+    """The other half: no PRA Vault account exists at all, so there is nothing for a
+    subscriber to write into. Creating one would be a managed system pointing at nothing
+    — name the missing step instead."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False)
+    out, _db = _run_register(rec, _row(ps_token_account_id="201",
+                                       ps_pra_vault_account_id=None,
+                                       pra_vault_account_id=None))
+    assert "register_managed_system" not in rec.events
     assert "sync_status" not in rec.events and "link" not in rec.events
     assert out["pra_synced"] is False and out["relinked"] is False
-    assert any("Remove the Password Safe registration" in w for w in out["warnings"])
+    assert any("register the PRA k8s tunnel" in w for w in out["warnings"])
+
+
+def test_the_mirror_switch_still_means_no_subscriber_and_no_complaint():
+    """A Password-Safe-managed token with no PRA copy is a valid configuration, so with
+    the mirror off the repair must neither create anything nor warn about the absence."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False, cfg={"k8s_ps_pravault_mirror_enabled": "0"})
+    out, _db = _run_register(rec, _row(ps_token_account_id="201",
+                                       ps_pra_vault_account_id=None,
+                                       pra_vault_account_id="77"))
+    assert "register_managed_system" not in rec.events and "link" not in rec.events
+    assert not any("PRA Vault" in w for w in out["warnings"])
 
 
 def test_a_failed_sync_status_read_leaves_the_link_alone():

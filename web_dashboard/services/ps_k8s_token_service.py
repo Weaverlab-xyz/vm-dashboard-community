@@ -353,8 +353,11 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
     account_name = f"{ns}/{sa}"
 
     if row.ps_token_account_id:
-        note = await _apply_rbac(db, cluster_id, mode=mode, warnings=warnings)
-        sync = await _reconcile_synced_link(row, job_id=job_id, warnings=warnings)
+        note = await _apply_rbac(db, cluster_id, mode=mode, warnings=warnings,
+                                 namespace=ns, cluster_name=cluster_name,
+                                 resource_group=resource_group)
+        sync = await _reconcile_synced_link(db, row, job_id=job_id, warnings=warnings,
+                                            mirror_to_pra=mirror_to_pra)
         # The other half of the recoverable half-state, and the reason this path cannot
         # just reconcile the link: step 2 commits the account id, but the seed is dropped
         # (a bearer token exceeds the create API's 128-character cap), so a run that died
@@ -389,7 +392,9 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
     #    than no managed system, because it looks registered.
     if job_id:
         await broadcast_progress(job_id, 15, "Applying the rotator RBAC…")
-    rbac_note = await _apply_rbac(db, cluster_id, mode=mode, warnings=warnings)
+    rbac_note = await _apply_rbac(db, cluster_id, mode=mode, warnings=warnings,
+                                  namespace=ns, cluster_name=cluster_name,
+                                  resource_group=resource_group)
 
     # 2. The token the cluster is using right now.
     if job_id:
@@ -519,9 +524,11 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
             "legacy_secret_deleted": legacy_deleted, "warnings": warnings}
 
 
-async def _reconcile_synced_link(row: K8sCluster, *, job_id: str = "",
-                                 warnings: list) -> dict:
-    """Re-create the ``SyncedAccounts`` link when an already-registered pair is unlinked.
+async def _reconcile_synced_link(db: Session, row: K8sCluster, *, job_id: str = "",
+                                 warnings: list,
+                                 mirror_to_pra: Optional[bool] = None) -> dict:
+    """Repair the PS → PRA half of an already-registered cluster: create the subscriber
+    if it is missing, and (re-)create the ``SyncedAccounts`` link if it is not there.
 
     ``register`` commits ``ps_token_account_id`` at step 2, when it creates the managed
     system — two steps before the (deliberately fatal) link. So a failure at the link
@@ -541,34 +548,77 @@ async def _reconcile_synced_link(row: K8sCluster, *, job_id: str = "",
     pair must not be POSTed at on every idempotent re-register, and a POST against a live
     link is not documented as idempotent. A relink that is attempted and does not confirm
     is fatal, for the same reason step 4 is — reporting success on an unsynced pair is the
-    hole this feature exists to close."""
-    if not row.ps_pra_vault_account_id:
-        # Nothing to link to. A re-register cannot repair this either: the PRA Vault
-        # account is only created on a first registration, so say so plainly instead of
-        # implying the re-run fixed something.
-        warnings.append(
-            "no PRA Vault Token account is registered for this cluster, so rotations do "
-            "not reach PRA — re-registering cannot create one. Remove the Password Safe "
-            "registration and register again (with a PRA k8s tunnel in place).")
-        return {"linked": False, "relinked": False}
+    hole this feature exists to close.
 
+    **A missing subscriber is repaired here too, and that is the ordinary order rather
+    than an accident.** Step 3 creates the "PRA Vault Token" account only when the
+    cluster already has a PRA Vault account to write into, so registering the token
+    before the PRA k8s tunnel — or with tunnel registration failing — leaves a cluster
+    whose token rotates while nothing carries the value into PRA. This used to tell the
+    operator to off-board the registration and register again: two managed systems
+    destroyed and re-created to add one missing reference, on a live cluster whose
+    ServiceAccount uid every issued token is bound to. Nothing about the subscriber needs
+    a first registration — it is created from ``bt_api_host`` and the cluster name — so it
+    is created here, and the link that follows is the same fatal step 4.
+
+    The seed is deliberately not the live token: the create API caps ``Password`` at 128
+    characters and a bearer token is 800-1,200, so a checkout here would buy a value that
+    is dropped anyway. The subscriber starts on a placeholder and Password Safe replaces
+    it with the parent's credential through the link.
+    """
     from . import ps_api_service
-    try:
-        st = await ps_api_service.synced_account_status(
-            parent_account_id=int(row.ps_token_account_id),
-            synced_account_id=int(row.ps_pra_vault_account_id))
-    except Exception as exc:  # noqa: BLE001
-        # Don't guess in either direction: a transient read failure must not fail a
-        # re-register that is otherwise fine, and blind-POSTing the link is not safe on a
-        # pair that may already be live. The status panel reads this the same way, live.
-        warnings.append(
-            "could not read the synced-account state from Password Safe, so the PRA sync "
-            "was left as it is — check the token rotation panel (details are in the "
-            "server log)")
-        logger.warning("PS token relink check for cluster %s failed: %s", row.id, exc)
-        return {"linked": False, "relinked": False}
-    if st.get("linked"):
-        return {"linked": True, "relinked": False}
+    just_created = False
+    if not row.ps_pra_vault_account_id:
+        mirror = (_cfg_bool("k8s_ps_pravault_mirror_enabled", True)
+                  if mirror_to_pra is None else bool(mirror_to_pra))
+        if not mirror:
+            # Deliberately off — a PS-managed token with no PRA copy is a valid
+            # configuration, not a half-finished one.
+            return {"linked": False, "relinked": False}
+        if not row.pra_vault_account_id:
+            warnings.append(
+                "no PRA Vault account exists for this cluster (register the PRA k8s "
+                "tunnel with credential injection first), so rotations will not reach "
+                "PRA — re-run this registration once the tunnel is in place and the "
+                "subscriber will be created then")
+            return {"linked": False, "relinked": False}
+        if job_id:
+            from ..api.websocket import broadcast_progress
+            await broadcast_progress(job_id, 50,
+                                     "Registering the missing PRA Vault Token account…")
+        try:
+            just_created = await _register_pravault_mirror(
+                db, row, vault_account_name=f"k8s-{row.name}-sa", initial_password="")
+        except Exception as exc:  # noqa: BLE001
+            # Non-fatal on its own, exactly as at step 3: the cluster token still
+            # rotates, PRA just is not tracking it yet.
+            warnings.append(f"PRA Vault Token account registration failed: {exc}")
+            logger.warning("PS token: PRA mirror repair for %s failed: %s", row.id, exc)
+            return {"linked": False, "relinked": False}
+        if not just_created:
+            warnings.append(
+                "Password Safe did not return a managed account id for the PRA Vault "
+                "Token account, so there is nothing to sync the token to yet")
+            return {"linked": False, "relinked": False}
+
+    if not just_created:
+        try:
+            st = await ps_api_service.synced_account_status(
+                parent_account_id=int(row.ps_token_account_id),
+                synced_account_id=int(row.ps_pra_vault_account_id))
+        except Exception as exc:  # noqa: BLE001
+            # Don't guess in either direction: a transient read failure must not fail a
+            # re-register that is otherwise fine, and blind-POSTing the link is not safe
+            # on a pair that may already be live. The status panel reads this the same
+            # way, live.
+            warnings.append(
+                "could not read the synced-account state from Password Safe, so the PRA "
+                "sync was left as it is — check the token rotation panel (details are in "
+                "the server log)")
+            logger.warning("PS token relink check for cluster %s failed: %s", row.id, exc)
+            return {"linked": False, "relinked": False}
+        if st.get("linked"):
+            return {"linked": True, "relinked": False}
 
     if job_id:
         from ..api.websocket import broadcast_progress
@@ -590,13 +640,31 @@ async def _reconcile_synced_link(row: K8sCluster, *, job_id: str = "",
     _save_state(row.id, synced_to_parent=True)
     logger.info("PS token: re-synced PRA Vault account %s to token account %s for "
                 "cluster %s", row.ps_pra_vault_account_id, row.ps_token_account_id, row.id)
-    return {"linked": True, "relinked": True}
+    if just_created:
+        # Say what is and is not true yet. Nothing was rotated here on purpose: the PRA
+        # Vault account already holds the value Password Safe holds (the tunnel vaulted
+        # it out of Password Safe), so the pair is in step, and a rotation to "prove" it
+        # would revoke the token any live brokered session is using.
+        warnings.append(
+            "created the missing PRA Vault Token account and synced it to the token "
+            "account — Password Safe carries the credential from here on, and PRA's copy "
+            "is refreshed by the next rotation. Rotate now if you want the path proven "
+            "immediately (in LongLived mode that revokes the token a live session is "
+            "using)")
+    return {"linked": True, "relinked": True, "subscriber_created": just_created}
 
 
-async def _apply_rbac(db: Session, cluster_id: str, *, mode: str, warnings: list) -> str:
+async def _apply_rbac(db: Session, cluster_id: str, *, mode: str, warnings: list,
+                     namespace: str = "", cluster_name: str = "",
+                     resource_group: str = "") -> str:
     """Apply the rotator RBAC. Non-fatal: Password Safe's own Verify Functional Account
     names every missing verb and prints the ClusterRole, so a failure here is
-    diagnosable, whereas refusing to register would leave nothing to verify."""
+    diagnosable, whereas refusing to register would leave nothing to verify.
+
+    ``namespace``/``cluster_name``/``resource_group`` are for the cloud-side identity
+    mapping only (the AKS role assignment, the EKS access entry): the in-cluster
+    manifest needs none of them, but the cloud that has to be told about the rotator
+    does."""
     if not _cfg_bool("k8s_ps_rotator_apply_rbac", True):
         return "skipped (k8s_ps_rotator_apply_rbac is off)"
     from . import k8s_service
@@ -614,13 +682,25 @@ async def _apply_rbac(db: Session, cluster_id: str, *, mode: str, warnings: list
             warnings.append(f"could not derive the GKE rotator subject: {exc}")
     if row is not None and (row.cloud or "").lower() == "aws":
         await _ensure_eks_access_entry(db, row, warnings)
+    if row is not None and (row.cloud or "").lower() == "azure":
+        await _ensure_aks_role_assignment(
+            db, row, warnings,
+            namespace=namespace or _cfg("pra_k8s_namespace", "pra-access"),
+            cluster_name=cluster_name, resource_group=resource_group)
     try:
-        return await k8s_service.apply_ps_rotator_rbac(
+        note = await k8s_service.apply_ps_rotator_rbac(
             db, cluster_id, mode=mode, subject_name=subject)
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"rotator RBAC apply failed: {exc}")
         logger.warning("PS token: rotator RBAC for %s failed: %s", cluster_id, exc)
         return f"failed: {exc}"
+    if "no binding subject" in note:
+        # The note reaches the operator only through the result dict, and a later step
+        # raising means there is no result dict (see _failure_message). An unbound
+        # rotator does not fail until the first rotation, so the remedy belongs where
+        # the failure path can still read it.
+        warnings.append(note)
+    return note
 
 
 async def _ensure_eks_access_entry(db: Session, row: K8sCluster, warnings: list) -> None:
@@ -656,6 +736,98 @@ async def _ensure_eks_access_entry(db: Session, row: K8sCluster, warnings: list)
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"EKS access entry creation failed: {exc}")
         logger.warning("PS token: EKS access entry for %s failed: %s", row.id, exc)
+
+
+async def _ensure_aks_role_assignment(db: Session, row: K8sCluster, warnings: list, *,
+                                      namespace: str, cluster_name: str = "",
+                                      resource_group: str = "") -> None:
+    """Authorise the rotator's service principal against the AKS Kubernetes API.
+
+    The AKS twin of :func:`_ensure_eks_access_entry`, and it exists for the same
+    reason: on this cloud the in-cluster ClusterRoleBinding is not what decides.
+    Every cluster this dashboard builds sets ``azure_rbac_enabled``
+    (``terraform/k8s_cluster/azure_aks``), which hands Kubernetes API authorisation
+    for a Microsoft Entra principal to Azure role assignments — and the functional
+    account's service principal is typically given "Azure Kubernetes Service Cluster
+    User Role", which is a CONTROL-plane role: it lets the identity fetch a kubeconfig
+    and authenticate, and grants no Kubernetes verb at all.
+
+    So the whole path looks correct and fails at the FIRST ROTATION, inside the
+    plugin's own log, quoting Azure rather than Kubernetes::
+
+        HTTP 403 (Forbidden): serviceaccounts "pra-access" is forbidden: User "<oid>"
+        cannot get resource "serviceaccounts" ... User does not have access to the
+        resource in Azure. Update role assignment to allow access.
+
+    Reader and Writer are the two roles Azure documents as assignable at
+    ``<cluster>/namespaces/<name>``, so those are scoped to the rotator's namespace
+    and anything else (admin, cluster admin, a custom role) goes on the cluster.
+    Writer is the default: it carries ``secrets/*`` and ``serviceaccounts/*``, which
+    covers LongLived (the Secret lifecycle) and Bound (TokenRequest) both.
+
+    Non-fatal, like its EKS twin — the exact ``az role assignment create`` goes in
+    the warnings, so an operator whose dashboard credential cannot delegate roles has
+    the one command that fixes it.
+    """
+    from . import azure_service
+    oid = _cfg("k8s_ps_rotator_aks_sp_object_id")
+    role = _cfg("k8s_ps_rotator_aks_role", "writer")
+    subscription = _cfg("azure_subscription_id")
+    tf = _deploy_tf_variables(db, row)
+    name = (cluster_name or tf.get("cluster_name")
+            or _cfg(f"k8s_ps_cluster_name_{row.id}") or row.name)
+    rg = (resource_group or tf.get("resource_group_name")
+          or _cfg(f"k8s_ps_resource_group_{row.id}"))
+    scope = ""
+    if subscription and rg and name:
+        scope = azure_service.aks_cluster_resource_id(subscription, rg, name)
+        if (role or "").strip().lower() in ("reader", "writer"):
+            scope = f"{scope}/namespaces/{namespace}"
+
+    def _manual(reason: str) -> None:
+        # --assignee resolves the principal through Graph, which fails outright for a
+        # service principal the operator cannot read ("Cannot find user or service
+        # principal in graph database"); --assignee-object-id skips that lookup.
+        warnings.append(
+            f"{reason} — the rotator's identity has no Kubernetes access on this AKS "
+            "cluster until it holds an AKS data-plane role, which is what a "
+            "\"User does not have access to the resource in Azure\" 403 at the first "
+            "rotation means. Grant it: az role assignment create --role "
+            "\"Azure Kubernetes Service RBAC Writer\" --assignee-object-id "
+            f"{oid or '<sp-object-id>'} --assignee-principal-type ServicePrincipal "
+            f"--scope {scope or '<cluster-resource-id>/namespaces/' + namespace}")
+
+    if not oid:
+        _manual("k8s_ps_rotator_aks_sp_object_id is not set, so no Azure role "
+                "assignment was created")
+        return
+    if not _cfg_bool("k8s_ps_rotator_aks_assign_role", True):
+        return
+    if not scope:
+        _manual("the AKS subscription / resource group / cluster name could not be "
+                "resolved, so no Azure role assignment was created")
+        return
+    try:
+        # None means "could not tell" and must not read as False: a cluster that does
+        # use Azure RBAC would then be left unauthorised on the strength of one failed
+        # GET. Only a definite False skips the grant.
+        if await azure_service.aks_azure_rbac_enabled(rg, name) is False:
+            logger.info("PS token: %s does not use Azure RBAC — the ClusterRoleBinding "
+                        "is what authorises the rotator there", row.name)
+            return
+        out = await azure_service.ensure_role_assignment(
+            scope=scope, role=role, principal_id=oid)
+        logger.info("PS token: AKS role assignment for %s: %s", row.name, out)
+        if out.get("created"):
+            # A new assignment takes up to five minutes to reach the authorisation
+            # server, and register rotates at step 5.
+            warnings.append(
+                f"granted the rotator {role} on {scope} — a new Azure role assignment "
+                "can take up to five minutes to take effect, so a rotation that 403s "
+                "immediately after registration is worth one retry")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PS token: AKS role assignment for %s failed: %s", row.id, exc)
+        _manual(f"the Azure role assignment for the rotator failed ({exc})")
 
 
 async def _register_pravault_mirror(db: Session, row: K8sCluster, *,
@@ -863,10 +1035,19 @@ async def sync_status(db: Session, cluster_id: str) -> dict:
     out = {"registered": True,
            "managed_account_id": row.ps_token_account_id,
            "pravault_account_id": row.ps_pra_vault_account_id or "",
+           # The PRA-side Vault account, which is what the subscriber writes into. With
+           # no subscriber the modal cannot otherwise tell "repairable here" from "there
+           # is nothing in PRA to sync to yet".
+           "pra_vault_present": bool(row.pra_vault_account_id),
            "linked": False}
     if not row.ps_pra_vault_account_id:
-        out["note"] = ("no PRA Vault Token account is registered, so rotations do not "
-                       "reach PRA")
+        out["note"] = (
+            "no PRA Vault Token account is registered, so rotations do not reach PRA — "
+            "Repair sync creates it and links it"
+            if row.pra_vault_account_id else
+            "no PRA Vault Token account is registered, and this cluster has no PRA Vault "
+            "account to write into — register the PRA k8s tunnel with credential "
+            "injection first, then Repair sync")
         return out
     from . import ps_api_service
     try:

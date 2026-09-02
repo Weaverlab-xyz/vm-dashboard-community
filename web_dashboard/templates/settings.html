@@ -2146,6 +2146,7 @@
                 </label>
               </div>
               <p class="text-xs text-gray-400">In-cluster rotator RBAC. The binding subject differs per cloud: AKS needs the service principal's <em>object id</em> (the plugin logs it on every run — not the client id), EKS the access-entry username + the IAM principal ARN behind the functional account's key. GKE derives the subject from the functional account's name when blank.</p>
+              <p class="text-xs text-gray-400">On AKS and EKS the binding alone does not authorise anything: an AKS cluster with Azure RBAC (every cluster built here) decides from an <em>Azure role assignment</em>, and EKS from an access entry. Both are created for you when the identity below is set, and both fail only at the first rotation when they are missing — on AKS with <span class="font-mono">&quot;User does not have access to the resource in Azure&quot;</span>.</p>
               <div class="grid grid-cols-3 gap-3">
                 <label class="flex items-center gap-2 text-sm text-gray-700 col-span-3">
                   <input type="checkbox" x-model="panelCfg.k8s_ps_rotator_apply_rbac"
@@ -2164,6 +2165,21 @@
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="00000000-1111-2222-3333-444444444444">
                 </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">AKS Data-Plane Role <span class="text-gray-400 font-normal">(Azure RBAC)</span></label>
+                  <select x-model="panelCfg.k8s_ps_rotator_aks_role"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="writer">RBAC Writer (namespace-scoped)</option>
+                    <option value="reader">RBAC Reader (namespace-scoped)</option>
+                    <option value="admin">RBAC Admin (cluster)</option>
+                    <option value="clusteradmin">RBAC Cluster Admin (cluster)</option>
+                  </select>
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700 col-span-3">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_rotator_aks_assign_role"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Grant the AKS object id that role (Writer carries secrets + serviceaccounts, which covers both token modes)
+                </label>
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">EKS Access-Entry Username</label>
                   <input type="text" x-model="panelCfg.k8s_ps_rotator_eks_username"

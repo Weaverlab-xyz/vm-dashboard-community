@@ -254,6 +254,136 @@ def aks_get_token(server_id: str = AKS_AAD_SERVER_APP_ID) -> str:
     return cred.get_token(f"{server_id}/.default").token
 
 
+# ── AKS data-plane authorisation (Azure RBAC for Kubernetes) ──────────────────
+# Every cluster this dashboard builds sets ``azure_rbac_enabled``, which hands
+# Kubernetes API *authorisation* for a Microsoft Entra principal to Azure role
+# assignments. Two things follow, and both read as something else:
+#
+#   * "Azure Kubernetes Service Cluster User Role" is a CONTROL-plane role — it lets
+#     an identity fetch a kubeconfig and nothing more. An identity holding only that
+#     authenticates to the API server perfectly and is then refused every verb.
+#   * the refusal quotes Azure, not Kubernetes: "User does not have access to the
+#     resource in Azure. Update role assignment to allow access."
+#
+# The four data-plane roles below are the ones that grant Kubernetes verbs. Reader
+# and Writer may be assigned at ``<cluster id>/namespaces/<name>`` scope, which is
+# how a single-namespace consumer (the Password Safe token rotator) gets exactly the
+# namespace it works in. GUIDs are well-known and identical in every tenant.
+AKS_RBAC_ROLE_IDS = {
+    # read-only, and deliberately NOT Secrets
+    "reader": "7f6c6a51-bcf8-42ba-9220-52d62157d7db",
+    # read/write most objects incl. secrets/* and serviceaccounts/*, no roles/bindings
+    "writer": "a7ffa36f-339b-4b5c-8bdf-e2c188b2c0eb",
+    # writer + roles/rolebindings within the scope
+    "admin": "3498e952-d568-435e-9b2c-8d77e338d7f7",
+    # cluster-wide super-user
+    "clusteradmin": "b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b",
+}
+
+_ARM = "https://management.azure.com"
+
+
+def aks_cluster_resource_id(subscription_id: str, resource_group: str,
+                            cluster_name: str) -> str:
+    """The ARM id of an AKS cluster — the scope every data-plane role assignment
+    hangs off (append ``/namespaces/<name>`` to narrow one to a namespace)."""
+    if not (subscription_id and resource_group and cluster_name):
+        raise AzureError(
+            "an AKS resource id needs a subscription id, a resource group and the "
+            "cluster name")
+    return (f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.ContainerService/managedClusters/{cluster_name}")
+
+
+async def _arm_token(credential) -> str:
+    # get_token is blocking on the sync azure-identity credential.
+    return (await asyncio.to_thread(credential.get_token, f"{_ARM}/.default")).token
+
+
+async def aks_azure_rbac_enabled(resource_group: str, cluster_name: str) -> Optional[bool]:
+    """Whether the cluster delegates Kubernetes authorisation to Azure RBAC.
+
+    ``None`` when it could not be determined — callers must not read that as False.
+    The property is spelled ``enableAzureRBAC`` over ARM and ``enableAzureRbac`` by
+    the CLI, so both spellings are accepted; keying on one would quietly report every
+    cluster as not using Azure RBAC.
+    """
+    import httpx
+    credential, subscription = await _ensure_creds()
+    token = await _arm_token(credential)
+    url = (f"{_ARM}{aks_cluster_resource_id(subscription, resource_group, cluster_name)}"
+           f"?api-version=2023-10-01")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        logger.warning("AKS %s: could not read aadProfile (%s): %s",
+                       cluster_name, resp.status_code, resp.text[:300])
+        return None
+    aad = ((resp.json().get("properties") or {}).get("aadProfile") or {})
+    for key in ("enableAzureRBAC", "enableAzureRbac"):
+        if key in aad:
+            return bool(aad[key])
+    return False
+
+
+async def ensure_role_assignment(*, scope: str, role: str, principal_id: str,
+                                 principal_type: str = "ServicePrincipal") -> dict:
+    """Idempotently assign ``role`` on ``scope`` to ``principal_id``.
+
+    ``role`` is a key of :data:`AKS_RBAC_ROLE_IDS` or any built-in/custom role
+    definition GUID. The assignment name is derived from (scope, principal, role), so
+    the PUT is an upsert and a repeat is free — no listing, no search.
+
+    Returns ``{"created": bool, "name": str, "scope": str}``. Needs
+    ``Microsoft.Authorization/roleAssignments/write`` (User Access Administrator or
+    RBAC Administrator) on the scope; a 403 here is the dashboard's own credential
+    being unable to delegate, which is worth saying rather than retrying.
+    """
+    import httpx
+    from . import azure_role_rules as rules
+    key = (role or "").strip().lower().replace(" ", "")
+    role_id = AKS_RBAC_ROLE_IDS.get(key, (role or "").strip())
+    if not rules.is_guid(role_id):
+        raise AzureError(
+            f"unknown role {role!r} — expected a role definition GUID or one of "
+            f"{', '.join(sorted(AKS_RBAC_ROLE_IDS))}")
+    if not scope:
+        raise AzureError("a role assignment needs a scope")
+    try:
+        # An application (client) id here is accepted by ARM and grants NOTHING — the
+        # assignment binds to the object id. Same trap as the rotator's oid config.
+        principal_id = rules.check_principal(principal_id)
+    except rules.AzureRoleRuleError as exc:
+        raise AzureError(str(exc)) from exc
+    credential, subscription = await _ensure_creds()
+    token = await _arm_token(credential)
+    name = rules.assignment_name(scope, principal_id, role_id)
+    url = f"{_ARM}{rules.assignment_path(scope, name)}?api-version=2022-04-01"
+    # A role definition id is subscription-qualified, and it must be the subscription
+    # the SCOPE lives in — not necessarily the credential's default one.
+    parts = scope.strip("/").split("/")
+    if len(parts) > 1 and parts[0].lower() == "subscriptions":
+        subscription = parts[1]
+    body = {"properties": {
+        "roleDefinitionId": rules.role_definition_id(subscription, role_id),
+        "principalId": principal_id,
+        # Stated explicitly: without it ARM resolves the principal through Graph and a
+        # service principal it cannot read 400s with "principal not found".
+        "principalType": principal_type,
+    }}
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.put(url, json=body,
+                                headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code in (200, 201):
+        return {"created": True, "name": name, "scope": scope, "role_id": role_id}
+    if resp.status_code == 409 and "RoleAssignmentExists" in resp.text:
+        # An equivalent assignment exists under a different name (someone made it by
+        # hand, or at a wider scope). Nothing to do, and not a failure.
+        return {"created": False, "name": name, "scope": scope, "role_id": role_id}
+    raise AzureError(
+        f"role assignment failed ({resp.status_code}): {resp.text[:400]}")
+
+
 def _get_compute(cred, sub_id):
     return ComputeManagementClient(cred, sub_id)
 

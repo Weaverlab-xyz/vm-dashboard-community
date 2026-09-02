@@ -119,7 +119,8 @@ k8s_ps_token_ttl_seconds k8s_ps_token_change_on_register
 k8s_ps_token_delete_legacy_secret k8s_ps_token_register_on_provision
 k8s_ps_pravault_mirror_enabled k8s_ps_token_checkout_duration_min
 k8s_ps_token_address_options k8s_ps_rotator_apply_rbac k8s_ps_rotator_gke_sa_email
-k8s_ps_rotator_aks_sp_object_id k8s_ps_rotator_eks_username
+k8s_ps_rotator_aks_sp_object_id k8s_ps_rotator_aks_assign_role
+k8s_ps_rotator_aks_role k8s_ps_rotator_eks_username
 k8s_ps_rotator_eks_principal_arn k8s_ps_rotator_eks_create_access_entry
 k8s_ps_rotator_bootstrap_namespace k8s_ps_rotator_bootstrap_sa
 pra_k8s_namespace pra_k8s_sa_name bt_vault_account_group_id
@@ -144,6 +145,16 @@ ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
 # data-api authenticate with a short-lived IAM token and carry no database password at
 # all. One shared operator-owned account can serve the second group and cannot serve the
 # first, so the mode has to be answerable per engine.
+
+# ADDED since the split, deliberately: `k8s_ps_rotator_aks_assign_role` and
+# `k8s_ps_rotator_aks_role`. The AKS half of the rotator RBAC was one key — the service
+# principal's object id, used as the ClusterRoleBinding subject — which quietly assumed
+# Kubernetes RBAC decides. It does not on the clusters this dashboard builds: they set
+# `azure_rbac_enabled`, so a Microsoft Entra principal is authorised by an Azure role
+# assignment, and the "Cluster User Role" such an identity usually holds is control-plane
+# only (fetch a kubeconfig, zero Kubernetes verbs). So there is now a switch for making
+# that assignment and a choice of which data-plane role, exactly as EKS has
+# `k8s_ps_rotator_eks_create_access_entry` next to its username.
 
 # RETIRED, deliberately absent from LEGACY_KEYS above: the six `k8s_token_sync_*` keys
 # (enabled / interval_minutes / request_duration_min / max_per_pass / max_failures /
