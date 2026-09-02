@@ -282,6 +282,59 @@ def test_postgres_grant_is_per_role_admin_option():
     assert "ADMIN OPTION" in stmt and "CREATEROLE" not in stmt
 
 
+# ── the functional account's OWN database login ───────────────────────────────
+#
+# The grant above administers the managed user; it says nothing about whether the
+# functional account can log in at all. That login is the one credential the dashboard
+# cannot create -- its password is the third ':'-segment of the functional account's
+# password in Password Safe, which the API never returns. Live 2026-09-02, Azure
+# postgres: a login that was never created failed Verify as "FATAL: password
+# authentication failed for user 'psfa_pg'", indistinguishable from a wrong password,
+# with nothing on the provisioning job having named the prerequisite.
+
+def test_postgres_fa_login_is_a_role_with_login_and_a_named_password_source():
+    stmt = svc._fa_login_statement("postgres", fa_db_user="psfa_pg")
+    assert 'CREATE ROLE "psfa_pg"' in stmt and "LOGIN PASSWORD" in stmt
+    # The placeholder has to say WHERE the password comes from, or the operator invents
+    # one and Verify fails identically to before.
+    assert "third :-segment" in stmt
+
+
+def test_every_supported_engine_has_a_login_statement_and_others_have_none():
+    for engine in ("postgres", "mysql", "sqlserver"):
+        assert svc._fa_login_statement(engine, fa_db_user="fa"), engine
+    assert svc._fa_login_statement("oracle", fa_db_user="fa") == ""
+
+
+def test_the_login_prerequisite_is_reported_independently_of_the_grant():
+    """It must NOT hang off the grant: under self-rotation the grant is skipped, and
+    Verify Functional Account still signs in as this login on every managed system."""
+    src = _read_service_source()
+    i = src.index("login_stmt = _fa_login_statement(")
+    j = src.index("if grant and fa_db_user:", i)
+    window = src[i:j]
+    # its own guard, and one that does not mention `grant`
+    assert "if login_stmt and fa_db_user and not fa_is_admin:" in window, window
+    assert "grant" not in window.split("if login_stmt")[1], window
+    # and it is emitted BEFORE the grant line, because it is the prerequisite
+    assert i < j
+
+
+def test_the_login_message_names_the_error_it_prevents():
+    src = _read_service_source()
+    i = src.index("login_stmt = _fa_login_statement(")
+    window = src[i:i + 1600]
+    assert "password authentication failed for user" in window, window
+    # and says the error cannot tell a missing login from a wrong password
+    assert "does not tell you which" in window, window
+
+
+def _read_service_source():
+    path = os.path.join(_ROOT, "web_dashboard", "services", "cloud_database_service.py")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
 # ── the Account Discovery grant (MySQL only) ──────────────────────────────────
 #
 # CREATE USER confers no read of the account catalogue, so the rotation grant above
