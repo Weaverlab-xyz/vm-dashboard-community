@@ -18,7 +18,7 @@
 <body class="{{ theme.body_bg }} min-h-screen font-sans text-gray-800">
 
   <!-- Navigation -->
-  <nav class="{{ theme.nav_bg }} text-white shadow-lg relative" x-data="responsiveNav()" x-cloak x-show="$store.auth.isLoggedIn" @keydown.escape.window="mobileNav = false">
+  <nav class="{{ theme.nav_bg }} text-white shadow-lg relative" x-data="responsiveNav()" x-cloak x-show="$store.auth.isLoggedIn" @keydown.escape.window="mobileNav = false; moreOpen = false">
     <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
       <div x-ref="navRow" class="flex items-center justify-between h-16 overflow-hidden">
         <!-- Brand -->
@@ -60,22 +60,21 @@
              @click="mobileNav = false"
              class="flex items-center space-x-1 flex-shrink-0">
           {% include '_nav_links.html' %}
-          {# Overflow menu. Lives here rather than in _nav_links.html so the drawer never
-             grows one: that include is rendered twice and must stay a flat, complete list.
-             Hidden unless applyPins actually moved something into it. #}
-          <div class="relative" x-show="moreCount > 0" x-cloak
-               @keydown.escape="moreOpen = false">
-            <button @click.stop="moreOpen = !moreOpen"
-                    class="px-2 py-2 rounded-md text-sm font-medium {{ theme.nav_hover }}"
-                    :aria-expanded="moreOpen"
-                    aria-label="More navigation links">More ▾</button>
-            <div x-ref="navMore"
-                 x-show="moreOpen" x-cloak
-                 @click.outside="moreOpen = false"
-                 @click="mobileNav = false; moreOpen = false"
-                 class="absolute right-0 mt-1 w-56 flex flex-col items-stretch space-y-1
-                        {{ theme.nav_bg }} shadow-2xl rounded-lg z-50 p-2"></div>
-          </div>
+          {# Overflow menu BUTTON. Lives here rather than in _nav_links.html so the drawer
+             never grows one: that include is rendered twice and must stay a flat, complete
+             list. Hidden unless applyPins actually moved something into it.
+
+             The button only. Its popover is a sibling of navRow, not a child — navRow is
+             `overflow-hidden` (that is what makes the scrollWidth fold read meaningful),
+             and an absolutely positioned panel hanging below a 64px row is a descendant of
+             that clip: it opened at full size and 122 of its 132px were clipped away, so
+             the button read as dead. See positionMore() for how the two are re-anchored. #}
+          <button x-ref="moreBtn"
+                  x-show="moreCount > 0" x-cloak
+                  @click.stop="toggleMore()"
+                  class="px-2 py-2 rounded-md text-sm font-medium {{ theme.nav_hover }}"
+                  :aria-expanded="moreOpen"
+                  aria-label="More navigation links">More ▾</button>
         </div>
         <div x-show="compact && mobileNav"
              @click="mobileNav = false"
@@ -119,6 +118,26 @@
         </div>
       </div>
     </div>
+    {# The overflow popover. A child of <nav> (which is `relative`) rather than of the row
+       holding its button, so navRow's `overflow-hidden` cannot clip it — the nav is the
+       nearest unclipped positioned ancestor, so `top-16` lands it flush under the 64px
+       row and positionMore() supplies the `right` that keeps it under its button.
+
+       `!compact` as well as moreOpen: the button is inside navInline and disappears with
+       it when the row folds, but this panel is not, so without the guard a popover left
+       open across a resize would outlive its trigger.
+
+       Capped and scrollable, like the drawer: a persona pins 5-7 links, so the OTHER
+       ~25 land here, and measured at a 720px viewport that popover is 1012px tall — its
+       bottom third simply left the screen with nothing to scroll. #}
+    <div x-ref="navMore"
+         x-show="moreOpen && !compact" x-cloak
+         @click.outside="moreOpen = false"
+         @click="mobileNav = false; moreOpen = false"
+         class="absolute top-16 mt-1 w-56 flex flex-col items-stretch space-y-1
+                max-h-[calc(100vh-5rem)] overflow-y-auto
+                {{ theme.nav_bg }} shadow-2xl rounded-lg z-50 p-2"></div>
+
     <!-- Flyout backdrop: dims the page while the drawer is open. Click
          to dismiss. Sits below the drawer (z-40 < drawer's z-50). -->
     <div x-show="compact && mobileNav"

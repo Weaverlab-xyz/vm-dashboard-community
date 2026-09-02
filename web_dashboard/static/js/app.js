@@ -463,6 +463,51 @@ function responsiveNav() {
             }
         },
 
+        // Open/close the overflow popover, anchoring it before it is shown.
+        toggleMore() {
+            this.moreOpen = !this.moreOpen;
+            if (this.moreOpen) this.positionMore();
+        },
+
+        // Anchor the popover's right edge to the More button's right edge.
+        //
+        // The popover cannot live inside the button's wrapper: base.html's x-ref="navRow"
+        // is `overflow-hidden` — which is what makes the `scrollWidth > clientWidth` fold
+        // read meaningful — and a panel hanging below a 64px row is a descendant of that
+        // clip. Measured in a browser: the panel opened at its full 132px and 122px of it
+        // were clipped away, leaving a same-colour sliver on the nav. z-index does not
+        // help; overflow clipping is not a stacking question.
+        //
+        // So the panel is a child of <nav> instead, and this restores the `right-0` it lost
+        // by moving. Rects rather than offsetLeft: the difference of two viewport-relative
+        // rects is scroll-independent and does not care which ancestor is the offsetParent.
+        //
+        // The host is read as menu.parentElement, NOT as $el. $el is per-expression: called
+        // from the button's own @click it resolves to the BUTTON, so `$el.right - btn.right`
+        // was 0 and this bailed every single time the user pressed the thing — the exact
+        // symptom it exists to fix, moved one layer down. parentElement is <nav>, which is
+        // the `relative` containing block the `right` offset is resolved against, and it is
+        // the same node no matter which element the caller was evaluated on.
+        positionMore() {
+            const btn = this.$refs.moreBtn;
+            const menu = this.$refs.navMore;
+            if (!btn || !menu || !menu.parentElement) return;
+            // Folded (or pre-layout): the button has no box, and trusting a zero rect
+            // would fling the panel to the far left. It is x-show'd off anyway.
+            if (!btn.offsetWidth) return;
+            const host = menu.parentElement.getBoundingClientRect();
+            const b = btn.getBoundingClientRect();
+            const right = host.right - b.right;
+            // Negative means the button is currently sitting outside the nav: measure()
+            // forces the inline row visible before it reads the fold, so mid-measure an
+            // overflowing row really does push this button past the nav's right edge.
+            // Clamping that to 0 would PERSIST a wrong anchor (the panel is x-show'd off
+            // while compact, so nothing would reveal it until the window grew again).
+            // Leave the last good value alone instead; the next open recomputes.
+            if (right <= 0) return;
+            menu.style.right = right + 'px';
+        },
+
         // How many overflow links are actually reachable. Counted rather than assumed,
         // because most unpinned links are admin-only (`x-show="$store.auth.isAdmin"`) and a
         // non-admin would otherwise get a "More" button opening an empty popover.
@@ -496,6 +541,10 @@ function responsiveNav() {
                 this.$nextTick(() => {
                     const row = this.$refs.navRow;
                     this.countMore();
+                    // Re-anchor here too, not just on open: this is the one moment the
+                    // inline row is forced visible, so it is the only place a resize
+                    // underneath an already-open popover can re-measure the button.
+                    this.positionMore();
                     if (row) {
                         this.compact = row.scrollWidth > row.clientWidth + 1;
                     }
