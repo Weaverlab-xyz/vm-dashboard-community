@@ -296,8 +296,10 @@ def aks_cluster_resource_id(subscription_id: str, resource_group: str,
 
 
 async def _arm_token(credential) -> str:
-    # get_token is blocking on the sync azure-identity credential.
-    return (await asyncio.to_thread(credential.get_token, f"{_ARM}/.default")).token
+    # get_token blocks on the sync azure-identity credential, so it goes through
+    # _to_thread onto Azure's own pool. The shared default executor is what this
+    # module's shim exists to keep off — test_cloud_executor enforces it by source.
+    return (await _to_thread(credential.get_token, f"{_ARM}/.default")).token
 
 
 async def aks_azure_rbac_enabled(resource_group: str, cluster_name: str) -> Optional[bool]:
