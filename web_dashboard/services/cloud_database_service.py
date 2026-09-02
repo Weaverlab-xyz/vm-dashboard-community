@@ -1527,13 +1527,21 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
     on failure so the caller falls back to admin staging."""
     from . import azure_service, jumpoint_host_service
     from . import cloud_db_sql_service as sql
-    region = _cfg(row.cloud + "_region") or row.region
+    # The DATABASE's own region first, and the resource group resolved FROM it — the
+    # flat `azure_resource_group` is the default region's, and both clouddb jump VMs
+    # carry the SAME name, so a flat group silently addresses the default region's VM.
+    # Proven live 2026-09-02: a westus2 MySQL onboarding ran its client on the centralus
+    # jumpoint and failed with "Unknown MySQL server host … (-2)" — the database's
+    # private DNS zone and VNet only exist in its own region. `rg` also rides into the
+    # plugin address that _onboard_ps_managed_systems registers, so the same slip aims
+    # every later rotation at the wrong VM as well.
+    region = row.region or _cfg("azure_location")
     host = await jumpoint_host_service.ensure_jumpoint_host(row.cloud, region)
     if not host:
         raise CloudDatabaseError(
             "no Azure jump VM available — the shared clouddb-jumpoint VM must be up to "
             "run the DB client (check azure_aci_deploy_key + azure_jumpoint_subnet_id)")
-    rg = _cfg("azure_resource_group")
+    rg = resolve_region("azure", region)["resource_group"]
     admin_username = (tf_variables.get("administrator_login")
                       or tf_variables.get("master_username") or "dbadmin")
     admin_password = (config_service.get(f"clouddb/{row.id}/admin")

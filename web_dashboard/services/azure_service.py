@@ -11,6 +11,7 @@ Credentials are cached in memory after the first successful fetch so Password
 Safe is only called once per server lifetime. Call invalidate_credentials() to
 force a refresh (e.g. after credential rotation).
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -1766,32 +1767,108 @@ def _finalize_run_result(stdout: str, stderr: str) -> dict:
     }
 
 
+# Azure serialises Run Command STRICTLY per VM: the action installs the
+# RunCommandLinux extension, runs the script and removes it again, and a second
+# invocation while that is in flight is rejected outright with HTTP 409 —
+# "(Conflict) Run command extension execution is in progress. Please wait for
+# completion before invoking a run command." There is no queue on Azure's side.
+#
+# The jump VM this module drives is SHARED by every cloud-database onboarding in a
+# region, and the job runner happily has two `clouddb_ps_register` jobs in flight at
+# once, so the collision is ordinary rather than exotic: two registrations claimed two
+# seconds apart on 2026-09-02 put two run commands on `clouddb-jumpoint`, and the
+# second job died on the 409 at 0s having done nothing. Waiting the other run out is
+# the whole fix — it is a lock, not a fault, and the holder finishes in minutes.
+#
+# Deliberately a retry rather than an in-process lock: a lock is per WORKER PROCESS
+# (see the process-local-state trap that has bitten this codebase before), so it would
+# still let two replicas — or the app and the worker — collide, while the 409 itself is
+# authoritative for every caller in the subscription.
+_RUN_CMD_BUSY_MARKER = "run command extension execution is in progress"
+_RUN_CMD_BUSY_WAIT = 900       # how long to wait out another run command, seconds
+_RUN_CMD_BUSY_POLL = 15        # gap between attempts, seconds
+
+
+class _RunCommandBusy(Exception):
+    """Another run command owns this VM's run-command extension (Azure's 409)."""
+
+
+def _is_run_command_busy(exc: Exception) -> bool:
+    """Whether ``exc`` is Azure refusing a run command because one is already running.
+
+    Matched on the message, not only on the 409 status: a resource group / VM name
+    conflict is also a 409 here and must NOT be waited out."""
+    return _RUN_CMD_BUSY_MARKER in str(exc).lower()
+
+
 def _run_vm_command_sync(cred, sub_id: str, rg: str, vm_name: str,
                          commands: list, timeout: int) -> dict:
     compute = _get_compute(cred, sub_id)
-    poller = compute.virtual_machines.begin_run_command(
-        rg, vm_name, RunCommandInput(command_id="RunShellScript",
-                                     script=_run_command_script(commands)))
+    try:
+        poller = compute.virtual_machines.begin_run_command(
+            rg, vm_name, RunCommandInput(command_id="RunShellScript",
+                                         script=_run_command_script(commands)))
+    except Exception as e:
+        if _is_run_command_busy(e):
+            raise _RunCommandBusy(str(e)) from e
+        raise
     result = poller.result(timeout=timeout)
+    if not poller.done():
+        # LROPoller.result(timeout=) does NOT abort the operation — it stops WAITING and
+        # hands back whatever was last polled, which here parses into an empty result
+        # and so reports the catch-all "Failed, rc=-1, no output". Say what actually
+        # happened instead: the script is still running in the guest, which is also why
+        # the next call to this VM will be met with the busy 409 above.
+        raise AzureError(
+            f"Azure VM Run Command on {vm_name} was still running after {timeout}s — "
+            f"the guest script has not finished (it keeps running on the VM). Nothing "
+            f"was read back; retry once it completes.")
     stdout, stderr = _parse_run_command_output(result)
     return _finalize_run_result(stdout, stderr)
 
 
 async def vm_run_command(rg: str, vm_name: str, commands: list, *,
-                         timeout: int = 300) -> dict:
+                         timeout: int = 300,
+                         busy_timeout: int = _RUN_CMD_BUSY_WAIT) -> dict:
     """Run shell ``commands`` in a VM's guest via Azure VM Run Command and wait for
     the result. Returns ``{status, response_code, stdout, stderr}`` — the same shape
     as :func:`aws_service.ssm_send_command`: a non-Success status (or non-zero
     response_code) is surfaced to the caller rather than raised, so callers decide
-    whether an in-guest failure is fatal. Only a transport/SDK error raises."""
-    try:
-        cred, sub_id = await _ensure_creds()
-        return await _to_thread(
-            _run_vm_command_sync, cred, sub_id, rg, vm_name, commands, timeout)
-    except AzureError:
-        raise
-    except Exception as e:
-        raise AzureError(f"Azure VM Run Command on {vm_name} failed: {e}") from e
+    whether an in-guest failure is fatal. Only a transport/SDK error raises.
+
+    A run command already executing on ``vm_name`` is waited out for up to
+    ``busy_timeout`` seconds rather than raised (see the note above): the VM is shared,
+    so "busy" is the normal state of a second concurrent onboarding, not a failure.
+    The sleep is on the event loop, not in the SDK thread, so waiting here does not
+    hold a slot in Azure's bounded pool."""
+    deadline = time.monotonic() + max(0, busy_timeout)
+    waited = False
+    while True:
+        try:
+            cred, sub_id = await _ensure_creds()
+            result = await _to_thread(
+                _run_vm_command_sync, cred, sub_id, rg, vm_name, commands, timeout)
+            if waited:
+                logger.info("Azure Run Command on %s started after waiting out another "
+                            "run command", vm_name)
+            return result
+        except _RunCommandBusy as busy:
+            if time.monotonic() >= deadline:
+                raise AzureError(
+                    f"Azure VM Run Command on {vm_name} could not start: another run "
+                    f"command has been executing on that VM for more than "
+                    f"{busy_timeout}s. That VM is shared by every cloud-database "
+                    f"onboarding in its region — either another onboarding is still "
+                    f"running (retry when it finishes) or a previous one left a hung "
+                    f"script behind, which restarting the VM clears.") from busy
+            waited = True
+            logger.info("Azure Run Command on %s is busy (another run command is "
+                        "executing) — retrying in %ss", vm_name, _RUN_CMD_BUSY_POLL)
+            await asyncio.sleep(_RUN_CMD_BUSY_POLL)
+        except AzureError:
+            raise
+        except Exception as e:
+            raise AzureError(f"Azure VM Run Command on {vm_name} failed: {e}") from e
 
 
 def _create_image_from_vm_sync(cred, sub_id: str, rg: str, vm_name: str, image_name: str, generalize: bool) -> dict:
