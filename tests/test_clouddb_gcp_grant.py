@@ -306,27 +306,57 @@ def test_every_supported_engine_has_a_login_statement_and_others_have_none():
     assert svc._fa_login_statement("oracle", fa_db_user="fa") == ""
 
 
-def test_the_login_prerequisite_is_reported_independently_of_the_grant():
-    """It must NOT hang off the grant: under self-rotation the grant is skipped, and
-    Verify Functional Account still signs in as this login on every managed system."""
+def test_the_login_prerequisite_is_reported_from_the_cloud_AGNOSTIC_path():
+    """It must NOT live in the GCP-only creation function, which is where it shipped and
+    where it fired for nobody who needed it: Azure and AWS are the two clouds whose
+    referenced functional account MUST carry a real per-server login, and neither runs
+    _create_db_managed_user_gcp. Reporting it there also named a login the dashboard had
+    just created itself (data-api's rotator IAM user)."""
     src = _read_service_source()
-    i = src.index("login_stmt = _fa_login_statement(")
-    j = src.index("if grant and fa_db_user:", i)
-    window = src[i:j]
-    # its own guard, and one that does not mention `grant`
-    assert "if login_stmt and fa_db_user and not fa_is_admin:" in window, window
-    assert "grant" not in window.split("if login_stmt")[1], window
-    # and it is emitted BEFORE the grant line, because it is the prerequisite
-    assert i < j
+    gcp_start = src.index("async def _create_db_managed_user_gcp(")
+    gcp_end = src.index("def _dbssm_assume_role(", gcp_start)
+    assert "login_stmt = _fa_login_statement(" not in src[gcp_start:gcp_end],         "the login prerequisite must not be reported from the GCP-only function"
+    # it lives in the shared reporter, and the reporter is called from the shared path
+    assert "def _report_fa_db_prereqs(" in src
+    call = src.index("_report_fa_db_prereqs(" + chr(10))
+    assert call > gcp_end, "the call belongs to the cloud-agnostic registration path"
 
 
 def test_the_login_message_names_the_error_it_prevents():
     src = _read_service_source()
-    i = src.index("login_stmt = _fa_login_statement(")
-    window = src[i:i + 1600]
+    i = src.index("def _report_fa_db_prereqs(")
+    window = src[i:i + 2400]
     assert "password authentication failed for user" in window, window
     # and says the error cannot tell a missing login from a wrong password
     assert "does not tell you which" in window, window
+
+
+def test_the_login_line_is_independent_of_the_grant_line():
+    """Under self-rotation there is no grant, and Verify Functional Account still signs
+    in as this login on every managed system — so the login must not be gated on it."""
+    src = _read_service_source()
+    i = src.index("def _report_fa_db_prereqs(")
+    window = src[i:i + 2600]
+    login_at = window.index("if login_stmt:")
+    grant_at = window.index("if report_grant:")
+    assert login_at < grant_at, "the prerequisite is reported first"
+    assert "report_grant" not in window[login_at:grant_at],         "the login line must not consult the grant flag"
+
+
+def test_only_a_referenced_account_with_a_login_half_has_a_prerequisite():
+    """create mode signs in as the minted admin; GCP IAM auth has no login half at all.
+    Both must report nothing, or every onboarding grows a line telling the operator to
+    create a principal that already exists."""
+    CONF.clear()
+    CONF["clouddb_ps_functional_account_azure_postgres"] = "SP:psfa_pg"
+    assert svc._fa_db_login(mode="reference",
+                            fa_key="clouddb_ps_functional_account_azure_postgres") == "psfa_pg"
+    assert svc._fa_db_login(mode="create",
+                            fa_key="clouddb_ps_functional_account_azure_postgres") == ""
+    CONF["clouddb_ps_functional_account_gcp_postgres"] = "ADC:"
+    assert svc._fa_db_login(mode="reference",
+                            fa_key="clouddb_ps_functional_account_gcp_postgres") == ""
+    CONF.clear()
 
 
 def _read_service_source():
