@@ -1627,6 +1627,26 @@ def _fa_grant_statement(engine: str, *, fa_db_user: str, managed_user: str,
     return ""
 
 
+def _fa_login_statement(engine: str, *, fa_db_user: str) -> str:
+    """The statement that CREATES the functional account's own database login, or ``""``.
+
+    The one credential in this feature the dashboard cannot issue: the login's password
+    is the third ``:``-segment of the functional account's password in Password Safe, and
+    Password Safe never returns a functional account's password over the API. So the
+    dashboard can name the statement but not run it, which is why this is a job-log line
+    and not a call."""
+    if engine == "postgres":
+        return (f'CREATE ROLE "{fa_db_user}" LOGIN PASSWORD '
+                f"'<the functional account password's third :-segment>';")
+    if engine == "mysql":
+        return (f"CREATE USER '{fa_db_user}'@'%' IDENTIFIED BY "
+                f"'<the functional account password's third :-segment>';")
+    if engine == "sqlserver":
+        return (f"CREATE LOGIN [{fa_db_user}] WITH PASSWORD = "
+                f"'<the functional account password's third :-segment>';")
+    return ""
+
+
 def _fa_discovery_grant_statement(engine: str, *, fa_db_user: str,
                                   fa_host: str = "%") -> str:
     """The extra grant ACCOUNT DISCOVERY needs on MySQL, or ``""``.
@@ -1946,6 +1966,29 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     grant = "" if (self_rotating or fa_is_admin) else _fa_grant_statement(
         engine, fa_db_user=fa_db_user, managed_user=managed_user,
         managed_host=managed_host)
+    # 4a. Before the grant, the prerequisite the grant silently assumes: the functional
+    #     account's own DB login has to EXIST on this server, with the password Password
+    #     Safe holds. The dashboard creates only the managed user and cannot create this
+    #     one — it never learns that password (§0 of the runbook). Reported whether or
+    #     not there is a grant to go with it, because Verify Functional Account logs in
+    #     as this login on every managed system, self-rotation included: under
+    #     self-rotation the grant is skipped and this line would otherwise be the only
+    #     thing an operator never gets told. Live 2026-09-02, Azure postgres: a missing
+    #     login fails Verify as "FATAL: password authentication failed for user
+    #     '<fa>'" — identical to a wrong password, because PostgreSQL and MySQL both
+    #     answer that for a role that does not exist. So the error cannot distinguish
+    #     the two, and naming both here is the only place that can.
+    login_stmt = _fa_login_statement(engine, fa_db_user=fa_db_user)
+    if login_stmt and fa_db_user and not fa_is_admin:
+        job_service.append_job_log(
+            db, job_id,
+            f"Password Safe's functional account signs in to this database as "
+            f"{fa_db_user!r}, which the dashboard cannot create — it does not have that "
+            f"password. Create it as an admin, with the password matching the third "
+            f"':'-segment of the functional account's password in Password Safe: "
+            f"{login_stmt} Until then every action on this managed system fails as "
+            f"\"password authentication failed for user '{fa_db_user}'\" — the same "
+            f"error a wrong password gives, so it does not tell you which it is.")
     if grant and fa_db_user:
         applied = False
         if channel == "data-api":
