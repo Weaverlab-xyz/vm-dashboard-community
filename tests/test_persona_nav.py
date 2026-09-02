@@ -262,6 +262,108 @@ def test_the_overflow_menu_hides_when_empty():
         "the More button is not gated on there being visible overflow links"
 
 
+# ── the popover has to escape the row's clip ─────────────────────────────────
+#
+# The button shipped working and the popover shipped invisible, which read as a dead
+# button. navRow is `overflow-hidden` -- that is what makes responsiveNav's
+# `scrollWidth > clientWidth` fold read meaningful -- and the popover was an absolutely
+# positioned child of a control inside it, hanging below a 64px row. Measured in a browser:
+# it opened at its full 132px and 122px of that was clipped away, leaving a sliver in the
+# nav's own colour. z-index cannot help; overflow clipping is not a stacking question.
+
+def _nav_row_span(src):
+    """``(start, end)`` character offsets of the ``x-ref="navRow"`` element in base.html.
+
+    A depth walk over ``<div``/``</div>`` rather than a regex, because "is this element
+    inside that one" is the entire question and no flat pattern can answer it.
+    """
+    start = src.index('x-ref="navRow"')
+    depth = 0
+    i = src.rindex("<div", 0, start)
+    for m in re.finditer(r"<div\b|</div>", src[i:]):
+        depth += 1 if m.group(0).startswith("<div") else -1
+        if depth == 0:
+            return i, i + m.end()
+    raise AssertionError("navRow never closes -- base.html div nesting is unbalanced")
+
+
+def test_the_popover_is_not_inside_the_clipped_row():
+    src = _read(_BASE)
+    start, end = _nav_row_span(src)
+    row = src[start:end]
+    assert "overflow-hidden" in row, (
+        "navRow lost `overflow-hidden`. That is not free: responsiveNav decides the fold "
+        "with `scrollWidth > clientWidth`, which needs the clip to mean anything. If this "
+        "was removed deliberately, re-measure the fold before trusting it.")
+    assert 'x-ref="navMore"' not in row, (
+        "the overflow popover is back inside navRow, which is `overflow-hidden`. It will "
+        "open at full size and be clipped to the 64px row -- the More button will look "
+        "dead. Keep the panel a child of <nav> and let positionMore() anchor it.")
+    assert 'x-ref="navMore"' in src[end:], \
+        "the overflow popover left base.html entirely"
+    assert 'x-ref="moreBtn"' in row, \
+        "the More BUTTON left the inline row; it has to be in the row it measures"
+
+
+def test_the_popover_is_hidden_when_the_row_folds():
+    """The button lives in navInline and vanishes with it in compact mode. The panel does
+    not, so it needs its own guard or a popover left open across a resize outlives the
+    trigger that opened it."""
+    src = _read(_BASE)
+    panel = src[src.index('x-ref="navMore"'):]
+    show = re.search(r'x-show="([^"]+)"', panel).group(1)
+    assert "moreOpen" in show and "!compact" in show, (
+        f'the popover\'s x-show is "{show}" -- it must test !compact as well as moreOpen')
+
+
+def test_the_popover_caps_its_height_and_scrolls():
+    """A persona pins 5-7 links, so the other ~25 land in here. Measured at a 720px
+    viewport that popover is 1012px tall: without a cap its bottom third leaves the screen
+    and nothing scrolls it, which loses those links exactly as thoroughly as the clip did.
+    """
+    src = _read(_BASE)
+    panel = src[src.index('x-ref="navMore"'):]
+    panel = panel[:panel.index("</div>")]
+    assert "max-h-" in panel and "overflow-y-auto" in panel, (
+        "the overflow popover has no height cap or no scroll; with ~25 links it runs off "
+        "the bottom of the viewport")
+
+
+def test_the_anchoring_does_not_read_el():
+    """``$el`` is per-expression, not per-component.
+
+    positionMore() is called from the More button's own ``@click``, and in that evaluation
+    ``$el`` is the BUTTON -- so ``$el.right - btn.right`` is 0 and the anchor silently
+    bails every single time the user presses the thing. That reproduced the original
+    symptom one layer down: the popover opened, unpositioned, at the nav's left edge.
+    Read the containing block off the panel itself instead.
+    """
+    src = _read(_APP_JS)
+    assert "positionMore() {" in src, (
+        "responsiveNav has no positionMore(). The popover lives outside navRow to escape "
+        "its clip, so something has to supply the `right` offset that keeps it under its "
+        "button; without it the panel opens at the nav's left edge.")
+    body = src.split("positionMore() {", 1)[1].split("\n        },", 1)[0]
+    assert "$el" not in body, (
+        "positionMore reads $el, which resolves to whichever element the caller was "
+        "evaluated on -- the More button, when called from its @click")
+    assert "parentElement" in body, \
+        "positionMore does not resolve the popover's containing block"
+    assert "this.$refs.moreBtn" in body, "positionMore does not measure the button by ref"
+
+
+def test_the_anchor_is_recomputed_when_the_popover_opens():
+    src = _read(_APP_JS)
+    assert "toggleMore() {" in src, \
+        "responsiveNav has no toggleMore(), so nothing re-anchors the popover on open"
+    body = src.split("toggleMore() {", 1)[1].split("\n        },", 1)[0]
+    assert "this.positionMore()" in body, (
+        "toggleMore does not re-anchor on open. The button moves whenever the row is "
+        "re-laid out, so a position computed once at init goes stale.")
+    assert 'x-ref="moreBtn"' in _read(_BASE) and "toggleMore()" in _read(_BASE), \
+        "base.html does not route the More button through toggleMore()"
+
+
 # ── the pins reach the page without a per-navigation request ─────────────────
 
 def test_the_context_processor_supplies_the_pins():
