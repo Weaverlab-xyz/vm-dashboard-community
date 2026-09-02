@@ -695,6 +695,34 @@ def _cfg(key: str) -> str:
     return getattr(settings, key, "") or ""
 
 
+def _row_region(row) -> str:
+    """The region a database row's own resources live in.
+
+    The ROW wins over the configured default region. Every caller below read the flat
+    per-cloud region key FIRST, which makes a region choice a no-op for everything
+    that is not the Terraform apply (the apply resolves the row's region properly):
+    the Gateway host, the SSM endpoints and the DB-client transport all went to the
+    DEFAULT region while the row, the job and the operator all said otherwise.
+
+    On Azure that read as harmless, because the key was composed as ``azure_region``
+    — which is not a config key at all (Azure's is ``azure_location``) — so it
+    returned "" and the row won by accident. That is why #726's live failure looked
+    Azure-specific when it was not: ``aws_region`` IS a key, so a us-west-2 database
+    really did ensure us-east-2's Gateway host, reclaim its SSM endpoints, and pack
+    ``us-east-2`` into its Password Safe plugin address.
+
+    Falls back to the configured default for a blank region, normalises what it
+    returns (so "West US 2" resolves like every other region string), and tolerates a
+    cloud with no region dimension — an agent-sourced or OCI row — rather than
+    raising into a best-effort teardown.
+    """
+    from . import region_catalog
+    try:
+        return region_catalog.resolve(row.cloud, row.region)
+    except ValueError:
+        return (row.region or "").strip()
+
+
 # Provider credentials for the terraform subprocess moved to the shared
 # services/terraform_provider_env module (reused by k8s_service); call sites use
 # terraform_provider_env.provider_env(cloud).
@@ -809,7 +837,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
     # broker the tunnel.
     from . import jumpoint_host_service
     try:
-        await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _cfg(row.cloud + "_region") or row.region)
+        await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _row_region(row))
     except Exception as exc:
         logger.warning("clouddb: ensure gateway host (broker) failed (non-fatal): %s", exc)
     try:
@@ -1374,7 +1402,7 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
     client image). Raises on failure so the caller falls back to admin staging."""
     from . import aws_service, jumpoint_host_service
     from . import cloud_db_sql_service as sql
-    region = _cfg(row.cloud + "_region") or row.region
+    region = _row_region(row)
     host_id = await jumpoint_host_service.ensure_jumpoint_host(row.cloud, region)
     if not host_id:
         raise CloudDatabaseError(
@@ -1535,13 +1563,15 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
     # private DNS zone and VNet only exist in its own region. `rg` also rides into the
     # plugin address that _onboard_ps_managed_systems registers, so the same slip aims
     # every later rotation at the wrong VM as well.
-    region = row.region or _cfg("azure_location")
+    region = _row_region(row)
     host = await jumpoint_host_service.ensure_jumpoint_host(row.cloud, region)
     if not host:
         raise CloudDatabaseError(
             "no Azure jump VM available — the shared clouddb-jumpoint VM must be up to "
             "run the DB client (check azure_aci_deploy_key + azure_jumpoint_subnet_id)")
-    rg = resolve_region("azure", region)["resource_group"]
+    # Resolved by the gateway service, not here: it owns where it PUT the VM, and its
+    # location normalisation is part of that answer.
+    rg = jumpoint_host_service.azure_host_resource_group(region)
     admin_username = (tf_variables.get("administrator_login")
                       or tf_variables.get("master_username") or "dbadmin")
     admin_password = (config_service.get(f"clouddb/{row.id}/admin")
@@ -1560,7 +1590,8 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
     prep_res = await azure_service.vm_run_command(rg, host, prep, timeout=600)
     if prep_res.get("status") != "Success":
         raise CloudDatabaseError(
-            f"jump-VM plugin prep failed (status={prep_res.get('status')}, "
+            f"jump-VM plugin prep on {rg}/{host} ({region}) failed "
+            f"(status={prep_res.get('status')}, "
             f"rc={prep_res.get('response_code')}): {_run_detail(prep_res)}")
     cmds = sql.onboard_commands(
         engine, host=row.private_host, port=port,
@@ -1569,7 +1600,11 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
     result = await azure_service.vm_run_command(rg, host, cmds, timeout=300)
     if result.get("status") != "Success" or int(result.get("response_code", -1)) != 0:
         raise CloudDatabaseError(
-            f"managed-user creation on the jump VM failed "
+            # Naming the VM, its resource group and the region is the whole remedy for
+            # a cross-region mis-address: the DB client's own error ("Unknown MySQL
+            # server host") is about DNS and cannot say which VM resolved it, which is
+            # what made #726 read as a broken database.
+            f"managed-user creation on jump VM {rg}/{host} ({region}) failed "
             f"(status={result.get('status')}, rc={result.get('response_code')}): "
             f"{_run_detail(result)}")
     logger.info("clouddb: managed DB user %r created via Azure Run Command on %s db_id=%s",
@@ -2981,7 +3016,7 @@ async def run_provision_apply(
         if _pra_configured():
             try:
                 from . import jumpoint_host_service
-                await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _cfg(row.cloud + "_region") or row.region)
+                await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _row_region(row))
             except Exception as exc:
                 logger.warning("clouddb: ensure gateway host (pre-apply) failed (non-fatal): %s", exc)
 
@@ -2991,7 +3026,7 @@ async def run_provision_apply(
         if row.cloud == "aws":
             try:
                 from . import ssm_endpoint_service
-                await ssm_endpoint_service.ensure_ssm_endpoints(_cfg(row.cloud + "_region") or row.region)
+                await ssm_endpoint_service.ensure_ssm_endpoints(_row_region(row))
             except Exception as exc:
                 logger.warning("clouddb: ensure SSM endpoints (pre-apply) failed (non-fatal): %s", exc)
 
@@ -3469,7 +3504,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     job_service.update_progress(db, job_id, 90, "Reclaiming idle Gateway host…")
     try:
         from . import jumpoint_host_service
-        await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, row.cloud, _cfg(row.cloud + "_region") or row.region)
+        await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, row.cloud, _row_region(row))
     except Exception as exc:
         warnings.append(f"Gateway host teardown: {exc}")
         logger.warning("clouddb: gateway host idle-teardown failed (non-fatal): %s", exc)
@@ -3479,7 +3514,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     if row.cloud == "aws":
         try:
             from . import ssm_endpoint_service
-            await ssm_endpoint_service.reclaim_ssm_endpoints(db, _cfg(row.cloud + "_region") or row.region)
+            await ssm_endpoint_service.reclaim_ssm_endpoints(db, _row_region(row))
         except Exception as exc:
             warnings.append(f"SSM endpoints teardown: {exc}")
             logger.warning("clouddb: SSM endpoints idle-teardown failed (non-fatal): %s", exc)
