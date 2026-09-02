@@ -1690,6 +1690,53 @@ def _fa_login_statement(engine: str, *, fa_db_user: str) -> str:
     return ""
 
 
+def _fa_db_login(*, mode: str, fa_key: str) -> str:
+    """The database login the plugin will sign in as, or ``""`` when there is no
+    prerequisite for an operator to satisfy.
+
+    Non-empty only for a REFERENCED account whose name carries a login half
+    (``<mode>:<dbLogin>``), because that login is the one principal the dashboard never
+    creates. In ``create`` mode the account it mints signs in as the database's own
+    minted admin, which exists by definition; on GCP under IAM database authentication
+    the referenced account has no login half at all (its composite is ``-:-:-``) and the
+    rotator IAM user is created by ``create_cloudsql_user`` — so both answer ``""``."""
+    if mode != _FA_MODE_REFERENCE:
+        return ""
+    return (_cfg(fa_key) or "").strip().partition(":")[2].strip()
+
+
+def _report_fa_db_prereqs(db: Session, job_id: str, *, engine: str, fa_db_login: str,
+                          managed_user: str, managed_host: str,
+                          report_grant: bool) -> None:
+    """Report, on the job, the database-side work the dashboard cannot do itself.
+
+    Cloud-agnostic ON PURPOSE. Both of these used to live inside
+    ``_create_db_managed_user_gcp``, which meant an Azure or AWS onboarding — the two
+    clouds where a referenced account MUST carry a real per-server login — reported
+    neither. Live 2026-09-02: an Azure postgres Verify failed with "password
+    authentication failed for user 'psfa_pg'" and nothing on the provisioning job had
+    ever mentioned that login."""
+    login_stmt = _fa_login_statement(engine, fa_db_user=fa_db_login)
+    if login_stmt:
+        job_service.append_job_log(
+            db, job_id,
+            f"Password Safe's functional account signs in to this database as "
+            f"{fa_db_login!r}, which the dashboard cannot create — it does not have that "
+            f"password. Create it as an admin, with the password matching the third "
+            f"':'-segment of the functional account's password in Password Safe: "
+            f"{login_stmt} Until then every action on this managed system fails as "
+            f"\"password authentication failed for user '{fa_db_login}'\" — the same "
+            f"error a wrong password gives, so it does not tell you which it is.")
+    if report_grant:
+        grant = _fa_grant_statement(engine, fa_db_user=fa_db_login,
+                                    managed_user=managed_user, managed_host=managed_host)
+        if grant:
+            job_service.append_job_log(
+                db, job_id,
+                f"Password Safe rotation needs one grant on this database, which the "
+                f"dashboard could not issue itself — run it as an admin: {grant}")
+
+
 def _fa_discovery_grant_statement(engine: str, *, fa_db_user: str,
                                   fa_host: str = "%") -> str:
     """The extra grant ACCOUNT DISCOVERY needs on MySQL, or ``""``.
@@ -2009,29 +2056,12 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     grant = "" if (self_rotating or fa_is_admin) else _fa_grant_statement(
         engine, fa_db_user=fa_db_user, managed_user=managed_user,
         managed_host=managed_host)
-    # 4a. Before the grant, the prerequisite the grant silently assumes: the functional
-    #     account's own DB login has to EXIST on this server, with the password Password
-    #     Safe holds. The dashboard creates only the managed user and cannot create this
-    #     one — it never learns that password (§0 of the runbook). Reported whether or
-    #     not there is a grant to go with it, because Verify Functional Account logs in
-    #     as this login on every managed system, self-rotation included: under
-    #     self-rotation the grant is skipped and this line would otherwise be the only
-    #     thing an operator never gets told. Live 2026-09-02, Azure postgres: a missing
-    #     login fails Verify as "FATAL: password authentication failed for user
-    #     '<fa>'" — identical to a wrong password, because PostgreSQL and MySQL both
-    #     answer that for a role that does not exist. So the error cannot distinguish
-    #     the two, and naming both here is the only place that can.
-    login_stmt = _fa_login_statement(engine, fa_db_user=fa_db_user)
-    if login_stmt and fa_db_user and not fa_is_admin:
-        job_service.append_job_log(
-            db, job_id,
-            f"Password Safe's functional account signs in to this database as "
-            f"{fa_db_user!r}, which the dashboard cannot create — it does not have that "
-            f"password. Create it as an admin, with the password matching the third "
-            f"':'-segment of the functional account's password in Password Safe: "
-            f"{login_stmt} Until then every action on this managed system fails as "
-            f"\"password authentication failed for user '{fa_db_user}'\" — the same "
-            f"error a wrong password gives, so it does not tell you which it is.")
+    # The functional account's own DB login is a prerequisite too, and it is reported
+    # from the cloud-agnostic path (_report_fa_db_prereqs) rather than here: this
+    # function only ever runs for GCP, and Azure/AWS are the two clouds where a
+    # referenced account MUST carry a real per-server login. Reporting it here also
+    # named a login the dashboard had just created itself — on data-api under IAM
+    # database authentication that is create_cloudsql_user's rotator.
     if grant and fa_db_user:
         applied = False
         if channel == "data-api":
@@ -2655,6 +2685,23 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
                     "%s, which refuses it at pre-flight; the functional account rotates "
                     "the managed user instead", row.id, _gcp_channel(engine))
         self_rotate = False
+    # What the dashboard cannot do to the database itself, named on the job. Keyed off
+    # the REFERENCED account's login half, so "create" mode (whose account signs in as
+    # the minted admin) and GCP's IAM-auth accounts (which have no login half) report
+    # nothing.
+    #
+    # The grant is reported here for every cloud EXCEPT gcp, whose data-api path applies
+    # it itself and reports only on failure — see _apply_fa_grant_gcp above. Do not
+    # "unify" those two: one is a fallback for a statement that was attempted, this one
+    # is for a statement nobody can attempt. Self-rotation needs no grant at all, since
+    # the managed account alters itself.
+    fa_db_login = _fa_db_login(mode=fa_mode, fa_key=fa_key)
+    if fa_db_login:
+        _report_fa_db_prereqs(
+            db, job_id, engine=engine, fa_db_login=fa_db_login,
+            managed_user=ctx["managed_user"],
+            managed_host=ctx.get("managed_user_host") or "%",
+            report_grant=(db_method != "dbgcp") and not self_rotate)
     reg = await ps_resource_service.register_managed_system(
         name=f"{name}-db", host_name=row.private_host,
         # ip_address is deliberately NOT passed: register_managed_system owns the

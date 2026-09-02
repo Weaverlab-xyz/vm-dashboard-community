@@ -50,6 +50,8 @@ _SVC = os.path.join(_ROOT, "web_dashboard", "services", "cloud_database_service.
 
 CONF = {}
 CALLS = []
+JOB_LOGS = []
+CERT_PATH = "/opt/bt/public_ssm.pem"
 FAIL_ON_REGISTER = []      # names that register_managed_system should blow up on
 FAIL_ON_DEREGISTER = []    # tf_state values that deregister should blow up on
 
@@ -92,6 +94,15 @@ async def _fake_get_workgroup_id(name):
     return 5
 
 
+async def _fake_get_functional_account(name):
+    """reference mode looks the operator's account up by name. The name IS the contract
+    (``<mode>:<dbLogin>``), so the fake echoes back whatever was configured."""
+    # "ssm"/"azure" platform names so _platform_name_ok accepts either cloud's plugin.
+    return {"id": 109, "account_name": name, "platform_id": 30,
+            "platform_name": "psql SSM Custom Plugin" if name.startswith("IAM:")
+            else "PostgreSQL Azure Run Command Plugin"}
+
+
 async def _fake_delete_functional_account(fa_id):
     CALLS.append(("delete_fa", fa_id))
     if fa_id in FAIL_ON_DEREGISTER:
@@ -131,6 +142,7 @@ def _install_stubs():
 
     ps = types.ModuleType("web_dashboard.services.ps_api_service")
     ps.create_functional_account_on_platform = _fake_create_fa_on_platform
+    ps.get_functional_account = _fake_get_functional_account
     ps.get_platform_id = _fake_get_platform_id
     ps.get_workgroup_id = _fake_get_workgroup_id
     ps.delete_functional_account = _fake_delete_functional_account
@@ -144,7 +156,7 @@ def _install_stubs():
 
     js = types.ModuleType("web_dashboard.services.job_service")
     js.update_progress = lambda *a, **k: None
-    js.append_job_log = lambda *a, **k: None
+    js.append_job_log = lambda _db, _job_id, msg: JOB_LOGS.append(msg)
     js.set_running = lambda *a, **k: None
     js.set_failed = lambda *a, **k: None
     js.set_completed = lambda *a, **k: None
@@ -198,6 +210,7 @@ def _run(coro):
 def _reset(**conf):
     CONF.clear()
     CALLS.clear()
+    JOB_LOGS.clear()
     FAIL_ON_REGISTER.clear()
     FAIL_ON_DEREGISTER.clear()
     CONF.update(conf)
@@ -217,7 +230,10 @@ def _row(**kw):
 def _ctx(**kw):
     defaults = dict(managed_user="psafe_dbabc12345", managed_pw="pw", jump_host_id="i-jump",
                     region="us-east-2", db_name="appdb", admin_username="dbadmin",
-                    client_image="postgres:16", port=5432)
+                    client_image="postgres:16", port=5432,
+                    # the Azure branch's two extra keys, filled by
+                    # _create_db_managed_user_azure on the real path
+                    jump_vm_name="clouddb-jumpoint", resource_group="rg")
     defaults.update(kw)
     return defaults
 
@@ -453,6 +469,59 @@ def test_an_operator_owned_functional_account_is_never_deleted():
         "a referenced functional account must survive teardown"
     # The ref keys go with the managed system they described — nothing remote to remove.
     assert "ps_db_functional_account_ref" not in job.metadata_dict
+
+
+# -- the database-side prerequisites, on the clouds that actually have them ----
+#
+# The dashboard creates the managed user and cannot create the functional account's own
+# DB login: that password lives in Password Safe, which never returns it. Azure and AWS
+# are the two clouds where a REFERENCED account must carry such a login, and they are
+# exactly the two that used to be told nothing -- the report shipped inside
+# _create_db_managed_user_gcp. Live 2026-09-02, Azure postgres: Verify failed with
+# "password authentication failed for user 'psfa_pg'" and no job line had ever named it.
+
+def _ref_conf(**extra):
+    conf = dict(clouddb_ps_functional_account_mode="reference",
+                clouddb_ps_functional_account_postgres="IAM:psfa_pg",
+                clouddb_ps_functional_account_azure_postgres="SP:psfa_pg",
+                clouddb_ps_ssm_public_key_path=CERT_PATH)
+    conf.update(extra)
+    return conf
+
+
+def test_aws_reference_mode_is_told_to_create_the_functional_accounts_login():
+    _reset(**_ref_conf())
+    _onboard(_row(cloud="aws"), _FakeJobRow())
+    logs = " ".join(JOB_LOGS)
+    assert "psfa_pg" in logs and "CREATE ROLE" in logs, JOB_LOGS
+    assert "third ':'-segment" in logs, JOB_LOGS
+    # and the grant that rotation needs on top of it
+    assert "ADMIN OPTION" in logs, JOB_LOGS
+
+
+def test_azure_reference_mode_is_told_the_same():
+    _reset(**_ref_conf())
+    _onboard(_row(cloud="azure"), _FakeJobRow())
+    logs = " ".join(JOB_LOGS)
+    assert "psfa_pg" in logs and "CREATE ROLE" in logs, JOB_LOGS
+    assert "ADMIN OPTION" in logs, JOB_LOGS
+
+
+def test_create_mode_is_told_nothing_because_its_account_is_the_minted_admin():
+    _reset(clouddb_ps_ssm_public_key_path=CERT_PATH)
+    _onboard(_row(cloud="azure"), _FakeJobRow())
+    logs = " ".join(JOB_LOGS)
+    assert "CREATE ROLE" not in logs and "ADMIN OPTION" not in logs, JOB_LOGS
+
+
+def test_self_rotation_drops_the_grant_but_keeps_the_login():
+    """Self-rotation means the managed account alters itself, so no grant is needed --
+    but Verify Functional Account still signs in as the functional account's login."""
+    _reset(**_ref_conf(clouddb_ps_self_rotation=True))
+    _onboard(_row(cloud="azure"), _FakeJobRow())
+    logs = " ".join(JOB_LOGS)
+    assert "CREATE ROLE" in logs, JOB_LOGS
+    assert "ADMIN OPTION" not in logs, JOB_LOGS
 
 
 def test_nothing_recorded_means_nothing_attempted():
