@@ -172,11 +172,39 @@ def _mssql_teardown_sql(managed: str) -> list:
     return [f"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = '{managed}') DROP LOGIN [{managed}];"]
 
 
-# ── docker-run command builders (run on the jump host via SSM) ────────────────
+# ── docker-run command builders (run on the jump host) ──────────────────────
+#
+# TLS on the jumphost→DB hop. Every DB terraform module here turns the server's
+# *forced*-TLS knob OFF — db_azure_postgres/db_azure_mysql set
+# require_secure_transport=OFF, db_postgres attaches an rds.force_ssl=0 group,
+# db_gcp_* set ssl_mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED — because the PRA protocol
+# tunnel proxies the *cleartext* wire protocol (that is how it injects the Vault
+# credential and records the session) and has no backend-TLS option.
+#
+# That is a constraint on the TUNNEL, not on us. These builders open their own
+# psql/mysql/sqlcmd connection, and every one of those servers still OFFERS TLS:
+# "forced off" is not "unavailable", and ALLOW_UNENCRYPTED_AND_ENCRYPTED says so in
+# its name. Proof it works from this exact network position — the Password Safe
+# plugin's own rotation connections, to the very same servers, run with TLS on all
+# three clouds (clouddb_ps_azure_ssl / clouddb_ps_ssm_ssl / clouddb_ps_gcp_dbops_ssl
+# all default True, which is the trailing `sslTRUE` segment of the packed managed-
+# system address). The original commit (7e89d6f) mirrored the *server's* posture into
+# the client and connected cleartext, which put the admin master password on the wire
+# in the clear for no reason at all.
+#
+# So: encrypt, but do NOT verify. `sslmode=require`, `--ssl-mode=REQUIRED` and sqlcmd
+# `-N t -C` all mean "this connection must be encrypted; do not check the certificate".
+# Verifying instead (`verify-full` / `VERIFY_IDENTITY` / `-N t` without `-C`) would need
+# each cloud's root CA reachable inside the client container: the stock postgres:16,
+# mysql:8.4 and mssql-tools18 images carry only the OS trust store, and nothing pins the
+# DigiCert root Azure Flexible Server presents, the Amazon RDS roots or the per-instance
+# Google Cloud SQL server CA. Shipping those bundles to the jump host is a separate
+# change, out of scope here: this hop is intra-VNet/VPC to a private endpoint, so
+# encrypting the admin password on the wire is the win that matters.
 
 def _pg_command(*, host, port, database, admin_user, admin_password, image, statements) -> str:
     db = _ident(database) if database else "postgres"
-    conn = f"host={host} port={int(port)} dbname={db} user={admin_user} sslmode=disable"
+    conn = f"host={host} port={int(port)} dbname={db} user={admin_user} sslmode=require"
     parts = [
         "docker", "run", "--rm",
         "-e", f"PGPASSWORD='{admin_password}'",
@@ -194,22 +222,24 @@ def _mysql_command(*, host, port, database, admin_user, admin_password, image, s
         "-e", f"MYSQL_PWD='{admin_password}'",
         image, "mysql",
         f"--host={host}", f"--port={int(port)}", f"--user={admin_user}",
-        "--ssl-mode=DISABLED", "--batch",
+        "--ssl-mode=REQUIRED", "--batch",
         "-e", f'"{batch}"',
     ]
     return " ".join(parts)
 
 
 def _mssql_command(*, host, port, database, admin_user, admin_password, image, statements) -> str:
-    # -b: exit non-zero on SQL error. -N o (optional encryption) -C (trust cert):
-    # the mssql tunnel does its own backend TLS. Batches joined with GO.
+    # -b: exit non-zero on SQL error. -N t (encryption mandatory) -C (trust the server
+    # cert without checking it against a CA) — see the TLS note above. -N t is also the
+    # mssql-tools18 default, which the original `-N o` (optional) downgraded, and Azure
+    # SQL is TLS-only anyway. Batches joined with GO.
     batch = "\nGO\n".join(statements) + "\nGO\n"
     parts = [
         "docker", "run", "--rm",
         "-e", f"SQLCMDPASSWORD='{admin_password}'",
         image, "/opt/mssql-tools18/bin/sqlcmd",
         "-S", f"{host},{int(port)}", "-U", admin_user, "-d", "master",
-        "-N", "o", "-C", "-b",
+        "-N", "t", "-C", "-b",
         "-Q", f'"{batch}"',
     ]
     return " ".join(parts)
