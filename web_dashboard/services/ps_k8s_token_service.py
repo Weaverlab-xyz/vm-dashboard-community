@@ -669,8 +669,25 @@ async def _register_pravault_mirror(db: Session, row: K8sCluster, *,
     second managed account that happens to hold the same value.
 
     Reuses ``method="pravault"`` — the HCL shape is identical to the cloud-DB mirror
-    (host_name = the PRA appliance URL, no dns_name, password-managed) and the plugin
-    resolves the vault account by NAME, which is that method's documented contract."""
+    (password-managed, and the plugin resolves the vault account by NAME, which is that
+    method's documented contract) with ONE difference, and it is load-bearing: the
+    appliance URL goes in ``dns_name`` and a per-cluster label in ``host_name``.
+
+    Password Safe names a workgroup-created managed system after its HostName, and the
+    Terraform provider's ``passwordsafe_managed_account`` attaches to its system by NAME
+    (it takes no system id). The cloud-DB and OT mirrors both put the appliance URL in
+    host_name, so every PRA Vault managed system in the tenant shares one name — and
+    since those two are on the same "PRA Vault Username Password" platform, the collision
+    never showed. This one is on "PRA Vault Token". Measured live: the system was created
+    on the Token platform, and the account was then created on the pre-existing cloud-DB
+    Username Password system of the same name, which the SyncedAccounts platform guard
+    refused to sync a cluster bearer token into.
+
+    The plugin has to find the URL in DnsName for this to work. That is the same shape the
+    ``k8ssa`` method already relies on (host_name is a human label there, the address rides
+    dns_name) and matches the pravault branch's own note that the plugin walks the
+    populated host fields in Password Safe's order — but it is worth confirming with one
+    rotation the first time this runs against a tenant."""
     from . import ps_api_service, ps_resource_service
     host = _cfg("bt_api_host").rstrip("/")
     if not host:
@@ -682,8 +699,9 @@ async def _register_pravault_mirror(db: Session, row: K8sCluster, *,
     platform_id = await ps_api_service.get_platform_id(
         _cfg("k8s_ps_pravault_token_platform", "PRA Vault Token"))
     workgroup_id = await ps_api_service.get_workgroup_id(_workgroup())
+    system_name = f"k8s-{row.name}-pravault"
     reg = await ps_resource_service.register_managed_system(
-        name=f"k8s-{row.name}-pravault", host_name=host,
+        name=system_name, host_name=system_name, dns_name=host,
         functional_account_id=fa["id"], platform_id=platform_id,
         workgroup_id=workgroup_id, ip_address="127.0.0.1", port=443,
         managed_account_name=vault_account_name, method="pravault",

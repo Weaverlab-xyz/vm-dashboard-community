@@ -417,6 +417,29 @@ def test_register_offers_the_live_token_as_the_seed_to_both_accounts():
     assert all(kw["initial_password"] == _LONG_TOKEN for kw in seeded)
 
 
+def test_the_pra_vault_mirror_gets_a_managed_system_name_of_its_own():
+    """The appliance URL must ride dns_name, NOT host_name.
+
+    Password Safe names a workgroup-created managed system after its HostName, and the
+    Terraform provider's managed-account resource attaches to its system BY NAME (it takes
+    no system id). The cloud-DB and OT mirrors both put the appliance URL in host_name, so
+    a URL here would make this system share their name — and this one is the only PRA Vault
+    caller on a different platform. Measured live: the account was created on the
+    pre-existing cloud-DB "PRA Vault Username Password" system and the SyncedAccounts
+    platform guard then refused to sync a cluster bearer token into it.
+    """
+    rec = Recorder()
+    _install_stubs(rec)
+    _run_register(rec, _row())
+    kws = [kw for _e, kw in [ev for ev in rec.events if isinstance(ev, tuple)
+                             and ev[0] == "registered"]]
+    mirror = next(kw for kw in kws if kw["method"] == "pravault")
+    assert mirror["dns_name"] == "https://pra.example.com", mirror
+    assert mirror["host_name"] == "k8s-gke-demo-pravault", (
+        f"host_name IS the managed system name — it must not be the appliance URL every "
+        f"other PRA Vault caller uses; got {mirror['host_name']!r}")
+
+
 def test_register_rotates_even_when_change_on_register_is_off_if_the_seed_was_dropped():
     """The seed cannot be taken for a bearer token (the create API caps Password at 128),
     so the rotation is the only thing that puts a real credential in the vault. Honouring

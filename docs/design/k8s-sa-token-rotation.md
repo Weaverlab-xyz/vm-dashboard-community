@@ -289,6 +289,18 @@ the failure surfaces only at the first rotation.
   on the wrong platform fails closed before the link is created. PRA does not enforce
   unique vault account names, and syncing a Kubernetes bearer token to some other plugin's
   account is the one failure here that puts a secret somewhere it does not belong.
+- **The mirror's managed system is named `k8s-<cluster>-pravault`, and that is not
+  cosmetic.** Password Safe names a workgroup-created managed system after its *HostName*,
+  and the Terraform provider's `passwordsafe_managed_account` attaches to its system **by
+  name** — it takes no system id. The other two PRA Vault callers (cloud-DB, OT) put the
+  appliance URL in `host_name`, so their systems all share one name; harmless while they
+  share the "PRA Vault Username Password" platform, and *not* harmless here. Measured live:
+  the mirror's own "PRA Vault Token" system was created, then the account was created on
+  the pre-existing cloud-DB Username Password system of the same name, and the SyncedAccounts
+  platform guard refused to sync a cluster bearer token into it — after registration had
+  already reported the account created. The URL therefore rides `dns_name` alone here, which
+  assumes the plugin reads it there (the same assumption `k8ssa` already makes for its
+  address); one rotation against a tenant confirms it.
 - **Removing the PRA tunnel deliberately leaves the link in place.** The plugin resolves
   its PRA Vault account by *name* (`k8s-<cluster>-sa`), so re-provisioning re-creates the
   account the link already points at and syncing resumes with no operator action. The cost
