@@ -512,17 +512,20 @@ def _listing_resource_groups(job_meta: dict) -> set:
         configured_regions=_configured_regions)
 
 
-async def _fetch_vms(db: Session) -> list:
-    """Dashboard-deployed Azure VMs (azure_deploy jobs) merged with live power
-    state. Shared by /vms and /dashboard-stats. Workgroup is normalized to
-    lowercase so both the list filter and the stats RBAC compare consistently."""
+def _deploy_job_meta(db: Session) -> dict:
+    """vm_name → the deploy-job facts the listing and the destroy fan-out both need.
+
+    One reader, because both callers feed it to ``_listing_resource_groups``: if the
+    destroy path enumerated resource groups differently from the listing, a VM could
+    be listed and then not found when Destroy was pressed — which is exactly the bug
+    ``_destroy_without_deploy_job`` was fixed for."""
     deploy_jobs = (
         db.query(Job)
         .filter(Job.job_type == "azure_deploy")
         .order_by(Job.created_at.desc())
         .all()
     )
-    job_meta = {
+    return {
         j.metadata_dict["vm_name"]: {
             "id": j.id,
             "created_by": j.created_by,
@@ -532,6 +535,13 @@ async def _fetch_vms(db: Session) -> list:
         }
         for j in deploy_jobs if j.metadata_dict.get("vm_name")
     }
+
+
+async def _fetch_vms(db: Session) -> list:
+    """Dashboard-deployed Azure VMs (azure_deploy jobs) merged with live power
+    state. Shared by /vms and /dashboard-stats. Workgroup is normalized to
+    lowercase so both the list filter and the stats RBAC compare consistently."""
+    job_meta = _deploy_job_meta(db)
 
     resource_groups = _listing_resource_groups(job_meta)
 
@@ -1087,16 +1097,21 @@ async def _destroy_without_deploy_job(
     """Fallback destroy for VMs that have no completed ``azure_deploy`` job — VDI
     pool seats and cloud-recovered ("unknown") VMs.
 
-    Resolve the resource group (prefer the RG parsed from a matching desktop-seat's
-    ARM ``vm_resource_id``; else the configured ``azure_resource_group`` — the
-    sandbox keeps every VM in one RG), confirm the VM actually exists in Azure
-    (keep the 404 when it's genuinely gone), then terminate it via the same
-    ``_run_destroy`` task with no deploy job. If a desktop-seat row backs this VM,
-    drop it (and its PRA RDP jump) so destroying the VM here doesn't strand the
-    seat row + jump."""
+    Locate the VM across every resource group the VM listing covers (preferring the
+    RG parsed from a matching desktop-seat's ARM ``vm_resource_id``), keep the 404
+    when it is genuinely nowhere, then terminate it via the same ``_run_destroy``
+    task with no deploy job. If a desktop-seat row backs this VM, drop it (and its
+    PRA RDP jump) so destroying the VM here doesn't strand the seat row + jump.
+
+    The fan-out is the fix for a Destroy button that 404'd on a VM sitting right
+    there in the table: this used to probe the flat ``azure_resource_group`` alone,
+    which names the DEFAULT region's group, while the listing already fans out over
+    every configured region's group. Anything in a non-default region was therefore
+    listed and then reported "may have already been terminated" — the one message
+    that reads like the VM is already gone."""
     from ..services import vdesktop_service
 
-    # Prefer the seat's full ARM id for the RG (more reliable than the flat config).
+    # Prefer the seat's full ARM id for the RG (more reliable than any config read).
     seat_rg = None
     seat = (
         db.query(VirtualDesktop)
@@ -1108,18 +1123,42 @@ async def _destroy_without_deploy_job(
     )
     if seat is not None and seat.vm_resource_id and "/" in seat.vm_resource_id:
         seat_rg, _ = vdesktop_service._parse_vm_id(seat.vm_resource_id)
-    rg = seat_rg or _rg()
 
-    try:
-        vm = await azure_service.get_vm(rg, vm_name)
-    except AzureError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    candidates = azure_listing.destroy_probe_order(
+        _listing_resource_groups(_deploy_job_meta(db)), preferred=seat_rg)
+
+    vm = None
+    answered_rg = None
+    probe_error = None
+    for candidate in candidates:
+        try:
+            found = await azure_service.get_vm(candidate, vm_name)
+        except AzureError as exc:
+            # One unreachable group must not mask a VM sitting in the next one —
+            # same reason the listing swallows a failed describe_vms per RG. The
+            # error is only surfaced if NO group answers.
+            probe_error = probe_error or exc
+            logger.warning("Azure destroy: get_vm failed for rg=%s vm=%s: %s",
+                           candidate, vm_name, exc)
+            continue
+        if found:
+            vm, answered_rg = found, candidate
+            break
+
     if vm is None:
+        if probe_error is not None:
+            raise HTTPException(status_code=502, detail=str(probe_error))
         raise HTTPException(
             status_code=404,
-            detail=f"No active deployment found for VM '{vm_name}'. "
-                   "It may have already been terminated or was not deployed from this dashboard.",
+            detail=f"No active deployment found for VM '{vm_name}', and no VM by that name "
+                   f"exists in any resource group this dashboard knows about "
+                   f"({', '.join(candidates) or 'none'}). It may have already been "
+                   "terminated, or it lives in a region that is not configured here.",
         )
+
+    # The ARM id is authoritative for the group; the probe order only tells us which
+    # group answered, and ARM's own casing of the id is what later calls should use.
+    rg = azure_listing.resource_group_from_vm_id(vm.get("vm_id")) or answered_rg
 
     # Best-effort: drop the desktop-seat row (+ its PRA RDP jump) before terminating
     # the VM, so the Azure-tab Destroy doesn't leave an orphaned seat / stranded jump.
