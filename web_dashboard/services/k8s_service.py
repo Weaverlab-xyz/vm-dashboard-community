@@ -2689,7 +2689,12 @@ def _ps_rotator_subject(cloud: str) -> tuple:
     id in the functional account's username and would require a Graph lookup; and an
     AWS access key id cannot be mapped to a principal ARN at all without the secret.
     GKE is the exception: there the functional account's own name IS the subject, so
-    the caller passes it in when config is blank."""
+    the caller passes it in when config is blank.
+
+    None of which holds once a rotation has been ATTEMPTED: the AKS 403 names the
+    principal it refused, and ``ps_k8s_token_service._harvest_aks_principal_oid`` reads
+    the object id back out of it for the remedy. That is a failure-path affordance, not
+    a substitute for the config key — bind time is before any rotation has run."""
     c = (cloud or "").strip().lower()
     if c == "gcp":
         return ("User", _cfg("k8s_ps_rotator_gke_sa_email"), "")

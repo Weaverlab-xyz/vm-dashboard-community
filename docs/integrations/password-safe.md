@@ -489,6 +489,15 @@ resource "serviceaccounts" in API group "" in the namespace "pra-access": User d
 have access to the resource in Azure. Update role assignment to allow access.
 ```
 
+That 403 is also where the object id comes from when it was never configured. A failed
+`k8s_ps_token` job reads the principal out of the rotation failure and fills it into the
+`az role assignment create` line it had already collected, so the remedy on the job page is
+runnable as printed instead of carrying a `<sp-object-id>` placeholder that the operator has
+to resolve through Microsoft Graph. Set `k8s_ps_rotator_aks_sp_object_id` to that value and
+the next register makes the assignment itself. The id is matched off the surrounding prose,
+never scanned for as a bare GUID: the same error body carries the subscription id (the
+address is `aks|<sub>|<rg>|<cluster>`) and the plugin's own id.
+
 Run **Verify Functional Account** in Password Safe after registering: it names every missing
 verb, prints the ClusterRole to apply, and logs the correct AKS object id on every run.
 

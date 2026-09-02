@@ -38,6 +38,7 @@ See docs/design/k8s-sa-token-rotation.md.
 import asyncio
 import json
 import logging
+import re
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -52,6 +53,39 @@ VALID_PS_TOKEN_MODES = ("longlived", "bound")
 # The API server's own floor for a TokenRequest lifetime. The plugin's address parser
 # only requires ttl > 0, but a cluster silently caps below this, so clamp what we build.
 _MIN_BOUND_TTL = 600
+
+# What ``_ensure_aks_role_assignment`` puts in its ``az role assignment create``
+# line when the object id is unknown, and what ``_name_the_aks_principal`` looks
+# for in order to fill it in. One constant because the two have to agree exactly:
+# a remedy whose placeholder had been reworded would silently stop being completed.
+_AKS_OID_PLACEHOLDER = "<sp-object-id>"
+
+# The AKS rotation plugin volunteers the object id twice on the failure path — once
+# as the identity it resolved, once as the principal the API server rejected:
+#
+#     Functional account maps to cluster identity 'oid 6f80ab07-…'
+#     HTTP 403 (Forbidden): serviceaccounts "pra-access" is forbidden: User
+#     "6f80ab07-…" cannot get resource "serviceaccounts" …
+#
+# Both are anchored on that surrounding prose rather than scanned for as bare
+# GUIDs, and that is the whole point of these patterns: the same error body also
+# carries the SUBSCRIPTION id (the managed system address is
+# ``aks|<sub>|<rg>|<cluster>``) and the plugin's own ``Id=8031CC52-…``, so an
+# unanchored GUID match would hand the operator a grant command for the wrong
+# principal. The quotes arrive JSON-escaped — a literal backslash-u-0-0-2-2, six
+# characters — because the plugin log is a string nested inside the Password Safe
+# error body, and unescaped when the same text is read straight from the plugin.
+# So tolerate both, and no quote at all.
+_Q = r"""(?:\\?["']|\\u002[27])?"""
+_GUID = (r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+         r"[0-9a-fA-F]{12})")
+_AKS_OID_PATTERNS = (
+    # The 403 itself, and preferred: this is the principal the cluster
+    # authenticated and then refused, which is exactly the one the role
+    # assignment has to name.
+    re.compile(rf"\bUser\s+{_Q}{_GUID}{_Q}\s+cannot\b"),
+    re.compile(rf"cluster\s+identity\s*{_Q}\s*(?:oid\s+)?{_GUID}"),
+)
 
 
 class PSK8sTokenError(Exception):
@@ -767,7 +801,9 @@ async def _ensure_aks_role_assignment(db: Session, row: K8sCluster, warnings: li
 
     Non-fatal, like its EKS twin — the exact ``az role assignment create`` goes in
     the warnings, so an operator whose dashboard credential cannot delegate roles has
-    the one command that fixes it.
+    the one command that fixes it. When the object id is unset that command carries
+    ``_AKS_OID_PLACEHOLDER``, and ``_name_the_aks_principal`` fills it in on the way to
+    a failed job: the 403 that proves the grant is missing also names the principal.
     """
     from . import azure_service
     oid = _cfg("k8s_ps_rotator_aks_sp_object_id")
@@ -794,7 +830,7 @@ async def _ensure_aks_role_assignment(db: Session, row: K8sCluster, warnings: li
             "\"User does not have access to the resource in Azure\" 403 at the first "
             "rotation means. Grant it: az role assignment create --role "
             "\"Azure Kubernetes Service RBAC Writer\" --assignee-object-id "
-            f"{oid or '<sp-object-id>'} --assignee-principal-type ServicePrincipal "
+            f"{oid or _AKS_OID_PLACEHOLDER} --assignee-principal-type ServicePrincipal "
             f"--scope {scope or '<cluster-resource-id>/namespaces/' + namespace}")
 
     if not oid:
@@ -1069,6 +1105,54 @@ async def sync_status(db: Session, cluster_id: str) -> dict:
 
 # ── worker entry ──────────────────────────────────────────────────────────────
 
+def _harvest_aks_principal_oid(text: str) -> str:
+    """The rotator's service-principal object id, read out of an AKS rotation failure.
+
+    ``_ensure_aks_role_assignment`` cannot derive this at register time — see
+    ``k8s_service._ps_rotator_subject`` for why the functional account's username does
+    not carry it — so an unset ``k8s_ps_rotator_aks_sp_object_id`` leaves an
+    ``az role assignment create`` line in the warnings with a placeholder where the
+    principal belongs. By the time anyone reads that line, though, the failure it
+    explains has already happened, and the AKS API server's 403 names the principal it
+    refused. The id the operator would otherwise go and look up in Microsoft Graph is
+    sitting a few lines above the remedy that asks them for it.
+
+    Observed live on 2026-09-02 against ``k8s-aks-central``: the failed job's page
+    carried the 403 quoting ``User "6f80ab07-…"`` *and* a grant command reading
+    ``--assignee-object-id <sp-object-id>``.
+
+    Returns "" whenever the text is not an AKS authorisation failure, which is the
+    common case — this runs on every failed ``k8s_ps_token`` job, on all four clouds.
+    """
+    for pattern in _AKS_OID_PATTERNS:
+        match = pattern.search(text or "")
+        if match:
+            # As written, not case-normalised: it has to read as the same string the
+            # operator can see in the 403 directly above it. Azure treats the two alike.
+            return match.group(1)
+    return ""
+
+
+def _name_the_aks_principal(msg: str, warnings: list) -> None:
+    """Fill the harvested object id into any remedy that had to guess at it.
+
+    Mutates the list, because ``run`` hands the same one to ``set_failed``'s structured
+    result: a remedy that is complete in the prose an operator reads and still a
+    placeholder in the metadata would be a difference with nothing behind it.
+    """
+    oid = _harvest_aks_principal_oid(msg)
+    if not oid:
+        return
+    for i, warning in enumerate(warnings):
+        if _AKS_OID_PLACEHOLDER not in warning:
+            continue
+        warnings[i] = warning.replace(_AKS_OID_PLACEHOLDER, oid) + (
+            f" — {oid} is the object id the cluster itself named in the 403 above, so "
+            "that command is ready to run as written. Set "
+            "k8s_ps_rotator_aks_sp_object_id to it as well, and the next register "
+            "makes the assignment without being asked.")
+
+
 def _failure_message(exc: Exception, warnings: list) -> str:
     """The failed job's ``error_message``: what raised, then what was already known.
 
@@ -1077,6 +1161,10 @@ def _failure_message(exc: Exception, warnings: list) -> str:
     problem exists only in the warnings and the result dict; ``_ensure_eks_access_entry``
     writes the exact ``aws eks create-access-entry`` line there when
     ``k8s_ps_rotator_eks_principal_arn`` is unset.
+
+    It is also the last point at which the exception and the warnings are both in hand,
+    which is what ``_name_the_aks_principal`` needs: on AKS the step that raises knows
+    the object id the earlier step could only leave a placeholder for.
 
     Diagnosed live on 2026-08-17 against EKS cluster k8s-aws-east: a register collected
     that access-entry line at step 1 and then failed at step 5 on a 400 from
@@ -1089,6 +1177,8 @@ def _failure_message(exc: Exception, warnings: list) -> str:
     reads it, and the structured copy goes to ``set_failed``'s result.
     """
     msg = str(exc) or exc.__class__.__name__
+    # Before the join, so the completed remedy is what gets rendered.
+    _name_the_aks_principal(msg, warnings)
     if not warnings:
         return msg
     return "\n".join([msg, "", f"Collected before the failure ({len(warnings)}):",
@@ -1122,8 +1212,12 @@ async def run(db: Session, *, cluster_id: str, job_id: str, action: str = "regis
                 f"{', '.join(VALID_PS_TOKEN_ACTIONS)})")
             return
     except Exception as exc:
+        # Two statements, not one call: _failure_message completes the AKS remedy in
+        # this very list, and having the structured copy depend on argument evaluation
+        # order for that is not something the next reader should have to work out.
+        message = _failure_message(exc, warnings)
         job_service.set_failed(
-            db, job_id, _failure_message(exc, warnings),
+            db, job_id, message,
             {"ps_k8s_token": {"action": action, "failed": True, "warnings": warnings}})
         logger.exception("PS token job failed cluster=%s action=%s", cluster_id, action)
         return

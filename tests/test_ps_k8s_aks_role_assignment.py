@@ -413,6 +413,103 @@ def test_a_missing_binding_subject_reaches_the_failed_job():
     assert warnings == [note]
 
 
+# ── completing the remedy from the failure that proves it ────────────────────────
+
+# The 2026-09-02 body verbatim, and a raw string on purpose. The plugin log reaches
+# the dashboard as a string nested inside the Password Safe error body, so its
+# quotes really are literal six-character backslash-u escapes and its newlines
+# literal two-character ones. Only the outermost pair of quotes is a real quote.
+_PLUGIN_400 = r'''POST ManagedAccounts/243/Credentials/Change failed (400): "Attempt[1] begin: 2026-09-02T20:58:09.2536694Z UTC\r\nRotating ServiceAccount token for \u0027pra-access/pra-access\u0027 on Aks cluster aks|c199a68c-f98a-41e7-a52c-b97364424406|dashboard-sandbox-rg|k8s-aks-central\r\nRun action with timeout 30000 msec\r\nToken mode: LongLived (from the managed system address)\r\nAPI server https://k8s-aks-central-1yyu3171.hcp.centralus.azmk8s.io:443 (pinned to the cluster CA)\r\nFunctional account maps to cluster identity \u0027oid 6f80ab07-1334-493c-b119-f5ff7e829a9d\u0027.\r\nError: HTTP 403 (Forbidden): serviceaccounts \u0022pra-access\u0022 is forbidden: User \u00226f80ab07-1334-493c-b119-f5ff7e829a9d\u0022 cannot get resource \u0022serviceaccounts\u0022 in API group \u0022\u0022 in the namespace \u0022pra-access\u0022: User does not have access to the resource in Azure. Update role assignment to allow access.\r\nAttempt[1] end: 2026-09-02T20:58:10.7315433Z UTC\r\nSkipping host \u0027127.0.0.1\u0027 - not a recognised cluster address (expected eks; aks; gke; or k8s;)\r\n\r\nPlugin: Name=Kubernetes Service Account Token, Id=8031CC52-492A-4489-8BCD-1268D9433214, Version=1.0.0.2, Publisher=integrations@beyondtrust.com"'''
+
+# The subscription id out of the managed system address, and the plugin's own id. Both
+# sit in the same body as the principal and neither is one.
+_SUBSCRIPTION = "c199a68c-f98a-41e7-a52c-b97364424406"
+_PLUGIN_ID = "8031CC52-492A-4489-8BCD-1268D9433214"
+
+
+def test_the_object_id_is_read_out_of_the_plugins_own_403():
+    """The id `--assignee-object-id` needs is in the failure that needs it, so nobody
+    has to go to Microsoft Graph for what the API server already said."""
+    assert svc._harvest_aks_principal_oid(_PLUGIN_400) == _OID
+
+
+def test_no_other_guid_in_the_body_can_be_mistaken_for_the_principal():
+    """Why the patterns are anchored on prose instead of scanning for GUIDs: the same
+    body carries the subscription id and the plugin's id, and a grant command naming
+    either of those is worse than one naming a placeholder."""
+    got = svc._harvest_aks_principal_oid(_PLUGIN_400)
+    assert got not in (_SUBSCRIPTION, _PLUGIN_ID)
+    # And with the two lines that DO name the principal removed, nothing is offered.
+    stripped = "\\r\\n".join(
+        ln for ln in _PLUGIN_400.split("\\r\\n")
+        if "cluster identity" not in ln and "is forbidden" not in ln)
+    assert _SUBSCRIPTION in stripped and _PLUGIN_ID in stripped
+    assert svc._harvest_aks_principal_oid(stripped) == ""
+
+
+def test_the_identity_line_carries_it_when_the_403_does_not():
+    """A rotation can name the identity it resolved and then fail for another reason;
+    that line is still the object id, and it is quoted with \\u0027 not \\u0022."""
+    only_identity = "\\r\\n".join(
+        ln for ln in _PLUGIN_400.split("\\r\\n") if "is forbidden" not in ln)
+    assert svc._harvest_aks_principal_oid(only_identity) == _OID
+
+
+def test_unquoted_and_plainly_quoted_text_is_read_too():
+    """The same log read straight from the plugin is not JSON-escaped."""
+    for body in (f'User "{_OID}" cannot get resource',
+                 f"User '{_OID}' cannot get resource",
+                 f"User {_OID} cannot get resource",
+                 f"Functional account maps to cluster identity 'oid {_OID}'"):
+        assert svc._harvest_aks_principal_oid(body) == _OID, body
+
+
+def test_a_failure_from_another_cloud_harvests_nothing():
+    """This runs on every failed k8s_ps_token job, so the quiet answer is the common
+    one — including for the EKS 401 that has no principal in it at all."""
+    for body in ("", "the server rejected our request: Unauthorized",
+                 "PSK8sTokenError: bt_api_host is not configured"):
+        assert svc._harvest_aks_principal_oid(body) == ""
+
+
+def test_the_failed_jobs_message_hands_over_a_runnable_grant_command():
+    """The bug this closes: the job page showed the 403 naming the principal AND a
+    remedy reading ``--assignee-object-id <sp-object-id>``, twenty lines apart."""
+    warnings, _calls = _ensure({"k8s_ps_rotator_aks_sp_object_id": ""})
+    assert svc._AKS_OID_PLACEHOLDER in warnings[0]      # what register collected
+
+    msg = svc._failure_message(RuntimeError(_PLUGIN_400), warnings)
+    assert svc._AKS_OID_PLACEHOLDER not in msg
+    assert f"--assignee-object-id {_OID}" in msg
+    # And it says which field to set so the NEXT register does not need a human.
+    assert "k8s_ps_rotator_aks_sp_object_id" in msg
+    # The scope the grant needs is still the namespace-scoped one, unchanged.
+    assert "/managedClusters/k8s-aks-central/namespaces/pra-access" in msg
+
+
+def test_the_structured_copy_is_completed_as_well():
+    """``run`` puts this same list in ``set_failed``'s result. A remedy that is whole
+    in the prose and still a placeholder in the metadata is a difference with nothing
+    behind it — hence the in-place edit."""
+    warnings, _calls = _ensure({"k8s_ps_rotator_aks_sp_object_id": ""})
+    svc._failure_message(RuntimeError(_PLUGIN_400), warnings)
+    assert not [w for w in warnings if svc._AKS_OID_PLACEHOLDER in w]
+    assert [w for w in warnings if _OID in w]
+
+
+def test_a_remedy_that_never_guessed_is_left_alone():
+    """When the object id WAS configured, the warning already names it and the
+    propagation-delay note is the whole message — there is nothing to fill in."""
+    warnings, _calls = _ensure({}, assign=RuntimeError("403 AuthorizationFailed"))
+    before = list(warnings)
+    svc._failure_message(RuntimeError(_PLUGIN_400), warnings)
+    assert warnings == before
+
+
+def test_a_failure_with_no_warnings_is_still_just_the_failure():
+    assert svc._failure_message(RuntimeError("boom"), []) == "boom"
+
+
 if __name__ == "__main__":
     fns = [v for name, v in sorted(globals().items()) if name.startswith("test_")]
     failures = 0
