@@ -965,6 +965,10 @@ class Settings(BaseSettings):
     azure_bt_jump_group_name: str = ""            # BT jump group for Azure Shell Jumps (falls back to bt_jump_group_name)
     # Azure Key Vault — SSH key retrieval (optional; leave blank to disable)
     azure_key_vault_url: str = ""                     # e.g. "https://my-vault.vault.azure.net/"
+    # RG of the vault above, for the cloud_function Azure module's data lookup (what
+    # lets it detect RBAC-vs-access-policy and grant the right one). Empty = the
+    # vault lives in azure_resource_group, which is true of most deployments.
+    azure_key_vault_resource_group: str = ""
     azure_ssh_keypair_secret_name: str = "azureVM-ssh-keypair"  # Unified secret: JSON {public_key, private_key}
     azure_ssh_key_secret_name: str = ""               # Legacy: separate public-key secret (fallback)
     azure_ssh_private_key_secret_name: str = ""       # Legacy: separate private-key secret (fallback)
