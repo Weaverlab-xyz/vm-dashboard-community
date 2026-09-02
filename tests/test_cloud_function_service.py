@@ -916,13 +916,33 @@ def test_azure_turns_a_name_into_a_key_vault_reference():
 
 
 def test_azure_says_which_setting_is_missing():
+    """And names a SETTABLE one. The message used to name azure_key_vault_name,
+    which is not a config.py field and has no panel — so the one action it asked
+    for was impossible to take."""
     _reset()
     try:
         svc._secret_environment("azure", {"FN_PORTAINER_API_KEY": "portainer-key"})
     except svc.CloudFunctionError as exc:
-        assert "azure_key_vault_name" in str(exc), exc
+        assert "secrets_azure_kv_url" in str(exc), exc
     else:
         raise AssertionError("an Azure reference resolved with no vault configured")
+
+
+def test_deploy_resolves_the_vault_the_derived_way():
+    """The wiring, not the resolver. _azure_key_vault() has always accepted a URL or
+    a name and derived one from the other, but deploy() read the name keys directly —
+    so an operator who configured the vault as a URL (the only way the UI offers)
+    got "nowhere for FN_DB_ADMIN_PASSWORD to come from" one step AFTER
+    _stage_admin_secret had written that very credential into that very vault.
+    """
+    import inspect
+    source = inspect.getsource(svc.deploy)
+    assert "_azure_key_vault()" in source, (
+        "deploy() must resolve the vault through _azure_key_vault(), which accepts "
+        "the URL form the Secrets page actually saves")
+    assert 'vault=_cfg("azure_key_vault_name")' not in source, (
+        "deploy() is reading the vault name key directly again — it is not a "
+        "config.py field, so it is permanently empty")
 
 
 def test_an_invalid_environment_name_is_refused_by_name():

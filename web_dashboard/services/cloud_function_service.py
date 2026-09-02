@@ -505,9 +505,10 @@ def _secret_environment(cloud: str, refs: Optional[dict], *, vault: str = "") ->
             continue
         if not vault:
             raise CloudFunctionError(
-                "azure_key_vault_name is not configured — an Azure function resolves "
-                "its credentials through a Key Vault reference, so there is nowhere "
-                f"for {name} to come from")
+                "no Azure Key Vault is configured — an Azure function resolves its "
+                "credentials through a Key Vault reference, so there is nowhere for "
+                f"{name} to come from. Set the vault URL in Settings → Secrets → "
+                "Azure Key Vault (secrets_azure_kv_url)")
         out[name] = (f"@Microsoft.KeyVault(SecretUri="
                      f"https://{vault}.vault.azure.net/secrets/{ref}/)")
     return out, {}
@@ -571,8 +572,8 @@ def _stage_azure_bearer(fn_id: str, secret: str) -> dict:
     if not refs:
         raise CloudFunctionError(
             "an Azure function keeps its bearer secret in Key Vault, and no vault is "
-            "configured — set the Azure Key Vault secrets backend "
-            "(Settings → Secrets → Azure Key Vault), or azure_key_vault_name")
+            "configured — set the vault URL in Settings → Secrets → Azure Key Vault "
+            "(secrets_azure_kv_url)")
     from . import secrets_backend_service
     secrets_backend_service.write_azure_kv(azure_bearer_key(fn_id), secret)
     return refs
@@ -966,9 +967,14 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
     # is leaked the instant the row and the Job are written, so it has to be refused
     # here rather than anywhere downstream.
     _reject_plaintext_secrets(environment)
+    # Through _azure_key_vault(), not the name keys directly: the vault is
+    # configured as a URL on the Secrets page (secrets_azure_kv_url), and reading
+    # only azure_key_vault_name here made every Azure secret_environment deploy fail
+    # on a vault that was demonstrably present — _stage_admin_secret had just
+    # written the credential INTO it. The bearer path below already resolves it the
+    # derived way; this is the same vault.
     secret_env, secret_vars = _secret_environment(
-        cloud, secret_environment,
-        vault=_cfg("azure_key_vault_name") or _cfg("azure_keyvault_name"))
+        cloud, secret_environment, vault=_azure_key_vault()[0])
     environment = {**(environment or {}), **secret_env}
     # Against the MERGED map, so a setting supplied as a secret reference counts as
     # supplied. Before the row is written, for the same reason the network is
