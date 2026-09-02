@@ -536,8 +536,19 @@
       </label>
       <label class="block">
         <span class="text-sm font-medium text-gray-700">Resource Broker installer asset</span>
-        <input type="text" x-model="bp.rb_asset"
-               class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+        <select x-model="bp.rb_asset"
+                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
+          <option value="">Not chosen</option>
+          <template x-for="a in winAssets" :key="a">
+            <option :value="a" x-text="a"></option>
+          </template>
+        </select>
+        <span x-show="!winAssets.length" x-cloak class="mt-1 block text-xs text-amber-700">
+          No Windows installer is staged, so this picker is empty. Upload the Resource
+          Broker bootstrapper on <a href="/config-mgmt"
+          class="underline hover:no-underline">Config Management</a> first — a blueprint
+          may be saved without it and the POV's panel will ask.
+        </span>
       </label>
 
       <p class="md:col-span-2 text-xs text-gray-500">
@@ -628,6 +639,7 @@ function templatesPage() {
     showBlueprintForm: false,
     runnerScript: '',
     verifyResult: null,
+    winAssets: [],
     _poll: null,
     form: { base_template_id: '', name: '', description: '', broker_vm_name: '',
             project_id: '', install_runner: true, keep_build_environment: false },
@@ -695,6 +707,7 @@ function templatesPage() {
       } catch (e) { this.error = e.message; return; }
       await this.load();
       this.loadRunner();
+      this.loadWinAssets();
     },
 
     async load() {
@@ -837,6 +850,24 @@ function templatesPage() {
       try {
         this.runnerScript = (await this.apiJson('/api/pov/runner-script')).install_script;
       } catch (e) { this.runnerScript = ''; }
+    },
+
+    // The staged Windows installers, for the blueprint's Resource Broker asset picker.
+    // Same call and same filter as pov/index.html's RB editor, deliberately: the two
+    // fields write the same storage key, and a text box here was the one place the pages
+    // disagreed -- a typo saved fine and only surfaced at Install time as "no Resource
+    // Broker installer is staged". Soft-fails to an empty list, which the field explains.
+    async loadWinAssets() {
+      try {
+        const res = await this.apiFetch('/api/config-mgmt/assets');
+        if (!res.ok) { this.winAssets = []; return; }
+        const data = await res.json();
+        // /api/config-mgmt/assets returns a bare list; tolerate {assets: [...]} too.
+        const rows = data.assets || data || [];
+        this.winAssets = rows
+          .map(a => (typeof a === 'string' ? a : (a.name || a.key || '')))
+          .filter(n => /\.(exe|msi)$/i.test(n));
+      } catch (e) { this.winAssets = []; }
     },
 
     async verify() {
