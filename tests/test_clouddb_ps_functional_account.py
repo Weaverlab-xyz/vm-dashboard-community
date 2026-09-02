@@ -242,6 +242,51 @@ def test_an_engine_override_beats_the_global():
     assert svc._ps_fa_mode("mysql") == svc._FA_MODE_REFERENCE
 
 
+# ── per-cloud mode ────────────────────────────────────────────────────────────
+#
+# The other direction the per-engine keys cannot express: one ..._mode_postgres governs
+# Azure postgres AND GCP postgres, and those two want opposite answers. Azure's Run
+# Command plugins pack THIS database's admin password into the functional account, so a
+# shared account there obliges someone to create its DB login on every server by hand --
+# with a password Password Safe never returns (live 2026-09-02: Verify failed as
+# "password authentication failed for user 'psfa_pg'" because nobody could).
+
+def test_a_cloud_override_beats_the_global():
+    _reset(clouddb_ps_functional_account_mode="reference",
+           clouddb_ps_functional_account_mode_azure="create")
+    assert svc._ps_fa_mode("postgres", "azure") == "create"
+    # ...and leaves the other clouds on the global, which is the whole point of the key
+    assert svc._ps_fa_mode("postgres", "gcp") == svc._FA_MODE_REFERENCE
+    assert svc._ps_fa_mode("postgres", "aws") == svc._FA_MODE_REFERENCE
+
+
+def test_an_engine_override_beats_a_cloud_override():
+    """Engine is the finer axis where the two disagree: SQL Server on Cloud SQL has no
+    IAM database authentication and must be "create" even under a cloud-wide
+    "reference". Reversing this ordering silently breaks GCP SQL Server rotation."""
+    _reset(clouddb_ps_functional_account_mode="create",
+           clouddb_ps_functional_account_mode_gcp="reference",
+           clouddb_ps_functional_account_mode_sqlserver="create")
+    assert svc._ps_fa_mode("sqlserver", "gcp") == "create"
+    assert svc._ps_fa_mode("postgres", "gcp") == svc._FA_MODE_REFERENCE
+
+
+def test_a_blank_cloud_override_falls_back_and_no_cloud_is_the_old_behaviour():
+    _reset(clouddb_ps_functional_account_mode="reference",
+           clouddb_ps_functional_account_mode_azure="")
+    assert svc._ps_fa_mode("postgres", "azure") == svc._FA_MODE_REFERENCE
+    # An engine-only call must resolve exactly as it did before the cloud rung existed --
+    # the PRA Vault account calls it with neither argument.
+    assert svc._ps_fa_mode("postgres") == svc._FA_MODE_REFERENCE
+    assert svc._ps_fa_mode() == svc._FA_MODE_REFERENCE
+
+
+def test_the_cloud_rung_is_case_and_whitespace_tolerant():
+    _reset(clouddb_ps_functional_account_mode="reference",
+           clouddb_ps_functional_account_mode_azure="  Create  ")
+    assert svc._ps_fa_mode("postgres", " AZURE ") == "create"
+
+
 def test_a_blank_override_falls_back_to_the_global():
     """Blank must mean "unset", not "create" — otherwise adding the key to a config
     file would silently switch every engine off reference mode."""

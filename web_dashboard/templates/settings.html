@@ -1391,6 +1391,52 @@
                   </select>
                 </div>
               </div>
+              <!-- Per-cloud overrides. Resolved BELOW the per-engine keys above and
+                   ABOVE the global source: engine is the axis GCP needs (SQL Server must
+                   differ from PostgreSQL on the same cloud), cloud is the axis the engine
+                   keys cannot express (one "PostgreSQL override" governs Azure and GCP
+                   postgres, which want opposite answers). Same x-init "" default as the
+                   engine row, same literal x-model per control. -->
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">AWS override</label>
+                  <select x-model="panelCfg.clouddb_ps_functional_account_mode_aws"
+                          x-init="panelCfg.clouddb_ps_functional_account_mode_aws = panelCfg.clouddb_ps_functional_account_mode_aws || ''"
+                          class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">Use the source above</option>
+                    <option value="create">Create one per database</option>
+                    <option value="reference">Reference an existing account</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">Azure override</label>
+                  <select x-model="panelCfg.clouddb_ps_functional_account_mode_azure"
+                          x-init="panelCfg.clouddb_ps_functional_account_mode_azure = panelCfg.clouddb_ps_functional_account_mode_azure || ''"
+                          class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">Use the source above</option>
+                    <option value="create">Create one per database</option>
+                    <option value="reference">Reference an existing account</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">GCP override</label>
+                  <select x-model="panelCfg.clouddb_ps_functional_account_mode_gcp"
+                          x-init="panelCfg.clouddb_ps_functional_account_mode_gcp = panelCfg.clouddb_ps_functional_account_mode_gcp || ''"
+                          class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">Use the source above</option>
+                    <option value="create">Create one per database</option>
+                    <option value="reference">Reference an existing account</option>
+                  </select>
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">
+                An <strong>engine</strong> override beats a <strong>cloud</strong> override, which beats the source
+                above. On <strong>Azure and AWS</strong> the functional account carries <em>that database's</em> admin
+                password, so <code class="bg-gray-100 px-1 rounded">reference</code> there means creating the
+                account's database login on every server by hand — with a password Password Safe never hands back.
+                Prefer <code class="bg-gray-100 px-1 rounded">create</code> on those two clouds; the cloud override
+                is how you do that without changing GCP.
+              </p>
               <p class="text-xs text-gray-400">
                 The source is not really a preference — it follows whether the functional account has to carry a
                 <strong>per-database</strong> secret. On GCP, <code class="bg-gray-100 px-1 rounded">data-api</code>

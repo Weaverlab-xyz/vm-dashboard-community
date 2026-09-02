@@ -511,6 +511,23 @@ class Settings(BaseSettings):
     clouddb_ps_functional_account_mode_postgres: str = ""    # blank = use the global
     clouddb_ps_functional_account_mode_mysql: str = ""       # blank = use the global
     clouddb_ps_functional_account_mode_sqlserver: str = ""   # blank = use the global
+    # Per-CLOUD overrides, resolved BETWEEN the per-engine keys above and the global
+    # below. The mode follows the plugin family, and the family is chosen by cloud: the
+    # Azure Run Command plugins pack THIS database's admin password into the functional
+    # account, so one shared account cannot serve N databases there — "reference" on
+    # Azure obliges someone to create the account's DB login on every server by hand,
+    # with a password Password Safe will never hand back. The AWS SSM plugins have the
+    # same shape. GCP data-api is the only family where "reference" is free.
+    #
+    # BELOW the per-engine keys, not above, because engine is the axis GCP genuinely
+    # needs: SQL Server on Cloud SQL must be "create" while PostgreSQL/MySQL on the same
+    # cloud want "reference", so a cloud-wide key must not be able to overrule the
+    # engine key that expresses that. There is deliberately no cloud+engine rung — it
+    # would be nine keys, one of which would silently outrank the two an operator
+    # actually set.
+    clouddb_ps_functional_account_mode_aws: str = ""     # blank = per-engine, then global
+    clouddb_ps_functional_account_mode_azure: str = ""   # blank = per-engine, then global
+    clouddb_ps_functional_account_mode_gcp: str = ""     # blank = per-engine, then global
     clouddb_ps_functional_account_postgres: str = ""     # on "psql SSM Custom Plugin"
     clouddb_ps_functional_account_mysql: str = ""        # on "mysql SSM Custom Plugin"
     clouddb_ps_functional_account_sqlserver: str = ""    # on "mssql SSM Custom Plugin"
