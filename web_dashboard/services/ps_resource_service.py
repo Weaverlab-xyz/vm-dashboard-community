@@ -364,6 +364,28 @@ def _validate_ip_field(ip_address: str, method: str) -> None:
         ) from None
 
 
+# ── Azure Run Command DB plugin timeout ───────────────────────────
+#
+# The managed system's ``timeout``, in SECONDS — the same unit the GCP Cloud SQL plugins
+# read (_DBGCP_PLUGIN_TIMEOUT_SECONDS below) and the opposite of the AWS SSM plugins
+# reading the very same field (_DBSSM_PLUGIN_TIMEOUT_MS above).
+#
+# The unit is not guesswork. This branch registered NO timeout at all until 2026-09-02,
+# so the field sat at Password Safe's default of 30 — and the plugin's own diagnostic
+# printed "Run action with timeout 30000 msec", i.e. the field multiplied by 1000. It
+# then aborted a Verify Functional Account 31 seconds in with .NET's "Thread was
+# interrupted from a waiting state", its watchdog interrupting the waiting thread at the
+# 30s ceiling. A single Azure VM Run Command round trip is routinely 20-60s on its own,
+# so 30 was never survivable; it failed as a timeout rather than as the AWS shape's
+# false SUCCESS only because this plugin family actually enforces the wait.
+#
+# 180 for the same reason GCP is 180, plus one specific to this family: every database
+# shares one jump VM, Azure permits one action-style Run Command per VM, and the plugin
+# answers a 409 by retrying 5 times at 15s. That ladder alone is 75s+ before the psql
+# call, so any value under ~90 makes the plugin's own contention handling unreachable.
+_DBAZURE_PLUGIN_TIMEOUT_SECONDS = 180
+
+
 # ── GCP Cloud SQL address grammar ─────────────────────────────────────────────
 #
 # Transcribed from the plugin's Factories/AddressFormat.cs + ParameterFactory.cs, for
@@ -760,10 +782,11 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
     if timeout_value and int(timeout_value) > 0:
         # Read by the PLUGIN, not by Password Safe as a socket timeout — a custom-plugin
         # platform never opens the connection itself. Deliberately unit-less here,
-        # because the two plugin families disagree: the AWS SSM plugins read
-        # milliseconds (_DBSSM_PLUGIN_TIMEOUT_MS) and the GCP Cloud SQL plugins read
-        # seconds (_DBGCP_PLUGIN_TIMEOUT_SECONDS). Naming this parameter after either
-        # unit is how one caller ends up passing the other one's number.
+        # because the plugin families disagree: the AWS SSM plugins read milliseconds
+        # (_DBSSM_PLUGIN_TIMEOUT_MS) while the GCP Cloud SQL and Azure Run Command
+        # plugins read seconds (_DBGCP_PLUGIN_TIMEOUT_SECONDS,
+        # _DBAZURE_PLUGIN_TIMEOUT_SECONDS). Naming this parameter after either unit is
+        # how one caller ends up passing the other one's number.
         sys_lines.append(_line("timeout", int(timeout_value)))
     if method not in _PLUGIN_METHODS:
         sys_lines.append(_line("remote_client_type", '"ssh"'))
@@ -1083,7 +1106,8 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="dbazure", dns_name=dns_name, emit_private_key=False,
-            dss_auto_management=False, use_own_credentials=use_own_credentials)
+            dss_auto_management=False, use_own_credentials=use_own_credentials,
+            timeout_value=_DBAZURE_PLUGIN_TIMEOUT_SECONDS)
     elif method == "dbgcp":
         # Cloud-DB via the "GCP Cloud SQL {engine}" plugins. Unlike its two DB siblings
         # there is no jump host: the plugin reaches a private-IP instance through the
