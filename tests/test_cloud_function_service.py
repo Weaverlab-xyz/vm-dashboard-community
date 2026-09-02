@@ -177,6 +177,79 @@ def test_defaults_are_applied_for_blank_sizing():
     assert got["timeout_seconds"] == 60 and got["memory_mb"] == 256
 
 
+def test_memory_is_only_sent_to_the_clouds_that_have_a_knob_for_it():
+    """On Azure the memory an app gets is a property of the App Service plan SKU, so
+    the module has no memory_mb variable — and terraform fails the WHOLE apply on a
+    -var it does not declare, five seconds in, before it creates anything."""
+    _reset()
+    assert _vars("aws")["memory_mb"] == 256
+    assert _vars("gcp")["memory_mb"] == 256
+    assert "memory_mb" not in _vars("azure")
+    assert _vars("azure")["timeout_seconds"] == 60
+
+
+def _declared_variables(cloud):
+    """The variable blocks of a cloud's module, as ``{name: has_default}``."""
+    import re
+    body = open(os.path.join(svc.template_dir(cloud), "main.tf"),
+                encoding="utf-8").read()
+    blocks = re.findall(r'^variable\s+"([^"]+)"\s*\{(.*?)^\}', body,
+                        re.S | re.M)
+    return {name: bool(re.search(r'^\s*default\s*=', block, re.M))
+            for name, block in blocks}
+
+
+def test_every_var_the_service_sends_is_declared_by_the_module():
+    """The drift guard. `terraform apply -var x=…` on a variable the root module does
+    not declare is a hard error, not a warning, so this mismatch cannot be caught by
+    anything short of a real deploy — which is how azure shipped with memory_mb and
+    timeout_seconds nobody declared."""
+    _reset()
+    for cloud in ("aws", "azure", "gcp"):
+        declared = _declared_variables(cloud)
+        assert declared, cloud                      # the parse itself works
+        undeclared = sorted(set(_vars(cloud)) - set(declared))
+        assert not undeclared, (cloud, undeclared)
+
+
+def test_every_required_module_variable_is_actually_sent():
+    """The other direction: a variable with no default that nobody passes stops the
+    apply the same way."""
+    _reset()
+    for cloud in ("aws", "azure", "gcp"):
+        required = {n for n, has_default in _declared_variables(cloud).items()
+                    if not has_default}
+        missing = sorted(required - set(_vars(cloud)))
+        assert not missing, (cloud, missing)
+
+
+def test_a_replayed_var_the_module_no_longer_takes_is_dropped():
+    """Destroy and update replay the var set persisted at DEPLOY time, so they carry
+    whatever that older build sent — including a variable the module has since
+    stopped declaring. Terraform refuses the whole run over one of those, which on
+    destroy means a function that can never be torn down."""
+    _reset()
+    kept = svc._drop_undeclared("azure", {"name": "fn-demo", "memory_mb": 256,
+                                          "location": "eastus"})
+    assert kept == {"name": "fn-demo", "location": "eastus"}
+    # aws does declare it — the filter must not be a blanket strip.
+    assert svc._drop_undeclared("aws", {"memory_mb": 256}) == {"memory_mb": 256}
+
+
+def test_an_unreadable_module_disables_the_filter_rather_than_emptying_it():
+    """Fail OPEN here: an empty var set fails every apply, while an unfiltered one
+    only fails the (rare) drifted case this guard exists for."""
+    _reset()
+    svc._MODULE_VARIABLE_CACHE.clear()
+    original = svc._TEMPLATE_DIRS["aws"]
+    svc._TEMPLATE_DIRS["aws"] = os.path.join(original, "does-not-exist")
+    try:
+        assert svc._drop_undeclared("aws", {"anything": 1}) == {"anything": 1}
+    finally:
+        svc._TEMPLATE_DIRS["aws"] = original
+        svc._MODULE_VARIABLE_CACHE.clear()
+
+
 # ── Secret hygiene ────────────────────────────────────────────────────────────
 
 def test_no_secret_survives_into_job_metadata():

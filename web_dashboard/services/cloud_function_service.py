@@ -79,6 +79,9 @@ _TEMPLATE_DIRS = {
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
+# cloud → the module's declared variable names, parsed once. See _module_variables.
+_MODULE_VARIABLE_CACHE: dict = {}
+
 # Front-door defaults. Deliberately the OPEN option on AWS/GCP: Entitle authenticates
 # with a plain header, so requiring SigV4 or an OIDC token would make the integration
 # undeployable without a proxy. The shared bearer secret is the gate in that case,
@@ -154,6 +157,49 @@ def terraform_available() -> bool:
 
 def template_dir(cloud: str) -> str:
     return _TEMPLATE_DIRS[cloud]
+
+
+def _module_variables(cloud: str) -> frozenset:
+    """Variable names the cloud's module declares, read from its ``.tf`` files.
+
+    Cached because it is read on every apply and destroy and the files ship in the
+    image. An unreadable module returns an empty set, which disables the filtering
+    below rather than emptying the var set.
+    """
+    cached = _MODULE_VARIABLE_CACHE.get(cloud)
+    if cached is None:
+        names = set()
+        try:
+            directory = _TEMPLATE_DIRS[cloud]
+            for entry in sorted(os.listdir(directory)):
+                if entry.endswith(".tf"):
+                    with open(os.path.join(directory, entry), encoding="utf-8") as fh:
+                        names.update(re.findall(r'^variable\s+"([^"]+)"', fh.read(),
+                                                re.M))
+        except OSError as exc:
+            logger.warning("cloudfn: cannot read the %s module's variables: %s",
+                           cloud, exc)
+        cached = _MODULE_VARIABLE_CACHE[cloud] = frozenset(names)
+    return cached
+
+
+def _drop_undeclared(cloud: str, variables: dict) -> dict:
+    """Remove ``-var``s the module has no ``variable`` block for.
+
+    Terraform treats an undeclared -var as a hard error, not a warning, and it fails
+    the run before touching anything — so on DESTROY the effect is a function that
+    can never be torn down. The persisted var set is a snapshot of whatever the
+    service sent at deploy time, and it outlives any later change to the module, so
+    replaying it has to tolerate a variable the module no longer takes.
+    """
+    declared = _module_variables(cloud)
+    if not declared:
+        return variables
+    stale = sorted(set(variables) - declared)
+    if stale:
+        logger.info("cloudfn: dropping %s -var(s) the %s module does not declare: %s",
+                    len(stale), cloud, ", ".join(stale))
+    return {k: v for k, v in variables.items() if k in declared}
 
 
 def _deploy_dir(job_id: str) -> str:
@@ -584,18 +630,23 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
     """The ``-var`` set for the cloud's module. Pure: no config reads, no I/O —
     everything it needs is already resolved by the caller, which is what makes it
     unit-testable without a database or a cloud."""
+    # Only what all three modules declare. Terraform fails an apply outright on a
+    # -var the root module has no variable block for, so a key belongs here only
+    # once every cloud has somewhere to put it — memory_mb does not, because on
+    # Azure memory comes from the App Service plan SKU, not from the app.
     common = {
         "name": name,
         "workload": workload,
         "shared_secret": opts["shared_secret"],
         "timeout_seconds": int(opts.get("timeout_seconds") or _DEFAULT_TIMEOUT_SECONDS),
-        "memory_mb": int(opts.get("memory_mb") or _DEFAULT_MEMORY_MB),
         "environment": dict(opts.get("environment") or {}),
     }
+    memory_mb = int(opts.get("memory_mb") or _DEFAULT_MEMORY_MB)
 
     if cloud == "aws":
         return {
             **common,
+            "memory_mb": memory_mb,
             "region": region,
             "runtime": _RUNTIME["aws"],
             "auth_mode": opts.get("auth_mode") or _DEFAULT_AUTH_MODE["aws"],
@@ -614,6 +665,7 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
     if cloud == "gcp":
         return {
             **common,
+            "memory_mb": memory_mb,
             "region": region,
             "project": opts["project"],
             "runtime": _RUNTIME["gcp"],
@@ -643,7 +695,10 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
         }
 
     # Azure: no bucket/key vars — run-from-package takes a single SAS URL, and the
-    # object key still carries the content hash so terraform sees a real diff.
+    # object key still carries the content hash so terraform sees a real diff. No
+    # memory_mb either: sku_name sizes the plan, and the app gets whatever the plan
+    # has. timeout_seconds DOES apply — the module turns it into the host.json
+    # functionTimeout override.
     bearer = dict(opts.get("azure_bearer") or {})
     return {
         **common,
@@ -1281,7 +1336,9 @@ async def _reinject_secrets(row: CloudFunction, tf_variables: dict) -> dict:
             variables["storage_account_access_key"] = account_key
             variables["package_sas_url"] = _azure_sas_url(
                 account, account_key, container, key)
-    return variables
+    # Last: a function deployed by an older build persisted variables its module may
+    # since have dropped, and every one of them would fail this run outright.
+    return _drop_undeclared(row.cloud, variables)
 
 
 async def run_deploy_apply(db: Session, *, fn_id: str, job_id: str,
