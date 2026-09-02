@@ -133,6 +133,13 @@ def check_scope(scope: str, allowed) -> str:
     raise AzureRoleRuleError(f"scope {scope!r} is not in this adapter's allowlist")
 
 
+def is_guid(value: str) -> bool:
+    """Whether ``value`` is a bare GUID — role definition ids and principal object
+    ids both are, and callers outside this module's allowlist (the AKS data-plane
+    roles, say) still need the same check."""
+    return bool(_GUID_RE.match(_norm(value).lower()))
+
+
 def check_principal(principal_id: str) -> str:
     """The service principal's OBJECT id.
 

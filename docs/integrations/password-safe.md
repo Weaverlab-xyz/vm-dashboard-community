@@ -450,6 +450,45 @@ Symptom when this is missed: registration succeeds, then the **first rotation** 
 `401`/`403` — nothing in the cluster looks wrong, because the binding is fine and it is the
 *identity* that was never mapped.
 
+**AKS has the same failure for a different reason: the ClusterRoleBinding is not what
+authorises a Microsoft Entra principal there.** Every cluster provisioned here sets
+`azure_rbac_enabled` (`terraform/k8s_cluster/azure_aks`), which delegates Kubernetes API
+*authorisation* to Azure role assignments. The role a rotator service principal is usually
+given — **Azure Kubernetes Service Cluster User Role** — is control-plane only: it grants
+`listClusterUserCredential`, so the identity fetches a kubeconfig and authenticates
+perfectly, and holds no Kubernetes verb at all.
+
+So the dashboard also creates the role assignment (`k8s_ps_rotator_aks_assign_role`, on by
+default) once `k8s_ps_rotator_aks_sp_object_id` is set. `k8s_ps_rotator_aks_role` picks which
+one: `writer` (the default) and `reader` are the two Azure documents as assignable at
+namespace scope, so those land on `<cluster>/namespaces/<pra namespace>`; `admin`,
+`clusteradmin` or a custom role definition GUID go on the cluster. Writer is the right
+default — it carries `secrets/*` and `serviceaccounts/*`, which covers LongLived's Secret
+lifecycle and Bound's TokenRequest both. This needs `Microsoft.Authorization/roleAssignments/write`
+(User Access Administrator or RBAC Administrator) on the cluster for the dashboard's own
+Azure credential; when it is missing, or the object id is unset, the job result prints the
+command:
+
+```
+az role assignment create --role "Azure Kubernetes Service RBAC Writer" \
+  --assignee-object-id <sp-object-id> --assignee-principal-type ServicePrincipal \
+  --scope <cluster-resource-id>/namespaces/pra-access
+```
+
+Use `--assignee-object-id`, not `--assignee`: the latter resolves the principal through
+Microsoft Graph and fails outright (*"Cannot find user or service principal in graph
+database"*) for a service principal the operator cannot read. A **new role assignment takes
+up to five minutes** to reach the authorisation server, and registration rotates immediately,
+so a 403 in the minute after a first registration is worth one retry before it means
+anything. Symptom when the assignment is missing — again at the *first rotation*, and it
+names its own cause:
+
+```
+HTTP 403 (Forbidden): serviceaccounts "pra-access" is forbidden: User "<oid>" cannot get
+resource "serviceaccounts" in API group "" in the namespace "pra-access": User does not
+have access to the resource in Azure. Update role assignment to allow access.
+```
+
 Run **Verify Functional Account** in Password Safe after registering: it names every missing
 verb, prints the ClusterRole to apply, and logs the correct AKS object id on every run.
 
@@ -468,6 +507,19 @@ through the dashboard at all.
 it, because an admin unlinking in the Password Safe console is exactly the condition an
 operator opens that panel to diagnose. `DELETE …/ps-token` unlinks before off-boarding either
 account.
+
+**Order of operations, and the repair when it was the other way round.** The subscriber is
+created only when the cluster already has a PRA Vault account to write into, so registering
+the token *before* the PRA k8s tunnel leaves a cluster whose token rotates while nothing
+carries the value into PRA — Synced Accounts on the parent reads `0 items` and there is no
+"PRA Vault Token" managed account in the tenant. **Re-running the registration repairs it**:
+`Repair sync` in the cluster's token panel (or a re-POST of `…/ps-token`) creates the
+subscriber, links the pair, and touches nothing in the cluster. The subscriber is created on a
+placeholder rather than a checkout of the live token — the same 128-character cap drops any
+real token — and Password Safe replaces it through the link, so **PRA's copy is refreshed by
+the next rotation**. The pair is already in step at that point (the tunnel vaulted the value
+Password Safe holds), so nothing is rotated to prove it; use **Rotate now** if you want the
+path proven immediately, remembering that LongLived revokes the token a live session is using.
 
 > **Removing the PRA tunnel does not unlink the pair.** The plugin resolves its PRA Vault
 > account by *name* (`k8s-<cluster>-sa`), so re-provisioning the tunnel re-creates the account
@@ -536,6 +588,8 @@ credential and the token is what the subscriber receives.
 | `k8s_ps_rotator_apply_rbac` | `true` | Apply the rotator ClusterRole + binding on register |
 | `k8s_ps_rotator_gke_sa_email` | — | Blank → derived from the GCP functional account's name |
 | `k8s_ps_rotator_aks_sp_object_id` | — | The `oid` claim; the plugin logs it on every run |
+| `k8s_ps_rotator_aks_assign_role` | `true` | Grant that oid an AKS data-plane role — with Azure RBAC the binding alone authorises nothing |
+| `k8s_ps_rotator_aks_role` | `writer` | `reader`/`writer` → namespace-scoped; `admin`/`clusteradmin`/GUID → cluster-scoped |
 | `k8s_ps_rotator_eks_username` | `passwordsafe-rotator` | Access-entry username = the RBAC `User` subject |
 | `k8s_ps_rotator_eks_principal_arn` | — | IAM principal behind the functional account's key |
 | `k8s_ps_rotator_eks_create_access_entry` | `true` | Create the access entry when the ARN is set |

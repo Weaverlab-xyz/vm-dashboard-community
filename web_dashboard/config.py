@@ -1805,9 +1805,17 @@ class Settings(BaseSettings):
     # the client id in the FA username); EKS needs the access-entry username + the IAM
     # principal ARN behind the FA's access key. GKE's subject IS the FA's account name
     # (the SA email), so it is derived when the override is blank.
+    #
+    # And on TWO clouds the ClusterRoleBinding is not what authorises the rotator at
+    # all: EKS needs an access entry mapping its IAM principal, and an AKS cluster with
+    # Azure RBAC (every cluster this dashboard builds) authorises from an Azure role
+    # assignment. Neither shows up until the FIRST ROTATION — register applies the
+    # binding, and the identity it names was never mapped.
     k8s_ps_rotator_apply_rbac: bool = True
     k8s_ps_rotator_gke_sa_email: str = ""            # blank → derived from the GCP functional account's name
     k8s_ps_rotator_aks_sp_object_id: str = ""        # the oid claim — the plugin logs it on every run
+    k8s_ps_rotator_aks_assign_role: bool = True      # grant that oid an AKS data-plane role (Cluster User Role alone grants NO verb)
+    k8s_ps_rotator_aks_role: str = "writer"          # reader|writer → namespace-scoped; admin|clusteradmin|<GUID> → cluster-scoped
     k8s_ps_rotator_eks_username: str = "passwordsafe-rotator"   # access-entry username = RBAC User subject
     k8s_ps_rotator_eks_principal_arn: str = ""       # IAM role/user behind the FA's access key (not derivable)
     k8s_ps_rotator_eks_create_access_entry: bool = True  # create the access entry when the ARN is set (never touches aws-auth)

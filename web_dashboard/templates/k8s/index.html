@@ -817,12 +817,14 @@ gcloud auth login --login-config=login.json</pre>
                    <span class="font-mono" x-text="psTokenStatus.subscriber_last_change || '—'"></span></p>
                 <p x-show="psTokenStatus.note" class="text-amber-600" x-text="psTokenStatus.note"></p>
                 <p x-show="psTokenStatus.error" class="text-red-600" x-text="psTokenStatus.error"></p>
-                <p x-show="psTokenStatus.registered && psTokenStatus.pravault_account_id && !psTokenStatus.linked && !psTokenStatus.error"
+                <p x-show="psTokenStatus.registered && !psTokenStatus.linked && !psTokenStatus.error
+                           && (psTokenStatus.pravault_account_id || psTokenStatus.pra_vault_present)"
                    class="text-red-600">
                   The PRA Vault account is not synced to the token account, so rotations will NOT reach PRA.
-                  Use <span class="font-medium">Repair sync</span> below — it re-creates the link and touches
-                  nothing in the cluster. If it fails with a permission error, grant the API identity
-                  Password Safe Account Management (Full control) and try again.
+                  Use <span class="font-medium">Repair sync</span> below — it creates the PRA Vault Token
+                  account if it is missing, links the pair, and touches nothing in the cluster. If it fails
+                  with a permission error, grant the API identity Password Safe Account Management
+                  (Full control) and try again.
                 </p>
               </div>
             </template>
@@ -876,10 +878,17 @@ gcloud auth login --login-config=login.json</pre>
                at the link (a 403 on the sync grant, most likely) leaves a row that reads
                as registered next to a pair that syncs nothing — and the register form
                above is hidden from then on. This re-runs the register, which reconciles
-               the missing link and touches nothing in the cluster. -->
+               the missing link and touches nothing in the cluster.
+
+               NOT gated on pravault_account_id: a cluster whose PRA tunnel was registered
+               AFTER its token has no subscriber account at all, and gating on one left
+               that state with no control in the UI — the same dead end the register
+               form's own hiding created. The repair creates the subscriber when the
+               cluster has a PRA Vault account (pra_vault_present) to write into. -->
           <template x-if="psTokenTarget && psTokenTarget.ps_token_managed && psTokenStatus
-                          && psTokenStatus.registered && psTokenStatus.pravault_account_id
-                          && !psTokenStatus.linked && !psTokenStatus.error">
+                          && psTokenStatus.registered && !psTokenStatus.linked
+                          && !psTokenStatus.error
+                          && (psTokenStatus.pravault_account_id || psTokenStatus.pra_vault_present)">
             <button @click="repairPsTokenSync()" :disabled="psTokenBusy"
                     class="px-3 py-2 text-sm border border-red-300 text-red-700 rounded-lg hover:bg-red-50 disabled:opacity-50">Repair sync</button>
           </template>
