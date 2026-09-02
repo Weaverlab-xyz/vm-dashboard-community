@@ -3,7 +3,8 @@ Cloud-database SQL layer for the optional Password Safe integration (AWS-only).
 
 The dashboard-provisioned DB is private; the only dashboard component with
 line-of-sight to it is the shared PRA Jumpoint EC2 host. This module builds the
-per-engine SQL and wraps it in a ``docker run`` DB-client invocation that is run
+per-engine SQL and wraps it in a DB-client invocation — ``docker run`` for
+PostgreSQL/MySQL, the natively installed sqlcmd for SQL Server — that is run
 on that host over AWS SSM Run Command (see aws_service.ssm_send_command) — the
 same SSM path Password Safe's DB custom plugin uses for rotation, so no DB
 drivers are added to the dashboard image and no separate jump host is needed.
@@ -35,11 +36,32 @@ VALID_ENGINES = ("postgres", "mysql", "sqlserver")
 
 # Per-engine defaults. The client image is overridable via settings so an
 # air-gapped/mirrored registry can be pointed at instead of Docker Hub / MCR.
+#
+# SQL Server's default is deliberately EMPTY — "" means "no container, run the
+# native client on the jump host". There is no sqlcmd image to default to:
+# `mcr.microsoft.com/mssql-tools18` (the default until 2026-09-02) does not exist
+# and never did. That string is the apt/dnf PACKAGE name, which is how the jump-host
+# prep installs it; MCR publishes `mssql-tools` (sqlcmd 17, a different binary path
+# and different flags) and no `mssql-tools18` repository at all, so every SQL Server
+# registration died on `docker run` rc=125 ("...: not found") before a byte reached
+# the database. See _mssql_command.
 _ENGINE = {
-    "postgres":  {"image": "postgres:16",                     "port": 5432},
-    "mysql":     {"image": "mysql:8.4",                       "port": 3306},
-    "sqlserver": {"image": "mcr.microsoft.com/mssql-tools18", "port": 1433},
+    "postgres":  {"image": "postgres:16", "port": 5432},
+    "mysql":     {"image": "mysql:8.4",   "port": 3306},
+    "sqlserver": {"image": "",            "port": 1433},
 }
+
+# Where both clouds' jump-host prep installs the `mssql-tools18` package, and the
+# path the Password Safe rotation plugins already invoke. Kept as one constant so
+# the onboarding and the container fallback below cannot drift from each other.
+SQLCMD_PATH = "/opt/mssql-tools18/bin/sqlcmd"
+
+# Repositories that do not exist and never did. Changing the FIELD default is not
+# enough on a live instance: the settings panel writes an `app_config` row when the
+# panel is saved, and a row written by an older instance outlives the default it was
+# seeded from — so the phantom image would keep being handed to `docker run` and this
+# fix would be inert exactly where it is needed. Dropped on read instead.
+_PHANTOM_IMAGES = ("mcr.microsoft.com/mssql-tools18",)
 
 # DB identifiers we create — restrict hard so they are safe to interpolate into
 # SQL (no quoting games) and into a shell command.
@@ -83,7 +105,28 @@ def default_port(engine: str) -> int:
 
 
 def default_client_image(engine: str) -> str:
+    """The DB-client container image for ``engine``, or ``""`` when the client runs
+    natively on the jump host (SQL Server — see the ``_ENGINE`` note)."""
     return _ENGINE[engine]["image"]
+
+
+def resolve_client_image(engine: str, configured: str = "") -> str:
+    """The image to actually run for ``engine`` — ``configured`` if it names a real
+    one, else this engine's default — or ``""`` meaning "run the client natively".
+
+    Callers pass the raw setting and use the result for BOTH the command build and
+    the decision to install a native client, so a phantom reference cannot make those
+    two disagree (which would install nothing and then run nothing).
+
+    A dropped phantom falls back to the ENGINE DEFAULT, not to ``""``. For SQL Server
+    that default is "" (native), which is the point; for PostgreSQL/MySQL it keeps
+    their real images, so this function can never hand `docker run` an empty image
+    argument — those two builders have no native mode to fall back to."""
+    image = (configured or "").strip() or default_client_image(engine)
+    for phantom in _PHANTOM_IMAGES:
+        if image == phantom or image.startswith((phantom + ":", phantom + "@")):
+            return default_client_image(engine)
+    return image
 
 
 def generate_password(length: int = 24) -> str:
@@ -172,7 +215,12 @@ def _mssql_teardown_sql(managed: str) -> list:
     return [f"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = '{managed}') DROP LOGIN [{managed}];"]
 
 
-# ── docker-run command builders (run on the jump host) ──────────────────────
+# ── DB-client command builders (run on the jump host) ───────────────────────
+#
+# PostgreSQL and MySQL run their client as a throwaway `docker run` (postgres:16 /
+# mysql:8.4 are real images and the jump hosts on both clouds run docker). SQL Server
+# runs the NATIVE sqlcmd the prep installs, because no sqlcmd container image exists
+# to run — see the _ENGINE note and _mssql_command.
 #
 # TLS on the jumphost→DB hop. Every DB terraform module here turns the server's
 # *forced*-TLS knob OFF — db_azure_postgres/db_azure_mysql set
@@ -195,12 +243,12 @@ def _mssql_teardown_sql(managed: str) -> list:
 # So: encrypt, but do NOT verify. `sslmode=require`, `--ssl-mode=REQUIRED` and sqlcmd
 # `-N t -C` all mean "this connection must be encrypted; do not check the certificate".
 # Verifying instead (`verify-full` / `VERIFY_IDENTITY` / `-N t` without `-C`) would need
-# each cloud's root CA reachable inside the client container: the stock postgres:16,
-# mysql:8.4 and mssql-tools18 images carry only the OS trust store, and nothing pins the
-# DigiCert root Azure Flexible Server presents, the Amazon RDS roots or the per-instance
-# Google Cloud SQL server CA. Shipping those bundles to the jump host is a separate
-# change, out of scope here: this hop is intra-VNet/VPC to a private endpoint, so
-# encrypting the admin password on the wire is the win that matters.
+# each cloud's root CA reachable by the client: the stock postgres:16 and mysql:8.4
+# images carry only the OS trust store, as does the jump host's own, and nothing pins
+# the DigiCert root Azure Flexible Server presents, the Amazon RDS roots or the
+# per-instance Google Cloud SQL server CA. Shipping those bundles to the jump host is a
+# separate change, out of scope here: this hop is intra-VNet/VPC to a private endpoint,
+# so encrypting the admin password on the wire is the win that matters.
 
 def _pg_command(*, host, port, database, admin_user, admin_password, image, statements) -> str:
     db = _ident(database) if database else "postgres"
@@ -229,20 +277,42 @@ def _mysql_command(*, host, port, database, admin_user, admin_password, image, s
 
 
 def _mssql_command(*, host, port, database, admin_user, admin_password, image, statements) -> str:
+    """sqlcmd invoking ``statements`` against ``host``, NATIVELY on the jump host.
+
+    Native rather than containerised because there is nothing to containerise:
+    `mcr.microsoft.com/mssql-tools18` — the default image this builder carried until
+    2026-09-02 — is not a registry repository, so `docker run` exited 125 without
+    connecting, and SQL Server registration could never have succeeded on either
+    cloud. `mssql-tools18` is the apt/dnf package name, and both clouds' jump-host
+    prep installs it (cloud_database_service._AZURE_CLIENT_INSTALL /
+    _SSM_CLIENT_INSTALL) for the rotation plugin, which invokes this same binary at
+    this same path — so onboarding and rotation now use one client, not two.
+
+    ``image`` is the opt-in escape hatch (a mirrored/air-gapped registry, or a jump
+    host where the package install is not wanted): a non-empty value goes back
+    through docker.
+    """
     # -b: exit non-zero on SQL error. -N t (encryption mandatory) -C (trust the server
     # cert without checking it against a CA) — see the TLS note above. -N t is also the
-    # mssql-tools18 default, which the original `-N o` (optional) downgraded, and Azure
+    # sqlcmd 18 default, which the original `-N o` (optional) downgraded, and Azure
     # SQL is TLS-only anyway. Batches joined with GO.
     batch = "\nGO\n".join(statements) + "\nGO\n"
-    parts = [
-        "docker", "run", "--rm",
-        "-e", f"SQLCMDPASSWORD='{admin_password}'",
-        image, "/opt/mssql-tools18/bin/sqlcmd",
+    args = [
         "-S", f"{host},{int(port)}", "-U", admin_user, "-d", "master",
         "-N", "t", "-C", "-b",
         "-Q", f'"{batch}"',
     ]
-    return " ".join(parts)
+    if image:
+        # --entrypoint is required, not stylistic: the only MCR image that carries
+        # sqlcmd 18 at SQLCMD_PATH is mcr.microsoft.com/mssql/server, whose
+        # ENTRYPOINT is launch_sqlservr.sh — a bare `docker run IMAGE sqlcmd …` hands
+        # the whole command line to the SQL Server launcher and sqlcmd never runs.
+        return " ".join(["docker", "run", "--rm",
+                         "-e", f"SQLCMDPASSWORD='{admin_password}'",
+                         "--entrypoint", SQLCMD_PATH, image] + args)
+    # The password rides an env assignment scoped to this one command rather than the
+    # shell's environment — same exposure as the `docker run -e` form it replaces.
+    return " ".join([f"SQLCMDPASSWORD='{admin_password}'", SQLCMD_PATH] + args)
 
 
 _ONBOARD_SQL = {"postgres": _pg_onboard_sql, "mysql": _mysql_onboard_sql, "sqlserver": _mssql_onboard_sql}
@@ -260,13 +330,13 @@ def onboard_commands(engine: str, *, host: str, port: int, database: str,
                      managed_user: str, managed_password: str,
                      client_image: str = "") -> list:
     """Shell command(s) that create the dedicated managed DB user (the rotation
-    target). Returned as an SSM ``commands`` list (one ``docker run`` line). Raises
+    target). Returned as an SSM ``commands`` list (one client-invocation line). Raises
     on unsafe identifiers/values so nothing unvalidated reaches the shell."""
     _check_engine(engine)
     managed = _ident(managed_user)
     mpw = _value(managed_password)
     _value(admin_password)
-    image = client_image or default_client_image(engine)
+    image = resolve_client_image(engine, client_image)
     statements = _ONBOARD_SQL[engine](managed, mpw)
     return [_COMMAND[engine](host=host, port=port, database=database,
                              admin_user=_ident(admin_user), admin_password=admin_password,
@@ -280,7 +350,7 @@ def teardown_commands(engine: str, *, host: str, port: int, database: str,
     _check_engine(engine)
     managed = _ident(managed_user)
     _value(admin_password)
-    image = client_image or default_client_image(engine)
+    image = resolve_client_image(engine, client_image)
     statements = _TEARDOWN_SQL[engine](managed)
     return [_COMMAND[engine](host=host, port=port, database=database,
                              admin_user=_ident(admin_user), admin_password=admin_password,
