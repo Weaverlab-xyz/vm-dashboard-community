@@ -535,6 +535,37 @@ def test_dbazure_account_is_password_managed_no_key_no_dss():
     assert 'variable "ps_account_private_key"' not in hcl
 
 
+def test_dbazure_register_pins_the_plugin_timeout_in_seconds():
+    """Live 2026-09-02: this branch registered no timeout, so the field sat at Password
+    Safe's default of 30, the plugin printed "timeout 30000 msec" (the field x1000, so it
+    reads SECONDS) and killed Verify Functional Account 31s in with "Thread was
+    interrupted from a waiting state". One Azure Run Command round trip is 20-60s."""
+    import asyncio
+    captured = {}
+
+    def _capture(hcl, tf_vars, tenant=None):
+        captured["hcl"] = hcl
+        return {"managed_system_id": "1", "managed_account_id": "2", "tf_state_json": None}
+
+    real = ps._apply_hcl_sync
+    ps._apply_hcl_sync = _capture
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="clouddb-pg", host_name="mydb.postgres.database.azure.com", port=5432,
+            functional_account_id=42, platform_id=30, workgroup_id="55",
+            managed_account_name="psafe_x", method="dbazure", dns_name=_DBAZURE_DNS))
+    finally:
+        ps._apply_hcl_sync = real
+    assert ps._line("timeout", 180) in captured["hcl"], captured["hcl"]
+    assert ps._DBAZURE_PLUGIN_TIMEOUT_SECONDS == 180
+    # Seconds, like GCP -- never the AWS millisecond number, which would read as 30000
+    # SECONDS here. And >= 90 so the plugin's own 409 ladder (5 retries at 15s, because
+    # every database shares one jump VM) fits inside the wait instead of being cut off.
+    assert ps._DBAZURE_PLUGIN_TIMEOUT_SECONDS == ps._DBGCP_PLUGIN_TIMEOUT_SECONDS
+    assert ps._DBAZURE_PLUGIN_TIMEOUT_SECONDS != ps._DBSSM_PLUGIN_TIMEOUT_MS
+    assert ps._DBAZURE_PLUGIN_TIMEOUT_SECONDS >= 90
+
+
 def test_dbazure_register_rejects_dns_name_without_eight_parts():
     import asyncio
     for bad in ("", "a;b;c", "a;b;c;d;e;f",                    # too few
