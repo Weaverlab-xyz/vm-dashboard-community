@@ -131,6 +131,159 @@ def test_component_status_shape_still_wins():
     assert (stdout, stderr) == ("the output", "the error")
 
 
+# ── The 409 "another run command is running" wait ─────────────────────────────
+# The jump VM is shared and Azure serialises Run Command per VM, so a second
+# concurrent onboarding gets HTTP 409 rather than a queue slot. vm_run_command waits
+# that out; before it did, the second of two `clouddb_ps_register` jobs claimed two
+# seconds apart failed at 0s having done nothing.
+
+class _Compute:
+    """Stand-in for ComputeManagementClient whose begin_run_command always 409s."""
+    def __init__(self, message):
+        self._message = message
+        self.calls = 0
+        self.virtual_machines = self
+
+    def begin_run_command(self, rg, vm_name, params):
+        self.calls += 1
+        raise RuntimeError(self._message)
+
+
+_BUSY_409 = ("(Conflict) Run command extension execution is in progress. Please wait "
+             "for completion before invoking a run command.")
+
+
+def test_is_run_command_busy_matches_only_the_extension_conflict():
+    assert az._is_run_command_busy(RuntimeError(_BUSY_409))
+    # A resource-group / VM conflict is ALSO a 409 here and must not be waited out.
+    assert not az._is_run_command_busy(
+        RuntimeError("(Conflict) VM 'clouddb-jumpoint' is being deallocated."))
+
+
+def test_run_command_sync_maps_the_busy_conflict_to_its_own_exception():
+    compute = _Compute(_BUSY_409)
+    orig = az._get_compute
+    az._get_compute = lambda cred, sub: compute
+    # Stand in for the SDK model when azure-mgmt-compute is absent (this file runs
+    # without the SDK installed, which is how CI runs it).
+    had_input = hasattr(az, "RunCommandInput")
+    orig_input = getattr(az, "RunCommandInput", None)
+    az.RunCommandInput = lambda **kw: kw
+    try:
+        try:
+            az._run_vm_command_sync(None, "sub", "rg", "vm", ["true"], 300)
+            raise AssertionError("expected _RunCommandBusy")
+        except az._RunCommandBusy:
+            pass
+        # Any other SDK error keeps propagating untouched.
+        az._get_compute = lambda cred, sub: _Compute("(Conflict) VM is deallocating")
+        try:
+            az._run_vm_command_sync(None, "sub", "rg", "vm", ["true"], 300)
+            raise AssertionError("expected RuntimeError")
+        except az._RunCommandBusy:
+            raise AssertionError("a non-busy conflict must not be waited out")
+        except RuntimeError:
+            pass
+    finally:
+        az._get_compute = orig
+        if had_input:
+            az.RunCommandInput = orig_input
+        else:
+            del az.RunCommandInput
+
+
+def test_run_command_sync_reports_a_poller_that_never_finished():
+    # result(timeout=) stops waiting without aborting the run: the old code turned that
+    # into "Failed, rc=-1" with no output, which reads like an in-guest error.
+    class _Poller:
+        def result(self, timeout=None):
+            return None
+
+        def done(self):
+            return False
+
+    class _Slow:
+        virtual_machines = None
+
+        def begin_run_command(self, rg, vm_name, params):
+            return _Poller()
+
+    slow = _Slow()
+    slow.virtual_machines = slow
+    orig, orig_input = az._get_compute, getattr(az, "RunCommandInput", None)
+    had_input = hasattr(az, "RunCommandInput")
+    az._get_compute = lambda cred, sub: slow
+    az.RunCommandInput = lambda **kw: kw
+    try:
+        az._run_vm_command_sync(None, "sub", "rg", "clouddb-jumpoint", ["true"], 300)
+        raise AssertionError("expected AzureError")
+    except az.AzureError as e:
+        assert "still running after 300s" in str(e)
+    finally:
+        az._get_compute = orig
+        if had_input:
+            az.RunCommandInput = orig_input
+        else:
+            del az.RunCommandInput
+
+
+class _RunHarness:
+    """Drive vm_run_command with a stubbed executor, credential fetch and sleep."""
+    def __init__(self, busy_times, final=None):
+        self.busy_times = busy_times
+        self.final = final if final is not None else {"status": "Success",
+                                                      "response_code": 0,
+                                                      "stdout": "", "stderr": ""}
+        self.attempts = 0
+        self.slept = []
+
+    async def _to_thread(self, fn, /, *args, **kwargs):
+        self.attempts += 1
+        if self.attempts <= self.busy_times:
+            raise az._RunCommandBusy(_BUSY_409)
+        return self.final
+
+    async def _sleep(self, seconds):
+        self.slept.append(seconds)
+
+    def run(self, **kwargs):
+        import asyncio as _aio
+        saved = (az._to_thread, az._ensure_creds, az.asyncio)
+
+        async def _creds():
+            return None, "sub"
+
+        az._to_thread = self._to_thread
+        az._ensure_creds = _creds
+        az.asyncio = types.SimpleNamespace(sleep=self._sleep)
+        try:
+            return _aio.run(az.vm_run_command("rg", "clouddb-jumpoint",
+                                              ["true"], **kwargs))
+        finally:
+            az._to_thread, az._ensure_creds, az.asyncio = saved
+
+
+def test_vm_run_command_waits_out_a_busy_extension_then_succeeds():
+    h = _RunHarness(busy_times=2)
+    res = h.run()
+    assert res["status"] == "Success"
+    assert h.attempts == 3                       # two 409s, then the real run
+    assert h.slept == [az._RUN_CMD_BUSY_POLL] * 2
+
+
+def test_vm_run_command_gives_up_with_an_actionable_message():
+    # busy_timeout=0 → no waiting at all, and the error has to name the remedy: the
+    # job's error_message is the only place an operator sees this.
+    h = _RunHarness(busy_times=99)
+    try:
+        h.run(busy_timeout=0)
+        raise AssertionError("expected AzureError")
+    except az.AzureError as e:
+        assert "shared" in str(e)
+        assert "restarting the VM" in str(e)
+    assert h.slept == []
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
