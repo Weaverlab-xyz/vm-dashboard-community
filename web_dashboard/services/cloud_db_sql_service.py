@@ -241,8 +241,8 @@ def _mssql_teardown_sql(managed: str) -> list:
 # in the clear for no reason at all.
 #
 # So: encrypt, but do NOT verify. `sslmode=require`, `--ssl-mode=REQUIRED` and sqlcmd
-# `-N t -C` all mean "this connection must be encrypted; do not check the certificate".
-# Verifying instead (`verify-full` / `VERIFY_IDENTITY` / `-N t` without `-C`) would need
+# `-N -C` all mean "this connection must be encrypted; do not check the certificate".
+# Verifying instead (`verify-full` / `VERIFY_IDENTITY` / `-N` without `-C`) would need
 # each cloud's root CA reachable by the client: the stock postgres:16 and mysql:8.4
 # images carry only the OS trust store, as does the jump host's own, and nothing pins
 # the DigiCert root Azure Flexible Server presents, the Amazon RDS roots or the
@@ -292,14 +292,24 @@ def _mssql_command(*, host, port, database, admin_user, admin_password, image, s
     host where the package install is not wanted): a non-empty value goes back
     through docker.
     """
-    # -b: exit non-zero on SQL error. -N t (encryption mandatory) -C (trust the server
-    # cert without checking it against a CA) — see the TLS note above. -N t is also the
-    # sqlcmd 18 default, which the original `-N o` (optional) downgraded, and Azure
-    # SQL is TLS-only anyway. Batches joined with GO.
+    # -b: exit non-zero on SQL error. -N (encrypt) -C (trust the server cert without
+    # checking it against a CA) — see the TLS note above. Batches joined with GO.
+    #
+    # `-N` is passed BARE, and that is the whole point of this line. sqlcmd's encryption
+    # switch is documented as `-N[s|m|o]`: the value is attached to the switch with no
+    # space (`-Ns`, `-Nm`, `-No`) and the only accepted letters are strict/mandatory/
+    # optional. `t` (for "true") belongs to the *Go* sqlcmd's `true|false|disable` set —
+    # a different binary. So `-N t` and the earlier `-N o` were BOTH malformed for
+    # /opt/mssql-tools18/bin/sqlcmd, and it rejected the command line before opening a
+    # socket: `Sqlcmd: Command -N: Invalid Parameters passed.`, rc=1, observed live on
+    # Azure 2026-09-02 at 25% "Creating the rotatable managed database user…".
+    # Bare `-N` means "encrypt" in every sqlcmd — the boolean flag of 17, and the
+    # documented `-Nm` (mandatory) default of the value-taking 18+ — so it is the one
+    # form that cannot be version-dependent, and `-C` then waives cert validation.
     batch = "\nGO\n".join(statements) + "\nGO\n"
     args = [
         "-S", f"{host},{int(port)}", "-U", admin_user, "-d", "master",
-        "-N", "t", "-C", "-b",
+        "-N", "-C", "-b",
         "-Q", f'"{batch}"',
     ]
     if image:

@@ -144,7 +144,7 @@ def test_sqlserver_onboard_targets_master_with_tunnel_flags():
     assert "CREATE LOGIN [psafe_ab12cd34] WITH PASSWORD = 'Managed-Pw_9';" in c
     assert "SQLCMDPASSWORD='Admin-Pw_123'" in c
     assert "sqlcmd" in c and "-d master" in c
-    assert "-N t -C" in c          # encryption mandatory + trust cert (no CA on the host)
+    assert " -N -C " in c          # encrypt + trust cert (no CA on the host)
     assert "ALTER ANY LOGIN" not in c
 
 
@@ -176,6 +176,38 @@ def test_sqlserver_runs_the_native_sqlcmd_because_no_such_image_exists():
                               admin_user="dbadmin", admin_password="Admin-Pw_123",
                               managed_user="psafe_ab12cd34")[0]
     assert "docker" not in t and sql.SQLCMD_PATH in t
+
+
+def test_sqlserver_passes_the_encryption_switch_in_the_only_form_sqlcmd_parses():
+    """`-N` must be BARE. A space-separated value is not a downgrade, it is a crash.
+
+    sqlcmd's encryption switch is documented as `-N[s|m|o]` — the value is ATTACHED
+    (`-Ns` strict / `-Nm` mandatory / `-No` optional) and those three letters are the
+    only ones the mssql-tools18 binary knows. `t` (for "true") belongs to the separate
+    *Go* sqlcmd's `true|false|disable` vocabulary. So `-N t` — and the `-N o` that
+    preceded it — never reached a socket at all:
+
+        Sqlcmd: Command -N: Invalid Parameters passed.
+
+    rc=1, observed live on Azure 2026-09-02, at 25% "Creating the rotatable managed
+    database user…" — the step right after the phantom-image fix above finally got a
+    real sqlcmd to run, which is why this was the NEXT failure and not the first.
+
+    Bare `-N` means "encrypt" in every sqlcmd ever shipped (the argument-less flag of
+    17, the documented `-Nm` default of the value-taking 18+), so it cannot depend on
+    which mssql-tools18 point release the jump-host prep happened to install. Pinned
+    with the surrounding spaces: a regression to `-N <value>` must fail here.
+    """
+    cmds = [sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0],
+            sql.teardown_commands("sqlserver", host="h", port=1433, database="",
+                                  admin_user="dbadmin", admin_password="Admin-Pw_123",
+                                  managed_user="psafe_ab12cd34")[0],
+            sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433,
+                                                 "client_image": "myreg/mssql:2022"})[0]]
+    for c in cmds:
+        assert " -N -C -b " in c
+        for bad in (" -N t", " -N o", " -N m", " -N s", " -N true", " -N mandatory"):
+            assert bad not in c, f"space-separated {bad.strip()!r} is a sqlcmd parse error"
 
 
 def test_a_saved_phantom_image_is_dropped_rather_than_run():
@@ -219,7 +251,7 @@ def test_a_configured_sqlserver_image_goes_back_through_docker_with_an_entrypoin
     # The binary is the entrypoint, so it must NOT also appear as the first argument.
     assert c.count(sql.SQLCMD_PATH) == 1
     # Identical SQL and connection flags on either path.
-    assert "-N t -C" in c and "-d master" in c
+    assert " -N -C " in c and "-d master" in c
     assert "CREATE LOGIN [psafe_ab12cd34] WITH PASSWORD = 'Managed-Pw_9';" in c
 
 
@@ -238,7 +270,7 @@ def test_client_connections_encrypt_but_do_not_verify():
     `sslTRUE` segment on all three clouds.
 
     ENCRYPT-BUT-DO-NOT-VERIFY is the deliberate choice, not an oversight. sslmode=
-    require / --ssl-mode=REQUIRED / sqlcmd -N t -C all encrypt without checking the
+    require / --ssl-mode=REQUIRED / sqlcmd -N -C all encrypt without checking the
     certificate. The verifying modes would need each cloud's root CA reachable by the
     client, and neither the stock postgres:16 / mysql:8.4 images nor the jump host
     running sqlcmd carry the Azure, RDS or Cloud SQL roots — so a verify-full here
@@ -259,9 +291,11 @@ def test_client_connections_encrypt_but_do_not_verify():
     assert "VERIFY_CA" not in my and "VERIFY_IDENTITY" not in my and "--ssl-ca" not in my
 
     ms = sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0]
-    # -N t = encryption mandatory (the mssql-tools18 default); -C = trust the cert.
-    assert "-N t -C" in ms
-    assert "-N o" not in ms
+    # Bare -N = encrypt; -C = trust the cert without a CA. Any ATTACHED value would
+    # also be legal sqlcmd (`-Nm`/`-Ns`), but a SPACE-separated one never is: see
+    # test_sqlserver_passes_the_encryption_switch_in_the_only_form_sqlcmd_parses.
+    assert " -N -C " in ms
+    assert "-No" not in ms and "-N o" not in ms
 
 
 # Statement-flag per engine: the flag that introduces SQL, as opposed to the
