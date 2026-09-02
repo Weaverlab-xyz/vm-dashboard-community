@@ -79,6 +79,8 @@ clouddb_ps_platform_sqlserver clouddb_ps_pravault_platform clouddb_ps_workgroup
 clouddb_ps_functional_account_mode clouddb_ps_functional_account_postgres
 clouddb_ps_functional_account_mode_postgres clouddb_ps_functional_account_mode_mysql
 clouddb_ps_functional_account_mode_sqlserver
+clouddb_ps_functional_account_mode_aws clouddb_ps_functional_account_mode_azure
+clouddb_ps_functional_account_mode_gcp
 clouddb_ps_functional_account_mysql clouddb_ps_functional_account_sqlserver
 clouddb_ps_pravault_functional_account clouddb_ps_self_rotation
 clouddb_ps_import_workgroup clouddb_ps_import_default_cloud clouddb_ps_import_max_systems
@@ -125,6 +127,16 @@ ot_ps_pra_checkout_enabled ot_ps_pravault_platform ot_ps_pravault_functional_acc
 ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
 """.split())
 
+# ADDED since the split, deliberately: the three `clouddb_ps_functional_account_mode_*`
+# per-CLOUD overrides (aws/azure/gcp), because the per-engine keys cannot express the
+# other direction -- one `..._mode_postgres` governs Azure postgres AND GCP postgres, and
+# those two want opposite answers. The Azure Run Command and AWS SSM plugins pack THIS
+# database's admin password into the functional account, so "reference" there obliges
+# someone to create the account's DB login on every server by hand, with a password
+# Password Safe never returns; GCP data-api is the only family where "reference" is free.
+# Resolved BELOW the per-engine keys so GCP's SQL Server override still wins, ABOVE the
+# global so one Azure key can override it without touching GCP.
+#
 # ADDED since the split, deliberately: the three `clouddb_ps_functional_account_mode_*`
 # per-engine overrides. The functional-account source was one global switch, which cannot
 # describe GCP Cloud SQL: SQL Server has no IAM database authentication, so it runs on the

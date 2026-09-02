@@ -1771,7 +1771,7 @@ def _dbgcp_fa_secret_available(row: CloudDatabase) -> bool:
     # "reference" mode names an account whose password the dashboard has never seen, so
     # there is nothing to stage and the config key is the only source. A registered
     # database has no minted admin credential either.
-    return (_ps_fa_mode(row.engine) != _FA_MODE_REFERENCE
+    return (_ps_fa_mode(row.engine, row.cloud) != _FA_MODE_REFERENCE
             and (getattr(row, "source", None) or "provisioned") != "registered")
 
 
@@ -2089,7 +2089,7 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     fa_secret_version = ""
     if channel == "data-api" and not iam_db_auth:
         fa_secret_version = _fa_secret_version_configured()
-        if not fa_secret_version and _ps_fa_mode(engine) != _FA_MODE_REFERENCE:
+        if not fa_secret_version and _ps_fa_mode(engine, row.cloud) != _FA_MODE_REFERENCE:
             fa_secret_version = await _stage_fa_secret_gcp(
                 db, row=row, job_id=job_id, project=project, region=region,
                 password=admin_password)
@@ -2236,15 +2236,15 @@ def _validate_referenced_fa_name(account_name: str, *, label: str, config_key: s
                 f"spells the prefix correctly).")
 
 
-def _ps_fa_mode(engine: str = "") -> str:
+def _ps_fa_mode(engine: str = "", cloud: str = "") -> str:
     """Where the DB plugin's functional account comes from: ``"reference"`` (the
     operator created it and named it in config -- VM/k8s parity) or ``"create"``
     (mint one per database from the configured credential material -- legacy default).
     An explicit choice, never inferred from a blank field.
 
-    Resolved PER ENGINE, falling back to the global key. The two modes are not a
-    preference, they are a consequence of whether the functional account carries a
-    PER-DATABASE secret:
+    Resolved most-specific-first: per ENGINE, then per CLOUD, then the global key. The
+    two modes are not a preference, they are a consequence of whether the functional
+    account carries a PER-DATABASE secret:
 
     * Where it does not -- GCP ``data-api`` under IAM database authentication, whose
       composite is ``-:-:-`` -- one operator-owned account serves every database, and
@@ -2257,11 +2257,28 @@ def _ps_fa_mode(engine: str = "") -> str:
     SQL Server on Cloud SQL is the case that forces this to be per-engine: it has no
     IAM database authentication, so it lands on ``cloud-run`` and needs ``create``,
     while PostgreSQL and MySQL on the same cloud want ``reference``. A single global
-    switch cannot express that, and picking either one breaks the other engines."""
+    switch cannot express that, and picking either one breaks the other engines.
+
+    ``cloud`` is the axis the per-engine keys cannot express either, in the other
+    direction: one ``..._mode_postgres`` governs Azure postgres AND GCP postgres, and
+    those two want opposite answers. It resolves BELOW engine so that GCP's SQL Server
+    override still wins over a cloud-wide setting -- engine is the finer axis where the
+    two disagree -- and ABOVE the global, so a single Azure key can override a global
+    ``reference`` without touching GCP.
+
+    The winning key is logged, because "the key I set was ignored" is otherwise
+    indistinguishable from "the mode I set did nothing"."""
     engine = (engine or "").strip().lower()
-    per_engine = _cfg(f"clouddb_ps_functional_account_mode_{engine}") if engine else ""
-    return (per_engine or _cfg("clouddb_ps_functional_account_mode")
-            or "create").strip().lower()
+    cloud = (cloud or "").strip().lower()
+    for key in (f"clouddb_ps_functional_account_mode_{engine}" if engine else "",
+                f"clouddb_ps_functional_account_mode_{cloud}" if cloud else "",
+                "clouddb_ps_functional_account_mode"):
+        val = _cfg(key).strip().lower() if key else ""
+        if val:
+            logger.info("clouddb: functional-account mode %r for cloud=%r engine=%r "
+                        "from %s", val, cloud, engine, key)
+            return val
+    return "create"
 
 
 async def _resolve_db_functional_account(*, mode: str, config_key: str, platform_id: int,
@@ -2427,7 +2444,7 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     # on cloud-run and its functional account carries THIS database's login — which one
     # shared operator-owned account cannot do. PostgreSQL and MySQL on the same cloud
     # want the opposite. See _ps_fa_mode.
-    fa_mode = _ps_fa_mode(engine)
+    fa_mode = _ps_fa_mode(engine, row.cloud)
     if row.cloud == "gcp":
         # "GCP Cloud SQL {engine}" on the data-api channel. No jump host, no broker
         # cert, no RSA key pair: the plugin reaches the private-IP instance through the
