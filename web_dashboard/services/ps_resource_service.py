@@ -982,7 +982,11 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     ``method="pravault"`` uses the "PRA Vault Username Password" / "PRA Vault Token" plugins:
     ``host_name`` must be the PRA appliance URL and ``managed_account_name`` the exact PRA
     Vault account name; ``dns_name`` defaults to ``host_name`` (the Username Password
-    platform requires a DnsName on create); the account is password-managed.
+    platform requires a DnsName on create); the account is password-managed. A caller that
+    must NOT share a managed system with the other PRA Vault callers — one onboarding
+    against a different platform, above all — passes the URL as ``dns_name`` and a unique
+    label as ``host_name``, because the managed system is named after its HostName and the
+    account attaches to its system by name (see the branch below).
 
     ``method="k8ssa"`` uses the "Kubernetes Service Account Token" plugin: ``dns_name`` must
     be a cluster address (``eks;<region>;<cluster>``, ``aks;<subscriptionId>;<resourceGroup>;
@@ -1130,14 +1134,28 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
         # "PRA Vault *" plugins: Password Safe PATCHes the rotated credential into a
         # PRA Vault account via the PRA Config API. The managed account name is the
         # exact PRA Vault account name, and the PRA appliance URL rides in BOTH
-        # host_name and dns_name: the "PRA Vault Username Password" platform's create
-        # API rejects a system without a DnsName (live 400 "DnsName is required" —
+        # host_name and dns_name by default: the "PRA Vault Username Password" platform's
+        # create API rejects a system without a DnsName (live 400 "DnsName is required" —
         # the field is required on the platform, unlike "PRA Vault Token"), and the
         # plugin walks the populated host fields in Password Safe's order, so a second
         # copy of the URL is at worst never read. Password-managed.
+        #
+        # **A caller that needs its own managed system must pass the URL as ``dns_name``
+        # and a unique label as ``host_name``.** Password Safe names a workgroup-created
+        # managed system after its HostName, and ``passwordsafe_managed_account`` attaches
+        # to its system BY NAME (the provider has no system_id argument — see
+        # ``_generate_managed_system_hcl``). So every caller that puts the appliance URL in
+        # host_name lands on one shared system name, and an account created against it goes
+        # to whichever same-named system Password Safe resolves first — across PLATFORMS.
+        # Measured live: the k8s mirror created its "PRA Vault Token" system, and its
+        # account was then created on the pre-existing cloud-DB "PRA Vault Username
+        # Password" system of the same name, which the SyncedAccounts platform guard
+        # caught (ps_api_service.link_synced_account) after the registration had already
+        # reported the account created.
         if not host_name:
             raise PSResourceError(
-                "PRA Vault onboarding requires host_name set to the PRA appliance URL")
+                "PRA Vault onboarding requires host_name set to the PRA appliance URL "
+                "(or to a unique system label, with the URL in dns_name)")
         hcl = _generate_managed_system_hcl(
             name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1",
             port=port or 443,

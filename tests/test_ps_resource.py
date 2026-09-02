@@ -460,8 +460,9 @@ def test_pravault_system_carries_the_appliance_url_in_host_and_dns_no_ssh():
 
 
 def test_pravault_register_defaults_dns_name_to_the_appliance_url():
-    # None of the pravault callers (OT cell, cloud-DB, k8s token) pass dns_name — the
-    # register branch itself must fill it, or every mirror create 400s as above.
+    # The OT cell and cloud-DB callers pass no dns_name — the register branch itself must
+    # fill it, or their mirror creates 400 as above. (The k8s token mirror does pass one:
+    # see the test below.)
     import asyncio
     captured = {}
 
@@ -478,6 +479,37 @@ def test_pravault_register_defaults_dns_name_to_the_appliance_url():
             ip_address="127.0.0.1", port=443, method="pravault"))
     finally:
         ps._apply_hcl_sync = real
+    assert ps._line("dns_name", '"https://pra.example.com"') in captured["hcl"]
+
+
+def test_pravault_register_keeps_an_explicit_dns_name_and_a_label_host_name():
+    """A caller that needs a managed system of its OWN passes the URL as dns_name and a
+    unique label as host_name — and the branch must not overwrite either.
+
+    Password Safe names the system after its HostName and the provider's managed-account
+    resource attaches to its system by NAME, so every caller that puts the appliance URL in
+    host_name shares one system name. That is harmless while they share a platform (OT +
+    cloud-DB are both "PRA Vault Username Password") and is exactly how the k8s token
+    mirror's account landed on the cloud-DB system instead of its own "PRA Vault Token"
+    one."""
+    import asyncio
+    captured = {}
+
+    def _fake_apply(hcl, tf_vars, tenant=None):
+        captured["hcl"] = hcl
+        return {"tf_state_json": "{}", "managed_system_id": "1", "managed_account_id": "2"}
+
+    real = ps._apply_hcl_sync
+    ps._apply_hcl_sync = _fake_apply
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="k8s-gke-demo-pravault", host_name="k8s-gke-demo-pravault",
+            dns_name="https://pra.example.com", functional_account_id=1,
+            platform_id=31, workgroup_id="wg", managed_account_name="k8s-gke-demo-sa",
+            ip_address="127.0.0.1", port=443, method="pravault"))
+    finally:
+        ps._apply_hcl_sync = real
+    assert ps._line("host_name", '"k8s-gke-demo-pravault"') in captured["hcl"]
     assert ps._line("dns_name", '"https://pra.example.com"') in captured["hcl"]
 
 
