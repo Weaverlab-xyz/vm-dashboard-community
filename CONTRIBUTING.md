@@ -161,7 +161,7 @@ need help from. Useful contributions include:
 
 To enable an integration, flip its flag in `Settings → Integrations`
 (or in the setup wizard on first run) and fill in the connection
-details. The relevant Appendix in [docs/ONBOARDING.md](docs/ONBOARDING.md)
+details. The matching page in [docs/integrations/](docs/integrations/README.md)
 has the field-by-field walkthrough for each hypervisor.
 
 When you report a finding, please mention:

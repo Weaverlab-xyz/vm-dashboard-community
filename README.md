@@ -152,8 +152,8 @@ Enable these on the **setup wizard's Feature Flags step** or in **Settings →
 Integrations** after first login — only if you have the backing infrastructure.
 The wizard turns a flag on; the per-integration fields live in Settings:
 
-- **VMware Workstation** — VM management (Windows host only; requires the
-  Windows Compose override — see [docs/ONBOARDING.md](docs/ONBOARDING.md) Appendix A)
+- **VMware Workstation** — VM management (Windows host only; needs a remote
+  agent on the Workstation host — see [docs/integrations/vmware.md](docs/integrations/vmware.md))
 - **Proxmox VE** — VM and node management via the Proxmox REST API
 - **VMware vSphere / ESXi** — VM power operations and inventory via SSH/API
 - **Microsoft Hyper-V** — VM management via WinRM

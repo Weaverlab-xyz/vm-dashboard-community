@@ -161,7 +161,7 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 _INDEX_SECTIONS = {
     "General", "integrations",
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
-    "databases",
+    "databases", "onboarding",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -174,6 +174,7 @@ _SECTION_LABELS = {
     "profiles/demo/personas":     "Demo profile · personas",
     "profiles/pov":               "POV profile",
     "databases":                  "Databases · Password Safe rotation",
+    "onboarding":                 "Onboarding · per-cloud setup",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
@@ -211,6 +212,13 @@ _TITLE_OVERRIDES = {
     "profiles/pov/ps-runbook":           "Password Safe POC runbook",
     "databases/password-safe":           "Rotation on AWS and Azure",
     "databases/password-safe-gcp":       "Rotation on GCP Cloud SQL",
+    "onboarding/aws":                    "AWS setup",
+    "onboarding/azure":                  "Azure setup",
+    "onboarding/gcp":                    "GCP setup",
+    "onboarding/after-first-run":        "After the first run",
+    "onboarding/feature-test":           "Feature-test checklist",
+    "onboarding/troubleshooting":        "Onboarding troubleshooting",
+    "integrations/entra-oauth":          "Sign in with Microsoft (Entra)",
 }
 
 _SHELL = """<!doctype html>

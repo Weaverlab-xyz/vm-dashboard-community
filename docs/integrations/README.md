@@ -47,6 +47,7 @@ Anything the dashboard cannot route to is reached through an agent instead — s
 | [Portainer](portainer.md) | you already run Portainer and want the dashboard to drive it. |
 | [Entra → Kubernetes federation](entra-k8s-federation.md) | you want people signing in to clusters as themselves rather than sharing a kubeconfig. |
 | [Generic OIDC (SSO)](oidc.md) | you want single sign-on for the dashboard instead of local passwords. |
+| [Sign in with Microsoft (Entra OAuth)](entra-oauth.md) | you want the legacy per-tenant Entra sign-in button rather than the generic OIDC path. |
 | [MCP server](mcp-server.md) | you want an AI client to drive the dashboard through its own API. |
 | [Deploy Docker Compose to the cloud](cloud-compose.md) | you followed an old link — this page has moved. |
 

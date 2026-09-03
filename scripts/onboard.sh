@@ -256,7 +256,7 @@ if (( HUB )); then
     if ! $_compose_cmd "${COMPOSE_FILE_ARGS[@]}" pull; then
         fail "$_compose_cmd pull failed — could not fetch the prebuilt image."
         fail "Behind a TLS-inspecting proxy, ensure Docker trusts your corp CA for Docker Hub"
-        fail "(see docs/ONBOARDING.md: 'WSL: docker pull fails with a certificate error')."
+        fail "(see docs/onboarding/troubleshooting.md: 'WSL: docker pull fails with a certificate error')."
         exit 1
     fi
 fi
@@ -321,5 +321,5 @@ echo
 printf "%sNext steps:%s\n" "$C_STEP" "$C_RESET"
 echo "  - The browser setup wizard will open automatically on first launch."
 echo "    Complete it to create your admin account and enter cloud credentials."
-echo "  - See docs/ONBOARDING.md for the full feature-test checklist."
+echo "  - See docs/onboarding/feature-test.md for the full feature-test checklist."
 echo "  - Stop the stack with:  $_compose_cmd -f $(basename "$COMPOSE_FILE") down"

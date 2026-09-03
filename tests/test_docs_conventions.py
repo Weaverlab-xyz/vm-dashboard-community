@@ -200,9 +200,17 @@ def _index_of(folder):
     own = os.path.join(_DOCS, folder, _INDEX)
     if os.path.isfile(own):
         return own
-    sibling = os.path.join(_DOCS, f"{folder}.md")
-    if folder and os.path.isfile(sibling):
-        return sibling
+    if not folder:
+        return None
+    # Case-insensitively, but by LISTING rather than by os.path.isfile: two of these hubs
+    # are SCREAMING_SNAKE (ONBOARDING.md), and isfile() on an NTFS checkout would match
+    # "onboarding.md" while the same call on CI's Linux would not -- a test that passes
+    # here and fails there, over a filename.
+    parent = os.path.join(_DOCS, os.path.dirname(folder))
+    want = f"{os.path.basename(folder)}.md".lower()
+    for f in os.listdir(parent):
+        if f.lower() == want and os.path.isfile(os.path.join(parent, f)):
+            return os.path.join(parent, f)
     return None
 
 
@@ -236,7 +244,8 @@ def test_every_index_links_every_doc_in_its_own_folder():
         for href in _LINK.findall(_read(index)):
             href = href.split("#")[0].rstrip("/")
             # hrefs in a sibling hub are relative to docs/, not to the folder
-            if base != folder and href.startswith(f"{os.path.basename(folder)}/"):
+            if base != folder and href.lower().startswith(
+                    f"{os.path.basename(folder).lower()}/"):
                 href = href.split("/", 1)[1]
             linked.add(href)
         here = os.path.join(_DOCS, folder)
@@ -261,9 +270,15 @@ def test_every_index_links_its_immediate_subfolders():
                     if os.path.dirname(f) == folder and f != folder}
         for child in sorted(children):
             name = os.path.basename(child)
-            # Whatever indexes the child counts: its own README, or the sibling
-            # <folder>.md hub a split cut its spokes out of.
-            if not ({name, f"{name}/{_INDEX}", f"{name}.md"} & linked):
+            # Whatever indexes the child counts: its own README, or the sibling hub a
+            # split cut its spokes out of -- under that hub's real name, which is not
+            # always the folder's case (ONBOARDING.md indexes onboarding/).
+            child_index = _index_of(child)
+            accept = {name, f"{name}/{_INDEX}"}
+            if child_index:
+                accept.add(os.path.relpath(child_index, os.path.join(_DOCS, folder))
+                           .replace("\\", "/"))
+            if not (accept & linked):
                 bad.append(f"{folder or '.'}/{_INDEX} does not link the {name}/ folder")
     assert not bad, "\n  ".join([""] + bad)
 

@@ -270,7 +270,7 @@ if ($Hub) {
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "docker compose pull failed - could not fetch the prebuilt image."
         Write-Fail "Behind a TLS-inspecting proxy, ensure Docker trusts your corp CA for Docker Hub"
-        Write-Fail "(see docs/ONBOARDING.md: 'docker pull fails with a certificate error')."
+        Write-Fail "(see docs/onboarding/troubleshooting.md: 'docker pull fails with a certificate error')."
         exit $LASTEXITCODE
     }
 } else {
@@ -331,5 +331,5 @@ $adminUser = $envVars.FIRST_RUN_ADMIN_USERNAME
 if (-not $adminUser) { $adminUser = "admin" }
 Write-Host "  - Log in with username '$adminUser' — password is in .env as FIRST_RUN_ADMIN_PASSWORD"
 Write-Host "    (Change it via Settings after first login; the env var is ignored once users exist.)"
-Write-Host "  - See docs/ONBOARDING.md for the feature-test checklist"
+Write-Host "  - See docs/onboarding/feature-test.md for the feature-test checklist"
 Write-Host "  - Stop the stack with:  docker compose -f $(Split-Path -Leaf $composeFile) down"
