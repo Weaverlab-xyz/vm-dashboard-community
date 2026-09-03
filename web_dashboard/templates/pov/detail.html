@@ -317,6 +317,87 @@
           Run or re-run the wire-up from <a href="/pov" class="underline hover:no-underline">the POV page</a>.
           Re-running is safe: a VM that already has an artifact is skipped.
         </p>
+
+        <!-- ── Password Safe readiness ────────────────────────────────────
+             The runbook's setup steps 5b-11 are clicked into the Password Safe console by
+             the customer's own admin, and almost none of it can be created through the
+             public API. So this reads it back instead: the question an SE loses time to is
+             "did they finish step 9?", which is a screen-share today. -->
+        <div x-show="env.ps_config_readable" class="border-t border-gray-100 p-4 space-y-2">
+          <div class="flex items-baseline justify-between">
+            <h3 class="text-sm font-medium text-gray-900">Password Safe readiness</h3>
+            <button @click="loadPsConfig()" :disabled="psBusy"
+                    class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline"
+                    x-text="psBusy ? 'reading…' : (psConfig ? 'Re-check' : 'Check')"></button>
+          </div>
+
+          <p x-show="psConfig && !psConfig.reachable" class="text-xs text-amber-700"
+             x-text="psConfig ? psConfig.detail : ''"></p>
+
+          <div x-show="psConfig && psConfig.reachable" class="space-y-1">
+            <template x-for="i in (psConfig ? psConfig.items : [])" :key="i.key">
+              <div class="flex items-baseline justify-between gap-3 text-xs">
+                <span class="text-gray-700" x-text="i.step"></span>
+                <span class="whitespace-nowrap"
+                      :class="{
+                        'text-green-700': i.state === 'ok',
+                        'text-amber-700': i.state === 'short' || i.state === 'missing',
+                        'text-gray-400': i.state === 'unavailable',
+                        'text-red-700': i.state === 'error'
+                      }"
+                      x-text="i.state === 'ok' ? i.found + ' found'
+                            : i.state === 'short' ? i.found + ' of ' + i.expected
+                            : i.state === 'missing' ? 'none'
+                            : i.state === 'unavailable' ? 'no API' : 'unreadable'"></span>
+              </div>
+            </template>
+            <!-- The remedy is shown for the states an operator acts on, not for `ok`. -->
+            <template x-for="i in psUnready" :key="'r-' + i.key">
+              <p class="text-[11px] text-gray-500 pl-2" x-text="'· ' + (i.detail || i.remedy)"></p>
+            </template>
+          </div>
+
+          <!-- Reported even though nothing can read them, so the panel accounts for the
+               whole runbook rather than the part that happens to be visible. -->
+          <div x-show="psConfig" class="pt-1 border-t border-gray-100">
+            <p class="text-[11px] text-gray-400">No API to check these — look in the console:</p>
+            <template x-for="u in (psConfig ? psConfig.unverifiable : [])" :key="u.step">
+              <p class="text-[11px] text-gray-400 pl-2"
+                 x-text="'· ' + u.step + ' — ' + u.detail"></p>
+            </template>
+          </div>
+        </div>
+
+        <!-- ── Re-run a Smart Rule ────────────────────────────────────────
+             Use case 1 is watching a rule onboard the discovered systems, and use case 18
+             is that again once two guests and a batch of AD users arrive. Neither needs a
+             rule created — both need one re-run, in front of a customer, repeatedly. -->
+        <div x-show="env.ps_config_readable" class="border-t border-gray-100 p-4 space-y-2">
+          <div class="flex items-baseline justify-between">
+            <h3 class="text-sm font-medium text-gray-900">Re-run a Smart Rule</h3>
+            <button @click="loadPsRules()" :disabled="psBusy"
+                    class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline">Load rules</button>
+          </div>
+          <div class="flex flex-wrap gap-2 items-center">
+            <select x-model="psRule" class="border border-gray-300 rounded px-2 py-1 text-xs">
+              <option value="">Smart Rule…</option>
+              <template x-for="r in psRules" :key="r.id">
+                <option :value="r.id"
+                        x-text="r.title + (r.last_processed ? ' · last ' + r.last_processed.slice(0, 10) : '')"></option>
+              </template>
+            </select>
+            <button @click="processPsRule()" :disabled="!psRule || psBusy"
+                    class="text-xs px-2 py-1 rounded bg-blue-600 text-white disabled:opacity-40 disabled:cursor-not-allowed">Process</button>
+          </div>
+          <p x-show="psRules.length === 0" class="text-xs text-gray-400">
+            Load the rules to pick one. They are created in the Password Safe console; this
+            re-runs one that is already there.
+          </p>
+          <p class="text-[11px] text-gray-400">
+            Queued in Password Safe, so this returns before it finishes — Re-check above,
+            or the rule's own last-processed date, is what says it did.
+          </p>
+        </div>
       </div>
 
       <!-- ── Share ────────────────────────────────────────────────────── -->
@@ -736,6 +817,12 @@
       addVmChoices: [],
       addPicked: [],
       addPowerOn: true,
+      // Password Safe readiness. `psConfig` is null until somebody presses Check, which
+      // is what the button's own label reads off.
+      psConfig: null,
+      psRules: [],
+      psRule: '',
+      psBusy: false,
       busy: '',
       notice: '',
       env: null,
@@ -803,6 +890,75 @@
           this.env = (await res.json()).environment;
         } catch (e) {
           this.error = 'Could not load this POV.';
+        }
+      },
+
+      // -- Password Safe readiness ------------------------------------------
+      //
+      // Both of these are LIVE reads against a customer's tenant, so they sit behind a
+      // button rather than on init: the readiness read is eight collections, and doing it
+      // on page load would charge every visit for something most visits do not look at.
+
+      // The items an operator can act on. `ok` needs no remedy, and showing one for it
+      // would bury the four that matter under eight that do not.
+      get psUnready() {
+        if (!this.psConfig || !this.psConfig.reachable) return [];
+        return this.psConfig.items.filter(i => i.state !== 'ok');
+      },
+
+      async loadPsConfig() {
+        this.error = ''; this.notice = ''; this.psBusy = true;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/ps-config`);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            this.error = data.detail || `Could not read the tenant (${res.status}).`;
+            return;
+          }
+          this.psConfig = data;
+        } catch (e) {
+          this.error = 'Could not read this POV\'s Password Safe tenant.';
+        } finally {
+          this.psBusy = false;
+        }
+      },
+
+      async loadPsRules() {
+        this.error = ''; this.notice = ''; this.psBusy = true;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/ps-smart-rules`);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            this.error = data.detail || `Could not read the Smart Rules (${res.status}).`;
+            return;
+          }
+          this.psRules = data.rules || [];
+          if (!this.psRules.length) this.notice = 'That tenant has no Smart Rules yet.';
+        } catch (e) {
+          this.error = 'Could not read the Smart Rules.';
+        } finally {
+          this.psBusy = false;
+        }
+      },
+
+      async processPsRule() {
+        this.error = ''; this.notice = ''; this.psBusy = true;
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/ps-smart-rules/${this.psRule}/process`,
+            { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            this.error = data.detail || `Could not process the rule (${res.status}).`;
+            return;
+          }
+          const rule = this.psRules.find(r => String(r.id) === String(this.psRule));
+          this.notice = `Queued ${rule ? rule.title : 'the rule'} in Password Safe. `
+                      + `It processes tenant-side — re-check to see it land.`;
+        } catch (e) {
+          this.error = 'Could not process that Smart Rule.';
+        } finally {
+          this.psBusy = false;
         }
       },
 

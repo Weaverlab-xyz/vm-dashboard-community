@@ -154,9 +154,12 @@ _MAX_PAGES = 40
 _LIST_TIMEOUT_S = 60.0
 
 
-def _list_client() -> httpx.AsyncClient:
+def _list_client(tenant=None) -> httpx.AsyncClient:
+    """Like ``_client`` but with the inventory timeout, and tenant-aware for the same
+    reason: a POV carries its own Password Safe tenant, and a paged read that could only
+    reach the singleton would report the install's estate for a customer's POV."""
     return httpx.AsyncClient(
-        base_url=f"{_base_url()}/",
+        base_url=f"{_base_url(tenant)}/",
         headers={"Accept": "application/json"},
         timeout=_LIST_TIMEOUT_S,
     )
@@ -260,6 +263,136 @@ async def _workgroup_id(client: httpx.AsyncClient, name_or_id: str) -> str:
             if wid is not None:
                 return str(wid)
     raise PSApiError(f"workgroup {val!r} not found in Password Safe")
+
+
+# ── configuration readiness ──────────────────────────────────────────────────
+#
+# What a POV's Password Safe tenant has been GIVEN, read back. The runbook a POV is driven
+# from spends its first ninety minutes on setup steps 5b-11 in the Password Safe console,
+# and almost none of that work can be created through the public API: password policies are
+# read-only, access policies are read plus a Test, and discovery credentials, discovery
+# scans, resource zones and directory queries have no documented endpoint at all. Smart
+# Rules can be PROCESSED but only one narrow shape can be created.
+#
+# So this dashboard does not try to do that work. It answers the question an SE actually
+# loses time to -- "did the customer's admin finish step 9?" -- which is a screen-share
+# today and a panel afterwards.
+
+# A collection read has THREE outcomes, not two, and the third is the point. A 404 means
+# this tenant's API version does not serve the endpoint, which is a fact about Password
+# Safe; anything else means the read failed, which is a fact about this credential or that
+# request. Reporting the first as a failure sends an operator to check permissions they
+# already have; reporting the second as "not available" hides a broken integration.
+PROBE_OK = "ok"
+PROBE_UNAVAILABLE = "unavailable"
+PROBE_ERROR = "error"
+
+
+async def _probe(client: httpx.AsyncClient, path: str, *, paged: bool = False,
+                 id_keys=("ID",)) -> dict:
+    """``{"state", "rows", "detail"}`` for one collection. Never raises."""
+    try:
+        rows = (await _get_paged(client, path, id_keys=id_keys) if paged
+                else await _get_all(client, path))
+        return {"state": PROBE_OK, "rows": rows, "detail": ""}
+    except PSApiError as exc:
+        text = str(exc)
+        if "(404)" in text or "(405)" in text:
+            return {"state": PROBE_UNAVAILABLE, "rows": [],
+                    "detail": "this Password Safe version does not serve that endpoint"}
+        if "(403)" in text or "(401)" in text:
+            return {"state": PROBE_ERROR, "rows": [],
+                    "detail": "the API identity is not permitted to read it"}
+        # The exception is logged whole and never carried outward: it can quote a response
+        # body, which is how a tenant's own data ends up on a dashboard page.
+        logger.warning("Password Safe: reading %s failed", path, exc_info=True)
+        return {"state": PROBE_ERROR, "rows": [],
+                "detail": "the read failed; see the dashboard log"}
+    except Exception:  # noqa: BLE001
+        logger.warning("Password Safe: reading %s failed", path, exc_info=True)
+        return {"state": PROBE_ERROR, "rows": [],
+                "detail": "the read failed; see the dashboard log"}
+
+
+# path -> (result key, paged?, id keys). Ordered as the runbook creates them, so somebody
+# reading the panel walks the document rather than an alphabet.
+_CONFIG_COLLECTIONS = (
+    ("Workgroups", "workgroups", False, ("ID", "WorkgroupID")),
+    ("AccessPolicies", "access_policies", False, ("AccessPolicyID", "ID")),
+    ("PasswordPolicies", "password_policies", False, ("PasswordRuleID", "ID")),
+    ("FunctionalAccounts", "functional_accounts", False, ("FunctionalAccountID", "ID")),
+    ("Directories", "directories", False, ("DirectoryID", "ID")),
+    ("ManagedSystems", "managed_systems", True,
+     ("ManagedSystemID", "SystemId", "SystemID")),
+    ("UserGroups", "user_groups", True, ("GroupID", "ID")),
+    ("SmartRules", "smart_rules", True, ("SmartRuleID", "ID")),
+)
+
+CONFIG_KEYS = tuple(key for _p, key, _g, _i in _CONFIG_COLLECTIONS)
+
+
+async def read_config_inventory(tenant=None) -> dict:
+    """Every collection the readiness panel needs, in ONE signed-in pass.
+
+    Returns ``{"reachable", "detail", "<key>": {"state", "rows", "detail"}, ...}``. No
+    collection is fatal — the panel's whole job is to say which of them answered, and one
+    missing endpoint must not cost the seven that worked.
+
+    Same session discipline as :func:`read_database_inventory`: one Token + SignAppIn +
+    Signout for the whole pass, because doing it per collection would be eight of each for
+    one button.
+    """
+    out = {}
+    async with _list_client(tenant) as client:
+        try:
+            await _sign_in(client, tenant)
+        except Exception:  # noqa: BLE001
+            logger.warning("Password Safe: sign-in for the readiness read failed",
+                           exc_info=True)
+            return {"reachable": False,
+                    "detail": "could not sign in to this POV's Password Safe tenant"}
+        try:
+            for path, key, paged, id_keys in _CONFIG_COLLECTIONS:
+                out[key] = await _probe(client, path, paged=paged, id_keys=id_keys)
+        finally:
+            await _sign_out(client)
+    out["reachable"] = True
+    out["detail"] = ""
+    return out
+
+
+async def process_smart_rule(rule_id, tenant=None, *, queue: bool = True) -> dict:
+    """``POST SmartRules/{id}/Process`` — the one runbook action the API does expose.
+
+    Use case 1 of the Password Safe POC runbook is "watch a Smart Rule onboard the
+    discovered systems on its own", and use case 18 is that again after two guests and a
+    batch of AD users appear. Neither needs a rule CREATED; both need one re-run, in front
+    of a customer, repeatedly. This is that call.
+
+    ``queue`` defaults true and is why this needs no job: Password Safe accepts the request
+    and processes asynchronously, so the button returns at once and the rule's own
+    ``LastProcessedDate`` is what says it finished. Processing synchronously would hold an
+    HTTP request open for however long the estate takes.
+    """
+    try:
+        rid = int(rule_id)
+    except (TypeError, ValueError):
+        raise PSApiError("a Smart Rule id is a number") from None
+    if rid <= 0:
+        raise PSApiError("a Smart Rule id is a positive number")
+
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
+        try:
+            resp = await client.post(f"SmartRules/{rid}/Process",
+                                     params={"queue": "true" if queue else "false"})
+            if resp.status_code not in (200, 201, 202, 204):
+                raise PSApiError(
+                    f"POST SmartRules/{rid}/Process failed ({resp.status_code}): "
+                    f"{resp.text[:400]}")
+            return {"smart_rule_id": rid, "queued": bool(queue)}
+        finally:
+            await _sign_out(client)
 
 
 async def read_database_inventory(*, workgroup: str = "") -> dict:

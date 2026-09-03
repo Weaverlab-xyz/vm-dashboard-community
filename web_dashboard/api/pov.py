@@ -69,7 +69,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
-                        pov_resource_broker,
+                        pov_ps_config, pov_resource_broker,
                         pov_schedule, pov_share, pov_spend, pov_summary,
                         pov_use_cases, pov_wireup)
 from .auth import get_current_user
@@ -187,6 +187,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     out.update(pov_resource_broker.describe(_db_of(env), env))
     out.update(pov_entitle_agent.describe(_db_of(env), env))
     out.update(pov_guest_step.describe(_db_of(env), env))
+    out.update(pov_ps_config.describe(env))
     # Kept rather than only spread, so the use-case summary below can be resolved from the
     # numbers this row already paid for. Recomputing it would put a second per-VM query on
     # the list endpoint for counts it is holding in a local variable.
@@ -890,6 +891,63 @@ async def guest_step(env_id: str, payload: GuestStepRequest,
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job.id,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+@router.get("/managed/{env_id}/ps-config")
+async def ps_config(env_id: str, db: Session = Depends(get_db),
+                    current_user: User = Depends(get_current_user)):
+    """Read this POV's Password Safe tenant back against the runbook that filled it.
+
+    A live read behind a button, like the Gateway check — not spread onto the POV list,
+    because it is eight collections per POV.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    try:
+        return await pov_ps_config.read(db, env)
+    except pov_ps_config.PsConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/managed/{env_id}/ps-smart-rules")
+async def ps_smart_rules(env_id: str, db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """The tenant's Smart Rules, for the picker behind the re-process button."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    try:
+        return {"rules": await pov_ps_config.smart_rules(db, env)}
+    except pov_ps_config.PsConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/managed/{env_id}/ps-smart-rules/{rule_id}/process")
+async def ps_process_smart_rule(env_id: str, rule_id: int,
+                                db: Session = Depends(get_db),
+                                current_user: User = Depends(get_current_user)):
+    """Re-run one Smart Rule in this POV's Password Safe tenant.
+
+    The runbook's use case 1 and use case 18 both come down to this, which is why it is a
+    button rather than a job: the call is queued tenant-side and returns at once, and the
+    rule's own last-processed time is what says it finished.
+
+    Not a write to anything this dashboard created — it re-runs a rule the customer's
+    admin made, which is what makes it safe on a POV somebody else configured.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    try:
+        result = await pov_ps_config.process(db, env, rule_id)
+    except pov_ps_config.PsConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    job_service.log_audit(
+        db, getattr(current_user, "username", "?"), "pov_smart_rule_processed",
+        details={"environment_id": env.id, "smart_rule_id": result.get("smart_rule_id"),
+                 "tenant": result.get("tenant")})
+    return result
 
 
 class AddVmsRequest(BaseModel):
