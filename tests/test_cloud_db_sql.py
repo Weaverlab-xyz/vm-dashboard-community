@@ -393,6 +393,67 @@ def test_sqlserver_login_guards_read_sys_sql_logins_not_server_principals():
     assert "sys.sql_logins" in ephemeral and "sys.database_principals" in ephemeral
 
 
+# sqlcmd batch separator: GO alone on its own line.
+BATCH_SEP = "\nGO\n"
+
+
+def test_azure_sql_onboard_creates_the_master_user_the_login_needs_to_connect():
+    """Azure SQL disables master's `guest`, so a bare login is refused at CONNECT with
+    `Cannot open database "master" requested by the login` — Password Safe's rotation
+    never reaches ALTER LOGIN. The contained user is what makes the account usable, and
+    master is where it has to be: it is the database every SQL Server admin session
+    opens, and the only one Azure SQL allows ALTER LOGIN in."""
+    azure = sql.onboard_commands(
+        "sqlserver", **{**_COMMON, "port": 1433, "flavor": "azure_sql"})[0]
+    assert ("IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE "
+            "name = 'psafe_ab12cd34') CREATE USER [psafe_ab12cd34] "
+            "FOR LOGIN [psafe_ab12cd34];") in azure
+    # After the login exists, not before, and in its own batch.
+    assert azure.index("CREATE LOGIN") < azure.index("CREATE USER")
+    assert azure.count(BATCH_SEP) >= 3, azure
+    # No privileges ride along: the account exists to be rotated, not to read.
+    assert "ALTER ROLE" not in azure and "GRANT" not in azure
+
+    # A real instance keeps `guest` in master, so the login connects without one — and
+    # the admin there may not be allowed to add users to master at all.
+    for flavor in ("rds", "cloudsql"):
+        other = sql.onboard_commands(
+            "sqlserver", **{**_COMMON, "port": 1433, "flavor": flavor})[0]
+        assert "CREATE USER" not in other, flavor
+    default = sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0]
+    rds = sql.onboard_commands(
+        "sqlserver", **{**_COMMON, "port": 1433, "flavor": "rds"})[0]
+    assert default == rds
+
+
+def test_azure_sql_teardown_drops_the_master_user_before_the_login():
+    """Azure SQL refuses to drop a login a database principal still maps to, so the
+    teardown has to undo exactly what onboarding made, in reverse."""
+    cmd = sql.teardown_commands(
+        "sqlserver", host="h", port=1433, database="", admin_user="dbadmin",
+        admin_password="Admin-Pw_123", managed_user="psafe_ab12cd34",
+        flavor="azure_sql")[0]
+    assert "DROP USER [psafe_ab12cd34];" in cmd
+    assert cmd.index("DROP USER") < cmd.index("DROP LOGIN")
+    assert "sys.database_principals" in cmd and "sys.sql_logins" in cmd
+    rds = sql.teardown_commands(
+        "sqlserver", host="h", port=1433, database="", admin_user="dbadmin",
+        admin_password="Admin-Pw_123", managed_user="psafe_ab12cd34", flavor="rds")[0]
+    assert "DROP USER" not in rds
+
+
+def test_onboard_rejects_a_flavor_sqlserver_does_not_have():
+    for bad in ("azure", "managed_instance", "sql_database"):
+        try:
+            sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433, "flavor": bad})
+        except sql.CloudDbSqlError as exc:
+            assert "flavor" in str(exc), exc
+        else:
+            raise AssertionError(f"accepted bogus flavor {bad!r}")
+    # Non-SQL-Server engines carry no flavor and must not start rejecting one.
+    assert sql.onboard_commands("postgres", **{**_COMMON, "flavor": "azure_sql"})
+
+
 def test_teardown_drops_managed_user():
     assert 'DROP ROLE IF EXISTS "psafe_ab12cd34";' in sql.teardown_commands(
         "postgres", host="h", port=5432, database="appdb", admin_user="dbadmin",

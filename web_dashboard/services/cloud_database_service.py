@@ -1448,7 +1448,11 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
     cmds = sql.onboard_commands(
         engine, host=row.private_host, port=port,
         database=db_name, admin_user=admin_username, admin_password=admin_password,
-        managed_user=managed_user, managed_password=managed_pw, client_image=image)
+        managed_user=managed_user, managed_password=managed_pw, client_image=image,
+        # SQL Server's managed offerings are not interchangeable and the flavor decides
+        # whether the login needs a contained user as well. Read from the adapter
+        # service's map rather than a second copy of it here.
+        flavor=cloud_db_adapter_service.flavor_for(engine, row.cloud))
     result = await aws_service.ssm_send_command(region, host_id, cmds, timeout=300)
     if result.get("status") != "Success" or int(result.get("response_code", -1)) != 0:
         raise CloudDatabaseError(
@@ -1654,7 +1658,11 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
     cmds = sql.onboard_commands(
         engine, host=row.private_host, port=port,
         database=db_name, admin_user=admin_username, admin_password=admin_password,
-        managed_user=managed_user, managed_password=managed_pw, client_image=image)
+        managed_user=managed_user, managed_password=managed_pw, client_image=image,
+        # azure_sql for SQL Server, and it is load-bearing here rather than cosmetic: it
+        # is what adds the contained USER in master without which the managed login
+        # cannot open a session, so Password Safe could never rotate it.
+        flavor=cloud_db_adapter_service.flavor_for(engine, row.cloud))
     result = await azure_service.vm_run_command(rg, host, cmds, timeout=300)
     if result.get("status") != "Success" or int(result.get("response_code", -1)) != 0:
         raise CloudDatabaseError(
