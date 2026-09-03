@@ -70,7 +70,7 @@ Management additionally requires an active storage backend — it has nowhere to
 from otherwise — so see [Storage Management](../../../storage-management.md) before enabling it.
 
 This focus is one of the few that works essentially unchanged on a
-[POV instance](../../../pov-instance.md): Ansible, Password Safe, Entitle and the remote agent are
+[POV instance](../../pov/README.md): Ansible, Password Safe, Entitle and the remote agent are
 all profile-neutral.
 
 ## Talking to this buyer

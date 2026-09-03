@@ -808,7 +808,7 @@ async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
 
     The Windows login is **not** a field here, and that is the point: it comes from the lab
     platform's own stored credentials, read per run. See
-    docs/design/pov-resource-broker.md §5.
+    docs/profiles/pov/design/resource-broker.md §5.
     """
     env = pov_env_service.get(db, env_id)
     if env is None:

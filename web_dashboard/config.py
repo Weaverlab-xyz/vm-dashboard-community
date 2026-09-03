@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # claiming both would have two answers to "which tenant?" at every call site, and the
     # wrong answer is silent -- an OT cell onboarding into a customer's Password Safe, or a
     # POV onboarding into the demo tenant. See services/feature_flags.enabled().
-    install_profile: str = "demo"       # "demo" | "pov" -- see docs/pov-instance.md
+    install_profile: str = "demo"       # "demo" | "pov" -- see docs/profiles/pov/README.md
     pov_environments_enabled: bool = False  # POV router + /pov page (pov profile only)
 
     # ── Lab platforms — where a POV environment actually runs ────────────────

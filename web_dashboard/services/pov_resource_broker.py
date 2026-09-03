@@ -1,6 +1,6 @@
 """Installing a Password Safe Resource Broker inside a POV environment.
 
-Slice 5b. See ``docs/design/pov-resource-broker.md`` for why it is shaped this way; the
+Slice 5b. See ``docs/profiles/pov/design/resource-broker.md`` for why it is shaped this way; the
 short version is that **the RB package comes from the customer's own Password Safe
 tenant**, so the dashboard can never fetch it and the "policy names the image" pattern
 ``pov_gateway`` uses does not transfer. The customer stages the installer through the

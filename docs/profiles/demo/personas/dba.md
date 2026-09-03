@@ -69,7 +69,7 @@ schedule with the consumer picking up the new value.
 the private-endpoint card, and **Kubernetes** for the service-account token card.
 
 **This focus needs a demo instance** for its own cards: cloud databases are demo-owned, so on
-a [POV instance](../../../pov-instance.md) they are masked. The cards say so rather than offering a
+a [POV instance](../../pov/README.md) they are masked. The cards say so rather than offering a
 link that would 404.
 
 ## Talking to this buyer

@@ -82,9 +82,23 @@ def _links():
             yield rel, href, path[len("/docs/"):].strip("/"), frag
 
 
+def _resolve(page):
+    """The file ``doc_page`` would serve for ``/docs/<page>``, or None for a 404.
+
+    Mirrors the route, including the folder fallback: /docs/profiles/pov serves that
+    folder's README.md, which is what lets a link name a directory the way it does on
+    GitHub. Checking only ``<page>.md`` here would fail every folder URL in the app while
+    the route serves them fine."""
+    for candidate in (os.path.join(_DOCS, f"{page}.md"),
+                      os.path.join(_DOCS, page, "README.md")):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _rendered_ids(page):
-    """Anchor ids for ``docs/<page>.md`` as the dashboard actually renders it."""
-    with open(os.path.join(_DOCS, f"{page}.md"), encoding="utf-8") as fh:
+    """Anchor ids for the page as the dashboard actually renders it."""
+    with open(_resolve(page), encoding="utf-8") as fh:
         return set(_ID.findall(_render_markdown(fh.read())))
 
 
@@ -93,7 +107,7 @@ def test_every_app_docs_link_resolves_to_a_page():
     suffix 404s. So does a link to a doc that was renamed or never written."""
     broken = sorted({
         f"{src} -> {href}" for src, href, page, _ in _links()
-        if not page or not os.path.isfile(os.path.join(_DOCS, f"{page}.md"))})
+        if not page or _resolve(page) is None})
     assert not broken, (
         f"{len(broken)} link(s) to a /docs page that 404s:\n  " + "\n  ".join(broken))
 
@@ -103,7 +117,7 @@ def test_every_app_docs_fragment_lands_on_a_real_heading():
     page with no error — see the module docstring for how the slugs differ."""
     broken = []
     for src, href, page, frag in _links():
-        if not frag or not os.path.isfile(os.path.join(_DOCS, f"{page}.md")):
+        if not frag or _resolve(page) is None:
             continue  # the page check above owns that failure
         if frag not in _rendered_ids(page):
             broken.append(f"{src} -> {href}")

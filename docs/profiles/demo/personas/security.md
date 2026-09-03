@@ -68,7 +68,7 @@ estate nobody can account for.
 and the cards that need them will say so. Add **Secrets scanning** for the discovery card.
 
 Every one of these is profile-neutral, so this focus works identically on a demo instance and a
-[POV instance](../../../pov-instance.md).
+[POV instance](../../pov/README.md).
 
 Read [Auto-delete Timer](../../../auto-delete-timer.md) before switching it on. It deletes
 infrastructure, and it has its own second gate for exactly that reason.

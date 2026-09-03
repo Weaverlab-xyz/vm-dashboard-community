@@ -84,7 +84,7 @@ is gated on it, because a cell nobody can reach would be a VM with no purpose. A
 **Password Safe** for the credential-checkout story and **Entitle** for the expiry story.
 
 The cell runs on AWS, Azure or GCP, so the focus also needs one cloud configured — which
-means it is a demo-instance story. On a [POV instance](../../../pov-instance.md) the cloud consoles
+means it is a demo-instance story. On a [POV instance](../../pov/README.md) the cloud consoles
 are masked and these cards say so rather than offering a link that would 404.
 
 ## Talking to this buyer

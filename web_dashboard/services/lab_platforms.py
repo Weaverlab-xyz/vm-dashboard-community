@@ -140,7 +140,7 @@ CAPABILITIES = {
         "vm_add": True,                # PUT /configurations/{id}.json, template_id+vm_ids
         # Can an environment be saved back as a template? This is what makes the template
         # BUILDER possible at all — see services/pov_template_builder and
-        # docs/integrations/skytap.md#building-a-template. Skytap has no "edit a template"
+        # docs/profiles/pov/skytap.md#building-a-template. Skytap has no "edit a template"
         # call, so authoring is always instantiate → change → bake, never edit in place.
         "template_authoring": True,    # POST /v2/templates {configuration_id}
         # Can a guest port be NAT-ed to a public ip:port? The builder needs exactly one of

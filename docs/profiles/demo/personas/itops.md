@@ -73,7 +73,7 @@ desktops**. Add **Password Safe** for the local-admin rotation card and **Remote
 the power-control card.
 
 The workstation and virtual-desktop features are demo-owned, so this focus is
-thinner on a [POV instance](../../../pov-instance.md) — though the EPM and PRA halves are
+thinner on a [POV instance](../../pov/README.md) — though the EPM and PRA halves are
 profile-neutral and work on either.
 
 ## Talking to this buyer

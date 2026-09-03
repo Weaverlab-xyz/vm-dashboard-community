@@ -72,7 +72,7 @@ for the console-JIT story, and turn on **Admission control** and the **Auto-dele
 for the guardrails card — both default off, and the guardrails card will tell you so rather
 than failing quietly.
 
-At least one cloud must be configured. On a [POV instance](../../../pov-instance.md) the cloud
+At least one cloud must be configured. On a [POV instance](../../pov/README.md) the cloud
 consoles are masked, so most of this focus reports as unavailable by design — that is the
 tenancy split doing its job, not a fault.
 

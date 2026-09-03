@@ -17,7 +17,7 @@ consumers:
     card whose product this POV does not include renders ``out_of_scope`` rather than
     vanishing.
   * **Only use cases the runbook can actually teach get a card.** Its seven unfinished
-    ones (12-17, 19) are documented in docs/pov-ps-runbook.md instead, and this pins that
+    ones (12-17, 19) are documented in docs/profiles/pov/ps-runbook.md instead, and this pins that
     they stay out -- a checkbox nobody can honestly tick reads as a gap in this dashboard.
   * **A POV card declares no instance-level requirements** -- flags and clouds resolve
     through a different reader.
@@ -250,15 +250,15 @@ def test_the_runbooks_unfinished_use_cases_have_no_card():
     unfinished = {"12", "13", "14", "15", "16", "17", "19"}
     present = set(_numbers(R.get("ps-poc-skytap").use_cases))
     overlap = sorted(present & unfinished)
-    assert not overlap, f"the runbook cannot teach {overlap}; see docs/pov-ps-runbook.md"
+    assert not overlap, f"the runbook cannot teach {overlap}; see docs/profiles/pov/ps-runbook.md"
 
 
 def test_the_doc_accounts_for_every_use_case_the_checklist_omits():
     """With the cards gone the doc is the ONLY record that the runbook has holes, so an SE
     looking for use case 15 has somewhere to find out why it is absent."""
-    doc = _read(os.path.join(_DOCS, "pov-ps-runbook.md"))
+    doc = _read(os.path.join(_DOCS, "profiles", "pov", "ps-runbook.md"))
     for n in ("12", "13", "14", "15", "16", "17", "19"):
-        missing = f"docs/pov-ps-runbook.md does not account for omitted use case {n}"
+        missing = f"docs/profiles/pov/ps-runbook.md does not account for omitted use case {n}"
         assert f"| {n} " in doc, missing
 
 

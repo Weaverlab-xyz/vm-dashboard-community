@@ -1,6 +1,6 @@
 """Installing an Entitle agent inside a POV environment, on a single-node k3s.
 
-The prerequisite ``docs/pov-instance.md`` used to say the dashboard would not satisfy.
+The prerequisite ``docs/profiles/pov/README.md`` used to say the dashboard would not satisfy.
 Entitle's SSH connector reaches a **private** target through an agent running inside that
 network, and a POV's VMs are private by construction — so every POV integration is a
 private one, and until now every POV needed an agent somebody else had deployed.

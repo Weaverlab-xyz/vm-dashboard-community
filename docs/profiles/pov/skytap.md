@@ -4,24 +4,24 @@ The first **lab platform** for POV environments. A POV is a Skytap *template* in
 whole; the dashboard creates those environments and wires their VMs into that POV's PRA,
 Password Safe and Entitle tenants.
 
-Available on a **POV instance only** — see [pov-instance.md](../pov-instance.md). On a demo
+Available on a **POV instance only** — see [pov-instance.md](README.md). On a demo
 instance the integration is masked off and Settings refuses to enable it.
 
 > **What the dashboard does with an environment.** Create it from a template, power it on
 > and off, and destroy it. Enrol an **agent inside it** — see
 > [The broker VM](#the-broker-vm) and the [template contract](#the-template-contract).
 > Install a **BeyondTrust Gateway** on that broker, registered into the POV's own PRA
-> tenant ([the POV Gateway](../pov-instance.md#the-pov-gateway)), and a **Password Safe
+> tenant ([the POV Gateway](gateway-and-broker.md#the-pov-gateway)), and a **Password Safe
 > Resource Broker** on a Windows VM beside it
-> ([the Resource Broker](../pov-instance.md#the-resource-broker)).
+> ([the Resource Broker](gateway-and-broker.md#the-resource-broker)).
 > Then, per VM: **one PRA jump item** through that Gateway, **Password Safe onboarding**
 > through that Resource Broker, and **Entitle registration** for the Linux guests
-> ([wiring the VMs](../pov-instance.md#wiring-the-vms-into-pra-password-safe-and-entitle)).
+> ([wiring the VMs](wiring.md#wiring-the-vms-into-pra-password-safe-and-entitle)).
 > Publish a **customer-facing share link** for the whole environment
-> ([the share link](../pov-instance.md#the-customer-facing-share-link)) — Skytap calls it a
+> ([the share link](customer-access.md#the-customer-facing-share-link)) — Skytap calls it a
 > publish set, and the dashboard always gives it a generated password and an expiry. And
 > reap the environment on an **auto-delete timer**
-> ([the auto-delete timer](../pov-instance.md#the-auto-delete-timer)), which warns on a
+> ([the auto-delete timer](lifecycle.md#the-auto-delete-timer)), which warns on a
 > ladder rather than once because an evaluation outlives whoever set it up.
 
 ---
@@ -170,7 +170,7 @@ Three smaller rules worth knowing:
 ## The broker VM
 
 Everything the dashboard does *inside* a POV after it is running goes through one VM in
-the environment: the **broker**. It runs the [remote agent](../remote-agents.md), and the
+the environment: the **broker**. It runs the [remote agent](../../remote-agents.md), and the
 agent dials out — because a POV lives on a lab platform's private network and this
 dashboard has no route into it. The Gateway install, the Resource Broker install and the
 per-VM wire-up all wait on this one thing, so it is worth setting up properly once.
@@ -184,7 +184,7 @@ the names it *did* find.
 
 A POV that also runs a Resource Broker needs a **second** special VM — a Windows Server
 2019 or 2022 x64 guest with WinRM enabled, on the same automatic network. See
-[the Resource Broker](../pov-instance.md#the-resource-broker); the rest of this section is
+[the Resource Broker](gateway-and-broker.md#the-resource-broker); the rest of this section is
 about the Linux broker.
 
 That VM needs three things:
@@ -465,7 +465,7 @@ a platform lacks degrades visibly instead of failing late:
 | Idle suspend | yes — `suspend_on_idle`, per environment, in seconds |
 | Bootstrap injection | **metadata** — per-VM `user_data`, read by the guest at `http://169.254.169.254/skytap`. Used by [the broker VM](#the-broker-vm) |
 | Share link | yes — publish sets, with a password and an expiry |
-| Stored credentials | yes — `…/vms/{id}/credentials`. Used by [the Resource Broker install](../pov-instance.md#there-is-no-login-field-on-purpose), which is why the dashboard stores no Windows password for a POV |
+| Stored credentials | yes — `…/vms/{id}/credentials`. Used by [the Resource Broker install](gateway-and-broker.md#there-is-no-login-field-on-purpose), which is why the dashboard stores no Windows password for a POV |
 | Verify | yes — one page of `/v2/templates`, surfaced as **Test connection** in Settings |
 | Project scoping | yes — `/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` |
 | Template authoring | yes — `POST /templates.json` with a `configuration_id`. There is no *edit a template* call on any lab platform, so authoring is always instantiate → change → bake. Used by [building a template](#building-a-template) |
@@ -494,7 +494,7 @@ rather than failing somewhere inside a job.
 |---|---|---|
 | "Skytap rejected the credentials … uses an API token, not your account password" | The account password was pasted into the token field | Use the API security token from the Skytap account page |
 | The POV page says Skytap is not configured | No URL, username or token stored | Settings → Integrations → Skytap |
-| Settings refuses to enable it with a 409 | This is a demo instance | Skytap is POV-only; see [pov-instance.md](../pov-instance.md) |
+| Settings refuses to enable it with a 409 | This is a demo instance | Skytap is POV-only; see [pov-instance.md](README.md) |
 | No POV nav link at all | `pov_environments_enabled` is off, or the profile is `demo` | The flag must be ON **and** the profile must be `pov` — `GET /api/features` shows `install_profile` |
 | "Skytap is still busy after N retries" | The account is genuinely rate-limited | Expected under heavy concurrent use; retry shortly. Running or suspending many VMs at once makes it more likely |
 | An environment shows a **rate-limited** badge | Skytap set `rate_limited` on it | Operations against it will be slow until it clears |

@@ -525,8 +525,8 @@ overlay as the other runners.
 
 The dashboard-side driver for this today is the POV feature, which generates the whole
 policy for a broker VM it created; see
-[pov-instance.md](pov-instance.md#the-pov-gateway). The same feature uses `agent_ansible`
-to install a [Password Safe Resource Broker](pov-instance.md#the-resource-broker) on a
+[pov-instance.md](profiles/pov/gateway-and-broker.md#the-pov-gateway). The same feature uses `agent_ansible`
+to install a [Password Safe Resource Broker](profiles/pov/gateway-and-broker.md#the-resource-broker) on a
 Windows VM beside it — a `.exe` asset, which the Config-Management runner now installs with
 `win_package`.
 
@@ -1222,7 +1222,7 @@ reading and writing.
 It exists because the dashboard's own "Local Filesystem / UNC" backend opens the SMB
 socket from inside its own container, which means it only works when the dashboard is
 already on the same network as the share. Most are not: a dashboard on Azure Container
-Apps has no route to a file server, and a [POV instance](pov-instance.md) has no cloud
+Apps has no route to a file server, and a [POV instance](profiles/pov/README.md) has no cloud
 provider to fall back on, so it has nowhere to put a playbook at all. The agent is
 already inside; this makes it the path.
 

@@ -68,7 +68,7 @@ injected — the platform console that usually has a shared login.
 token-rotation card and **Portainer** for the container-platform card.
 
 Kubernetes is demo-owned, so this focus **needs a demo instance**; on a
-[POV instance](../../../pov-instance.md) its cards report as unavailable by design.
+[POV instance](../../pov/README.md) its cards report as unavailable by design.
 
 ## Talking to this buyer
 

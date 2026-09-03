@@ -174,7 +174,7 @@ def _interfaces(raw_vm: dict) -> tuple[str, list[dict], list[dict]]:
 
     A published service is Skytap NAT-ing a guest port to a public ip:port. We surface them
     because they are useful to see, NOT because the wire-up uses them — POV wiring reaches
-    VMs on their private IPs through an in-environment Gateway. See docs/pov-instance.md.
+    VMs on their private IPs through an in-environment Gateway. See docs/profiles/pov/README.md.
 
     The third return value is the NICs themselves, each with its **id**. Publishing a
     service is a POST *under an interface*, so a caller that only has the flattened service
@@ -451,7 +451,7 @@ async def add_vms(env_id: str, template_id: str, vm_ids: list) -> dict:
     already uses for the name and the idle timer. Send ``template_id`` to the v2 form and
     it answers **200 with the environment unchanged** — no error, no VMs, nothing to
     investigate. That is worse than the 404 the two creates give, which at least says
-    something happened. See "The two calls that are v1" in docs/integrations/skytap.md.
+    something happened. See "The two calls that are v1" in docs/profiles/pov/skytap.md.
 
     ``vm_ids`` is optional in the API and required here. Omitting it merges the template
     **whole**, and against a POV that means silently doubling the environment — a
@@ -542,7 +542,7 @@ async def inject_bootstrap(env_id: str, vm_id: str, payload: str) -> None:
     Skytap hands the payload to the guest and **nothing executes it**. There is no
     cloud-init datasource here: the guest fetches it from the metadata service itself, so
     a template with no runner reads this and does nothing at all, silently. See the
-    template contract in docs/integrations/skytap.md — that contract is the other half of
+    template contract in docs/profiles/pov/skytap.md — that contract is the other half of
     this function, and neither half works alone.
 
     Two consequences the caller must know rather than discover:
@@ -755,7 +755,7 @@ async def get_environment(env_id: str) -> dict:
 #
 # The write half of the catalogue. Until this landed the dashboard could only *read*
 # `/v2/templates`, which made the whole POV feature downstream of a catalogue nobody could
-# author from here — see docs/integrations/skytap.md#building-a-template.
+# author from here — see docs/profiles/pov/skytap.md#building-a-template.
 #
 # Skytap has no "edit a template" call, and that is not an omission this module should try
 # to paper over. A template is immutable; the way you change one is to instantiate it, change
@@ -868,7 +868,7 @@ async def delete_template(template_id: str) -> None:
 
 # ── published services ───────────────────────────────────────────────────────
 #
-# Skytap NATs a guest port to a public ip:port. docs/integrations/skytap.md is explicit
+# Skytap NATs a guest port to a public ip:port. docs/profiles/pov/skytap.md is explicit
 # that POV *wiring* does not use these, because a published address changes per environment
 # and per power cycle — the wire-up reaches VMs on their private IPs through a Gateway
 # inside the environment.

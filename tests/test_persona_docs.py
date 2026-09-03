@@ -154,7 +154,7 @@ def test_a_demo_only_focus_says_so():
             if masked < len(entry["use_cases"]) / 2:
                 continue
             text = _read(os.path.join(_PERSONA_DOCS, entry["persona"] + ".md"))
-            assert "pov-instance.md" in text, (
+            assert "pov/README.md" in text, (
                 f"{entry['persona']} has {masked} masked cards on a POV instance but its doc "
                 "never mentions the POV/demo split")
     finally:

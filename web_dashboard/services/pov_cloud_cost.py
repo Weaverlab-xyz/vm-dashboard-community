@@ -20,7 +20,7 @@ which is the right failure, because the alternative is a hardcoded price table t
 stale silently and reports a number an operator might plan around.
 
 **It is a LIST price, not a bill.** No Savings Plans, no Reserved Instances, no free tier,
-no credits, no data transfer, no snapshots. `docs/pov-instance.md` says so where an
+no credits, no data transfer, no snapshots. `docs/profiles/pov/README.md` says so where an
 operator reads it, because a credit cliff reading as a cost rise is a mistake this
 codebase has made on a real account before.
 """

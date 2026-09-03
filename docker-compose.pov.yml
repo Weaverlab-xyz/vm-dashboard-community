@@ -14,7 +14,7 @@
 # into a customer's Password Safe, or a POV onboarding into the demo tenant. So
 # INSTALL_PROFILE below is a hard gate: see services/feature_flags.enabled().
 #
-# Read docs/pov-instance.md before the first run. The short version: its JWT_SECRET_KEY
+# Read docs/profiles/pov/README.md before the first run. The short version: its JWT_SECRET_KEY
 # must be its OWN value, and you cannot pg_dump config between the two instances.
 
 services:

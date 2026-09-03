@@ -75,7 +75,7 @@ for the discovery card.
 
 **This focus needs a demo instance.** Every hypervisor integration is demo-owned, because
 their deploys and Web Jumps resolve the global BeyondTrust tenant — so on a
-[POV instance](../../../pov-instance.md) most of these cards report as unavailable. That is a
+[POV instance](../../pov/README.md) most of these cards report as unavailable. That is a
 deliberate tenancy decision rather than a gap, and the POV plan floats reusing a
 Proxmox/vSphere connection as an on-premises lab platform later; it needs the tenancy question
 answered first.

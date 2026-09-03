@@ -202,8 +202,16 @@ _TITLE_OVERRIDES = {
     "profiles/demo/personas/dba":        "DBA / data platform",
     "profiles/demo/personas/security":   "Security / IAM analyst",
     "profiles/demo/personas/sre":        "Platform / SRE",
-    # Not a persona: the derived title would be "Ot Demo Cell".
+    # Not personas. The derived title is the filename title-cased, which reads as a
+    # filename ("Ps Runbook", "Standing One Up") rather than as the page.
     "profiles/demo/ot-demo-cell":        "OT Demo Cell",
+    "profiles/pov/standing-one-up":      "Standing up a POV instance",
+    "profiles/pov/public-cloud":         "Running POVs on a public cloud",
+    "profiles/pov/gateway-and-broker":   "The Gateway and the Resource Broker",
+    "profiles/pov/wiring":               "Wiring VMs into PRA, Password Safe and Entitle",
+    "profiles/pov/customer-access":      "What the customer sees",
+    "profiles/pov/lifecycle":            "Keeping a POV true, and reaping it",
+    "profiles/pov/ps-runbook":           "Password Safe POC runbook",
 }
 
 _SHELL = """<!doctype html>

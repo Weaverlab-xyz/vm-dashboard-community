@@ -349,7 +349,7 @@ def sweep(db: Session) -> int:
 
     Ridden on the POV reconcile pass rather than the expiry sweep, and deliberately outside
     the platform-specific part of it: a fresh POV instance starts with the auto-delete timer
-    off (docs/pov-instance.md), and whether an accessor should still work has nothing to do
+    off (docs/profiles/pov/README.md), and whether an accessor should still work has nothing to do
     with whether the lab platform is reachable.
     """
     now = _now()

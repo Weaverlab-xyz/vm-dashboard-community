@@ -325,7 +325,7 @@ _CLOUDOPS = Persona(
                     "same three layers the demo estate shows, on the customer’s own lab.",
             target="#wired",
             minutes=12,
-            docs="pov-instance",
+            docs="profiles/pov/wiring",
             requires_products=("pra", "password_safe"),
         ),
         UseCase(
@@ -460,7 +460,7 @@ _DEVOPS = Persona(
                     "rotation project stalls on, answered against something running.",
             target="#overview",
             minutes=8,
-            docs="design/pov-resource-broker",
+            docs="profiles/pov/design/resource-broker",
             requires_products=("password_safe",),
         ),
         UseCase(
@@ -694,7 +694,7 @@ _ITOPS = Persona(
                     "on the call.",
             target="#share",
             minutes=6,
-            docs="pov-instance",
+            docs="profiles/pov/customer-access",
         ),
     ),
 )
@@ -1016,7 +1016,7 @@ _SECURITY = Persona(
                     "spreadsheet.",
             target="#wired",
             minutes=8,
-            docs="pov-instance",
+            docs="profiles/pov/wiring",
         ),
         UseCase(
             id="pov-security-session-record",
@@ -1047,7 +1047,7 @@ _SECURITY = Persona(
                     "leaves nothing behind.",
             target="#overview",
             minutes=8,
-            docs="pov-instance",
+            docs="profiles/pov/customer-access",
         ),
     ),
 )
@@ -1159,7 +1159,7 @@ _SRE = Persona(
                     "ask for before any of this ships.",
             target="#overview",
             minutes=10,
-            docs="design/pov-resource-broker",
+            docs="profiles/pov/design/resource-broker",
         ),
     ),
 )

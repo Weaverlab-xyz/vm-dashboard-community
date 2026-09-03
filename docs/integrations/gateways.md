@@ -91,7 +91,7 @@ A [remote agent](../remote-agents.md#the-beyondtrust-gateway) can run a Gateway 
 own host**, inside a network the dashboard cannot route to at all. The dashboard never
 touches a cloud API for this one — it queues an `agent_gateway` job and the agent starts a
 privileged container beside itself. Today the driver is the
-[POV feature](../pov-instance.md#the-pov-gateway), which generates the whole policy for a
+[POV feature](../profiles/pov/gateway-and-broker.md#the-pov-gateway), which generates the whole policy for a
 broker VM it created.
 
 **It is not in this tab, and that is not an oversight.** The `gateways` inventory is

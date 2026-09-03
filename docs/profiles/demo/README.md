@@ -5,7 +5,7 @@
 The default profile, and what every existing install already is. A demo instance manages
 **your** estate: your cloud accounts, your hypervisors, your images. You show it to people.
 
-That is the difference from the [POV profile](../pov-instance.md), where each environment
+That is the difference from the [POV profile](../pov/README.md), where each environment
 belongs to a customer and points at the customer's own BeyondTrust tenant. See
 [the gate](../README.md#the-gate) for why the two cannot be the same instance.
 
@@ -19,7 +19,7 @@ belongs to a customer and points at the customer's own BeyondTrust tenant. See
 ## Everything else is a capability doc
 
 Almost every feature a demo instance has is documented once at the
-[docs root](../../README.md) rather than here, because the page describing how to deploy an
+[docs root](../../../README.md) rather than here, because the page describing how to deploy an
 EC2 instance is the same page whether you are demoing or running a lab. Each of those pages
 carries `**Profile:** demo` in its header block.
 
