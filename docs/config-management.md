@@ -1,5 +1,7 @@
 # Config Management
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are about to run an Ansible job and want to know how the runner handles secrets and isolation.
+
 This document explains how the dashboard does config management — the
 philosophy that drives the design, the best practices the codebase
 encodes, and how the on-premises and cloud paths fit together.

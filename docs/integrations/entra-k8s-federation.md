@@ -1,5 +1,7 @@
 # Entra ID → Kubernetes real-identity federation
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you want people signing in to clusters as themselves rather than sharing a kubeconfig.
+
 Bind **one Entra (Azure AD) security group** to cluster RBAC and let its members sign
 in to your clusters **as themselves** — their Entra token carries the group's Object
 ID, which matches a Kubernetes `Group` subject. Entitle's Entra-ID integration

@@ -1,5 +1,7 @@
 # Entitle Integration
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want access to expire on its own instead of being revoked by someone remembering.
+
 The Entitle integration has three independent tracks that share one Entitle
 tenant + API token. You can enable any combination:
 

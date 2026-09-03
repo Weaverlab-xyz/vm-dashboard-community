@@ -1,5 +1,7 @@
 # VMware vSphere / ESXi Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on vSphere or a standalone ESXi host.
+
 ## What is it?
 
 The vSphere integration connects the dashboard to a VMware vCenter Server or a

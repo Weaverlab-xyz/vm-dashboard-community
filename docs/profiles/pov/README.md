@@ -43,6 +43,8 @@ the UI can degrade visibly rather than offering a button that fails.
 
 Two more pages sit beside these: the POV lab platform [Skytap](skytap.md),
 and the [Password Safe POC runbook](ps-runbook.md) a POV can be run against.
+Why two of these subsystems are shaped the way they are is in
+[design/](design/README.md).
 
 ## What this stack deliberately does not mount
 

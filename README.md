@@ -13,6 +13,27 @@ the dashboard deploys resources into **your** accounts.
 > adds multi-tenant isolation, automatic rotation, and managed upgrades.
 > See [docs/saas-comparison.md](docs/saas-comparison.md) for how it compares.
 
+## Who this is for
+
+Every page under [`docs/`](docs/README.md) opens with the same line: who it is for,
+which install profile it applies to, and the situation that should send you to it.
+Four readers, four ways in:
+
+| You are… | Start here |
+|---|---|
+| **installing or running** the dashboard | [Onboarding](docs/ONBOARDING.md), then the reference table below |
+| **showing** it to someone | [Demo profile](docs/profiles/demo/README.md) — one page per role, plus the OT demo cell |
+| running **customer proof-of-value** work | [POV profile](docs/profiles/pov/README.md) |
+| **changing the code** | [CONTRIBUTING.md](CONTRIBUTING.md), then [design notes](docs/design/README.md) |
+
+And pick a profile before you install, because it is a gate rather than a preference:
+`install_profile` is **`demo`** (the default — your own estate, which you show to people)
+or **`pov`** (customer evaluations, each against the customer's own BeyondTrust tenant),
+and the two are mutually exclusive. [Demo and POV profiles](docs/profiles/README.md)
+explains why, and which features each one gets.
+
+The full index of every page is [docs/README.md](docs/README.md).
+
 ## How the dashboard thinks
 
 Before you spin it up, the reference docs below explain the
@@ -40,8 +61,8 @@ works:
 | [Remote Agents](docs/remote-agents.md) | Reaching infrastructure the dashboard cannot route to: an outbound-dialing agent an operator runs inside the private network — no inbound ports, no stored path in. Enrolment and credential sealing (*the config file travels, the key does not*), discovery, agent-executed Config Management, and the one-shot sibling runners for Hyper-V and bare ESXi. | Your hypervisors, databases or clusters live somewhere the dashboard can't reach — a customer network, a lab behind NAT, an air-gapped segment. |
 | [Cloud Hosting](docs/cloud-hosting.md) | Running the dashboard itself on Azure Container Apps / Cloud Run / ECS instead of Compose: the gateway sidecar that splits the agent endpoint from the UI, why an unset `DATABASE_URL` or `JWT_SECRET_KEY` fails silently, and what on-premises capability you give up. | You want the dashboard reachable from outside your LAN, or fronting remote agents. |
 | [Config Migration](docs/config-migration.md) | Moving Settings configuration between two instances. Why `pg_dump` of the config table restores unreadable ciphertext without erroring, and what deliberately stays behind. | You're standing up a second instance and don't want to re-type months of configuration. |
-| [Personas](docs/profiles/demo/personas) | One page per role — Cloud Ops, DevOps, hypervisor admin, IT, OT/ICS, DBA, security analyst, SRE — covering what that person owns, the four-layer story in their language (provisioning → PRA → Password Safe → Entitle), the use cases to run, and which integrations each needs. The in-app **Use cases** page is the same catalog, with each card reporting whether this instance can actually run it — and on a POV instance it leads with one POV, resolved against the products *that* evaluation is wired into, tickable as you run them, and tickable by the customer themselves. | You are presenting to a specific role and want the story and the click path, rather than a feature list. |
-| [POV Instance](docs/profiles/pov/README.md) | Running a **second** dashboard for customer POV/POC environments: why `install_profile` makes demo and POV mutually exclusive, which features each profile gets, the **BeyondTrust tenant registry** that replaces the singletons (and why an explicit tenant never falls back to the default), the four things that bite — its own JWT key, a cold first boot, a reachable agent endpoint, and an unarmed auto-delete timer — the **per-POV use-case checklist**, which asks what *this* POV can demonstrate rather than what this instance supports, the **accessor** — an ephemeral login for the customer that reaches its own POV and nothing else, and is deleted with it — and the **evaluation summary** each POV leaves behind once its infrastructure is gone. | You do customer proof-of-value work and don't want it sharing an instance, a database or a BeyondTrust tenant with your demo estate. |
+| [Personas](docs/profiles/demo/personas/README.md) | One page per role — Cloud Ops, DevOps, hypervisor admin, IT, OT/ICS, DBA, security analyst, SRE — covering what that person owns, the four-layer story in their language (provisioning → PRA → Password Safe → Entitle), the use cases to run, and which integrations each needs. The in-app **Use cases** page is the same catalog, with each card reporting whether this instance can actually run it. | You are presenting to a specific role and want the story and the click path, rather than a feature list. |
+| [POV Instance](docs/profiles/pov/README.md) | Running a **second** dashboard for customer POV/POC environments, across seven pages: the **tenant registry** that replaces the singletons, running POVs on a public cloud, the POV Gateway and Resource Broker, wiring guests into PRA / Password Safe / Entitle, and what the customer sees — the per-POV use-case checklist, the **accessor** login that reaches its own POV and nothing else, and the share link. | You do customer proof-of-value work and don't want it sharing an instance, a database or a BeyondTrust tenant with your demo estate. |
 | [Skytap](docs/profiles/pov/skytap.md) | The first POV **lab platform**: the API token (not your password), why 423 is normal rather than an error, why every read carries `keep_idle`, why the Terraform provider is deliberately unused, the **template contract** the broker VM has to satisfy — Skytap hands `user_data` to the guest and nothing executes it — and the **template builder** that now writes that runner for you and bakes the result into a new template. | You're pointing a POV instance at Skytap and want to know what it will and won't do with the account. |
 
 Together they're the philosophy of the tool: **declarative,

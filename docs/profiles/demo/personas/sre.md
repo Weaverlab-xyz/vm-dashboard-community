@@ -1,5 +1,7 @@
 # Platform / SRE
 
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are presenting to whoever owns the clusters and the services on them.
+
 Owns the platform other teams build on: Kubernetes clusters, the container runtime, the
 management plane. Their privilege is unusual in shape — broad rather than deep. Cluster-admin
 on one cluster is not especially dangerous; cluster-admin on all of them, permanently, is.

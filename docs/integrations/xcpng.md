@@ -1,5 +1,7 @@
 # XCP-ng / XenServer Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on XCP-ng or XenServer.
+
 The dashboard connects to an **XCP-ng** or **XenServer** host or pool master via the
 **XAPI XML-RPC API** using Python's built-in `xmlrpc.client` — no external SDK required.
 

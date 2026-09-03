@@ -1,5 +1,7 @@
 # Cloud VMs
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are deploying cloud VMs and want the full access and onboarding story.
+
 The dashboard deploys **cloud virtual machines** across AWS, Azure, GCP, and OCI, then
 layers the BeyondTrust PAM stack on top — the same **provisioning + three layers** model
 as [Databases](databases.md) and [Kubernetes](kubernetes.md):

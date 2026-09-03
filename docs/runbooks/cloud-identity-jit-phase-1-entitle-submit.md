@@ -1,5 +1,7 @@
 # Phase 1 — Cloud-identity JIT Entitle submit + poll
 
+> **Audience:** contributor · **Profile:** `both` · **Read this when:** you are verifying that a real elevation request reaches Entitle.
+
 Validates the real-elevation path from the [cloud-identity JIT
 design](../design/cloud-identity-jit.md) §6.1.
 

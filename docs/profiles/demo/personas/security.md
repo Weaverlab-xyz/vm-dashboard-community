@@ -1,5 +1,7 @@
 # Security / IAM Analyst
 
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are presenting to whoever has to answer who had access to what, and prove it.
+
 Does not own the infrastructure. Owns the **question**: who can reach what, with which
 privilege, and what did they do with it. Everyone else on this list is a source of answers,
 and the answers usually disagree.

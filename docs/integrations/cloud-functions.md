@@ -1,5 +1,7 @@
 # Cloud Functions (preview)
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a stable HTTPS endpoint external systems can call to act inside your network.
+
 > **Preview feature.** Enable it in **Settings → Preview features → Cloud Functions**,
 > then configure a package store in **Settings → Integrations → Cloud Functions**.
 > Design notes: [docs/design/cloud-functions.md](../design/cloud-functions.md).

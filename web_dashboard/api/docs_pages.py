@@ -161,7 +161,6 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 _INDEX_SECTIONS = {
     "General", "integrations",
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
-    "onboarding", "remote-agents", "databases", "integrations/remote-worker",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -173,10 +172,6 @@ _SECTION_LABELS = {
     "profiles/demo":              "Demo profile",
     "profiles/demo/personas":     "Demo profile · personas",
     "profiles/pov":               "POV profile",
-    "onboarding":                 "Onboarding",
-    "remote-agents":              "Remote agents",
-    "databases":                  "Databases",
-    "integrations/remote-worker": "Remote Worker runners",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
@@ -323,8 +318,9 @@ async def doc_index() -> HTMLResponse:
             # docs/README.md would list as a link to a second copy of this page.
             # The FOLDER url, not ".../README" -- doc_page falls back to the README, and a
             # path with mixed case in it is the kind of link that works on a Windows
-            # checkout and 404s in the container.
-            indexes[section] = section
+            # checkout and 404s in the container. "General" is synthetic rather than a
+            # directory, so the root index is the one that needs its real href.
+            indexes[section] = href if section == "General" else section
             # Registers the section even when the README is the only .md in it, which is the
             # case for docs/profiles/ -- otherwise that folder's index is unreachable from
             # here. Also keeps the `sorted(groups)` loop below the one place sections are

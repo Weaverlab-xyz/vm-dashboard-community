@@ -1,5 +1,7 @@
 # Runbook — Entitle resource registration (E2E)
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you want to confirm built resources really do register as Entitle integrations.
+
 End-to-end check that built VMs/DBs register as Entitle integrations, and (for
 private targets) that the Entitle agent makes them reachable. See
 [`../integrations/entitle.md`](../integrations/entitle.md) and

@@ -1,5 +1,7 @@
 # Rancher Kubernetes Management
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you have more than a couple of clusters and want one place to see them.
+
 ## What is it?
 
 The Rancher integration gives the dashboard a **central Kubernetes management

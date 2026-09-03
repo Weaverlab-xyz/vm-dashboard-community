@@ -1,5 +1,7 @@
 # Storage Management
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are enabling a feature that needs a storage backend, which several of them do.
+
 This document explains how the dashboard stores playbooks, scripts, and
 other large assets that don't fit in the encrypted credentials database
 — and how to choose, configure, and migrate between cloud object stores.

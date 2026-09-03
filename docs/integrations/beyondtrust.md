@@ -1,5 +1,7 @@
 # BeyondTrust Integrations
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are wiring the dashboard into BeyondTrust and want to know which product does which job.
+
 ## What is it?
 
 The dashboard integrates with four BeyondTrust products. Each has its own page and its

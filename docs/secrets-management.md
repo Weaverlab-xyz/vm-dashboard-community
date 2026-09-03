@@ -1,5 +1,7 @@
 # Secrets Management
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are deciding where to store cloud credentials, and how to evolve that over time.
+
 This document explains how the dashboard stores and protects credentials,
 the security philosophy behind the design, and how to migrate secrets to
 an external vault once you are ready.

@@ -99,7 +99,8 @@ on. Check both.
 
 ## What this folder does not cover
 
-The capability docs at the docs root are written once and shared: Cloud VMs, Databases,
-Kubernetes, Image Management and the rest describe what the dashboard does, and each one's
+The capability docs at the [docs root](../README.md) are written once and shared: Cloud
+VMs, Databases, Kubernetes, Image Management and the rest describe what the dashboard
+does, and each one's
 header block names the profile it applies to. This folder covers only what is *specific* to
 running a demo estate or a customer POV.

@@ -1,5 +1,7 @@
 # Skytap
 
+> **Audience:** operator · **Profile:** `pov` · **Read this when:** you are pointing a POV instance at Skytap and want to know what it will and will not do with the account.
+
 The first **lab platform** for POV environments. A POV is a Skytap *template* instantiated
 whole; the dashboard creates those environments and wires their VMs into that POV's PRA,
 Password Safe and Entitle tenants.

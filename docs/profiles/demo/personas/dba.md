@@ -1,5 +1,7 @@
 # DBA / Data Platform
 
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are presenting to whoever owns the databases and who gets a session on them.
+
 Owns the databases, and therefore the data. Their accounts are the ones an attacker actually
 wants: a database administrator does not need to move laterally, because they are already at
 the destination.

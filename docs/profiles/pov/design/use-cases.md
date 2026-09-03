@@ -1,5 +1,7 @@
 # Design: use cases per POV, and the accessor who ticks them off
 
+> **Audience:** contributor · **Profile:** `pov` · **Read this when:** you are changing the per-POV use-case checklist or who may tick it off.
+
 Three slices. This note covers all of them, because the first one has to carry the
 columns and the vocabulary the other two need, and deciding that twice is how they end up
 disagreeing.

@@ -1,5 +1,7 @@
 # Databases
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are standing up a managed database, or want to manage one you already run.
+
 The dashboard manages databases two ways — **provision** a new managed database in a
 cloud, or **register** one that already exists, on-premises included — and layers the
 BeyondTrust PAM stack on top of what it provisions. Provisioning needs a Terraform

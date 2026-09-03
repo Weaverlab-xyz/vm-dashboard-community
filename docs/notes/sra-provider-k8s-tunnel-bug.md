@@ -1,5 +1,7 @@
 # `beyondtrust/sra` provider: `tunnel_type = "k8s"` is blocked by the schema validator
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** a Terraform-managed k8s tunnel is refused by the provider's own schema.
+
 ## Summary
 
 The `sra_protocol_tunnel_jump` resource in the

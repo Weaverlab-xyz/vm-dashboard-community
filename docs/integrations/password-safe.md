@@ -1,5 +1,7 @@
 # BeyondTrust Password Safe
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want credentials vaulted and rotated rather than stored by this dashboard.
+
 ## What is it?
 
 **BeyondTrust Password Safe / Secrets Safe** is on-demand checkout of SSH keys and

@@ -1,5 +1,7 @@
 # Nutanix AHV Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on Nutanix AHV.
+
 The dashboard connects to **Prism Central** (or Prism Element) via the Nutanix REST API v3
 to list and control AHV virtual machines.
 

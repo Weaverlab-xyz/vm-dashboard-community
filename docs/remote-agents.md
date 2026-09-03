@@ -1,5 +1,7 @@
 # Remote Agents
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** your hypervisors, databases or clusters live somewhere the dashboard cannot reach.
+
 Every other execution path in this dashboard dials **out** to its target. That works
 for a cloud API, and it works for a LAN the dashboard container happens to sit on. It
 cannot work for a private network the dashboard is not in — which is why the local

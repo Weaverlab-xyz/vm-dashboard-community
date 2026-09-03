@@ -1,5 +1,7 @@
 # Hypervisor Admin
 
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are presenting to whoever owns the on-prem virtualisation estate.
+
 Owns the virtualisation layer — vSphere, Proxmox, Hyper-V, Nutanix, XCP-ng — and with it the
 most concentrated privilege in the datacentre. A hypervisor root account can read the disk of
 every guest on the host, which makes it more powerful than any single server's administrator

@@ -1,5 +1,7 @@
 # Infrastructure as Code
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are about to deploy your first cloud resource and want to know what is actually running underneath.
+
 This document explains how the dashboard does infrastructure as code —
 the philosophy that drives the design, the best practices the codebase
 encodes, and how each cloud's deployment path fits the same model.

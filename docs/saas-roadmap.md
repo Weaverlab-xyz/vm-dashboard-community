@@ -1,5 +1,7 @@
 # SaaS Roadmap
 
+> **Audience:** contributor · **Profile:** `both` · **Read this when:** you want to know which capabilities are reserved for the hosted edition, and why.
+
 The hosted SaaS edition is a target architecture for the dashboard.
 This doc is the consolidated list of features it will add on top of
 the shipping [community edition](../README.md), with honest status

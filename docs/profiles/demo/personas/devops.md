@@ -1,5 +1,7 @@
 # DevOps Engineer
 
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are presenting to whoever owns the pipeline and the automation on it.
+
 Owns the pipelines and the automation that runs against everything else. Their code has to
 authenticate to servers, databases, clouds and registries — and unlike a person, it cannot be
 handed a password at the moment it needs one.

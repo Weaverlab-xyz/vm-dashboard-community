@@ -1,5 +1,7 @@
 # Onboarding Guide — Infrastructure Management Dashboard (Community Edition)
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are setting the dashboard up for the first time and want the shortest path to a running instance.
+
 This guide walks you from a fresh machine to a running dashboard deploying
 resources into your own AWS, Azure, and GCP accounts. Target time:
 **under 30 minutes**.

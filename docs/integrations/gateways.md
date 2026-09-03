@@ -1,5 +1,7 @@
 # BeyondTrust Gateway Hosts
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** a resource sits in a private network and something has to broker a session into it.
+
 ## What is it?
 
 A **BeyondTrust Gateway** is the host that brokers PRA sessions into a private cloud

@@ -147,6 +147,31 @@ def test_a_folder_url_serves_that_folders_readme():
         assert r.status_code == 200, f"/docs/{folder} returned {r.status_code}, not its README"
 
 
+def test_every_section_heading_on_the_index_resolves():
+    """The /docs index hangs each section's heading off that folder's README, so those
+    hrefs are the most-clicked links on the page. They are also the easiest to get wrong:
+    "General" is a synthetic section name rather than a directory, so emitting the section
+    string for it produced /docs/General -- a 404 at the top of the index."""
+    try:
+        from fastapi.testclient import TestClient
+        from web_dashboard.main import app
+        from web_dashboard.services import config_service
+    except Exception as exc:
+        print(f"SKIP index-heading check: fastapi absent ({exc})")
+        return
+    import re
+    c = TestClient(app)
+    c.__enter__()
+    config_service.set("setup_complete", "1")
+    config_service._setup_complete = True
+    index = c.get("/docs")
+    assert index.status_code == 200
+    hrefs = re.findall(r'<h2><a href="([^"]+)"', index.text)
+    assert hrefs, "no section heading links on the /docs index"
+    for href in hrefs:
+        assert c.get(href).status_code == 200, f"{href} on the /docs index 404s"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     if _render_markdown is None:

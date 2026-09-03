@@ -1,5 +1,7 @@
 # The Password Safe Cloud POC runbook, on a POV
 
+> **Audience:** operator · **Profile:** `pov` · **Read this when:** you are running the Password Safe Cloud POC against a POV instance.
+
 BeyondTrust's canonical procedure for a customer-facing Password Safe Cloud POC is the SE
 Lab step-by-step: **Confluence SELab page 870514897, "Using Skytap for a Password Safe
 Cloud POC: Step-by-Step"**, rev 7.0 (2026-09-02), validated by its author against PWS SaaS

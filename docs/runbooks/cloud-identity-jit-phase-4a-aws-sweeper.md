@@ -1,5 +1,7 @@
 # Phase 4a — Cloud-identity JIT sweeper (AWS reconciliation)
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are verifying the AWS reconciliation sweeper.
+
 Validates Phase 4a of the [cloud-identity JIT design](../design/cloud-identity-jit.md) §6.7
 ("Audit trail + agent-revoke sweeper").
 

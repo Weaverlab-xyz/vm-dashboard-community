@@ -1,5 +1,7 @@
 # Cloud cost guardrails
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** your lab cloud bill is higher than the resources you can see explain.
+
 Rules and failure modes for keeping small AWS, Azure and GCP lab accounts honest. Written
 after audits on 2026-08-26 that found **roughly 60% of AWS spend and 43% of Azure spend
 was waste** — and that in both clouds the things previously blamed for it were wrong —

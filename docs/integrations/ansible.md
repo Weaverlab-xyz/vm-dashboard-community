@@ -1,5 +1,7 @@
 # Remote Worker (Ansible, Kubernetes & image-promote runners)
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are configuring the runner images that execute Config Management, k8s and promote jobs.
+
 > **Formerly "Ansible."** The Settings panel is now
 > **Configuration → Remote Worker**. The doc path
 > (`docs/integrations/ansible.md`) is unchanged so existing links resolve.

@@ -1,5 +1,7 @@
 # OT / ICS Engineer
 
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are presenting to whoever owns the plant network and the vendors who need into it.
+
 Runs the plant network. Owns the PLCs, the HMI, the historian — and a set of constraints no
 IT engineer has: the equipment cannot be patched on your schedule, it often cannot be
 patched at all, and it speaks protocols that were designed on the assumption that anything

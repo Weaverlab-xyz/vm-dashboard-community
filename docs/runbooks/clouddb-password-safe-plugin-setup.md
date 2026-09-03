@@ -1,5 +1,7 @@
 # Cloud-DB Password Safe plugin setup + test (Azure Run Command / AWS SSM / GCP Cloud SQL)
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are standing up database credential rotation and need the one-time manual setup.
+
 Operator runbook for standing up **database credential rotation** through the custom
 Password Safe plugins: the three **`{engine} Azure Run Command Plugin`**s, the three
 **`{engine} SSM Custom Plugin`**s and the three **`GCP Cloud SQL {engine}`** plugins.

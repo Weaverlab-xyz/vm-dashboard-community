@@ -1,5 +1,7 @@
 # Cloud Ops Engineer
 
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are presenting to whoever owns the cloud accounts and the spend in them.
+
 Owns infrastructure that is created and destroyed daily. Their estate has no stable
 inventory — an instance that existed this morning may be gone, and the one that replaced it
 has a different name, a different address and a fresh set of credentials.

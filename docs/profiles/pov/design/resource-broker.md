@@ -1,5 +1,7 @@
 # Design: installing a Password Safe Resource Broker in a POV
 
+> **Audience:** contributor · **Profile:** `pov` · **Read this when:** you are changing how a POV installs its Password Safe Resource Broker.
+
 Slice 5b of the POV feature — the half [#648](https://github.com/Weaverlab-xyz/vm-dashboard-community/pull/648)
 deliberately left out. It fills `PovEnvironment.ps_application_host_id`.
 

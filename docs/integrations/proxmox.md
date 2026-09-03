@@ -1,5 +1,7 @@
 # Proxmox VE Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on Proxmox VE.
+
 ## What is it?
 
 The Proxmox VE integration connects the dashboard to one or more

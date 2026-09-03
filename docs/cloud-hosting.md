@@ -1,5 +1,7 @@
 # Cloud Hosting
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want the dashboard reachable from outside your LAN, or fronting remote agents.
+
 Running **the dashboard itself** as a managed container in your own cloud
 account — Azure Container Apps, GCP Cloud Run, or AWS ECS — instead of Docker
 Compose on a host you maintain.

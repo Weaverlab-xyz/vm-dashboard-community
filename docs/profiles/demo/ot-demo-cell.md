@@ -1,5 +1,7 @@
 # OT Demo Cell
 
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are showing an air-gapped plant cell and the PAM layers on top of it.
+
 The dashboard can stand up a simulated **OT/ICS plant cell** — Modbus, Siemens
 S7comm, Rockwell EtherNet/IP and OPC UA PLC simulators plus the FUXA web SCADA/HMI —
 inside a cloud sandbox's **private,

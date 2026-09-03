@@ -1,5 +1,7 @@
 # Phase 2 — Entitle virtual application provisioning
 
+> **Audience:** contributor · **Profile:** `both` · **Read this when:** you are provisioning the Entitle virtual applications that back those groups.
+
 > **Legacy mechanism.** This runbook covers Entitle granting dashboard
 > permissions through **Entra groups**. The current mechanism is a REST
 > integration that works for any user and takes effect immediately — see

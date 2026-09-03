@@ -1,5 +1,7 @@
 # Microsoft Hyper-V Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on Hyper-V and you want them managed from here.
+
 ## What is it?
 
 The Hyper-V integration connects the dashboard to a Windows host running

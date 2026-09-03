@@ -1,5 +1,7 @@
 # Phase 4c — Cloud-identity JIT sweeper (GCP reconciliation)
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are verifying the GCP reconciliation sweeper.
+
 Validates Phase 4c of the [cloud-identity JIT design](../design/cloud-identity-jit.md) §6.7
 ("Audit trail + agent-revoke sweeper" — GCP leg).
 

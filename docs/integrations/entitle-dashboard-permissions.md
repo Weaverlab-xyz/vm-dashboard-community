@@ -1,5 +1,7 @@
 # Entitle dashboard permissions
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want dashboard access without standing admins, or you need to tell the two mechanisms apart.
+
 How Entitle grants **permissions inside this dashboard** — time-boxed access to a
 scope (`aws`, `k8s`, …) or to administrator, without standing privilege.
 
