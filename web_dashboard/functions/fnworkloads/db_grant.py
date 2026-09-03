@@ -38,7 +38,7 @@ import os
 import secrets
 import string
 
-from fnruntime import entitle, logs, secretref
+from fnruntime import entitle, logs, secretref, tds
 from fnruntime.contract import Context, Request, Response
 
 NAME = "db_grant"
@@ -205,18 +205,21 @@ def _connect(engine: str, *, host: str, port: int, database: str,
              user: str, password: str):
     """One TLS connection. Encryption is not optional: Azure Flexible Server and
     Azure SQL both refuse plaintext, and a JIT credential is exactly the traffic you
-    least want in the clear."""
+    least want in the clear.
+
+    SQL Server goes through ``fnruntime.tds`` rather than calling ``pytds.connect``
+    here, because getting encryption out of python-tds takes more than passing a
+    keyword — and this workload and ``ps_dbops`` were both getting it wrong in the
+    same way. See that module.
+    """
     if engine == "mysql":
         import pymysql
         return pymysql.connect(
             host=host, port=port, user=user, password=password,
             database=database or None, connect_timeout=_CONNECT_TIMEOUT,
             ssl={"ssl": {}}, autocommit=True)
-    import pytds
-    return pytds.connect(
-        server=host, port=port, database=database or "master", user=user,
-        password=password, login_timeout=_CONNECT_TIMEOUT,
-        cafile=_env("FN_DB_CAFILE") or None, validate_host=False, autocommit=True)
+    return tds.connect(host=host, port=port, database=database, user=user,
+                       password=password, timeout=_CONNECT_TIMEOUT)
 
 
 def _execute(plan, target: dict) -> int:
@@ -684,16 +687,57 @@ def _revoke_access(req, ctx, targets):
     return _apply(plan, target, ctx, {"actor_identifier": username, "role_code": role})
 
 
+def _reachability_problem(server: dict) -> str:
+    """Open ONE connection and say what went wrong, or ``""``.
+
+    This is what makes check_config's promise true. Without it the route resolved
+    settings, said ``valid: true``, and left every remaining way to fail — TLS, the
+    firewall, the VNet route, a wrong admin credential — to be discovered as an
+    opaque 500 on somebody's real access request, with the reason reachable only in
+    the function's own log stream. That is precisely how a python-tds handshake that
+    could never succeed survived a paired, "validated" integration.
+
+    Server-scoped rather than per-database: the admin login, the network path and
+    the TLS handshake are properties of the server, so one connection tests all of
+    them and check_config stays a single connect rather than one per asset. SQL
+    Server uses ``master`` because a contained Azure SQL database is reachable only
+    once the login exists, and the login lives there.
+    """
+    database = "master" if server["engine"] == "sqlserver" else server["database"]
+    try:
+        connection = _connect(server["engine"], host=server["host"],
+                              port=server["port"], database=database,
+                              user=server["admin_user"], password=_admin_password())
+    except Exception as exc:
+        # scrub_text because a driver echoes what it was given, and the message is
+        # going into a response body rather than only into a log.
+        return logs.scrub_text(
+            f"cannot connect to {server['engine']} at {server['host']}:"
+            f"{server['port']} (database {database}) as {server['admin_user']}: "
+            f"{type(exc).__name__}: {exc}")
+    try:
+        connection.close()
+    except Exception:
+        pass
+    return ""
+
+
 def _check_config(req, ctx, targets):
     """Configuration self-test. Reports every asset it resolved so a misconfigured
     integration is caught at setup rather than at the first real grant."""
     problems = []
+    server = next(iter(targets.values()))
     if not _dry_run():
         try:
             _admin_password()
         except Exception as exc:
             problems.append(str(exc))
-    server = next(iter(targets.values()))
+        else:
+            # Only once there IS a credential — otherwise this reports a login
+            # failure whose real cause is already in the list above.
+            unreachable = _reachability_problem(server)
+            if unreachable:
+                problems.append(unreachable)
     return Response(200, {"data": {
         "valid": not problems,
         "assets": sorted(targets),

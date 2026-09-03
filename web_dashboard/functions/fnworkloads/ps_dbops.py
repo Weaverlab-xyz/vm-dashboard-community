@@ -60,7 +60,7 @@ import os
 import re
 import time
 
-from fnruntime import logs
+from fnruntime import logs, tds
 from fnruntime.contract import Context, Request, Response
 
 NAME = "ps_dbops"
@@ -361,6 +361,11 @@ def _connect(engine: str, *, host: str, port: int, database: str, user: str,
     TLS is the default and switching it off is an explicit per-managed-system choice
     (address field 5). Cloud SQL for SQL Server and MySQL both accept encrypted
     connections without a client certificate, so there is nothing to mount.
+
+    ``ssl`` applies to MySQL only, as it always has. A SQL Server connection is
+    encrypted unconditionally because the alternative does not exist: python-tds with
+    no CA file cannot complete a handshake with any managed flavor here at all — see
+    fnruntime.tds.
     """
     seconds = connect_timeout(timeout)
     if engine == "mysql":
@@ -370,12 +375,11 @@ def _connect(engine: str, *, host: str, port: int, database: str, user: str,
             database=database or None, connect_timeout=seconds,
             ssl={"ssl": {}} if ssl else None, autocommit=True)
     if engine == "sqlserver":
-        import pytds
-        return pytds.connect(
-            server=host, port=port, database=database or "master", user=user,
-            password=password, login_timeout=seconds,
-            cafile=_env("FN_DB_CAFILE") or None, validate_host=False,
-            autocommit=True)
+        # Via fnruntime.tds, not pytds directly: python-tds encrypts only when it is
+        # handed a CA file, and every managed SQL Server here refuses a connection
+        # that does not. See that module.
+        return tds.connect(host=host, port=port, database=database, user=user,
+                           password=password, timeout=seconds)
     if engine == "postgres":
         # Reachable only when an operator forces clouddb_ps_gcp_channel=cloud-run for
         # every engine. PostgreSQL's own channel (data-api) needs no service at all,

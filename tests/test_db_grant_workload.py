@@ -125,6 +125,98 @@ def test_check_config_reports_valid_and_the_resolved_target():
     assert body["data"]["engine"] == "mysql"
 
 
+def _stub_connect(raises=None):
+    """Swap the driver out and record what check_config asked it to open. Returns
+    ``(restore, calls)``."""
+    calls = []
+    original = db_grant._connect
+
+    def connect(engine, **kwargs):
+        calls.append(dict(kwargs, engine=engine))
+        if raises is not None:
+            raise raises
+
+        class _Connection:
+            def close(self):
+                calls.append({"closed": True})
+
+        return _Connection()
+
+    db_grant._connect = connect
+
+    def restore():
+        db_grant._connect = original
+
+    return restore, calls
+
+
+def test_check_config_actually_opens_a_connection_when_it_is_armed():
+    """Resolving settings is not a self-test. Everything that actually breaks a
+    grant — TLS, the firewall, the VNet route, a wrong admin credential — only shows
+    up on a connection, and check_config exists so it shows up HERE rather than as
+    an opaque 500 on somebody's real access request."""
+    _env(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql", FN_DB_DRY_RUN="0",
+         FN_DB_ADMIN_PASSWORD="pw")
+    restore, calls = _stub_connect()
+    try:
+        data = _call("POST", "/check_config").body["data"]
+    finally:
+        restore()
+    assert data["valid"] is True, data
+    # One connection for the SERVER, not one per asset — and to master, because a
+    # contained Azure SQL database has no login until master has one.
+    opened = [c for c in calls if "engine" in c]
+    assert len(opened) == 1, calls
+    assert opened[0]["database"] == "master", opened[0]
+    assert opened[0]["user"] == "dbadmin", opened[0]
+
+
+def test_check_config_names_the_target_when_the_connection_fails():
+    """python-tds refusing a handshake used to reach the operator as
+    ``{"error": "internal error"}`` on create_actor. Here it is a sentence."""
+    _env(FN_DB_ENGINE="sqlserver", FN_DB_DRY_RUN="0", FN_DB_ADMIN_PASSWORD="pw")
+    restore, _calls = _stub_connect(
+        raises=RuntimeError("Client does not have encryption enabled"))
+    try:
+        resp = _call("POST", "/check_config")
+    finally:
+        restore()
+    assert resp.status == 200, resp.body
+    data = resp.body["data"]
+    assert data["valid"] is False, data
+    problem = " ".join(data["problems"])
+    assert "db.internal" in problem and "1433" in problem, problem
+    assert "encryption" in problem, problem
+
+
+def test_check_config_connects_to_nothing_in_dry_run():
+    """Dry run's promise is that the function opens no connection at all; a
+    diagnostic that quietly broke it would be the one place that lied."""
+    _env(FN_DB_ENGINE="sqlserver")
+    restore, calls = _stub_connect(raises=AssertionError("dry run must not connect"))
+    try:
+        data = _call("POST", "/check_config").body["data"]
+    finally:
+        restore()
+    assert data["valid"] is True and data["dry_run"] is True, data
+    assert calls == [], calls
+
+
+def test_check_config_does_not_blame_the_network_for_a_missing_credential():
+    """With no admin password every connection fails, and reporting both makes the
+    fixable problem the second thing an operator reads."""
+    _env(FN_DB_ENGINE="sqlserver", FN_DB_DRY_RUN="0")
+    restore, calls = _stub_connect(raises=RuntimeError("login failed"))
+    try:
+        data = _call("POST", "/check_config").body["data"]
+    finally:
+        restore()
+    assert data["valid"] is False, data
+    assert len(data["problems"]) == 1, data["problems"]
+    assert "credential" in data["problems"][0], data["problems"]
+    assert calls == [], calls
+
+
 def test_get_assets_advertises_the_role_options_entitle_offers():
     """role_options is how an operator picks a role_code; an empty list means the
     request form has nothing to choose."""
