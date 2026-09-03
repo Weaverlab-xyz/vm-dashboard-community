@@ -404,8 +404,9 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
             if job_id:
                 await broadcast_progress(
                     job_id, 80, "Rotating to replace the create-time placeholder…")
-            await ps_api_service.change_managed_account_password(
-                int(row.ps_token_account_id))
+            await _rotate_token_once(
+                db, row, int(row.ps_token_account_id), warnings=warnings, namespace=ns,
+                cluster_name=cluster_name, resource_group=resource_group, job_id=job_id)
             refilled = True
             _save_state(cluster_id, rotated=True)
             warnings.append(
@@ -520,7 +521,9 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
     if change:
         if job_id:
             await broadcast_progress(job_id, 80, "Rotating the token once to prove the path…")
-        await ps_api_service.change_managed_account_password(int(row.ps_token_account_id))
+        await _rotate_token_once(
+            db, row, int(row.ps_token_account_id), warnings=warnings, namespace=ns,
+            cluster_name=cluster_name, resource_group=resource_group, job_id=job_id)
         rotated = True
 
     # 6. Retire the Secret the plugin's label-scoped sweep would never remove.
@@ -772,9 +775,120 @@ async def _ensure_eks_access_entry(db: Session, row: K8sCluster, warnings: list)
         logger.warning("PS token: EKS access entry for %s failed: %s", row.id, exc)
 
 
+def _harvest_aks_principal_oid(text: str) -> str:
+    """The rotator's service-principal object id, read out of an AKS rotation failure.
+
+    ``_ensure_aks_role_assignment`` cannot derive this at register time — see
+    ``k8s_service._ps_rotator_subject`` for why the functional account's username does
+    not carry it — so an unset ``k8s_ps_rotator_aks_sp_object_id`` leaves an
+    ``az role assignment create`` line in the warnings with a placeholder where the
+    principal belongs. By the time anyone reads that line, though, the failure it
+    explains has already happened, and the AKS API server's 403 names the principal it
+    refused. The id the operator would otherwise go and look up in Microsoft Graph is
+    sitting a few lines above the remedy that asks them for it.
+
+    Observed live on 2026-09-02 against ``k8s-aks-central``: the failed job's page
+    carried the 403 quoting ``User "6f80ab07-…"`` *and* a grant command reading
+    ``--assignee-object-id <sp-object-id>``.
+
+    Returns "" whenever the text is not an AKS authorisation failure, which is the
+    common case — this runs on every failed ``k8s_ps_token`` job, on all four clouds.
+    """
+    for pattern in _AKS_OID_PATTERNS:
+        match = pattern.search(text or "")
+        if match:
+            # As written, not case-normalised: it has to read as the same string the
+            # operator can see in the 403 directly above it. Azure treats the two alike.
+            return match.group(1)
+    return ""
+
+
+
+async def _resolve_aks_rotator_oid(row: K8sCluster, warnings: list) -> tuple:
+    """``(object_id, where_it_came_from)`` for the rotator's service principal.
+
+    Config used to be the ONLY answer, and requiring an operator to paste a GUID is what
+    made every AKS registration fail the same way twice. Three routes now, cheapest and
+    most certain first, and any of them can come up empty without breaking anything --
+    the caller falls back to the manual remedy.
+
+    1. ``k8s_ps_rotator_aks_sp_object_id``, if somebody set it.
+    2. **The dashboard's own token.** A Password Safe functional account for Azure
+       carries the *application (client) id* as its username, and an oid cannot be
+       derived from an appid. But a token states the oid of the principal it was issued
+       TO -- so when the functional account's appid is our own appid (the usual case:
+       one app registration doing both jobs), the oid we need is a claim in a token this
+       process already mints, at no cost and with no directory permission.
+    3. **Microsoft Graph**, when the functional account is a different principal. Needs
+       ``Application.Read.All`` consent, which most tenants have not granted, so it
+       returns "" rather than failing -- see
+       ``azure_service.service_principal_object_id``.
+
+    Route 2's appid comparison is the load-bearing part. Using our own oid *without*
+    confirming the appid matches would grant an unrelated principal access to the
+    cluster whenever the functional account is a separate app registration, and it
+    would look like it worked: the assignment succeeds, and the rotation 403s exactly
+    as before.
+    """
+    configured = _cfg("k8s_ps_rotator_aks_sp_object_id")
+    if configured:
+        return configured, "config"
+    from . import azure_service
+
+    app_id = ""
+    try:
+        from . import ps_api_service
+        fa = await ps_api_service.get_functional_account(
+            _functional_account_name(row.cloud))
+        app_id = (fa.get("account_name") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("PS token: could not read the Azure functional account to resolve "
+                    "the rotator oid: %s", exc)
+
+    own = {}
+    try:
+        own = await azure_service.own_identity()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("PS token: could not read the dashboard's own Azure identity: %s",
+                    exc)
+
+    if own.get("oid") and app_id and app_id.lower() == (own.get("appid") or "").lower():
+        return own["oid"], ("the dashboard's own Azure token (the functional account is "
+                            "the same app registration)")
+    if app_id:
+        oid = await azure_service.service_principal_object_id(app_id)
+        if oid:
+            return oid, f"Microsoft Graph (appId {app_id})"
+    return "", ""
+
+
+def _remember_aks_oid(oid: str, source: str, warnings: list) -> None:
+    """Persist a resolved object id into config, and say so.
+
+    Only when the key is empty, so an operator's own value is never overwritten, and
+    never silently: the warning names the value and where it came from. Without this the
+    Graph and 403 routes would re-derive the same GUID on every registration, and a
+    tenant with no Graph consent would keep depending on a rotation failing first.
+    """
+    if not oid or _cfg("k8s_ps_rotator_aks_sp_object_id"):
+        return
+    try:
+        from . import config_service
+        config_service.set("k8s_ps_rotator_aks_sp_object_id", oid)
+        warnings.append(
+            f"recorded k8s_ps_rotator_aks_sp_object_id = {oid}, resolved from {source} "
+            "-- future registrations grant the role before the first rotation instead "
+            "of after it. Clear the field in Settings if the rotator identity changes.")
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(
+            f"resolved the rotator object id ({oid}) from {source} but could not save "
+            f"it to k8s_ps_rotator_aks_sp_object_id ({exc}) -- set it by hand so the "
+            "next registration does not have to rediscover it")
+
+
 async def _ensure_aks_role_assignment(db: Session, row: K8sCluster, warnings: list, *,
                                       namespace: str, cluster_name: str = "",
-                                      resource_group: str = "") -> None:
+                                      resource_group: str = "", oid: str = "") -> None:
     """Authorise the rotator's service principal against the AKS Kubernetes API.
 
     The AKS twin of :func:`_ensure_eks_access_entry`, and it exists for the same
@@ -806,7 +920,11 @@ async def _ensure_aks_role_assignment(db: Session, row: K8sCluster, warnings: li
     a failed job: the 403 that proves the grant is missing also names the principal.
     """
     from . import azure_service
-    oid = _cfg("k8s_ps_rotator_aks_sp_object_id")
+    # An explicit oid is the recovery path handing over the principal the cluster itself
+    # named; otherwise work it out, which no longer means "read the config key".
+    source = "the cluster's own 403" if oid else ""
+    if not oid:
+        oid, source = await _resolve_aks_rotator_oid(row, warnings)
     role = _cfg("k8s_ps_rotator_aks_role", "writer")
     subscription = _cfg("azure_subscription_id")
     tf = _deploy_tf_variables(db, row)
@@ -834,8 +952,11 @@ async def _ensure_aks_role_assignment(db: Session, row: K8sCluster, warnings: li
             f"--scope {scope or '<cluster-resource-id>/namespaces/' + namespace}")
 
     if not oid:
-        _manual("k8s_ps_rotator_aks_sp_object_id is not set, so no Azure role "
-                "assignment was created")
+        _manual("the rotator's object id could not be resolved -- "
+                "k8s_ps_rotator_aks_sp_object_id is not set, the Password Safe "
+                "functional account is not this dashboard's own app registration, and "
+                "Microsoft Graph did not answer (that needs Application.Read.All "
+                "consent). No Azure role assignment was created")
         return
     if not _cfg_bool("k8s_ps_rotator_aks_assign_role", True):
         return
@@ -853,7 +974,10 @@ async def _ensure_aks_role_assignment(db: Session, row: K8sCluster, warnings: li
             return
         out = await azure_service.ensure_role_assignment(
             scope=scope, role=role, principal_id=oid)
-        logger.info("PS token: AKS role assignment for %s: %s", row.name, out)
+        logger.info("PS token: AKS role assignment for %s: %s (oid from %s)",
+                    row.name, out, source or "config")
+        if source and source != "config":
+            _remember_aks_oid(oid, source, warnings)
         if out.get("created"):
             # A new assignment takes up to five minutes to reach the authorisation
             # server, and register rotates at step 5.
@@ -864,6 +988,99 @@ async def _ensure_aks_role_assignment(db: Session, row: K8sCluster, warnings: li
     except Exception as exc:  # noqa: BLE001
         logger.warning("PS token: AKS role assignment for %s failed: %s", row.id, exc)
         _manual(f"the Azure role assignment for the rotator failed ({exc})")
+
+
+async def _rotate_token_once(db: Session, row: K8sCluster, account_id: int, *,
+                             warnings: list, namespace: str = "",
+                             cluster_name: str = "", resource_group: str = "",
+                             job_id: str = "") -> None:
+    """Rotate the managed account, and on an AKS authorisation 403 fix the cause and
+    retry instead of handing the operator a command to run.
+
+    **This is the only moment the dashboard can be certain which principal needs the
+    grant.** Every other route is inference: config is a GUID somebody typed, the appid
+    comparison assumes one app registration does both jobs, and Graph needs a consent
+    most tenants have not given. The 403 is different in kind -- the AKS API server
+    authenticated the functional account, resolved it to an object id, and named that
+    object id when it refused. Granting the namespace-scoped role to exactly the
+    principal the cluster just rejected is the intended end state, not a guess at it.
+
+    So the recovery is: harvest the oid, make the assignment, wait for Azure to apply it,
+    rotate again. A new role assignment takes up to five minutes to reach the
+    authorisation server, which is why this waits rather than failing on one retry --
+    and why ``k8s_ps_rotator_aks_propagation_seconds`` exists to bound it.
+
+    Careful about what counts as retryable: only a failure that still names a principal.
+    Anything else on the retry is a DIFFERENT failure and is raised at once, because
+    burning the propagation budget on, say, a Password Safe outage would replace a clear
+    error with a slow vague one.
+
+    Non-AKS clouds and unrecognisable failures re-raise untouched, so this is a no-op
+    everywhere except the case it was written for.
+    """
+    from ..api.websocket import broadcast_progress
+    from . import ps_api_service
+    try:
+        await ps_api_service.change_managed_account_password(account_id)
+        return
+    except Exception as first:
+        oid = ""
+        if (row.cloud or "").strip().lower() == "azure":
+            oid = _harvest_aks_principal_oid(str(first))
+        if not oid:
+            raise
+        if not _cfg_bool("k8s_ps_rotator_aks_assign_role", True):
+            # The operator turned the grant off. Recovering anyway would be overriding
+            # a deliberate choice, and the retry loop below would burn its whole budget
+            # on an assignment that was never going to be made.
+            raise
+        logger.warning("PS token: rotation for cluster %s was refused for principal %s "
+                       "- granting the AKS data-plane role and retrying", row.id, oid)
+        if job_id:
+            await broadcast_progress(
+                job_id, 82, "Rotation refused - granting the rotator AKS access…")
+        before = len(warnings)
+        await _ensure_aks_role_assignment(
+            db, row, warnings,
+            namespace=namespace or _cfg("pra_k8s_namespace", "pra-access"),
+            cluster_name=cluster_name, resource_group=resource_group, oid=oid)
+        # _ensure_aks_role_assignment is deliberately non-fatal: it reports a refusal
+        # into the warnings rather than raising. If it could not make the assignment,
+        # retrying is pointless and the original 403 is the honest failure to show.
+        granted = not any("az role assignment create" in w
+                          for w in warnings[before:])
+        if not granted:
+            raise
+        budget = max(0, _cfg_int("k8s_ps_rotator_aks_propagation_seconds", 240))
+        step = 20
+        waited = 0
+        last = first
+        while waited < budget:
+            await asyncio.sleep(min(step, budget - waited))
+            waited += step
+            if job_id:
+                await broadcast_progress(
+                    job_id, 85,
+                    f"Waiting for Azure to apply the role assignment ({waited}s)…")
+            try:
+                await ps_api_service.change_managed_account_password(account_id)
+            except Exception as again:
+                if not _harvest_aks_principal_oid(str(again)):
+                    raise
+                last = again
+                continue
+            warnings.append(
+                f"the first rotation was refused because the rotator held no AKS "
+                f"data-plane role; granted it and the rotation succeeded {waited}s "
+                f"later. Nothing further is needed -- the grant persists.")
+            return
+        warnings.append(
+            f"granted the rotator its AKS data-plane role, but the rotation was still "
+            f"refused {waited}s later. Azure can take up to five minutes to apply a new "
+            f"assignment, so this is most likely still propagating: use Rotate now in a "
+            f"few minutes, or raise k8s_ps_rotator_aks_propagation_seconds. The grant "
+            f"itself is in place and does not need repeating.")
+        raise last
 
 
 async def _register_pravault_mirror(db: Session, row: K8sCluster, *,
@@ -983,7 +1200,10 @@ async def rotate_now(db: Session, cluster_id: str, *, job_id: str = "",
     # the return value never happens.
     if note:
         warnings.append(note)
-    await ps_api_service.change_managed_account_password(int(row.ps_token_account_id))
+    # Same recovery as registration. An operator who presses Rotate now on a cluster
+    # whose rotator was never authorised should get a rotation, not the same 403 twice.
+    await _rotate_token_once(db, row, int(row.ps_token_account_id),
+                             warnings=warnings, job_id=job_id)
     return {"rotated": True, "pra_synced": linked, "note": note, "warnings": warnings}
 
 
@@ -1104,34 +1324,6 @@ async def sync_status(db: Session, cluster_id: str) -> dict:
 
 
 # ── worker entry ──────────────────────────────────────────────────────────────
-
-def _harvest_aks_principal_oid(text: str) -> str:
-    """The rotator's service-principal object id, read out of an AKS rotation failure.
-
-    ``_ensure_aks_role_assignment`` cannot derive this at register time — see
-    ``k8s_service._ps_rotator_subject`` for why the functional account's username does
-    not carry it — so an unset ``k8s_ps_rotator_aks_sp_object_id`` leaves an
-    ``az role assignment create`` line in the warnings with a placeholder where the
-    principal belongs. By the time anyone reads that line, though, the failure it
-    explains has already happened, and the AKS API server's 403 names the principal it
-    refused. The id the operator would otherwise go and look up in Microsoft Graph is
-    sitting a few lines above the remedy that asks them for it.
-
-    Observed live on 2026-09-02 against ``k8s-aks-central``: the failed job's page
-    carried the 403 quoting ``User "6f80ab07-…"`` *and* a grant command reading
-    ``--assignee-object-id <sp-object-id>``.
-
-    Returns "" whenever the text is not an AKS authorisation failure, which is the
-    common case — this runs on every failed ``k8s_ps_token`` job, on all four clouds.
-    """
-    for pattern in _AKS_OID_PATTERNS:
-        match = pattern.search(text or "")
-        if match:
-            # As written, not case-normalised: it has to read as the same string the
-            # operator can see in the 403 directly above it. Azure treats the two alike.
-            return match.group(1)
-    return ""
-
 
 def _name_the_aks_principal(msg: str, warnings: list) -> None:
     """Fill the harvested object id into any remedy that had to guess at it.

@@ -510,6 +510,373 @@ def test_a_failure_with_no_warnings_is_still_just_the_failure():
     assert svc._failure_message(RuntimeError("boom"), []) == "boom"
 
 
+# --- stubbing service submodules so BOTH import routes see them ------------------
+
+_SVC_PKG = "web_dashboard.services"
+
+
+def _install(**mods):
+    """Install stub service modules and return what to hand back to ``_restore``.
+
+    ``from . import x`` resolves through the parent package's ATTRIBUTE when one exists,
+    and only falls back to ``sys.modules``. So a stub placed in ``sys.modules`` alone is
+    silently ignored the moment anything has imported the real module for real -- which
+    another test in this file does, which is why these tests passed alone and failed in
+    a full run. Setting (and restoring) both is what makes them order-independent.
+    """
+    pkg = sys.modules[_SVC_PKG]
+    saved = {}
+    for short, mod in mods.items():
+        full = f"{_SVC_PKG}.{short}"
+        saved[short] = (sys.modules.get(full), getattr(pkg, short, None))
+        sys.modules[full] = mod
+        setattr(pkg, short, mod)
+    return saved
+
+
+def _restore(saved):
+    pkg = sys.modules[_SVC_PKG]
+    for short, (old_mod, old_attr) in saved.items():
+        full = f"{_SVC_PKG}.{short}"
+        if old_mod is None:
+            sys.modules.pop(full, None)
+        else:
+            sys.modules[full] = old_mod
+        if old_attr is None:
+            if hasattr(pkg, short):
+                delattr(pkg, short)
+        else:
+            setattr(pkg, short, old_attr)
+
+
+# --- resolving the object id without asking an operator for it -------------------
+
+def _jwt(payload):
+    """A token shaped like the ones Entra issues -- header.payload.signature, base64url
+    with the padding stripped. Only the payload is ever read."""
+    import base64
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return "eyJhbGciOiJSUzI1NiJ9." + body + ".not-a-real-signature"
+
+
+_APPID = "1111aaaa-2222-bbbb-3333-cccc4444dddd"
+
+
+def test_the_padding_a_jwt_strips_is_put_back():
+    """base64url in a JWT has no "=" padding, and b64decode refuses a short block --
+    so a claim reader that forgets this works on three payloads in four."""
+    for extra in ("a", "ab", "abc", "abcd"):
+        claims = az._jwt_claims(_jwt({"oid": _OID, "pad": extra}))
+        assert claims.get("oid") == _OID, extra
+
+
+def test_a_malformed_token_is_unknown_rather_than_fatal():
+    for bad in ("", "not-a-jwt", "a.b", "a.!!!!.c"):
+        assert az._jwt_claims(bad) == {}, bad
+
+
+def test_our_own_object_id_is_a_claim_not_a_graph_lookup():
+    """The whole point: an oid cannot be derived from an appid, but a token states the
+    oid of the principal it was issued to. No directory permission involved."""
+    resp = _Resp(200, {})
+    ident = _with_arm(resp, lambda: asyncio.run(az.own_identity()))
+    # _with_arm's stub credential returns a fixed opaque token, so patch in a real shape.
+    orig = az._arm_token
+
+    async def _tok(cred):
+        return _jwt({"oid": _OID, "appid": _APPID, "tid": "tenant-1"})
+    az._arm_token = _tok
+    try:
+        ident = _with_arm(resp, lambda: asyncio.run(az.own_identity()))
+    finally:
+        az._arm_token = orig
+    assert ident == {"oid": _OID, "appid": _APPID, "tid": "tenant-1"}
+
+
+def _resolve(cfg, *, fa_name=None, own=None, graph="", fa_raises=None):
+    """Run _resolve_aks_rotator_oid against stubbed Password Safe + Azure."""
+    store = {"k8s_ps_functional_account_azure": "fa-azure"}
+    store.update(cfg)
+
+    fake_az = types.ModuleType("web_dashboard.services.azure_service")
+
+    async def _own():
+        return own if own is not None else {}
+    fake_az.own_identity = _own
+
+    async def _sp(app_id):
+        return graph
+    fake_az.service_principal_object_id = _sp
+
+    fake_ps = types.ModuleType("web_dashboard.services.ps_api_service")
+
+    async def _fa(name):
+        if fa_raises:
+            raise fa_raises
+        return {"id": 7, "account_name": fa_name or "", "platform_id": 1,
+                "platform_name": "Azure"}
+    fake_ps.get_functional_account = _fa
+
+    saved = _install(azure_service=fake_az, ps_api_service=fake_ps)
+    orig_cfg = svc._cfg
+    svc._cfg = lambda key, default="": store.get(key, default)
+    warnings = []
+    try:
+        return asyncio.run(svc._resolve_aks_rotator_oid(_row(), warnings)), warnings
+    finally:
+        svc._cfg = orig_cfg
+        _restore(saved)
+
+
+def test_a_configured_object_id_still_wins():
+    (oid, source), _w = _resolve({"k8s_ps_rotator_aks_sp_object_id": _OID})
+    assert (oid, source) == (_OID, "config")
+
+
+def test_the_functional_accounts_appid_matching_ours_yields_our_oid():
+    """The usual lab shape: one app registration is both the dashboard's credential and
+    the Password Safe functional account, so the oid is already in our own token."""
+    (oid, source), _w = _resolve({}, fa_name=_APPID,
+                                 own={"oid": _OID, "appid": _APPID, "tid": "t"})
+    assert oid == _OID
+    assert "own Azure token" in source
+
+
+def test_a_functional_account_on_a_DIFFERENT_appid_never_gets_our_oid():
+    """The load-bearing guard. Granting our own oid when the functional account is a
+    separate app registration would succeed at the ARM call and change nothing about
+    the 403 -- an assignment for a principal that never authenticates to the cluster."""
+    (oid, source), _w = _resolve({}, fa_name="9999ffff-0000-1111-2222-333344445555",
+                                 own={"oid": _OID, "appid": _APPID, "tid": "t"})
+    assert oid == ""      # Graph declined too (graph="")
+    assert source == ""
+
+
+def test_graph_answers_for_a_functional_account_that_is_not_us():
+    other = "9999ffff-0000-1111-2222-333344445555"
+    (oid, source), _w = _resolve({}, fa_name=other,
+                                 own={"oid": _OID, "appid": _APPID, "tid": "t"},
+                                 graph="dddd1111-2222-3333-4444-555566667777")
+    assert oid == "dddd1111-2222-3333-4444-555566667777"
+    assert "Graph" in source
+
+
+def test_an_unreadable_functional_account_is_not_fatal():
+    """Password Safe being unreachable must degrade to "cannot tell", not take the
+    registration down -- there is still the 403 route."""
+    (oid, source), _w = _resolve({}, fa_raises=RuntimeError("PS 500"),
+                                 own={"oid": _OID, "appid": _APPID, "tid": "t"})
+    assert (oid, source) == ("", "")
+
+
+def _remember(existing, oid, *, set_raises=None):
+    store = {"k8s_ps_rotator_aks_sp_object_id": existing}
+    written = {}
+
+    fake_cfgsvc = types.ModuleType("web_dashboard.services.config_service")
+
+    def _set(key, value, workgroup=None):
+        if set_raises:
+            raise set_raises
+        written[key] = value
+    fake_cfgsvc.set = _set
+
+    saved = _install(config_service=fake_cfgsvc)
+    orig_cfg = svc._cfg
+    svc._cfg = lambda key, default="": store.get(key, default)
+    warnings = []
+    try:
+        svc._remember_aks_oid(oid, "the cluster's own 403", warnings)
+    finally:
+        svc._cfg = orig_cfg
+        _restore(saved)
+    return written, warnings
+
+
+def test_a_resolved_object_id_is_recorded_and_announced():
+    """So the NEXT registration grants before the first rotation instead of after it,
+    and so a tenant with no Graph consent stops depending on a failure happening first.
+    Announced, because a config key changing under an operator is not a detail."""
+    written, warnings = _remember("", _OID)
+    assert written == {"k8s_ps_rotator_aks_sp_object_id": _OID}
+    assert len(warnings) == 1
+    assert _OID in warnings[0] and "403" in warnings[0]
+
+
+def test_an_operator_set_object_id_is_never_overwritten():
+    written, warnings = _remember("their-own-value", _OID)
+    assert written == {} and warnings == []
+
+
+def test_a_config_write_that_fails_says_to_set_it_by_hand():
+    written, warnings = _remember("", _OID, set_raises=RuntimeError("read-only"))
+    assert written == {}
+    assert "set it by hand" in warnings[0]
+
+
+# --- the self-healing rotation ---------------------------------------------------
+
+_FORBIDDEN = ('POST ManagedAccounts/244/Credentials/Change failed (400): "Error: HTTP '
+              '403 (Forbidden): serviceaccounts "pra-access" is forbidden: User '
+              f'"{_OID}" cannot get resource "serviceaccounts": User does not have '
+              'access to the resource in Azure."')
+
+
+def _heal(*, cloud="azure", rotate_results, cfg=None, grant=None, rbac_enabled=True):
+    """Drive _rotate_token_once. ``rotate_results`` is consumed one per rotation
+    attempt: an exception is raised, anything else counts as success."""
+    store = {"azure_subscription_id": "sub-1111",
+             "k8s_ps_rotator_aks_sp_object_id": "",
+             "pra_k8s_namespace": "pra-access",
+             "k8s_ps_rotator_aks_propagation_seconds": "40"}
+    store.update(cfg or {})
+    calls = []
+    pending = list(rotate_results)
+
+    fake_ps = types.ModuleType("web_dashboard.services.ps_api_service")
+
+    async def _change(account_id):
+        calls.append(("rotate", account_id))
+        outcome = pending.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+    fake_ps.change_managed_account_password = _change
+
+    fake_az = types.ModuleType("web_dashboard.services.azure_service")
+    fake_az.aks_cluster_resource_id = az.aks_cluster_resource_id
+
+    async def _enabled(rg, name):
+        return rbac_enabled
+    fake_az.aks_azure_rbac_enabled = _enabled
+
+    async def _assign(*, scope, role, principal_id):
+        calls.append(("assign", scope, role, principal_id))
+        if grant is not None:
+            raise grant
+        return {"created": True, "name": "n", "scope": scope, "role_id": role}
+    fake_az.ensure_role_assignment = _assign
+
+    fake_ws = types.ModuleType("web_dashboard.api.websocket")
+
+    async def _bp(job_id, pct, msg):
+        return None
+    fake_ws.broadcast_progress = _bp
+    api_pkg = sys.modules.setdefault("web_dashboard.api",
+                                     types.ModuleType("web_dashboard.api"))
+    api_pkg.__path__ = []
+    sys.modules["web_dashboard.api.websocket"] = fake_ws
+
+    fake_cfgsvc = types.ModuleType("web_dashboard.services.config_service")
+    fake_cfgsvc.set = lambda key, value, workgroup=None: None
+
+    saved = _install(ps_api_service=fake_ps, azure_service=fake_az,
+                     config_service=fake_cfgsvc)
+    orig = (svc._cfg, svc._cfg_bool, svc._cfg_int, svc._deploy_tf_variables,
+            asyncio.sleep)
+    svc._cfg = lambda key, default="": store.get(key, default)
+    svc._cfg_bool = lambda key, default=False: bool(store.get(key, default))
+    svc._cfg_int = lambda key, default: int(store.get(key, default))
+    svc._deploy_tf_variables = lambda db, row: {}
+    slept = []
+
+    async def _no_sleep(seconds):
+        slept.append(seconds)
+    asyncio.sleep = _no_sleep
+    warnings = []
+    try:
+        asyncio.run(svc._rotate_token_once(
+            None, _row(cloud=cloud), 244, warnings=warnings, namespace="pra-access",
+            resource_group="dashboard-sandbox-rg", job_id="job-1"))
+        raised = None
+    except Exception as exc:  # noqa: BLE001
+        raised = exc
+    finally:
+        (svc._cfg, svc._cfg_bool, svc._cfg_int, svc._deploy_tf_variables,
+         asyncio.sleep) = orig
+        _restore(saved)
+        sys.modules.pop("web_dashboard.api.websocket", None)
+    return {"raised": raised, "calls": calls, "warnings": warnings, "slept": slept}
+
+
+def test_a_rotation_that_works_grants_nothing():
+    out = _heal(rotate_results=[{"ok": True}])
+    assert out["raised"] is None
+    assert out["calls"] == [("rotate", 244)]
+
+
+def test_a_refused_rotation_grants_the_role_and_retries():
+    """The fix the user asked for: the code applies the permission itself instead of
+    printing a command. The principal comes from the 403, which is the only source that
+    is not an inference -- the API server authenticated it and then refused it."""
+    out = _heal(rotate_results=[RuntimeError(_FORBIDDEN), {"ok": True}])
+    assert out["raised"] is None
+    kinds = [c[0] for c in out["calls"]]
+    assert kinds == ["rotate", "assign", "rotate"]
+    assign = next(c for c in out["calls"] if c[0] == "assign")
+    assert assign[3] == _OID                       # the oid out of the 403
+    assert assign[1].endswith("/namespaces/pra-access")
+    assert any("granted it and the rotation succeeded" in w for w in out["warnings"])
+
+
+def test_the_retry_waits_for_azure_to_apply_the_assignment():
+    """A new assignment takes up to five minutes to reach the authorisation server, so
+    one immediate retry would fail for a reason that has already been fixed."""
+    out = _heal(rotate_results=[RuntimeError(_FORBIDDEN), RuntimeError(_FORBIDDEN),
+                                {"ok": True}])
+    assert out["raised"] is None
+    assert out["slept"], "the retry did not wait at all"
+    assert sum(out["slept"]) <= 40                 # bounded by the configured budget
+
+
+def test_an_exhausted_budget_still_says_the_grant_is_in_place():
+    """It has to fail -- the vault holds the create-time placeholder until a rotation
+    lands. But it must not read as "do the grant again"."""
+    out = _heal(rotate_results=[RuntimeError(_FORBIDDEN)] * 6)
+    assert out["raised"] is not None
+    msg = " ".join(out["warnings"])
+    assert "does not need repeating" in msg
+    assert "Rotate now" in msg
+
+
+def test_a_non_azure_cluster_is_left_completely_alone():
+    boom = RuntimeError(_FORBIDDEN)
+    out = _heal(cloud="aws", rotate_results=[boom])
+    assert out["raised"] is boom
+    assert out["calls"] == [("rotate", 244)]
+
+
+def test_an_unrelated_rotation_failure_is_raised_at_once():
+    """Only a failure that names a principal is retryable. Spending the propagation
+    budget on a Password Safe outage would turn a clear error into a slow vague one."""
+    boom = RuntimeError('POST ManagedAccounts/244/Credentials/Change failed (500)')
+    out = _heal(rotate_results=[boom])
+    assert out["raised"] is boom
+    assert not [c for c in out["calls"] if c[0] == "assign"]
+
+
+def test_a_refused_grant_surfaces_the_original_403():
+    """When the dashboard's own credential cannot delegate roles there is nothing to
+    wait for, and the 403 that started this is the honest thing to show."""
+    first = RuntimeError(_FORBIDDEN)
+    out = _heal(rotate_results=[first], grant=RuntimeError("AuthorizationFailed"))
+    assert out["raised"] is first
+    assert out["slept"] == []
+    assert any("az role assignment create" in w for w in out["warnings"])
+
+
+def test_turning_the_grant_off_is_respected_by_the_recovery_too():
+    """k8s_ps_rotator_aks_assign_role=false is a deliberate choice; recovering anyway
+    would override it, and the retry loop would wait out its budget for an assignment
+    that was never going to be made."""
+    first = RuntimeError(_FORBIDDEN)
+    out = _heal(rotate_results=[first],
+                cfg={"k8s_ps_rotator_aks_assign_role": False})
+    assert out["raised"] is first
+    assert not [c for c in out["calls"] if c[0] == "assign"]
+    assert out["slept"] == []
+
+
 if __name__ == "__main__":
     fns = [v for name, v in sorted(globals().items()) if name.startswith("test_")]
     failures = 0

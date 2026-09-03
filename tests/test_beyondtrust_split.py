@@ -120,7 +120,8 @@ k8s_ps_token_delete_legacy_secret k8s_ps_token_register_on_provision
 k8s_ps_pravault_mirror_enabled k8s_ps_token_checkout_duration_min
 k8s_ps_token_address_options k8s_ps_rotator_apply_rbac k8s_ps_rotator_gke_sa_email
 k8s_ps_rotator_aks_sp_object_id k8s_ps_rotator_aks_assign_role
-k8s_ps_rotator_aks_role k8s_ps_rotator_eks_username
+k8s_ps_rotator_aks_role k8s_ps_rotator_aks_propagation_seconds
+k8s_ps_rotator_eks_username
 k8s_ps_rotator_eks_principal_arn k8s_ps_rotator_eks_create_access_entry
 k8s_ps_rotator_bootstrap_namespace k8s_ps_rotator_bootstrap_sa
 pra_k8s_namespace pra_k8s_sa_name bt_vault_account_group_id
@@ -155,6 +156,15 @@ ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
 # only (fetch a kubeconfig, zero Kubernetes verbs). So there is now a switch for making
 # that assignment and a choice of which data-plane role, exactly as EKS has
 # `k8s_ps_rotator_eks_create_access_entry` next to its username.
+
+# ADDED since the split, deliberately: `k8s_ps_rotator_aks_propagation_seconds`. The
+# AKS grant became self-healing -- a rotation refused for want of a data-plane role now
+# reads the principal out of the API server's own 403, makes the assignment and retries,
+# instead of printing an `az` command. That retry has to WAIT: Azure takes up to five
+# minutes to apply a new role assignment, so one immediate retry would fail for a reason
+# that had already been fixed. It is a key rather than a constant because it is the one
+# number trading a longer registration against a registration that fails with its own
+# fix already in place.
 
 # RETIRED, deliberately absent from LEGACY_KEYS above: the six `k8s_token_sync_*` keys
 # (enabled / interval_minutes / request_duration_min / max_per_pass / max_failures /

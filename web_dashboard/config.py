@@ -1816,6 +1816,7 @@ class Settings(BaseSettings):
     k8s_ps_rotator_aks_sp_object_id: str = ""        # the oid claim — the plugin logs it on every run
     k8s_ps_rotator_aks_assign_role: bool = True      # grant that oid an AKS data-plane role (Cluster User Role alone grants NO verb)
     k8s_ps_rotator_aks_role: str = "writer"          # reader|writer → namespace-scoped; admin|clusteradmin|<GUID> → cluster-scoped
+    k8s_ps_rotator_aks_propagation_seconds: int = 240  # a refused rotation grants the role, then waits this long for Azure to apply it
     k8s_ps_rotator_eks_username: str = "passwordsafe-rotator"   # access-entry username = RBAC User subject
     k8s_ps_rotator_eks_principal_arn: str = ""       # IAM role/user behind the FA's access key (not derivable)
     k8s_ps_rotator_eks_create_access_entry: bool = True  # create the access entry when the ARN is set (never touches aws-auth)

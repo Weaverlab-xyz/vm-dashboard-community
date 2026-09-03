@@ -143,6 +143,12 @@ def test_no_sync_endpoints_remain():
 
 _FRESH_PATH_MARKER = "address = _address_for("
 
+# register() no longer calls Password Safe's change endpoint directly. Every rotation
+# goes through this helper, which retries once behind an AKS role assignment when the
+# API server refuses the rotator -- see test_every_rotation_goes_through_the_recovery
+# for why the indirection is the thing being pinned, not an implementation detail.
+_ROTATE_CALL = "_rotate_token_once"
+
 
 def _fresh_registration_path(code):
     """The part of register() that onboards a NEW cluster, i.e. everything after the
@@ -166,7 +172,7 @@ def test_registration_links_before_it_rotates():
     Linking first means a failure at that point has changed nothing in the cluster."""
     code = _fresh_registration_path(_fn_code(_TOKENSVC, "register"))
     link = code.find("link_synced_account")
-    rotate = code.find("change_managed_account_password")
+    rotate = code.find(_ROTATE_CALL)
     assert link != -1, "register() never links the two managed accounts"
     assert rotate != -1, "register() no longer rotates once to prove the path"
     assert link < rotate, (
@@ -187,8 +193,30 @@ def test_a_re_register_refills_an_account_still_holding_its_placeholder():
         "the re-register must fill the vault when NOTHING ever put a real credential in "
         "it — the test is seeded OR rotated, not rotated alone (a short credential that "
         "was genuinely seeded and deliberately left unrotated must survive untouched)")
-    assert "change_managed_account_password" in head, \
+    assert _ROTATE_CALL in head, \
         "the already-registered path detects the placeholder but never replaces it"
+
+
+def test_every_rotation_goes_through_the_recovery_path():
+    """No caller may rotate by calling Password Safe's change endpoint directly.
+
+    On AKS the first rotation is where a missing data-plane role assignment surfaces,
+    as a 403 naming the object id that needs the grant. ``_rotate_token_once`` is what
+    turns that into a grant and a retry; a direct
+    ``ps_api_service.change_managed_account_password`` call silently opts out of the
+    recovery and reinstates the failure this indirection exists to remove -- and it
+    would look completely reasonable in review, which is why it is pinned statically.
+
+    The helper itself is the one legitimate caller, so it is excluded by name.
+    """
+    src = _src(_TOKENSVC)
+    helper = _fn_code(_TOKENSVC, "_rotate_token_once")
+    assert "change_managed_account_password" in helper, (
+        "_rotate_token_once no longer rotates anything -- re-anchor this scan")
+    outside = src.replace(helper, "")
+    assert "change_managed_account_password" not in outside, (
+        "something in ps_k8s_token_service rotates without going through "
+        f"{_ROTATE_CALL}, so the AKS role-assignment recovery is bypassed there")
 
 
 def test_registration_passes_the_token_account_as_the_parent():
