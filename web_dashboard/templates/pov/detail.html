@@ -110,10 +110,20 @@
               <dd class="text-xs" :class="env.gateway_name ? 'text-green-700' : 'text-gray-400'"
                   x-text="env.gateway_name || 'not installed'"></dd>
             </div>
+            <!-- Keyed on rb_ready, not on ps_application_host_id. That column is an
+                 operator override with no automatic writer, so reading it as "installed"
+                 reported every POV as having no Resource Broker however many times one
+                 had been installed. There is no true installed signal to read: what this
+                 dashboard knows is whether the install has everything it needs. -->
             <div class="flex items-center justify-between">
               <dt class="text-gray-600">Resource Broker</dt>
-              <dd class="text-xs" :class="env.ps_application_host_id ? 'text-green-700' : 'text-gray-400'"
-                  x-text="env.ps_application_host_id ? 'installed' : 'not installed'"></dd>
+              <dd class="text-xs" :class="env.rb_ready ? 'text-green-700' : 'text-gray-400'"
+                  x-text="env.rb_ready ? 'staged on ' + (env.rb_vm_name || 'rb') : 'not configured'"></dd>
+            </div>
+            <div class="flex items-center justify-between">
+              <dt class="text-gray-600">Application host</dt>
+              <dd class="text-xs text-gray-500"
+                  x-text="env.ps_application_host_id || 'none — routed by zone'"></dd>
             </div>
             <div class="flex items-center justify-between">
               <dt class="text-gray-600">Broker agent</dt>

@@ -281,17 +281,58 @@ long enough for the fetch, or to widen the resolver by one typed field.
 WinRM also has to be *reachable and enabled* on that guest, which is a template-contract
 question rather than a dashboard one — see §7.
 
-## 6. What `ps_application_host_id` actually holds
+## 6. What `ps_application_host_id` actually holds — RESOLVED
 
-Worth settling before the column is filled. The RB registering itself with the tenant is
-Password Safe's business, not this dashboard's — the install hands over a key and the
-product does the rest. So the dashboard should **read the id back** after the install
-rather than assign one, most likely by listing brokers via `ps_api_service` and matching
-on the name the install used.
+This section used to guess that the column held a Resource Broker id, to be read back
+after the install "by listing brokers via `ps_api_service`". Both halves of that were
+wrong, and the guess cost the feature: `pov_wireup.ps_context` refused the entire Password
+Safe half without the column, and **no code path ever wrote it**, so every POV ever
+created skipped Password Safe onboarding with a message about a missing Resource Broker
+that was in fact installed.
 
-If that read is not available, the honest thing is to leave the column NULL and record the
-install in the job, rather than invent an id that means nothing. A column filled with a
-guess is worse than an empty one — the next slice will join on it.
+**It is not the broker handle.** `application_host_id` is a managed-system attribute
+naming *another managed system* that carries `IsApplicationHost` — the provider emits the
+pair, `application_host_id` alongside `is_application_host = false`. What makes Password
+Safe reach a private address is the broker's **resource zone** and the workgroup mapped to
+it, which is BeyondInsight configuration this dashboard performs no part of.
+
+Three pieces of evidence, none of which needed a live tenant:
+
+* `cloud_database_service` onboards private databases *through* a Resource Broker and
+  passes no `application_host_id` at all. It is the most live-tested Password Safe path in
+  this repo, and it works.
+* `ps_api_service` has no broker or zone endpoint of any kind, so the read-back this
+  section proposed had nothing to call.
+* BeyondTrust's own Skytap Password Safe POC runbook (Confluence SELab page 870514897,
+  rev 7.0, validated against PWS SaaS 26.2.0.1427) **never mentions an application host**.
+  Its step 5 creates the resource zone, adds the workgroup to it, installs the broker into
+  that zone, and every later use case brokers RDP sessions and injects credentials with no
+  application host anywhere.
+
+**What shipped instead:**
+
+* the refusal is gone — `ps_context` sends `0` ("leave it to the platform") when the
+  column is unset, matching every other caller here, and the job log names the
+  zone/workgroup prerequisite so a rotation failure has somewhere to start;
+* the column is an **operator override** with exactly one writer,
+  `pov_resource_broker.set_application_host` behind
+  `POST /api/pov/managed/{id}/application-host`, so a tenant that does want one can say so
+  and no POV is ever stuck on a value nothing derives;
+* teardown forgets the override and separately says the broker's own registration is a
+  customer-side object to retire in the tenant — those were one sentence, and only the
+  second was ever true.
+
+The original instinct in this section was still right about one thing: a column filled
+with a guess is worse than an empty one. The mistake was **gating** on it.
+
+### Still unverified
+
+Whether setting an override changes anything observable. If it does not, that is the
+expected outcome. A cheap probe would settle the mechanism outright:
+`ps_api_service._workgroup_id` already reads `GET Workgroups` and discards every field but
+the id — one temporary log of a row's keys shows whether a resource-zone id is present,
+which would make the zone-to-workgroup mapping something this dashboard could verify
+rather than merely name.
 
 ## 7. The template contract grows a second VM
 
@@ -352,7 +393,7 @@ In:
 * `agent_ansible` + an `ansible:` block in the generated broker policy, scoped to the RB
   host's `/32` on 5985/5986 (§4)
 * a `POST /api/pov/managed/{id}/resource-broker` that preflights and queues the run
-* reading `ps_application_host_id` back, or leaving it NULL and saying so (§6)
+* `ps_application_host_id` as an operator **override** rather than a precondition, with one writer and an endpoint to set it (§6)
 * the template contract's second VM, documented (§7)
 
 Out:

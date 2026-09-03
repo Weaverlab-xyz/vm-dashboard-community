@@ -804,6 +804,42 @@ async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
+class ApplicationHostRequest(BaseModel):
+    """Set or clear this POV's Password Safe application host id.
+
+    An **override**, and the only writer of that column. It is not the Resource Broker
+    handle: what routes Password Safe to a private address is the broker's resource zone
+    and the workgroup mapped to it, which is BeyondInsight configuration this dashboard
+    performs no part of. The wire-up sends ``0`` when nothing is set here, which is what
+    every other Password Safe caller in this codebase does.
+
+    ``0`` clears it, and that is the normal state.
+    """
+    application_host_id: int = 0
+
+
+@router.post("/managed/{env_id}/application-host")
+async def application_host(env_id: str, payload: ApplicationHostRequest,
+                           db: Session = Depends(get_db),
+                           current_user: User = Depends(get_current_user)):
+    """Record an operator-supplied application host id, so a wire-up is never stuck on it."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    try:
+        note = pov_resource_broker.set_application_host(
+            db, env, payload.application_host_id)
+    except pov_resource_broker.ResourceBrokerError as exc:
+        # 400 rather than 409: this one is about the value in the request, not about a
+        # step the operator has yet to take.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"note": note,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
 class EntitleAgentRequest(BaseModel):
     """Configure and install this POV's Entitle agent.
 

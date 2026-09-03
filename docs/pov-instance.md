@@ -1104,13 +1104,34 @@ reads.
 Re-running is the remedy for a half-finished run, and it is safe by the "already wired"
 rule above.
 
-### Password Safe reaches the VM through the Resource Broker
+### Password Safe reaches the VM through the Resource Broker — by zone, not by field
 
-Every managed system names the POV's Resource Broker as its **application host**. That is
-the field that tells Password Safe to manage the host *via* the broker rather than
-reaching a private address from the cloud tenant — which would fail on every rotation,
-days later and on a schedule, rather than at onboarding. So a POV with no Resource Broker
-skips this half and says so.
+Password Safe does reach these guests through the Resource Broker slice 5b installs. What
+arranges that is the broker's **resource zone** and the workgroup mapped to it: you create
+the zone, add the workgroup to it, and install the broker into that zone. All of it is
+BeyondInsight configuration, and **this dashboard performs no part of it.**
+
+`application_host_id` is *not* that mechanism, though this document used to say it was. It
+is a managed-system attribute naming another managed system that carries
+`IsApplicationHost`. Three things say so:
+
+* `cloud_database_service` onboards private databases *through* a Resource Broker and
+  passes no `application_host_id` at all. It is the most live-tested Password Safe path
+  here, and it works.
+* `ps_vm_hook` passes whatever integer an operator typed into
+  `passwordsafe_application_host_id`. Nothing derives one.
+* BeyondTrust's own Skytap Password Safe POC runbook (SELab, rev 7.0, validated against
+  PWS SaaS 26.2.0.1427) never mentions an application host anywhere. Its step 5 creates
+  the zone, adds the workgroup, and installs the broker.
+
+So `PovEnvironment.ps_application_host_id` is an **optional override** with one writer —
+`POST /api/pov/managed/{id}/application-host` — and the wire-up sends `0` when it is
+unset, which is what every other caller in this codebase does. It used to be a hard
+precondition, which meant the Password Safe half refused on every POV ever created: no
+code path has ever written that column automatically.
+
+If a rotation later cannot reach a guest, check the broker's zone-to-workgroup mapping
+first. The wire-up's job log says which of the two it used.
 
 Two things come from the tenant rather than from Settings, because they are names inside
 *that* tenant and mean nothing in another one:

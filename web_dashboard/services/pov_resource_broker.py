@@ -160,6 +160,40 @@ def configure(db: Session, env: PovEnvironment, *, zone_name: str | None = None,
     db.commit()
 
 
+def set_application_host(db: Session, env: PovEnvironment, value: int | None) -> str:
+    """Set or clear ``ps_application_host_id``. Returns a line describing what happened.
+
+    **An override, and the only writer.** ``application_host_id`` is a managed-system
+    attribute naming another managed system that carries ``IsApplicationHost``; it is not
+    the Resource Broker handle, and it is not what routes Password Safe to a private
+    address — the broker's resource ZONE and the workgroup mapped to it are. Every other
+    caller in this codebase leaves it at 0 (``cloud_database_service``) or takes an
+    operator-typed config integer (``ps_vm_hook``), and the cloud-DB path proves 0 works
+    through a broker.
+
+    So this exists for the tenant that genuinely wants one, and to make sure a wire-up is
+    never stuck on a column nothing fills automatically. ``0`` and ``None`` clear it, which
+    is the normal state.
+
+    Not verified against a live tenant. If setting one changes nothing observable, that is
+    the expected outcome and the zone mapping is what to check.
+    """
+    try:
+        value = int(value or 0)
+    except (TypeError, ValueError):
+        raise ResourceBrokerError(
+            "an application host id is a whole number — a Password Safe managed system id, "
+            "or 0 to clear it") from None
+    if value < 0:
+        raise ResourceBrokerError(
+            "an application host id is a positive managed system id, or 0 to clear it")
+    env.ps_application_host_id = value or None
+    db.commit()
+    if value:
+        return f"Password Safe application host set to {value} for this POV."
+    return "Cleared this POV's Password Safe application host."
+
+
 # ── the RB host ──────────────────────────────────────────────────────────────
 
 def select_rb_vm(db: Session, env: PovEnvironment) -> PovEnvironmentVM:
@@ -389,12 +423,22 @@ def teardown(db: Session, env: PovEnvironment) -> str:
         clear_installer_key(env)
         lines.append("Cleared the stored Resource Broker installer key.")
     if env.ps_application_host_id:
+        # Not the broker's registration — that is a customer-side object named by zone and
+        # install key, and this column never held it. This is the operator's override, so
+        # forgetting it is all that is owed.
         lines.append(
-            f"Password Safe still lists Resource Broker {env.ps_application_host_id}; "
-            f"retire it in the tenant.")
+            f"Forgot the Password Safe application host override "
+            f"({env.ps_application_host_id}).")
         env.ps_application_host_id = None
         db.commit()
-    return " ".join(lines) or "No Resource Broker to clean up."
+    if not lines:
+        return "No Resource Broker to clean up."
+    # Only once there WAS one: a POV that never installed a broker must not be told to
+    # retire one in the tenant.
+    lines.append(
+        "The Resource Broker's own registration in the Password Safe tenant is a "
+        "customer-side object this dashboard never created; retire it in the tenant.")
+    return " ".join(lines)
 
 
 # ── what the UI shows ────────────────────────────────────────────────────────

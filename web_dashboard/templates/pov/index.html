@@ -378,8 +378,11 @@
                        configured' would send an SE looking in three places. -->
                   <p x-show="e.rb_asset && !e.rb_has_key" class="text-xs text-amber-700">no installer key</p>
                   <p x-show="e.rb_asset && !e.rb_zone" class="text-xs text-amber-700">no zone</p>
-                  <p x-show="e.ps_application_host_id" class="text-xs text-green-700"
-                     x-text="'broker ' + e.ps_application_host_id"></p>
+                  <!-- An override, not the broker handle: Password Safe reaches these
+                       VMs by the broker's resource ZONE. Blank is the normal state, so it
+                       is shown only when somebody set one. -->
+                  <p x-show="e.ps_application_host_id" class="text-xs text-gray-600"
+                     x-text="'app host ' + e.ps_application_host_id"></p>
                   <button @click="startEditRb(e)" :disabled="!actionable(e)"
                           class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
                 </div>
@@ -397,6 +400,9 @@
                          class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
                   <input type="password" x-model="rbEdit.installer_key" autocomplete="new-password"
                          :placeholder="rbEdit.has_key ? 'key stored — blank keeps it' : 'installer key'"
+                         class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                  <input type="text" x-model="rbEdit.application_host_id" inputmode="numeric"
+                         placeholder="application host id (optional, 0 = none)"
                          class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
                   <div class="flex gap-1">
                     <button @click="saveRb(e, true)" class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white">Install</button>
@@ -1428,6 +1434,7 @@ function povPage() {
     startEditRb(env) {
       this.rbEdit = { vm_name: env.rb_vm_name || '', asset: env.rb_asset || '',
                       zone: env.rb_zone || '', installer_key: '',
+                      application_host_id: env.ps_application_host_id || '',
                       has_key: !!env.rb_has_key };
       this.editingRb = env.id;
       this.loadWinAssets();
@@ -1436,6 +1443,15 @@ function povPage() {
     async saveRb(env, install) {
       this.error = ''; this.notice = '';
       try {
+        // Separate endpoint, and sent first so an install that follows already sees it.
+        // Only when it CHANGED: this write is the column's only writer, and posting a
+        // blank box on every save would silently clear an id somebody typed earlier.
+        const host = String(this.rbEdit.application_host_id ?? '').trim();
+        const before = String(env.ps_application_host_id || '');
+        if (host !== before) {
+          await this.post(`/api/pov/managed/${env.id}/application-host`,
+                          { application_host_id: Number(host || 0) });
+        }
         const data = await this.post(`/api/pov/managed/${env.id}/resource-broker`, {
           vm_name: this.rbEdit.vm_name,
           asset: this.rbEdit.asset,
