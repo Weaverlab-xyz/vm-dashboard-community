@@ -1969,9 +1969,11 @@ class PovUseCaseProgress(Base):
     # services/personas.UseCase.id, validated against the registry before any write --
     # see pov_use_cases.set_state. An unvalidated column here would be a free-text store.
     card_id = Column(String(64), nullable=False)
-    # Which role's list it came from. Denormalised from the registry so a card that later
-    # moves between personas keeps the answer it was ticked under, which is what the SE
-    # actually remembers.
+    # Which GROUP's list it came from -- a persona key, or a `pov_runbooks` key once a POV
+    # is being run against a published procedure. Denormalised from the registry so a card
+    # that later moves between groups keeps the answer it was ticked under, which is what
+    # the SE actually remembers. The two registries are disjoint by card id, so one column
+    # answers both without ambiguity.
     persona = Column(String(32), nullable=False)
     # done | skipped. `skipped` is a real answer, not an absence: "we showed them and it
     # did not land" and "we never got to it" are different things to walk into a renewal
