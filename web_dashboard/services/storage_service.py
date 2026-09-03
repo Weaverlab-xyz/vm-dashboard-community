@@ -15,7 +15,9 @@ the migrate flow, which copies between any two configured backends.
 Supported asset types:
     .yml / .yaml  — Ansible playbooks
     .sh           — shell scripts
-    .rpm / .deb   — packages
+    .ps1          — PowerShell scripts
+    .rpm / .deb   — Linux packages
+    .exe / .msi   — Windows installers (e.g. the Resource Broker bootstrapper)
 
 Public API:
     list_assets()                          — assets in the active backend

@@ -545,9 +545,10 @@
         </select>
         <span x-show="!winAssets.length" x-cloak class="mt-1 block text-xs text-amber-700">
           No Windows installer is staged, so this picker is empty. Upload the Resource
-          Broker bootstrapper on <a href="/config-mgmt"
-          class="underline hover:no-underline">Config Management</a> first — a blueprint
-          may be saved without it and the POV's panel will ask.
+          Broker bootstrapper — an <code class="bg-gray-100 px-0.5 rounded">.exe</code> — on
+          <a href="/storage" class="underline hover:no-underline">Storage</a> first; it runs
+          from <a href="/config-mgmt" class="underline hover:no-underline">Config
+          Management</a>. A blueprint may be saved without it and the POV's panel will ask.
         </span>
       </label>
 

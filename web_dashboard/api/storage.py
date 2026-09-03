@@ -498,7 +498,9 @@ async def upload_asset(
 ):
     """Upload an asset to the active backend. Open to any logged-in user —
     matches the existing /api/config-mgmt/upload endpoint so the same access
-    decision applies. Allowed extensions: .yml/.yaml, .sh, .ps1, .rpm, .deb."""
+    decision applies. Allowed extensions: .yml/.yaml, .sh, .ps1, .rpm, .deb,
+    .exe/.msi — the last two are Windows installers, and are what stages a POV's
+    Password Safe Resource Broker bootstrapper."""
     import base64
     try:
         data = base64.b64decode(req.content_b64)

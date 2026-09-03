@@ -404,7 +404,7 @@
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <h2 class="text-base font-semibold text-gray-700 mb-1">Upload an asset</h2>
     <p class="text-sm text-gray-500 mb-4">
-      Pick a playbook or script — it goes straight into the active backend
+      Pick a playbook, script or installer — it goes straight into the active backend
       and becomes available on /config-mgmt for runs against your VMs and
       cloud instances.
       <span x-show="!activeBackend" x-cloak class="block text-amber-600 mt-1">
@@ -414,7 +414,7 @@
 
     <div class="flex flex-wrap items-center gap-3">
       <input type="file" @change="onFilePick($event)"
-             accept=".yml,.yaml,.sh,.ps1,.rpm,.deb"
+             accept=".yml,.yaml,.sh,.ps1,.rpm,.deb,.exe,.msi"
              :disabled="!activeBackend || uploading"
              class="text-sm file:mr-3 file:py-1.5 file:px-3 file:rounded-lg
                     file:border file:border-gray-300 file:text-xs file:font-medium
@@ -439,11 +439,18 @@
       <code class="bg-gray-100 px-1 rounded">.sh</code>
       <code class="bg-gray-100 px-1 rounded">.ps1</code>
       <code class="bg-gray-100 px-1 rounded">.rpm</code>
-      <code class="bg-gray-100 px-1 rounded">.deb</code>.
+      <code class="bg-gray-100 px-1 rounded">.deb</code>
+      <code class="bg-gray-100 px-1 rounded">.exe</code>
+      <code class="bg-gray-100 px-1 rounded">.msi</code>.
       Scripts and packages are auto-wrapped in a generated playbook at run
-      time; <code class="bg-gray-100 px-1 rounded">.ps1</code> targets Windows
+      time; <code class="bg-gray-100 px-1 rounded">.ps1</code>,
+      <code class="bg-gray-100 px-1 rounded">.exe</code> and
+      <code class="bg-gray-100 px-1 rounded">.msi</code> target Windows
       hosts (the host's Ansible inventory must set
       <code class="bg-gray-100 px-1 rounded">ansible_connection=winrm</code>).
+      A Windows installer is how a POV's Password Safe Resource Broker
+      bootstrapper is staged — it comes from your own tenant, so the dashboard
+      cannot fetch it for you.
     </p>
   </div>
 
@@ -904,7 +911,7 @@ function storagePage() {
 
     async uploadFile() {
       if (!this.pendingFile || !this.activeBackend) return;
-      const allowed = ['.yml', '.yaml', '.sh', '.ps1', '.rpm', '.deb'];
+      const allowed = ['.yml', '.yaml', '.sh', '.ps1', '.rpm', '.deb', '.exe', '.msi'];
       const lower = this.pendingFile.name.toLowerCase();
       if (!allowed.some(ext => lower.endsWith(ext))) {
         this.showToast(`Unsupported file type. Allowed: ${allowed.join(', ')}`, 'error');
@@ -913,12 +920,18 @@ function storagePage() {
       this.uploading = true;
       try {
         // Read file as base64. Done in two steps so the binary is preserved
-        // even for .deb/.rpm payloads.
+        // even for .deb/.rpm/.exe payloads. Chunked rather than one byte at a
+        // time: a Windows installer is an order of magnitude larger than the
+        // playbooks this started with, and a per-byte loop over a 50 MB .msi
+        // blocks the UI thread long enough to look like a hung page.
         const buf = await this.pendingFile.arrayBuffer();
         const bytes = new Uint8Array(buf);
-        let bin = '';
-        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-        const b64 = btoa(bin);
+        const CHUNK = 0x8000;   // below the argument-count limit of .apply()
+        const parts = [];
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+          parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK)));
+        }
+        const b64 = btoa(parts.join(''));
         const res = await API.post('/api/storage/upload', {
           filename: this.pendingFile.name,
           content_b64: b64,
