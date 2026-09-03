@@ -775,7 +775,7 @@ a plan that assumes "we can automate the console" gets corrected before it is wr
 
 | Object | State |
 |---|---|
-| Resource zones, resource brokers | **no endpoint of any kind.** Independently confirms why `ps_application_host_id` was never the broker handle — see `docs/design/pov-resource-broker.md` §6 |
+| Resource zones, resource brokers | **no endpoint of any kind.** Independently confirms why `ps_application_host_id` was never the broker handle — see [`docs/profiles/pov/design/resource-broker.md`](../profiles/pov/design/resource-broker.md) §6 |
 | Discovery credentials | no endpoint |
 | Discovery scans | no endpoint; run from the console |
 | Directory queries | no endpoint |
