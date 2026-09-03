@@ -527,6 +527,21 @@ The defaults leave the front door open on AWS and GCP, because Entitle authentic
 with a plain header and would otherwise need a proxy — so the bearer secret is the
 gate there. Tighten `auth_mode` per function if you front it with a gateway.
 
+**Azure is the exception: its front door cannot be opened.** The Functions host
+requires its own key on every route but `/api/health`, so the dashboard fetches it
+after the deploy, stores it as `cloudfn/{id}/invoke-key`, and sends it as
+`x-functions-key` — from Test invoke, and as a second header on the Entitle REST
+integration it registers. A hand-written `curl` needs it too; the **Endpoint** button
+shows it.
+
+Which of the two gates refused you is in the **body**, not the status code:
+
+| Response to an authenticated route | Who refused | What to do |
+|---|---|---|
+| `401`, **empty** body | the Azure host key (or GCP's `run.invoker`, or an AWS Function URL permission) — the front door, before your code ran | re-run Test invoke: it re-fetches the key from ARM. `GET /api/health` returning 200 confirms the app itself is healthy |
+| `401 {"error": "unauthorized"}` | `fnruntime.auth` inside the handler | the bearer secret the dashboard holds is not the one the function verifies — redeploy to mint a matching pair |
+| `500 {"error": "function not configured", ...}` | the workload | the named setting is missing; `POST /check_config` lists all of them |
+
 The secret is minted at deploy, stored encrypted (`cloudfn/{id}/bearer`), and shown
 via the **Endpoint** button. The handler **fails closed**: if it cannot resolve the
 secret it returns 500, never 200 — including when the secret store is unreachable or

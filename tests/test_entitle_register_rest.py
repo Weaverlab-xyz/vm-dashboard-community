@@ -7,6 +7,7 @@ and 404s on every real grant.
 """
 import json
 import os
+import re
 import sys
 import types
 
@@ -187,6 +188,81 @@ def test_the_shared_secret_is_a_terraform_variable_not_a_literal():
     assert "var.rest_secret" in hcl
     assert 'variable "rest_secret" { sensitive = true }' in hcl
     assert "supersecret" not in hcl
+
+
+# ── The front door's own credential ──────────────────────────────────────────
+#
+# Live 2026-09-03: a paired Azure SQL Server adapter served /api/health 200 and
+# answered every OTHER route with 401 and a zero-length body — the Functions host
+# key gate, refusing before the container ran. An integration registered without
+# that key is refused the same way on every call Entitle makes, and nothing in the
+# dashboard or in Entitle looks wrong.
+
+
+def _headers_map(hcl: str, **bind) -> dict:
+    """The generated ``headers`` map, parsed, with its variables bound.
+
+    The map is emitted on one line with quoted keys, so binding the variables makes
+    it JSON as-is — which means this parses the real output rather than a
+    re-implementation of it. A stray comma or a missing quote fails here.
+    """
+    line = [ln for ln in hcl.splitlines() if ln.strip().startswith("headers =")]
+    assert len(line) == 1, hcl
+    text = line[0].split("headers =", 1)[1].strip()
+    for var, value in bind.items():
+        text = text.replace("${var." + var + "}", value)
+    return json.loads(text.replace(" = ", ": "))
+
+
+def test_an_extra_header_reaches_the_integration_by_variable_not_literal():
+    hcl = _hcl(extra_headers={"x-functions-key": "the-host-key"})
+    assert 'variable "rest_header_0" { sensitive = true }' in hcl, hcl
+    # The whole point of the variable: the value never lands in the workdir.
+    assert "the-host-key" not in hcl
+    # And the bearer is still sent — the two are ANDed, not alternatives.
+    assert _headers_map(hcl, rest_secret="s", rest_header_0="the-host-key") == {
+        "Authorization": "Bearer s", "x-functions-key": "the-host-key"}
+
+
+def test_every_header_variable_in_the_map_is_declared():
+    """An undeclared variable is an apply-time failure, which is a bad way to find
+    out that a header and its value came from two different lists."""
+    hcl = _hcl(extra_headers={"x-tenant": "t", "x-functions-key": "k"})
+    for var in re.findall(r"\$\{var\.([A-Za-z0-9_]+)\}", hcl):
+        assert f'variable "{var}" {{ sensitive = true }}' in hcl, var
+    assert _headers_map(hcl, rest_secret="s", rest_header_0="k",
+                        rest_header_1="t") == {
+        "Authorization": "Bearer s", "x-functions-key": "k", "x-tenant": "t"}
+
+
+def test_no_extra_headers_generates_the_same_hcl_as_before():
+    """Every existing AWS and GCP integration must be unaffected."""
+    assert _hcl() == _hcl(extra_headers=None) == _hcl(extra_headers={})
+    assert "rest_header_" not in _hcl()
+
+
+def test_the_header_to_variable_pairing_has_one_source():
+    """The declarations, the map and the TF_VAR_ values all come from here — three
+    hand-maintained lists is how a header ends up with an unbound variable."""
+    assert ers._rest_header_vars(None) == []
+    # Sorted, so re-registering the same integration generates the same HCL.
+    assert ers._rest_header_vars({"b": "2", "a": "1"}) == [
+        ("a", "rest_header_0"), ("b", "rest_header_1")]
+
+
+def test_the_stored_state_keeps_no_header_value():
+    """Terraform writes connection_json to state in plaintext and the state is
+    stashed in the database — so BOTH credentials a REST integration holds have to
+    be redacted, not just the keys named in _SECRET_JSON_KEYS."""
+    blob = json.dumps({"host": "fn.azurewebsites.net",
+                       "headers": {"Authorization": "Bearer supersecret",
+                                   "x-functions-key": "the-host-key"}})
+    scrubbed = json.loads(ers._scrub_connection_json(blob))
+    assert scrubbed["host"] == "fn.azurewebsites.net", scrubbed
+    # The NAMES survive: they are configuration, and worth reading at teardown.
+    assert set(scrubbed["headers"]) == {"Authorization", "x-functions-key"}
+    for value in scrubbed["headers"].values():
+        assert "supersecret" not in value and "the-host-key" not in value, scrubbed
 
 
 def test_registration_without_a_secret_is_refused():

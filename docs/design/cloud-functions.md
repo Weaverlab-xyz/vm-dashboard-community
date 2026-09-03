@@ -226,8 +226,24 @@ and `AzureWebJobsFeatureFlags = "EnableWorkerIndexing"` + `FUNCTIONS_EXTENSION_V
 boots, serves the default landing page, and registers zero functions.
 
 Azure host keys have **no azurerm data source** — they are fetched post-apply over
-the ARM REST API and stored as `cloudfn/{fn_id}/invoke-key`. Strictly non-fatal:
-if it fails the bearer secret still protects the function.
+the ARM REST API and stored as `cloudfn/{fn_id}/invoke-key`. The fetch stays
+non-fatal (the function is deployed, and the bearer secret still protects it) but a
+function without that key **cannot be called at all**: the Functions host refuses
+every route but `/api/health` with a 401 and a zero-length body, before the
+container runs, so `/check_config` — and therefore Test invoke and the Entitle
+preflight — never answers.
+
+Two things follow, and both were live failures on 2026-09-03:
+
+- **The fetch polls.** `terraform apply` returns when ARM has *created* the app,
+  which is before the Functions host has started and minted its default key; until
+  it has, `listKeys` answers 200 with an **empty** `functionKeys` map. That is not
+  an error, so the first implementation stored nothing, silently, and never retried.
+- **It is re-fetched on demand.** Test invoke, the **Endpoint** panel and the
+  Entitle preflight all repair a missing key, and an empty 401 is retried once when
+  ARM reports a *different* key — which covers a key regenerated in the portal.
+  Otherwise one lost race left a working function permanently un-invokable, with a
+  redeploy as the only repair.
 
 **GCP — `google_cloudfunctions2_function`.** Two things operators must know up
 front, because they are the top two failure modes: every deploy runs Cloud Build
