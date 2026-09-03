@@ -81,7 +81,7 @@ minted on an install permanently pins the signing audience, and every agent
 signature is checked against it afterwards. A platform-assigned name — an
 `*.azurecontainerapps.io` default FQDN, a Cloud Run auto-URL — will change, and
 changing it strands the fleet. Bind a custom domain first. See
-[remote-agents.md](remote-agents.md#the-signing-audience-is-pinned-by-that-first-code).
+[remote-agents.md](remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
 
 ---
 

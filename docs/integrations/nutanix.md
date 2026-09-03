@@ -119,7 +119,7 @@ image still works.
 ## Over a remote agent
 
 A Prism Central the dashboard has no network route to can be reached through a
-[remote agent](../remote-agents.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 

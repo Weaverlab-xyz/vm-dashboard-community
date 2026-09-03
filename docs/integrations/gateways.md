@@ -89,7 +89,7 @@ real ceiling, so the dashboard doesn't invent a smaller one.
 
 ## A third kind: a Gateway on an agent host
 
-A [remote agent](../remote-agents.md#the-beyondtrust-gateway) can run a Gateway **on its
+A [remote agent](../remote-agents/enrolment.md#the-beyondtrust-gateway) can run a Gateway **on its
 own host**, inside a network the dashboard cannot route to at all. The dashboard never
 touches a cloud API for this one — it queues an `agent_gateway` job and the agent starts a
 privileged container beside itself. Today the driver is the
@@ -126,7 +126,7 @@ Capability requirements are the same as the GCP host in the table below: a tunne
 granularly, which is why the agent's `policy.yaml` has to say `privileged: true` and why the
 agent refuses to start one without it. Everything else about the agent side — the four
 grants, the 2.4.0 image floor — is in
-[Remote Agents](../remote-agents.md#the-beyondtrust-gateway).
+[Remote Agents](../remote-agents/enrolment.md#the-beyondtrust-gateway).
 
 ### Its status is read live, never stored
 

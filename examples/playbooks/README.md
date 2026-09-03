@@ -29,7 +29,7 @@ shown, never stored on the job, and is scrubbed from the job output (requires th
 - **As a BeyondTrust Password Safe managed account** — pick the account from the
   live list; the credential is checked out just-in-time.
 
-See [Using a Secrets-Management secret in a run](../../docs/integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
+See [Using a Secrets-Management secret in a run](../../docs/integrations/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
 Plaintext extra vars still work for non-sensitive parameters.
 
 ### Optional: fetch a secret from Password Safe inside the play
