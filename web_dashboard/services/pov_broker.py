@@ -540,14 +540,29 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
 
     # The Config-Management grant is scoped to this POV's Windows guests — or to the one
     # named Resource Broker host, once somebody has named it — plus its Linux guests, or
-    # the one named Entitle agent host. Computed here rather than inside render_policy so
-    # that function stays pure and testable.
-    from . import pov_entitle_agent, pov_resource_broker
+    # the one named Entitle agent host, plus any guest an operator has opened up for a
+    # guest step. Computed here rather than inside render_policy so that function stays
+    # pure and testable.
+    #
+    # Imported in the function body, not at module scope: `pov_gateway` reaches this module
+    # and `pov_guest_step` reaches `pov_gateway`, so a top-level import here would close a
+    # real cycle. Same reason the other two are local.
+    from . import pov_entitle_agent, pov_guest_step, pov_resource_broker
+    # Unions, not replacements. The three grants answer different questions — where the
+    # Resource Broker goes, where the Entitle agent goes, and which guests an SE wants to
+    # configure — and a POV can want all three at once. `render_policy` de-duplicates the
+    # SSH list against the WinRM one, so an address in both keeps only its WinRM ports.
+    win_targets = sorted(set(pov_resource_broker.windows_targets(db, env))
+                         | set(pov_guest_step.windows_targets(db, env)))
+    ssh_targets = sorted(set(pov_entitle_agent.linux_targets(db, env))
+                         | set(pov_guest_step.linux_targets(db, env)))
+    # Recorded so a guest named AFTER this render is refused with "press Broker" instead of
+    # failing as a connection timeout twenty minutes later. What is stored is what was
+    # written, which is why it happens here and not in the module that reads it.
+    pov_guest_step.record_grant(db, env, win_targets + ssh_targets)
     payload = render_bootstrap(
         env_name=env.name, dashboard_url=dashboard_url, enroll_code=code,
-        policy_yaml=render_policy(targets,
-                                  pov_resource_broker.windows_targets(db, env),
-                                  pov_entitle_agent.linux_targets(db, env)))
+        policy_yaml=render_policy(targets, win_targets, ssh_targets))
 
     mod = lab_platforms.adapter(env.platform)
     if mechanism == "metadata":

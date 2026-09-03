@@ -68,7 +68,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
-                        pov_cloud_cost, pov_entitle_agent, pov_resource_broker,
+                        pov_cloud_cost, pov_entitle_agent, pov_guest_step,
+                        pov_resource_broker,
                         pov_schedule, pov_share, pov_spend, pov_summary,
                         pov_use_cases, pov_wireup)
 from .auth import get_current_user
@@ -181,6 +182,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     out.update(pov_gateway.describe(_db_of(env), env))
     out.update(pov_resource_broker.describe(_db_of(env), env))
     out.update(pov_entitle_agent.describe(_db_of(env), env))
+    out.update(pov_guest_step.describe(_db_of(env), env))
     # Kept rather than only spread, so the use-case summary below can be resolved from the
     # numbers this row already paid for. Recomputing it would put a second per-VM query on
     # the list endpoint for counts it is holding in a local variable.
@@ -799,6 +801,63 @@ async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
     except pov_resource_broker.ResourceBrokerError as exc:
         # 409 with the remedy passed through — every refusal this raises is something the
         # operator does next: stage an installer, name a zone, press Broker.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job_id": job.id,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class GuestStepRequest(BaseModel):
+    """Open a POV's guests up for configuration, and optionally run one step now.
+
+    ``vm_names`` is the opt-in list, and it is what widens the broker agent's
+    ``policy.yaml`` grant on the next Broker run. ``None`` leaves it alone, ``[]`` clears
+    it. A POV that has named none behaves exactly as it did before this existed — the grant
+    widens because somebody asked for a specific guest, never because a POV exists.
+
+    ``asset`` is a storage key: a ``.ps1`` for a Windows guest, a ``.sh`` for a Linux one,
+    a playbook, or a Windows installer. Upload it on the Storage page first.
+
+    ``arguments`` is only meaningful for an ``.exe``/``.msi`` — it is the only play shape
+    that templates a variable for them — and is refused with that reason for anything else,
+    rather than accepted and silently dropped.
+
+    There is no login field, for the same reason the Resource Broker install has none: the
+    guest credential comes from the lab platform's own stored credentials, read per run.
+    """
+    vm_names: list[str] | None = None
+    vm_name: str | None = None
+    asset: str | None = None
+    arguments: str = ""
+    run: bool = False
+
+
+@router.post("/managed/{env_id}/guest-step", status_code=202)
+async def guest_step(env_id: str, payload: GuestStepRequest,
+                     db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
+    """Set the guest-step list and, when asked, queue one run on the broker agent."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+
+    pov_guest_step.configure(db, env, vm_names=payload.vm_names)
+
+    if not payload.run:
+        # Saving the list is useful on its own: it is what the next Broker run grants, and
+        # an SE usually names the guests before they have uploaded anything to run on them.
+        return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+    try:
+        job = pov_guest_step.queue(
+            db, env, vm_name=payload.vm_name or "", asset=payload.asset or "",
+            arguments=payload.arguments,
+            created_by=getattr(current_user, "username", None))
+    except pov_guest_step.GuestStepError as exc:
+        # 409 with the remedy passed through — every refusal this raises names what the
+        # operator does next: stage a file, add the guest to the list, press Broker.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job.id,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
