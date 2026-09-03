@@ -98,7 +98,7 @@ connection is wired by hand, once per cell (~1 minute): FUXA → Connections →
 
 The other sims are reachable from FUXA by compose service name too — `S7` at `s7`:102
 (DB1 words 0/2/4/6), `EthernetIP` at `enip`:44818, `OPC UA` at
-`opc.tcp://opcua:4840/ot-sim/server/` — so one view can show Siemens and Rockwell tags
+`opc.tcp://opcua:4840/freeopcua/server/` — so one view can show Siemens and Rockwell tags
 beside the Modbus ones.
 
 Either way the last step is yours: **drop the tags on a view**. A FUXA view is SVG,
