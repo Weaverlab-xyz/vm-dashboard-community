@@ -17,6 +17,7 @@ infrastructure lives, or things that run work on it.
 | [BeyondTrust Integrations](beyondtrust.md) | you are wiring the dashboard into BeyondTrust and want to know which product does which job. |
 | [Privileged Remote Access](privileged-remote-access.md) | you want sessions onto provisioned resources brokered and recorded rather than routed. |
 | [Password Safe](password-safe.md) | you want credentials vaulted and rotated rather than stored by this dashboard. |
+| [Password Safe for databases](databases/) | the credential you want vaulted belongs to a database — two pages under [`databases/`](databases/), split by cloud. |
 | [Gateways](gateways.md) | a resource sits in a private network and something has to broker a session into it. |
 | [Entitle](entitle.md) | you want access to expire on its own instead of being revoked by someone remembering. |
 | [Entitle dashboard permissions](entitle-dashboard-permissions.md) | you want dashboard access without standing admins, or you need to tell the two mechanisms apart. |

@@ -496,8 +496,8 @@ The mechanism, the functional-account rules and the per-cloud setup are two page
 
 | Channel | Page |
 |---|---|
-| AWS (`dbssm`) and Azure (`dbazure`), plus the shared model | [Password Safe rotation (AWS + Azure)](databases/password-safe.md) |
-| GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe rotation for Cloud SQL](databases/password-safe-gcp.md) |
+| AWS (`dbssm`) and Azure (`dbazure`), plus the shared model | [Password Safe rotation (AWS + Azure)](integrations/databases/password-safe.md) |
+| GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe rotation for Cloud SQL](integrations/databases/password-safe-gcp.md) |
 
 ## Layer 3 — Entitle (just-in-time access)
 
