@@ -193,8 +193,9 @@ def _index_of(folder):
     Either the folder's own README.md, or -- for a hub-and-spoke split -- the sibling
     ``<folder>.md`` the spokes were cut out of. The sibling case is not a shortcut: a
     folder cannot have BOTH, because ``doc_page`` resolves ``<page>.md`` before falling
-    back to ``<page>/README.md``, so docs/databases.md and docs/databases/README.md would
-    both answer /docs/databases and the README would be the one you could never reach.
+    back to ``<page>/README.md``, so docs/remote-agents.md and docs/remote-agents/README.md
+    would both answer /docs/remote-agents and the README would be the one you could
+    never reach.
     The hub keeps the filename because operator-facing strings name it -- eight scripts
     and six agent error messages name ONBOARDING.md and remote-agents.md."""
     own = os.path.join(_DOCS, folder, _INDEX)

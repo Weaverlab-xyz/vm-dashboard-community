@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you are onboarding a Cloud SQL database into Password Safe over the Data API.
 
-Part of [Databases](../databases.md), Layer 2. The shared model and the
+Part of [Databases](../../databases.md), Layer 2. The shared model and the
 AWS/Azure channels are in
 [Password Safe rotation (AWS + Azure)](password-safe.md).
 
@@ -114,7 +114,7 @@ validator refuses the global form at the click rather than letting a rotation di
 > shape is defined by the plugin and is not in this repository, and a plausible guess would
 > produce a service that deploys cleanly and fails every rotation. Point one managed system
 > at it and click *Verify Managed Account* — the real request lands in Cloud Logging.
-> See [docs/design/ps-dbops-cloud-run.md](../design/ps-dbops-cloud-run.md).
+> See [docs/design/ps-dbops-cloud-run.md](../../design/ps-dbops-cloud-run.md).
 
 The DB is registered on the **`GCP Cloud SQL {engine}`** platform with the five-field
 address `channel;project:region:instance;dbName;audience;ssl[;key=value]`:
