@@ -1479,7 +1479,7 @@ class CloudFunction(Base):
 
 class K8sCluster(Base):
     """Inventory of dashboard-managed Kubernetes clusters — Kubernetes
-    management (docs/saas-kubernetes-management-plan.md).
+    management (docs/kubernetes.md).
 
     One row per managed cluster. **Phase 1** records a cluster the dashboard
     can reach (provisioned out-of-band or registered from an existing

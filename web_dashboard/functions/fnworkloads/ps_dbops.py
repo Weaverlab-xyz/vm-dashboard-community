@@ -30,7 +30,7 @@ are deliberate:
    region (see docs/design/ps-dbops-cloud-run.md).
 
 **The v1 contract is implemented from the plugin repo's own specification** —
-``docs/PLAN-CloudRunSqlServer.md`` §2 (envelope, status/code table) and §4 (the
+``PLAN-CloudRunSqlServer.md`` §2 (envelope, status/code table) and §4 (the
 statement per operation), which state they implement ``IDbOpsClient`` as already
 declared plugin-side in ``Shared/Services/Transports.cs``. That is a written
 specification from the other side of the wire, not a guess, which is what the seam was
@@ -603,7 +603,7 @@ def _parse_credential_op(payload: dict, version: int) -> dict:
     """Translate one plugin request into an operation this module can run.
 
     Implemented from the plugin repository's own specification —
-    ``docs/PLAN-CloudRunSqlServer.md`` §2 for the envelope and §4 for what each
+    ``PLAN-CloudRunSqlServer.md`` §2 for the envelope and §4 for what each
     operation runs — which states it implements ``IDbOpsClient`` as already declared in
     the plugin's ``Shared/Services/Transports.cs``.
 

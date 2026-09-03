@@ -3,7 +3,7 @@
 Gated on ``k8s_management_enabled`` (feature-gate dependency). Phase 1
 registers/lists managed clusters via ``k8s_service`` and stores the kubeconfig
 as a backend reference; Phase 2 launches a management plane (Rancher) into a
-registered cluster. See docs/saas-kubernetes-management-plan.md.
+registered cluster. See docs/kubernetes.md.
 
   GET    /api/k8s/__phase1__               — health check (router-mounted probe)
   GET    /api/k8s/clusters                 — list managed clusters

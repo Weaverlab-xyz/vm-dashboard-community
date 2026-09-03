@@ -461,7 +461,7 @@ It reports the contract path, the versions it can serve, its region, and how man
 instances are in its allowlist.
 
 **The v1 contract is implemented**, from the plugin repo's own
-`docs/PLAN-CloudRunSqlServer.md` §2 and §4. `/v1/credential-op` serves `verify`, `change`,
+`PLAN-CloudRunSqlServer.md` §2 and §4. `/v1/credential-op` serves `verify`, `change`,
 `change-self` and `list-accounts`, answers in the plan's response envelope, and maps each
 database failure onto its status/code table — so a wrong password comes back as
 **401 `DB_AUTH_FAILED`** (a legitimate Verify "false") rather than as a generic failure.

@@ -191,18 +191,44 @@ def test_the_renderer_actually_uses_the_github_slugifier():
     assert 'id="alpha--beta"' in html, html
 
 
-# ``docs/<page>.md#<anchor>`` written OUTSIDE docs/ — in a log message, a Dockerfile
-# comment, a runner README. Not a markdown link and not an app route, so neither the
-# sweep above nor test_app_docs_links ever looked at one.
-_BARE_REF = re.compile(r"\bdocs/([A-Za-z0-9_./-]+\.md)#([A-Za-z0-9_-]+)")
+# ``docs/<page>.md`` named OUTSIDE a markdown link — in a log message, a Dockerfile
+# comment, a runner README, a backticked path in prose. Neither a markdown link nor an
+# app route, so neither the sweep above nor test_app_docs_links ever looked at one.
+#
+# The ``#<anchor>`` is optional, and requiring it here is how this stayed blind to the
+# commonest form by far. ``_strip_code()`` removes code spans before ``_links()`` runs,
+# so a backticked `docs/x.md` written *inside* docs/ was checked by nothing at all: not
+# as a link (stripped), not as a bare ref (no fragment, and ``docs`` wasn't a root).
+# Twelve of them named a page that had been renamed or never written.
+_BARE_REF = re.compile(r"\bdocs/([A-Za-z0-9_./-]+\.md)(?:#([A-Za-z0-9_-]+))?")
 
-_REF_ROOTS = ("runners", "scripts", "provisioners", "examples", "web_dashboard",
+_REF_ROOTS = ("docs", "runners", "scripts", "provisioners", "examples", "web_dashboard",
               "terraform", "corp-ca")
 _REF_SUFFIXES = (".py", ".md", ".sh", ".ps1", ".yml", ".yaml", ".tf", "Dockerfile")
 
+# References that spell ``docs/...`` but do not mean *this* repo's docs/. Exact
+# (source, reference) pairs rather than a path prefix: if either the prose or the file
+# moves, the sweep flags it again and the exclusion gets re-justified rather than
+# silently inherited. Prefer rewording over adding to this — a sentence that names "the
+# plugin repository's own ``PLAN-CloudRunSqlServer.md``", with no ``docs/`` root, needs
+# no entry here and misleads no reader either.
+_REF_EXCLUDED = {
+    # The BeyondTrust SRA Terraform *provider's* docs tree, quoted while describing a
+    # bug in that provider. Both pages exist — in its repository, not in this one.
+    ("docs/notes/sra-provider-k8s-tunnel-bug.md",
+     "docs/data-sources/protocol_tunnel_jump_list.md"),
+    ("docs/notes/sra-provider-k8s-tunnel-bug.md",
+     "docs/resources/protocol_tunnel_jump.md"),
+    # The docstring explaining the ``.md.md`` 404 this viewer used to serve: the dead
+    # path *is* the example. "Fixing" it would delete the thing being documented.
+    ("web_dashboard/api/docs_pages.py", "docs/cloud-vms.md.md"),
+}
+
 
 def _bare_refs():
-    """(source, "docs/<page>.md", fragment) for every such reference."""
+    """(source, "docs/<page>.md", fragment) for every such reference.
+
+    ``fragment`` is ``""`` when the reference names a page and no heading."""
     for root in _REF_ROOTS:
         base = os.path.join(_ROOT, root)
         if not os.path.isdir(base):
@@ -219,10 +245,12 @@ def _bare_refs():
                     continue
                 src = os.path.relpath(p, _ROOT).replace("\\", "/")
                 for page, frag in _BARE_REF.findall(text):
-                    yield src, "docs/" + page, frag
+                    page = "docs/" + page
+                    if (src, page) not in _REF_EXCLUDED:
+                        yield src, page, frag
 
 
-def test_every_doc_anchor_named_outside_docs_resolves():
+def test_every_doc_page_named_outside_a_link_exists():
     """A runner prints one of these AT AN OPERATOR, at the moment it refuses their job.
 
     ``runners/agent/agent.py`` refused a Config Management run with "see
@@ -236,26 +264,43 @@ def test_every_doc_anchor_named_outside_docs_resolves():
     images, so a stale one keeps being printed until that image is rebuilt — which makes
     this the worst place in the repo to have a dead anchor and the last place anything
     was checking.
+
+    The page must exist; the heading is checked only where the reference names one,
+    since most of these point at a whole page and are exactly as dead when it is gone.
     """
     ids = _ids_by_doc()
     broken = []
     for src, page, frag in _bare_refs():
+        named = f"{src} -> {page}#{frag}" if frag else f"{src} -> {page}"
         if page not in ids:
-            broken.append(f"{src} -> {page}#{frag} (no such page)")
-        elif frag not in ids[page]:
-            broken.append(f"{src} -> {page}#{frag} (no such heading)")
+            broken.append(f"{named} (no such page)")
+        elif frag and frag not in ids[page]:
+            broken.append(f"{named} (no such heading)")
+    broken = sorted(set(broken))
     assert not broken, (
-        str(len(broken)) + " doc anchor(s) named outside docs/ resolve to nothing:\n  "
-        + "\n  ".join(sorted(broken)))
+        str(len(broken)) + " doc reference(s) outside a markdown link resolve to "
+        "nothing:\n  " + "\n  ".join(broken))
 
 
 def test_the_bare_reference_sweep_is_actually_finding_them():
     """An empty sweep passes the test above. These paths are written in prose, inside
-    error strings, so a directory move or a reworded message can quietly empty it."""
+    error strings, so a directory move or a reworded message can quietly empty it.
+
+    Counted per half because the two fail independently: ``docs`` covers the backticked
+    cross-references ``_strip_code()`` hides from ``_links()``, and the other roots cover
+    the paths baked into agent images and code comments. The docs/ half was zero until
+    ``docs`` became a root, and the whole sweep only ever saw references that happened to
+    carry a fragment — a bar most of them don't clear."""
     refs = list(_bare_refs())
-    assert len(refs) >= 5, (
-        f"only {len(refs)} docs/<page>.md#<anchor> reference(s) found outside docs/ — "
-        "the sweep is looking in the wrong place, or the pattern stopped matching")
+    inside = [r for r in refs if r[0].startswith("docs/")]
+    outside = [r for r in refs if not r[0].startswith("docs/")]
+    assert len(inside) >= 25 and len(outside) >= 100, (
+        f"{len(inside)} docs/<page>.md reference(s) found inside docs/ and "
+        f"{len(outside)} outside — the sweep is looking in the wrong place, or the "
+        "pattern stopped matching")
+    assert any(frag for _, _, frag in refs), (
+        "no reference with a #fragment found — the optional-fragment group stopped "
+        "capturing, which would silently reduce this to a page-existence check")
 
 
 if __name__ == "__main__":

@@ -378,7 +378,7 @@ rather than merely name.
 
 Slice 3 documented what a POV template's broker VM must carry: Docker, an automatic
 network, and the metadata runner. This adds a second machine to that contract, and it
-should be written into `docs/integrations/skytap.md` beside the first rather than
+should be written into `docs/profiles/pov/skytap.md` beside the first rather than
 discovered:
 
 * a **Windows Server 2019 x64 or 2022 x64** VM, on the same automatic network — the

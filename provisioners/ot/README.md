@@ -33,7 +33,8 @@ The dashboard's **OT Demo Cell** action (each cloud page → OT tab) deploys thi
 and wires the BeyondTrust access layer around it: Web Jump → `http://<vm>:1881`,
 Protocol Tunnel → the chosen PLC port, plus the Shell Jump and Password Safe
 onboarding the normal deploy path already provides. On GCP the cell can also be fenced
-into its own Purdue zone (`ot_purdue_firewall_enabled`). See `docs/cloud-ot.md`.
+into its own Purdue zone (`ot_purdue_firewall_enabled`). See
+`docs/profiles/demo/ot-demo-cell.md`.
 
 ## Building the image
 
