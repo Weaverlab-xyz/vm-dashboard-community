@@ -144,7 +144,7 @@ def test_sqlserver_onboard_targets_master_with_tunnel_flags():
     assert "CREATE LOGIN [psafe_ab12cd34] WITH PASSWORD = 'Managed-Pw_9';" in c
     assert "SQLCMDPASSWORD='Admin-Pw_123'" in c
     assert "sqlcmd" in c and "-d master" in c
-    assert " -N -C " in c          # encrypt + trust cert (no CA on the host)
+    assert " -Nm -C " in c         # encrypt + trust cert (no CA on the host)
     assert "ALTER ANY LOGIN" not in c
 
 
@@ -179,24 +179,27 @@ def test_sqlserver_runs_the_native_sqlcmd_because_no_such_image_exists():
 
 
 def test_sqlserver_passes_the_encryption_switch_in_the_only_form_sqlcmd_parses():
-    """`-N` must be BARE. A space-separated value is not a downgrade, it is a crash.
+    """The encryption value is ATTACHED — `-Nm`. A space is a crash, and so is bare `-N`.
 
-    sqlcmd's encryption switch is documented as `-N[s|m|o]` — the value is ATTACHED
-    (`-Ns` strict / `-Nm` mandatory / `-No` optional) and those three letters are the
-    only ones the mssql-tools18 binary knows. `t` (for "true") belongs to the separate
-    *Go* sqlcmd's `true|false|disable` vocabulary. So `-N t` — and the `-N o` that
-    preceded it — never reached a socket at all:
+    sqlcmd's switch is `-N[s|m|o]` (strict / mandatory / optional): one token, no
+    space. /opt/mssql-tools18/bin/sqlcmd rejects anything else before it ever opens a
+    socket —
 
         Sqlcmd: Command -N: Invalid Parameters passed.
 
-    rc=1, observed live on Azure 2026-09-02, at 25% "Creating the rotatable managed
-    database user…" — the step right after the phantom-image fix above finally got a
-    real sqlcmd to run, which is why this was the NEXT failure and not the first.
+    rc=1, at 25% "Creating the rotatable managed database user…", observed live on
+    Azure TWICE: with `-N t` on 2026-09-02 (`t` for "true" is the separate *Go*
+    sqlcmd's vocabulary, so that one was wrong twice over), and again on 2026-09-03
+    after a bare `-N` replaced it. The message names the SWITCH, never the value, so
+    the second failure cannot say which candidate it was — an un-rebuilt image still
+    sending `-N t`, or a bare -N swallowing the `-C` that follows it as its parameter.
+    An attached value is correct under either reading.
 
-    Bare `-N` means "encrypt" in every sqlcmd ever shipped (the argument-less flag of
-    17, the documented `-Nm` default of the value-taking 18+), so it cannot depend on
-    which mssql-tools18 point release the jump-host prep happened to install. Pinned
-    with the surrounding spaces: a regression to `-N <value>` must fail here.
+    `-Nm` is mandatory encryption, attached, and `o|m|s` have been the accepted values
+    on Linux since sqlcmd 18.0 — the only major mssql-tools18 ships. Omitting -N
+    altogether would also encrypt on a current build, but defaults to `-No`
+    (optional — cleartext if the server declines) on older ones, so the explicit form
+    is what is pinned. Any `-N` followed by a space must fail here.
     """
     cmds = [sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0],
             sql.teardown_commands("sqlserver", host="h", port=1433, database="",
@@ -205,7 +208,9 @@ def test_sqlserver_passes_the_encryption_switch_in_the_only_form_sqlcmd_parses()
             sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433,
                                                  "client_image": "myreg/mssql:2022"})[0]]
     for c in cmds:
-        assert " -N -C -b " in c
+        assert " -Nm -C -b " in c
+        # Bare `-N` is the 2026-09-03 regression: it parses as -N consuming "-C".
+        assert " -N " not in c, "bare -N consumes the following -C and is rejected"
         for bad in (" -N t", " -N o", " -N m", " -N s", " -N true", " -N mandatory"):
             assert bad not in c, f"space-separated {bad.strip()!r} is a sqlcmd parse error"
 
@@ -251,7 +256,7 @@ def test_a_configured_sqlserver_image_goes_back_through_docker_with_an_entrypoin
     # The binary is the entrypoint, so it must NOT also appear as the first argument.
     assert c.count(sql.SQLCMD_PATH) == 1
     # Identical SQL and connection flags on either path.
-    assert " -N -C " in c and "-d master" in c
+    assert " -Nm -C " in c and "-d master" in c
     assert "CREATE LOGIN [psafe_ab12cd34] WITH PASSWORD = 'Managed-Pw_9';" in c
 
 
@@ -291,10 +296,10 @@ def test_client_connections_encrypt_but_do_not_verify():
     assert "VERIFY_CA" not in my and "VERIFY_IDENTITY" not in my and "--ssl-ca" not in my
 
     ms = sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0]
-    # Bare -N = encrypt; -C = trust the cert without a CA. Any ATTACHED value would
-    # also be legal sqlcmd (`-Nm`/`-Ns`), but a SPACE-separated one never is: see
-    # test_sqlserver_passes_the_encryption_switch_in_the_only_form_sqlcmd_parses.
-    assert " -N -C " in ms
+    # -Nm = encryption mandatory; -C = trust the cert without a CA. The value must be
+    # ATTACHED, and `-No` (optional) would be the downgrade this test guards against:
+    # see test_sqlserver_passes_the_encryption_switch_in_the_only_form_sqlcmd_parses.
+    assert " -Nm -C " in ms
     assert "-No" not in ms and "-N o" not in ms
 
 
