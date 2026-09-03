@@ -4,7 +4,7 @@ The dashboard can stand up a simulated **OT/ICS plant cell** — Modbus, Siemens
 S7comm, Rockwell EtherNet/IP and OPC UA PLC simulators plus the FUXA web SCADA/HMI —
 inside a cloud sandbox's **private,
 egress-less subnet**, then layer the BeyondTrust PAM stack on top. Same
-**provisioning + three layers** model as [Cloud VMs](cloud-vms.md); the OT twist is
+**provisioning + three layers** model as [Cloud VMs](../../cloud-vms.md); the OT twist is
 that the air-gapped subnet *is* the plant network, and every path in is PRA-brokered:
 
 - **Provisioning** *(stand it up)* — deploy a VM from the Packer-baked **`ot-sim`**
@@ -295,7 +295,7 @@ Notes that save demo time:
   path to forget, on any cloud.
 - **Expiry**: the child is a normal deploy row for its cloud, so the cell participates
   in the auto-delete timer with no extra configuration (see
-  [auto-delete-timer](auto-delete-timer.md)).
+  [auto-delete-timer](../../auto-delete-timer.md)).
 - **Air-gap**: keep the on-demand egress flags **off** for the cell's cloud
   (`gcp_vm_nat_enabled` / `aws_nat_instance_enabled`; Azure VMs have no dashboard
   NAT toggle). Turning one on gives cell subnets egress and silently deflates the

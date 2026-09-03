@@ -569,7 +569,7 @@ path proven immediately, remembering that LongLived revokes the token a live ses
 The **OT demo cell** uses the same primitive for its `adminuser` credential — parent on the
 GCP VM SSH Rotation platform, subscriber on the **PRA Vault Username Password** plugin, PRA
 Vault account associated to the cell's Jump Group for checkout/injection. See
-[cloud-ot.md](../cloud-ot.md#pra-checkout-of-the-cells-admin-credential).
+[cloud-ot.md](../profiles/demo/ot-demo-cell.md#pra-checkout-of-the-cells-admin-credential).
 
 **The LongLived break window.** Rotation revokes the old token immediately. Password Safe
 applies the new value to the subscriber as part of the same change, but change operations are

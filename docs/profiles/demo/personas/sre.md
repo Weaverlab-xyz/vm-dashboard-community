@@ -33,34 +33,34 @@ so tightening it does not cost anyone an outage.
 An engineer requests cluster access for the length of an incident and gets an RBAC binding named
 after them, which removes itself afterwards. No permanent cluster-admin group.
 
-**Guide:** [Entra → Kubernetes federation](../integrations/entra-k8s-federation.md)
+**Guide:** [Entra → Kubernetes federation](../../../integrations/entra-k8s-federation.md)
 
 ### Reach a private cluster API server
 
 Run kubectl against a cluster with no public endpoint, through a brokered tunnel.
 
-**Guide:** [Kubernetes](../kubernetes.md)
+**Guide:** [Kubernetes](../../../kubernetes.md)
 
 ### Rotate a ServiceAccount token
 
 The long-lived token in a CI system or a sidecar, rotated on a schedule with the consumer
 picking up the new value.
 
-**Guide:** [ServiceAccount token rotation](../design/k8s-sa-token-rotation.md)
+**Guide:** [ServiceAccount token rotation](../../../design/k8s-sa-token-rotation.md)
 
 ### One group, every cluster
 
 Federate cluster access to the corporate directory, so joining a team grants the right access
 everywhere and leaving revokes it — instead of per-cluster identity nobody deprovisions.
 
-**Guide:** [Entra → Kubernetes federation](../integrations/entra-k8s-federation.md)
+**Guide:** [Entra → Kubernetes federation](../../../integrations/entra-k8s-federation.md)
 
 ### A container platform with a vaulted admin
 
 Stand up a Portainer or Rancher node and reach its UI by Web Jump with the admin credential
 injected — the platform console that usually has a shared login.
 
-**Guide:** [Rancher](../integrations/rancher.md) · [Portainer](../integrations/portainer.md)
+**Guide:** [Rancher](../../../integrations/rancher.md) · [Portainer](../../../integrations/portainer.md)
 
 ## What to enable
 
@@ -68,7 +68,7 @@ injected — the platform console that usually has a shared login.
 token-rotation card and **Portainer** for the container-platform card.
 
 Kubernetes is demo-owned, so this focus **needs a demo instance**; on a
-[POV instance](../pov-instance.md) its cards report as unavailable by design.
+[POV instance](../../../pov-instance.md) its cards report as unavailable by design.
 
 ## Talking to this buyer
 

@@ -15,7 +15,7 @@ So a runbook is a group of cards like a persona is, and deliberately **not** a p
     items, and appears in the setup wizard and the lens picker. "Password Safe POC
     runbook" is not a job title, and putting it there would offer an SE a role they are
     not, in four places that have nothing to do with a POV.
-  * A persona also owes ``docs/personas/<key>.md`` a section per demo card, and demo cards
+  * A persona also owes ``docs/profiles/demo/personas/<key>.md`` a section per demo card, and demo cards
     target the demo estate — pages a POV instance masks. A runbook has no demo half.
 
 What it DOES share is the card shape and every consumer: :class:`personas.UseCase` and

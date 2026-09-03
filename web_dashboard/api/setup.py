@@ -739,7 +739,7 @@ class PasswordSafeFeatureConfig(BaseModel):
     # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
     passwordsafe_gcp_registration_method: str = "gcpvm"   # "gcpvm" (GCP VM SSH Rotation plugin) | "ssh"
     passwordsafe_gcp_change_password_on_register: bool = True  # mint first key on onboard (adminuser has none baked in)
-    # OT demo cell → PRA checkout: a synced PRA Vault account per cell (docs/cloud-ot.md).
+    # OT demo cell → PRA checkout: a synced PRA Vault account per cell (docs/profiles/demo/ot-demo-cell.md).
     # Blank platform/FA fall back to the clouddb_ps_pravault_* pair below at read time.
     ot_ps_pra_checkout_enabled: bool = True
     ot_ps_checkout_converge: bool = True   # one Change through the new link, so PRA holds a real credential now

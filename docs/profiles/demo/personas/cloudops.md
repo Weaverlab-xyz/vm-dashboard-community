@@ -32,7 +32,7 @@ Deploy a cloud VM and watch Shell Jump, Password Safe onboarding and an Entitle 
 themselves in a single job. The machine is under management before anyone could have logged
 into it.
 
-**Guide:** [Cloud VMs](../cloud-vms.md)
+**Guide:** [Cloud VMs](../../../cloud-vms.md)
 
 ### Onboard a cloud VM with nothing installed on it
 
@@ -40,7 +40,7 @@ Rotate the admin credential on a VM with no agent and no inbound port, over the 
 control plane — Systems Manager on AWS, Run Command on Azure, ssh-keys metadata on GCP. The
 objection this answers is "we cannot install anything on those images".
 
-**Guide:** [Password Safe](../integrations/password-safe.md)
+**Guide:** [Password Safe](../../../integrations/password-safe.md)
 
 ### Time-boxed access to the cloud console itself
 
@@ -48,22 +48,22 @@ Grant an engineer the console for two hours through Entitle, then show the role 
 remove itself. Worth doing because most organisations have solved server access and left
 standing administrators in the cloud IAM.
 
-**Guide:** [Cloud identity JIT](../design/cloud-identity-jit.md)
+**Guide:** [Cloud identity JIT](../../../design/cloud-identity-jit.md)
 
 ### Bake a golden image once, promote it everywhere
 
 Build a hardened image with Packer in one cloud and promote it to the others, so every VM in
 every region starts from the same audited baseline.
 
-**Guide:** [Image Management](../image-management.md)
+**Guide:** [Image Management](../../../image-management.md)
 
 ### Guardrails: refuse the deploy, then reap it
 
 Admission policy turns down a non-compliant request up front; the auto-delete timer removes
 what did get built. The two halves of not accumulating privileged infrastructure by accident.
 
-**Guide:** [Policy Guardrails](../policy-guardrails.md) ·
-[Auto-delete Timer](../auto-delete-timer.md)
+**Guide:** [Policy Guardrails](../../../policy-guardrails.md) ·
+[Auto-delete Timer](../../../auto-delete-timer.md)
 
 ## What to enable
 
@@ -72,7 +72,7 @@ for the console-JIT story, and turn on **Admission control** and the **Auto-dele
 for the guardrails card — both default off, and the guardrails card will tell you so rather
 than failing quietly.
 
-At least one cloud must be configured. On a [POV instance](../pov-instance.md) the cloud
+At least one cloud must be configured. On a [POV instance](../../../pov-instance.md) the cloud
 consoles are masked, so most of this focus reports as unavailable by design — that is the
 tenancy split doing its job, not a fault.
 

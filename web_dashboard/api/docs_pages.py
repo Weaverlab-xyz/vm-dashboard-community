@@ -159,7 +159,7 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 # filtered by install_profile(): making index *content* vary with instance state is the leak
 # above wearing a different hat. A demo instance already lists the POV pages today.
 _INDEX_SECTIONS = {
-    "General", "integrations", "personas",
+    "General", "integrations",
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
     "onboarding", "remote-agents", "databases", "integrations/remote-worker",
 }
@@ -169,7 +169,6 @@ _INDEX_SECTIONS = {
 _SECTION_LABELS = {
     "General":                    "Platform reference",
     "integrations":               "Integrations",
-    "personas":                   "Personas",
     "profiles":                   "Demo and POV profiles",
     "profiles/demo":              "Demo profile",
     "profiles/demo/personas":     "Demo profile · personas",
@@ -181,9 +180,10 @@ _SECTION_LABELS = {
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
-# named after the persona key so /docs/personas/<key> matches the vocabulary the app, the API
-# and the nav all use -- which is right for the URL and useless as a label: the index derives
-# its text from the filename, so these would list as "Ot", "Dba" and "Sre".
+# named after the persona key so /docs/profiles/demo/personas/<key> matches the
+# vocabulary the app, the API and the nav all use -- which is right for the URL and
+# useless as a label: the index derives its text from the filename, so these would
+# list as "Ot", "Dba" and "Sre".
 #
 # An explicit map, deliberately NOT "use each doc's H1 for every page". Measured across the 53
 # indexed docs that would change 40 titles and several for the worse -- one H1 is a
@@ -194,14 +194,16 @@ _SECTION_LABELS = {
 # deliberately independent of the persona registry -- see the note on _INDEX_SECTIONS above,
 # and _shell below for why this shell must never learn the ACTIVE persona.
 _TITLE_OVERRIDES = {
-    "personas/cloudops":   "Cloud Ops engineer",
-    "personas/devops":     "DevOps engineer",
-    "personas/hypervisor": "Hypervisor admin",
-    "personas/itops":      "IT engineer",
-    "personas/ot":         "OT / ICS engineer",
-    "personas/dba":        "DBA / data platform",
-    "personas/security":   "Security / IAM analyst",
-    "personas/sre":        "Platform / SRE",
+    "profiles/demo/personas/cloudops":   "Cloud Ops engineer",
+    "profiles/demo/personas/devops":     "DevOps engineer",
+    "profiles/demo/personas/hypervisor": "Hypervisor admin",
+    "profiles/demo/personas/itops":      "IT engineer",
+    "profiles/demo/personas/ot":         "OT / ICS engineer",
+    "profiles/demo/personas/dba":        "DBA / data platform",
+    "profiles/demo/personas/security":   "Security / IAM analyst",
+    "profiles/demo/personas/sre":        "Platform / SRE",
+    # Not a persona: the derived title would be "Ot Demo Cell".
+    "profiles/demo/ot-demo-cell":        "OT Demo Cell",
 }
 
 _SHELL = """<!doctype html>
@@ -311,7 +313,10 @@ async def doc_index() -> HTMLResponse:
             # A folder's own index page. It becomes that section's HEADING rather than an
             # entry under it: nine list items all titled "Readme" is not an index, and
             # docs/README.md would list as a link to a second copy of this page.
-            indexes[section] = href
+            # The FOLDER url, not ".../README" -- doc_page falls back to the README, and a
+            # path with mixed case in it is the kind of link that works on a Windows
+            # checkout and 404s in the container.
+            indexes[section] = section
             # Registers the section even when the README is the only .md in it, which is the
             # case for docs/profiles/ -- otherwise that folder's index is unreachable from
             # here. Also keeps the `sorted(groups)` loop below the one place sections are

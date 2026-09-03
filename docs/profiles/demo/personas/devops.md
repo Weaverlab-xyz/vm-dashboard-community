@@ -31,22 +31,22 @@ at run time and scoped to the run**, so there is nothing durable to leak.
 Run an Ansible playbook that looks its own credential up from Password Safe as it executes.
 Nothing in the repository, nothing in the inventory file, nothing on disk when it finishes.
 
-**Guide:** [Ansible](../integrations/ansible.md) ·
-[Password Safe](../integrations/password-safe.md)
+**Guide:** [Ansible](../../../integrations/ansible.md) ·
+[Password Safe](../../../integrations/password-safe.md)
 
 ### A workload that mints its own cloud credential
 
 Replace a long-lived access key with a short-lived one the workload requests when it needs
 it — the secret nobody can leak because nobody is holding it.
 
-**Guide:** [Workload Credentials](../integrations/workload-credentials.md)
+**Guide:** [Workload Credentials](../../../integrations/workload-credentials.md)
 
 ### SSH accounts that exist only for the run
 
 A pipeline requests an account, gets it for the length of the job, and the account is
 destroyed on completion. There is no build user to audit, rotate or forget about.
 
-**Guide:** [Entitle user JIT](../design/entitle-user-jit.md)
+**Guide:** [Entitle user JIT](../../../design/entitle-user-jit.md)
 
 ### A serverless function that fetches its secret at cold start
 
@@ -54,23 +54,23 @@ Deploy a cloud function with no environment secret and show it pull what it need
 invocation — the same pattern as the playbook, in a runtime with no filesystem to leave
 anything on.
 
-**Guide:** [Cloud Functions](../integrations/cloud-functions.md)
+**Guide:** [Cloud Functions](../../../integrations/cloud-functions.md)
 
 ### What changed on this host since the last run
 
 Configuration drift against the last known-good run: the question every incident review opens
 with, answered without logging into anything.
 
-**Guide:** [Configuration Management](../config-management.md)
+**Guide:** [Configuration Management](../../../config-management.md)
 
 ## What to enable
 
 **Configuration Management** (Ansible), **Password Safe** and **Entitle**. Configuration
 Management additionally requires an active storage backend — it has nowhere to read a playbook
-from otherwise — so see [Storage Management](../storage-management.md) before enabling it.
+from otherwise — so see [Storage Management](../../../storage-management.md) before enabling it.
 
 This focus is one of the few that works essentially unchanged on a
-[POV instance](../pov-instance.md): Ansible, Password Safe, Entitle and the remote agent are
+[POV instance](../../../pov-instance.md): Ansible, Password Safe, Entitle and the remote agent are
 all profile-neutral.
 
 ## Talking to this buyer

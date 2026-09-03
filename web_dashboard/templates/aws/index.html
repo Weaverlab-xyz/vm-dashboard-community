@@ -1421,7 +1421,7 @@
   </div>
 
   {% if pra_enabled %}
-  <!-- ── TAB: OT Demo Cell (mirrors the GCP page's tab; docs/cloud-ot.md) ──── -->
+  <!-- ── TAB: OT Demo Cell (mirrors the GCP page's tab; docs/profiles/demo/ot-demo-cell.md) ──── -->
   <div x-show="activeTab === 'ot'" x-cloak>
     <div class="mb-4">
       <h2 class="text-lg font-semibold text-gray-800">OT Demo Cell</h2>
@@ -1883,7 +1883,7 @@
         { id: 'debian',  label: 'Debian 12',         family: 'debian-12',    user: 'admin'   },
       ],
 
-      // ── OT demo cell (mirrors the GCP page's tab; docs/cloud-ot.md) ────────
+      // ── OT demo cell (mirrors the GCP page's tab; docs/profiles/demo/ot-demo-cell.md) ────────
       otLoaded:        false,
       otPresets:       [],
       otCells:         [],
@@ -2182,7 +2182,7 @@
         } catch (e) { /* non-fatal */ }
       },
 
-      // ── OT demo cell (mirrors the GCP page's tab; docs/cloud-ot.md) ────────
+      // ── OT demo cell (mirrors the GCP page's tab; docs/profiles/demo/ot-demo-cell.md) ────────
       switchToOT() {
         this.activeTab = 'ot';
         if (!this.otLoaded) this.loadOTData();

@@ -39,28 +39,28 @@ spreadsheet.
 Scan the estate for secrets sitting in configuration. It always turns something up, which is
 the point — a control that finds nothing is indistinguishable from one that is not running.
 
-**Guide:** [Secrets Management](../secrets-management.md)
+**Guide:** [Secrets Management](../../../secrets-management.md)
 
 ### Refuse the deploy that would have been a finding
 
 Policy turns down a non-compliant request before anything is built, with a reason the requester
 can act on. Prevention rather than a quarterly report.
 
-**Guide:** [Policy Guardrails](../policy-guardrails.md)
+**Guide:** [Policy Guardrails](../../../policy-guardrails.md)
 
 ### Push the events somewhere that gets read
 
 Stream privileged-access events to Slack, Teams or a signed webhook, so the record lives in the
 tool the team already watches rather than one somebody has to remember to open.
 
-**Guide:** [Notifications](../notifications.md)
+**Guide:** [Notifications](../../../notifications.md)
 
 ### Nothing privileged outlives its purpose
 
 Every resource carries an expiry, and the ones that pass it are removed. The antidote to an
 estate nobody can account for.
 
-**Guide:** [Auto-delete Timer](../auto-delete-timer.md)
+**Guide:** [Auto-delete Timer](../../../auto-delete-timer.md)
 
 ## What to enable
 
@@ -68,9 +68,9 @@ estate nobody can account for.
 and the cards that need them will say so. Add **Secrets scanning** for the discovery card.
 
 Every one of these is profile-neutral, so this focus works identically on a demo instance and a
-[POV instance](../pov-instance.md).
+[POV instance](../../../pov-instance.md).
 
-Read [Auto-delete Timer](../auto-delete-timer.md) before switching it on. It deletes
+Read [Auto-delete Timer](../../../auto-delete-timer.md) before switching it on. It deletes
 infrastructure, and it has its own second gate for exactly that reason.
 
 ## Talking to this buyer
