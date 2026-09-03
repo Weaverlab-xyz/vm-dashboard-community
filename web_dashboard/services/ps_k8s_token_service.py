@@ -1288,9 +1288,18 @@ async def sync_status(db: Session, cluster_id: str) -> dict:
         raise PSK8sTokenError(f"cluster {cluster_id} not found")
     if not row.ps_token_account_id:
         return {"registered": False, "linked": False}
+    st = get_state(cluster_id)
     out = {"registered": True,
            "managed_account_id": row.ps_token_account_id,
            "pravault_account_id": row.ps_pra_vault_account_id or "",
+           # "seeded OR rotated" is the same test register() uses to decide the
+           # placeholder refill, and it is the one thing that distinguishes a
+           # registration that WORKS from one that got as far as creating the account
+           # and then failed -- which is the state an unauthorised rotator leaves
+           # behind, looking registered while the vault holds a credential that
+           # authenticates to nothing. The modal cannot infer it from PS: the account
+           # exists and has a password either way.
+           "vault_has_real_credential": bool(st.get("seeded") or st.get("rotated")),
            # The PRA-side Vault account, which is what the subscriber writes into. With
            # no subscriber the modal cannot otherwise tell "repairable here" from "there
            # is nothing in PRA to sync to yet".
@@ -1299,11 +1308,11 @@ async def sync_status(db: Session, cluster_id: str) -> dict:
     if not row.ps_pra_vault_account_id:
         out["note"] = (
             "no PRA Vault Token account is registered, so rotations do not reach PRA — "
-            "Repair sync creates it and links it"
+            "Repair registration creates it and links it"
             if row.pra_vault_account_id else
             "no PRA Vault Token account is registered, and this cluster has no PRA Vault "
             "account to write into — register the PRA k8s tunnel with credential "
-            "injection first, then Repair sync")
+            "injection first, then Repair registration")
         return out
     from . import ps_api_service
     try:

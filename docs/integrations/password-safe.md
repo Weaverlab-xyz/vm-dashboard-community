@@ -552,7 +552,7 @@ created only when the cluster already has a PRA Vault account to write into, so 
 the token *before* the PRA k8s tunnel leaves a cluster whose token rotates while nothing
 carries the value into PRA — Synced Accounts on the parent reads `0 items` and there is no
 "PRA Vault Token" managed account in the tenant. **Re-running the registration repairs it**:
-`Repair sync` in the cluster's token panel (or a re-POST of `…/ps-token`) creates the
+`Repair registration` in the cluster's token panel (or a re-POST of `…/ps-token`) creates the
 subscriber, links the pair, and touches nothing in the cluster. The subscriber is created on a
 placeholder rather than a checkout of the live token — the same 128-character cap drops any
 real token — and Password Safe replaces it through the link, so **PRA's copy is refreshed by

@@ -821,10 +821,22 @@ gcloud auth login --login-config=login.json</pre>
                            && (psTokenStatus.pravault_account_id || psTokenStatus.pra_vault_present)"
                    class="text-red-600">
                   The PRA Vault account is not synced to the token account, so rotations will NOT reach PRA.
-                  Use <span class="font-medium">Repair sync</span> below — it creates the PRA Vault Token
+                  Use <span class="font-medium">Repair registration</span> below — it creates the PRA Vault Token
                   account if it is missing, links the pair, and touches nothing in the cluster. If it fails
                   with a permission error, grant the API identity Password Safe Account Management
                   (Full control) and try again.
+                </p>
+                <p x-show="psTokenStatus.registered && !psTokenStatus.vault_has_real_credential
+                           && !psTokenStatus.error"
+                   class="text-red-600">
+                  Nothing has ever put a real credential in the vault — a ServiceAccount token is too
+                  long to seed, so only a completed rotation does, and none has completed. Password Safe
+                  is holding the placeholder the account was created with, which authenticates to
+                  nothing, and the PRA tunnel would be handed that. Use
+                  <span class="font-medium">Repair registration</span>: it re-applies the rotator RBAC
+                  (on AKS that is the Azure role assignment, which is what a first rotation refused for
+                  "User does not have access to the resource in Azure" was missing) and rotates to fill
+                  the vault.
                 </p>
               </div>
             </template>
@@ -873,24 +885,34 @@ gcloud auth login --login-config=login.json</pre>
             <button @click="rotatePsToken()" :disabled="psTokenBusy"
                     class="px-3 py-2 text-sm border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-50 disabled:opacity-50">Rotate now</button>
           </template>
-          <!-- Only offered when Password Safe says the pair is unlinked. Registration
-               commits the token account two steps before it links the pair, so a failure
-               at the link (a 403 on the sync grant, most likely) leaves a row that reads
-               as registered next to a pair that syncs nothing — and the register form
-               above is hidden from then on. This re-runs the register, which reconciles
-               the missing link and touches nothing in the cluster.
+          <!-- Offered whenever the cluster is registered, and deliberately NOT gated on
+               any particular half-state. Registration commits the token account at step 2
+               and can then fail at the link (step 4), the proving rotation (step 5) or the
+               legacy-Secret delete (step 6) — and from the moment step 2 lands,
+               ps_token_managed hides the register form above. So every one of those
+               failures used to leave the cluster with no control that re-runs the
+               register, which is the repair path for all of them.
 
-               NOT gated on pravault_account_id: a cluster whose PRA tunnel was registered
-               AFTER its token has no subscriber account at all, and gating on one left
-               that state with no control in the UI — the same dead end the register
-               form's own hiding created. The repair creates the subscriber when the
-               cluster has a PRA Vault account (pra_vault_present) to write into. -->
-          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed && psTokenStatus
-                          && psTokenStatus.registered && !psTokenStatus.linked
-                          && !psTokenStatus.error
-                          && (psTokenStatus.pravault_account_id || psTokenStatus.pra_vault_present)">
-            <button @click="repairPsTokenSync()" :disabled="psTokenBusy"
-                    class="px-3 py-2 text-sm border border-red-300 text-red-700 rounded-lg hover:bg-red-50 disabled:opacity-50">Repair sync</button>
+               This gate has been wrong twice by trying to enumerate which half-state is
+               repairable: first it also required pravault_account_id (which stranded a
+               cluster whose PRA tunnel was registered AFTER its token), then it required
+               !linked (which stranded a cluster that linked fine and died at the
+               rotation — live, on AKS, twice, because the rotator held no Azure
+               data-plane role). Enumerating is the bug. Re-POSTing …/ps-token is
+               idempotent by design and documented as the repair path, so the honest gate
+               is "is there a registration to repair".
+
+               Not gated on psTokenStatus either: that is a live Password Safe read, and
+               "Password Safe is unreachable" must not be a reason the repair is
+               unavailable. -->
+          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
+            <button @click="repairPsTokenRegistration()" :disabled="psTokenBusy"
+                    :class="psTokenStatus && psTokenStatus.registered
+                            && (!psTokenStatus.linked || !psTokenStatus.vault_has_real_credential)
+                            ? 'border-red-300 text-red-700 hover:bg-red-50'
+                            : 'border-gray-300 text-gray-700 hover:bg-gray-50'"
+                    class="px-3 py-2 text-sm border rounded-lg disabled:opacity-50"
+                    title="Re-run the registration: re-applies the rotator RBAC (including the AKS role assignment), re-creates the PRA Vault account and sync link if missing, and rotates only if nothing ever put a real credential in the vault">Repair registration</button>
           </template>
         </div>
         <div class="flex gap-3">
@@ -1552,18 +1574,24 @@ function k8sPage() {
       }
     },
 
-    // Re-runs the register on an already-registered cluster. That path re-applies the
-    // rotator RBAC and re-creates the SyncedAccounts link if it is missing; it creates no
-    // managed systems, checks out nothing and does not rotate, so the cluster's current
-    // token keeps working either way.
-    async repairPsTokenSync() {
+    // Re-runs the register on an already-registered cluster: re-applies the rotator
+    // RBAC (on AKS that includes the Azure data-plane role assignment) and re-creates the
+    // SyncedAccounts link if it is missing. It creates no managed systems and checks out
+    // nothing.
+    //
+    // It CAN rotate, which the old comment here denied: when stored state shows neither a
+    // seed nor a completed rotation, the vault still holds the create-time placeholder and
+    // the re-register replaces it. That is the whole point on a cluster whose first
+    // rotation was refused -- but it means this is not unconditionally a no-op on the
+    // cluster, so do not describe it as one.
+    async repairPsTokenRegistration() {
       this.psTokenBusy = true;
       try {
         const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token`, {});
         if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
         await this.loadPsTokenStatus(this.psTokenTarget.id);
       } catch (e) {
-        this.flash(e.message || 'Repairing the Password Safe sync failed.', 'error');
+        this.flash(e.message || 'Repairing the Password Safe registration failed.', 'error');
       } finally {
         this.psTokenBusy = false;
       }
