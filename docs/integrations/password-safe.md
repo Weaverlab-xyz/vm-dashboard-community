@@ -38,7 +38,7 @@ half of the story.
   `beyondtrust.secrets_safe` Galaxy collection. The dashboard reuses this same OAuth
   client (`pscli_*`) — auto-injecting it into the runner as `PASSWORD_SAFE_*` — so no
   separate credential is needed. See
-  [integrations/ansible.md](ansible.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
+  [integrations/ansible.md](ansible\secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
   and [examples/playbooks/password-safe/](../../examples/playbooks/password-safe/).
 
 ---
@@ -133,7 +133,7 @@ details are worth knowing because they are not obvious:
   RBAC-locked secret and force-deleted after the run.
 
 Full walkthrough in
-[Ansible → Managed-account checkout](ansible.md#managed-account-checkout-beyondtrust-password-safe).
+[Ansible → Managed-account checkout](ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ### Hypervisor credentials for a remote agent
 

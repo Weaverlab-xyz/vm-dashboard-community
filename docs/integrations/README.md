@@ -41,7 +41,7 @@ Anything the dashboard cannot route to is reached through an agent instead — s
 
 | Page | Read this when |
 |---|---|
-| [Remote Worker](ansible.md) | you are configuring the runner images that execute Config Management, k8s and promote jobs. |
+| [Remote Worker](ansible.md) | you are configuring the runner images that execute Config Management, k8s and promote jobs — six pages under [`ansible/`](ansible/ansible-runner.md). |
 | [Cloud Functions (preview)](cloud-functions.md) | you need a stable HTTPS endpoint external systems can call to act inside your network. |
 | [Rancher](rancher.md) | you have more than a couple of clusters and want one place to see them. |
 | [Portainer](portainer.md) | you already run Portainer and want the dashboard to drive it. |

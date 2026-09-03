@@ -364,7 +364,7 @@ Managed-account checkout works on the **local and Azure (ACI) runners** (both
 inject inline); on **ECS / Cloud Run** it requires the opt-in below.
 
 Full operator detail lives in
-[docs/integrations/ansible.md → Using a Secrets-Management secret in a run](integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
+[docs/integrations/ansible.md → Using a Secrets-Management secret in a run](integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
 
 ### Ephemeral cloud secrets
 
@@ -406,7 +406,7 @@ use. If that trade-off isn't acceptable, use the local or ACI runner (inline, no
 store copy) — the default.
 
 Full operator detail:
-[docs/integrations/ansible.md → Managed-account checkout](integrations/ansible.md#managed-account-checkout-beyondtrust-password-safe).
+[docs/integrations/ansible.md → Managed-account checkout](integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ---
 

@@ -259,7 +259,7 @@ credential from the provisioning job's Terraform variables and the encrypted con
 clusters — an on-premises database runs in a sibling container on the dashboard host,
 because nothing in a cloud has a route to your LAN; a cloud-hosted one runs on that
 cloud's transient in-subnet runner. See
-[Ansible → Kubernetes-cluster and database targets](integrations/ansible.md#kubernetes-cluster-and-database-targets-localhost-runs).
+[Ansible → Kubernetes-cluster and database targets](integrations/ansible\kubernetes-runner.md#kubernetes-cluster-and-database-targets-localhost-runs).
 
 **Every runner takes the just-in-time credential, AWS and GCP included.** A database run is
 a localhost play, and its connection variables ride the runner's *inline* environment
