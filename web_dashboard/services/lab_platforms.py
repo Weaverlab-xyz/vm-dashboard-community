@@ -133,6 +133,11 @@ CAPABILITIES = {
         # simply has no such field to offer, which is why the POV create form asks this
         # before rendering one.
         "projects": True,              # /v2/projects/{id}/{templates,configurations}
+        # Can VMs be added to an environment that already exists? Skytap alone can, by
+        # merging a template into it. A cloud POV's VM set is whatever its own template
+        # service created, so the button is hidden there rather than offered and refused —
+        # which is what this table is for.
+        "vm_add": True,                # PUT /configurations/{id}.json, template_id+vm_ids
         # Can an environment be saved back as a template? This is what makes the template
         # BUILDER possible at all — see services/pov_template_builder and
         # docs/integrations/skytap.md#building-a-template. Skytap has no "edit a template"
@@ -184,6 +189,7 @@ CAPABILITIES = {
         # the povEnvironment tag, both created per POV, so there is nothing for the create
         # form to ask.
         "projects": False,
+        "vm_add": False,
         # Baking N AMIs off a running environment is a later slice, and a deliberate one:
         # every baked template is a standing storage bill. Templates are edited in the
         # dashboard today, which is a different thing from authoring one on the platform.
@@ -213,6 +219,7 @@ CAPABILITIES = {
         # resource group this creates per POV — so there is nothing for the create form
         # to ask.
         "projects": False,
+        "vm_add": False,
         "template_authoring": False,
         "published_services": False,
     },
@@ -235,6 +242,7 @@ CAPABILITIES = {
         # configured project and records it on the row, and `pov_cloud_gcp` reads it back
         # rather than re-deriving it from current config.
         "projects": True,
+        "vm_add": False,
         "template_authoring": False,
         "published_services": False,
     },
@@ -257,6 +265,7 @@ CAPABILITIES = {
         # place. A compartment is NOT used AS the environment — see pov_cloud_oci on why
         # the obvious analogy to an Azure resource group is the wrong one.
         "projects": True,
+        "vm_add": False,
         "template_authoring": False,
         "published_services": False,
     },

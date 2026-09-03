@@ -320,6 +320,134 @@ async def run_env_power(job_id: str, meta: dict) -> None:
         db.close()
 
 
+# ── adding VMs to a live environment ─────────────────────────────────────────
+
+async def run_env_add_vms(job_id: str, meta: dict) -> None:
+    """Copy VMs from a template into an environment that already exists.
+
+    The runbook motion this exists for is the strongest demo in BeyondTrust's Skytap
+    Password Safe POC: use case 18 adds two guests and a batch of AD users to a running
+    environment and shows the existing Smart Rules onboard all of it with nothing edited.
+    Use case 15 wants the same call for a Password Safe Cache guest that template Part 1
+    does not carry.
+
+    Four steps, and the last two are the reason this is a job rather than an endpoint:
+
+    1. the platform merge, which is asynchronous;
+    2. a wait for the environment to settle out of ``busy``;
+    3. ``refresh_vms``, so the new guests exist as rows before anything can reference them;
+    4. optionally powering the environment on — the copies arrive **stopped** even when
+       everything around them is running, and an SE who did not notice would be looking at
+       a Smart Rule that "did not work" on a guest that was never up.
+
+    Deliberately does NOT re-broker. The agent's ``policy.yaml`` is written at enrolment,
+    so a new guest is not a Config-Management target until somebody presses Broker — and
+    doing it here would silently re-enrol the agent in the middle of a live POV, which is a
+    much bigger side effect than the one it would save. The completion note says so
+    instead.
+    """
+    db = SessionLocal()
+    try:
+        env = get(db, meta.get("environment_id", ""))
+        if env is None:
+            job_service.set_failed(db, job_id, "the POV environment row is gone")
+            return
+        if not env.platform_environment_id:
+            job_service.set_failed(
+                db, job_id,
+                "this environment was never created on the platform, so there is nothing "
+                "to add VMs to.")
+            return
+
+        if not lab_platforms.supports(env.platform, "vm_add"):
+            label = lab_platforms.capabilities(env.platform).get("label", env.platform)
+            job_service.set_failed(
+                db, job_id,
+                f"{label} cannot add VMs to an environment that already exists. Its VM "
+                f"set is whatever created it.")
+            return
+
+        template_id = str(meta.get("template_id") or "").strip()
+        vm_ids = [str(v).strip() for v in (meta.get("vm_ids") or []) if str(v).strip()]
+        power_on = bool(meta.get("power_on"))
+        mod = _adapter(env)
+
+        job_service.update_progress(db, job_id, 10,
+                                    f"Copying {len(vm_ids)} VM(s) into {env.name}…")
+        try:
+            await mod.add_vms(env.platform_environment_id, template_id, vm_ids)
+        except Exception as exc:  # noqa: BLE001
+            job_service.set_failed(db, job_id, f"the platform refused the copy: {exc}")
+            return
+
+        # The copy leaves the environment `busy`, and `refresh_vms` reads through that
+        # perfectly well — but a caller that powers on next needs it settled, and reading
+        # the VM list mid-copy can return the old set. So wait either way.
+        job_service.update_progress(db, job_id, 40, "Waiting for the copy to finish…")
+        try:
+            settled = await mod.get_environment(env.platform_environment_id)
+            target = (settled.get("runstate") or "").strip().lower()
+            if target in ("", "busy"):
+                # Settle on whatever it was doing. `wait_for_runstate` refuses a state it
+                # was not asked for, so ask for the one the environment already reports
+                # rather than guessing at "running".
+                target = (env.runstate or "stopped").strip().lower()
+            settled = await mod.wait_for_runstate(env.platform_environment_id, target)
+        except Exception as exc:  # noqa: BLE001
+            # Non-fatal: the VMs are copied either way, and failing here would report a
+            # completed copy as a failure and invite somebody to run it twice.
+            logger.warning("POV %s: the environment did not settle after the copy",
+                           env.id, exc_info=True)
+            job_service.append_job_log(
+                db, job_id,
+                f"NOTE: the copy was accepted but the environment did not settle "
+                f"({type(exc).__name__}). Re-check the platform before adding more.")
+            settled = {}
+
+        job_service.update_progress(db, job_id, 70, "Re-reading the VM list…")
+        try:
+            count = await refresh_vms(db, env)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: could not re-read VMs after the copy", env.id,
+                           exc_info=True)
+            job_service.set_failed(
+                db, job_id,
+                f"the VMs were copied but this dashboard could not re-read the "
+                f"environment ({type(exc).__name__}). Press Re-check on the POV list.")
+            return
+
+        if power_on:
+            job_service.update_progress(db, job_id, 85, "Powering the environment on…")
+            try:
+                await mod.set_runstate(env.platform_environment_id, "running")
+                settled = await mod.wait_for_runstate(env.platform_environment_id,
+                                                      "running")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("POV %s: power-on after the copy failed", env.id,
+                               exc_info=True)
+                job_service.append_job_log(
+                    db, job_id,
+                    f"NOTE: the VMs were copied but the environment did not power on "
+                    f"({type(exc).__name__}). Start it from the POV list.")
+
+        env.runstate = (settled or {}).get("runstate") or env.runstate
+        db.commit()
+
+        job_service.append_job_log(
+            db, job_id,
+            "The new guests are not Config-Management targets yet: the broker agent's "
+            "policy is written at enrolment. Press Broker on the POV to grant them, and "
+            "tick them on the VMs tab first if you want to run anything on them.")
+        job_service.set_completed(db, job_id, {
+            "environment_id": env.id,
+            "added": len(vm_ids),
+            "vm_count": count,
+            "runstate": env.runstate,
+        })
+    finally:
+        db.close()
+
+
 # ── destroy ──────────────────────────────────────────────────────────────────
 
 async def run_env_destroy(job_id: str, meta: dict) -> None:

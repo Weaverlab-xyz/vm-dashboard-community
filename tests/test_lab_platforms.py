@@ -44,7 +44,7 @@ from web_dashboard.services.skytap_client import SkytapClient, SkytapCreds  # no
 _REQUIRED_CAPABILITY_KEYS = {
     "label", "templates", "runstate", "idle_suspend",
     "bootstrap_injection", "share_link", "stored_credentials",
-    "verify", "projects", "scheduled_suspend",
+    "verify", "projects", "scheduled_suspend", "vm_add",
 }
 
 # bootstrap_injection is one INTENT with different mechanisms, so it is an enum.

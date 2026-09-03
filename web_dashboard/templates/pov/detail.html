@@ -187,6 +187,46 @@
           </table>
         </div>
 
+        <!-- ── Add VMs from a template ────────────────────────────────────
+             Skytap alone can do this: `vm_add` in the capability table. Use case 18 of
+             the Password Safe POC runbook adds two guests to a RUNNING environment and
+             shows the existing Smart Rules onboard them with nothing edited. -->
+        <div x-show="env.vm_add" class="border-t border-gray-100 p-4 space-y-2">
+          <h3 class="text-sm font-medium text-gray-900">Add VMs from a template</h3>
+          <div class="flex flex-wrap gap-2 items-center">
+            <select x-model="addTemplate" @change="loadTemplateVms()"
+                    class="border border-gray-300 rounded px-2 py-1 text-xs">
+              <option value="">Source template…</option>
+              <template x-for="t in addTemplates" :key="t.id">
+                <option :value="t.id" x-text="t.name + ' (' + (t.vm_count || 0) + ' VMs)'"></option>
+              </template>
+            </select>
+            <label class="inline-flex items-center gap-1 text-xs text-gray-600">
+              <input type="checkbox" x-model="addPowerOn">
+              <span>power on after</span>
+            </label>
+            <button @click="addVms()" :disabled="!addTemplate || !addPicked.length"
+                    class="text-xs px-2 py-1 rounded bg-blue-600 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                    x-text="'Add ' + (addPicked.length || '') + ' VM(s)'"></button>
+          </div>
+          <div x-show="addTemplate" class="flex flex-wrap gap-3">
+            <template x-for="v in addVmChoices" :key="v.id">
+              <label class="inline-flex items-center gap-1 text-xs text-gray-700">
+                <input type="checkbox" :value="v.id" x-model="addPicked">
+                <span x-text="(v.name || v.id) + (v.os_family ? ' · ' + v.os_family : '')"></span>
+              </label>
+            </template>
+            <p x-show="addTemplate && !addVmChoices.length" class="text-xs text-gray-400">
+              No VMs read back from that template.
+            </p>
+          </div>
+          <p class="text-[11px] text-gray-400">
+            The copies arrive stopped even while the rest of the environment is running —
+            leave "power on after" ticked unless you want them off. They are not
+            Config-Management targets until you press Broker.
+          </p>
+        </div>
+
         <!-- ── Run a step on a guest ──────────────────────────────────────
              The runbook this POV is usually driven from asks an SE to add the RDS role to
              a member server, install SQL Server on it, and run a user-creation script on
@@ -689,6 +729,13 @@
       stepAsset: '',
       stepArgs: '',
       stepAssets: [],
+      // Add-VMs. `addPicked` is bound by x-model on checkboxes, so it must start as an
+      // array or the first tick replaces it with a scalar.
+      addTemplate: '',
+      addTemplates: [],
+      addVmChoices: [],
+      addPicked: [],
+      addPowerOn: true,
       busy: '',
       notice: '',
       env: null,
@@ -724,6 +771,9 @@
         if (this.tabs.some(t => t.id === hash)) this.tab = hash;
         await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadAccessors(),
                            this.loadSummary(), this.loadStepAssets()]);
+        // After loadEnv, not beside it: the template list is only fetched for a platform
+        // that can merge one, and that answer arrives with the environment.
+        await this.loadTemplates();
         this.loading = false;
       },
 
@@ -754,6 +804,54 @@
         } catch (e) {
           this.error = 'Could not load this POV.';
         }
+      },
+
+      // -- adding VMs -------------------------------------------------------
+
+      async loadTemplates() {
+        // Only for a platform that can merge one into a live environment; on a cloud POV
+        // the panel is hidden and this would be a call with nowhere to put its answer.
+        if (!this.env.vm_add) { this.addTemplates = []; return; }
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/templates?platform=${encodeURIComponent(this.env.platform || '')}`);
+          if (!res.ok) { this.addTemplates = []; return; }
+          this.addTemplates = (await res.json()).templates || [];
+        } catch (e) { this.addTemplates = []; }
+      },
+
+      async loadTemplateVms() {
+        // Cleared on every change: a selection carried over from the previous template
+        // would post ids that do not belong to the one now named.
+        this.addPicked = [];
+        this.addVmChoices = [];
+        if (!this.addTemplate) return;
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/templates/${encodeURIComponent(this.addTemplate)}/vms`
+            + `?platform=${encodeURIComponent(this.env.platform || '')}`);
+          if (!res.ok) return;
+          this.addVmChoices = (await res.json()).vms || [];
+        } catch (e) { /* the picker stays empty and the button stays disabled */ }
+      },
+
+      async addVms() {
+        this.error = ''; this.notice = '';
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/vms`,
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ template_id: this.addTemplate,
+                                     vm_ids: this.addPicked,
+                                     power_on: !!this.addPowerOn }) });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not add VMs (${res.status}).`; return; }
+          this.notice = `Copying ${this.addPicked.length} VM(s) — watch job ${data.job_id}. `
+                      + `Press Broker afterwards to grant them.`;
+          this.addPicked = [];
+          await this.loadEnv();
+        } catch (e) { this.error = 'Could not queue the VM copy.'; }
       },
 
       // -- guest steps ------------------------------------------------------
