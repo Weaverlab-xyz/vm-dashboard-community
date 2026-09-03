@@ -141,7 +141,7 @@ nothing, and the resulting registration would read as healthy.
 This matters because the likeliest cause of that failure is a **403 on the link**, and the
 grant is genuinely unsettled (see the prerequisites below): the operator fixes it
 tenant-side and then wants a retry. The cluster is untouched throughout, so the retry is
-cheap and safe. The k8s panel surfaces it as **Repair sync**, shown only while Password
+cheap and safe. The k8s panel surfaces it as **Repair registration**, shown whenever Password
 Safe reports the pair unlinked — the register form itself is hidden once the row looks
 registered, which is what made the half-state unreachable from the UI.
 
