@@ -566,16 +566,52 @@ def test_both_pages_filter_to_what_the_preflight_will_accept():
         assert r"/\.(exe|msi)$/i" in _pov_template(name), f"{name}: wrong asset filter"
 
 
-def test_the_staging_hint_points_at_a_route_that_exists():
-    """Both pages tell an SE to upload the installer somewhere. It was `/config-management`
-    for a while, which 404s -- the page is served at `/config-mgmt`."""
+def test_the_staging_hint_points_at_the_page_that_can_actually_upload():
+    """Both pages tell an SE where to stage the installer, and the link has been wrong
+    twice. First it was `/config-management`, which 404s. Then it was `/config-mgmt`,
+    which exists but carries no file input at all -- that page RUNS an asset, the Storage
+    page is what accepts one. An SE following the hint landed on a page with nothing to
+    click and concluded the .exe was unsupported."""
     with open(os.path.join(_ROOT, "web_dashboard", "main.py"), encoding="utf-8") as fh:
         main_src = fh.read()
-    assert '@app.get("/config-mgmt"' in main_src
+    assert '@app.get("/storage"' in main_src
     for name in _POV_PAGES:
         src = _pov_template(name)
-        assert 'href="/config-mgmt"' in src, f"{name}: no staging hint"
+        assert 'href="/storage"' in src, f"{name}: no staging hint"
         assert "/config-management" not in src, f"{name}: dead upload link"
+    with open(os.path.join(_ROOT, "web_dashboard", "templates", "storage", "index.html"),
+              encoding="utf-8") as fh:
+        assert 'type="file"' in fh.read(), "the Storage page lost its uploader"
+
+
+def _storage_page() -> str:
+    path = os.path.join(_ROOT, "web_dashboard", "templates", "storage", "index.html")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_the_upload_form_offers_every_extension_the_backend_stores():
+    """The Storage page gates uploads TWICE on the client -- the file input's `accept`
+    and a second list in `uploadFile()` -- and neither is enforced server-side, so a
+    missing extension is a purely cosmetic refusal that is nonetheless total: the picker
+    greys the file out and the toast says "Unsupported file type".
+
+    That is exactly how `.exe` was blocked. Every other table already called it a winpkg
+    and `ansible_local_service` already generated a `win_package` play for it; only these
+    two literals disagreed, so the Resource Broker bootstrapper could not be staged at
+    all. Pinned against `_ASSET_EXTENSIONS` because that set is what decides whether an
+    uploaded asset is ever LISTED -- offering an upload the listing then hides is the
+    same dead end from the other direction.
+    """
+    src = _storage_page()
+    accept = src.split('accept="', 1)[1].split('"', 1)[0]
+    offered = {e.strip().lower() for e in accept.split(",") if e.strip()}
+    allowed_js = src.split("const allowed = [", 1)[1].split("]", 1)[0]
+    checked = {e.strip().strip("'\"").lower() for e in allowed_js.split(",") if e.strip()}
+    for ext in storage_service._ASSET_EXTENSIONS:
+        assert ext in offered, f"{ext}: the file picker greys it out"
+        assert ext in checked, f"{ext}: uploadFile() rejects it before the request"
+    assert offered == checked, "the two client-side lists disagree"
 
 
 if __name__ == "__main__":

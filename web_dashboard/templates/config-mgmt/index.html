@@ -64,9 +64,13 @@
               <p class="text-sm text-amber-600">
                 No assets found. Upload <code class="bg-amber-50 px-1 rounded">.yml</code>,
                 <code class="bg-amber-50 px-1 rounded">.sh</code>,
-                <code class="bg-amber-50 px-1 rounded">.deb</code>, or
-                <code class="bg-amber-50 px-1 rounded">.rpm</code> files to your storage backend in
-                <a href="/settings" class="underline">Settings → Integrations → Ansible</a>.
+                <code class="bg-amber-50 px-1 rounded">.ps1</code>,
+                <code class="bg-amber-50 px-1 rounded">.deb</code>,
+                <code class="bg-amber-50 px-1 rounded">.rpm</code>,
+                <code class="bg-amber-50 px-1 rounded">.exe</code>, or
+                <code class="bg-amber-50 px-1 rounded">.msi</code> files on the
+                <a href="/storage" class="underline">Storage</a> page — the backend itself is
+                configured in <a href="/settings" class="underline">Settings → Integrations → Ansible</a>.
               </p>
             </template>
             <template x-if="!assetsLoading && assets.length > 0">

@@ -269,7 +269,7 @@ def preflight(db: Session, env: PovEnvironment) -> tuple:
     if not staged:
         raise ResourceBrokerError(
             "no Resource Broker installer is staged for this POV. Download it from the "
-            "Password Safe tenant, upload it on the Config Management page, and name it "
+            "Password Safe tenant, upload the .exe on the Storage page, and name it "
             "here.")
     if ansible_local_service.asset_type(staged) != "winpkg":
         raise ResourceBrokerError(
