@@ -64,6 +64,16 @@ _RESERVED_VAR = re.compile(r"^ansible_", re.IGNORECASE)
 # sealed body is roughly 4/3 of this before the cap on the far side applies.
 MAX_BUNDLE_BYTES = 256 * 1024
 
+# Above this, an asset is NOT carried in the bundle. It is left in object storage and the
+# play downloads it on the target instead — see `_remote_fetch_playbook`.
+#
+# Well under MAX_BUNDLE_BYTES rather than equal to it, because the asset is only one of the
+# bundle's tenants: base64 costs it a third again, and the playbook, extra vars and
+# connection material share the same 256 KB. Picking the ceiling itself would mean an asset
+# that "fits" still failing at the check below, with a message about the total that names
+# nothing the operator can act on.
+MAX_EMBEDDED_ASSET_BYTES = 128 * 1024
+
 # Where the agent extracts the run's files. NOT /tmp: the sibling mounts a tmpfs over /tmp
 # at start, which would shadow anything placed there before start and delete it with no
 # diagnostic at all. Stated here because the path is half of a contract with the agent.
@@ -160,6 +170,70 @@ def _split_playbook_and_asset(asset: str, raw: bytes) -> tuple:
     return play, base, raw
 
 
+async def _remote_fetch_url(asset: str, asset_backend: str, *, prefetched_b64: str) -> str:
+    """A signed download URL when this asset is too big to travel in the bundle, else "".
+
+    Decided from the asset's SIZE, read off the backend's listing, and decided BEFORE
+    anything is fetched. That ordering is the point: the question is "is this file too
+    large to move through the dashboard", and answering it by moving the file through the
+    dashboard would be the bug. A 314 MB installer read into memory here would cost the
+    container more than the run does.
+
+    Returns "" — meaning "embed it, as before" — whenever the asset is small, already
+    prefetched, or of a type the download wrapper has no shape for. Raises
+    :class:`BundleError` only when the asset is too big AND nothing can rescue it, because
+    that is the case where the operator has something to fix.
+    """
+    # An agent-brokered prefetch has already happened at enqueue and is bounded by that
+    # backend's own ~190 KB ceiling, so there is nothing to decide.
+    if prefetched_b64:
+        return ""
+
+    backend = asset_backend or storage_service.active_backend()
+    if not backend:
+        return ""
+
+    try:
+        size = await storage_service.asset_size(backend, asset)
+    except storage_service.StorageError:
+        # Not being able to size it is not itself a failure: fall through to the embedding
+        # path, which reads the asset and will report a real error if one exists. Better a
+        # run that tries than one refused because a listing hiccuped.
+        return ""
+
+    if size < 0 or size <= MAX_EMBEDDED_ASSET_BYTES:
+        return ""
+
+    human = f"{size / (1024 * 1024):.1f} MB"
+    if not ansible_local_service.can_remote_fetch(asset):
+        raise BundleError(
+            f"{asset} is {human}, over the "
+            f"{MAX_EMBEDDED_ASSET_BYTES // 1024} KB an agent-executed run can carry, and "
+            f"a {ansible_local_service.asset_type(asset)} cannot be installed from a "
+            f"download link. Only "
+            f"{', '.join(ansible_local_service.REMOTE_FETCH_TYPES)} assets can.")
+    if not storage_service.can_presign(backend):
+        raise BundleError(
+            f"{asset} is {human}, over the "
+            f"{MAX_EMBEDDED_ASSET_BYTES // 1024} KB an agent-executed run can carry, so "
+            f"the target has to download it itself — and '{backend}' cannot produce a "
+            f"download link, because it is a filesystem path rather than an object store. "
+            f"Move this asset to a cloud backend and re-run.")
+
+    try:
+        return await storage_service.presigned_url(backend, asset)
+    except storage_service.StorageError as exc:
+        raise BundleError(str(exc)) from exc
+
+
+def _remote_fetch_playbook(asset: str) -> str:
+    """The wrapper play for an asset the target downloads itself."""
+    try:
+        return ansible_local_service.generate_remote_fetch_playbook_yaml(asset)
+    except ValueError as exc:
+        raise BundleError(str(exc)) from exc
+
+
 async def build(db, *, job, agent) -> tuple:
     """``(bundle, scrub)`` for one ``agent_ansible`` job.
 
@@ -187,9 +261,14 @@ async def build(db, *, job, agent) -> tuple:
     # Read off the RAW metadata, not `meta`: run_kwargs normalises to the closed key set
     # the agent's envelope uses, and these bytes deliberately are not in it — they stay on
     # the dashboard side of the bundle.
-    playbook, asset_name, asset_bytes = await _playbook_and_asset(
-        meta["asset"], meta["asset_backend"],
-        prefetched_b64=str(raw_meta.get("asset_bytes_b64") or ""))
+    asset_url = await _remote_fetch_url(meta["asset"], meta["asset_backend"],
+                                        prefetched_b64=str(raw_meta.get("asset_bytes_b64") or ""))
+    if asset_url:
+        playbook, asset_name, asset_bytes = _remote_fetch_playbook(meta["asset"]), "", b""
+    else:
+        playbook, asset_name, asset_bytes = await _playbook_and_asset(
+            meta["asset"], meta["asset_backend"],
+            prefetched_b64=str(raw_meta.get("asset_bytes_b64") or ""))
 
     run_kind = meta["run_kind"]
     transport = meta["transport"]
@@ -225,6 +304,15 @@ async def build(db, *, job, agent) -> tuple:
     for name, value in (creds.extra_vars or {}).items():
         if not _RESERVED_VAR.match(str(name)):
             extra_vars[name] = value
+
+    # The download URL rides with the other play data, and is scrubbed like a password
+    # because that is what it is: a bearer token that reads the object until it expires.
+    # Set AFTER the resolver's vars so an operator cannot shadow it, and scrubbed even
+    # though the play marks its own task `no_log` — belt and braces, since the agent
+    # derives its redaction set from what it is handed.
+    if asset_url:
+        extra_vars[ansible_local_service.ASSET_URL_VAR] = asset_url
+        scrub.append(asset_url)
 
     # A POV run's login comes from the LAB PLATFORM, not from this database. Fetched here,
     # at the moment the agent asks, so nothing has to be stored for it — and so a POV whose

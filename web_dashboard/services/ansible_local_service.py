@@ -72,6 +72,138 @@ def asset_type(name: str) -> str:
     return _EXT_TYPE.get(ext, "playbook")
 
 
+# The variable the remote-fetch wrapper reads its download URL from. A VAR rather than a
+# URL rendered into the YAML: the URL is a bearer token for the object, and a value carried
+# in extra_vars is scrubbed from output by the same machinery that scrubs a password, while
+# one baked into the playbook text would be echoed by any task that prints the play.
+ASSET_URL_VAR = "asset_source_url"
+
+# Types the remote-fetch wrapper knows how to install. Scripts and playbooks are absent on
+# purpose: they are kilobytes, they already fit in any envelope, and a `script`/`win_script`
+# task wants a file on the CONTROLLER rather than on the target, so "download it on the far
+# end" is not a shape they have.
+REMOTE_FETCH_TYPES = ("winpkg", "rpm", "deb")
+
+
+def can_remote_fetch(asset_name: str) -> bool:
+    """Whether :func:`generate_remote_fetch_playbook_yaml` handles this asset."""
+    return asset_type(asset_name) in REMOTE_FETCH_TYPES
+
+
+def generate_remote_fetch_playbook_yaml(asset_name: str) -> str:
+    """A wrapper play that downloads the asset ON THE TARGET, then installs it.
+
+    The sibling of :func:`generate_playbook_yaml`, and the reason it is a sibling rather
+    than a flag on that function: the two differ in *where the file is*, which changes
+    every task, not just a path. The other generator hands Ansible a file on the
+    controller and lets it copy; this one never has the file at all.
+
+    It exists because a run executed by a remote agent carries its asset inside a signed
+    job envelope capped at 256 KB, so an installer cannot travel that way. Here the bytes
+    go straight from object storage to the target host and are never held by the
+    dashboard, the agent, or the envelope.
+
+    The download is ``no_log`` throughout: the URL is a time-limited bearer token for the
+    object, and a task that echoed its own arguments would put it in the job log.
+    """
+    atype = asset_type(asset_name)
+    base = os.path.basename(asset_name)
+    if atype not in REMOTE_FETCH_TYPES:
+        raise ValueError(
+            f"{base} is a {atype}, which cannot be installed from a download link. "
+            f"Only {', '.join(REMOTE_FETCH_TYPES)} assets can.")
+
+    if atype == "winpkg":
+        # `ansible.windows.win_get_url` to a path under the remote temp dir, then the same
+        # `win_package` install the embedded wrapper does — including its exit-code
+        # handling, so a 3010 "reboot required" still reads as success. The file is removed
+        # afterwards because it is large and the target did not ask to keep it.
+        # The Windows destination is a SINGLE-quoted YAML scalar, and it has to be: the
+        # path puts a backslash before the filename, and inside a double-quoted scalar
+        # YAML reads that as an escape sequence -- the '\B' of Bootstrapper.exe is not a
+        # valid one, so the whole play fails to parse before Ansible ever sees it. In a
+        # single-quoted scalar a backslash is literal. The tests round-trip the generated
+        # YAML rather than eyeballing it, which is how this was caught.
+        return f"""\
+- hosts: all
+  vars:
+    _asset_dest: '{{{{ ansible_env.TEMP }}}}\\{base}'
+  tasks:
+    - name: Download {base} to the target
+      ansible.windows.win_get_url:
+        url: "{{{{ {ASSET_URL_VAR} }}}}"
+        dest: "{{{{ _asset_dest }}}}"
+        force: yes
+      no_log: true
+
+    - name: Install {base}
+      ansible.windows.win_package:
+        path: "{{{{ _asset_dest }}}}"
+        arguments: "{{{{ {WINPKG_ARGS_VAR} | default('') }}}}"
+        state: present
+      register: winpkg_result
+
+    - name: Remove the downloaded {base}
+      ansible.windows.win_file:
+        path: "{{{{ _asset_dest }}}}"
+        state: absent
+      when: not ansible_check_mode
+
+    - name: Report {base} result
+      ansible.builtin.debug:
+        msg: "rc={{{{ winpkg_result.rc | default('n/a') }}}} reboot_required={{{{ winpkg_result.reboot_required | default(false) }}}}"
+"""
+
+    if atype == "rpm":
+        return f"""\
+- hosts: all
+  become: yes
+  vars:
+    _asset_dest: "/tmp/{base}"
+  tasks:
+    - name: Download {base} to the target
+      ansible.builtin.get_url:
+        url: "{{{{ {ASSET_URL_VAR} }}}}"
+        dest: "{{{{ _asset_dest }}}}"
+        mode: "0644"
+      no_log: true
+
+    - name: Install {base}
+      ansible.builtin.dnf:
+        name: "{{{{ _asset_dest }}}}"
+        state: present
+        disable_gpg_check: true
+
+    - name: Remove the downloaded {base}
+      ansible.builtin.file:
+        path: "{{{{ _asset_dest }}}}"
+        state: absent
+"""
+
+    return f"""\
+- hosts: all
+  become: yes
+  vars:
+    _asset_dest: "/tmp/{base}"
+  tasks:
+    - name: Download {base} to the target
+      ansible.builtin.get_url:
+        url: "{{{{ {ASSET_URL_VAR} }}}}"
+        dest: "{{{{ _asset_dest }}}}"
+        mode: "0644"
+      no_log: true
+
+    - name: Install {base}
+      ansible.builtin.apt:
+        deb: "{{{{ _asset_dest }}}}"
+
+    - name: Remove the downloaded {base}
+      ansible.builtin.file:
+        path: "{{{{ _asset_dest }}}}"
+        state: absent
+"""
+
+
 def generate_playbook_yaml(asset_name: str) -> str:
     """
     Generate an Ansible playbook that runs/installs the given asset.
