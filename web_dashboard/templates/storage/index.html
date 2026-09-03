@@ -20,11 +20,6 @@
     is preserved so you can verify before deleting.
   </p>
 
-  <!-- Toast -->
-  <div x-show="toast" x-cloak x-transition
-       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
-       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
-
   <!-- ── Active backend picker ─────────────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <h2 class="text-base font-semibold text-gray-700 mb-1">Backend</h2>
@@ -682,7 +677,6 @@ function storagePage() {
     // so we can mix assets from different backends in one batch (issue #13).
     selected: [],
     bulkDeleting: false,
-    toast: '', toastType: 'success',
 
     // BeyondTrust EPM-L agent packages. Gated on the beyondtrust feature flag —
     // the section stays hidden entirely when the integration is off.
@@ -1034,10 +1028,15 @@ function storagePage() {
       }
     },
 
+    // Delegates to base.html's fixed-position #toast-container. This page used to
+    // render its own toast inline at the top of the document flow, which meant the
+    // feedback for a control far down the page — "Test connection" on agent_local is
+    // the sixth backend — appeared above the viewport and self-cleared unseen. Any
+    // in-flow toast on a long page has that bug; position is the whole point.
+    // `toast` is the global from base.html, already used directly by the EPM-L
+    // handlers above.
     showToast(msg, type = 'success') {
-      this.toast = msg;
-      this.toastType = type;
-      setTimeout(() => { this.toast = ''; }, 4500);
+      toast(msg, type);
     },
   };
 }
