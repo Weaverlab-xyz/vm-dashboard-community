@@ -864,6 +864,7 @@ class PasswordSafeFeatureConfig(BaseModel):
     k8s_ps_rotator_aks_sp_object_id: str = ""
     k8s_ps_rotator_aks_assign_role: bool = True
     k8s_ps_rotator_aks_role: str = "writer"
+    k8s_ps_rotator_aks_propagation_seconds: int = 240
     k8s_ps_rotator_eks_username: str = "passwordsafe-rotator"
     k8s_ps_rotator_eks_principal_arn: str = ""
     k8s_ps_rotator_eks_create_access_entry: bool = True
