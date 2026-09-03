@@ -40,7 +40,7 @@ fills one in, it gets a card.**
 | 12 — SSMS application session | Work in progress; needs SQL Server and SSMS on App01, which its own step 3 leaves unwritten |
 | 13 — Web application (AWS/Gmail) | Not QA'd since Q4 2022; needs shared AWS and Gmail accounts that do not exist |
 | 14 — Bring your own tool | Never written up. PuTTY ships on the workstation, so it is demonstrable, just not scripted |
-| 15 — DR via Password Safe Cache | Personal notes only, and it needs a `BtPocCache01` guest that is not in template Part 1 |
+| 15 — DR via Password Safe Cache | Personal notes only. The `BtPocCache01` guest it needs is not in template Part 1, though the VMs tab can now copy one in from Appendix 1's template |
 | 16 — API access via the Resource Kit | Unwritten; the document notes it overlaps use case 15's API setup |
 | 17 — Workforce Passwords | Outline only, though short |
 | 19 — SSH key management | Points at another repository instead of documenting it; needs a key-based Linux account seeded in the template |
@@ -75,6 +75,8 @@ Automated, from the POV page:
 - **running a staged file on any guest you allow** — the runbook's step 3 (the RDS role and
   the SQL Server / SSMS install on `BtPocApp01`) and use case 18's `SetupMoreUsers.ps1` on
   the domain controller. See below;
+- **adding VMs from a template to a live POV** — use case 18's `BtPocApp02` and
+  `BtPocLin02` from template Part 2, and use case 15's `BtPocCache01`. On the VMs tab;
 - per-VM PRA jump items and Password Safe managed systems and accounts;
 - the auto-delete timer, sleep schedule and spend cap, which the runbook has no equivalent
   for.

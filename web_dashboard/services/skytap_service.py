@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["SkytapError", "SkytapAuthError", "VALID_RUNSTATES", "SHARE_ACCESS",
            "configured", "credentials", "configured_project_id", "verify",
            "list_templates", "list_environments", "get_environment",
-           "create_environment", "update_environment", "set_runstate",
+           "create_environment", "update_environment", "add_vms", "set_runstate",
            "wait_for_runstate", "delete_environment", "inject_bootstrap",
            "stored_credentials", "create_share", "delete_share",
            "get_template", "create_template", "delete_template",
@@ -434,6 +434,59 @@ async def update_environment(env_id: str, changes: dict) -> dict:
     if not env_id:
         raise SkytapError("an environment id is required")
     raw = await _client().request("PUT", f"/v2/configurations/{env_id}", json=changes)
+    return _environment(raw) if isinstance(raw, dict) else await get_environment(env_id)
+
+
+async def add_vms(env_id: str, template_id: str, vm_ids: list) -> dict:
+    """Copy specific VMs from a template into an environment that already exists.
+
+    Skytap calls this **merging a template into an environment**, and it is the only way
+    VMs are ever added to one: its v2 reference says outright that "VMs are created
+    indirectly, either by creating an environment from a template or by merging a template
+    into an existing environment", and documents no endpoint for the second half.
+
+    **v1, and a PUT — which makes this the most mistakable call in this module.** The path
+    is ``PUT /configurations/{id}.json``, not ``PUT /v2/configurations/{id}``. Both exist,
+    both are a PUT at the same resource, and the v2 one is what ``update_environment``
+    already uses for the name and the idle timer. Send ``template_id`` to the v2 form and
+    it answers **200 with the environment unchanged** — no error, no VMs, nothing to
+    investigate. That is worse than the 404 the two creates give, which at least says
+    something happened. See "The two calls that are v1" in docs/integrations/skytap.md.
+
+    ``vm_ids`` is optional in the API and required here. Omitting it merges the template
+    **whole**, and against a POV that means silently doubling the environment — a
+    destructive default nobody reaches for on purpose.
+
+    Returns the environment, which will usually report ``busy``: the copy is asynchronous
+    and the new VMs arrive **stopped** even when the rest of the environment is running.
+    A caller wanting them on powers the environment on afterwards, which is what the
+    Skytap UI's own "Add VMs" flow tells an operator to do.
+    """
+    env_id = str(env_id or "").strip()
+    template_id = str(template_id or "").strip()
+    ids = [str(v).strip() for v in (vm_ids or []) if str(v).strip()]
+    if not env_id:
+        raise SkytapError("an environment id is required")
+    if not template_id:
+        raise SkytapError("a source template id is required to add VMs")
+    if not ids:
+        raise SkytapError(
+            "name at least one VM to add. Adding none would merge the whole template "
+            "into this environment, which is not what an empty selection means.")
+
+    body = {"template_id": template_id, "vm_ids": ids}
+    try:
+        raw = await _client().request("PUT", f"/configurations/{env_id}.json", json=body)
+    except SkytapError as exc:
+        # 409 has exactly one documented cause and it is not obvious from the message:
+        # a running IBM Power VM cannot be suspended for the copy. Named here because
+        # "conflict" against an environment that is plainly fine reads as a Skytap fault.
+        if "409" in str(exc):
+            raise SkytapError(
+                f"Skytap refused the VM copy into {env_id} with a conflict. The "
+                f"documented cause is a running Power VM among the ones being copied — "
+                f"those cannot be suspended for the copy. Shut them down and retry.")                 from None
+        raise
     return _environment(raw) if isinstance(raw, dict) else await get_environment(env_id)
 
 

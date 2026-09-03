@@ -177,6 +177,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         "ps_tenant_id": env.ps_tenant_id or "",
         "entitle_tenant_id": env.entitle_tenant_id or "",
     }
+    # The row carries its platform's answer so the page can hide the Add-VMs panel
+    # instead of offering it and refusing. `/api/pov/platforms` serves the whole
+    # capability map, but the detail page reads one environment, not the registry.
+    out["vm_add"] = lab_platforms.supports(env.platform, "vm_add")
     if broker is not None:
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
@@ -302,6 +306,31 @@ async def list_templates(platform: str = Query(_DEFAULT_PLATFORM),
         return {"platform": name, "templates": await mod.list_templates()}
     except Exception as exc:  # noqa: BLE001
         raise _platform_error(exc, f"listing {name} templates") from exc
+
+
+@router.get("/templates/{template_id}/vms")
+async def list_template_vms(template_id: str, platform: str = Query(_DEFAULT_PLATFORM),
+                            current_user: User = Depends(get_current_user)):
+    """The VMs inside one template, so an operator can pick which to copy.
+
+    The template LIST carries a count and not the VMs — a per-template VM read on a list
+    of forty templates would be forty calls for a number nobody clicked on yet. This is
+    the read behind the picker, taken when somebody chooses a source.
+    """
+    name, mod = _adapter(platform)
+    if not lab_platforms.supports(name, "vm_add"):
+        label = lab_platforms.capabilities(name).get("label", name)
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} cannot add VMs to an existing environment, so there is "
+                   f"nothing to pick from.")
+    try:
+        detail = await mod.get_template(template_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _platform_error(exc, f"reading {name} template {template_id}") from exc
+    return {"platform": name, "template_id": template_id,
+            "name": detail.get("name") or "",
+            "vms": detail.get("vms") or []}
 
 
 @router.get("/environments")
@@ -859,6 +888,70 @@ async def guest_step(env_id: str, payload: GuestStepRequest,
         # 409 with the remedy passed through — every refusal this raises names what the
         # operator does next: stage a file, add the guest to the list, press Broker.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job_id": job.id,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class AddVmsRequest(BaseModel):
+    """Copy VMs from a template into a POV that already exists.
+
+    The motion this is for is use case 18 of BeyondTrust's Skytap Password Safe POC: add
+    two guests to a running environment and show the existing Smart Rules onboard them
+    with nothing edited. Use case 15 wants the same call for a Password Safe Cache guest
+    that template Part 1 does not carry.
+
+    ``vm_ids`` is required, not optional. Skytap's own API treats an omitted list as
+    "merge the whole template", which against a live POV means silently doubling it.
+
+    ``power_on`` defaults to true because the copies arrive **stopped** even when
+    everything around them is running, and a Smart Rule that "did not work" on a guest
+    that was never powered on is a bad half-hour.
+    """
+    template_id: str
+    vm_ids: list[str]
+    power_on: bool = True
+
+
+@router.post("/managed/{env_id}/vms", status_code=202)
+async def add_vms(env_id: str, payload: AddVmsRequest,
+                  db: Session = Depends(get_db),
+                  current_user: User = Depends(get_current_user)):
+    """Queue a VM copy into this POV."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+
+    if not lab_platforms.supports(env.platform, "vm_add"):
+        label = lab_platforms.capabilities(env.platform).get("label", env.platform)
+        raise HTTPException(
+            status_code=409,
+            detail=f"{label} cannot add VMs to an environment that already exists. Its "
+                   f"VM set is whatever created it.")
+
+    template_id = (payload.template_id or "").strip()
+    vm_ids = [v.strip() for v in (payload.vm_ids or []) if v and v.strip()]
+    if not template_id:
+        raise HTTPException(status_code=400, detail="Name the source template.")
+    if not vm_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Pick at least one VM. An empty selection would merge the whole "
+                   "template into this environment.")
+    if pov_env_service.power_job_in_flight(db, env.id):
+        # The copy waits for the environment to settle and may power it on, so it and a
+        # power job would each be waiting on a runstate the other is changing.
+        raise HTTPException(
+            status_code=409,
+            detail="A power job is already running on this POV. Let it finish first.")
+
+    job = job_service.create_job(
+        db, job_type="pov_env_add_vms", created_by=getattr(current_user, "username", None),
+        workgroup=env.workgroup,
+        metadata={"environment_id": env.id, "template_id": template_id,
+                  "vm_ids": vm_ids, "power_on": bool(payload.power_on)})
     return {"job_id": job.id,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 

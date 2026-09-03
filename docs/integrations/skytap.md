@@ -396,6 +396,49 @@ is the trap worth remembering: the message reads exactly like "the id you sent d
 exist", so the first live template build was spent inspecting a base template id that was
 perfectly good. A 404 on a *create* means the endpoint, not the payload.
 
+### And a third, which is worse
+
+Adding VMs to an environment that already exists is v1 too — and it is a **PUT**, at a path
+the v2 API also serves:
+
+| Operation | Call |
+|---|---|
+| Copy VMs from a template into an existing environment | `PUT /configurations/{id}.json` — `template_id`, `vm_ids[]` |
+
+Skytap's v2 reference says plainly that "VMs are created indirectly, either by creating an
+environment from a template or by merging a template into an existing environment", and
+documents no endpoint for the second half. The v1 merge is that endpoint. It also accepts
+`merge_configuration` in place of `template_id`, to merge from another environment; the
+dashboard does not use that form.
+
+**`PUT /v2/configurations/{id}` exists, is what `update_environment` uses for the name and
+the idle timer, and answers a `template_id` with `200` and the environment unchanged.** No
+error, no VMs, nothing to investigate — strictly worse than the 404 the creates give,
+because a 404 at least says something happened. `skytap_service.add_vms` is the only caller
+of the v1 path and `tests/test_pov_add_vms.py` pins it against the code, not the docstring.
+
+Two behaviours worth knowing:
+
+* **`vm_ids` is optional in the API and required by this dashboard.** Omitted, the whole
+  template is merged — against a live POV that silently doubles the environment.
+* **`409` has one documented cause**: a running IBM Power VM among the ones being copied,
+  which cannot be suspended for the copy. Nothing in the word "conflict" says so, so
+  `add_vms` names it.
+* The copies arrive **stopped** even when the rest of the environment is running, which is
+  why the `pov_env_add_vms` job powers the environment on afterwards unless told not to.
+
+#### If you add VMs in Skytap's own UI instead
+
+The dashboard will not notice. `pov_reconcile` is deliberately **one collection read per
+pass** — that is the property that lets it run over every POV cheaply — so it refreshes a
+runstate, a rate-limit flag and an idle timer, and never a VM list. Adding a per-environment
+VM read to it would turn one call into one per POV.
+
+`pov_environment_vms` is refreshed by three things: a provision, a power action, and the
+add-VMs job. **Broker** does it too, via `run_env_broker`, which is the shortest way to pick
+up a guest added outside the dashboard — and it is what you would press for a new guest
+anyway, since a Config-Management grant is written at enrolment.
+
 ## What is deliberately not used
 
 **The Terraform provider.** `skytap/skytap` last released v0.15.1 in November 2022, and its
@@ -427,6 +470,7 @@ a platform lacks degrades visibly instead of failing late:
 | Project scoping | yes — `/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` |
 | Template authoring | yes — `POST /templates.json` with a `configuration_id`. There is no *edit a template* call on any lab platform, so authoring is always instantiate → change → bake. Used by [building a template](#building-a-template) |
 | Published services | yes — `…/interfaces/{id}/services`, a guest port NAT-ed to a public `ip:port`. Used **only** by a template build, for the length of one build |
+| Add VMs to a live environment | yes — `PUT /configurations/{id}.json` with `template_id` + `vm_ids[]`. The only platform that can: a cloud POV's VM set is whatever its template service created. See [the third v1 trap](#and-a-third-which-is-worse) |
 
 > **The two project paths are not yet confirmed against a live account.** Three things are
 > assumed: that they return the same object shape as the account-wide collections, that
