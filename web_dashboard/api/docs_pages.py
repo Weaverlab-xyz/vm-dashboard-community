@@ -12,7 +12,7 @@ confusingly.
 import html as _html
 import posixpath as _posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
@@ -356,6 +356,26 @@ async def doc_index() -> HTMLResponse:
         title = (_TITLE_OVERRIDES.get(href)
                  or rel.name.replace("-", " ").replace("_", " ").title())
         groups.setdefault(section, []).append((title, href))
+
+    # A folder split out of a page -- databases/, onboarding/, remote-agents/,
+    # integrations/ansible/ -- has no README of its own, because doc_page resolves
+    # <page>.md before <page>/README.md and the hub has to win that URL. Its index is
+    # that sibling hub, so hang the heading off it rather than leaving the section
+    # unlinked.
+    for section in groups:
+        if section in indexes or section == "General":
+            continue
+        # Matched by LISTING, not by is_file(): ONBOARDING.md indexes onboarding/, and
+        # (_DOCS_DIR / "onboarding.md").is_file() is True on an NTFS dev checkout and
+        # False in the Linux image -- so a case-insensitive match here would link the
+        # heading locally and silently drop it in production.
+        parent = _DOCS_DIR / PurePosixPath(section).parent
+        want = f"{PurePosixPath(section).name}.md".lower()
+        hub = next((p for p in parent.iterdir()
+                    if p.name.lower() == want and p.is_file()), None)
+        if hub is not None:
+            indexes[section] = str(
+                hub.relative_to(_DOCS_DIR).with_suffix("")).replace("\\", "/")
 
     parts = ["<h1>Documentation</h1>",
              '<p>Shipped with this build. The API explorer lives at '

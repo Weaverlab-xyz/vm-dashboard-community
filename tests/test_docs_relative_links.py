@@ -172,6 +172,42 @@ def test_every_section_heading_on_the_index_resolves():
         assert c.get(href).status_code == 200, f"{href} on the /docs index 404s"
 
 
+def test_every_index_href_names_a_file_with_its_real_case():
+    """The /docs index links each section heading to that folder's index -- its README, or
+    the sibling hub a split was cut out of. Resolving that hub with a plain is_file() is a
+    trap: docs/ONBOARDING.md indexes docs/onboarding/, and
+    (docs / "onboarding.md").is_file() is TRUE on an NTFS dev checkout and FALSE in the
+    Linux image. So the buggy version links the heading here, drops it silently in
+    production, and emits /docs/onboarding -- a URL that 404s there.
+
+    Checked by LISTING the directory, which is case-exact on every platform, rather than
+    by asking whether the path exists.
+    """
+    try:
+        from fastapi.testclient import TestClient
+        from web_dashboard.main import app
+        from web_dashboard.services import config_service
+    except Exception as exc:
+        print(f"SKIP index-case check: fastapi absent ({exc})")
+        return
+    import pathlib
+    import re
+    docs = pathlib.Path(_ROOT) / "docs"
+    c = TestClient(app)
+    c.__enter__()
+    config_service.set("setup_complete", "1")
+    config_service._setup_complete = True
+    hrefs = re.findall(r'<h2><a href="/docs/([^"]+)"', c.get("/docs").text)
+    assert hrefs, "no section heading links on the /docs index"
+    for href in hrefs:
+        rel = pathlib.PurePosixPath(href)
+        parent = docs / rel.parent
+        names = {p.name for p in parent.iterdir()}
+        assert f"{rel.name}.md" in names or rel.name in names, (
+            f"/docs/{href} does not name a real file in docs/{rel.parent} with that "
+            f"exact case -- it will 404 on a case-sensitive filesystem")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     if _render_markdown is None:
