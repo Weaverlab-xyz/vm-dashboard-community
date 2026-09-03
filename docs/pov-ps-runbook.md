@@ -72,6 +72,9 @@ Automated, from the POV page:
 - the **Password Safe Resource Broker** install on the named Windows guest — the runbook's
   step 5, minus creating the resource zone and fetching the install key, which stay in the
   Password Safe console;
+- **running a staged file on any guest you allow** — the runbook's step 3 (the RDS role and
+  the SQL Server / SSMS install on `BtPocApp01`) and use case 18's `SetupMoreUsers.ps1` on
+  the domain controller. See below;
 - per-VM PRA jump items and Password Safe managed systems and accounts;
 - the auto-delete timer, sleep schedule and spend cap, which the runbook has no equivalent
   for.
@@ -87,6 +90,32 @@ Manual, and correctly so:
   policies, discovery credentials, discovery scans, directory queries, user groups and
   Smart Rules. None of that exists in `ps_api_service` today, and Smart Rules are the
   engine of most of the use cases.
+
+## Running a step on a guest
+
+The POV detail page's **VMs** tab has a Configure column and a "Run a step on a guest"
+panel. Tick a guest, choose a file you have uploaded on the Storage page, press Run. A
+`.ps1` runs on a Windows guest, a `.sh` on a Linux one, a `.yml` playbook on either, and an
+`.exe`/`.msi` installs — the only one of the four that takes arguments, because it is the
+only play shape with a variable for them.
+
+There is no login field. The credential comes from the lab platform's own stored
+credentials, read per run, which is also why nothing goes stale when a template password
+changes.
+
+**Two things will trip you up.**
+
+The guest must be **ticked first**. The broker agent is granted a closed list of `/32`
+addresses, so a run at a guest outside that list is refused up front — it would otherwise
+reach the agent and fail as a connection timeout, which reads as a firewall problem.
+
+The grant is written when the agent is **enrolled**, so a guest ticked since then is not
+granted yet. The page says so in amber, and the run is refused with the remedy: press
+**Broker** on the POV list to rewrite the policy. This is the one step in the sequence that
+is not obvious, and it is why the refusal exists instead of a timeout.
+
+What this deliberately is *not*: a way to run arbitrary commands. The file is one you
+staged, the guest is one you ticked, and both are recorded on the job.
 
 ## One thing worth knowing about reachability
 

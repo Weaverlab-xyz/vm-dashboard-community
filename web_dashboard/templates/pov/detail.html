@@ -153,6 +153,9 @@
                 <th class="text-left px-4 py-2 font-medium">OS</th>
                 <th class="text-left px-4 py-2 font-medium">Runstate</th>
                 <th class="text-left px-4 py-2 font-medium">Private address</th>
+                <!-- The agent is granted a CLOSED list of addresses, so this checkbox is
+                     what makes a guest reachable at all. Off by default on purpose. -->
+                <th class="text-left px-4 py-2 font-medium">Configure</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-100">
@@ -165,15 +168,74 @@
                   <td class="px-4 py-2 text-gray-600" x-text="vm.os_family || '—'"></td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.runstate || '—'"></td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.private_ip || '—'"></td>
+                  <td class="px-4 py-2">
+                    <label class="inline-flex items-center gap-1 text-xs text-gray-600">
+                      <input type="checkbox" :checked="isOptedIn(vm)"
+                             @change="toggleOptIn(vm)"
+                             :disabled="!vm.os_family || !vm.private_ip">
+                      <span x-text="isOptedIn(vm) ? 'allowed' : 'no'"></span>
+                    </label>
+                  </td>
                 </tr>
               </template>
               <tr x-show="!(env.vms || []).length">
-                <td colspan="4" class="px-4 py-6 text-center text-gray-400">
+                <td colspan="5" class="px-4 py-6 text-center text-gray-400">
                   No VMs read back from the platform yet.
                 </td>
               </tr>
             </tbody>
           </table>
+        </div>
+
+        <!-- ── Run a step on a guest ──────────────────────────────────────
+             The runbook this POV is usually driven from asks an SE to add the RDS role to
+             a member server, install SQL Server on it, and run a user-creation script on
+             the domain controller. All three are "put this file on that guest and run it",
+             which the Resource Broker install already does — so this is the same job type
+             with the asset and the target chosen here. -->
+        <div class="border-t border-gray-100 p-4 space-y-2">
+          <div class="flex items-baseline justify-between">
+            <h3 class="text-sm font-medium text-gray-900">Run a step on a guest</h3>
+            <a href="/storage" class="text-xs text-blue-600 underline">Upload a file</a>
+          </div>
+
+          <!-- The refusal an operator can act on BEFORE pressing Run: policy.yaml is
+               written at enrolment, so a guest ticked since then is not granted yet. -->
+          <p x-show="env.guest_step_stale" class="text-xs text-amber-700">
+            A guest was allowed since the broker agent was last given its policy. Press
+            Broker on the POV list to rewrite it, or the run will time out.
+          </p>
+
+          <div class="flex flex-wrap gap-2 items-center">
+            <select x-model="stepVm" class="border border-gray-300 rounded px-2 py-1 text-xs">
+              <option value="">Guest…</option>
+              <template x-for="n in (env.guest_step_resolved || [])" :key="n">
+                <option :value="n" x-text="n"></option>
+              </template>
+            </select>
+            <select x-model="stepAsset" class="border border-gray-300 rounded px-2 py-1 text-xs">
+              <option value="">Staged file…</option>
+              <template x-for="a in stepAssets" :key="a">
+                <option :value="a" x-text="a"></option>
+              </template>
+            </select>
+            <!-- Only an .exe/.msi play templates an arguments variable, so the box appears
+                 only for one. Typing them against a .ps1 is refused, not dropped. -->
+            <input x-show="/\.(exe|msi)$/i.test(stepAsset)" type="text" x-model="stepArgs"
+                   placeholder="installer arguments"
+                   class="border border-gray-300 rounded px-2 py-1 text-xs font-mono w-64">
+            <button @click="runStep()" :disabled="!stepVm || !stepAsset"
+                    class="text-xs px-2 py-1 rounded bg-blue-600 text-white disabled:opacity-40 disabled:cursor-not-allowed">Run</button>
+          </div>
+
+          <p x-show="!(env.guest_step_resolved || []).length" class="text-xs text-gray-400">
+            Tick a guest above to allow it to be configured. The broker agent is granted a
+            closed list of addresses, so nothing else can be reached.
+          </p>
+          <p class="text-[11px] text-gray-400">
+            The login comes from the lab platform's own stored credentials, read per run —
+            there is nothing to enter here.
+          </p>
         </div>
       </div>
 
@@ -621,6 +683,12 @@
       envId: envId,
       loading: true,
       error: '',
+      // The guest-step form. Kept flat rather than an object so a half-filled form
+      // survives a reload of `env` -- which happens on every save.
+      stepVm: '',
+      stepAsset: '',
+      stepArgs: '',
+      stepAssets: [],
       busy: '',
       notice: '',
       env: null,
@@ -655,7 +723,7 @@
         const hash = window.location.hash.slice(1);
         if (this.tabs.some(t => t.id === hash)) this.tab = hash;
         await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadAccessors(),
-                           this.loadSummary()]);
+                           this.loadSummary(), this.loadStepAssets()]);
         this.loading = false;
       },
 
@@ -686,6 +754,75 @@
         } catch (e) {
           this.error = 'Could not load this POV.';
         }
+      },
+
+      // -- guest steps ------------------------------------------------------
+      //
+      // The opt-in list is what widens the broker agent's policy.yaml grant, so ticking a
+      // box here is a permission change and is treated as one: it posts immediately rather
+      // than batching into the Run click, so an operator can tick and press Broker without
+      // having chosen a file yet.
+
+      isOptedIn(vm) {
+        const name = (vm.name || '').toLowerCase();
+        return (this.env.guest_step_vms || []).some(n => String(n).toLowerCase() === name);
+      },
+
+      async toggleOptIn(vm) {
+        const name = vm.name || '';
+        if (!name) return;
+        const current = (this.env.guest_step_vms || []).map(String);
+        const next = this.isOptedIn(vm)
+          ? current.filter(n => n.toLowerCase() !== name.toLowerCase())
+          : current.concat([name]);
+        await this.saveSteps(next);
+      },
+
+      async saveSteps(vmNames) {
+        this.error = ''; this.notice = '';
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/guest-step`,
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ vm_names: vmNames, run: false }) });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not save (${res.status}).`; return; }
+          this.env = data.environment || this.env;
+        } catch (e) { this.error = 'Could not save the guest list.'; }
+      },
+
+      async loadStepAssets() {
+        try {
+          const res = await this.apiFetch('/api/config-mgmt/assets');
+          if (!res.ok) { this.stepAssets = []; return; }
+          const data = await res.json();
+          const rows = data.assets || data || [];
+          this.stepAssets = rows
+            .map(a => (typeof a === 'string' ? a : (a.name || a.key || '')))
+            .filter(n => n);
+        } catch (e) { this.stepAssets = []; }
+      },
+
+      async runStep() {
+        this.error = ''; this.notice = '';
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/guest-step`,
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ vm_name: this.stepVm, asset: this.stepAsset,
+                                     arguments: this.stepArgs, run: true }) });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            // Every refusal from this endpoint names the remedy, so it is shown verbatim
+            // rather than replaced with a status code.
+            this.error = data.detail || `Could not run the step (${res.status}).`;
+            return;
+          }
+          this.env = data.environment || this.env;
+          this.notice = `Running ${this.stepAsset} on ${this.stepVm} — watch job ${data.job_id}.`;
+        } catch (e) { this.error = 'Could not queue the step.'; }
       },
 
       async loadUseCases() {
