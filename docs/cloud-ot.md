@@ -238,6 +238,11 @@ shows "tunnel established" with the listen port) and point your client at
 port, so client configs read naturally. The session is audited/recorded like any other
 jump; closing it closes the listener.
 
+**Setting up a rep machine:** [OT protocol clients on Windows](ot-protocol-clients.md) walks through installing the four Python clients and
+running [`scripts/ot/verify_tunnels.py`](../scripts/ot/verify_tunnels.py), which
+reads every protocol through its tunnel and tells you which are live *before* you
+share your screen.
+
 Per-protocol, with a client to demo with:
 
 | Preset | Port | Client through `127.0.0.1:<port>` | Against the `ot-sim` cell |
@@ -334,7 +339,7 @@ the same view is a one-minute job:
 |---|---|---|---|
 | S7 | `s7` | 102 | DB1 words at offsets 0, 2, 4, 6 |
 | EthernetIP | `enip` | 44818 | `COUNTER`, `TEMPERATURE`, `FLOW`, `RUNNING` |
-| OPC UA | `opcua` (`opc.tcp://opcua:4840/ot-sim/server/`) | 4840 | `Plant/Counter`, `…/Temperature`, `…/Flow`, `…/Running` |
+| OPC UA | `opcua` (`opc.tcp://opcua:4840/freeopcua/server/`) | 4840 | `Plant/Counter`, `…/Temperature`, `…/Flow`, `…/Running` |
 
 A single recorded HMI session showing a **Siemens and a Rockwell** device side by side,
 on a host with no route to the internet, is the demo this cell exists for.
@@ -379,8 +384,13 @@ outside the image. Step 2a and step 10 below are their first live pass.
    - Siemens — python-snap7 `db_read(1, 0, 8)` against `127.0.0.1:102`. The
      pure-Python server logs a COTP framing warning on some handshakes; the read is
      what matters, not that line;
-   - Rockwell — `pylogix` `Read("COUNTER")` against `127.0.0.1:44818`;
+   - Rockwell — `pylogix` `Read("Counter")` against `127.0.0.1:44818` (CIP tag
+     names are case-sensitive);
    - OPC UA — UaExpert against `opc.tcp://127.0.0.1:4840`, browse `Objects/Plant`.
+
+   `python scripts/ot/verify_tunnels.py` does all four in one pass and distinguishes
+   "no listener" from "listener, no answer" from "answers but frozen" — see
+   [OT protocol clients on Windows](ot-protocol-clients.md).
 5. Password Safe: managed system `projectId/zone/instanceName` exists; the mirror
    system `<cell>-pravault` exists with account `<cell>-adminuser`; the pair shows
    under `adminuser`'s **Synced Accounts**; rotate `adminuser` and watch the change
