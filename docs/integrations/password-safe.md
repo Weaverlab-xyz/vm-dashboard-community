@@ -736,3 +736,58 @@ dashboard sends the account's real managed system (read from the account when th
 does not already hold it) and quotes Password Safe's response body in the job error, which
 is where the numeric code that separates these lives: `4034` is a request awaiting approval
 and `4035` the account's concurrent-request cap — both also 403.
+
+## What the public API can and cannot do
+
+Researched against BeyondTrust's own endpoint tables — the [BeyondInsight
+APIs](https://docs.beyondtrust.com/bips/v24.3/docs/beyondinsight-api) and [Password Safe
+APIs](https://docs.beyondtrust.com/bips/v24.3/docs/password-safe-api) references — while
+scoping the POV readiness panel. Recorded here so nobody has to establish it twice, and so
+a plan that assumes "we can automate the console" gets corrected before it is written.
+
+**Creatable:**
+
+| Object | Call |
+|---|---|
+| User groups, their permissions and memberships | `POST UserGroups`, `POST UserGroups/{id}/Permissions`, `.../Users` |
+| Workgroups | `POST Workgroups` |
+| Assets | `POST Workgroups/{workgroupID}/Assets` |
+| Address groups and their addresses | `POST AddressGroups` |
+| API registrations | `POST` |
+| Users | `POST Users` |
+| Functional accounts | `POST FunctionalAccounts` — already used by `pov_functional_account` |
+| Directory managed systems | `POST Workgroups/{id}/Directories` |
+| Managed accounts | `POST ManagedSystems/{systemID}/ManagedAccounts` |
+| Attributes and attribute types | `POST` |
+| Smart Rules — **one shape only** | `POST SmartRules/FilterAssetAttribute` |
+
+**Actionable:**
+
+| Action | Call |
+|---|---|
+| Re-process a Smart Rule | `POST SmartRules/{id}/Process` — used by `pov_ps_config.process` |
+| Rotate a managed account's credential | `POST ManagedAccounts/{id}/Credentials/Change` |
+| Test an access policy | `POST AccessPolicies/Test` |
+
+**Not creatable — read-only, or no endpoint at all:**
+
+| Object | State |
+|---|---|
+| Resource zones, resource brokers | **no endpoint of any kind.** Independently confirms why `ps_application_host_id` was never the broker handle — see `docs/design/pov-resource-broker.md` §6 |
+| Discovery credentials | no endpoint |
+| Discovery scans | no endpoint; run from the console |
+| Directory queries | no endpoint |
+| Password policies | read-only |
+| Access policies | read, plus the Test above |
+| Applications | read-only |
+| Smart Rules, generally | read, delete and process; create is the one narrow shape above |
+
+The practical consequence: **the engine of a Password Safe POC — an authenticated discovery
+scan and the Smart Rules that act on its results — cannot be built by this dashboard.** What
+it can do is verify the work and re-run a rule, which is what `pov_ps_config` does.
+
+Absence from the documentation is not proof of absence from the product, and this was not
+checked against a live tenant. The `_probe` helper in `ps_api_service` is built for that
+uncertainty: a `404` is reported as "this Password Safe version does not serve that
+endpoint" rather than as a failure, so a tenant that *does* serve one of these shows up as
+readable instead of broken.
