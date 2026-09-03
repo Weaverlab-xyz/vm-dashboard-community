@@ -161,6 +161,7 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 _INDEX_SECTIONS = {
     "General", "integrations",
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
+    "databases",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -172,6 +173,7 @@ _SECTION_LABELS = {
     "profiles/demo":              "Demo profile",
     "profiles/demo/personas":     "Demo profile · personas",
     "profiles/pov":               "POV profile",
+    "databases":                  "Databases · Password Safe rotation",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
@@ -207,6 +209,8 @@ _TITLE_OVERRIDES = {
     "profiles/pov/customer-access":      "What the customer sees",
     "profiles/pov/lifecycle":            "Keeping a POV true, and reaping it",
     "profiles/pov/ps-runbook":           "Password Safe POC runbook",
+    "databases/password-safe":           "Rotation on AWS and Azure",
+    "databases/password-safe-gcp":       "Rotation on GCP Cloud SQL",
 }
 
 _SHELL = """<!doctype html>

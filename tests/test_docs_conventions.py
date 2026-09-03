@@ -14,9 +14,11 @@ for anyone who already knows its path.
 
   * **The folder index.** Nineteen docs had zero inbound links from anywhere -- all eight
     persona pages, six cloud-identity-JIT phase runbooks, both POV design notes. They were
-    reachable only by knowing the path. Every folder therefore carries a ``README.md``,
-    which GitHub renders as the folder's landing page and which ``docs_pages.doc_index``
-    hangs the section heading off instead of listing as an entry called "Readme".
+    reachable only by knowing the path. Every folder therefore has an index: either its
+    own ``README.md``, which GitHub renders as the folder's landing page and which
+    ``docs_pages.doc_index`` hangs the section heading off instead of listing as an entry
+    called "Readme", or -- for a hub-and-spoke split -- the sibling ``<folder>.md`` the
+    spokes were cut out of. Never both; see ``_index_of``.
 
 Three placement rules, each learned the hard way, are asserted rather than commented:
 
@@ -185,12 +187,40 @@ def test_exactly_one_line_declares_the_audience():
 
 # ── the folder indexes ───────────────────────────────────────────────────────
 
+def _index_of(folder):
+    """The page that indexes a folder, or None.
+
+    Either the folder's own README.md, or -- for a hub-and-spoke split -- the sibling
+    ``<folder>.md`` the spokes were cut out of. The sibling case is not a shortcut: a
+    folder cannot have BOTH, because ``doc_page`` resolves ``<page>.md`` before falling
+    back to ``<page>/README.md``, so docs/databases.md and docs/databases/README.md would
+    both answer /docs/databases and the README would be the one you could never reach.
+    The hub keeps the filename because operator-facing strings name it -- eight scripts
+    and six agent error messages name ONBOARDING.md and remote-agents.md."""
+    own = os.path.join(_DOCS, folder, _INDEX)
+    if os.path.isfile(own):
+        return own
+    sibling = os.path.join(_DOCS, f"{folder}.md")
+    if folder and os.path.isfile(sibling):
+        return sibling
+    return None
+
+
 def test_every_folder_with_docs_has_an_index():
-    missing = sorted(f for f in _folders()
-                     if not os.path.isfile(os.path.join(_DOCS, f, _INDEX)))
+    missing = sorted(f for f in _folders() if _index_of(f) is None)
     assert not missing, (
-        f"these folders have no {_INDEX}, so their pages are reachable only by path: "
-        f"{[f or 'docs/' for f in missing]}")
+        f"these folders have neither a {_INDEX} nor a sibling hub, so their pages are "
+        f"reachable only by path: {[f or 'docs/' for f in missing]}")
+
+
+def test_no_folder_has_both_a_readme_and_a_sibling_hub():
+    """Both is worse than either: /docs/<folder> serves the hub, so the README becomes a
+    page nothing can navigate to -- the exact problem the indexes exist to fix."""
+    both = sorted(f for f in _folders()
+                  if f and os.path.isfile(os.path.join(_DOCS, f, _INDEX))
+                  and os.path.isfile(os.path.join(_DOCS, f"{f}.md")))
+    assert not both, (
+        f"these folders have a {_INDEX} AND a sibling <folder>.md: {both}. Keep one.")
 
 
 def test_every_index_links_every_doc_in_its_own_folder():
@@ -198,12 +228,17 @@ def test_every_index_links_every_doc_in_its_own_folder():
     looks deliberately unlisted rather than forgotten."""
     bad = []
     for folder in sorted(_folders()):
-        index = os.path.join(_DOCS, folder, _INDEX)
-        if not os.path.isfile(index):
+        index = _index_of(folder)
+        if index is None:
             continue  # the test above owns that failure
+        base = os.path.dirname(os.path.relpath(index, _DOCS)).replace("\\", "/")
         linked = set()
         for href in _LINK.findall(_read(index)):
-            linked.add(href.split("#")[0].rstrip("/"))
+            href = href.split("#")[0].rstrip("/")
+            # hrefs in a sibling hub are relative to docs/, not to the folder
+            if base != folder and href.startswith(f"{os.path.basename(folder)}/"):
+                href = href.split("/", 1)[1]
+            linked.add(href)
         here = os.path.join(_DOCS, folder)
         for f in sorted(os.listdir(here)):
             if not f.endswith(".md") or f == _INDEX:
@@ -218,15 +253,17 @@ def test_every_index_links_its_immediate_subfolders():
     island that happens to exist."""
     bad = []
     for folder in sorted(_folders()):
-        index = os.path.join(_DOCS, folder, _INDEX)
-        if not os.path.isfile(index):
+        index = _index_of(folder)
+        if index is None:
             continue
         linked = {h.split("#")[0].rstrip("/") for h in _LINK.findall(_read(index))}
         children = {f for f in _folders()
                     if os.path.dirname(f) == folder and f != folder}
         for child in sorted(children):
             name = os.path.basename(child)
-            if not ({name, f"{name}/{_INDEX}"} & linked):
+            # Whatever indexes the child counts: its own README, or the sibling
+            # <folder>.md hub a split cut its spokes out of.
+            if not ({name, f"{name}/{_INDEX}", f"{name}.md"} & linked):
                 bad.append(f"{folder or '.'}/{_INDEX} does not link the {name}/ folder")
     assert not bad, "\n  ".join([""] + bad)
 
