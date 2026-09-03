@@ -1,6 +1,8 @@
 # OT protocol clients on Windows
 
-How to set up a Windows laptop to read an [OT Demo Cell](cloud-ot.md) through its PRA
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are setting up a rep machine to read an OT cell through its PRA protocol tunnels.
+
+How to set up a Windows laptop to read an [OT Demo Cell](ot-demo-cell.md) through its PRA
 protocol tunnels, and what to type in front of a customer. Four Python clients cover
 the four protocols the cell simulates — `pymodbus`, `asyncua`, `pylogix` and
 `python-snap7` — and all four install as plain wheels with no native toolchain, no
@@ -53,7 +55,7 @@ corporate root CA rather than disabling verification:
 $env:PIP_CERT = "C:\path\to\corp-root.crt"
 ```
 
-The same PEM you would drop in [corp-ca/](../corp-ca/README.md).
+The same PEM you would drop in [corp-ca/](../../../corp-ca/README.md).
 
 ### Version notes that matter
 
@@ -70,7 +72,7 @@ The same PEM you would drop in [corp-ca/](../corp-ca/README.md).
 
 ## Verify the whole cell in one command
 
-[`scripts/ot/verify_tunnels.py`](../scripts/ot/verify_tunnels.py) reads all four
+[`scripts/ot/verify_tunnels.py`](../../../scripts/ot/verify_tunnels.py) reads all four
 protocols and tells you which are live. Run it **after** starting the cell's tunnel
 jump items in the representative console:
 
@@ -253,11 +255,11 @@ port, so a client that wanders off it just hangs.
 | pip fails with `CERTIFICATE_VERIFY_FAILED` | TLS-inspecting proxy — set `PIP_CERT` to your corporate root CA (above) |
 | `TypeError` on `read_holding_registers` | pymodbus version drift on the unit-id kwarg — try `slave=1` instead of `device_id=1` |
 | OPC UA connects but browsing finds no `Plant` | Wrong namespace or endpoint path. Resolve the index with `get_namespace_index("http://ot-sim.demo")` rather than hardcoding `ns=2` |
-| Azure cell: Web Jump works, the tunnel never establishes | The cell's Gateway resolved to an **ACI** gateway — ACI is serverless and cannot do protocol tunneling. See [cloud-ot.md](cloud-ot.md#troubleshooting) |
+| Azure cell: Web Jump works, the tunnel never establishes | The cell's Gateway resolved to an **ACI** gateway — ACI is serverless and cannot do protocol tunneling. See [cloud-ot.md](ot-demo-cell.md#troubleshooting) |
 
 ## See also
 
-- [OT Demo Cell](cloud-ot.md) — deploying the cell, the PRA wiring, standalone tunnels
-  to real gear, and the [tunnel reference](cloud-ot.md#using-the-protocol-tunnels)
-- [`provisioners/ot/README.md`](../provisioners/ot/README.md) — what the image contains,
+- [OT Demo Cell](ot-demo-cell.md) — deploying the cell, the PRA wiring, standalone tunnels
+  to real gear, and the [tunnel reference](ot-demo-cell.md#using-the-protocol-tunnels)
+- [`provisioners/ot/README.md`](../../../provisioners/ot/README.md) — what the image contains,
   the version pins, and how to swap in real OpenPLC

@@ -15,6 +15,7 @@ belongs to a customer and points at the customer's own BeyondTrust tenant. See
 |---|---|
 | [Personas](personas/README.md) | One page per role — what that person owns, the four-layer story in their language, and the use cases to run for them. |
 | [OT Demo Cell](ot-demo-cell.md) | A simulated OT/ICS plant cell — PLC simulators and a web SCADA/HMI in an egress-less subnet, reached only through a Gateway. The air gap *is* the demo. |
+| [OT protocol clients on Windows](ot-protocol-clients.md) | Setting up a rep machine to read that cell: the four Python clients, a runnable snippet per protocol, and why DNP3 answers nothing. |
 
 ## Everything else is a capability doc
 

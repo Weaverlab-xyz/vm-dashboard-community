@@ -241,7 +241,7 @@ port, so client configs read naturally. The session is audited/recorded like any
 jump; closing it closes the listener.
 
 **Setting up a rep machine:** [OT protocol clients on Windows](ot-protocol-clients.md) walks through installing the four Python clients and
-running [`scripts/ot/verify_tunnels.py`](../scripts/ot/verify_tunnels.py), which
+running [`scripts/ot/verify_tunnels.py`](../../../scripts/ot/verify_tunnels.py), which
 reads every protocol through its tunnel and tells you which are live *before* you
 share your screen.
 

@@ -27,10 +27,22 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SIM = os.path.join(_ROOT, "provisioners", "ot", "ot-sim-debian.sh")
 _VERIFY = os.path.join(_ROOT, "scripts", "ot", "verify_tunnels.py")
 _DOCS = [
-    os.path.join(_ROOT, "docs", "cloud-ot.md"),
-    os.path.join(_ROOT, "docs", "ot-protocol-clients.md"),
+    os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell.md"),
+    os.path.join(_ROOT, "docs", "profiles", "demo", "ot-protocol-clients.md"),
     os.path.join(_ROOT, "provisioners", "ot", "README.md"),
 ]
+
+
+def test_the_docs_this_file_checks_all_still_exist():
+    """The checks below used to skip a doc that had moved, which is the one failure mode
+    this file cannot afford: a silent skip looks exactly like a pass, so a rename would
+    quietly stop holding the docs against the bake script. Both OT docs moved under
+    docs/profiles/demo/ and nothing failed until this test was added."""
+    missing = [d for d in _DOCS if not os.path.exists(d)]
+    assert not missing, (
+        f"_DOCS names {len(missing)} file(s) that no longer exist: "
+        f"{[os.path.relpath(d, _ROOT) for d in missing]} -- the checks in this file skip "
+        "what they cannot find, so a stale path here disables them silently")
 
 
 def _read(path):
@@ -97,8 +109,6 @@ def test_docs_advertise_the_endpoint_path_the_sim_serves():
     endpoint = re.search(r'ENDPOINT = "opc\.tcp://0\.0\.0\.0:\d+([^"]*)"', _SRC)
     path = endpoint.group(1)
     for doc in _DOCS:
-        if not os.path.exists(doc):
-            continue
         for line in _read(doc).splitlines():
             for url in re.findall(r"opc\.tcp://[^\s`)|\"']+", line):
                 url = url.rstrip(".,;")
@@ -126,12 +136,10 @@ def test_value_names_match_the_opcua_and_cip_tags():
 def test_docs_spell_cip_tag_names_the_way_the_sim_serves_them():
     """CIP tag names are case-sensitive and pylogix reports a miss as a Status,
     not an exception -- so the wrong case reads as "the tunnel is broken".
-    docs/cloud-ot.md said ``Read("COUNTER")`` for as long as the tag existed."""
+    the OT demo cell doc said ``Read("COUNTER")`` for as long as the tag existed."""
     cip = re.search(r"^TAGS = \[([^\]]+)\]", _SRC, re.M)
     tags = set(re.findall(r'"(\w+)"', cip.group(1)))
     for doc in _DOCS:
-        if not os.path.exists(doc):
-            continue
         for name in re.findall(r'Read\("(\w+)"\)', _read(doc)):
             assert name in tags, (
                 f"{os.path.basename(doc)}: tells the reader to Read(\"{name}\"), but "
