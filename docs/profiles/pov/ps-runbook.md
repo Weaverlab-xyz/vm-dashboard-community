@@ -193,7 +193,7 @@ never mentions an "application host" anywhere.
 `ps_application_host_id` on a POV is therefore an optional override, not the routing
 mechanism, and the wire-up sends `0` when it is unset. If a rotation fails to reach a guest
 days after onboarding, check the zone-to-workgroup mapping first. See
-`docs/profiles/pov/design/resource-broker.md` §6.
+[`docs/profiles/pov/design/resource-broker.md`](design/resource-broker.md) §6.
 
 ## A caution about the shared template
 

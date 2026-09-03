@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you are handing rotation of an AWS or Azure database credential to Password Safe.
 
-Part of [Databases](../databases.md), Layer 2. The GCP channel is separate: see
+Part of [Databases](../../databases.md), Layer 2. The GCP channel is separate: see
 [Cloud SQL over the Data API](password-safe-gcp.md).
 
 ### Two ways in: at provision, or afterwards
@@ -32,7 +32,7 @@ use **Import from Password Safe** instead.
 > hand if you want the database back on its admin login.
 
 > **Setting this up or testing the plugins?**
-> [docs/runbooks/clouddb-password-safe-plugin-setup.md](../runbooks/clouddb-password-safe-plugin-setup.md)
+> [docs/runbooks/clouddb-password-safe-plugin-setup.md](../../runbooks/clouddb-password-safe-plugin-setup.md)
 > is the field-by-field operator runbook: prerequisites, exactly what to put in each
 > settings-panel field, the test procedure, and how to read a failure.
 

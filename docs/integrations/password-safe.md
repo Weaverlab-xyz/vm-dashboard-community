@@ -669,7 +669,7 @@ is on), or the row's **Register in Password Safe** action afterwards — which i
 database built before Password Safe was configured gets onboarded without being rebuilt.
 Registering after the fact **re-brokers the PRA tunnel** so it injects the rotatable managed
 user rather than the master admin; see
-[Databases → Two ways in](../databases/password-safe.md#two-ways-in-at-provision-or-afterwards).
+[Databases → Two ways in](databases/password-safe.md#two-ways-in-at-provision-or-afterwards).
 
 The dashboard can also **register** a database it did not create — on-premises or in a cloud —
 so it can be a Configuration Management target. That path has no tunnel and no onboarding: its
@@ -775,7 +775,7 @@ a plan that assumes "we can automate the console" gets corrected before it is wr
 
 | Object | State |
 |---|---|
-| Resource zones, resource brokers | **no endpoint of any kind.** Independently confirms why `ps_application_host_id` was never the broker handle — see `docs/profiles/pov/design/resource-broker.md` §6 |
+| Resource zones, resource brokers | **no endpoint of any kind.** Independently confirms why `ps_application_host_id` was never the broker handle — see [`docs/profiles/pov/design/resource-broker.md`](../profiles/pov/design/resource-broker.md) §6 |
 | Discovery credentials | no endpoint |
 | Discovery scans | no endpoint; run from the console |
 | Directory queries | no endpoint |
