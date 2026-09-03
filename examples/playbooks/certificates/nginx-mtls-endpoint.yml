@@ -1,0 +1,110 @@
+# An mTLS endpoint that demands a client certificate signed by the lab CA.
+# Target: a Linux VM (any cloud). This is the thing a plugin-issued certificate
+# authenticates TO, and it is the step demonstrations usually skip.
+#
+# The endpoint echoes the presented subject DN back. That is the point: curl succeeding
+# proves TLS completed, but the endpoint answering "CN=svc-deploy-pipeline" proves the
+# plugin's certificate authenticated as the RIGHT identity.
+#
+# extra_vars (required):
+#   ca_chain_pem: the CA chain. Certificate Lab → the CA row → "Chain", or
+#                 `gcloud privateca pools get-ca-certs <pool> --location <loc>`.
+# extra_vars (optional):
+#   mtls_port:        8443
+#   mtls_server_name: api.demo.internal
+#
+# Open the port in the security group / NSG / firewall first.
+- name: nginx endpoint requiring a client certificate
+  hosts: all
+  become: true
+  vars:
+    mtls_port: 8443
+    mtls_server_name: api.demo.internal
+    cert_dir: /etc/nginx/certs
+  handlers:
+    - name: Restart nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+
+  tasks:
+    - name: Fail early when no CA chain was supplied
+      ansible.builtin.assert:
+        that:
+          - ca_chain_pem is defined
+          - ca_chain_pem | trim | length > 0
+        fail_msg: >-
+          ca_chain_pem is required. Without it nginx has nothing to verify client
+          certificates against, and ssl_verify_client would reject every caller with an
+          error that reads like a client problem.
+
+    - name: Install nginx and openssl
+      ansible.builtin.package:
+        name:
+          - nginx
+          - openssl
+        state: present
+
+    - name: Ensure the certificate directory exists
+      ansible.builtin.file:
+        path: "{{ cert_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the CA chain client certificates must chain to
+      ansible.builtin.copy:
+        dest: "{{ cert_dir }}/ca-chain.pem"
+        content: "{{ ca_chain_pem }}"
+        mode: "0644"
+      notify: Restart nginx
+
+    # The SERVER certificate is self-signed and separate from the lab CA on purpose.
+    # It only has to make TLS complete; what is being demonstrated is the CLIENT
+    # certificate, and issuing the server's own from the lab CA would blur the two.
+    # Consumers pass --cacert for the chain and simply do not verify this one.
+    - name: Generate the server key and self-signed certificate
+      ansible.builtin.command:
+        cmd: >-
+          openssl req -x509 -newkey rsa:2048 -nodes
+          -keyout {{ cert_dir }}/server.key -out {{ cert_dir }}/server.crt
+          -days 365 -subj "/CN={{ mtls_server_name }}"
+          -addext "subjectAltName=DNS:{{ mtls_server_name }}"
+        creates: "{{ cert_dir }}/server.crt"
+      notify: Restart nginx
+
+    - name: Lock down the server key
+      ansible.builtin.file:
+        path: "{{ cert_dir }}/server.key"
+        mode: "0600"
+
+    - name: Write the mTLS server block
+      ansible.builtin.copy:
+        dest: /etc/nginx/conf.d/mtls-demo.conf
+        mode: "0644"
+        content: |
+          server {
+              listen {{ mtls_port }} ssl;
+              server_name {{ mtls_server_name }};
+
+              ssl_certificate     {{ cert_dir }}/server.crt;
+              ssl_certificate_key {{ cert_dir }}/server.key;
+
+              # The chain the plugin's certificates will chain to.
+              ssl_client_certificate {{ cert_dir }}/ca-chain.pem;
+              ssl_verify_client on;
+              ssl_verify_depth 3;
+
+              location / {
+                  # Echo the presented identity back, so a successful call proves WHICH
+                  # certificate authenticated rather than merely that TLS completed.
+                  add_header Content-Type text/plain always;
+                  return 200 "authenticated as: $ssl_client_s_dn\nserial: $ssl_client_serial\nverify: $ssl_client_verify\n";
+              }
+          }
+      notify: Restart nginx
+
+    - name: Enable and start nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true

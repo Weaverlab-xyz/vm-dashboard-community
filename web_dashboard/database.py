@@ -1421,6 +1421,65 @@ class CloudDatabase(Base):
     expiry_warned_at = Column(DateTime, nullable=True)
 
 
+class CertLab(Base):
+    """Inventory of dashboard-provisioned certificate authorities for the Password Safe
+    Certificate plugin's lab.
+
+    One row per **CA pool**, which is the thing that carries standing cost: a GCP CAS
+    DevOps-tier pool is ~$20/month whether or not it issues anything, and an AWS Private
+    CA is ~$400/month. The mTLS endpoint and the CI runner are ordinary VMs deployed
+    through the normal cloud pages, so they already have their own timers and their own
+    Destroy — this row exists so the CA has one too.
+
+    ``tf_state`` is the scrubbed Terraform state, which is what makes teardown
+    deterministic: the destroy is fed by the recorded state rather than by hand-typed
+    ids, exactly as the database and cluster paths are.
+
+    ``ps_tf_state`` holds the separate state for the managed system + managed account, so
+    deregistering the Password Safe objects and destroying the CA are independent — a
+    lab can be torn down while the certificate identity's audit history stays.
+    """
+    __tablename__ = "cert_labs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(120), nullable=False)
+    cloud = Column(String(20), nullable=False, default="gcp")   # gcp | aws
+    backend = Column(String(20), nullable=False, default="gcpcas")  # the plugin's backend name
+    project = Column(String(120), nullable=True)                # GCP project / AWS account
+    location = Column(String(64), nullable=True)                # CAS region — location-scoped
+    pool_id = Column(String(120), nullable=True)                # the `pool=` on the address
+    status = Column(String(32), nullable=False, default="provisioning", index=True)
+
+    # Terraform state lives in the active storage backend under terraform-state/<job id>,
+    # so destroy re-inits from there and works after a container recreate wiped the deploy
+    # dir. This id is the key to it, which is why deleting a provisioning Job row would
+    # orphan a billing CA pool.
+    deploy_job_id = Column(String(36), nullable=True)
+    # The chain the mTLS endpoint must trust. Public by definition — a CA certificate is
+    # not a secret — so it is stored plainly and handed to the nginx playbook as an
+    # extra_var rather than being fetched again at run time.
+    ca_chain_pem = Column(Text, nullable=True)
+    # The enrollment service account's email. Its KEY is never stored here: it goes
+    # straight into the Password Safe functional account, which is the protected field
+    # built for it. Nothing secret belongs on a row the inventory page renders.
+    enroll_account = Column(String(255), nullable=True)
+
+    ps_system_id = Column(String(36), nullable=True)
+    ps_account_id = Column(String(36), nullable=True)
+    ps_address = Column(Text, nullable=True)                    # the composed profile
+    ps_tf_state = Column(Text, nullable=True)                   # scrubbed
+    error_message = Column(Text, nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    # Auto-delete timer — NULL = never, never "inherit the default" (see Job.expires_at).
+    # Only ever stamped on a PROVISIONED pool: a CA someone else built is inventory, not
+    # something this dashboard may reap.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
+
 class CloudFunction(Base):
     """Inventory of dashboard-deployed cloud functions — Cloud Functions, Phase 1
     (docs/design/cloud-functions.md).

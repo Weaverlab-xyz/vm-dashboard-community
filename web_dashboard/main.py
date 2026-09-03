@@ -812,6 +812,7 @@ templates.env.globals["app_env"] = settings.app_env
 from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
 from .api import cloud_databases  # noqa: E402
+from .api import cert_lab as cert_lab_api  # noqa: E402
 from .api import cloud_functions as cloud_functions_api  # noqa: E402
 from .api import entitle_rest as entitle_rest_api  # noqa: E402
 from .api import pra as pra_api  # noqa: E402
@@ -985,6 +986,8 @@ app.include_router(cloud_databases.router)
 # so a stale route can't leak either).
 app.include_router(cloud_functions_api.router,
                    dependencies=[_feature_gate("cloud_functions_enabled")])
+app.include_router(cert_lab_api.router,
+                   dependencies=[_feature_gate("cert_lab_enabled")])
 # The one Entitle adapter the dashboard hosts itself, because here the dashboard IS
 # the target system. Gated by entitle_user_jit_enabled, and additionally closed
 # (503) whenever entitle_rest_secret is unset — see the router's _require_secret.
@@ -1391,6 +1394,15 @@ async def gcp_page(request: Request):
          dependencies=[_profile_page_gate("cloud_pages")])
 async def oci_page(request: Request):
     return templates.TemplateResponse("oci/index.html", {"request": request})
+
+
+@app.get("/cert-lab", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("cert_lab_enabled")])
+async def cert_lab_page(request: Request):
+    """Certificate Lab: build a private CA that can be destroyed on a timer, and onboard
+    certificate identities onto the Password Safe "Certificate" custom plugin.
+    Nav-, page- and router-gated on cert_lab_enabled (a preview flag)."""
+    return templates.TemplateResponse("cert_lab/index.html", {"request": request})
 
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)

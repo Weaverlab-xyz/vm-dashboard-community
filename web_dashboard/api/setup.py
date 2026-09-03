@@ -1705,6 +1705,46 @@ class CloudFunctionsFeatureConfig(BaseModel):
     gcp_functions_service_account: str = ""
 
 
+class CertLabFeatureConfig(BaseModel):
+    """Config-only panel (no `enabled`) for the Certificate Lab PREVIEW feature.
+    The preview toggle owns `cert_lab_enabled`; this panel holds the Password Safe
+    objects the "Certificate" plugin needs and the certificate-profile defaults.
+    See _CONFIG_ONLY_FEATURES.
+
+    None of these is a secret, deliberately. Both of the plugin's credentials — the CA
+    enrollment identity and the BeyondInsight API user — ride ONE Password Safe functional
+    account, which is a protected field built for exactly that; this panel only names it.
+    Nothing secret belongs on the managed system's address or the account name either,
+    since neither is protected and both are visible anywhere Password Safe shows the
+    object."""
+    cert_ps_platform: str = "Certificate"
+    cert_ps_workgroup: str = ""
+    cert_ps_functional_account: str = ""
+    cert_ps_functional_account_mode: str = "reference"
+    # Blank derives the ORIGIN of pscli_api_url, which is the same tenant by construction.
+    # The plugin appends its own API path, so the full API URL here yields a doubled path.
+    cert_ps_biurl: str = ""
+    # "<safe>/<folder>/<folder>". The plugin creates NOTHING and fails when the folder is
+    # absent, so the dashboard creates the folder tree — but never the safe, which carries
+    # its own ACL. That ACL and the managed account's access policy are both live controls
+    # on the certificate; the weaker of the two is the real access boundary.
+    cert_ps_folder: str = "Certificates"
+    # A Secrets Safe OwnerGroupId. NOT the `secrets_bt_owner` used elsewhere, which is a
+    # numeric USER id written with `-ot User`.
+    cert_ps_owner_group_id: str = ""
+    cert_ps_secret_template: str = ""
+    # Profile defaults. Blank means "do not emit the option", which is also what keeps the
+    # address inside Password Safe's 255-character column — a fully spelled-out ADCS
+    # profile is 269 characters before anyone types a real CA name.
+    cert_default_lifetime: str = "24h"
+    cert_default_key: str = "ecdsa-p256"
+    cert_default_eku: str = "ClientAuth"
+    cert_default_warn: str = ""
+    cert_default_subject: str = ""
+    cert_gcp_cas_location: str = "us-central1"
+    cert_gcp_cas_tier: str = "DEVOPS"
+
+
 class NotificationsFeatureConfig(BaseModel):
     """Outbound notifications. Two brakes, both deliberate.
 
@@ -1821,6 +1861,7 @@ _FEATURE_MODELS = {
     "multi_region":   MultiRegionFeatureConfig,
     "oidc":           OidcFeatureConfig,
     "cloud_functions": CloudFunctionsFeatureConfig,
+    "cert_lab": CertLabFeatureConfig,
     "workload_credentials": WorkloadCredentialsFeatureConfig,
     "worker":         WorkerFeatureConfig,
 }
@@ -1832,6 +1873,7 @@ _FEATURE_MODELS = {
 # "worker" is here because the job worker has no off position at all: it is the process
 # that runs every queued job, so an enable toggle could only ever mislead.
 _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker", "cloud_functions",
+                         "cert_lab",
                          "workload_credentials"}
 
 _SECRET_FEATURE_KEYS = frozenset({
@@ -2239,6 +2281,17 @@ _PREVIEW_FLAGS = {
     # change. Deliberately no release dates here or in any operator-facing text: this
     # repository is public, and a schedule is BeyondTrust's to announce. Off means the
     # dashboard uses today's static cloud credentials, unchanged.
+    # Preview because none of the plugin's four submission paths has been proven against
+    # a live CA yet — the shared core is covered by the plugin's own 286-assertion suite,
+    # but ADCS, AWS Private CA, GCP CAS and the Entra publishers can only be exercised
+    # against a real authority, account or tenant. Off means the dashboard behaves exactly
+    # as it did before, and no CA pool can be created to bill for.
+    "cert_lab_enabled": (
+        "Certificate Lab",
+        "Preview. Build a private CA (GCP CAS) that can be destroyed on a timer, and "
+        "onboard certificate identities onto the Password Safe \"Certificate\" custom "
+        "plugin — the managed account holds the PKCS#12 passphrase, Secrets Safe holds "
+        "the bundle."),
     "workload_credentials_enabled": (
         "Workload Credentials (BeyondTrust)",
         "Preview. Mint short-lived AWS and Azure credentials on demand instead of "
@@ -2253,6 +2306,7 @@ _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
     "cloud_functions_enabled": "cloud_functions",
     "workload_credentials_enabled": "workload_credentials",
+    "cert_lab_enabled": "cert_lab",
 }
 
 

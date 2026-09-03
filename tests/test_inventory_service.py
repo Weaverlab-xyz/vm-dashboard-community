@@ -19,8 +19,12 @@ if _ROOT not in sys.path:
 
 def _install_stubs():
     db = types.ModuleType("web_dashboard.database")
-    for name in ("Job", "CloudDatabase", "K8sCluster", "VirtualDesktop",
-                 "HypervisorConnection", "HypervisorVMCache"):
+    # Every name inventory_service imports from web_dashboard.database. A missing one
+    # does not fail this file -- it makes the import below raise and the whole thing
+    # SKIP, silently, which is how PovEnvironment went unnoticed here for as long as it
+    # did. If you add a model to that import, add it here.
+    for name in ("Job", "CertLab", "CloudDatabase", "K8sCluster", "VirtualDesktop",
+                 "HypervisorConnection", "HypervisorVMCache", "PovEnvironment"):
         setattr(db, name, type(name, (), {}))
     sys.modules["web_dashboard.database"] = db
 

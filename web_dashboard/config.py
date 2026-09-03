@@ -1826,6 +1826,49 @@ class Settings(BaseSettings):
     # Vault account to the token account with SyncedAccounts, and a managed account and
     # its subscribers always share a credential, so every rotation reaches PRA with
     # nothing here on a timer and no interval to tune.
+
+    # ── Certificate Lab (the "Certificate" custom plugin) ────────────────────
+    # Password Safe as a certificate registrar and broker: a managed account becomes a
+    # certificate identity holding the PKCS#12 PASSPHRASE, and Secrets Safe holds the
+    # bundle that passphrase opens. Both halves are needed and both are governed.
+    #
+    # Everything the plugin reads comes from standard Password Safe fields, because
+    # appsettings.json ships INSIDE the .psplugin and a Password Safe **Cloud** tenant
+    # cannot edit it. So the whole certificate profile rides the managed system's Network
+    # Address, and the two credentials ride one functional account split on the LAST colon.
+    # Operator prerequisites (manual): import the .psplugin, create the platform, create
+    # the functional account, and create the Secrets Safe folder's parent safe.
+    # See docs/certificates.md.
+    # PREVIEW flag, alongside cloud_functions_enabled / vdesktops_enabled /
+    # workload_credentials_enabled in setup._PREVIEW_FLAGS: none of the plugin's four
+    # submission paths has been proven against a live CA yet. Off means the dashboard
+    # behaves exactly as before, and no CA pool can be created to bill for.
+    cert_lab_enabled: bool = False                   # master gate: page, nav, router
+    cert_ps_platform: str = "Certificate"            # plugin platform (name or id) — resolved live via /Platforms
+    cert_ps_workgroup: str = ""                      # blank → passwordsafe_workgroup
+    cert_ps_functional_account: str = ""             # the enrollment identity + BI API user, on the Certificate platform
+    cert_ps_functional_account_mode: str = "reference"  # reference an existing account | create one
+    # Where the plugin writes the bundle. `biurl` is the BeyondInsight base URL the plugin
+    # calls; on a Cloud tenant it is the ONLY place it can come from, since appsettings.json
+    # is unreachable. `owner` is a Secrets Safe OwnerGroupId — deliberately NOT the
+    # `secrets_bt_owner` used elsewhere, which is a numeric USER id written with `-ot User`.
+    cert_ps_biurl: str = ""                          # https://<tenant> — blank falls back to pscli_api_url's origin
+    cert_ps_folder: str = "Certificates"             # Secrets Safe folder — MUST already exist; the plugin creates nothing
+    cert_ps_owner_group_id: str = ""                 # OwnerGroupId for created secrets; Secrets Safe requires an owner
+    cert_ps_secret_template: str = ""                # blank → the plugin's own default, cert/{system}/{account}
+    # Certificate profile defaults, applied to a new managed system unless the form
+    # overrides them. Left blank means "do not emit the option at all", which keeps the
+    # address short — and the address has 255 characters, total.
+    cert_default_lifetime: str = "24h"               # 90m|12h|30d|2w|1y; a bare number means DAYS. Ignored by ADCS
+    cert_default_key: str = "ecdsa-p256"             # rsa2048|rsa3072|rsa4096|ecdsa-p256|ecdsa-p384|ecdsa-p521
+    cert_default_eku: str = "ClientAuth"             # named explicitly: under eku=Auto a DNS SAN drags serverAuth in
+    cert_default_warn: str = ""                      # renewal threshold as a % of the certificate's own lifetime (plugin default 25)
+    cert_default_subject: str = ""                   # blank → the plugin's own default, CN={AccountName}
+    # GCP CAS lab defaults, read by the Certificate Lab page when it composes a gcpcas
+    # address against a pool this dashboard provisioned.
+    cert_gcp_cas_location: str = "us-central1"       # CAS is regional; the pool, its CAs and any template all share this
+    cert_gcp_cas_tier: str = "DEVOPS"                # DEVOPS (~$20/mo/pool) | ENTERPRISE. DevOps keeps no certificate records
+
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md

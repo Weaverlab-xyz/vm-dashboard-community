@@ -65,6 +65,7 @@ HANDLED_TYPES = (
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
     "clouddb_adapter_pair", "clouddb_dbops_deploy",
+    "certca_provision", "certca_decommission", "cert_ps_register",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
@@ -102,6 +103,7 @@ HEAVY_TYPES = (
     "clouddb_provision", "clouddb_decommission",      # cloud_database_service, same
     "cloudfn_deploy", "cloudfn_update",               # cloud_function_service, same
     "cloudfn_decommission",
+    "certca_provision", "certca_decommission",        # cert_lab_service, terraform apply/destroy
     "clouddb_adapter_pair",                           # drives cloudfn_deploy's apply inline
     "clouddb_dbops_deploy",                           # same, twice (deploy then audience)
     "packer_aws_build", "packer_azure_build",         # packer_service._stream_command
@@ -127,6 +129,9 @@ MEDIUM_TYPES = (
     # terraform per Password Safe managed system (ps_resource_service) and — on the
     # register path — a re-broker of the DB's PRA tunnel. No streaming, no long process.
     "clouddb_ps_register",
+    # One short terraform for the Password Safe managed system (ps_resource_service),
+    # plus a ps-cli round trip to create the Secrets Safe folder the plugin writes into.
+    "cert_ps_register",
     # cloud SDK + HTTP readiness poll + an OPT-IN short terraform for the PRA Web Jump
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown",
@@ -437,6 +442,21 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             await cloud_database_service.run_ps_register(
                 db, db_id=meta["db_id"], job_id=job_id,
                 action=meta.get("action", "register"))
+        elif job_type == "certca_provision":
+            from .services import cert_lab_service
+            await cert_lab_service.run_provision_apply(
+                db, lab_id=meta["lab_id"], job_id=job_id)
+        elif job_type == "certca_decommission":
+            from .services import cert_lab_service
+            await cert_lab_service.run_decommission(
+                db, lab_id=meta["lab_id"], job_id=job_id)
+        elif job_type == "cert_ps_register":
+            from .services import cert_lab_service
+            await cert_lab_service.run_ps_register(
+                db, lab_id=meta["lab_id"], job_id=job_id,
+                account_name=meta["account_name"],
+                action=meta.get("action", "register"),
+                address=meta.get("address", ""))
         elif job_type == "cloudfn_deploy":
             from .services import cloud_function_service
             await cloud_function_service.run_deploy_apply(

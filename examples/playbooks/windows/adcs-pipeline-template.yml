@@ -1,0 +1,154 @@
+# Prepare an existing AD CS enterprise CA for the Password Safe Certificate plugin.
+# Target: the issuing CA (often the DC itself), over WinRM.
+#
+# This does NOT install AD CS or promote a domain controller. It creates the two things
+# the plugin needs on a CA that already exists: a certificate template it can enrol
+# against, and a least-privilege enrollment account with Enroll on that template.
+#
+# Four settings on the template decide whether the plugin works at all:
+#   * SUBJECT SUPPLIED IN THE REQUEST. Without it ADCS overrides the plugin's subject with
+#     the enrolling account's directory name, and the whole subject-template mechanism is
+#     bypassed silently.
+#   * NO CA CERTIFICATE MANAGER APPROVAL. With it every rotation returns
+#     CR_DISP_UNDER_SUBMISSION and the plugin fails by design — a rotation job cannot block
+#     on a human clicking Issue in the CA console.
+#   * A SHORT VALIDITY. 7 days makes renewal observable inside a demonstration rather than
+#     theoretical. Note the TEMPLATE decides validity: `lifetime=` on the plugin's address
+#     is ignored on ADCS, and the plugin does not pretend otherwise.
+#   * CLIENT AUTHENTICATION EKU only.
+#
+# extra_vars (optional):
+#   template_name:   CorpPipelineClientAuth
+#   template_days:   7
+#   enroll_account:  svc-adcs-enroll
+#   enroll_ou:       DN of the OU to create the account in (default: the Users container)
+#
+# The enrollment account's PASSWORD is deliberately not set here: it belongs in the
+# Password Safe functional account's protected field, and a password passed as an extra_var
+# lands in job metadata and in Live Output. Set it once by hand, or manage that account
+# with Password Safe itself.
+- name: Prepare an ADCS template and enrollment account for the Certificate plugin
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_winrm_server_cert_validation: ignore
+    template_name: CorpPipelineClientAuth
+    template_display_name: Corp Pipeline Client Auth
+    template_days: 7
+    enroll_account: svc-adcs-enroll
+    enroll_ou: ""
+
+  tasks:
+    - name: Confirm this host is actually a certification authority
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        certutil -dump | Select-String -Pattern 'Config' | Select-Object -First 4
+      changed_when: false
+      register: ca_dump
+
+    # The `ca=` value for the plugin's address, in the exact form it wants:
+    # CA-HOST\CA Common Name. Read off the CA rather than assembled by hand, because a
+    # guessed common name fails later as an opaque enrollment error.
+    - name: Read the CA configuration string
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        $cfg = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+        $host_fqdn = $env:COMPUTERNAME + '.' + $env:USERDNSDOMAIN
+        $host_fqdn + '\' + $cfg.Active
+      changed_when: false
+      register: ca_config
+
+    - name: Create the certificate template by duplicating Client Authentication
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory
+        $root = (Get-ADRootDSE).configurationNamingContext
+        $path = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$root"
+        $found = Get-ADObject -Filter "cn -eq '{{ template_name }}'" -SearchBase $path -ErrorAction SilentlyContinue
+        if ($found) { Write-Output 'EXISTS'; exit 0 }
+
+        $base = Get-ADObject -Filter "cn -eq 'ClientAuth'" -SearchBase $path -Properties *
+        $skip = @('cn','distinguishedName','name','objectGUID','uSNCreated','uSNChanged',
+                  'whenCreated','whenChanged','displayName','msPKI-Cert-Template-OID',
+                  'instanceType','objectCategory','objectClass','nTSecurityDescriptor')
+        $attrs = @{}
+        foreach ($p in $base.PropertyNames) {
+          if ($skip -notcontains $p) { $attrs[$p] = $base.$p }
+        }
+
+        # Validity and renewal are FILETIME byte arrays: NEGATIVE 100-nanosecond intervals.
+        $ticks = [int64]({{ template_days }} * 24 * 60 * 60 * 10000000)
+        $attrs['pKIExpirationPeriod'] = [System.BitConverter]::GetBytes(-$ticks)
+        $attrs['pKIOverlapPeriod'] = [System.BitConverter]::GetBytes([int64](-1 * 24 * 60 * 60 * 10000000))
+        # Bit 0x00000001 = ENROLLEE_SUPPLIES_SUBJECT. Without it ADCS overrides the
+        # plugin's subject and the subject template is silently ignored.
+        $attrs['msPKI-Certificate-Name-Flag'] = 1
+        # No CA manager approval: bit 0x2 (PEND_ALL_REQUESTS) must be CLEAR, or every
+        # rotation comes back CR_DISP_UNDER_SUBMISSION.
+        $attrs['msPKI-Enrollment-Flag'] = 0
+
+        New-ADObject -Name '{{ template_name }}' -Type pKICertificateTemplate -Path $path -DisplayName '{{ template_display_name }}' -OtherAttributes $attrs
+        Write-Output 'CREATED'
+      register: template_result
+      changed_when: "'CREATED' in template_result.stdout"
+
+    - name: Create the enrollment account if it does not exist
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory
+        $found = Get-ADUser -Filter "sAMAccountName -eq '{{ enroll_account }}'" -ErrorAction SilentlyContinue
+        if ($found) { Write-Output 'EXISTS'; exit 0 }
+        $params = @{
+          Name = '{{ enroll_account }}'
+          SamAccountName = '{{ enroll_account }}'
+          Description = 'Password Safe Certificate plugin enrollment identity'
+          Enabled = $false
+        }
+        {% if enroll_ou %}
+        $params['Path'] = '{{ enroll_ou }}'
+        {% endif %}
+        New-ADUser @params
+        Write-Output 'CREATED'
+      register: account_result
+      changed_when: "'CREATED' in account_result.stdout"
+
+    # Enroll, and nothing else. The enrollment account does not need to be a CA manager.
+    # It can obtain a certificate for any identity the template permits, though — so a
+    # template that constrains subject and EKU is a better control than a permissive one
+    # policed only by the plugin's configuration.
+    - name: Grant the enrollment account Enroll on the template
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory
+        $root = (Get-ADRootDSE).configurationNamingContext
+        $dn = "CN={{ template_name }},CN=Certificate Templates,CN=Public Key Services,CN=Services,$root"
+        $user = Get-ADUser -Identity '{{ enroll_account }}'
+        $acl = Get-Acl -Path "AD:$dn"
+        # 0e10c968-78fb-11d2-90d4-00c04f79dc55 is the Certificate-Enrollment extended right.
+        $enroll = [GUID]'0e10c968-78fb-11d2-90d4-00c04f79dc55'
+        $rule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule($user.SID, 'ExtendedRight', 'Allow', $enroll)
+        $acl.AddAccessRule($rule)
+        Set-Acl -Path "AD:$dn" -AclObject $acl
+        Write-Output 'GRANTED'
+      changed_when: true
+
+    - name: Publish the template on the issuing CA
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        $existing = certutil -CATemplates 2>$null | Select-String -Pattern '{{ template_name }}'
+        if ($existing) { Write-Output 'ALREADY PUBLISHED'; exit 0 }
+        certutil -SetCATemplates "+{{ template_name }}"
+        Write-Output 'PUBLISHED'
+      register: publish_result
+      changed_when: "'ALREADY' not in publish_result.stdout"
+
+    # Everything the plugin's Network Address needs from this CA, in one place.
+    - name: The values for the managed system's Network Address
+      ansible.builtin.debug:
+        msg: >-
+          ca={{ ca_config.stdout | trim }}
+          template={{ template_name }}
+          -- functional account username is <DOMAIN>\{{ enroll_account }}:<bi-run-as-user>.
+          Enable the account and set its password before the first rotation.

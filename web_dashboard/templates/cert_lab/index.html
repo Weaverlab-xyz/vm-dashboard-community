@@ -1,0 +1,389 @@
+{% extends "base.html" %}
+{% block title %}Certificates{% endblock %}
+
+{# Certificate Lab page (PREVIEW, gated by cert_lab_enabled).
+   Builds a private CA — today a GCP CAS DevOps-tier pool — and onboards certificate
+   identities onto the Password Safe "Certificate" custom plugin. Backed by /api/cert-lab.
+
+   Two things on this page are load-bearing and easy to mistake for decoration:
+     * the address character counter. The managed system's Network Address is the ENTIRE
+       configuration surface for this plugin (a Password Safe Cloud tenant cannot edit the
+       appsettings.json inside the .psplugin) and Password Safe's column is 255 characters.
+       The fully spelled-out ADCS profile from the plugin's documentation is 269.
+     * the cost line on each CA. The pool bills whether or not it ever issues anything,
+       which is the entire reason this row has an auto-delete timer. #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="certLabPage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <div class="flex items-center gap-2">
+      <h1 class="text-2xl font-bold text-gray-800">Certificates</h1>
+      <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Preview</span>
+    </div>
+    <button @click="openBuild()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Build a CA
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    Password Safe as a certificate <strong>registrar and broker</strong> — it never becomes
+    a certificate authority. The managed account holds the PKCS#12 passphrase, Secrets Safe
+    holds the bundle it opens, and both halves are governed. Build a private CA here, onboard
+    an identity onto it, then rotate from BeyondInsight.
+    <a href="/docs/certificates" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- What is not configured yet. Every item here fails hours later inside the plugin
+       rather than at the click, so it is named up front. -->
+  <div x-show="missing.length" x-cloak
+       class="mb-6 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3 text-sm text-amber-800">
+    <p class="font-medium mb-1">Finish the Password Safe setup before onboarding an identity</p>
+    <ul class="list-disc list-inside space-y-0.5">
+      <template x-for="m in missing" :key="m"><li x-text="m"></li></template>
+    </ul>
+    <p class="mt-2">
+      <a href="/settings" class="text-amber-900 underline">Settings → Certificate Lab</a>
+    </p>
+  </div>
+
+  <!-- CA list -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div x-show="loading" class="px-4 py-8 text-center text-sm text-gray-400">Loading…</div>
+
+    <div x-show="!loading && authorities.length === 0" x-cloak
+         class="px-4 py-10 text-center text-sm text-gray-500">
+      No certificate authority yet. A GCP CAS pool on the DevOps tier is about
+      <strong>$20/month</strong> plus roughly $0.30 per certificate, and it bills whether or
+      not it issues anything — so every CA built here carries an auto-delete timer.
+    </div>
+
+    <table x-show="!loading && authorities.length" x-cloak class="min-w-full text-sm">
+      <thead class="bg-gray-50 text-gray-600">
+        <tr>
+          <th class="text-left font-medium px-4 py-2">Name</th>
+          <th class="text-left font-medium px-4 py-2">Pool</th>
+          <th class="text-left font-medium px-4 py-2">Location</th>
+          <th class="text-left font-medium px-4 py-2">Status</th>
+          <th class="text-left font-medium px-4 py-2">Identity</th>
+          <th class="text-left font-medium px-4 py-2">Expires</th>
+          <th class="px-4 py-2"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="ca in authorities" :key="ca.id">
+          <tr>
+            <td class="px-4 py-2 font-medium text-gray-800" x-text="ca.name"></td>
+            <td class="px-4 py-2 font-mono text-xs text-gray-600" x-text="ca.pool_id"></td>
+            <td class="px-4 py-2 text-gray-600" x-text="ca.location"></td>
+            <td class="px-4 py-2">
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                    :class="statusClass(ca.status)" x-text="ca.status"></span>
+              <span x-show="ca.error_message" x-cloak
+                    class="block text-xs text-red-600 mt-1" x-text="ca.error_message"></span>
+            </td>
+            <td class="px-4 py-2 text-gray-600">
+              <span x-show="ca.ps_account_id" x-cloak class="text-xs">onboarded</span>
+              <span x-show="!ca.ps_account_id" x-cloak class="text-xs text-gray-400">—</span>
+            </td>
+            <td class="px-4 py-2 text-gray-600 text-xs"
+                x-text="ca.expires_at ? new Date(ca.expires_at).toLocaleString() : 'never'"></td>
+            <td class="px-4 py-2 text-right whitespace-nowrap">
+              <button x-show="ca.has_chain" x-cloak @click="showChain(ca)"
+                      class="text-blue-600 hover:underline text-xs mr-3">Chain</button>
+              <button x-show="ca.status === 'available' && !ca.ps_account_id" x-cloak
+                      @click="openIdentity(ca)"
+                      class="text-blue-600 hover:underline text-xs mr-3">Add identity</button>
+              <button @click="destroy(ca)"
+                      class="text-red-600 hover:underline text-xs">Destroy</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Build a CA -->
+  <div x-show="buildOpen" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-40"
+       @click.self="buildOpen = false">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg p-6">
+      <h2 class="text-lg font-semibold text-gray-800 mb-1">Build a certificate authority</h2>
+      <p class="text-xs text-gray-500 mb-4">
+        A CAS pool, a self-signed root CA, and the enrollment service account the plugin
+        authenticates as. Destroying it removes all three in one pass — the module sets the
+        three flags CAS otherwise uses to refuse deletion.
+      </p>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+          <input x-model="form.name" placeholder="demo-pipeline"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">GCP project</label>
+          <input x-model="form.project" placeholder="bt-se-lab"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Location</label>
+          <select x-model="form.location"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <template x-for="l in options.locations" :key="l">
+              <option :value="l" x-text="l"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            The pool, its CAs and any certificate template are all location-scoped and must agree.
+          </p>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="buildOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg border border-gray-300">Cancel</button>
+        <button @click="build()" :disabled="busy"
+                class="text-sm px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+          Build
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add a certificate identity -->
+  <div x-show="identityOpen" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-40"
+       @click.self="identityOpen = false">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6">
+      <h2 class="text-lg font-semibold text-gray-800 mb-1">Add a certificate identity</h2>
+      <p class="text-xs text-gray-500 mb-4">
+        One managed account per identity. The account name becomes the subject CN by default,
+        and the whole profile below becomes the managed system's Network Address.
+      </p>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Account name</label>
+          <input x-model="ident.account_name" @input="refreshPreview()"
+                 placeholder="svc-deploy-pipeline"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Lifetime</label>
+            <input x-model="ident.lifetime" @input="refreshPreview()" placeholder="24h"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Key</label>
+            <select x-model="ident.key" @change="refreshPreview()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+              <option value="">(default)</option>
+              <option>ecdsa-p256</option><option>ecdsa-p384</option>
+              <option>rsa2048</option><option>rsa3072</option><option>rsa4096</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            DNS SANs <span class="font-normal text-gray-400">(comma-separated, optional)</span>
+          </label>
+          <input x-model="ident.dns" @input="refreshPreview()"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+          <p class="text-xs text-gray-400 mt-1">
+            A pipeline identity is not a host, so usually leave this empty — and note that
+            under <code>eku=Auto</code> a DNS SAN drags <code>serverAuth</code> into the EKU set.
+          </p>
+        </div>
+
+        <!-- The address, and its length. Not decoration: see the note at the top. -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-xs font-medium text-gray-600">Network Address</label>
+            <span class="text-xs font-mono"
+                  :class="preview.length > preview.limit ? 'text-red-600 font-semibold' : 'text-gray-400'"
+                  x-text="preview.length + ' / ' + preview.limit"></span>
+          </div>
+          <textarea readonly rows="4" x-text="preview.address"
+                    class="w-full border rounded-lg px-3 py-1.5 text-xs font-mono bg-gray-50"
+                    :class="preview.error ? 'border-red-300' : 'border-gray-300'"></textarea>
+          <p x-show="preview.error" x-cloak class="text-xs text-red-600 mt-1" x-text="preview.error"></p>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="identityOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg border border-gray-300">Cancel</button>
+        <button @click="addIdentity()" :disabled="busy || !!preview.error"
+                class="text-sm px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+          Onboard
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- The CA chain -->
+  <div x-show="chainOpen" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-40"
+       @click.self="chainOpen = false">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6">
+      <h2 class="text-lg font-semibold text-gray-800 mb-1">CA chain</h2>
+      <p class="text-xs text-gray-500 mb-3">
+        Hand this to the mTLS endpoint playbook as <code>ca_chain_pem</code>. It is the
+        <code>ssl_client_certificate</code> nginx verifies presented certificates against.
+      </p>
+      <textarea readonly rows="14" x-text="chainPem"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50"></textarea>
+      <div class="flex justify-end mt-4">
+        <button @click="chainOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg border border-gray-300">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Every call goes through window.API, which attaches the bearer token from the auth
+// store. Calling an /api route with the browser's own fetch would be ANONYMOUS and 401 —
+// there is no auth cookie on this app.
+function certLabPage() {
+  return {
+    loading: true,
+    busy: false,
+    authorities: [],
+    options: { locations: ['us-central1'], address_limit: 255 },
+    missing: [],
+    toast: '',
+    toastType: 'info',
+
+    buildOpen: false,
+    form: { name: '', project: '', location: 'us-central1' },
+
+    identityOpen: false,
+    identTarget: null,
+    ident: { account_name: '', lifetime: '', key: '', dns: '' },
+    preview: { address: '', length: 0, limit: 255, error: null },
+
+    chainOpen: false,
+    chainPem: '',
+
+    async init() {
+      await Promise.all([this.load(), this.loadOptions()]);
+    },
+
+    async load() {
+      this.loading = true;
+      try {
+        this.authorities = (await API.get('/api/cert-lab')) || [];
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.loading = false; }
+    },
+
+    async loadOptions() {
+      try {
+        const o = (await API.get('/api/cert-lab/options')) || {};
+        this.options = o;
+        this.missing = o.missing || [];
+        this.preview.limit = o.address_limit || 255;
+        if (o.default_location) this.form.location = o.default_location;
+      } catch (e) { /* the page still works without the hints */ }
+    },
+
+    notify(msg, type) {
+      this.toast = msg;
+      this.toastType = type || 'info';
+      setTimeout(() => { this.toast = ''; }, 6000);
+    },
+
+    statusClass(s) {
+      if (s === 'available') return 'bg-green-100 text-green-800';
+      if (s === 'failed') return 'bg-red-100 text-red-800';
+      if (s === 'deleted') return 'bg-gray-100 text-gray-600';
+      return 'bg-blue-100 text-blue-800';
+    },
+
+    openBuild() { this.buildOpen = true; },
+
+    async build() {
+      this.busy = true;
+      try {
+        await API.post('/api/cert-lab', this.form);
+        this.buildOpen = false;
+        this.notify('Building the CA — follow progress in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.busy = false; }
+    },
+
+    openIdentity(ca) {
+      this.identTarget = ca;
+      this.ident = { account_name: '', lifetime: '', key: '', dns: '' };
+      this.identityOpen = true;
+      this.refreshPreview();
+    },
+
+    // The overrides the address carries. A blank field is DROPPED rather than sent
+    // empty, which is what keeps the address inside its 255-character budget: an option
+    // left at its default costs nothing absent and 10-30 characters spelled out.
+    overrides() {
+      const out = {};
+      if (this.ident.lifetime) out.lifetime = this.ident.lifetime;
+      if (this.ident.key) out.key = this.ident.key;
+      if (this.ident.dns) out.dns = this.ident.dns;
+      return out;
+    },
+
+    async refreshPreview() {
+      if (!this.identTarget) return;
+      try {
+        this.preview = await API.post('/api/cert-lab/preview-address', {
+          backend: this.identTarget.backend,
+          backend_options: {
+            project: this.identTarget.project,
+            location: this.identTarget.location,
+            pool: this.identTarget.pool_id,
+          },
+          overrides: this.overrides(),
+        });
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    async addIdentity() {
+      this.busy = true;
+      try {
+        await API.post('/api/cert-lab/' + this.identTarget.id + '/identities', {
+          account_name: this.ident.account_name,
+          overrides: this.overrides(),
+        });
+        this.identityOpen = false;
+        this.notify('Onboarding — then run Change Password in BeyondInsight to issue the first certificate.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.busy = false; }
+    },
+
+    async showChain(ca) {
+      try {
+        const r = await API.get('/api/cert-lab/' + ca.id + '/chain');
+        this.chainPem = (r && r.ca_chain_pem) || '';
+        this.chainOpen = true;
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    async destroy(ca) {
+      const warning = 'Destroy ' + ca.name + '?\n\n'
+        + 'This deletes the CA pool, its root CA and the enrollment service account. '
+        + 'Certificates it already issued stay valid until they expire — the plugin does '
+        + 'not consult CRLs — but nothing can be issued or renewed afterwards.';
+      if (!confirm(warning)) return;
+      try {
+        await API.del('/api/cert-lab/' + ca.id);
+        this.notify('Destroying — follow progress in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+  };
+}
+</script>
+{% endblock %}

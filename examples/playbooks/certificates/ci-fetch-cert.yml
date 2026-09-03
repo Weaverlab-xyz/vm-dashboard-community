@@ -1,0 +1,137 @@
+# Retrieve a plugin-issued certificate and authenticate to a protected API with it.
+# Target: a Linux VM standing in for a CI runner. This is the deliverable an audience
+# should remember — a PROGRAM obtains the credential, with no human in the loop.
+#
+# Both halves come out of Password Safe and neither is written into this file:
+#   * the PKCS#12 passphrase is the MANAGED ACCOUNT's credential
+#   * the bundle it opens is a SECRETS SAFE file secret
+# Retrieving one without the other yields nothing usable, which is why the folder's ACL
+# and the account's access policy are both live controls.
+#
+# Credentials are AUTO-INJECTED by the dashboard into every runner when Password Safe is
+# enabled (PASSWORD_SAFE_API_URL / _CLIENT_ID / _CLIENT_SECRET) — see
+# docs/integrations/ansible.md. You supply nothing here.
+#
+# extra_vars:
+#   cert_system:  ca-adcs-clientauth        the managed SYSTEM's asset name
+#   cert_account: svc-deploy-pipeline       the managed ACCOUNT
+#   cert_secret:  cert/<system>/<account>   the bundle's Secrets Safe title
+#   api_url:      https://api.demo.internal:8443/
+#   build_id:     the CI build id, carried into the Password Safe audit trail
+- name: Authenticate to an mTLS API with a Password Safe-issued certificate
+  hosts: all
+  become: false
+  vars:
+    cert_system: ca-adcs-clientauth
+    cert_account: svc-deploy-pipeline
+    cert_secret: "cert/{{ cert_system }}/{{ cert_account }}"
+    api_url: https://api.demo.internal:8443/
+    build_id: local
+    work_dir: /tmp/ps-cert
+
+  tasks:
+    - name: Ensure openssl and curl are present
+      ansible.builtin.package:
+        name:
+          - openssl
+          - curl
+        state: present
+      become: true
+
+    - name: Create a private working directory
+      ansible.builtin.file:
+        path: "{{ work_dir }}"
+        state: directory
+        mode: "0700"
+
+    # The passphrase. `reason` carries the build id into the Password Safe audit trail,
+    # so the audit record answers WHICH BUILD used the certificate — not merely that
+    # something did.
+    - name: Fetch the PKCS#12 passphrase from the managed account
+      ansible.builtin.set_fact:
+        cert_passphrase: >-
+          {{ lookup('beyondtrust.secrets_safe.managed_account',
+                    cert_system ~ '/' ~ cert_account,
+                    reason='CI build ' ~ build_id) }}
+      no_log: true
+      delegate_to: localhost
+
+    - name: Fetch the certificate bundle from Secrets Safe
+      ansible.builtin.set_fact:
+        cert_bundle_b64: >-
+          {{ lookup('beyondtrust.secrets_safe.secret', cert_secret) | b64encode }}
+      no_log: true
+      delegate_to: localhost
+
+    - name: Deliver the bundle to the runner
+      ansible.builtin.copy:
+        dest: "{{ work_dir }}/bundle.pfx"
+        content: "{{ cert_bundle_b64 | b64decode }}"
+        mode: "0600"
+      no_log: true
+
+    # Split the bundle for the client. The private key never left Password Safe as
+    # anything but this encrypted bundle, and it never reached the CA at all — only the
+    # CSR did.
+    - name: Extract the certificate
+      ansible.builtin.command:
+        cmd: >-
+          openssl pkcs12 -in {{ work_dir }}/bundle.pfx -passin env:PFXPASS
+          -clcerts -nokeys -out {{ work_dir }}/client.crt
+        creates: "{{ work_dir }}/client.crt"
+      environment:
+        PFXPASS: "{{ cert_passphrase }}"
+      no_log: true
+
+    - name: Extract the private key
+      ansible.builtin.command:
+        cmd: >-
+          openssl pkcs12 -in {{ work_dir }}/bundle.pfx -passin env:PFXPASS
+          -nocerts -nodes -out {{ work_dir }}/client.key
+        creates: "{{ work_dir }}/client.key"
+      environment:
+        PFXPASS: "{{ cert_passphrase }}"
+      no_log: true
+
+    - name: Lock down the private key
+      ansible.builtin.file:
+        path: "{{ work_dir }}/client.key"
+        mode: "0600"
+
+    - name: Show which certificate is being presented
+      ansible.builtin.command:
+        cmd: openssl x509 -in {{ work_dir }}/client.crt -noout -subject -enddate -serial
+      changed_when: false
+      register: presenting
+
+    # The real proof. A certificate that verifies in a console but fails a handshake has
+    # proven nothing.
+    # -k skips verification of the SERVER's certificate, which the endpoint playbook
+    # deliberately self-signs: what is being demonstrated is the CLIENT certificate, and
+    # the server's identity is not part of the argument. The client half is fully
+    # verified — nginx checks it against the lab CA chain and refuses anything else.
+    - name: Call the protected API with the certificate
+      ansible.builtin.command:
+        cmd: >-
+          curl -sS --fail -k
+          --cert {{ work_dir }}/client.crt --key {{ work_dir }}/client.key
+          {{ api_url }}
+        chdir: "{{ work_dir }}"
+      changed_when: false
+      register: api_response
+      failed_when: api_response.rc != 0
+
+    - name: The endpoint's answer
+      ansible.builtin.debug:
+        msg: >-
+          presenting {{ presenting.stdout_lines | join(' | ') }}
+          -- endpoint said: {{ api_response.stdout }}
+
+    # The lookup checks the credential back in on its own, and with "Change Password After
+    # Any Release" on the account policy that check-in is what makes the NEXT build get a
+    # freshly issued certificate. All that is left here is not leaving a private key on a
+    # build agent.
+    - name: Remove the retrieved material from the runner
+      ansible.builtin.file:
+        path: "{{ work_dir }}"
+        state: absent

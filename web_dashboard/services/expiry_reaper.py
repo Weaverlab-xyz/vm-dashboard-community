@@ -46,7 +46,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..database import CloudDatabase, Job, JobLog, K8sCluster, PovEnvironment
+from ..database import CertLab, CloudDatabase, Job, JobLog, K8sCluster, PovEnvironment
 from . import expiry_policy, job_service
 
 logger = logging.getLogger(__name__)
@@ -552,7 +552,7 @@ def _reap_vm(db: Session, target: dict) -> str:
 
 
 def _reap_row(db: Session, target: dict) -> str:
-    """Start the teardown for one expired database, cluster or POV, returning the job id.
+    """Start the teardown for one expired database, cluster, CA or POV, returning the job id.
 
     Goes through the same ``start_decommission`` the DELETE endpoints call, which already
     refuses to start a second teardown while one is in flight and flips the row's status
@@ -574,6 +574,10 @@ def _reap_row(db: Session, target: dict) -> str:
         from . import k8s_service
         out = k8s_service.start_decommission(db, rid, created_by=REAPER_ACTOR)
         model, jid = K8sCluster, out.get("job_id")
+    elif kind == "certlab":
+        from . import cert_lab_service
+        out = cert_lab_service.start_decommission(db, lab_id=rid, created_by=REAPER_ACTOR)
+        model, jid = CertLab, out.get("job_id")
     elif kind == "pov":
         # The identical job row DELETE /api/pov/managed/{id} creates. Going through the
         # queue rather than calling the teardown directly is what makes the share link,

@@ -48,6 +48,11 @@ _DEMO_ONLY = (
     "cloud_database_enabled",
     "k8s_management_enabled",
     "cloud_functions_enabled",
+    # Demo-only for the tenancy reason above, not by taste: the Certificate plugin's
+    # managed system and functional account are written through the global pscli_*
+    # singletons, so on a POV instance this would onboard certificate identities into
+    # the wrong customer's Password Safe while appearing to work.
+    "cert_lab_enabled",
     "cost_explorer_enabled",
 )
 
@@ -157,6 +162,7 @@ def flags() -> dict:
         "entitle_registration_enabled": enabled("entitle_registration_enabled", settings.entitle_registration_enabled),
         "k8s_management_enabled": enabled("k8s_management_enabled", settings.k8s_management_enabled),
         "cloud_functions_enabled": enabled("cloud_functions_enabled", settings.cloud_functions_enabled),
+        "cert_lab_enabled":     enabled("cert_lab_enabled",      settings.cert_lab_enabled),
         "cost_explorer_enabled": enabled("cost_explorer_enabled", settings.cost_explorer_enabled),
         "remote_agents_enabled": enabled("remote_agents_enabled", settings.remote_agents_enabled),
         # POV environments. Masked off entirely on a demo instance — see _POV_ONLY.
@@ -276,6 +282,7 @@ def feature_map() -> dict:
         "cloud_database": raw["cloud_database_enabled"],
         "k8s_management": raw["k8s_management_enabled"],
         "cloud_functions": raw["cloud_functions_enabled"],
+        "cert_lab":       raw["cert_lab_enabled"],
         "resource_expiry": raw["resource_expiry_enabled"],
         "remote_agents": raw["remote_agents_enabled"],
         "notifications": raw["notifications_enabled"],

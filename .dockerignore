@@ -35,6 +35,7 @@ terraform/*
 !terraform/cloud_function
 # Admission-control Rego policies — read at runtime by admission_service (the
 # pre-action guardrails). COPYed by the Dockerfile, so must be in the context.
+!terraform/cert_ca
 !terraform/policy
 *.tfstate
 *.tfstate.*
