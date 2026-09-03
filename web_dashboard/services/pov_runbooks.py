@@ -25,18 +25,23 @@ through exactly the code a persona card does.
 
 Two properties carried over from ``pov_use_cases``, for the same reasons:
 
-  * **It never subtracts.** Every card is present for every product mix; a card whose
-    product this POV does not include renders ``out_of_scope``. So the checklist always
-    mirrors the document — an SE who cannot find use case 15 in the UI would go looking
-    for it in the runbook, and finding it marked out of scope is the answer.
+  * **A product mix never subtracts.** Every registered card is present for every mix; a
+    card whose product this POV does not include renders ``out_of_scope`` rather than
+    vanishing. "This evaluation does not include PRA" and "this card does not exist" are
+    different answers, and only one of them is somebody's next decision.
   * **The registry is the allowlist for writes.** :func:`find_card` is what
     ``pov_use_cases.set_state`` consults, so an unknown id is refused rather than stored.
 
-**The cards mirror the runbook, including the parts the runbook has not finished.** Seven
-of its twenty use cases are unwritten, unQA'd, or personal notes, and their card says so.
-That is more useful than omitting them: a card that reads "the runbook's own steps for
-this are incomplete" stops an SE promising a demo they cannot give, where a missing card
-just reads as a gap in this dashboard.
+**A card is a demo an SE can actually give, so the runbook's unfinished use cases have
+none.** Seven of its twenty are unwritten, unQA'd since 2022, or the author's personal
+notes: 12 (needs SQL Server and SSMS that its own step 3 never documents), 13, 14, 15
+(needs a guest that is not in the template), 16, 17 and 19. A card for one of those is a
+checkbox an SE cannot honestly tick — it would sit unticked on every POV and read as
+either a gap in this dashboard or, worse, a demo somebody promises and then cannot show.
+
+They are not silently dropped. ``docs/pov-ps-runbook.md`` lists all seven with what is
+missing from each, so an SE looking for use case 15 finds out why it is absent instead of
+wondering. When the runbook fills one in, it gets a card.
 """
 from __future__ import annotations
 
@@ -70,9 +75,13 @@ class Runbook:
 # separates them, and 8/9/10 stay separate for the same reason even though they are one
 # pattern shown three times.
 #
-# Every card is a thing DEMONSTRATED to a customer. The runbook's setup steps 1-11 are not
-# cards: they are a precondition for all twenty, they are done once, and an SE who has not
-# finished them has nothing to tick.
+# Every card is a thing DEMONSTRATED to a customer. Two kinds of thing are therefore not
+# cards:
+#
+#   * the runbook's setup steps 1-11 -- a precondition for all of them, done once, and an
+#     SE who has not finished them has nothing to tick;
+#   * its seven unfinished use cases (12-17 and 19), which no SE can give as written. Those
+#     are documented in docs/pov-ps-runbook.md instead. See the module docstring.
 
 _PS_POC_SKYTAP = Runbook(
     key="ps-poc-skytap",
@@ -198,67 +207,6 @@ _PS_POC_SKYTAP = Runbook(
             requires_products=("password_safe",),
         ),
         UseCase(
-            id="pspoc-uc12-ssms-app-session",
-            title="UC12 · Application session via SQL Server Management Studio",
-            summary="A published application session into SSMS with the credential injected. "
-                    "**The runbook is incomplete here** — it needs SQL Server and SSMS "
-                    "installed on App01, which its own step 3 leaves unwritten. Confirm "
-                    "before promising it.",
-            target="#vms",
-            minutes=20,
-            requires_products=("password_safe",),
-        ),
-        UseCase(
-            id="pspoc-uc13-web-application",
-            title="UC13 · Web application (AWS or Gmail)",
-            summary="Credential injection into a browser session through the AutoIT "
-                    "Universal App. **Not QA'd by the runbook since 2022**, and it needs "
-                    "shared AWS and Gmail accounts that do not exist. Treat as unproven.",
-            target="#vms",
-            minutes=20,
-            requires_products=("password_safe",),
-        ),
-        UseCase(
-            id="pspoc-uc14-bring-your-own-tool",
-            title="UC14 · Bring your own tool (MobaXterm)",
-            summary="A customer's own SSH client driven by a Direct Connect shortcut. "
-                    "**The runbook never wrote this one up** — PuTTY ships on the "
-                    "workstation, so it is demonstrable, just not scripted.",
-            target="#vms",
-            minutes=10,
-            requires_products=("password_safe",),
-        ),
-        UseCase(
-            id="pspoc-uc15-dr-pws-cache",
-            title="UC15 · Disaster recovery via Password Safe Cache",
-            summary="Break-glass checkout when the tenant is unreachable. **Personal notes "
-                    "only in the runbook**, and it needs a Cache01 guest that is not in "
-                    "template Part 1 — so the lab cannot show it as shipped.",
-            target="#vms",
-            minutes=25,
-            requires_products=("password_safe",),
-        ),
-        UseCase(
-            id="pspoc-uc16-api-resource-kit",
-            title="UC16 · API access via the Password Safe Resource Kit",
-            summary="A scripted checkout against an API registration. **Unwritten in the "
-                    "runbook**, which notes it overlaps UC15's API setup — do that one "
-                    "first and this is mostly done.",
-            target="#wired",
-            minutes=15,
-            requires_products=("password_safe",),
-        ),
-        UseCase(
-            id="pspoc-uc17-workforce-passwords",
-            title="UC17 · Workforce Passwords",
-            summary="A requestor stores their own web credentials in Secrets Safe and logs "
-                    "in through the browser extension. **Outline only in the runbook**, "
-                    "though it is short: grant the feature, then demonstrate.",
-            target="#access",
-            minutes=15,
-            requires_products=("password_safe",),
-        ),
-        UseCase(
             id="pspoc-uc18-smart-rule-scale",
             title="UC18 · Smart Rules at scale — new servers and users, no rule changes",
             summary="Add the Part 2 guests, run SetupMoreUsers.ps1 on the DC, re-scan, and "
@@ -266,16 +214,6 @@ _PS_POC_SKYTAP = Runbook(
                     "runbook's strongest demo, and the one that answers “does this scale”.",
             target="#vms",
             minutes=25,
-            requires_products=("password_safe",),
-        ),
-        UseCase(
-            id="pspoc-uc19-ssh-key-rotation",
-            title="UC19 · SSH key management and rotation",
-            summary="Password Safe managing and rotating an SSH key rather than a password. "
-                    "**The runbook points at another repository instead of documenting it**, "
-                    "and it needs a key-based Linux account seeded in the template.",
-            target="#wired",
-            minutes=20,
             requires_products=("password_safe",),
         ),
         UseCase(

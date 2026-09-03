@@ -339,7 +339,8 @@ def test_the_runbook_group_reaches_the_catalog():
     env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
     groups = pov_use_cases.describe(db, env)["groups"]
     keys = [g["persona"] for g in groups]
-    assert keys == list(personas.VALID_PERSONAS) + list(pov_runbooks.VALID_RUNBOOKS),         f"the catalog drops, reorders or duplicates a group: {keys}"
+    expected = list(personas.VALID_PERSONAS) + list(pov_runbooks.VALID_RUNBOOKS)
+    assert keys == expected, f"the catalog drops, reorders or duplicates a group: {keys}"
     db.close()
 
 
@@ -352,7 +353,8 @@ def test_the_runbook_cards_are_counted_in_the_summary_total():
     env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
     total = pov_use_cases.describe(db, env)["summary"]["total"]
     runbook_cards = sum(len(r.use_cases) for r in pov_runbooks.all_runbooks())
-    assert total >= runbook_cards,         f"summary total {total} is below the {runbook_cards} runbook cards alone"
+    low = f"summary total {total} is below the {runbook_cards} runbook cards alone"
+    assert total >= runbook_cards, low
     db.close()
 
 
@@ -375,7 +377,8 @@ def test_a_runbook_card_can_be_ticked_and_records_its_runbook():
     stored = (db.query(PovUseCaseProgress)
                 .filter(PovUseCaseProgress.environment_id == env.id,
                         PovUseCaseProgress.card_id == card).first())
-    assert stored.persona == "ps-poc-skytap",         f"the tick was filed under {stored.persona!r}, not its runbook"
+    misfiled = f"the tick was filed under {stored.persona!r}, not its runbook"
+    assert stored.persona == "ps-poc-skytap", misfiled
 
     assert pov_use_cases.clear(db, env, card) is True
     db.close()

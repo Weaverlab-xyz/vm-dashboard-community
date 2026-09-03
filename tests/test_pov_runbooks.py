@@ -13,9 +13,12 @@ consumers:
     would too.
   * **A fragment target is a real tab** on pov/detail.html. The fragment IS the
     destination; a stale one lands silently on Overview.
-  * **It never subtracts.** Every card is present for every product mix, so the checklist
-    always mirrors the document. An SE who cannot find use case 15 in the UI would go
-    looking for it in the runbook.
+  * **A product mix never subtracts.** Every registered card is present for every mix; a
+    card whose product this POV does not include renders ``out_of_scope`` rather than
+    vanishing.
+  * **Only use cases the runbook can actually teach get a card.** Its seven unfinished
+    ones (12-17, 19) are documented in docs/pov-ps-runbook.md instead, and this pins that
+    they stay out -- a checkbox nobody can honestly tick reads as a gap in this dashboard.
   * **A POV card declares no instance-level requirements** -- flags and clouds resolve
     through a different reader.
 
@@ -212,25 +215,52 @@ def test_find_card_refuses_what_it_does_not_know():
         assert found is None and key == "", f"{bad!r} resolved to {key!r}"
 
 
-# ── the Password Safe POC runbook mirrors its document ──────────────────────
+# ── the Password Safe POC runbook, against its document ──────────────────
 
-def test_the_password_safe_poc_runbook_covers_every_use_case_in_the_document():
-    """The document numbers its use cases to 20 and splits 11 into A and B, so a complete
-    checklist is 21 cards. The checklist exists to mirror the document -- a missing card
-    reads as a gap in this dashboard rather than as a use case the runbook itself never
-    finished, which is why the seven unfinished ones are present and say so in their copy.
+def _numbers(cards):
+    """Each card's runbook number, from its own title. The title is the only place the
+    number lives, which is deliberate: an SE matches card to page by reading it."""
+    out = []
+    for c in cards:
+        m = re.match(r"^UC(\d+[AB]?) " + "\u00b7" + " ", c.title)
+        assert m, f"{c.id} does not lead with its runbook number: {c.title!r}"
+        out.append(m.group(1))
+    return out
+
+
+def test_the_password_safe_poc_runbook_carries_only_the_use_cases_it_can_teach():
+    """The document numbers its use cases to 20 and splits 11 into A and B. Seven of them
+    are unwritten, unQA'd since 2022, or the author's personal notes, and a card for one of
+    those is a checkbox no SE can honestly tick -- so 14 cards, in the document's own order.
+
+    Pinned as an exact list rather than a count: the point is WHICH are absent, and a count
+    alone would let a future edit swap a real use case for an unfinished one.
     """
     from web_dashboard.services import pov_runbooks as R
     rb = R.get("ps-poc-skytap")
     assert rb is not None, "the Password Safe POC runbook is not registered"
-    assert len(rb.use_cases) == 21, f"expected 21 cards, found {len(rb.use_cases)}"
-    numbers = [re.match(r"^UC(\d+[AB]?) ", c.title).group(1) for c in rb.use_cases]
-    assert numbers == ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11A", "11B",
-                       "12", "13", "14", "15", "16", "17", "18", "19", "20"],         f"the cards do not follow the document's numbering: {numbers}"
-    # Every card names its runbook number, which is how an SE matches card to page.
-    for c in rb.use_cases:
-        assert re.match(r"^UC\d+[AB]? · ", c.title), \
-            f"{c.id} does not lead with its runbook number: {c.title!r}"
+    assert _numbers(rb.use_cases) == [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11A", "11B", "18", "20"]
+
+
+def test_the_runbooks_unfinished_use_cases_have_no_card():
+    """12-17 and 19. Their absence IS the decision, so it is pinned rather than left to
+    whoever next reads the document and wonders why they are missing."""
+    from web_dashboard.services import pov_runbooks as R
+    unfinished = {"12", "13", "14", "15", "16", "17", "19"}
+    present = set(_numbers(R.get("ps-poc-skytap").use_cases))
+    overlap = sorted(present & unfinished)
+    assert not overlap, f"the runbook cannot teach {overlap}; see docs/pov-ps-runbook.md"
+
+
+def test_the_doc_accounts_for_every_use_case_the_checklist_omits():
+    """With the cards gone the doc is the ONLY record that the runbook has holes, so an SE
+    looking for use case 15 has somewhere to find out why it is absent."""
+    doc = _read(os.path.join(_DOCS, "pov-ps-runbook.md"))
+    for n in ("12", "13", "14", "15", "16", "17", "19"):
+        missing = f"docs/pov-ps-runbook.md does not account for omitted use case {n}"
+        assert f"| {n} " in doc, missing
+
 
 
 def test_the_pra_integration_card_needs_both_products():

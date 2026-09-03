@@ -6,26 +6,34 @@ Cloud POC: Step-by-Step"**, rev 7.0 (2026-09-02), validated by its author agains
 26.2.0.1427. It is 75 pages, and it runs as roughly two 90-minute working sessions.
 
 This page is about how that document and this dashboard fit together. The POV detail
-page's **Use cases** tab carries the runbook as a group of tickable cards, one per use
-case, in the document's own numbering — so a POC that runs across several sessions and
-more than one person knows where it got to.
+page's **Use cases** tab carries the runbook as a group of tickable cards, in the
+document's own numbering — so a POC that runs across several sessions and more than one
+person knows where it got to.
 
 ## What the cards are, and are not
 
-The cards are the runbook's **twenty-one demonstrations** (its use cases 1–20, with 11 split
-into 11A and 11B). They are not its setup steps. Steps 1–11 — the tenant, the Skytap
-environment, the resource zone and broker, policies, functional accounts, discovery
-credentials, the scan, the directory credentials and the user groups — are a precondition
-for all twenty-one, they happen once, and an SE who has not finished them has nothing to
-tick.
+There are **fourteen cards**: use cases 1–10, 11A, 11B, 18 and 20. Two kinds of thing in
+the runbook deliberately have no card.
+
+**Its setup steps.** Steps 1–11 — the tenant, the Skytap environment, the resource zone and
+broker, policies, functional accounts, discovery credentials, the scan, the directory
+credentials and the user groups — are a precondition for every use case, they happen once,
+and an SE who has not finished them has nothing to tick.
+
+**Its seven unfinished use cases**, listed below. A card is a demo an SE can actually give;
+one pointing at a procedure the document never wrote is a checkbox nobody can honestly
+tick, and it would sit unticked on every POV reading either as a gap in this dashboard or,
+worse, as a demo somebody promises and then cannot show.
 
 Progress is per POV and records who ticked each card and in what capacity, so a prospect
 ticking one through the accessor page is distinguishable from the SE doing it. `skipped` is
 a real answer, deliberately different from never having got to it.
 
-## Seven cards say the runbook is incomplete
+## The seven use cases with no card
 
-The document has holes, and the cards name them rather than hiding them:
+The document has holes. They are recorded here rather than as cards, so an SE who goes
+looking for use case 15 finds out why it is absent instead of wondering. **When the runbook
+fills one in, it gets a card.**
 
 | Use case | State in the runbook |
 | --- | --- |
@@ -37,17 +45,22 @@ The document has holes, and the cards name them rather than hiding them:
 | 17 — Workforce Passwords | Outline only, though short |
 | 19 — SSH key management | Points at another repository instead of documenting it; needs a key-based Linux account seeded in the template |
 
-A card that reads "the runbook's own steps for this are incomplete" stops an SE promising a
-demo they cannot give. A *missing* card just reads as a gap in this dashboard, which is
-why all twenty-one are present.
+Several are close. 16 overlaps 15's API-registration setup, and 17 is short. If you work one
+of them out on a real POC, that is worth taking back to the document — and the card follows.
 
-Use case **20 — Password Safe / PRA integration** is new in rev 7.0 and marked
-work-in-progress by its author. It is also **not** what this dashboard's wire-up does: it
-discovers Password Safe accounts inside PRA so a user works from the PRA console, and it
-needs Builder to enable tunnel and web jump, a Gateway on the *Windows* broker, and Jump
-Clients on the guests. The dashboard's slice 6a creates Shell Jump and RDP jump items
-pinned to the POV's own Gateway on the *Linux* broker — a real and useful thing the runbook
-does not do, and not a substitute.
+## Use case 20 does have a card, but it is not what the wire-up does
+
+Password Safe / PRA integration is new in rev 7.0 and marked work-in-progress by its author,
+so it sits on the line drawn above. It keeps its card because, unlike the seven, the document
+does lay out the whole sequence — its own words are "documents very closely what needs to
+happen".
+
+Worth being clear about what it is: it discovers Password Safe accounts *inside PRA* so a
+user works from the PRA console and off VPN, and it needs Builder to enable tunnel and web
+jump, a Gateway on the **Windows** broker, and Jump Clients on the guests. The dashboard's
+slice 6a creates Shell Jump and RDP jump items pinned to the POV's own Gateway on the
+**Linux** broker. That is a real and useful thing the runbook does not do, and it is not a
+substitute for use case 20.
 
 ## What the dashboard automates, and what stays manual
 
