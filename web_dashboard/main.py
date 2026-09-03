@@ -860,8 +860,10 @@ def _profile_page_gate(name: str):
     The sibling of :func:`_feature_gate` for pages that are not feature flags. The four
     cloud consoles and the image registry are gated on credential presence rather than on
     a toggle, so there is no flag for ``_DEMO_ONLY`` to mask and they kept rendering on a
-    POV instance -- pages that instance can never put data in, because its wizard
-    deliberately writes no cloud credentials.
+    POV instance -- pages that instance has no use for. Credential presence is no longer
+    even a proxy for the answer: a POV may hold one cloud's credentials for its lab
+    platform, and may now hold another's for object storage (``_POV_STORAGE_SPEC`` in
+    api/setup.py), while still having no business showing a console.
 
     It exists as a gate rather than only a hidden nav link for the reason commit 28cfc67
     gave: dropping the link leaves the page reachable by URL and by anything that

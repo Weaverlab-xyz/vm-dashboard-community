@@ -664,15 +664,14 @@ async def _agent_fetch(name: str) -> bytes:
 async def _agent_upload(name: str, data: bytes) -> None:
     ceiling = _agent_max_content_bytes()
     if len(data) > ceiling:
-        # Refused here rather than at the agent, for the reason every preflight in
+        # Refused here as well as in `_check_upload`, for the reason every preflight in
         # agent_storage_service is where it is: a job that fails on the far side reads as
         # an agent fault, and the operator has no way to see that the file was simply too
-        # big for the transport.
+        # big for the transport. This one is the backend's own guarantee, and it holds for
+        # a caller that reaches the dispatch table by some other route.
         raise StorageError(
-            f"'{name}' is {len(data) // 1024} KB. A share reached through an agent moves "
-            f"files inside a signed job envelope, which is capped at "
-            f"{ceiling // 1024} KB — playbooks and scripts fit, packages do not. Use a "
-            f"cloud backend for this file.")
+            f"'{name}' is {_human_bytes(len(data))}, over the {_human_bytes(ceiling)} "
+            f"limit: {upload_ceiling_reason('agent_local')}.")
     await _agent_run("upload", name=name, content_b64=base64.b64encode(data).decode())
     await _agent_invalidate_list()
 
@@ -732,6 +731,79 @@ def _validate_backend(backend: str) -> None:
         raise StorageError(f"Backend '{backend}' is not configured.")
 
 
+# ── Upload ceilings ──────────────────────────────────────────────────────────
+# Every upload in this app is base64-in-JSON, browser to endpoint, buffered whole at both
+# ends. That is fine for the playbooks and scripts it was written for and it is the reason
+# a large file does not merely fail — it takes the browser tab with it, because building
+# the base64 costs the renderer the ArrayBuffer, the joined binary string and the encoded
+# string all at once, before a single byte is sent and before any server-side check can
+# run. So the ceiling has to be readable by the CLIENT, and it has to come from here
+# rather than being restated in the template: two readers of the same limit drift, and the
+# one that drifts low rejects files that work while the one that drifts high crashes.
+#
+# `agent_local` is a HARD limit — the file rides the signed job envelope, and no amount of
+# memory changes it. Every other backend is a SOFT one: the object stores themselves take
+# far more, and the number below is about what this transport survives, not what S3 holds.
+# Raising it means replacing base64-in-JSON with a streaming upload, not editing the
+# constant.
+MAX_INLINE_UPLOAD_BYTES = 64 * 1024 * 1024
+
+
+def _human_bytes(n: int) -> str:
+    """Sizes in a refusal are read by a person deciding what to do next, and "321939 KB"
+    makes them do the division. Matches the /storage page's `formatBytes`."""
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if v < 1024 or unit == "GB":
+            return f"{int(v)} {unit}" if unit == "B" else f"{v:.1f} {unit}"
+        v /= 1024
+    return f"{v:.1f} GB"
+
+
+def max_upload_bytes(backend: str) -> int:
+    """Largest file that can be uploaded to `backend` through the /storage form, in bytes.
+
+    The smaller of the two ceilings that apply: the transport's, which every inline upload
+    shares, and the backend's own, which today only `agent_local` has. Server-side writers
+    such as `epml_service` are subject to the second alone and do not call this.
+    """
+    if backend == "agent_local":
+        return min(_agent_max_content_bytes(), MAX_INLINE_UPLOAD_BYTES)
+    return MAX_INLINE_UPLOAD_BYTES
+
+
+class UploadTooLarge(StorageError):
+    """Raised when a file exceeds the inline-upload ceiling. A distinct type so the
+    endpoints can answer 413 rather than folding it into the 502 that every other
+    StorageError becomes."""
+
+
+def check_inline_upload(name: str, size: int) -> None:
+    """Reject a file too large for the base64-in-JSON upload path.
+
+    Takes a SIZE, not the bytes, so a caller can preflight before decoding.
+    """
+    backend = active_backend() or ""
+    ceiling = max_upload_bytes(backend)
+    if ceiling and size > ceiling:
+        raise UploadTooLarge(
+            f"'{name}' is {_human_bytes(size)}, over the {_human_bytes(ceiling)} upload "
+            f"limit: {upload_ceiling_reason(backend)}.")
+
+
+def upload_ceiling_reason(backend: str) -> str:
+    """Why :func:`max_upload_bytes` is what it is, phrased for an operator.
+
+    The refusal has to name the remedy, because "too big" alone sends someone looking for
+    a setting to raise — and for `agent_local` there is no such setting.
+    """
+    if backend == "agent_local":
+        return ("a share reached through an agent moves files inside a signed job "
+                "envelope, so playbooks and scripts fit and packages do not")
+    return ("uploads are carried inline in the request, which the browser and the server "
+            "both hold in memory whole")
+
+
 # ── Public API: active-backend operations ────────────────────────────────────
 
 async def list_assets() -> list[dict]:
@@ -764,13 +836,26 @@ async def fetch_playbook_b64(name: str) -> str:
     return await fetch_asset_b64(name)
 
 
-async def upload_asset(name: str, data: bytes) -> None:
-    backend = _require_active()
+def _check_upload(name: str) -> None:
+    """Extension preflight, shared by both uploaders.
+
+    Deliberately does NOT apply :data:`MAX_INLINE_UPLOAD_BYTES`. That ceiling belongs to
+    the base64-in-JSON *endpoints*, and `epml_service` reaches these uploaders having
+    downloaded a package server-side — no browser, no JSON body, so an agent package
+    larger than the inline limit must keep working. The one size limit that is a property
+    of a backend rather than of a transport is `agent_local`'s, and `_agent_upload`
+    enforces that itself.
+    """
     if not any(name.endswith(ext) for ext in _ASSET_EXTENSIONS):
         raise StorageError(
             f"Unsupported file type for '{name}'. "
             f"Allowed extensions: {', '.join(sorted(_ASSET_EXTENSIONS))}"
         )
+
+
+async def upload_asset(name: str, data: bytes) -> None:
+    backend = _require_active()
+    _check_upload(name)
     try:
         await _run_op(backend, "upload", name, data)
     except StorageError:
@@ -813,11 +898,7 @@ async def fetch_asset_in(backend: str, name: str) -> bytes:
 
 async def upload_asset_to(backend: str, name: str, data: bytes) -> None:
     _validate_backend(backend)
-    if not any(name.endswith(ext) for ext in _ASSET_EXTENSIONS):
-        raise StorageError(
-            f"Unsupported file type for '{name}'. "
-            f"Allowed extensions: {', '.join(sorted(_ASSET_EXTENSIONS))}"
-        )
+    _check_upload(name)
     try:
         await _run_op(backend, "upload", name, data)
     except StorageError:
