@@ -2,6 +2,12 @@
 
 The third axis, and the one that only exists because a POV is not an instance.
 
+It also owns the FOURTH. ``pov_runbooks`` groups the same card shape by the published
+procedure a POV is being run against rather than by role, and this module is where the two
+registries meet: :func:`_groups` appends its catalog and both write paths consult its
+``find_card``. The split is deliberate -- a persona presets feature flags, orders dashboard
+tiles and appears in the setup wizard, and a runbook is not a job title.
+
 ``feature_flags.install_profile`` gates — it decides whether a feature exists here at all.
 ``personas`` curates — it decides which role's story leads. Neither can answer the question
 an SE actually has in front of a customer, which is **"can I run this on THIS POV?"** A POV
@@ -34,7 +40,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovUseCaseProgress
-from . import personas, pov_wireup
+from . import personas, pov_runbooks, pov_wireup
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +132,18 @@ def describe_row(row: PovUseCaseProgress | None) -> dict:
 
 
 def _groups(db: Session, env: PovEnvironment, products: dict) -> list:
-    """The catalog for this POV with each card's progress merged in."""
+    """The catalog for this POV with each card's progress merged in.
+
+    Two registries, appended rather than merged: `personas` groups cards by ROLE and
+    `pov_runbooks` groups them by the published PROCEDURE a POV is being run against. They
+    are disjoint by card id and both emit the same group shape, so every consumer below --
+    `_summarize`, the detail page's group loop, `pov_summary.by_persona` -- takes them
+    without knowing which is which. Runbooks come last because a role is what an SE IS and
+    a runbook is what they are working through today.
+    """
     rows = _rows(db, env)
-    groups = personas.pov_catalog(env.id, products)
+    groups = (personas.pov_catalog(env.id, products)
+              + pov_runbooks.catalog(env.id, products))
     for group in groups:
         for card in group["use_cases"]:
             card["progress"] = describe_row(rows.get(card["id"]))
@@ -199,6 +214,10 @@ def set_state(db: Session, env: PovEnvironment, card_id: str, *,
     """
     persona_key, card = personas.find_pov_card(card_id)
     if card is None:
+        # The runbook registry is the second half of the allowlist, not a fallback: a card
+        # id belongs to exactly one of the two, and an id in neither is still refused.
+        persona_key, card = pov_runbooks.find_card(card_id)
+    if card is None:
         raise UseCaseError(f"no POV use case with id {card_id!r}")
     if state not in VALID_STATES:
         raise UseCaseError(
@@ -238,6 +257,8 @@ def clear(db: Session, env: PovEnvironment, card_id: str) -> bool:
     everywhere else in this module, and a row saying so would be a second way to spell it.
     """
     persona_key, card = personas.find_pov_card(card_id)
+    if card is None:
+        persona_key, card = pov_runbooks.find_card(card_id)
     if card is None:
         raise UseCaseError(f"no POV use case with id {card_id!r}")
     deleted = (db.query(PovUseCaseProgress)

@@ -319,6 +319,83 @@ def test_the_takeaway_is_copied_rather_than_downloaded():
     assert "r.note" in markdown, "the export drops what they said"
 
 
+# ── the runbook axis reaches the same consumers ──────────────────────────────
+#
+# `pov_runbooks` is a SECOND card registry appended by `pov_use_cases._groups`. It emits
+# the persona group shape on purpose, so the detail page's group loop, `_summarize` and
+# `by_persona` below take it without knowing which registry a group came from. These pin
+# that it actually arrives -- a registry nothing appends is a file with tests.
+
+
+def _runbook_card():
+    from web_dashboard.services import pov_runbooks
+    return pov_runbooks.get("ps-poc-skytap").use_cases[0].id
+
+
+def test_the_runbook_group_reaches_the_catalog():
+    from web_dashboard.services import personas, pov_runbooks
+    st = _fixture()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
+    groups = pov_use_cases.describe(db, env)["groups"]
+    keys = [g["persona"] for g in groups]
+    assert keys == list(personas.VALID_PERSONAS) + list(pov_runbooks.VALID_RUNBOOKS),         f"the catalog drops, reorders or duplicates a group: {keys}"
+    db.close()
+
+
+def test_the_runbook_cards_are_counted_in_the_summary_total():
+    """`_summarize` counts only in-scope cards. The live POV names a Password Safe tenant,
+    so the runbook's cards are in scope and its denominator has to include them."""
+    from web_dashboard.services import pov_runbooks
+    st = _fixture()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
+    total = pov_use_cases.describe(db, env)["summary"]["total"]
+    runbook_cards = sum(len(r.use_cases) for r in pov_runbooks.all_runbooks())
+    assert total >= runbook_cards,         f"summary total {total} is below the {runbook_cards} runbook cards alone"
+    db.close()
+
+
+def test_a_runbook_card_can_be_ticked_and_records_its_runbook():
+    """`set_state` consults both registries. The `persona` column stores whichever group
+    the card came from, which is what makes a runbook tick renderable later."""
+    st = _fixture()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
+    card = _runbook_card()
+    row = pov_use_cases.set_state(db, env, card, state="done", by="se@example",
+                                  note="shown in session 1")
+    assert row["state"] == "done" and row["note"] == "shown in session 1"
+
+    found = next(c for g in pov_use_cases.describe(db, env)["groups"]
+                 for c in g["use_cases"] if c["id"] == card)
+    assert found["progress"]["state"] == "done"
+
+    from web_dashboard.database import PovUseCaseProgress
+    stored = (db.query(PovUseCaseProgress)
+                .filter(PovUseCaseProgress.environment_id == env.id,
+                        PovUseCaseProgress.card_id == card).first())
+    assert stored.persona == "ps-poc-skytap",         f"the tick was filed under {stored.persona!r}, not its runbook"
+
+    assert pov_use_cases.clear(db, env, card) is True
+    db.close()
+
+
+def test_a_card_id_in_neither_registry_is_still_refused():
+    """The two registries together are the allowlist. Widening `set_state` to consult a
+    second one must not turn it into a free-text store."""
+    st = _fixture()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
+    try:
+        pov_use_cases.set_state(db, env, "pspoc-not-a-real-card", state="done")
+        raise AssertionError("an unknown card id was accepted")
+    except pov_use_cases.UseCaseError as exc:
+        assert "no POV use case" in str(exc)
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
