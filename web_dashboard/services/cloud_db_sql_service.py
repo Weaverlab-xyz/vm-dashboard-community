@@ -195,10 +195,30 @@ def _mysql_onboard_sql(managed: str, managed_pw: str) -> list:
             f"ALTER USER '{managed}'@'%' IDENTIFIED BY '{managed_pw}';"]
 
 
+# The login-existence guard reads sys.SQL_LOGINS, not sys.server_principals, and that
+# is the difference between working and not working on Azure. Azure SQL Database is a
+# supported flavor here (terraform/db_azure_sqlserver builds azurerm_mssql_server +
+# azurerm_mssql_database), and in Azure SQL Database "SQL logins are not persisted in
+# sys.server_principals" — the virtual master still HAS that view (it carries the fixed
+# server roles), so the query compiles and returns nothing, and the guard fails open in
+# the one direction that hurts: CREATE LOGIN runs against a login that is already there.
+# Observed live 2026-09-03 on a centralus Azure SQL database — clouddb_ps_register died
+# at 25% "Creating the rotatable managed database user..." with `Msg 15025 ... The server
+# principal 'psafe_3540e6f34a2f' already exists.`, which is the create-or-reset dead end
+# the note above exists to prevent, reached through a guard that looked like it did.
+#
+# sys.sql_logins is the compatibility view over the same rows restricted to SQL logins —
+# the only kind this module ever creates — and it is documented for Azure SQL Database's
+# virtual master as well as for SQL Server 2008+, so RDS and Cloud SQL are unaffected. It
+# has to be read while connected to master, which _mssql_command hardcodes.
+
+_MSSQL_LOGIN_EXISTS = "SELECT 1 FROM sys.sql_logins WHERE name = '{name}'"
+
+
 def _mssql_onboard_sql(managed: str, managed_pw: str) -> list:
     # Two statements, so the caller's "\nGO\n" join puts ALTER LOGIN alone in its own
     # batch — the form that is valid whatever options it carries.
-    return [f"IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = '{managed}') "
+    return [f"IF NOT EXISTS ({_MSSQL_LOGIN_EXISTS.format(name=managed)}) "
             f"CREATE LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';",
             f"ALTER LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';"]
 
@@ -212,7 +232,10 @@ def _mysql_teardown_sql(managed: str) -> list:
 
 
 def _mssql_teardown_sql(managed: str) -> list:
-    return [f"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = '{managed}') DROP LOGIN [{managed}];"]
+    # sys.sql_logins for the same reason as the onboard guard — read against
+    # sys.server_principals this fails CLOSED on Azure SQL, silently skipping the DROP
+    # and reporting a clean teardown that left the login behind.
+    return [f"IF EXISTS ({_MSSQL_LOGIN_EXISTS.format(name=managed)}) DROP LOGIN [{managed}];"]
 
 
 # ── DB-client command builders (run on the jump host) ───────────────────────
@@ -544,8 +567,12 @@ def _mssql_drop_role(*, user: str, role: str) -> list:
 
 
 def _mssql_drop_login(*, user: str) -> list:
+    # sys.sql_logins, not sys.server_principals — see _MSSQL_LOGIN_EXISTS. This is the
+    # sharp end of that bug: azure_sql is the flavor this ephemeral path exists for, and
+    # a guard that can never match makes delete_actor a silent no-op, so an account
+    # Entitle believes it revoked keeps its login and its password.
     return [
-        f"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = '{user}') "
+        f"IF EXISTS ({_MSSQL_LOGIN_EXISTS.format(name=user)}) "
         f"DROP LOGIN [{user}];"
     ]
 

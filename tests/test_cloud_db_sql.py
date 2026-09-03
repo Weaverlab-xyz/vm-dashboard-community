@@ -121,7 +121,7 @@ def test_onboard_is_create_or_reset_so_the_retry_action_can_run():
     assert "ALTER USER 'psafe_ab12cd34'@'%' IDENTIFIED BY 'Managed-Pw_9';" in my
 
     ms = sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0]
-    assert ("IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE "
+    assert ("IF NOT EXISTS (SELECT 1 FROM sys.sql_logins WHERE "
             "name = 'psafe_ab12cd34') CREATE LOGIN [psafe_ab12cd34]") in ms
     # ALTER LOGIN alone in its own batch — the form valid whatever options it carries.
     assert "\nGO\nALTER LOGIN [psafe_ab12cd34] WITH PASSWORD = 'Managed-Pw_9';\nGO\n" in ms
@@ -367,6 +367,30 @@ def test_onboard_never_pins_tls_onto_the_managed_account_itself():
 def test_client_image_override():
     c = sql.onboard_commands("postgres", **{**_COMMON, "client_image": "myregistry/pg:16"})[0]
     assert "myregistry/pg:16" in c
+
+
+def test_sqlserver_login_guards_read_sys_sql_logins_not_server_principals():
+    """Live regression (2026-09-03, centralus): Azure SQL Database does NOT persist SQL
+    logins in sys.server_principals, so a guard reading that view matched nothing in the
+    virtual master and clouddb_ps_register hit `Msg 15025 … The server principal
+    'psafe_…' already exists.` at 25%. The same view made the teardown/delete_actor drop
+    a silent no-op. sys.sql_logins is documented for Azure SQL Database's master and for
+    SQL Server 2008+, so it is correct on all three clouds."""
+    onboard = sql.onboard_commands("sqlserver", **{**_COMMON, "port": 1433})[0]
+    teardown = sql.teardown_commands(
+        "sqlserver", host="h", port=1433, database="", admin_user="dbadmin",
+        admin_password="Admin-Pw_123", managed_user="psafe_ab12cd34")[0]
+    ephemeral = " ".join(
+        stmt
+        for _db, statements in sql.delete_actor_plan(
+            "sqlserver", username="jit_a_1", database="appdb", flavor="azure_sql")
+        for stmt in statements)
+    for sql_text in (onboard, teardown, ephemeral):
+        assert "sys.server_principals" not in sql_text, sql_text
+    assert "sys.sql_logins" in onboard and "sys.sql_logins" in teardown
+    # The ephemeral DROP LOGIN is guarded on the login catalog; the contained USER it
+    # drops first is a database principal and legitimately reads sys.database_principals.
+    assert "sys.sql_logins" in ephemeral and "sys.database_principals" in ephemeral
 
 
 def test_teardown_drops_managed_user():
