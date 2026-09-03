@@ -253,7 +253,7 @@ port, so a client that wanders off it just hangs.
 | pip fails with `CERTIFICATE_VERIFY_FAILED` | TLS-inspecting proxy — set `PIP_CERT` to your corporate root CA (above) |
 | `TypeError` on `read_holding_registers` | pymodbus version drift on the unit-id kwarg — try `slave=1` instead of `device_id=1` |
 | OPC UA connects but browsing finds no `Plant` | Wrong namespace or endpoint path. Resolve the index with `get_namespace_index("http://ot-sim.demo")` rather than hardcoding `ns=2` |
-| Azure cell: Web Jump works, the tunnel never establishes | The Gateway resolved to an **ACI** jumpoint, which cannot do protocol tunneling. See [cloud-ot.md](cloud-ot.md#troubleshooting) |
+| Azure cell: Web Jump works, the tunnel never establishes | The cell's Gateway resolved to an **ACI** gateway — ACI is serverless and cannot do protocol tunneling. See [cloud-ot.md](cloud-ot.md#troubleshooting) |
 
 ## See also
 
