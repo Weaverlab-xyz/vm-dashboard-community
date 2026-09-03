@@ -173,7 +173,7 @@ def _value(val: str) -> str:
 # credential this run is about to hand Password Safe.
 
 
-def _pg_onboard_sql(managed: str, managed_pw: str) -> list:
+def _pg_onboard_sql(managed: str, managed_pw: str, flavor: str = "") -> list:
     # Postgres has no CREATE ROLE IF NOT EXISTS, so the branch goes in a DO block. Its
     # body is a single-quoted string literal with the inner quotes doubled rather than
     # a $$-quoted one: the statement is interpolated into a double-quoted shell word,
@@ -186,7 +186,7 @@ def _pg_onboard_sql(managed: str, managed_pw: str) -> list:
     ]
 
 
-def _mysql_onboard_sql(managed: str, managed_pw: str) -> list:
+def _mysql_onboard_sql(managed: str, managed_pw: str, flavor: str = "") -> list:
     # 8.4 defaults new users to caching_sha2_password (which the PRA tunnel
     # requires — no mysql_native_password). The ALTER is unconditional so a user left
     # by an earlier attempt ends on this run's password; on a fresh create it is a
@@ -213,29 +213,65 @@ def _mysql_onboard_sql(managed: str, managed_pw: str) -> list:
 # has to be read while connected to master, which _mssql_command hardcodes.
 
 _MSSQL_LOGIN_EXISTS = "SELECT 1 FROM sys.sql_logins WHERE name = '{name}'"
+_MSSQL_DB_USER_EXISTS = "SELECT 1 FROM sys.database_principals WHERE name = '{name}'"
+
+# Azure SQL Database's contained-database model, as a flavor list. TWO consequences ride
+# on this one tuple, and both say the same thing — on that flavor a login is not a
+# principal of any database until it is made one:
+#
+#   * the ephemeral path creates the login on a SEPARATE connection to master, because
+#     there is no USE statement to switch database with (see create_actor_plan);
+#   * a login with no USER in the database it connects to cannot sign in AT ALL. On RDS
+#     and Cloud SQL the `guest` user is enabled in master, and that is what lets a bare
+#     login open a session there; Azure SQL disables guest, so the same login is refused
+#     with `Cannot open database "master" requested by the login`.
+_SPLIT_LOGIN_FLAVORS = ("azure_sql",)
 
 
-def _mssql_onboard_sql(managed: str, managed_pw: str) -> list:
-    # Two statements, so the caller's "\nGO\n" join puts ALTER LOGIN alone in its own
-    # batch — the form that is valid whatever options it carries.
-    return [f"IF NOT EXISTS ({_MSSQL_LOGIN_EXISTS.format(name=managed)}) "
-            f"CREATE LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';",
-            f"ALTER LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';"]
+def _mssql_onboard_sql(managed: str, managed_pw: str, flavor: str = "") -> list:
+    # Separate statements, so the caller's "\nGO\n" join gives each its own batch —
+    # the form ALTER LOGIN is valid in whatever options it carries.
+    statements = [f"IF NOT EXISTS ({_MSSQL_LOGIN_EXISTS.format(name=managed)}) "
+                  f"CREATE LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';",
+                  f"ALTER LOGIN [{managed}] WITH PASSWORD = '{managed_pw}';"]
+    if flavor in _SPLIT_LOGIN_FLAVORS:
+        # A login alone is not enough on Azure SQL: with no USER it cannot open a
+        # session on any database, so Password Safe's rotation fails at CONNECT —
+        # before it ever runs ALTER LOGIN — with `Cannot open database "master"
+        # requested by the login`. master is the right database and the only
+        # candidate: every admin session against a SQL Server row opens master by
+        # definition (cloud_database_service.connection_db_name), so master is what
+        # the plugin's managed-system address names and what the PRA tunnel targets,
+        # and on Azure SQL ALTER LOGIN is legal ONLY there — a self-rotating login
+        # has nowhere else to do its work. No role membership goes with it: changing
+        # your OWN password needs no permission, and this account exists to be
+        # rotated, not to read anything.
+        statements.append(
+            f"IF NOT EXISTS ({_MSSQL_DB_USER_EXISTS.format(name=managed)}) "
+            f"CREATE USER [{managed}] FOR LOGIN [{managed}];")
+    return statements
 
 
-def _pg_teardown_sql(managed: str) -> list:
+def _pg_teardown_sql(managed: str, flavor: str = "") -> list:
     return [f'DROP ROLE IF EXISTS "{managed}";']
 
 
-def _mysql_teardown_sql(managed: str) -> list:
+def _mysql_teardown_sql(managed: str, flavor: str = "") -> list:
     return [f"DROP USER IF EXISTS '{managed}'@'%';"]
 
 
-def _mssql_teardown_sql(managed: str) -> list:
+def _mssql_teardown_sql(managed: str, flavor: str = "") -> list:
     # sys.sql_logins for the same reason as the onboard guard — read against
     # sys.server_principals this fails CLOSED on Azure SQL, silently skipping the DROP
     # and reporting a clean teardown that left the login behind.
-    return [f"IF EXISTS ({_MSSQL_LOGIN_EXISTS.format(name=managed)}) DROP LOGIN [{managed}];"]
+    #
+    # The master user goes FIRST, for the same reason delete_actor_plan drops its
+    # contained users before the login: Azure SQL refuses to drop a login a database
+    # principal still maps to, so a teardown that only knew about the login would start
+    # failing outright the moment onboarding began creating one.
+    users = _mssql_drop_user(user=managed) if flavor in _SPLIT_LOGIN_FLAVORS else []
+    return list(users) + [
+        f"IF EXISTS ({_MSSQL_LOGIN_EXISTS.format(name=managed)}) DROP LOGIN [{managed}];"]
 
 
 # ── DB-client command builders (run on the jump host) ───────────────────────
@@ -373,16 +409,21 @@ def _check_engine(engine: str) -> None:
 def onboard_commands(engine: str, *, host: str, port: int, database: str,
                      admin_user: str, admin_password: str,
                      managed_user: str, managed_password: str,
-                     client_image: str = "") -> list:
+                     client_image: str = "", flavor: str = "") -> list:
     """Shell command(s) that create the dedicated managed DB user (the rotation
     target). Returned as an SSM ``commands`` list (one client-invocation line). Raises
-    on unsafe identifiers/values so nothing unvalidated reaches the shell."""
+    on unsafe identifiers/values so nothing unvalidated reaches the shell.
+
+    ``flavor`` is SQL Server's managed offering (:data:`VALID_FLAVORS`); callers hold a
+    cloud and get it from ``cloud_db_adapter_service.flavor_for``. Only SQL Server reads
+    it, and only to decide whether the login also needs a contained USER in master —
+    everything the statements say is otherwise flavor-independent."""
     _check_engine(engine)
     managed = _ident(managed_user)
     mpw = _value(managed_password)
     _value(admin_password)
     image = resolve_client_image(engine, client_image)
-    statements = _ONBOARD_SQL[engine](managed, mpw)
+    statements = _ONBOARD_SQL[engine](managed, mpw, _check_flavor(engine, flavor))
     return [_COMMAND[engine](host=host, port=port, database=database,
                              admin_user=_ident(admin_user), admin_password=admin_password,
                              image=image, statements=statements)]
@@ -390,13 +431,17 @@ def onboard_commands(engine: str, *, host: str, port: int, database: str,
 
 def teardown_commands(engine: str, *, host: str, port: int, database: str,
                       admin_user: str, admin_password: str,
-                      managed_user: str, client_image: str = "") -> list:
-    """Shell command(s) that drop the managed DB user (best-effort teardown)."""
+                      managed_user: str, client_image: str = "",
+                      flavor: str = "") -> list:
+    """Shell command(s) that drop the managed DB user (best-effort teardown).
+
+    ``flavor`` as in :func:`onboard_commands`, and it has to match what onboarding was
+    given: on Azure SQL there is a contained user to remove before the login."""
     _check_engine(engine)
     managed = _ident(managed_user)
     _value(admin_password)
     image = resolve_client_image(engine, client_image)
-    statements = _TEARDOWN_SQL[engine](managed)
+    statements = _TEARDOWN_SQL[engine](managed, _check_flavor(engine, flavor))
     return [_COMMAND[engine](host=host, port=port, database=database,
                              admin_user=_ident(admin_user), admin_password=admin_password,
                              image=image, statements=statements)]
@@ -433,8 +478,8 @@ VALID_ROLES = ("read", "readwrite")
 VALID_FLAVORS = ("rds", "azure_sql", "cloudsql")
 _DEFAULT_FLAVOR = {"sqlserver": "rds", "mysql": "", "postgres": ""}
 
-# Which flavors need the login created on a SEPARATE connection to `master`.
-_SPLIT_LOGIN_FLAVORS = ("azure_sql",)
+# _SPLIT_LOGIN_FLAVORS lives up with the SQL Server statement builders, because the
+# Password Safe onboarding path branches on the same fact.
 
 # SQL Server's fixed database roles do NOT nest: db_datawriter grants INSERT,
 # UPDATE and DELETE and no SELECT at all, so a "readwrite" account that got only
@@ -579,7 +624,7 @@ def _mssql_drop_login(*, user: str) -> list:
 
 def _mssql_drop_user(*, user: str) -> list:
     return [
-        f"IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '{user}') "
+        f"IF EXISTS ({_MSSQL_DB_USER_EXISTS.format(name=user)}) "
         f"DROP USER [{user}];"
     ]
 

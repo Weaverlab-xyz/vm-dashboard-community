@@ -136,6 +136,16 @@ the self-rotate action. Turn on **Rotate with the account's own credentials**
 Leave it **off** in `create` mode, where the functional account *is* the minted DB admin and
 therefore already privileged.
 
+**"A login that can authenticate" is a real requirement on Azure SQL**, not a given. Azure
+SQL Database disables `guest` in `master`, so a login with no `USER` there cannot open a
+session at all and the rotation fails at CONNECT — before `ALTER LOGIN` — with `Cannot open
+database "master" requested by the login`. Onboarding therefore creates the managed login
+**and** a role-less contained user in `master` (`master` because that is the database every
+SQL Server managed system's address names, and the only one Azure SQL permits `ALTER LOGIN`
+in). Nothing to do by hand; a SQL Server system onboarded by a build from before 2026-09-03
+needs **Register in Password Safe** re-run on the row. AWS RDS and Cloud SQL keep `guest`
+enabled in `master`, so they get the login only.
+
 Two consequences that are easy to miss:
 
 - **`SP:` mode needs nothing broker-side; `MSI:` mode does.** All three plugins resolve the
@@ -729,6 +739,8 @@ whose only trace was a `Password Safe onboarding skipped (non-fatal)` log line.)
 | `jump-host plugin prep failed` | the SSM key drop itself failed — a bad *Key Directory*, or the Gateway host is not reachable over SSM |
 | (AWS) `Index was outside the bounds of the array` in the plugin log | a packed field has too few segments for the plugin's fixed-position parse: an address with the wrong per-engine count (5 mssql / 6 psql / 7 mysql), a functional-account username without its `:`, or a password without both `:`s. Systems onboarded before the per-engine formats carry the old six-field address — use the row's **Register in Password Safe** action to rebuild them |
 | `role "psafe_…" already exists` / `CREATE USER` fails on **Register in Password Safe** | a previous attempt created the managed database user before failing later. Onboarding is create-or-reset on every engine, so this is fixed — a build from before 2026-08-27 needs the user dropped by hand, or the newer image |
+| (Azure, SQL Server) `Msg 15025 … The server principal 'psafe_…' already exists` at 25% *Creating the rotatable managed database user* | the create-or-reset guard above read `sys.server_principals`, which **Azure SQL Database does not populate with SQL logins** — so it matched nothing and the create ran anyway. Guards read `sys.sql_logins` from 2026-09-03; on an older build, drop the login by hand (`DROP LOGIN [psafe_…]` in `master`) or take the newer image. AWS and GCP never hit this |
+| (Azure, SQL Server) rotation or *Verify* fails with `Cannot open database "master" requested by the login` | the managed login has no `USER` in `master`, and Azure SQL disables `guest` there — see §0. Fixed at onboarding from 2026-09-03; re-run **Register in Password Safe** on the row to add the user to an existing system |
 | `Bad IP value: '<packed address>' in 'IPAddress' field` | a managed system registered by a build between 2026-08-25 and 2026-08-27, which put the packed address in the IP field. Re-register from the row's **Register in Password Safe** action |
 | (AWS) `Index and length must refer to a location within the string` | the address's assumeRole segment is under 12 characters — the pre-fix `local` default; re-register, or fix the address in BeyondInsight (`NoAssumeRole` or a full role ARN) |
 | (AWS) rotation fails and the functional account's name has no `:` (a bare `EC2`, or an IAM username) | the account cannot be parsed at all — `<mode>:<dbLogin>` over a three-part password (§0). In `create` mode it is a pre-fix account: delete it and re-register. In `reference` mode it is **your** account: rename it in BeyondInsight and fix its password, then **Register in Password Safe**. New onboardings refuse an unparseable name up front, so this only reaches the plugin on systems registered before that guard |
