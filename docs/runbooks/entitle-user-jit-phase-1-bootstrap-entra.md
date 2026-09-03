@@ -1,5 +1,7 @@
 # Phase 1 — Entitle user-JIT bootstrap (Entra groups)
 
+> **Audience:** contributor · **Profile:** `both` · **Read this when:** you are creating the Entra groups the legacy user-JIT path needs.
+
 > **Legacy mechanism.** This runbook covers Entitle granting dashboard
 > permissions through **Entra groups**. The current mechanism is a REST
 > integration that works for any user and takes effect immediately — see

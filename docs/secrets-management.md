@@ -1,5 +1,7 @@
 # Secrets Management
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are deciding where to store cloud credentials, and how to evolve that over time.
+
 This document explains how the dashboard stores and protects credentials,
 the security philosophy behind the design, and how to migrate secrets to
 an external vault once you are ready.
@@ -328,7 +330,7 @@ Unlike the four backend prefixes, `ps_account://` is deliberately **not** resolv
 `config_service.get()`. The others are stateless reads; this one opens a request that
 something has to close, so it is handled only on the agent-credential path where the release
 lifecycle exists. See
-[docs/remote-agents.md](remote-agents.md#the-credential-the-dashboard-holds).
+[docs/remote-agents.md](remote-agents/credentials.md#the-credential-the-dashboard-holds).
 
 ---
 
@@ -362,7 +364,7 @@ Managed-account checkout works on the **local and Azure (ACI) runners** (both
 inject inline); on **ECS / Cloud Run** it requires the opt-in below.
 
 Full operator detail lives in
-[docs/integrations/ansible.md → Using a Secrets-Management secret in a run](integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
+[docs/integrations/ansible.md → Using a Secrets-Management secret in a run](integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
 
 ### Ephemeral cloud secrets
 
@@ -404,7 +406,7 @@ use. If that trade-off isn't acceptable, use the local or ACI runner (inline, no
 store copy) — the default.
 
 Full operator detail:
-[docs/integrations/ansible.md → Managed-account checkout](integrations/ansible.md#managed-account-checkout-beyondtrust-password-safe).
+[docs/integrations/ansible.md → Managed-account checkout](integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ---
 

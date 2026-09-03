@@ -1,5 +1,7 @@
 # Auto-delete Timer
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want lab resources to clean themselves up -- read it before enabling it, because it deletes infrastructure.
+
 **This feature deletes infrastructure.** A timer that runs out ends in the same teardown the
 Destroy button runs — terminated instances, deleted databases, destroyed clusters, none of it
 recoverable. Everything below is arranged around making that safe to switch on.

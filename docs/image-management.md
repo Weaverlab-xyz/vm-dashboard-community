@@ -1,5 +1,7 @@
 # Image Management
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are about to build a custom image and need to know how it will reach the other clouds.
+
 This document explains how the dashboard treats VM images — the
 philosophy that drives the design, the lifecycle the codebase encodes,
 and how a single source image becomes an AMI, an Azure Managed Image,

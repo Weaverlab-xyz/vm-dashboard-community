@@ -10,8 +10,9 @@ previously FastAPI owned the exact ``/docs`` path, which made the two collide
 confusingly.
 """
 import html as _html
+import posixpath as _posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
@@ -60,17 +61,75 @@ class _GitHubSlugger:
         return slug
 
 
-def _render_markdown(text: str) -> str:
+def _relative_link_extension(page: str):
+    """Rewrite GitHub-relative ``*.md`` links into ``/docs/...`` routes.
+
+    ``docs/`` is authored and reviewed on GitHub, so a cross-reference is written the way
+    GitHub resolves it — ``[Cloud VMs](cloud-vms.md)``, or ``../../cloud-vms.md`` from a
+    nested page. Nothing rewrote those, and there is no ``<base>`` in ``_SHELL``, so the
+    browser resolved them against the current route: ``/docs/cloud-vms.md``, which makes
+    ``doc_page`` look for ``docs/cloud-vms.md.md`` and 404. Every relative link in the tree
+    was dead in this viewer while working perfectly on GitHub — the same split
+    ``tests/test_app_docs_links.py`` was written about, one layer down.
+
+    ``tests/test_docs_anchors.py`` resolves these links against the filesystem the way
+    GitHub does, so it proves the *targets* exist; this makes the rendered href agree.
+
+    Imports inside, so the module keeps its no-hard-dependency-on-markdown contract.
+    """
+    from markdown.extensions import Extension
+    from markdown.treeprocessors import Treeprocessor
+
+    base = _posixpath.dirname(page)
+
+    class _Rewrite(Treeprocessor):
+        def run(self, root):
+            for a in root.iter("a"):
+                href = a.get("href") or ""
+                if href.startswith(("http://", "https://", "mailto:", "#", "/")):
+                    continue
+                path, _, frag = href.partition("#")
+                if not path or not (path.endswith(".md") or path.endswith("/")):
+                    continue
+                target = _posixpath.normpath(_posixpath.join(base, path))
+                # A ".." that climbs out of docs/ is a broken link either way; leave it
+                # exactly as authored rather than inventing a route for it.
+                if target.startswith(".."):
+                    continue
+                if target.endswith(".md"):
+                    target = target[: -len(".md")]
+                target = target.rstrip("/")
+                # A directory link ("personas/") lands on that folder's README via the
+                # fallback in doc_page.
+                a.set("href", f"/docs/{target}" + (f"#{frag}" if frag else ""))
+
+    class _Ext(Extension):
+        def extendMarkdown(self, md):
+            # After "toc" (which mints the heading ids) and after inline processing, so
+            # every <a> exists by now. The priority is below toc's 5.
+            md.treeprocessors.register(_Rewrite(md), "docs_relative_links", 4)
+
+    return _Ext()
+
+
+def _render_markdown(text: str, page: str | None = None) -> str:
     """Render Markdown → HTML. Imported lazily so a missing ``markdown`` lib can't
     crash app startup — the docs renderer is non-essential; it degrades to a
-    readable <pre> fallback rather than taking the whole dashboard down."""
+    readable <pre> fallback rather than taking the whole dashboard down.
+
+    ``page`` is the doc's path under ``docs/`` without the ``.md`` suffix — i.e. exactly
+    what ``doc_page`` was given. Passing it turns relative links into working routes (see
+    ``_relative_link_extension``). It defaults to None so callers that only want the HTML,
+    including the docs tests, need not care.
+    """
     try:
         import markdown as _md
         from markdown.extensions.toc import TocExtension
-        return _md.markdown(text, extensions=[
-            "fenced_code", "tables", "sane_lists",
-            TocExtension(slugify=_GitHubSlugger()),
-        ])
+        extensions = ["fenced_code", "tables", "sane_lists",
+                      TocExtension(slugify=_GitHubSlugger())]
+        if page is not None:
+            extensions.append(_relative_link_extension(page))
+        return _md.markdown(text, extensions=extensions)
     except ModuleNotFoundError:
         return f"<pre>{_html.escape(text)}</pre>"
 
@@ -81,9 +140,13 @@ router = APIRouter(tags=["docs"])
 _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 
 # Only these sections are surfaced on the /docs index. Other subdirectories
-# (design/, notes/, runbooks/) still render if you know the path — they're just
-# internal enough that we don't want them cluttering the operator-facing index.
+# (design/, notes/, runbooks/, profiles/pov/design/) still render if you know the path —
+# they're just internal enough that we don't want them cluttering the operator-facing index.
 # "General" is the synthetic name for docs that live at the docs/ root.
+#
+# A section is the doc's parent directory as a relative path, so a nested folder joins this
+# set under its full path ("profiles/demo/personas"), not its basename. That is also why
+# every member needs a _SECTION_LABELS entry: a path reads as a path in an <h2>.
 #
 # `personas` is operator-facing: one page per role explaining which demo to run and why, so
 # it belongs in the index rather than behind a known path. NOTE that adding it does NOT make
@@ -91,12 +154,36 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 # order for everybody. This shell is public and unauthenticated (see `_shell`), so reordering
 # it by the instance's chosen focus would leak that focus to anyone who asks; the
 # persona-aware view of the same material is /use-cases, behind the auth shell.
-_INDEX_SECTIONS = {"General", "integrations", "personas"}
+#
+# The same reasoning is why BOTH profiles' sections are listed to everybody rather than
+# filtered by install_profile(): making index *content* vary with instance state is the leak
+# above wearing a different hat. A demo instance already lists the POV pages today.
+_INDEX_SECTIONS = {
+    "General", "integrations",
+    "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
+    "databases", "onboarding", "integrations/ansible", "remote-agents",
+}
+
+# Heading text per section. Without this a nested section renders as
+# <h2>profiles/demo/personas</h2> — a directory path where the index wants a phrase.
+_SECTION_LABELS = {
+    "General":                    "Platform reference",
+    "integrations":               "Integrations",
+    "profiles":                   "Demo and POV profiles",
+    "profiles/demo":              "Demo profile",
+    "profiles/demo/personas":     "Demo profile · personas",
+    "profiles/pov":               "POV profile",
+    "databases":                  "Databases · Password Safe rotation",
+    "onboarding":                 "Onboarding · per-cloud setup",
+    "integrations/ansible":       "Remote Worker runners",
+    "remote-agents":              "Remote agents",
+}
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
-# named after the persona key so /docs/personas/<key> matches the vocabulary the app, the API
-# and the nav all use -- which is right for the URL and useless as a label: the index derives
-# its text from the filename, so these would list as "Ot", "Dba" and "Sre".
+# named after the persona key so /docs/profiles/demo/personas/<key> matches the
+# vocabulary the app, the API and the nav all use -- which is right for the URL and
+# useless as a label: the index derives its text from the filename, so these would
+# list as "Ot", "Dba" and "Sre".
 #
 # An explicit map, deliberately NOT "use each doc's H1 for every page". Measured across the 53
 # indexed docs that would change 40 titles and several for the worse -- one H1 is a
@@ -107,14 +194,45 @@ _INDEX_SECTIONS = {"General", "integrations", "personas"}
 # deliberately independent of the persona registry -- see the note on _INDEX_SECTIONS above,
 # and _shell below for why this shell must never learn the ACTIVE persona.
 _TITLE_OVERRIDES = {
-    "personas/cloudops":   "Cloud Ops engineer",
-    "personas/devops":     "DevOps engineer",
-    "personas/hypervisor": "Hypervisor admin",
-    "personas/itops":      "IT engineer",
-    "personas/ot":         "OT / ICS engineer",
-    "personas/dba":        "DBA / data platform",
-    "personas/security":   "Security / IAM analyst",
-    "personas/sre":        "Platform / SRE",
+    "profiles/demo/personas/cloudops":   "Cloud Ops engineer",
+    "profiles/demo/personas/devops":     "DevOps engineer",
+    "profiles/demo/personas/hypervisor": "Hypervisor admin",
+    "profiles/demo/personas/itops":      "IT engineer",
+    "profiles/demo/personas/ot":         "OT / ICS engineer",
+    "profiles/demo/personas/dba":        "DBA / data platform",
+    "profiles/demo/personas/security":   "Security / IAM analyst",
+    "profiles/demo/personas/sre":        "Platform / SRE",
+    # Not personas. The derived title is the filename title-cased, which reads as a
+    # filename ("Ps Runbook", "Standing One Up") rather than as the page.
+    "profiles/demo/ot-demo-cell":        "OT Demo Cell",
+    "profiles/pov/standing-one-up":      "Standing up a POV instance",
+    "profiles/pov/public-cloud":         "Running POVs on a public cloud",
+    "profiles/pov/gateway-and-broker":   "The Gateway and the Resource Broker",
+    "profiles/pov/wiring":               "Wiring VMs into PRA, Password Safe and Entitle",
+    "profiles/pov/customer-access":      "What the customer sees",
+    "profiles/pov/lifecycle":            "Keeping a POV true, and reaping it",
+    "profiles/pov/ps-runbook":           "Password Safe POC runbook",
+    "databases/password-safe":           "Rotation on AWS and Azure",
+    "databases/password-safe-gcp":       "Rotation on GCP Cloud SQL",
+    "onboarding/aws":                    "AWS setup",
+    "onboarding/azure":                  "Azure setup",
+    "onboarding/gcp":                    "GCP setup",
+    "onboarding/after-first-run":        "After the first run",
+    "onboarding/feature-test":           "Feature-test checklist",
+    "onboarding/troubleshooting":        "Onboarding troubleshooting",
+    "integrations/entra-oauth":          "Sign in with Microsoft (Entra)",
+    "integrations/ansible/config-reference":  "Config field reference",
+    "integrations/ansible/shared-cloud":      "Shared cloud infrastructure",
+    "integrations/ansible/ansible-runner":    "The Ansible runner",
+    "integrations/ansible/kubernetes-runner": "The Kubernetes runner",
+    "integrations/ansible/secrets":           "Secrets in a run",
+    "integrations/ansible/playbooks":         "Playbook structure",
+    "remote-agents/enrolment":               "Enrolling an agent",
+    "remote-agents/agent-host":              "Running the agent on your host",
+    "remote-agents/hypervisors":             "Hypervisor connections",
+    "remote-agents/credentials":             "Credentials an agent uses",
+    "remote-agents/config-runs":             "Agent-executed Config Management",
+    "remote-agents/file-shares":             "Agent-brokered file shares",
 }
 
 _SHELL = """<!doctype html>
@@ -212,6 +330,7 @@ async def doc_index() -> HTMLResponse:
         raise HTTPException(status_code=404, detail="docs directory not found")
 
     groups: dict = {}
+    indexes: dict = {}
     for path in sorted(_DOCS_DIR.rglob("*.md")):
         rel = path.relative_to(_DOCS_DIR).with_suffix("")
         section = str(rel.parent).replace("\\", "/")
@@ -219,24 +338,67 @@ async def doc_index() -> HTMLResponse:
         if section not in _INDEX_SECTIONS:
             continue
         href = str(rel).replace("\\", "/")
+        if rel.name == "README":
+            # A folder's own index page. It becomes that section's HEADING rather than an
+            # entry under it: nine list items all titled "Readme" is not an index, and
+            # docs/README.md would list as a link to a second copy of this page.
+            # The FOLDER url, not ".../README" -- doc_page falls back to the README, and a
+            # path with mixed case in it is the kind of link that works on a Windows
+            # checkout and 404s in the container. "General" is synthetic rather than a
+            # directory, so the root index is the one that needs its real href.
+            indexes[section] = href if section == "General" else section
+            # Registers the section even when the README is the only .md in it, which is the
+            # case for docs/profiles/ -- otherwise that folder's index is unreachable from
+            # here. Also keeps the `sorted(groups)` loop below the one place sections are
+            # ordered.
+            groups.setdefault(section, [])
+            continue
         title = (_TITLE_OVERRIDES.get(href)
                  or rel.name.replace("-", " ").replace("_", " ").title())
         groups.setdefault(section, []).append((title, href))
+
+    # A folder split out of a page -- databases/, onboarding/, remote-agents/,
+    # integrations/ansible/ -- has no README of its own, because doc_page resolves
+    # <page>.md before <page>/README.md and the hub has to win that URL. Its index is
+    # that sibling hub, so hang the heading off it rather than leaving the section
+    # unlinked.
+    for section in groups:
+        if section in indexes or section == "General":
+            continue
+        # Matched by LISTING, not by is_file(): ONBOARDING.md indexes onboarding/, and
+        # (_DOCS_DIR / "onboarding.md").is_file() is True on an NTFS dev checkout and
+        # False in the Linux image -- so a case-insensitive match here would link the
+        # heading locally and silently drop it in production.
+        parent = _DOCS_DIR / PurePosixPath(section).parent
+        want = f"{PurePosixPath(section).name}.md".lower()
+        hub = next((p for p in parent.iterdir()
+                    if p.name.lower() == want and p.is_file()), None)
+        if hub is not None:
+            indexes[section] = str(
+                hub.relative_to(_DOCS_DIR).with_suffix("")).replace("\\", "/")
 
     parts = ["<h1>Documentation</h1>",
              '<p>Shipped with this build. The API explorer lives at '
              '<a href="/swagger">/swagger</a>.</p>']
     for section in sorted(groups):
-        parts.append(f"<h2>{_html.escape(section)}</h2><ul>")
-        for title, href in groups[section]:
-            parts.append(f'<li><a href="/docs/{_html.escape(href)}">{_html.escape(title)}</a></li>')
-        parts.append("</ul>")
+        label = _html.escape(_SECTION_LABELS.get(section, section))
+        index_href = indexes.get(section)
+        if index_href:
+            label = f'<a href="/docs/{_html.escape(index_href)}">{label}</a>'
+        parts.append(f"<h2>{label}</h2>")
+        if groups[section]:
+            parts.append("<ul>")
+            for title, href in groups[section]:
+                parts.append(
+                    f'<li><a href="/docs/{_html.escape(href)}">{_html.escape(title)}</a></li>')
+            parts.append("</ul>")
     return HTMLResponse(_shell("Documentation", "".join(parts)))
 
 
 @router.get("/docs/{page:path}", response_class=HTMLResponse)
 async def doc_page(page: str) -> HTMLResponse:
-    """Render ``docs/<page>.md``. 404 if it's missing or escapes the docs dir."""
+    """Render ``docs/<page>.md``, or ``docs/<page>/README.md`` for a folder. 404 if it's
+    missing or escapes the docs dir."""
     rel = page.strip("/")
     if not rel:
         raise HTTPException(status_code=404, detail="doc not found")
@@ -247,9 +409,20 @@ async def doc_page(page: str) -> HTMLResponse:
     except ValueError:
         raise HTTPException(status_code=404, detail="doc not found")
     if not candidate.is_file():
-        raise HTTPException(status_code=404, detail="doc not found")
+        # A folder URL serves that folder's index, so /docs/profiles/pov works and every
+        # link can name the directory the way it does on GitHub. Without this the hub is
+        # reachable only at /docs/profiles/pov/README -- mixed case, on a case-sensitive
+        # container filesystem, which is a link that passes a check on Windows and 404s in
+        # the image.
+        candidate = (_DOCS_DIR / rel / "README.md").resolve()
+        try:
+            candidate.relative_to(_DOCS_DIR)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="doc not found")
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail="doc not found")
 
-    html = _render_markdown(candidate.read_text(encoding="utf-8"))
+    html = _render_markdown(candidate.read_text(encoding="utf-8"), page=rel)
     # Escape the page-derived title before reflecting it into the HTML shell —
     # it originates from the request path, so render it as text, not markup
     # (prevents reflected XSS; CodeQL py/reflective-xss).

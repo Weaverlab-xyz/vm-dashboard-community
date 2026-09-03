@@ -1,5 +1,7 @@
 # Sandbox + provisioning audit: cost and gaps
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are changing a sandbox bootstrapper or a provisioning path and want to know what leaked cost last time.
+
 Audit of the four sandbox bootstrappers and the provisioning paths for cloud VMs, cloud
 databases and Kubernetes clusters, answering three questions: what's missing, what can get
 cheaper by moving from the sandbox script into per-resource Terraform, and why `/costs`

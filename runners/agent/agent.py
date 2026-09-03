@@ -1114,7 +1114,7 @@ class Policy:
                 "this agent's policy.yaml does not enable Config Management. Add an "
                 "`ansible:` block with `enabled: true`, the image(s) for the kinds of run "
                 "you want, and a `targets:` list — see "
-                "docs/remote-agents.md#agent-executed-ansible. Note this is a separate "
+                "docs/remote-agents/config-runs.md#agent-executed-config-management. Note this is a separate "
                 "grant from `targets:` and `sibling:` on purpose: it allows a playbook to "
                 "be applied to a host, not merely a port to be probed.")
         images = {"vm": ("vm_image", self.ansible_vm_image),
@@ -1142,7 +1142,7 @@ class Policy:
             raise PolicyRefusal(
                 "this agent's policy.yaml does not enable the BeyondTrust Gateway. Add a "
                 "`gateway:` block with `enabled: true`, the image, and "
-                "`privileged: true` — see docs/remote-agents.md#the-beyondtrust-gateway. "
+                "`privileged: true` — see docs/remote-agents/enrolment.md#the-beyondtrust-gateway. "
                 "It needs the Docker socket, like the other runners.")
         if not self.gateway_image_name:
             raise PolicyRefusal(
@@ -3527,7 +3527,7 @@ def _run_sibling(policy: "Policy", env: dict, emit, cancelled,
         raise PolicyRefusal(
             "this agent's policy.yaml does not enable the sibling runner. Set "
             "`sibling: {enabled: true, image: chrweav/hypervisor-runner:latest}` and "
-            "mount the Docker socket — see docs/remote-agents.md#the-sibling-runner.")
+            "mount the Docker socket — see docs/remote-agents/hypervisors.md#the-sibling-runner.")
 
     # The credential rides in Env in the create body: not in argv (where it would show
     # in `ps` on the host) and not in a file (which would need a bind mount).

@@ -1,5 +1,7 @@
 # VMware vSphere / ESXi Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on vSphere or a standalone ESXi host.
+
 ## What is it?
 
 The vSphere integration connects the dashboard to a VMware vCenter Server or a
@@ -209,7 +211,7 @@ image still works.
 ## Over a remote agent
 
 A vCenter the dashboard has no network route to can be reached through a
-[remote agent](../remote-agents.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 
@@ -235,7 +237,7 @@ Power actions still work: they are dispatched to the agent as jobs and appear on
 with Live Output, exactly like a discovery scan. Power On, Force Off, Reset and Shutdown
 all map to a verb; **Suspend** does not, and is refused with a 501 naming what is
 available rather than approximated onto a neighbouring operation — see
-[the verbs](../remote-agents.md#the-verbs).
+[the verbs](../remote-agents/hypervisors.md#the-verbs).
 
 Shutdown is the one that needs the guest: it is not a power action but a call to
 vCenter's separate `guest/power` endpoint, through VMware Tools. The synced inventory

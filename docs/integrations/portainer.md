@@ -1,5 +1,7 @@
 # Portainer CE Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you already run Portainer and want the dashboard to drive it.
+
 ## What is it?
 
 The Portainer CE integration connects the dashboard to a single

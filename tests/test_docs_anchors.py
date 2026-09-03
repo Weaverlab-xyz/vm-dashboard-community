@@ -191,6 +191,73 @@ def test_the_renderer_actually_uses_the_github_slugifier():
     assert 'id="alpha--beta"' in html, html
 
 
+# ``docs/<page>.md#<anchor>`` written OUTSIDE docs/ — in a log message, a Dockerfile
+# comment, a runner README. Not a markdown link and not an app route, so neither the
+# sweep above nor test_app_docs_links ever looked at one.
+_BARE_REF = re.compile(r"\bdocs/([A-Za-z0-9_./-]+\.md)#([A-Za-z0-9_-]+)")
+
+_REF_ROOTS = ("runners", "scripts", "provisioners", "examples", "web_dashboard",
+              "terraform", "corp-ca")
+_REF_SUFFIXES = (".py", ".md", ".sh", ".ps1", ".yml", ".yaml", ".tf", "Dockerfile")
+
+
+def _bare_refs():
+    """(source, "docs/<page>.md", fragment) for every such reference."""
+    for root in _REF_ROOTS:
+        base = os.path.join(_ROOT, root)
+        if not os.path.isdir(base):
+            continue
+        for dp, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for f in sorted(files):
+                if not f.endswith(_REF_SUFFIXES):
+                    continue
+                p = os.path.join(dp, f)
+                try:
+                    text = open(p, encoding="utf-8").read()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                src = os.path.relpath(p, _ROOT).replace("\\", "/")
+                for page, frag in _BARE_REF.findall(text):
+                    yield src, "docs/" + page, frag
+
+
+def test_every_doc_anchor_named_outside_docs_resolves():
+    """A runner prints one of these AT AN OPERATOR, at the moment it refuses their job.
+
+    ``runners/agent/agent.py`` refused a Config Management run with "see
+    docs/remote-agents.md#agent-executed-ansible" long after that heading had been renamed
+    to "Agent-executed Config Management" — so the operator being told why their job
+    failed was sent to a page that scrolled nowhere.
+
+    Nothing caught it, for two compounding reasons: these are neither markdown links (so
+    ``_links()`` above never saw them) nor ``/docs`` app routes (so
+    ``tests/test_app_docs_links.py`` never saw them). And they are baked into agent
+    images, so a stale one keeps being printed until that image is rebuilt — which makes
+    this the worst place in the repo to have a dead anchor and the last place anything
+    was checking.
+    """
+    ids = _ids_by_doc()
+    broken = []
+    for src, page, frag in _bare_refs():
+        if page not in ids:
+            broken.append(f"{src} -> {page}#{frag} (no such page)")
+        elif frag not in ids[page]:
+            broken.append(f"{src} -> {page}#{frag} (no such heading)")
+    assert not broken, (
+        str(len(broken)) + " doc anchor(s) named outside docs/ resolve to nothing:\n  "
+        + "\n  ".join(sorted(broken)))
+
+
+def test_the_bare_reference_sweep_is_actually_finding_them():
+    """An empty sweep passes the test above. These paths are written in prose, inside
+    error strings, so a directory move or a reworded message can quietly empty it."""
+    refs = list(_bare_refs())
+    assert len(refs) >= 5, (
+        f"only {len(refs)} docs/<page>.md#<anchor> reference(s) found outside docs/ — "
+        "the sweep is looking in the wrong place, or the pattern stopped matching")
+
+
 if __name__ == "__main__":
     if _render_markdown is None:
         print(f"SKIP all: renderer unavailable ({_IMPORT_ERR})")

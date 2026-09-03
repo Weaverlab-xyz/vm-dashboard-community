@@ -1,5 +1,7 @@
 # Design: rotating the k8s ServiceAccount token with Password Safe
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are touching ServiceAccount token rotation and need the reasoning that is not in the code.
+
 Why the k8s token-rotation feature is shaped the way it is. Four of these are things a
 future reader cannot recover from the code, because they are facts about the Password
 Safe plugin or about Kubernetes, not about this repo.

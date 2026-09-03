@@ -1,5 +1,7 @@
 # Nutanix AHV Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on Nutanix AHV.
+
 The dashboard connects to **Prism Central** (or Prism Element) via the Nutanix REST API v3
 to list and control AHV virtual machines.
 
@@ -117,7 +119,7 @@ image still works.
 ## Over a remote agent
 
 A Prism Central the dashboard has no network route to can be reached through a
-[remote agent](../remote-agents.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 

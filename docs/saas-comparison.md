@@ -1,5 +1,7 @@
 # Community vs. hosted — what ships today
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are choosing between running this yourself and a managed edition.
+
 The dashboard codebase has two shipping deployment topologies:
 
 - **Community (self-hosted)** — runs on a host you control, secrets in an

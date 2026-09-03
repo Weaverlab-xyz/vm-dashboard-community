@@ -1,5 +1,7 @@
 # VMware Workstation Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are running VMs on VMware Workstation on this machine.
+
 ## What is it?
 
 The VMware integration lists your VMware Workstation VMs on the **Workstation** page,

@@ -1,5 +1,7 @@
 # Storage Management
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are enabling a feature that needs a storage backend, which several of them do.
+
 This document explains how the dashboard stores playbooks, scripts, and
 other large assets that don't fit in the encrypted credentials database
 — and how to choose, configure, and migrate between cloud object stores.
@@ -31,7 +33,7 @@ UI so you can copy assets between them without downtime.
 | **Azure Blob Storage** | Storage account + container + blob prefix | Teams on Azure; integrates with Azure SP creds |
 | **Google Cloud Storage** | GCS bucket + object prefix | Teams on GCP; same SA creds as Compute Engine |
 | **Local Filesystem / UNC** | Filesystem path inside the dashboard container, or a corporate `\\server\share` UNC accessed via SMB | On-prem hypervisor targets when a corporate file share is the source of truth — see [the constraint below](#constraint-local-backend-only-works-with-the-local-ansible-runner) |
-| **Remote Filesystem / UNC (via agent)** | The same kind of target, reached by a [remote agent](remote-agents.md) instead of by the dashboard container | A **cloud-hosted** dashboard — or a [POV instance](pov-instance.md) — that needs an on-prem share it has no network route to. See [below](#remote-filesystem--unc-via-agent) |
+| **Remote Filesystem / UNC (via agent)** | The same kind of target, reached by a [remote agent](remote-agents.md) instead of by the dashboard container | A **cloud-hosted** dashboard — or a [POV instance](profiles/pov/README.md) — that needs an on-prem share it has no network route to. See [below](#remote-filesystem--unc-via-agent) |
 
 They are interchangeable from the dashboard's perspective. Switching
 backends does **not** move data; the Migrate panel does that explicitly,
@@ -211,7 +213,7 @@ already inside your network does, and reports back over the same
 outbound-polling channel it uses for hypervisor and Config-Management work.
 
 That inverts who has to be where. A dashboard on Azure Container Apps, or a
-[POV instance](pov-instance.md) with no cloud provider at all, can use a
+[POV instance](profiles/pov/README.md) with no cloud provider at all, can use a
 corporate share as its storage backend — and because the dashboard fetches
 the bytes and hands them to whichever Ansible runner is selected, a **cloud
 runner is fine**. There is no `ansible_runner=local` requirement.

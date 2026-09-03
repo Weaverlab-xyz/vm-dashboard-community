@@ -1,5 +1,7 @@
 # Cloud Containers
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you want a containerised app on a cloud runtime without standing up Portainer.
+
 The **Containers → Cloud** tab deploys a Docker Compose file to a managed cloud container
 runtime — without going through Portainer — and monitors the container workloads the
 dashboard runs across AWS, Azure, and GCP.

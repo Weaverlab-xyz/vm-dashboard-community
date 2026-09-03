@@ -1,5 +1,7 @@
 # Microsoft Hyper-V Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on Hyper-V and you want them managed from here.
+
 ## What is it?
 
 The Hyper-V integration connects the dashboard to a Windows host running
@@ -270,7 +272,7 @@ argument.
 
 So a Hyper-V host has to be somewhere the dashboard can reach. Every other hypervisor
 here can go through an agent; see
-[remote agents](../remote-agents.md#hypervisor-connections).
+[remote agents](../remote-agents/hypervisors.md#hypervisor-connections).
 
 A remote agent's discovery scan *will* report WinRM on 5985/5986, but marked **possible
 only**: nearly every domain-joined Windows Server answers there and the overwhelming
@@ -288,7 +290,7 @@ Power actions still work: they are dispatched to the agent as jobs and appear on
 with Live Output, exactly like a discovery scan. Start, Force Off, Shutdown and Restart
 all map to a verb; **Pause, Resume and Save** do not, and are refused with a 501 naming
 what is available rather than approximated onto a neighbouring operation — see
-[the verbs](../remote-agents.md#the-verbs).
+[the verbs](../remote-agents/hypervisors.md#the-verbs).
 
 Shutdown is the one that needs the guest. It runs bare `Stop-VM`, which shuts down
 through the guest operating system — not `-TurnOff` (the power cut) and not `-Force`,

@@ -34,7 +34,7 @@ for missing and wrong so probing tells nothing.
 **Registering this adapter with Entitle is a later slice.** Until then an SE points an
 Entitle REST integration at these routes by hand, which is also how the Ephemeral-mode
 question in ``entitle_registration_service.register_rest`` gets answered — see
-docs/design/pov-use-cases.md.
+docs/profiles/pov/design/use-cases.md.
 """
 import hmac
 import logging

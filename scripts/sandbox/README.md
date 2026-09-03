@@ -16,6 +16,12 @@ the Jumpoint is the only outbound proxy.
 | Rollback  | `rollback.sh`       | `Rollback-Sandbox.ps1`       |
 | Shared    | `lib/common.sh`     | `lib/Common.ps1`             |
 
+> **This is the script reference.** For what each script *creates*, how it
+> isolates traffic, cost, verification and tear-down, read
+> [`docs/CLOUD_SANDBOX.md`](../../docs/CLOUD_SANDBOX.md) — which the dashboard
+> also serves at `/docs/CLOUD_SANDBOX`, so you can read it without the repo
+> open. That guide already points here; this is the way back.
+
 Both variants are functionally equivalent — same tags, same idempotency,
 same printed config block. Pick whichever fits your shell. State files
 written by one variant are readable by the other (same

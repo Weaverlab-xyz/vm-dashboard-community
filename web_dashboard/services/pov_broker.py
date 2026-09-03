@@ -15,7 +15,7 @@ Platform-agnostic on purpose. The only platform-specific step is handing the pay
 the guest, which goes through ``lab_platforms`` — the ``bootstrap_injection`` capability.
 Skytap's mechanism is ``"metadata"``: the platform stores ``user_data`` and the guest
 fetches it. **Nothing executes it for you.** That is why this module is only half of the
-feature; the other half is the template contract in ``docs/integrations/skytap.md``, and a
+feature; the other half is the template contract in ``docs/profiles/pov/skytap.md``, and a
 template without a runner reads the payload and does nothing, silently.
 
 Four orderings are load-bearing here, each wrong in a way that is quiet rather than loud:
@@ -634,7 +634,7 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     # is STOPPED, so there is nothing to clear here without a stop/start of a VM that has
     # just come up. The exposure is smaller than it looks: the code is single-use and
     # fifteen minutes old by now, and the instance requires IMDSv2, so reading it needs a
-    # token obtained from on the guest. It is written down in docs/pov-instance.md rather
+    # token obtained from on the guest. It is written down in docs/profiles/pov/README.md rather
     # than quietly accepted.
     if mechanism == "metadata":
         try:

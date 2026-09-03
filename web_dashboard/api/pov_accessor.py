@@ -92,7 +92,7 @@ async def create_accessor(env_id: str, payload: AccessorRequest,
     with a credential only one person ever saw.
 
     This is also the path that makes the slice usable before the Entitle integration is
-    registered — see docs/design/pov-use-cases.md on why that half is deliberately later.
+    registered — see docs/profiles/pov/design/use-cases.md on why that half is deliberately later.
     """
     env = _env_or_404(db, env_id)
     try:

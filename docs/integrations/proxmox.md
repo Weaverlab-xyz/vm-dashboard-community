@@ -1,5 +1,7 @@
 # Proxmox VE Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on Proxmox VE.
+
 ## What is it?
 
 The Proxmox VE integration connects the dashboard to one or more
@@ -195,7 +197,7 @@ image still works.
 ## Over a remote agent
 
 A Proxmox cluster the dashboard has no network route to can be reached through a
-[remote agent](../remote-agents.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 
@@ -217,7 +219,7 @@ worse than an empty cell.
 Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
 with Live Output, exactly like a discovery scan. Every button this page offers — Start,
 Stop, Shutdown and Reboot — maps to a verb, so nothing here is refused; see
-[the verbs](../remote-agents.md#the-verbs) for how the other products differ.
+[the verbs](../remote-agents/hypervisors.md#the-verbs) for how the other products differ.
 
 One upgrade note: Shutdown and Reboot use the `shutdown` and `reboot` verbs, which are
 newer than the agent image many installs are running. Until an agent is re-pulled it

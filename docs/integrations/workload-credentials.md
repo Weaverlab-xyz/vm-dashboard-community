@@ -1,5 +1,7 @@
 # BeyondTrust Workload Credentials
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** a workload needs a credential minted at run time rather than one stored for it.
+
 > **Preview.** Workload Credentials is not yet generally available, and its API may
 > still change. It is gated behind a **preview flag** (Settings → Preview features) and
 > is off by default — nothing about your existing credentials changes until you turn it

@@ -1,5 +1,7 @@
 # Phase 4b — Cloud-identity JIT sweeper (Azure reconciliation)
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are verifying the Azure reconciliation sweeper.
+
 Validates Phase 4b of the [cloud-identity JIT design](../design/cloud-identity-jit.md) §6.7
 ("Audit trail + agent-revoke sweeper" — Azure leg).
 

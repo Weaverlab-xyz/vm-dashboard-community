@@ -115,7 +115,7 @@ def generate_playbook_yaml(asset_name: str) -> str:
         #
         # `arguments` comes from a variable with a default of "", so a run that passes none
         # still renders valid YAML. A BeyondTrust Resource Broker install puts its /quiet,
-        # INSTALLKEY and ZONE there — see docs/design/pov-resource-broker.md.
+        # INSTALLKEY and ZONE there — see docs/profiles/pov/design/resource-broker.md.
         return f"""\
 - hosts: all
   tasks:

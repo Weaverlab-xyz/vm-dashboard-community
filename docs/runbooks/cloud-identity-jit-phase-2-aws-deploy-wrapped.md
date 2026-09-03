@@ -1,5 +1,7 @@
 # Phase 2 — Cloud-identity JIT for AWS EC2 (deploy + terminate)
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are verifying the first cloud SDK writes wrapped in an elevation.
+
 Validates Phase 2 of the [cloud-identity JIT design](../design/cloud-identity-jit.md) —
 first cloud SDK write paths wrapped in `cloud_identity_service.elevate()`.
 

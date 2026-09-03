@@ -1,5 +1,7 @@
 # Entitle Integration
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want access to expire on its own instead of being revoked by someone remembering.
+
 The Entitle integration has three independent tracks that share one Entitle
 tenant + API token. You can enable any combination:
 
@@ -67,7 +69,7 @@ environment** (not per build).
 > private network, so the shared one above cannot reach them. The POV page installs a
 > single-node k3s on a Linux guest and Helm-installs the agent there, minting the token in
 > that POV's own Entitle tenant — see
-> [the POV instance guide](../pov-instance.md#the-entitle-agent). The keys on this page
+> [the POV instance guide](../profiles/pov/wiring.md#the-entitle-agent). The keys on this page
 > describe the *instance-wide* agent used by managed clusters and stay untouched by it. A registration for a private target fails (non-fatally)
 with a clear message if no agent is configured. The Entitle agent is the *management*
 plane (it mints/revokes the ephemeral SSH account or DB role); the **PRA tunnel** the

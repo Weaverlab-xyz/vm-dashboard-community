@@ -1607,7 +1607,7 @@ class BeyondTrustTenant(Base):
     the global singletons — ``bt_api_host``, ``pscli_api_url``, ``entitle_api_url`` — and
     that is correct there, because there is exactly one. A POV instance runs several POVs
     at once and **each has its own PRA appliance and its own Password Safe Cloud tenant**,
-    so "which tenant?" stops having one answer. See docs/pov-instance.md.
+    so "which tenant?" stops having one answer. See docs/profiles/pov/README.md.
 
     Modelled on ``HypervisorConnection``, which solved the same shape one layer down: N
     named rows replacing a singleton, credentials as Fernet ciphertext *or* an external
@@ -1697,7 +1697,7 @@ class PovEnvironment(Base):
     ``created_by``, and an operator-chosen ``name`` slug. Adding a customer column
     later should be treated as a schema regression: a free-text "customer" box is
     where a company name eventually gets typed, and this database is not approved to
-    hold it. See docs/pov-instance.md.
+    hold it. See docs/profiles/pov/README.md.
 
     Every platform call is keyed on ``platform_environment_id``, **never on name**, so
     an SE may rename an environment on the platform to whatever their approvals allow

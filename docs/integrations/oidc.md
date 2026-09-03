@@ -1,5 +1,7 @@
 # Generic OIDC Integration
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want single sign-on for the dashboard instead of local passwords.
+
 ## What is it?
 
 The OIDC integration lets people sign in to the dashboard with your existing

@@ -1,5 +1,7 @@
 # MCP Server (AI Client Integration)
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want an AI client to drive the dashboard through its own API.
+
 ## What is it?
 
 The dashboard exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io)

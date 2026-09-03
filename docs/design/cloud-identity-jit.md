@@ -1,5 +1,7 @@
 # Design — Machine-Identity JIT Cloud Access via Entitle
 
+> **Audience:** contributor · **Profile:** `both` · **Read this when:** you are changing how the dashboard's own cloud writes are authorised.
+
 > **Status:** Design draft v2 — revised after validation against Entitle's
 > public API and Terraform-provider docs. No code changes yet.
 > **Scope:** Community + prod/dev. Community is the reference target.

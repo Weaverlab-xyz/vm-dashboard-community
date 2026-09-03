@@ -15,7 +15,7 @@ So a runbook is a group of cards like a persona is, and deliberately **not** a p
     items, and appears in the setup wizard and the lens picker. "Password Safe POC
     runbook" is not a job title, and putting it there would offer an SE a role they are
     not, in four places that have nothing to do with a POV.
-  * A persona also owes ``docs/personas/<key>.md`` a section per demo card, and demo cards
+  * A persona also owes ``docs/profiles/demo/personas/<key>.md`` a section per demo card, and demo cards
     target the demo estate — pages a POV instance masks. A runbook has no demo half.
 
 What it DOES share is the card shape and every consumer: :class:`personas.UseCase` and
@@ -39,7 +39,7 @@ notes: 12 (needs SQL Server and SSMS that its own step 3 never documents), 13, 1
 checkbox an SE cannot honestly tick — it would sit unticked on every POV and read as
 either a gap in this dashboard or, worse, a demo somebody promises and then cannot show.
 
-They are not silently dropped. ``docs/pov-ps-runbook.md`` lists all seven with what is
+They are not silently dropped. ``docs/profiles/pov/ps-runbook.md`` lists all seven with what is
 missing from each, so an SE looking for use case 15 finds out why it is absent instead of
 wondering. When the runbook fills one in, it gets a card.
 """
@@ -81,7 +81,7 @@ class Runbook:
 #   * the runbook's setup steps 1-11 -- a precondition for all of them, done once, and an
 #     SE who has not finished them has nothing to tick;
 #   * its seven unfinished use cases (12-17 and 19), which no SE can give as written. Those
-#     are documented in docs/pov-ps-runbook.md instead. See the module docstring.
+#     are documented in docs/profiles/pov/ps-runbook.md instead. See the module docstring.
 
 _PS_POC_SKYTAP = Runbook(
     key="ps-poc-skytap",
@@ -90,7 +90,7 @@ _PS_POC_SKYTAP = Runbook(
           "across several sessions and more than one person knows where it got to.",
     source="Confluence SELab page 870514897, rev 7.0 — "
            "“Using Skytap for a Password Safe Cloud POC: Step-by-Step”",
-    docs=("pov-ps-runbook",),
+    docs=("profiles/pov/ps-runbook",),
     use_cases=(
         UseCase(
             id="pspoc-uc1-onboard-systems",

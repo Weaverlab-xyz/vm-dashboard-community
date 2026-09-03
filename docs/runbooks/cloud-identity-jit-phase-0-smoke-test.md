@@ -1,5 +1,7 @@
 # Phase 0 — Cloud-identity JIT smoke test
 
+> **Audience:** contributor · **Profile:** `both` · **Read this when:** you are verifying the cloud-identity-JIT scaffolding before wiring anything real.
+
 Validates the scaffolding for the [cloud-identity JIT design](../design/cloud-identity-jit.md).
 
 After Phase 0 deploys, this confirms:

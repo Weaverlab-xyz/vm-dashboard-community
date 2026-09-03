@@ -1,5 +1,7 @@
 # Cloud Sandbox Guide
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you want an isolated cloud account for the dashboard's labs, bootstrapped rather than hand-built.
+
 A walkthrough of `scripts/sandbox/` — bash and PowerShell scripts that
 provision **isolated lab environments** in AWS, Azure, and GCP for the
 VM Dashboard. Target audience: testers and lab operators who want a

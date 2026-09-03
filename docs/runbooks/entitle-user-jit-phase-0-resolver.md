@@ -1,5 +1,7 @@
 # Phase 0 — Entitle user-JIT resolver verification
 
+> **Audience:** contributor · **Profile:** `both` · **Read this when:** you are verifying how the legacy Entra-group resolver behaves.
+
 > **Legacy mechanism.** This runbook covers Entitle granting dashboard
 > permissions through **Entra groups**. The current mechanism is a REST
 > integration that works for any user and takes effect immediately — see

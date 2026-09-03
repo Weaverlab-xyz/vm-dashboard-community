@@ -1,5 +1,7 @@
 # BeyondTrust Privileged Remote Access
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want sessions onto provisioned resources brokered and recorded rather than routed.
+
 ## What is it?
 
 **BeyondTrust Privileged Remote Access (PRA/SRA)** brokers access to everything the

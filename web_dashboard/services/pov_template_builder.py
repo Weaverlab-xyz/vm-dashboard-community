@@ -16,7 +16,7 @@ duration.
     bake -> reap
 
 The one part worth reading twice is **prepare**, because it is the piece with no automation
-before this. ``docs/integrations/skytap.md#the-template-contract`` requires the broker VM to
+before this. ``docs/profiles/pov/skytap.md#the-template-contract`` requires the broker VM to
 carry a metadata runner: the platform hands ``user_data`` to the guest and *nothing executes
 it*, so a template whose broker cannot fetch and run its own bootstrap produces a POV that
 comes up, bills, and never enrols an agent. That runner has lived only as an example in a
@@ -27,7 +27,7 @@ cannot drift — and installed over one short-lived SSH session.
 Two boundaries this module holds deliberately:
 
 **The Windows Resource Broker VM is checked, never prepared.** Its installer is staged by
-the customer (see ``docs/design/pov-resource-broker.md``) and there is no WinRM route from
+the customer (see ``docs/profiles/pov/design/resource-broker.md``) and there is no WinRM route from
 here into a lab platform's private network. The contract check reports whether a suitable
 guest is present; installing on it stays the POV's job, after the broker agent exists.
 
@@ -132,7 +132,7 @@ def _marker_stem(marker: str) -> str:
     and the shell splits an unquoted pattern on spaces — ``*# BEGIN-… v1*)`` parses as the
     pattern ``*#`` followed by a syntax error. Dropping the ``# `` prefix and the version
     leaves a single word, which is also exactly the form the template contract in
-    ``docs/integrations/skytap.md`` documents.
+    ``docs/profiles/pov/skytap.md`` documents.
     """
     stem = marker.lstrip("#").strip()
     parts = stem.split()
@@ -512,7 +512,7 @@ async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
 async def prepare_broker_vm(mod, env_id: str, vm: dict) -> str:
     """Publish SSH, install the runner, revoke the published service. Returns a summary.
 
-    ``docs/integrations/skytap.md`` rules published services out for POV *wiring*, because a
+    ``docs/profiles/pov/skytap.md`` rules published services out for POV *wiring*, because a
     published address changes per environment and per power cycle. A build is the one case
     where that objection does not apply: the address is created, used once and revoked
     inside this function, so there is nothing to churn and nothing that outlives the job.

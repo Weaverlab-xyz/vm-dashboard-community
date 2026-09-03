@@ -1,5 +1,7 @@
 # Config Migration
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are standing up a second instance and do not want to re-type months of configuration.
+
 Move a dashboard's **Settings** configuration from one instance to another —
 dev to prod, a laptop to a hosted deployment, or a rebuild after a host dies.
 

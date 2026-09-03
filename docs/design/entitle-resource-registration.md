@@ -1,5 +1,7 @@
 # Entitle resource registration — design
 
+> **Audience:** contributor · **Profile:** `both` · **Read this when:** you are changing how built resources register themselves as Entitle integrations.
+
 ## Context
 
 The dashboard registers each resource it builds as an Entitle **integration** so

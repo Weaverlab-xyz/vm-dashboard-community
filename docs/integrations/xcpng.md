@@ -1,5 +1,7 @@
 # XCP-ng / XenServer Integration
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on XCP-ng or XenServer.
+
 The dashboard connects to an **XCP-ng** or **XenServer** host or pool master via the
 **XAPI XML-RPC API** using Python's built-in `xmlrpc.client` — no external SDK required.
 
@@ -143,7 +145,7 @@ image still works.
 ## Over a remote agent
 
 A XCP-ng pool the dashboard has no network route to can be reached through a
-[remote agent](../remote-agents.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 
@@ -166,7 +168,7 @@ Power actions still work: they are dispatched to the agent as jobs and appear on
 with Live Output, exactly like a discovery scan. Start, Force Off, Shutdown, Reboot and
 Hard Reboot all map to a verb; **Suspend, Resume, Pause and Unpause** do not, and are
 refused with a 501 naming what is available rather than approximated onto a neighbouring
-operation — see [the verbs](../remote-agents.md#the-verbs).
+operation — see [the verbs](../remote-agents/hypervisors.md#the-verbs).
 
 Shutdown and Reboot are the two that need the guest utilities. The synced inventory
 carries no `tools_installed`, so those buttons are offered rather than hidden — and no

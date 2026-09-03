@@ -17,7 +17,7 @@
 #
 # The cost is real and is documented rather than hidden: launching this needs the Docker
 # socket, which is root on the host. See examples/remote-agent/docker-compose.sibling.yml
-# and docs/remote-agents.md#the-sibling-runner. The agent never mounts it by default.
+# and docs/remote-agents/hypervisors.md#the-sibling-runner. The agent never mounts it by default.
 #
 # Published (public Docker Hub): chrweav/hypervisor-runner:latest
 # Build + push:

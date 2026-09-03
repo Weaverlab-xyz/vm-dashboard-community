@@ -255,7 +255,7 @@ _CLOUDOPS = Persona(
     tile_emphasis=("aws_instances", "azure_vms", "gcp_instances", "registered_images"),
     nav_pins=("dashboard", "aws", "azure", "gcp", "images", "inventory", "jobs"),
     quick_deploy=("ec2", "azure_vm", "gce", "oci"),
-    docs=("personas/cloudops",),
+    docs=("profiles/demo/personas/cloudops",),
     preset_flags=("pra_enabled", "password_safe_enabled"),
     use_cases=(
         UseCase(
@@ -325,7 +325,7 @@ _CLOUDOPS = Persona(
                     "same three layers the demo estate shows, on the customer’s own lab.",
             target="#wired",
             minutes=12,
-            docs="pov-instance",
+            docs="profiles/pov/wiring",
             requires_products=("pra", "password_safe"),
         ),
         UseCase(
@@ -372,7 +372,7 @@ _DEVOPS = Persona(
     tile_emphasis=("k8s_clusters", "cloud_run_jobs", "ecs_tasks"),
     nav_pins=("dashboard", "config_mgmt", "secrets", "functions", "jobs", "inventory"),
     quick_deploy=("k8s", "gce", "ec2"),
-    docs=("personas/devops",),
+    docs=("profiles/demo/personas/devops",),
     preset_flags=("ansible_enabled", "password_safe_enabled", "entitle_enabled"),
     use_cases=(
         UseCase(
@@ -460,7 +460,7 @@ _DEVOPS = Persona(
                     "rotation project stalls on, answered against something running.",
             target="#overview",
             minutes=8,
-            docs="design/pov-resource-broker",
+            docs="profiles/pov/design/resource-broker",
             requires_products=("password_safe",),
         ),
         UseCase(
@@ -485,7 +485,7 @@ _HYPERVISOR = Persona(
     tile_emphasis=("vsphere_vms", "proxmox_vms", "nutanix_vms", "gateways"),
     nav_pins=("dashboard", "vsphere", "proxmox", "connections", "agents", "jobs"),
     quick_deploy=("proxmox_vm", "nutanix_vm"),
-    docs=("personas/hypervisor",),
+    docs=("profiles/demo/personas/hypervisor",),
     preset_flags=("pra_enabled", "vsphere_enabled", "proxmox_enabled"),
     use_cases=(
         UseCase(
@@ -600,7 +600,7 @@ _ITOPS = Persona(
     tile_emphasis=("workstation_vms",),
     nav_pins=("dashboard", "vms", "desktops", "agents", "jobs", "inventory"),
     quick_deploy=("proxmox_vm",),
-    docs=("personas/itops",),
+    docs=("profiles/demo/personas/itops",),
     preset_flags=("epml_enabled", "pra_enabled"),
     use_cases=(
         UseCase(
@@ -694,7 +694,7 @@ _ITOPS = Persona(
                     "on the call.",
             target="#share",
             minutes=6,
-            docs="pov-instance",
+            docs="profiles/pov/customer-access",
         ),
     ),
 )
@@ -719,7 +719,7 @@ _OT = Persona(
     # `pra_enabled` only. api/ot.py is gated on it and nothing else is required to demo a
     # cell -- a preset that ticks the union of everything a persona might touch is
     # indistinguishable from ticking everything.
-    docs=("personas/ot",),
+    docs=("profiles/demo/personas/ot",),
     preset_flags=("pra_enabled",),
     use_cases=(
         UseCase(
@@ -730,7 +730,7 @@ _OT = Persona(
                     "brokered tunnel — no VPN, no inbound rule.",
             target="/gcp#ot",
             minutes=15,
-            docs="cloud-ot",
+            docs="profiles/demo/ot-demo-cell",
             requires_flags=("pra_enabled",),
             requires_clouds=("gcp", "aws", "azure"),
         ),
@@ -743,7 +743,7 @@ _OT = Persona(
                     "“we are a Rockwell shop” in one demo.",
             target="/gcp#ot",
             minutes=10,
-            docs="cloud-ot",
+            docs="profiles/demo/ot-demo-cell",
             requires_flags=("pra_enabled",),
             requires_clouds=("gcp", "aws", "azure"),
         ),
@@ -767,7 +767,7 @@ _OT = Persona(
                     "without ever seeing it.",
             target="/gcp#ot",
             minutes=12,
-            docs="cloud-ot",
+            docs="profiles/demo/ot-demo-cell",
             requires_flags=("pra_enabled", "password_safe_enabled"),
             requires_clouds=("gcp", "aws", "azure"),
         ),
@@ -839,7 +839,7 @@ _DBA = Persona(
     tile_emphasis=("cloud_databases",),
     nav_pins=("dashboard", "databases", "secrets", "jobs", "inventory"),
     quick_deploy=("database",),
-    docs=("personas/dba",),
+    docs=("profiles/demo/personas/dba",),
     preset_flags=("cloud_database_enabled", "password_safe_enabled", "entitle_enabled"),
     use_cases=(
         UseCase(
@@ -954,7 +954,7 @@ _SECURITY = Persona(
     tile_emphasis=("active_jobs", "deployed_resources"),
     nav_pins=("dashboard", "inventory", "jobs", "secrets", "users", "groups"),
     quick_deploy=(),
-    docs=("personas/security",),
+    docs=("profiles/demo/personas/security",),
     preset_flags=("admission_control_enabled",),
     use_cases=(
         UseCase(
@@ -1016,7 +1016,7 @@ _SECURITY = Persona(
                     "spreadsheet.",
             target="#wired",
             minutes=8,
-            docs="pov-instance",
+            docs="profiles/pov/wiring",
         ),
         UseCase(
             id="pov-security-session-record",
@@ -1047,7 +1047,7 @@ _SECURITY = Persona(
                     "leaves nothing behind.",
             target="#overview",
             minutes=8,
-            docs="pov-instance",
+            docs="profiles/pov/customer-access",
         ),
     ),
 )
@@ -1061,7 +1061,7 @@ _SRE = Persona(
     tile_emphasis=("k8s_clusters", "rancher_nodes", "portainer_endpoints"),
     nav_pins=("dashboard", "k8s", "containers", "jobs", "inventory"),
     quick_deploy=("k8s",),
-    docs=("personas/sre",),
+    docs=("profiles/demo/personas/sre",),
     preset_flags=("k8s_management_enabled", "entitle_enabled", "pra_enabled"),
     use_cases=(
         UseCase(
@@ -1159,7 +1159,7 @@ _SRE = Persona(
                     "ask for before any of this ships.",
             target="#overview",
             minutes=10,
-            docs="design/pov-resource-broker",
+            docs="profiles/pov/design/resource-broker",
         ),
     ),
 )

@@ -1,5 +1,7 @@
 # BeyondTrust Password Safe
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want credentials vaulted and rotated rather than stored by this dashboard.
+
 ## What is it?
 
 **BeyondTrust Password Safe / Secrets Safe** is on-demand checkout of SSH keys and
@@ -36,7 +38,7 @@ half of the story.
   `beyondtrust.secrets_safe` Galaxy collection. The dashboard reuses this same OAuth
   client (`pscli_*`) — auto-injecting it into the runner as `PASSWORD_SAFE_*` — so no
   separate credential is needed. See
-  [integrations/ansible.md](ansible.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
+  [integrations/ansible.md](ansible\secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
   and [examples/playbooks/password-safe/](../../examples/playbooks/password-safe/).
 
 ---
@@ -131,7 +133,7 @@ details are worth knowing because they are not obvious:
   RBAC-locked secret and force-deleted after the run.
 
 Full walkthrough in
-[Ansible → Managed-account checkout](ansible.md#managed-account-checkout-beyondtrust-password-safe).
+[Ansible → Managed-account checkout](ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ### Hypervisor credentials for a remote agent
 
@@ -569,7 +571,7 @@ path proven immediately, remembering that LongLived revokes the token a live ses
 The **OT demo cell** uses the same primitive for its `adminuser` credential — parent on the
 GCP VM SSH Rotation platform, subscriber on the **PRA Vault Username Password** plugin, PRA
 Vault account associated to the cell's Jump Group for checkout/injection. See
-[cloud-ot.md](../cloud-ot.md#pra-checkout-of-the-cells-admin-credential).
+[cloud-ot.md](../profiles/demo/ot-demo-cell.md#pra-checkout-of-the-cells-admin-credential).
 
 **The LongLived break window.** Rotation revokes the old token immediately. Password Safe
 applies the new value to the subscriber as part of the same change, but change operations are
@@ -667,7 +669,7 @@ is on), or the row's **Register in Password Safe** action afterwards — which i
 database built before Password Safe was configured gets onboarded without being rebuilt.
 Registering after the fact **re-brokers the PRA tunnel** so it injects the rotatable managed
 user rather than the master admin; see
-[Databases → Two ways in](../databases.md#two-ways-in-at-provision-or-afterwards).
+[Databases → Two ways in](../databases/password-safe.md#two-ways-in-at-provision-or-afterwards).
 
 The dashboard can also **register** a database it did not create — on-premises or in a cloud —
 so it can be a Configuration Management target. That path has no tunnel and no onboarding: its

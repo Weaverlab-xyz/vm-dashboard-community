@@ -305,7 +305,7 @@ async def _pov_reconcile_loop() -> None:
 
     Deliberately NOT folded into the expiry sweep, which already walks the same rows.
     ``expiry_reaper.enqueue_sweep_if_due`` returns None while ``resource_expiry_enabled``
-    is off, and a fresh POV instance starts with it off (docs/pov-instance.md) — so a POV's
+    is off, and a fresh POV instance starts with it off (docs/profiles/pov/README.md) — so a POV's
     runstate would stop being refreshed because an unrelated feature had not been turned on.
 
     Always launched, and a no-op when POV environments are off or masked by the profile, so
@@ -1477,7 +1477,7 @@ async def agents_page(request: Request):
          dependencies=[_feature_gate("pov_environments_enabled")])
 async def pov_page(request: Request):
     """POV environments. Nav-, page- and router-gated on pov_environments_enabled, which is
-    available on a POV instance only — see docs/pov-instance.md.
+    available on a POV instance only — see docs/profiles/pov/README.md.
 
     The page gate goes through _feature_gate (and so through feature_flags.enabled) rather
     than config_service, because that is also what renders the nav link. Without it this

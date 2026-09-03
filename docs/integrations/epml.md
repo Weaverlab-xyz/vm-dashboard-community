@@ -1,5 +1,7 @@
 # BeyondTrust EPM for Linux (EPM-L)
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are rolling Endpoint Privilege Management for Linux onto provisioned hosts.
+
 ## What is it?
 
 **BeyondTrust Endpoint Privilege Management for Linux (EPM-L)** is a SaaS

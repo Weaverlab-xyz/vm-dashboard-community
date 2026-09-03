@@ -22,5 +22,5 @@ directory into the image's system trust store before `pip install` and
 Files in this directory (other than `.gitkeep` and this README) are gitignored,
 so you won't accidentally commit your corporate cert.
 
-See [docs/ONBOARDING.md](../docs/ONBOARDING.md#wsl-docker-pull-fails-with-a-certificate-error)
+See [the onboarding troubleshooting guide](../docs/onboarding/troubleshooting.md#wsl-docker-pull-fails-with-a-certificate-error)
 for the full WSL setup, including how to export the cert from Windows.

@@ -5,7 +5,7 @@ provision job, an explicit power action, and ``pov_env_service.refresh_vms`` —
 two callers are those same two paths. Nothing ever asked the platform again.
 
 That is a real problem and not a cosmetic one, because of what *else* changes a POV's
-runstate. ``suspend_on_idle`` — which ``docs/integrations/skytap.md`` calls the single
+runstate. ``suspend_on_idle`` — which ``docs/profiles/pov/skytap.md`` calls the single
 biggest lever on lab-platform spend — suspends an idle environment on the platform's own
 timer, with nothing to tell this dashboard it happened. The row went on saying ``running``
 indefinitely. And the POV page gates its Start/Suspend buttons on that value, so an SE
@@ -39,7 +39,7 @@ listing came back short would throw that away on the strength of a scope questio
 Its own job type rather than a step inside ``expiry_sweep``, which also walks POV rows
 every pass. That sweep is not enqueued at all while ``resource_expiry_enabled`` is off
 (``expiry_reaper.enqueue_sweep_if_due`` returns None), and a fresh POV instance starts with
-it off — see ``docs/pov-instance.md``. Hanging this off it would mean the dashboard's view
+it off — see ``docs/profiles/pov/README.md``. Hanging this off it would mean the dashboard's view
 of a customer's running environments silently stopped updating because an unrelated feature
 had not been turned on yet.
 """
@@ -477,7 +477,7 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
         # work has nothing to do with whether Skytap is reachable, which is what every
         # branch inside that loop turns on. It rides this pass rather than the expiry sweep
         # because a fresh POV instance starts with the auto-delete timer OFF
-        # (docs/pov-instance.md), and a login must not outlive its POV because an unrelated
+        # (docs/profiles/pov/README.md), and a login must not outlive its POV because an unrelated
         # feature was never enabled.
         # Imported here, like config_service and pov_env_service elsewhere in this file:
         # the sweep is one call on one path, and a module-level import would put the whole

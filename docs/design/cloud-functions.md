@@ -1,5 +1,7 @@
 # Cloud Functions (preview) — design
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are extending the Cloud Functions preview or its workload catalog.
+
 Status: **preview** (`cloud_functions_enabled`). Phase 1 = the modular function
 lifecycle + a catalog of standalone workloads. Phase 2 = using those functions as
 Entitle REST integrations (see §7).

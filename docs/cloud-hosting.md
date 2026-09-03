@@ -1,5 +1,7 @@
 # Cloud Hosting
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want the dashboard reachable from outside your LAN, or fronting remote agents.
+
 Running **the dashboard itself** as a managed container in your own cloud
 account — Azure Container Apps, GCP Cloud Run, or AWS ECS — instead of Docker
 Compose on a host you maintain.
@@ -79,7 +81,7 @@ minted on an install permanently pins the signing audience, and every agent
 signature is checked against it afterwards. A platform-assigned name — an
 `*.azurecontainerapps.io` default FQDN, a Cloud Run auto-URL — will change, and
 changing it strands the fleet. Bind a custom domain first. See
-[remote-agents.md](remote-agents.md#the-signing-audience-is-pinned-by-that-first-code).
+[remote-agents.md](remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
 
 ---
 

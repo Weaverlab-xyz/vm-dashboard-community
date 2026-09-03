@@ -1081,7 +1081,7 @@
   </div>
 
   {% if pra_enabled %}
-  <!-- ── Tab: OT Demo Cell (mirrors the GCP page's tab; docs/cloud-ot.md) ──── -->
+  <!-- ── Tab: OT Demo Cell (mirrors the GCP page's tab; docs/profiles/demo/ot-demo-cell.md) ──── -->
   <div x-show="activeTab === 'ot'" x-cloak>
     <div class="mb-4">
       <h2 class="text-lg font-semibold text-gray-800">OT Demo Cell</h2>
@@ -1437,7 +1437,7 @@ function azureDashboard() {
     // the dropdowns show only "(configured default)" and the backend falls back.
     praPickers: { configured: false, jump_groups: [], gateways: [], loaded: false },
 
-    // ── OT demo cell (mirrors the GCP page's tab; docs/cloud-ot.md) ──────────
+    // ── OT demo cell (mirrors the GCP page's tab; docs/profiles/demo/ot-demo-cell.md) ──────────
     otLoaded:        false,
     otPresets:       [],
     otCells:         [],
@@ -1752,7 +1752,7 @@ function azureDashboard() {
       } catch (e) { /* non-fatal */ }
     },
 
-    // ── OT demo cell (mirrors the GCP page's tab; docs/cloud-ot.md) ──────────
+    // ── OT demo cell (mirrors the GCP page's tab; docs/profiles/demo/ot-demo-cell.md) ──────────
     switchToOT() {
       this.activeTab = 'ot';
       if (!this.otLoaded) this.loadOTData();

@@ -1,5 +1,7 @@
 # Kubernetes
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are managing Kubernetes clusters and the privileged access into them.
+
 The dashboard provisions (or imports) managed Kubernetes clusters and layers management +
 privileged access on top — the same **provisioning + stacked layers** model as
 [Databases](databases.md) and [Cloud VMs](cloud-vms.md), adapted to Kubernetes:

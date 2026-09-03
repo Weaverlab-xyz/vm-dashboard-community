@@ -1,5 +1,7 @@
 # Action Guardrails (pre-action policy)
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want disallowed deploys blocked before they start rather than reviewed after.
+
 Action Guardrails evaluate a deploy request against [Open Policy Agent](https://www.openpolicyagent.org/)
 (OPA) Rego policies **before the job is created** — so a disallowed deploy never
 starts. It's the *pre-action* half of policy: it blocks. (Contrast with *post-apply*

@@ -28,7 +28,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-persona-docs")
 
 _DOCS = os.path.join(_ROOT, "docs")
-_PERSONA_DOCS = os.path.join(_DOCS, "personas")
+_PERSONA_DOCS = os.path.join(_DOCS, "profiles", "demo", "personas")
 _DOCS_PAGES = os.path.join(_ROOT, "web_dashboard", "api", "docs_pages.py")
 _README = os.path.join(_ROOT, "README.md")
 
@@ -39,13 +39,17 @@ def _read(path):
 
 
 def _doc_files():
-    return sorted(f for f in os.listdir(_PERSONA_DOCS) if f.endswith(".md"))
+    """README.md is the folder index, not a role -- docs_pages hangs the /docs section
+    heading off it rather than listing it, and the orphan check below would otherwise
+    read it as a persona named "README"."""
+    return sorted(f for f in os.listdir(_PERSONA_DOCS)
+                  if f.endswith(".md") and f != "README.md")
 
 
 # ── every persona has a doc, and every doc has a persona ─────────────────────
 
 def test_the_persona_docs_directory_exists():
-    assert os.path.isdir(_PERSONA_DOCS), "docs/personas/ is missing"
+    assert os.path.isdir(_PERSONA_DOCS), "docs/profiles/demo/personas/ is missing"
 
 
 def test_every_persona_declares_exactly_one_doc():
@@ -53,8 +57,8 @@ def test_every_persona_declares_exactly_one_doc():
     for p in P.all_personas():
         assert len(p.docs) == 1, \
             f"{p.key} declares {len(p.docs)} docs; expected exactly one narrative page"
-        assert p.docs[0] == f"personas/{p.key}", \
-            f"{p.key} declares docs={p.docs!r}; expected ('personas/{p.key}',)"
+        assert p.docs[0] == f"profiles/demo/personas/{p.key}", \
+            f"{p.key} declares docs={p.docs!r}; expected ('profiles/demo/personas/{p.key}',)"
 
 
 def test_every_declared_doc_exists_on_disk():
@@ -150,7 +154,7 @@ def test_a_demo_only_focus_says_so():
             if masked < len(entry["use_cases"]) / 2:
                 continue
             text = _read(os.path.join(_PERSONA_DOCS, entry["persona"] + ".md"))
-            assert "pov-instance.md" in text, (
+            assert "pov/README.md" in text, (
                 f"{entry['persona']} has {masked} masked cards on a POV instance but its doc "
                 "never mentions the POV/demo split")
     finally:
@@ -162,8 +166,8 @@ def test_a_demo_only_focus_says_so():
 def test_the_docs_index_surfaces_the_personas_section():
     src = _read(_DOCS_PAGES)
     block = src.split("_INDEX_SECTIONS = {", 1)[1].split("}", 1)[0]
-    assert '"personas"' in block, \
-        "personas is not in _INDEX_SECTIONS, so the pages render only at a known path"
+    assert '"profiles/demo/personas"' in block, \
+        "the personas folder is not in _INDEX_SECTIONS, so the pages render only at a known path"
 
 
 def test_the_index_titles_match_the_persona_labels():
@@ -180,13 +184,18 @@ def test_the_index_titles_match_the_persona_labels():
     block = src.split("_TITLE_OVERRIDES = {", 1)[1].split("\n}", 1)[0]
     pairs = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', block))
     for p in P.all_personas():
-        key = f"personas/{p.key}"
+        key = f"profiles/demo/personas/{p.key}"
         assert key in pairs, f"docs_pages._TITLE_OVERRIDES has no entry for {key}"
         assert pairs[key] == p.label, (
             f"{key} is titled {pairs[key]!r} in the docs index but the persona's label is "
             f"{p.label!r} — the index and the app would name the same role differently")
-    extra = set(pairs) - {f"personas/{p.key}" for p in P.all_personas()}
-    assert not extra, f"_TITLE_OVERRIDES has entries for unknown docs: {sorted(extra)}"
+    # Scoped to the persona prefix. The map legitimately carries other pages whose
+    # filename is an identifier rather than a phrase ("Ot Demo Cell"), and those answer
+    # to no persona label.
+    prefix = "profiles/demo/personas/"
+    extra = ({k for k in pairs if k.startswith(prefix)}
+             - {prefix + p.key for p in P.all_personas()})
+    assert not extra, f"_TITLE_OVERRIDES has entries for unknown personas: {sorted(extra)}"
 
 
 def test_the_override_is_not_a_general_h1_rewrite():
@@ -230,7 +239,7 @@ def test_the_docs_index_is_not_reordered_by_anything():
 def test_the_readme_documents_the_personas_pages():
     """README.md's table is the entry point for someone who has not opened the app yet."""
     text = _read(_README)
-    assert "docs/personas/" in text, "README does not link the personas docs"
+    assert "docs/profiles/demo/personas" in text, "README does not link the personas docs"
     assert "Personas" in text
 
 

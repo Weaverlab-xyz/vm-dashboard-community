@@ -1,5 +1,7 @@
 # Runbook — first Cloud Functions deploy (GCP → AWS → Azure)
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are bringing Cloud Functions up end to end for the first time.
+
 The first end-to-end run of the Cloud Functions preview. Nothing in this feature has
 been executed against a real cloud, so treat this as a bring-up: the goal of each
 stage is to retire one class of risk, not to reach a working Entitle grant on the

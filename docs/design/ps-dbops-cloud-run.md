@@ -1,5 +1,7 @@
 # The dashboard deploys `bt-dbops`
 
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are working on the in-VPC service the Cloud SQL rotation plugin calls.
+
 The `cloud-run` channel of the Password Safe GCP Cloud SQL plugin needs a small service
 inside the VPC — "bt-dbops" — that holds the database drivers and opens the actual
 connection, so a credential can travel in a request body instead of being mirrored into

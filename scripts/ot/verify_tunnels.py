@@ -3,7 +3,7 @@
 
 Run this on the rep's machine with the cell's Protocol Tunnel Jumps started in the
 PRA representative console. Each tunnel listens on ``127.0.0.1:<local port>``, so
-every check below is a plain localhost client -- the same clients docs/cloud-ot.md
+every check below is a plain localhost client -- the same clients docs/profiles/demo/ot-demo-cell.md
 tells customers to use (pymodbus, python-snap7, pylogix, asyncua).
 
 Why it exists: the bake's smoke test only asserts ``.State.Running``, so a cell can

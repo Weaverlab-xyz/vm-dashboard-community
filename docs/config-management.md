@@ -1,5 +1,7 @@
 # Config Management
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are about to run an Ansible job and want to know how the runner handles secrets and isolation.
+
 This document explains how the dashboard does config management — the
 philosophy that drives the design, the best practices the codebase
 encodes, and how the on-premises and cloud paths fit together.
@@ -8,7 +10,7 @@ encodes, and how the on-premises and cloud paths fit together.
 > Docker" runner below cannot serve your on-premises targets: it is a sibling
 > container on the *dashboard's* host, which has neither a Docker socket nor a
 > route to your LAN. Those targets are reached by a
-> [remote agent](remote-agents.md#agent-executed-config-management) instead, which
+> [remote agent](remote-agents/config-runs.md#agent-executed-config-management) instead, which
 > runs the same one-shot container inside your network. Everything else in this
 > document — the asset types, the secret handling, the drift tracking — is
 > unchanged.
@@ -86,7 +88,7 @@ Behind the scenes (see [`services/ansible_local_service.py`](../web_dashboard/se
   inventory directly from the dashboard host.
 
 Two limits of that path are worth knowing before you rely on it, and a
-[remote agent](remote-agents.md#agent-executed-config-management) is the answer
+[remote agent](remote-agents/config-runs.md#agent-executed-config-management) is the answer
 to both:
 
 - **It targets the hypervisor *hosts*, not their guests.** `build_inventory()`
@@ -284,7 +286,7 @@ Where the Ansible process actually runs. Picked in
 | **AWS ECS Fargate** | A Fargate task launched per run in your VPC. | EC2 targets in private subnets without a path back to the dashboard host. |
 | **Azure ACI** | An Azure Container Instance per run, in your VNet. | Azure VMs in private subnets. |
 | **GCP Cloud Run Jobs** | A Cloud Run Job per run, in your project. | GCE instances. |
-| **Remote agent** | A one-shot container on the *agent's* host, inside your network. Not selectable here — it is chosen automatically when the target is only reachable that way. | On-prem hypervisor guests and on-prem databases, especially from a cloud-hosted dashboard. See [remote agents](remote-agents.md#agent-executed-config-management). |
+| **Remote agent** | A one-shot container on the *agent's* host, inside your network. Not selectable here — it is chosen automatically when the target is only reachable that way. | On-prem hypervisor guests and on-prem databases, especially from a cloud-hosted dashboard. See [remote agents](remote-agents/config-runs.md#agent-executed-config-management). |
 
 The cloud runners exist because connecting from a dashboard sitting on
 a corporate LAN to a deeply-private cloud subnet is often impossible
@@ -454,7 +456,7 @@ a Secrets-Management secret (as a named var, become password, or SSH key) — or
 **BeyondTrust Password Safe managed account** checked out just-in-time — straight
 into the run. The operator never sees the value; it's scrubbed from job output and
 the use is audited. Requires the `secrets:use` permission. See
-[Using a Secrets-Management secret in a run](integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
+[Using a Secrets-Management secret in a run](integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
 
 **Tag your runs.** The `Extra Vars` field on the run form accepts JSON
 — include a `run_id` or a deployment ticket number so when something

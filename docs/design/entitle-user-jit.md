@@ -1,5 +1,7 @@
 # Design — Entitle User-Based JIT Authorization (Entra Quickstart)
 
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are wiring the dashboard into an existing Entra ID and Entitle deployment, or migrating off that path.
+
 > ### ⚠️ This documents the LEGACY (Entra-group) mechanism
 >
 > There are now **two** ways Entitle grants dashboard permissions, and this design
@@ -15,7 +17,7 @@
 > — it compares the two, and covers migrating from this one.
 
 > **Status:** Design + execution plan, v1.
-> **Audience:** enterprise operators wiring the dashboard into an
+> **Written for:** enterprise operators wiring the dashboard into an
 > existing Entra ID + Entitle deployment. Community/dev installs
 > that don't run Entra can skip it; the feature is purely additive.
 > **Companion to** [`integrations/entitle.md`](../integrations/entitle.md)
