@@ -161,15 +161,15 @@ def get_function(fn_id: str, db: Session = Depends(get_db),
 
 
 @router.get("/{fn_id}/invoke-info")
-def invoke_info(fn_id: str, db: Session = Depends(get_db),
-                user: User = Depends(require_admin)):
+async def invoke_info(fn_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(require_admin)):
     """Endpoint + credentials, for pasting into an Entitle REST integration.
 
     Admin-only: this returns the shared secret in plaintext.
     """
     _require_enabled()
     try:
-        return cloud_function_service.invoke_info(db, fn_id)
+        return await cloud_function_service.invoke_info(db, fn_id)
     except CloudFunctionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

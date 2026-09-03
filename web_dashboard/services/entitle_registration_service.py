@@ -602,6 +602,11 @@ def _scrub_connection_json(blob: str) -> str:
     for name in _SECRET_JSON_KEYS:
         if conn.get(name):
             conn[name] = _REDACTED
+    # Every credential a REST integration holds lives in `headers` — the adapter
+    # bearer, and on Azure the Function App host key — so the VALUES go, not the
+    # map: the header names are configuration, and worth keeping legible.
+    if isinstance(conn.get("headers"), dict):
+        conn["headers"] = {k: _REDACTED for k in conn["headers"]}
     return json.dumps(conn)
 
 
@@ -825,13 +830,25 @@ def _split_base_url(base_url: str) -> tuple:
     return (parts.scheme or "https"), parts.netloc, parts.path.rstrip("/")
 
 
+def _rest_header_vars(extra_headers: Optional[dict] = None) -> list:
+    """``[(header_name, tf_var_name)]`` for the non-Authorization headers.
+
+    One place, so the three things that must agree cannot drift: the ``variable``
+    declarations, the ``headers`` map in ``connection_json``, and the ``TF_VAR_``
+    values. Sorted, so re-registering the same integration generates the same HCL.
+    """
+    return [(name, f"rest_header_{i}")
+            for i, name in enumerate(sorted(extra_headers or {}))]
+
+
 def _rest_connection_json_hcl(*, base_url: str, ephemeral: bool,
-                              auth_header: str) -> str:
+                              auth_header: str,
+                              extra_headers: Optional[dict] = None) -> str:
     """``connection_json`` for a REST integration, in that mode's own key set.
 
     The bearer secret is referenced as ``var.rest_secret`` rather than interpolated,
     so it never lands in the HCL written to disk — the same discipline the DB path
-    uses for ``db_password``.
+    uses for ``db_password``, and ``extra_headers``' values follow it.
     """
     schema, host, prefix = _split_base_url(base_url)
     lines = [f"    schema = {json.dumps(schema)}",
@@ -841,19 +858,31 @@ def _rest_connection_json_hcl(*, base_url: str, ephemeral: bool,
     # Token auth: Entitle sends these verbatim on every request, which is exactly
     # what fnruntime.auth verifies. The alternative the docs offer (oauth_data) buys
     # nothing here — the adapter has no OAuth server in front of it.
-    lines.append(
-        f"    headers = {{ {json.dumps(auth_header)} = \"Bearer ${{var.rest_secret}}\" }}")
+    #
+    # It is a MAP, and that is what makes an Azure adapter registrable at all: the
+    # Functions host demands its own x-functions-key alongside the bearer, and that
+    # key cannot ride in the URL instead — Entitle appends /give_access & friends to
+    # base_url, so a query string there would land in the middle of the path.
+    pairs = [f"{json.dumps(auth_header)} = \"Bearer ${{var.rest_secret}}\""]
+    pairs += [f"{json.dumps(name)} = \"${{var.{var}}}\""
+              for name, var in _rest_header_vars(extra_headers)]
+    lines.append("    headers = { " + ", ".join(pairs) + " }")
     body = "\n".join(lines)
     return f"  connection_json = jsonencode({{\n{body}\n  }})\n"
 
 
 def _generate_rest_hcl(*, name: str, base_url: str, private: bool,
                        ephemeral: bool, auth_header: str,
-                       fields: Optional[dict] = None) -> str:
+                       fields: Optional[dict] = None,
+                       extra_headers: Optional[dict] = None) -> str:
     label = _safe_name(name)
-    header = _provider_header('variable "rest_secret" { sensitive = true }\n', fields)
+    variables = ["rest_secret"] + [v for _h, v in _rest_header_vars(extra_headers)]
+    header = _provider_header(
+        "".join(f'variable "{v}" {{ sensitive = true }}\n' for v in variables),
+        fields)
     conn = _rest_connection_json_hcl(base_url=base_url, ephemeral=ephemeral,
-                                     auth_header=auth_header)
+                                     auth_header=auth_header,
+                                     extra_headers=extra_headers)
     # allow_creating_accounts follows `ephemeral` directly. Note this is where the
     # MySQL limitation goes away: the constraint was never MySQL's, it was Entitle's
     # MySQL CONNECTOR's, and a REST adapter does not use that connector.
@@ -872,6 +901,7 @@ output "integration_id" {{
 async def register_rest(*, name: str, base_url: str, shared_secret: str,
                         private: bool = False, ephemeral: bool = True,
                         auth_header: str = "Authorization",
+                        extra_headers: Optional[dict] = None,
                         ctx: Optional["EntitleTenantCtx"] = None) -> dict:
     """Register a Cloud Functions adapter as an Entitle REST integration.
 
@@ -898,6 +928,14 @@ async def register_rest(*, name: str, base_url: str, shared_secret: str,
         "Standing Accounts" in that dropdown, the discriminator is real and belongs
         here — check the integration's Settings after the first registration.
 
+    ``extra_headers`` are sent alongside the bearer on every call, for a front door
+    that wants a credential of its own: an **Azure** Function App requires
+    ``x-functions-key`` on every route but ``/health``, and without it every call
+    Entitle makes is refused by the Functions host — with an empty 401, before the
+    adapter runs — leaving an integration that looks healthy and resolves nothing.
+    The values are passed as Terraform variables like the bearer, so they never
+    reach the HCL on disk.
+
     ``ctx`` names the tenant this integration is created in, exactly as it does for
     :func:`register_ssh_host`. **Without it every REST registration lands in the global
     singleton tenant** — the API key from ``_api_key()`` AND the owner/workflow ids from
@@ -916,11 +954,22 @@ async def register_rest(*, name: str, base_url: str, shared_secret: str,
         raise EntitleRegistrationError(
             "REST registration needs the adapter's shared secret — without it "
             "every call Entitle makes would be rejected by the function")
+    blank = sorted(h for h, v in (extra_headers or {}).items() if not v)
+    if blank:
+        # An empty value would register a header Entitle sends as "", which the
+        # front door refuses exactly as it refuses a missing one — and it would be
+        # a lot harder to see, since the integration LOOKS like it carries the key.
+        raise EntitleRegistrationError(
+            f"no value for the {', '.join(blank)} header(s) the function's front "
+            "door requires — every call Entitle makes would be refused before the "
+            "adapter runs")
     hcl = _generate_rest_hcl(name=name, base_url=base_url, private=private,
                              ephemeral=ephemeral, auth_header=auth_header,
-                             fields=_hcl_fields(ctx))
-    return await asyncio.to_thread(_apply_hcl_sync, hcl,
-                                   {"rest_secret": shared_secret}, ctx)
+                             fields=_hcl_fields(ctx), extra_headers=extra_headers)
+    tf_vars = {"rest_secret": shared_secret}
+    tf_vars.update({var: (extra_headers or {})[header]
+                    for header, var in _rest_header_vars(extra_headers)})
+    return await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars, ctx)
 
 
 async def register_kubernetes(*, name: str, private: bool = True,

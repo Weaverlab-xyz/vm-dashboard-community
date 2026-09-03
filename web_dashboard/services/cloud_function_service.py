@@ -786,12 +786,21 @@ def get_function(db: Session, fn_id: str) -> Optional[CloudFunction]:
     return db.query(CloudFunction).filter(CloudFunction.id == fn_id).first()
 
 
-def invoke_info(db: Session, fn_id: str) -> dict:
+async def invoke_info(db: Session, fn_id: str) -> dict:
     """Everything needed to call the function — including the bearer secret, which
-    is why the API gates this on an admin/write permission rather than read."""
+    is why the API gates this on an admin/write permission rather than read.
+
+    Async only so an Azure function with no stored host key can fetch one here: this
+    is the panel an operator copies a curl or an Entitle integration out of, and
+    omitting ``x-functions-key`` makes every one of those calls fail the same
+    invisible way the dashboard's own Test invoke did.
+    """
     row = get_function(db, fn_id)
     if not row:
         raise CloudFunctionError(f"unknown function {fn_id!r}")
+    if row.cloud == "azure" and row.invoke_url and not config_service.get(
+            f"cloudfn/{row.id}/invoke-key"):
+        await _azure_invoke_key(db, row)
     return {
         "id": row.id,
         "name": row.name,
@@ -1370,12 +1379,14 @@ async def run_deploy_apply(db: Session, *, fn_id: str, job_id: str,
         if row.cloud == "azure":
             # Non-fatal by design: azurerm exposes no data source for host keys, so
             # this is a separate ARM call, and failing it must not fail a function
-            # that is already deployed and already protected by the bearer secret.
+            # that is already deployed. It is not harmless, though — without the key
+            # the Functions host refuses every route but /health — so the helper
+            # polls, logs what it is costing, and every reader re-fetches on demand.
             try:
-                await _store_azure_host_key(row, str(outputs.get("default_hostname") or ""))
+                await _store_azure_host_key(row)
             except Exception as exc:
                 logger.warning("cloudfn: could not fetch the Azure host key for %s "
-                               "(non-fatal; the bearer secret still applies): %s",
+                               "(non-fatal; Test invoke re-fetches it): %s",
                                row.name, exc)
 
         job_service.set_completed(db, job_id, result={
@@ -1389,11 +1400,25 @@ async def run_deploy_apply(db: Session, *, fn_id: str, job_id: str,
         job_service.set_failed(db, job_id, str(exc))
 
 
-async def _store_azure_host_key(row: CloudFunction, hostname: str) -> None:
-    """Fetch the Function App's default host key over ARM and stash it.
+# How long the deploy-time fetch keeps re-asking ARM for the host key.
+#
+# `terraform apply` returns when ARM has CREATED the Function App, which is before
+# the Functions host has started and minted its own default key — and until it has,
+# listKeys answers 200 with an EMPTY functionKeys map. That is not an error, so it
+# used to fall straight through the `if key:` guard and store nothing, silently, with
+# no log line and no retry. The app then serves 401 with a zero-length body to every
+# authenticated call forever, which is indistinguishable from a wrong bearer secret
+# and is not repaired by anything short of a redeploy.
+_HOST_KEY_GRACE_SECONDS = 90
+_HOST_KEY_POLL_SECONDS = 5
 
-    This is the Azure half of the layered auth: the key is the front door, the
-    bearer secret is checked independently inside the handler.
+
+async def _fetch_azure_host_key(name: str) -> str:
+    """The Function App's default host key, over ARM.
+
+    Returns ``""`` when the host has not minted one yet — a 200 with an empty
+    ``functionKeys`` is the normal answer for the first ~minute of an app's life, so
+    the caller must treat empty as "ask again", not as "there is no key".
     """
     import asyncio
 
@@ -1406,14 +1431,84 @@ async def _store_azure_host_key(row: CloudFunction, hostname: str) -> None:
         credential.get_token, "https://management.azure.com/.default")).token
     url = (f"https://management.azure.com/subscriptions/{subscription}"
            f"/resourceGroups/{resource_group}/providers/Microsoft.Web/sites/"
-           f"{row.name}/host/default/listKeys?api-version=2022-03-01")
+           f"{name}/host/default/listKeys?api-version=2022-03-01")
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(url, headers={"Authorization": f"Bearer {token}"})
         response.raise_for_status()
-        key = (response.json().get("functionKeys") or {}).get("default", "")
-    if key:
-        config_service.set(f"cloudfn/{row.id}/invoke-key", key)
-        row.invoke_key_ref = f"config://cloudfn/{row.id}/invoke-key"
+        return str((response.json().get("functionKeys") or {}).get("default") or "")
+
+
+async def _store_azure_host_key(
+        row: CloudFunction, *,
+        grace_seconds: int = _HOST_KEY_GRACE_SECONDS) -> str:
+    """Fetch the Function App's default host key over ARM and stash it.
+
+    This is the Azure half of the layered auth: the key is the front door, the
+    bearer secret is checked independently inside the handler. Without it the front
+    door refuses every request and the handler — and therefore ``/check_config``,
+    and therefore Test invoke and the Entitle preflight — never runs.
+
+    Polls, because the key does not exist the moment the app does. Returns the key,
+    or ``""`` after ``grace_seconds`` — and says so in the log, naming the
+    consequence, because the caller treats this as non-fatal.
+    """
+    import asyncio
+    import time
+
+    deadline = time.monotonic() + max(0, int(grace_seconds))
+    while True:
+        why = ""
+        try:
+            key = await _fetch_azure_host_key(row.name)
+        except Exception as exc:  # noqa: BLE001 - reported, then retried
+            key, why = "", f"{type(exc).__name__}: {exc}"
+        if key:
+            config_service.set(f"cloudfn/{row.id}/invoke-key", key)
+            row.invoke_key_ref = f"config://cloudfn/{row.id}/invoke-key"
+            return key
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "cloudfn: no Azure host key for %s after %ss (%s) — the function is "
+                "deployed and protected, but its front door will answer 401 with an "
+                "empty body to every call until the key is fetched; Test invoke "
+                "re-fetches it on demand",
+                row.name, int(grace_seconds),
+                why or "ARM returned no functionKeys.default")
+            return ""
+        await asyncio.sleep(_HOST_KEY_POLL_SECONDS)
+
+
+async def _azure_invoke_key(db: Session, row: CloudFunction, *,
+                            refresh: bool = False) -> str:
+    """The stored Azure host key, fetched on demand when missing (or ``refresh``).
+
+    The deploy-time fetch is the only writer this had, it is non-fatal, and it races
+    the host's own key mint — so one lost race left a perfectly good function
+    permanently un-invokable from the dashboard, with a redeploy as the only repair.
+    Fetching here makes that self-healing, and covers the key having been rotated or
+    regenerated in the portal since the deploy.
+
+    Never raises: a function with no key is still worth calling, and the 401 that
+    comes back is a better diagnostic than an exception about ARM.
+    """
+    stored = config_service.get(f"cloudfn/{row.id}/invoke-key") or ""
+    if stored and not refresh:
+        return stored
+    try:
+        key = await _fetch_azure_host_key(row.name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cloudfn: could not fetch the Azure host key for %s: %s",
+                       row.name, exc)
+        return stored
+    if not key or key == stored:
+        return stored
+    config_service.set(f"cloudfn/{row.id}/invoke-key", key)
+    row.invoke_key_ref = f"config://cloudfn/{row.id}/invoke-key"
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001 - the config row is what matters
+        db.rollback()
+    return key
 
 
 # ── Decommission ──────────────────────────────────────────────────────────────
@@ -1525,11 +1620,28 @@ async def run_entitle_register(db: Session, *, fn_id: str, job_id: str,
                     "function has no shared secret; redeploy it before registering")
             job_service.update_progress(db, job_id, 20, "Checking the adapter's config…")
             await _refuse_unconfigured_adapter(db, row)
+            # Azure's front door wants a credential of its own on every route, so the
+            # integration has to carry it too — the bearer alone gets Entitle an
+            # empty 401 from the Functions host, on every call, forever. The
+            # preflight above has just proved this key works, so a missing one here
+            # means the fetch failed and registering would publish a dead endpoint.
+            extra_headers = {}
+            if row.cloud == "azure":
+                host_key = await _azure_invoke_key(db, row)
+                if not host_key:
+                    raise CloudFunctionError(
+                        f"no Azure host key for {row.name}, so every call Entitle "
+                        "makes would be refused by the Functions host before the "
+                        "adapter runs. Check that the dashboard's Azure credential "
+                        f"can listKeys on the Function App in "
+                        f"{_cfg('azure_resource_group') or 'its resource group'}.")
+                extra_headers["x-functions-key"] = host_key
             job_service.update_progress(db, job_id, 40, "Registering adapter in Entitle…")
             result = await entitle.register_rest(
                 name=f"{row.name} ({row.workload})",
                 base_url=row.invoke_url,
                 shared_secret=secret,
+                extra_headers=extra_headers,
                 # The FUNCTION is VPC-attached; the ENDPOINT is public, which is the
                 # whole point — so no agent, regardless of network_mode.
                 private=False,
@@ -1603,27 +1715,53 @@ async def invoke(db: Session, *, fn_id: str, payload: Optional[dict] = None,
     import httpx
     url = _invoke_url(row.invoke_url, path)
     secret = config_service.get(f"cloudfn/{row.id}/bearer") or ""
-    headers = {"content-type": "application/json"}
-    if secret:
-        headers["Authorization"] = f"Bearer {secret}"
     key = config_service.get(f"cloudfn/{row.id}/invoke-key") or ""
-    if key:
-        # Azure's front door takes the host key as a query param or x-functions-key.
-        headers["x-functions-key"] = key
+    if row.cloud == "azure" and not key:
+        # The Functions host requires it on every route but /health, and the
+        # deploy-time fetch is allowed to lose its race with the host's key mint.
+        # Without this the whole page reads as "the adapter is broken".
+        key = await _azure_invoke_key(db, row)
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        if verb == "GET":
-            # No body on a GET: the adapters' two read routes take none, and sending
-            # one makes the request look different from what Entitle actually sends.
-            response = await client.get(url, headers=headers)
-        else:
-            response = await client.post(url, json=payload or {}, headers=headers)
-    try:
-        body = response.json()
-    except ValueError:
-        body = response.text[:4000]
+    async def _call(front_door_key: str):
+        headers = {"content-type": "application/json"}
+        if secret:
+            headers["Authorization"] = f"Bearer {secret}"
+        if front_door_key:
+            # Azure's front door takes the host key as a query param or x-functions-key.
+            headers["x-functions-key"] = front_door_key
+        async with httpx.AsyncClient(timeout=60) as client:
+            if verb == "GET":
+                # No body on a GET: the adapters' two read routes take none, and
+                # sending one makes the request look different from what Entitle
+                # actually sends.
+                return await client.get(url, headers=headers)
+            return await client.post(url, json=payload or {}, headers=headers)
+
+    response = await _call(key)
+    body = _response_body(response)
+    if row.cloud == "azure" and _is_front_door_denial(response.status_code, body):
+        # The one 401 worth a second attempt: Azure's is a bare empty body, so it
+        # says only "the host key you sent is not the one I hold" — which is exactly
+        # what a regenerated key, or a key this dashboard never captured, looks like.
+        # Retry only when ARM hands back a DIFFERENT key, so a genuinely closed front
+        # door still costs one call and still reports itself.
+        fresh = await _azure_invoke_key(db, row, refresh=True)
+        if fresh and fresh != key:
+            logger.info("cloudfn: %s refused the stored host key; retrying with the "
+                        "one ARM now reports", row.name)
+            response = await _call(fresh)
+            body = _response_body(response)
     return {"status": response.status_code, "body": body, "url": url,
             "elapsed_ms": int(response.elapsed.total_seconds() * 1000)}
+
+
+def _response_body(response) -> object:
+    """The parsed body if it is JSON, else the text, truncated. An Azure front-door
+    denial has NO body at all, which is what :func:`_is_front_door_denial` reads."""
+    try:
+        return response.json()
+    except ValueError:
+        return response.text[:4000]
 
 
 def _is_front_door_denial(status: int, body) -> bool:

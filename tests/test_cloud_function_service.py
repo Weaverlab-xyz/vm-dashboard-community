@@ -1182,6 +1182,254 @@ def test_an_update_applies_where_the_function_already_is():
         "run_update_apply does not apply in the original deploy directory"
 
 
+# ── Azure's front door: the host key the dashboard has to hold ───────────────
+#
+# Live 2026-09-03, jit-sqlserver-8429a407 (a db_grant adapter paired with an Azure
+# SQL Server): /api/health answered 200 — so the app was up and the v2 model had
+# indexed its functions — and POST /api/check_config answered 401 with a
+# ZERO-LENGTH body, byte-identical whether the request carried no x-functions-key
+# or a garbage one. That is the Functions host key gate, refusing before the
+# container runs, so the bearer secret is never even read.
+#
+# The dashboard's only writer of that key ran seconds after `terraform apply`
+# returned, treated an empty functionKeys map as success, never retried, and was
+# never called again — so losing that one race left a perfectly good function
+# permanently un-invokable, with a redeploy as the only repair.
+
+
+class _FakeResponse:
+    def __init__(self, status, body=None, text=""):
+        self.status_code = status
+        self._body = body
+        self.text = text
+        self.elapsed = types.SimpleNamespace(total_seconds=lambda: 0.01)
+
+    def json(self):
+        if self._body is None:
+            # What an Azure front-door denial does: there is no body to parse.
+            raise ValueError("no json")
+        return self._body
+
+
+class _FakeHttp:
+    """Records the headers of every request and replays scripted responses."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.sent = []
+
+    def client_factory(self):
+        recorder = self
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def _record(self, headers):
+                recorder.sent.append(dict(headers or {}))
+                return recorder.responses.pop(0)
+
+            async def get(self, url, headers=None):
+                return await self._record(headers)
+
+            async def post(self, url, json=None, headers=None):
+                return await self._record(headers)
+
+        return _Client
+
+    @property
+    def keys_sent(self):
+        return [h.get("x-functions-key", "") for h in self.sent]
+
+
+def _azure_row(**over):
+    row = types.SimpleNamespace(
+        id="fn1", name="jit-sqlserver-8429a407", cloud="azure",
+        workload="db_grant", status="available",
+        invoke_url="https://jit-sqlserver-8429a407.azurewebsites.net/api",
+        invoke_key_ref=None)
+    for key, value in over.items():
+        setattr(row, key, value)
+    return row
+
+
+class _FakeDb:
+    def __init__(self):
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+
+def _invoke(row, responses, arm_keys, path="/check_config"):
+    """Drive ``invoke`` against a fake front door. Returns (result, http, fetched)."""
+    import httpx
+    http = _FakeHttp(responses)
+    fetched = []
+
+    async def _fake_fetch(name):
+        fetched.append(name)
+        return arm_keys.pop(0) if arm_keys else ""
+
+    real_client = httpx.AsyncClient
+    real_get, real_fetch = svc.get_function, svc._fetch_azure_host_key
+    httpx.AsyncClient = http.client_factory()
+    svc.get_function = lambda db, fn_id: row
+    svc._fetch_azure_host_key = _fake_fetch
+    try:
+        result = _run(svc.invoke(_FakeDb(), fn_id=row.id, path=path, payload={}))
+    finally:
+        httpx.AsyncClient = real_client
+        svc.get_function, svc._fetch_azure_host_key = real_get, real_fetch
+    return result, http, fetched
+
+
+def test_an_azure_function_with_no_stored_host_key_fetches_one_before_calling():
+    """The repair for the live failure: nothing else ever wrote this key again."""
+    _reset()
+    result, http, fetched = _invoke(
+        _azure_row(), [_FakeResponse(200, {"data": {"valid": True}})], ["K1"])
+    assert fetched == ["jit-sqlserver-8429a407"], fetched
+    assert http.keys_sent == ["K1"], http.keys_sent
+    assert result["status"] == 200
+    # And stored, so the next call needs no ARM round trip.
+    assert CONF["cloudfn/fn1/invoke-key"] == "K1"
+
+
+def test_an_empty_401_is_retried_with_the_key_arm_now_reports():
+    """Azure's denial says only "not the key I hold" — which is what a regenerated
+    key looks like, and what a key this dashboard never captured looks like."""
+    _reset()
+    CONF["cloudfn/fn1/invoke-key"] = "STALE"
+    result, http, _fetched = _invoke(
+        _azure_row(),
+        [_FakeResponse(401, None, ""), _FakeResponse(200, {"data": {"valid": True}})],
+        ["FRESH"])
+    assert http.keys_sent == ["STALE", "FRESH"], http.keys_sent
+    assert result["status"] == 200, result
+    assert CONF["cloudfn/fn1/invoke-key"] == "FRESH"
+
+
+def test_a_closed_front_door_still_costs_one_extra_call_and_reports_itself():
+    """When ARM hands back the same key, the door is genuinely shut: retrying it
+    would only turn one clear 401 into two."""
+    _reset()
+    CONF["cloudfn/fn1/invoke-key"] = "SAME"
+    result, http, _f = _invoke(_azure_row(), [_FakeResponse(401, None, "")], ["SAME"])
+    assert http.keys_sent == ["SAME"], http.keys_sent
+    assert result["status"] == 401 and result["body"] == "", result
+
+
+def test_the_workloads_own_401_is_never_retried():
+    """fnruntime.auth names `error`; no front door does. A wrong bearer is not fixed
+    by a new host key, and retrying it would report the wrong cause."""
+    _reset()
+    CONF["cloudfn/fn1/invoke-key"] = "K1"
+    result, http, fetched = _invoke(
+        _azure_row(), [_FakeResponse(401, {"error": "unauthorized"})], ["K2"])
+    assert http.keys_sent == ["K1"], http.keys_sent
+    assert fetched == [], "asked ARM about the workload's own denial"
+    assert result["status"] == 401
+
+
+def test_only_azure_has_a_front_door_key_to_refresh():
+    """GCP's empty 401 is IAM lag, waited out by the register preflight, and AWS's
+    is a Function URL permission. Neither has a key to re-fetch."""
+    _reset()
+    for cloud in ("aws", "gcp"):
+        result, http, fetched = _invoke(
+            _azure_row(cloud=cloud), [_FakeResponse(401, None, "")], ["K1"])
+        assert fetched == [], (cloud, fetched)
+        assert http.keys_sent == [""], (cloud, http.keys_sent)
+        assert result["status"] == 401
+
+
+def _store_key(row, arm, grace=0):
+    """Drive ``_store_azure_host_key`` with a scripted ARM, polling instantly."""
+    real_fetch, real_poll = svc._fetch_azure_host_key, svc._HOST_KEY_POLL_SECONDS
+    tries = []
+
+    async def _fake_fetch(name):
+        tries.append(name)
+        answer = arm.pop(0) if arm else ""
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    svc._fetch_azure_host_key, svc._HOST_KEY_POLL_SECONDS = _fake_fetch, 0
+    try:
+        return _run(svc._store_azure_host_key(row, grace_seconds=grace)), tries
+    finally:
+        svc._fetch_azure_host_key = real_fetch
+        svc._HOST_KEY_POLL_SECONDS = real_poll
+
+
+def test_the_deploy_waits_for_the_host_to_mint_its_key():
+    """`terraform apply` returns when ARM has CREATED the app, which is before the
+    Functions host has started — and until it has, listKeys answers 200 with an
+    EMPTY functionKeys map. That is not an error, so nothing raised and nothing
+    retried."""
+    _reset()
+    row = _azure_row()
+    key, tries = _store_key(row, ["", "", "K1"], grace=60)
+    assert key == "K1" and len(tries) == 3, (key, tries)
+    assert CONF["cloudfn/fn1/invoke-key"] == "K1"
+    assert row.invoke_key_ref == "config://cloudfn/fn1/invoke-key"
+
+
+def test_a_transient_arm_failure_is_retried_not_fatal():
+    _reset()
+    key, tries = _store_key(_azure_row(), [RuntimeError("boom"), "K1"], grace=60)
+    assert key == "K1" and len(tries) == 2, (key, tries)
+
+
+def test_a_host_key_that_never_arrives_is_logged_not_swallowed():
+    """It stays non-fatal — the function is deployed and protected — but silence is
+    what made the live 401 read as a broken adapter rather than a missing key."""
+    _reset()
+    warnings = []
+    real_logger = svc.logger
+    svc.logger = types.SimpleNamespace(
+        warning=lambda msg, *a: warnings.append(msg % a if a else msg),
+        info=lambda *a, **k: None, error=lambda *a, **k: None,
+        debug=lambda *a, **k: None)
+    try:
+        key, tries = _store_key(_azure_row(), [""], grace=0)
+    finally:
+        svc.logger = real_logger
+    assert key == "" and len(tries) == 1, (key, tries)
+    assert "cloudfn/fn1/invoke-key" not in CONF
+    assert len(warnings) == 1, warnings
+    assert "jit-sqlserver-8429a407" in warnings[0] and "401" in warnings[0], warnings
+
+
+def test_registering_an_azure_adapter_sends_entitle_the_host_key_too():
+    """Entitle's REST integration holds ONE set of headers, and the Functions host
+    demands x-functions-key on every route. Without it the registration succeeds and
+    every call Entitle makes is refused before the adapter runs — an integration that
+    looks healthy in both systems and resolves nothing."""
+    import inspect
+    source = inspect.getsource(svc.run_entitle_register)
+    assert "extra_headers" in source, \
+        "run_entitle_register no longer passes the front door's own credential"
+    assert "x-functions-key" in source
+    # And it refuses rather than publishing an endpoint Entitle cannot reach.
+    assert "_azure_invoke_key" in source
+    signature = inspect.signature(
+        __import__("web_dashboard.services.entitle_registration_service",
+                   fromlist=["register_rest"]).register_rest)
+    assert "extra_headers" in signature.parameters
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
