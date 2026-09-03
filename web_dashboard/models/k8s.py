@@ -1,6 +1,6 @@
 """Pydantic models for Kubernetes management (`/api/k8s`).
 
-Phase 1 of docs/saas-kubernetes-management-plan.md — register/list managed
+Phase 1 of Kubernetes management (docs/kubernetes.md) — register/list managed
 clusters and store the kubeconfig as a backend reference. Provisioning,
 management-plane launch, brokered access, and in-cluster secret delivery land
 in later phases.

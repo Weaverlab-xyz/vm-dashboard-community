@@ -43,7 +43,8 @@ _TEMPLATE_DIR = os.path.normpath(
 # Terraform state is stored in the user's ACTIVE storage backend (the same
 # bucket/container + creds the /storage system uses), under this prefix and keyed
 # per deployment job id, so a container recreate no longer orphans cloud resources.
-# See docs/terraform-state-backend-plan.md. `local` keeps state in the deploy dir.
+# See docs/infrastructure-as-code.md#state-the-thing-that-makes-iac-work.
+# `local` keeps state in the deploy dir.
 _TF_STATE_PREFIX = "terraform-state"
 
 

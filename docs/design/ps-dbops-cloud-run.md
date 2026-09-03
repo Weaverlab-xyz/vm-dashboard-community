@@ -154,7 +154,7 @@ interface attached; it needs no CPU between requests.
 ## 5. The contract, implemented from the plugin repo's specification
 
 `POST /v1/credential-op` version 1 is implemented. The source is the plugin repository's
-own `docs/PLAN-CloudRunSqlServer.md` — §2 for the envelope and the status/code table, §4
+own `PLAN-CloudRunSqlServer.md` — §2 for the envelope and the status/code table, §4
 for the statement each operation runs — which states it implements `IDbOpsClient` as
 already declared plugin-side in `Shared/Services/Transports.cs`. That is a written
 specification from the other side of the wire, which is what the seam was waiting for; it
