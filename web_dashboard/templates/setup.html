@@ -120,7 +120,10 @@
            class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1">
         <p class="text-xs text-amber-800 font-medium">A POV instance is deliberately narrow.</p>
         <p class="text-xs text-amber-700">
-          The cloud credential steps are skipped and nothing is written for them. Demo
+          The four cloud credential steps are skipped and nothing is written for them
+          &mdash; except object storage, which the next-but-one step offers on its own so
+          this instance has somewhere to stage files too large for an agent-brokered
+          share. The cloud consoles stay unavailable regardless. Demo
           features — on-premises hypervisors, cloud databases, Kubernetes, containers,
           virtual desktops, cost reporting — stay unavailable on this instance whatever
           their toggles say. Run a second instance, with its own database, for those.
@@ -750,6 +753,134 @@ gcloud iam service-accounts keys create sa-key.json \
     </div>
 
     <!-- ── Feature Flags ── -->
+    <!-- ── POV cloud storage ──
+         A POV instance's only asset store is otherwise the agent-brokered share, which
+         rides the 256 KB signed job envelope and so refuses every installer. A bucket
+         lifts that. Deliberately storage-scoped: one provider, only the credentials this
+         backend actually reads, and none of the deploy-shaped defaults (aws_region,
+         azure_resource_group, gcp_region) whose presence is what makes a cloud read as
+         half-configured. The cloud CONSOLES stay 404 on this instance either way. -->
+    <div x-show="stepKey === 'povstorage'" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Cloud storage <span class="text-sm font-normal text-gray-400">(optional)</span></h2>
+        <p class="text-gray-500 text-sm mt-1">
+          Where this POV keeps playbooks, scripts and installers. Pick a cloud if you need
+          to stage a file too large for a share reached through an agent &mdash; that route
+          carries files inside a signed job envelope and tops out around 190&nbsp;KB, which
+          rules out every <code class="bg-gray-100 px-1 rounded text-xs">.exe</code> and
+          <code class="bg-gray-100 px-1 rounded text-xs">.msi</code>.
+        </p>
+      </div>
+
+      <div class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
+        <p class="text-xs text-blue-800">
+          These credentials are used <strong>for object storage only</strong>. The AWS,
+          Azure and GCP consoles stay unavailable on a POV instance, and nothing here
+          turns them on.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <template x-for="opt in povStorageOptions" :key="opt.value">
+          <div @click="form.pov_storage.provider = opt.value"
+               class="border-2 rounded-lg px-4 py-3 cursor-pointer transition-all"
+               :class="form.pov_storage.provider === opt.value
+                       ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:border-gray-300'">
+            <div class="flex items-center gap-2">
+              <span class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0"
+                    :class="form.pov_storage.provider === opt.value ? 'border-blue-600' : 'border-gray-300'">
+                <span x-show="form.pov_storage.provider === opt.value"
+                      class="w-2 h-2 rounded-full bg-blue-600"></span>
+              </span>
+              <span class="text-sm font-medium text-gray-900" x-text="opt.label"></span>
+            </div>
+            <p class="text-xs text-gray-500 mt-1 ml-6" x-text="opt.hint"></p>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="form.pov_storage.provider === 'aws'" x-transition class="space-y-4 border-t border-gray-200 pt-5">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Access Key ID</label>
+          <input type="text" x-model="form.aws.aws_access_key_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="AKIAIOSFODNN7EXAMPLE">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Secret Access Key</label>
+          <input type="password" x-model="form.aws.aws_secret_access_key" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : ''">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
+          <input type="text" x-model="form.pov_storage.storage_s3_bucket" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="my-pov-assets">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Region</label>
+          <select x-model="form.pov_storage.storage_s3_region" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <template x-for="r in awsRegions" :key="r.value">
+              <option :value="r.value" x-text="r.label"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Prefix <span class="text-gray-400 font-normal">(optional)</span></label>
+          <input type="text" x-model="form.pov_storage.storage_s3_prefix" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="config-mgmt">
+        </div>
+      </div>
+
+      <div x-show="form.pov_storage.provider === 'azure'" x-transition class="space-y-4 border-t border-gray-200 pt-5">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Tenant ID</label>
+          <input type="text" x-model="form.azure.azure_tenant_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="00000000-0000-0000-0000-000000000000">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+          <input type="text" x-model="form.azure.azure_client_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="00000000-0000-0000-0000-000000000000">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
+          <input type="password" x-model="form.azure.azure_client_secret" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : ''">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Storage Account</label>
+          <input type="text" x-model="form.pov_storage.storage_azure_account" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="mypovstorage">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Container</label>
+          <input type="text" x-model="form.pov_storage.storage_azure_container" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="playbooks">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Prefix <span class="text-gray-400 font-normal">(optional)</span></label>
+          <input type="text" x-model="form.pov_storage.storage_azure_prefix" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="config-mgmt">
+        </div>
+      </div>
+
+      <div x-show="form.pov_storage.provider === 'gcp'" x-transition class="space-y-4 border-t border-gray-200 pt-5">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Project ID</label>
+          <input type="text" x-model="form.gcp.gcp_project_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="my-project-123456">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Service Account JSON</label>
+          <textarea x-model="form.gcp.gcp_service_account_json" rows="5" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    :placeholder="isReconfig ? '(leave blank to keep current)' : ''"></textarea>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
+          <input type="text" x-model="form.pov_storage.storage_gcs_bucket" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="my-pov-assets">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Prefix <span class="text-gray-400 font-normal">(optional)</span></label>
+          <input type="text" x-model="form.pov_storage.storage_gcs_prefix" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="config-mgmt">
+        </div>
+      </div>
+
+      <p x-show="!form.pov_storage.provider" class="text-xs text-gray-500">
+        Skipping this leaves the agent-brokered share as the only option, which is fine for
+        playbooks and scripts. You can add a bucket later from Settings &rarr; Storage.
+      </p>
+    </div>
+
     <div x-show="stepKey === 'features'" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">Feature Flags</h2>
@@ -869,13 +1000,19 @@ function wizard() {
       { key: 'azure',    label: 'Azure', profiles: ['demo'] },
       { key: 'gcp',      label: 'GCP',   profiles: ['demo'] },
       { key: 'oci',      label: 'OCI',   profiles: ['demo'] },
+      // The mirror image of the four above: cloud credentials a POV instance DOES ask
+      // for, because a bucket is the only asset store it can have that is not capped at
+      // the agent job envelope. One provider, storage scope only — see
+      // api/setup.py::_POV_STORAGE_SPEC.
+      { key: 'povstorage', label: 'Storage', profiles: ['pov'] },
       { key: 'features', label: 'Features' },
     ],
 
-    // The steps this instance actually shows. A POV instance never asks for cloud
-    // credentials it will not use -- and, more importantly, never WRITES them: see
-    // _apply_config, which skips the cloud blocks entirely rather than saving their
-    // defaults for a cloud nobody configured.
+    // The steps this instance actually shows. A POV instance is not asked for the four
+    // cloud CONSOLE credential sets, and _apply_config writes none of them rather than
+    // saving their defaults for a cloud nobody configured. Its own 'povstorage' step is
+    // the deliberate exception and writes a narrow, storage-only subset -- one provider,
+    // opted into by name. See api/setup.py::_POV_STORAGE_SPEC.
     get steps() {
       const p = this.form.profile.install_profile;
       return this.allSteps.filter(s => !s.profiles || s.profiles.includes(p));
@@ -915,10 +1052,21 @@ function wizard() {
                   oci_region: 'us-ashburn-1', oci_compartment_ocid: '',
                   oci_vcn_ocid: '', oci_default_subnet_ocid: '',
                   oci_ssh_key_secret: '', oci_vault_ocid: '' },
+      pov_storage: { provider: '',
+                     storage_s3_bucket: '', storage_s3_region: 'us-east-2', storage_s3_prefix: '',
+                     storage_azure_account: '', storage_azure_container: '', storage_azure_prefix: '',
+                     storage_gcs_bucket: '', storage_gcs_prefix: '' },
       features: { vmware_enabled: false,
                   password_safe_enabled: false, pra_enabled: false, epml_enabled: false,
                   portainer_enabled: false, ansible_enabled: false, entitle_enabled: false },
     },
+
+    povStorageOptions: [
+      { value: '',      label: 'None',        hint: 'Agent-brokered share only' },
+      { value: 'aws',   label: 'AWS S3',      hint: 'Bucket + IAM access key' },
+      { value: 'azure', label: 'Azure Blob',  hint: 'Storage account + app registration' },
+      { value: 'gcp',   label: 'Google Cloud Storage', hint: 'Bucket + service account' },
+    ],
 
     awsRegions: [
       { value: 'us-east-1',      label: 'US East (N. Virginia)' },
@@ -1240,6 +1388,22 @@ function wizard() {
                              'oci_default_subnet_ocid', 'oci_ssh_key_secret', 'oci_vault_ocid']) {
               if (cfg[f]) this.form.oci[f] = cfg[f];
             }
+            // POV storage. The chooser is DERIVED from the active backend rather than
+            // stored as its own key: storage_active_backend is what the rest of the app
+            // already reads, so a second key naming the same choice could disagree with
+            // it. Without this a reconfigure shows "None" beside a wired-up bucket, and
+            // since nothing is written unless a provider is named, saving would silently
+            // leave the old bucket in place while the screen claimed otherwise.
+            const povProviderOf = { s3: 'aws', azure_blob: 'azure', gcs: 'gcp' };
+            if (povProviderOf[cfg.storage_active_backend]) {
+              this.form.pov_storage.provider = povProviderOf[cfg.storage_active_backend];
+            }
+            for (const f of ['storage_s3_bucket', 'storage_s3_region', 'storage_s3_prefix',
+                             'storage_azure_account', 'storage_azure_container',
+                             'storage_azure_prefix',
+                             'storage_gcs_bucket', 'storage_gcs_prefix']) {
+              if (cfg[f]) this.form.pov_storage[f] = cfg[f];
+            }
             // Feature flags
             for (const flag of this.featureFlags) {
               if (cfg[flag.key] !== undefined) {
@@ -1296,6 +1460,9 @@ function wizard() {
           azure:    this.form.azure,
           gcp:      this.form.gcp,
           oci:      this.form.oci,
+          // Ignored server-side unless the profile is 'pov' and a provider was named, so
+          // sending it unconditionally is safe and keeps the body shape stable.
+          pov_storage: this.form.pov_storage,
           features: this.form.features,
         };
 

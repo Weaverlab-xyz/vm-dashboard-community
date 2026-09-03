@@ -36,10 +36,11 @@ customer downloads RB package from their Password Safe tenant
         │
         ▼
 POST /api/config-mgmt/upload            ← already exists, with a secret scan
-        │
+        │                                    (or straight into the bucket out of band —
+        │                                     the inline upload path caps at 64 MB)
         ▼
-storage backend (S3 / Azure blob / GCS / local)
-        │
+storage backend (S3 / Azure blob / GCS)  ← a POV configures one on the wizard's
+        │                                  Storage step; see §1a
         ▼
 agent_ansible job on the POV's broker agent      ← already ships in agent 2.3
         │  asset      = the uploaded installer
@@ -87,6 +88,43 @@ That last row matters more than its size. EPM-L already solves "install a Beyond
 agent, keyed to a tenant, without the key touching the database" — and the RB installer key
 is the same problem with a different product on the label. Slice 5b should look like it,
 not like something new.
+
+## 1a. How the bytes actually reach the RB host
+
+The note above used to stop at "put it in a storage backend", which skipped the two
+constraints that decide the whole shape. Both were found by trying it with the real
+artifact — `BeyondTrust.Agents.Bootstrapper.exe`, **314 MB**.
+
+**The agent job envelope is the binding constraint, not the backend.**
+`agent_ansible_bundle` fetches the asset and embeds it in a bundle capped at
+`MAX_BUNDLE_BYTES = 256 KB`, and it did so *regardless of which backend the asset lived
+in*. Putting the installer in S3 therefore did not help by itself: the run still failed at
+256 KB. That is three orders of magnitude, so no ceiling adjustment reaches it.
+
+**So the asset is not carried at all.** Above `MAX_EMBEDDED_ASSET_BYTES` (128 KB), the
+dashboard mints a **time-limited signed URL** for the object and generates a wrapper play
+that runs `win_get_url` on the Windows RB host, then `win_package` against the downloaded
+file. The bytes go from object storage straight to the target, and are never held by the
+dashboard, the agent, or the envelope. A 314 MB installer produces a bundle of about
+**1.5 KB**.
+
+The decision is made from the storage **listing**, before anything is read — the question
+is whether the file is too big to move through the dashboard, and answering it by moving
+the file through the dashboard would defeat the point.
+
+Three consequences worth knowing:
+
+* **`agent_local` cannot do this.** A share reached through an agent is a filesystem path
+  with no signing authority and nothing serving it over HTTP, so a POV that has only that
+  backend still cannot stage an installer. This is why the wizard grew a Storage step —
+  see `_POV_STORAGE_SPEC` in `api/setup.py`. The refusal says so rather than failing
+  vaguely.
+* **The URL is a secret.** It is a bearer token for the object until it expires. It rides
+  in `extra_vars`, is added to the run's scrub list, and is never rendered into the
+  playbook text; the download task is `no_log`.
+* **Only `.exe`/`.msi`, `.rpm` and `.deb` can be delivered this way.** A `.sh` or `.ps1`
+  wants a file on the *controller* for `script`/`win_script`, so "download it on the far
+  end" is not a shape those have — and at kilobytes they never need it.
 
 ## 1. What the installer actually is, and the `.exe` asset-type gap
 

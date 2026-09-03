@@ -119,6 +119,11 @@ async def list_backends(current_user: User = Depends(get_current_user)):
                 # The UI disables the "active" radio and shows this as the reason.
                 "hub_only":      b in storage_service.ACTIVE_BACKEND_EXCLUSIONS,
                 "hub_only_reason": storage_service.ACTIVE_BACKEND_EXCLUSIONS.get(b, ""),
+                # Largest file this backend accepts through /upload, and why. The upload
+                # form needs both BEFORE it reads the file: an oversize pick that gets as
+                # far as base64 has already cost the tab more memory than it has.
+                "max_upload_bytes":   storage_service.max_upload_bytes(b),
+                "upload_limit_reason": storage_service.upload_ceiling_reason(b),
             }
             for b in BACKENDS
         ],
@@ -506,6 +511,13 @@ async def upload_asset(
         data = base64.b64decode(req.content_b64)
     except Exception:
         raise HTTPException(status_code=400, detail="content_b64 is not valid base64.")
+    # The inline-transport ceiling, enforced where the base64 body actually arrives. It
+    # is not in `storage_service.upload_asset` because server-side writers (EPM-L package
+    # sync) reach that without a JSON body and must not inherit a browser's limit.
+    try:
+        storage_service.check_inline_upload(req.filename, len(data))
+    except storage_service.UploadTooLarge as e:
+        raise HTTPException(status_code=413, detail=str(e))
     # Advisory secret scan (never blocks the upload — a heads-up only).
     findings = []
     from ..services import config_service as cs, secret_scan

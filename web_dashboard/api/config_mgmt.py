@@ -80,6 +80,13 @@ async def upload_asset(
         data = base64.b64decode(req.content_b64)
     except Exception:
         raise HTTPException(status_code=400, detail="content_b64 is not valid base64.")
+    # The inline-transport ceiling, enforced where the base64 body actually arrives. It
+    # is not in `storage_service.upload_asset` because server-side writers (EPM-L package
+    # sync) reach that without a JSON body and must not inherit a browser's limit.
+    try:
+        storage_service.check_inline_upload(req.filename, len(data))
+    except storage_service.UploadTooLarge as e:
+        raise HTTPException(status_code=413, detail=str(e))
     # Advisory secret scan (never blocks the upload — a heads-up only).
     findings = []
     from ..services import config_service as cs, secret_scan

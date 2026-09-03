@@ -274,6 +274,75 @@ class PersonaSetup(BaseModel):
         return v if v in personas.VALID_PERSONAS else ""
 
 
+# What a POV instance may write per storage provider, and nothing else. Three lists
+# rather than "the whole cloud block" because the block carries deploy-shaped defaults
+# (aws_region, azure_resource_group, azure_location, gcp_region) whose presence is what
+# makes a cloud read as half-configured — see _apply_config.
+#
+# `aws_region` is deliberately absent: `storage_s3_region` covers the bucket, and
+# aws_service._aws_kwargs falls back to its region ARGUMENT when aws_region is unset, so
+# leaving it empty keeps the generic key honest about this being storage-only.
+_POV_STORAGE_SPEC = {
+    "aws": {
+        "backend":     "s3",
+        "credentials": ("aws_access_key_id", "aws_secret_access_key"),
+        "settings":    ("storage_s3_bucket", "storage_s3_region", "storage_s3_prefix"),
+    },
+    "azure": {
+        "backend":     "azure_blob",
+        # No azure_subscription_id: the blob client does not read one, and withholding it
+        # keeps feature_flags.cloud_configured("azure") answering False on a POV that has
+        # only a storage credential.
+        "credentials": ("azure_tenant_id", "azure_client_id", "azure_client_secret"),
+        "settings":    ("storage_azure_account", "storage_azure_container",
+                        "storage_azure_prefix"),
+    },
+    "gcp": {
+        "backend":     "gcs",
+        "credentials": ("gcp_project_id", "gcp_service_account_json"),
+        "settings":    ("storage_gcs_bucket", "storage_gcs_prefix"),
+    },
+}
+
+
+class PovStorageSetup(BaseModel):
+    """Object storage for a POV instance — the one route by which one writes cloud
+    credentials.
+
+    A POV skips the four cloud steps because it has no use for a cloud CONSOLE, and
+    _apply_config skips their writes so that clicking past a step cannot leave a cloud
+    looking half-configured. Neither of those arguments applies to a bucket: it is asked
+    for explicitly, one provider at a time, and nothing is written unless `provider` names
+    one. That is the difference between "we never ask" and "we ask and you declined".
+
+    Holding a cloud credential is already an anticipated POV state — see the `consoles`
+    guard in feature_flags.feature_map, added when a POV gained a lab-platform cloud. The
+    consoles stay 404 and the tiles stay hidden regardless of what lands here.
+    """
+    provider: str = ""            # "" | "aws" | "azure" | "gcp"
+    storage_s3_bucket: str = ""
+    storage_s3_region: str = ""
+    storage_s3_prefix: str = ""
+    storage_azure_account: str = ""
+    storage_azure_container: str = ""
+    storage_azure_prefix: str = ""
+    storage_gcs_bucket: str = ""
+    storage_gcs_prefix: str = ""
+
+    @field_validator("provider")
+    @classmethod
+    def _known_provider(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        # Empty is the legitimate "no cloud storage on this POV" answer, and stays the
+        # default. An unrecognised name RAISES rather than coercing to empty, unlike
+        # PersonaSetup: silently dropping it would report a successful save for a bucket
+        # that was never wired up, and the operator would find out at upload time.
+        if v and v not in _POV_STORAGE_SPEC:
+            raise ValueError(
+                f"pov_storage.provider must be one of {', '.join(_POV_STORAGE_SPEC)}, or empty")
+        return v
+
+
 class SetupPayload(BaseModel):
     admin: AdminSetup
     # `None`, not a default ProfileSetup(): absent must mean "leave the profile alone",
@@ -291,6 +360,9 @@ class SetupPayload(BaseModel):
     azure: AzureSetup
     gcp: GCPSetup = GCPSetup()
     oci: OCISetup = OCISetup()
+    # Defaulted, so an older UI or a script that omits it leaves a POV's storage alone
+    # rather than clearing it — the same reasoning as `profile` and `persona` above.
+    pov_storage: PovStorageSetup = PovStorageSetup()
     features: FeaturesSetup
 
 
@@ -362,6 +434,40 @@ _WIZARD_SECRET_FIELDS = frozenset({
 })
 
 
+def _pov_storage_pairs(payload: SetupPayload) -> dict:
+    """The config a POV instance's storage choice writes. Empty when none was made.
+
+    Empty VALUES are skipped rather than written, which is what keeps "clicked past it"
+    from landing a partial bucket config — the same hazard the demo-only guard above
+    exists for, arriving through the one door a POV now has.
+    """
+    provider = payload.pov_storage.provider
+    if not provider:
+        return {}
+    spec = _POV_STORAGE_SPEC[provider]
+    creds = {"aws": payload.aws, "azure": payload.azure,
+             "gcp": payload.gcp}[provider].model_dump()
+    chosen = payload.pov_storage.model_dump()
+
+    pairs: dict = {}
+    for field in spec["credentials"]:
+        value = creds.get(field, "")
+        # Same reconfigure rule as the demo branch: a blank secret means "keep what is
+        # already stored", not "erase it".
+        if field in _WIZARD_SECRET_FIELDS and not value:
+            continue
+        pairs[field] = value
+    for field in spec["settings"]:
+        value = chosen.get(field, "")
+        if value:
+            pairs[field] = value
+    # Selecting it as active is the point of the step. Without this the operator finishes
+    # the wizard with a configured backend that nothing reads, and Config Management still
+    # reports no active storage.
+    pairs["storage_active_backend"] = spec["backend"]
+    return pairs
+
+
 def _apply_config(payload: SetupPayload) -> None:
     """Write all wizard values to the config store and invalidate service caches."""
     from ..services import config_service
@@ -399,6 +505,12 @@ def _apply_config(payload: SetupPayload) -> None:
                 if field in _WIZARD_SECRET_FIELDS and not value:
                     continue
                 pairs[field] = value
+    else:
+        # A POV writes cloud credentials for ONE purpose: a bucket to stage assets in, so
+        # that Config Management has somewhere to read from that is not capped at the
+        # agent job envelope. Narrow on purpose — see _POV_STORAGE_SPEC for what is
+        # written and, more importantly, what is not.
+        pairs.update(_pov_storage_pairs(payload))
 
     # Feature flags — always store (explicit true/false is meaningful)
     pairs.update({

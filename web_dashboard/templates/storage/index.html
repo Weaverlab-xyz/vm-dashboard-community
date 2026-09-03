@@ -432,6 +432,17 @@
       </span>
     </div>
 
+    <!-- The ceiling, stated before the file picker rather than only on refusal. The
+         agent-brokered backend's is ~190 KB, which rules out every installer, and an
+         operator who learns that from an error has already gone and fetched one. -->
+    <p x-show="activeBackend && activeMaxUpload()" x-cloak
+       class="text-xs text-gray-500 mt-3">
+      Maximum upload for
+      <span class="font-medium" x-text="backendLabel(activeBackend)"></span>:
+      <span class="font-mono" x-text="formatBytes(activeMaxUpload())"></span>
+      — <span x-text="activeUploadReason()"></span>.
+    </p>
+
     <p class="text-xs text-gray-400 mt-3">
       Allowed types:
       <code class="bg-gray-100 px-1 rounded">.yml</code>
@@ -904,8 +915,38 @@ function storagePage() {
       }
     },
 
+    // The ceiling the ACTIVE backend advertises, from /api/storage/backends. Read from
+    // the server rather than restated here: the agent-brokered backend's limit is derived
+    // from the job envelope, so a number typed into this template would drift the moment
+    // that changed.
+    activeMaxUpload() {
+      const b = this.backends.find(x => x.id === this.activeBackend);
+      return (b && b.max_upload_bytes) || 0;
+    },
+
+    activeUploadReason() {
+      const b = this.backends.find(x => x.id === this.activeBackend);
+      return (b && b.upload_limit_reason) || '';
+    },
+
+    // Size is checked HERE, at pick time, and not in uploadFile(). By the time
+    // uploadFile() runs it has already allocated the ArrayBuffer, the joined binary
+    // string and the base64 of it — for a large installer that is several times the
+    // file's size in renderer heap, and the tab dies before any request is sent. A
+    // server-side limit cannot save a tab that never got to make the call.
     onFilePick(event) {
       const f = event?.target?.files?.[0];
+      const ceiling = this.activeMaxUpload();
+      if (f && ceiling && f.size > ceiling) {
+        this.pendingFile = null;
+        if (event?.target) event.target.value = '';
+        this.showToast(
+          `${f.name} is ${this.formatBytes(f.size)}, over the `
+          + `${this.formatBytes(ceiling)} limit for `
+          + `${this.backendLabel(this.activeBackend)} — ${this.activeUploadReason()}.`,
+          'error');
+        return;
+      }
       this.pendingFile = f || null;
     },
 
