@@ -328,6 +328,75 @@ async def aks_azure_rbac_enabled(resource_group: str, cluster_name: str) -> Opti
     return False
 
 
+_GRAPH = "https://graph.microsoft.com"
+
+
+def _jwt_claims(token: str) -> dict:
+    """The claims of a JWT, unverified. Returns {} rather than raising.
+
+    The missing signature check is not a shortcut: the only tokens passed here are ones
+    this process has just obtained from Microsoft's own token endpoint, over TLS, with
+    its own client secret. Reading a claim out of that is not a trust decision about a
+    caller, and there is no caller. Never use this on a token that arrived from outside.
+    """
+    import base64
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)     # JWT strips base64url padding
+        return json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+    except Exception:  # noqa: BLE001 — a malformed token is "unknown", never fatal
+        return {}
+
+
+async def own_identity() -> dict:
+    """``{"oid", "appid", "tid"}`` for the credential this dashboard authenticates with.
+
+    ``oid`` is the SERVICE PRINCIPAL's object id in this tenant. That is the value an
+    Azure role assignment binds to, and it is a **different GUID from ``appid``** — the
+    application (client) id that gets configured and that appears as a Password Safe
+    functional account's username. Going from appid to oid normally means a Microsoft
+    Graph lookup, but a token issued TO a principal states its oid outright, so for our
+    OWN identity the answer costs nothing and needs no directory permission at all.
+
+    Empty strings when the claim is absent; callers treat that as "could not tell".
+    """
+    credential, _sub = await _ensure_creds()
+    claims = _jwt_claims(await _arm_token(credential))
+    return {"oid": str(claims.get("oid") or ""),
+            "appid": str(claims.get("appid") or claims.get("azp") or ""),
+            "tid": str(claims.get("tid") or "")}
+
+
+async def service_principal_object_id(app_id: str) -> str:
+    """The object id for an application (client) id, via Microsoft Graph. "" if unknown.
+
+    Best-effort on purpose. This needs an *application* permission with admin consent
+    (``Application.Read.All`` or ``Directory.Read.All``); the dashboard's registration is
+    ARM-scoped and does not have it unless somebody granted it. A 403/401 here is a
+    missing consent rather than a defect, and every caller has another route to the same
+    answer, so this degrades to "" instead of raising — otherwise adding it would turn a
+    working path into a broken one for every tenant without Graph consent.
+    """
+    import httpx
+    app_id = (app_id or "").strip()
+    if not app_id:
+        return ""
+    credential, _sub = await _ensure_creds()
+    try:
+        token = (await _to_thread(credential.get_token, f"{_GRAPH}/.default")).token
+        url = (f"{_GRAPH}/v1.0/servicePrincipals(appId='{app_id}')"
+               "?$select=id,appId,displayName")
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code == 200:
+            return str(resp.json().get("id") or "")
+        logger.info("Graph lookup for appId %s returned %s — no directory permission, "
+                    "most likely", app_id, resp.status_code)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Graph lookup for appId %s failed: %s", app_id, exc)
+    return ""
+
+
 async def ensure_role_assignment(*, scope: str, role: str, principal_id: str,
                                  principal_type: str = "ServicePrincipal") -> dict:
     """Idempotently assign ``role`` on ``scope`` to ``principal_id``.

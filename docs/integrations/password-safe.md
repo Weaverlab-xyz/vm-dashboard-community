@@ -459,7 +459,37 @@ given — **Azure Kubernetes Service Cluster User Role** — is control-plane on
 perfectly, and holds no Kubernetes verb at all.
 
 So the dashboard also creates the role assignment (`k8s_ps_rotator_aks_assign_role`, on by
-default) once `k8s_ps_rotator_aks_sp_object_id` is set. `k8s_ps_rotator_aks_role` picks which
+default). **It no longer needs to be told the object id.** Three routes, tried in order:
+
+1. `k8s_ps_rotator_aks_sp_object_id`, if you set it.
+2. **The dashboard's own token.** An Azure functional account's username is the
+   *application (client) id*, and an object id cannot be derived from one — but a token
+   states the oid of the principal it was issued to. When the functional account's appid
+   is the dashboard's own appid (one app registration doing both jobs, the usual case),
+   the oid is already a claim in a token the dashboard mints anyway: no directory
+   permission, no extra call. It is only used when the two appids match, because granting
+   our own oid for a functional account that is a *different* app registration would
+   succeed at ARM and change nothing about the 403.
+3. **Microsoft Graph**, when the functional account is a different principal. Needs
+   `Application.Read.All` (or `Directory.Read.All`) consent, which most tenants have not
+   granted, so a 403 here is skipped rather than fatal.
+
+If all three come up empty the first rotation still fails — and **that failure is itself
+the fourth route.** The AKS API server authenticated the functional account, resolved it
+to an object id, and named that object id when it refused; so the dashboard reads the
+principal out of the 403, makes the namespace-scoped assignment, waits for Azure to apply
+it (`k8s_ps_rotator_aks_propagation_seconds`, default 240) and rotates again. A whole
+registration therefore completes with no object id configured anywhere. Whatever the
+resolved value was, it is written back to `k8s_ps_rotator_aks_sp_object_id` — announced in
+the job result, and never over an operator's own value — so later registrations grant
+before the first rotation rather than after it.
+
+That recovery is the reason nothing in `ps_k8s_token_service` may call
+`ManagedAccounts/{id}/Credentials/Change` directly; every rotation goes through
+`_rotate_token_once`, and a static test enforces it. It backs off in three cases, all
+deliberate: a non-Azure cluster, a failure that names no principal (a Password Safe
+outage must not spend the propagation budget), and
+`k8s_ps_rotator_aks_assign_role=false`. `k8s_ps_rotator_aks_role` picks which
 one: `writer` (the default) and `reader` are the two Azure documents as assignable at
 namespace scope, so those land on `<cluster>/namespaces/<pra namespace>`; `admin`,
 `clusteradmin` or a custom role definition GUID go on the cluster. Writer is the right
@@ -596,9 +626,10 @@ credential and the token is what the subscriber receives.
 | `k8s_ps_token_address_options` | — | Extra `;key=value` appended to every address |
 | `k8s_ps_rotator_apply_rbac` | `true` | Apply the rotator ClusterRole + binding on register |
 | `k8s_ps_rotator_gke_sa_email` | — | Blank → derived from the GCP functional account's name |
-| `k8s_ps_rotator_aks_sp_object_id` | — | The `oid` claim; the plugin logs it on every run |
+| `k8s_ps_rotator_aks_sp_object_id` | — | The `oid` claim. Resolved automatically when blank (own token → Graph → the first 403) and written back |
 | `k8s_ps_rotator_aks_assign_role` | `true` | Grant that oid an AKS data-plane role — with Azure RBAC the binding alone authorises nothing |
 | `k8s_ps_rotator_aks_role` | `writer` | `reader`/`writer` → namespace-scoped; `admin`/`clusteradmin`/GUID → cluster-scoped |
+| `k8s_ps_rotator_aks_propagation_seconds` | `240` | How long a refused rotation waits for a NEW role assignment to apply before giving up |
 | `k8s_ps_rotator_eks_username` | `passwordsafe-rotator` | Access-entry username = the RBAC `User` subject |
 | `k8s_ps_rotator_eks_principal_arn` | — | IAM principal behind the functional account's key |
 | `k8s_ps_rotator_eks_create_access_entry` | `true` | Create the access entry when the ARN is set |

@@ -2175,6 +2175,13 @@
                     <option value="clusteradmin">RBAC Cluster Admin (cluster)</option>
                   </select>
                 </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">AKS Grant Propagation Wait <span class="text-gray-400 font-normal">(seconds)</span></label>
+                  <input type="number" min="0" step="20" x-model.number="panelCfg.k8s_ps_rotator_aks_propagation_seconds"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="240">
+                  <p class="text-xs text-gray-500 mt-1">A rotation refused for want of a data-plane role grants it and retries for this long. Azure can take up to five minutes to apply a new assignment.</p>
+                </div>
                 <label class="flex items-center gap-2 text-sm text-gray-700 col-span-3">
                   <input type="checkbox" x-model="panelCfg.k8s_ps_rotator_aks_assign_role"
                          class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
