@@ -30,13 +30,19 @@ exists, and a VM that could not be wired records its reason in ``wiring_error`` 
 continues. A POV where seven of eight VMs are reachable is worth more than one that rolled
 back to zero because the eighth had no address yet.
 
-**Password Safe reaches the VM through the Resource Broker, not directly.** Slice 5b
-installed one inside the environment and recorded it as
-``PovEnvironment.ps_application_host_id``; every managed system this creates names it as
-its ``application_host_id``, which is the field that tells Password Safe to manage the
-host *via* that broker. Without it the platform would try to reach a private address from
-the cloud tenant and fail on every rotation — a failure that surfaces days later, on a
-schedule, rather than at onboarding.
+**Password Safe reaches these VMs through the Resource Broker slice 5b installed, and
+``application_host_id`` is NOT what arranges that.** What routes a cloud tenant to a
+private address is the broker's resource ZONE and the workgroup mapped to it — a
+BeyondInsight configuration step this dashboard performs no part of. The evidence is in
+this repo: ``cloud_database_service`` onboards private databases through a Resource Broker
+and passes no ``application_host_id`` at all, and ``ps_vm_hook`` passes an operator-typed
+config integer. Both work.
+
+So ``PovEnvironment.ps_application_host_id`` is an OPTIONAL override here, passed straight
+through when an operator has set it and sent as ``0`` ("leave it to the platform") when
+they have not. It used to be a hard precondition, which blocked every Password Safe
+onboarding on a column nothing in the codebase ever wrote. If a rotation later fails to
+reach a guest, the zone/workgroup mapping is the thing to check first.
 
 The Password Safe half is **optional and independent**. A POV wired into PRA is already
 useful, and a tenant that has not been given a workgroup or a functional account is a
@@ -166,13 +172,6 @@ async def ps_context(db: Session, env: PovEnvironment, *, mint: bool = True) -> 
         raise WireupError(
             f"the Password Safe tenant {tenant.name!r} names no workgroup, so there is "
             f"nowhere for a managed system to land. Set it on the tenant.")
-    if not env.ps_application_host_id:
-        # The Resource Broker IS how Password Safe reaches a private address. Without it
-        # the platform tries from the cloud tenant and fails on every rotation — days
-        # later, on a schedule, rather than here.
-        raise WireupError(
-            "this POV has no Password Safe Resource Broker, so the platform would have no "
-            "route to these VMs. Install one from the Resource Broker column first.")
 
     api = ps_api_service.tenant_creds(tenant.base_url, tenant.client_id, tenant.secret)
     tf = ps_resource_service.tenant_creds(
@@ -254,7 +253,9 @@ async def ps_context(db: Session, env: PovEnvironment, *, mint: bool = True) -> 
             # codebase treats as a bug.
             "minted": {fam: acct["id"] for fam, acct in accounts.items()
                        if acct.get("created")},
-            "application_host_id": int(env.ps_application_host_id),
+            # 0 means "leave it to the platform", which is what every other caller in
+            # this codebase sends. Only an operator-set override is ever non-zero.
+            "application_host_id": int(env.ps_application_host_id or 0),
             "label": tenant.name}
 
 
@@ -570,10 +571,16 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
             workgroup_id=ps["workgroup_id"],
             managed_account_name=username or "adminuser",
             initial_password=password,
-            # The Resource Broker. This is the field that tells Password Safe to manage
-            # the host THROUGH it rather than reaching a private address from the cloud.
+            # An OPTIONAL override, 0 unless an operator set one. What actually routes
+            # Password Safe to a private address is the Resource Broker's resource zone —
+            # see the module docstring.
             application_host_id=ps["application_host_id"],
-            method="ssh",
+            # PASSWORD-managed, not key-managed. A POV guest's credential is the lab
+            # platform's own stored login (seeded above as `initial_password`); there is no
+            # per-VM keypair anywhere in this feature and never was. `method="ssh"` demands
+            # a `private_key` this path cannot supply, so it failed EVERY VM here with a
+            # message about a "VM keypair secret" that does not exist for a POV.
+            method="password",
             tenant=ps["tf"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("POV %s: onboarding %s to Password Safe failed", env.id, vm.name,
@@ -703,10 +710,15 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
             f"Wiring {len(vms)} VM(s) into PRA tenant {tenant['label']} through Gateway "
             f"{gateway}.")
         if ps:
+            host_id = ps["application_host_id"]
             job_service.append_job_log(
                 db, job_id,
-                f"Onboarding them into Password Safe tenant {ps['label']} through "
-                f"Resource Broker {ps['application_host_id']}.")
+                f"Onboarding them into Password Safe tenant {ps['label']}"
+                + (f" through application host {host_id}." if host_id else
+                   ". No application host is set, so Password Safe reaches these VMs by "
+                   "the Resource Broker's resource zone. If a rotation later cannot reach "
+                   "a guest, check that the broker's zone is mapped to workgroup "
+                   f"{ps['workgroup_id']}."))
             for family, fa_id in sorted((ps.get("minted") or {}).items()):
                 job_service.append_job_log(
                     db, job_id,
@@ -986,7 +998,9 @@ def describe(db: Session, env: PovEnvironment) -> dict:
         "wireup_ready": bool(env.gateway_name and env.pra_tenant_id and rows),
         # Reported separately from `wireup_ready` because the two halves are independent:
         # a POV with no Password Safe tenant still wires into PRA.
-        "ps_onboard_ready": bool(env.ps_tenant_id and env.ps_application_host_id and rows),
+        # Deliberately NOT gated on `ps_application_host_id`: that column is an optional
+        # override, and gating on it reported every POV as un-onboardable.
+        "ps_onboard_ready": bool(env.ps_tenant_id and rows),
         # The Entitle half needs a key this dashboard cannot derive, so "ready" here means
         # the operator supplied one — the agent-token check belongs to the tenant and is
         # reported by the run rather than guessed at per row.

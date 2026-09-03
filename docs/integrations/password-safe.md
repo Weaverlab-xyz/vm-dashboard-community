@@ -317,7 +317,7 @@ cloud via the `*_registration_method` key (set to `ssh`).
 | `passwordsafe_gcp_registration_method` | `gcpvm` | GCP method: `gcpvm` (GCP VM SSH Rotation plugin) or `ssh` |
 | `passwordsafe_gcp_change_password_on_register` | `true` | Mint `adminuser`'s first key into GCE `ssh-keys` metadata right after onboarding |
 | `passwordsafe_ssh_key_enforcement_mode` | `2` | SSH method only — 0 none / 1 auto / 2 strict |
-| `passwordsafe_application_host_id` | `0` | SSH method only — >0 routes via a broker/application host |
+| `passwordsafe_application_host_id` | `0` | Optional. >0 sets a managed system's `ApplicationHostID` — the id of another managed system flagged `IsApplicationHost`. **Not** the Resource Broker handle: broker reachability comes from the broker's resource zone and the workgroup mapped to it. Leave at `0` unless a tenant specifically wants one |
 
 Off-boarding is automatic: destroying the VM removes the managed system + account
 (Terraform destroy from the stored state). Onboarding failures are **non-fatal** — they are

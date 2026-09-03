@@ -16,9 +16,13 @@ somewhere this dashboard can no longer reach:
   * **One VM's failure is not the run's failure** — but a run where nothing worked is.
   * **The Password Safe half is independent of the PRA half.** A half-configured tenant
     skips it with a message; it never costs the jump items that already worked.
-  * **The managed system names the Resource Broker as its application host** — the field
-    that tells Password Safe to reach the VM THROUGH the broker rather than from the
-    cloud tenant, which would fail on every rotation days later.
+  * **`application_host_id` is an OPTIONAL override, not the broker handle.** It used to
+    be a hard precondition, which blocked every onboarding here on a column nothing in
+    the codebase ever wrote. What routes Password Safe to a private address is the
+    broker's resource ZONE and the workgroup mapped to it; `cloud_database_service`
+    onboards private databases through a broker sending no `application_host_id` at all.
+  * **A POV guest's account is PASSWORD-managed.** There is no per-VM keypair in this
+    feature, so `method="ssh"` — which demands one — failed every VM.
   * **Entitle needs an agent this dashboard does not install**, so a tenant that names no
     agent token is refused with that reason rather than registered against the install's
     own tenant — and never at the cost of the halves that worked.
@@ -603,20 +607,34 @@ def test_a_pov_with_no_password_safe_tenant_is_not_an_error():
     db.close()
 
 
-def test_no_resource_broker_is_refused_with_the_reason():
-    """Without it the platform reaches a private address from the cloud tenant and fails
-    on every rotation — days later, on a schedule, rather than here."""
+def test_no_application_host_is_accepted_and_sent_as_zero():
+    """It is an override, not a route. Refusing without one blocked EVERY onboarding on a
+    column nothing in the codebase writes — and `cloud_database_service` reaches private
+    databases through a Resource Broker sending 0, which is the proof it is not the
+    broker handle."""
     db = d.SessionLocal()
     env = _ps_env(db)
     env.ps_application_host_id = None
     db.commit()
+    original = _install_ps(_FakePS())
     try:
-        asyncio.run(w.ps_context(db, env))
-        raise AssertionError("a POV with no Resource Broker was accepted")
-    except w.WireupError as exc:
-        assert "Resource Broker" in str(exc) and "route" in str(exc)
+        ps = asyncio.run(w.ps_context(db, env))
     finally:
-        db.close()
+        _restore_ps(original)
+    assert ps, "a POV with no application host was refused"
+    assert ps["application_host_id"] == 0
+    db.close()
+
+
+def test_readiness_does_not_depend_on_an_application_host():
+    """`ps_onboard_ready` gated on it reported every POV as un-onboardable."""
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    env.ps_application_host_id = None
+    db.commit()
+    _vm(db, env)
+    assert w.describe(db, env)["ps_onboard_ready"] is True
+    db.close()
 
 
 def test_a_tenant_with_no_workgroup_is_refused():
@@ -631,8 +649,9 @@ def test_a_tenant_with_no_workgroup_is_refused():
         db.close()
 
 
-def test_the_managed_system_names_the_resource_broker_as_its_application_host():
-    """The field that tells Password Safe to manage the host THROUGH the broker."""
+def test_an_operator_set_application_host_is_passed_through_unchanged():
+    """The one thing the column still does: a tenant that wants an application host gets
+    exactly the id an operator typed, and nothing derives or guesses one."""
     db = d.SessionLocal()
     env = _ps_env(db)
     vm = _vm(db, env)
@@ -646,6 +665,52 @@ def test_the_managed_system_names_the_resource_broker_as_its_application_host():
     assert fake.registered[0]["application_host_id"] == 4242
     db.refresh(vm)
     assert vm.ps_managed_system_id == "900" and vm.ps_managed_account_id == "901"
+    db.close()
+
+
+def test_the_povs_onboarding_shape_survives_the_real_register_call():
+    """The regression that hid behind ``_FakePS`` for the life of this feature.
+
+    Every other Password Safe test in this file replaces ``register_managed_system``
+    wholesale, so nothing ever exercised its argument validation — and this path passed
+    ``method="ssh"`` with no ``private_key``, which that function refuses outright. The
+    result was that EVERY VM failed the Password Safe half with a message about a "VM
+    keypair secret", a thing a POV has never had: the only per-POV key in this feature is
+    Entitle's, and a guest's credential comes from the lab platform's stored login.
+
+    So this one patches only the terraform boundary. The real generator, the real method
+    dispatch and the real refusals all run.
+    """
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    vm = _vm(db, env)
+    original = _install_ps(_FakePS())
+    # …and put the REAL register_managed_system back, faking terraform instead.
+    w.ps_resource_service.register_managed_system = original["reg"]
+    captured = {}
+
+    def _apply(hcl, tf_vars, tenant):
+        captured["hcl"], captured["vars"] = hcl, tf_vars
+        return {"managed_system_id": "900", "managed_account_id": "901",
+                "tf_state_json": '{"resources":[]}'}
+
+    real_apply = w.ps_resource_service._apply_hcl_sync
+    w.ps_resource_service._apply_hcl_sync = _apply
+    try:
+        ps = asyncio.run(w.ps_context(db, env))
+        line = asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
+    finally:
+        w.ps_resource_service._apply_hcl_sync = real_apply
+        _restore_ps(original)
+
+    assert "FAILED" not in line, line
+    assert "keypair" not in line, line
+    # Password-managed all the way down: no key in the HCL and none in the TF_VARs.
+    assert "private_key" not in captured["hcl"]
+    assert "ps_account_private_key" not in captured["vars"]
+    assert "dss_auto_management_flag = false" in captured["hcl"]
+    db.refresh(vm)
+    assert vm.ps_managed_system_id == "900"
     db.close()
 
 

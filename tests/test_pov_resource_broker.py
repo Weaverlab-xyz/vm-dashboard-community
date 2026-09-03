@@ -504,7 +504,11 @@ def test_an_unusable_platform_credential_names_the_vm():
 # ── teardown ─────────────────────────────────────────────────────────────────
 
 def test_teardown_clears_the_key_and_says_the_tenant_still_lists_the_broker():
-    """The RB's registration is a customer-side object this dashboard never created."""
+    """The RB's registration is a customer-side object this dashboard never created.
+
+    It is named by zone and install key, and `ps_application_host_id` never held it — so
+    the line distinguishes forgetting the override from retiring the broker.
+    """
     db = d.SessionLocal()
     env, _a, _v = _ready(db)
     env.ps_application_host_id = 4242
@@ -512,7 +516,68 @@ def test_teardown_clears_the_key_and_says_the_tenant_still_lists_the_broker():
     line = rb.teardown(db, env)
     assert not rb.has_installer_key(env)
     assert "4242" in line and "retire it" in line
+    assert "override" in line
     assert env.ps_application_host_id is None
+    db.close()
+
+
+# -- the application host override --------------------------------------------
+#
+# `ps_application_host_id` had NO writer for the life of this feature, and
+# `pov_wireup.ps_context` refused the whole Password Safe half without one -- so a POV
+# could install a Resource Broker successfully and still never onboard a single VM.
+#
+# The column is also not what people thought it was. `application_host_id` names another
+# MANAGED SYSTEM carrying `IsApplicationHost`; what routes Password Safe to a private
+# address is the broker's resource ZONE and the workgroup mapped to it. The evidence:
+# `cloud_database_service` onboards private databases through a Resource Broker passing no
+# `application_host_id` at all, and BeyondTrust's own Skytap POC runbook (SELab, rev 7.0)
+# never mentions an application host anywhere -- it creates the zone, adds the workgroup to
+# it, and installs the broker into it.
+#
+# So this is an override for the tenant that wants one, and an escape hatch so no POV is
+# ever stuck on a value nothing derives.
+
+
+def test_setting_an_application_host_records_it():
+    db = d.SessionLocal()
+    env = _env(db)
+    line = rb.set_application_host(db, env, 4242)
+    assert env.ps_application_host_id == 4242
+    assert "4242" in line
+    assert rb.describe(db, env)["ps_application_host_id"] == 4242
+    db.close()
+
+
+def test_zero_clears_it_because_that_is_the_normal_state():
+    db = d.SessionLocal()
+    env = _env(db, ps_application_host_id=4242)
+    line = rb.set_application_host(db, env, 0)
+    assert env.ps_application_host_id is None
+    assert "Cleared" in line
+    db.close()
+
+
+def test_a_negative_application_host_id_is_refused():
+    db = d.SessionLocal()
+    env = _env(db)
+    try:
+        rb.set_application_host(db, env, -1)
+        raise AssertionError("a negative managed system id was accepted")
+    except rb.ResourceBrokerError as exc:
+        assert "positive" in str(exc)
+    assert env.ps_application_host_id is None
+    db.close()
+
+
+def test_a_non_numeric_application_host_id_is_refused_not_coerced():
+    db = d.SessionLocal()
+    env = _env(db)
+    try:
+        rb.set_application_host(db, env, "broker01")
+        raise AssertionError("a non-numeric managed system id was accepted")
+    except rb.ResourceBrokerError as exc:
+        assert "whole number" in str(exc)
     db.close()
 
 

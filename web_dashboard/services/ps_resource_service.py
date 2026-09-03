@@ -90,7 +90,11 @@ _REDACTED = "**REDACTED-BY-DASHBOARD**"
 _PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "dbgcp",
                              "pravault", "k8ssa"})
 # Methods whose managed account is password-managed (no SSH DSS key auto-management).
-_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "dbgcp", "pravault", "k8ssa"})
+# ``password`` is the only NON-plugin member: a traditional managed system reached at its
+# own address, whose account Password Safe rotates by password because the caller has a
+# working login and no key material. See the branch in ``register_managed_system``.
+_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "dbgcp", "pravault", "k8ssa",
+                                       "password"})
 
 # Password Safe's managed-system address column is 255 chars. The cloud-DB plugin addresses
 # pack 6-8 fields into it, and the Azure one is close to the ceiling with realistic values
@@ -788,7 +792,10 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
         # _DBAZURE_PLUGIN_TIMEOUT_SECONDS). Naming this parameter after either unit is
         # how one caller ends up passing the other one's number.
         sys_lines.append(_line("timeout", int(timeout_value)))
-    if method not in _PLUGIN_METHODS:
+    if method == "ssh":
+        # Named for `ssh` rather than "not a plugin" because `password` is also
+        # non-plugin and must NOT carry these: a Windows managed system has no remote
+        # client type and no key-enforcement mode, and that method serves both families.
         sys_lines.append(_line("remote_client_type", '"ssh"'))
         sys_lines.append(_line("ssh_key_enforcement_mode", int(ssh_key_enforcement_mode)))
     if application_host_id and int(application_host_id) > 0:
@@ -996,6 +1003,12 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     password-managed — the credential IS the bearer token — but a bearer token cannot be
     seeded (see ``initial_password``), so the first rotation is what populates it.
 
+    ``method="password"`` is the traditional (non-plugin) managed system reached at its own
+    ``host_name``/``ip_address``, whose account is PASSWORD-managed: no ``private_key``, no
+    DSS auto-management, and none of the SSH client fields — so it serves a Windows guest as
+    readily as a Linux one. For callers that hold a working login and no key material, which
+    is every lab guest reached through the platform's own stored credentials.
+
     ``method="ssh"`` (default) keeps the traditional key-managed flow and requires
     ``private_key``.
 
@@ -1186,11 +1199,25 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             application_host_id=application_host_id,
             method="k8ssa", dns_name=dns_name, emit_private_key=False,
             dss_auto_management=False)
+    elif method == "password":
+        # Same shape as `ssh` minus the key. A caller with a working login and no key
+        # material used to fall through to the branch below and be refused for a "VM
+        # keypair secret" it does not have and never could -- which read as a
+        # misconfiguration rather than as a method that did not exist yet.
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address, port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="password", emit_private_key=False, dss_auto_management=False)
     else:
         if not private_key:
             raise PSResourceError(
                 "no SSH private key available for the managed account — Password Safe "
-                "manages the account by key; check the VM keypair secret")
+                "manages the account by key; check the VM keypair secret. A caller that "
+                "manages the account by PASSWORD wants method='password'.")
         hcl = _generate_managed_system_hcl(
             name=name, host_name=host_name, ip_address=ip_address, port=port,
             functional_account_id=functional_account_id, platform_id=platform_id,

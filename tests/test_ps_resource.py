@@ -109,6 +109,57 @@ def test_application_host_id_is_opt_in():
     assert "is_application_host      = false" in withhost
 
 
+def test_the_password_method_is_a_non_plugin_system_with_no_key():
+    """A traditional managed system whose account Password Safe rotates by PASSWORD.
+
+    Exists because a caller can hold a working login and no key material — every POV lab
+    guest reached through the lab platform's own stored credentials. Those callers used to
+    fall through to the key-managed branch and be refused for a "VM keypair secret" that
+    does not exist for them.
+    """
+    hcl = ps._generate_managed_system_hcl(method="password", emit_private_key=False,
+                                          dss_auto_management=False, **_COMMON)
+    # A real address, not a plugin placeholder: it is reached at its own host/ip.
+    assert 'host_name                = "se-lab-vm"' in hcl
+    assert 'ip_address               = "10.0.0.5"' in hcl
+    # Password-managed: no key variable, no key attribute, no DSS auto-management.
+    assert 'variable "ps_account_private_key"' not in hcl
+    assert "private_key" not in hcl
+    assert "dss_auto_management_flag = false" in hcl
+    assert "password                 = var.ps_account_password" in hcl
+
+
+def test_the_password_method_omits_the_ssh_client_fields():
+    """Not gated on "is a plugin" any more, because `password` is non-plugin too — and a
+    WINDOWS managed system has no remote client type and no key-enforcement mode. Emitting
+    them here is what would send a Windows guest down an SSH shape."""
+    hcl = ps._generate_managed_system_hcl(method="password", emit_private_key=False,
+                                          dss_auto_management=False, **_COMMON)
+    assert "remote_client_type" not in hcl
+    assert "ssh_key_enforcement_mode" not in hcl
+    # …while the default ssh shape still carries both.
+    ssh = ps._generate_managed_system_hcl(**_COMMON)
+    assert 'remote_client_type       = "ssh"' in ssh
+    assert "ssh_key_enforcement_mode = 2" in ssh
+
+
+def test_the_password_method_is_declared_password_managed():
+    assert "password" in ps._PASSWORD_MANAGED_METHODS
+
+
+def test_the_key_managed_refusal_names_the_password_method():
+    """The refusal an operator actually hits should name the way out. `pov_wireup` sat on
+    this exact message for the life of the feature without it."""
+    import asyncio
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="x", host_name="x", functional_account_id=1, platform_id=2,
+            workgroup_id="55", private_key=""))
+        raise AssertionError("a key-managed registration with no key was accepted")
+    except ps.PSResourceError as exc:
+        assert "method='password'" in str(exc)
+
+
 def test_scrub_redacts_password_and_private_key():
     state = (
         '{"resources":[{"type":"passwordsafe_managed_account","instances":'
