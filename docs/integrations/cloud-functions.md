@@ -64,7 +64,9 @@ this adds** — an always-on, externally callable endpoint is.
 > [Cloud databases](../databases.md) and the `clouddb_adapter_pair` job.
 > `POST /check_config` is the route to ask an already-deployed adapter whether it is
 > configured; it answers `{"data": {"valid": false, "problems": [...]}}` rather than
-> failing when it is not.
+> failing when it is not. Once `db_grant` is armed (`FN_DB_DRY_RUN=0`) it also opens
+> one real connection, so it answers the question a dry run cannot: whether the
+> function can actually reach the database.
 
 ### Field reference
 
@@ -233,10 +235,20 @@ cannot redirect a grant at another database):
 | `FN_DB_ADMIN_USER` | the admin login that runs CREATE/DROP |
 | `FN_DB_ADMIN_PASSWORD` | **never set directly** — pass it as `secret_environment` (see [Credentials](#credentials)) |
 | `FN_DB_DRY_RUN` | unset or truthy = dry run. **Default is dry run.** |
+| `FN_DB_CAFILE` | optional PEM bundle **inside the package** to verify the database's certificate against. Unset (the normal case) = encrypt without verifying |
 
 `FN_DB_FLAVOR=azure_sql` is not cosmetic: Azure SQL Database is a contained-database
 model, so the login goes in `master` on the logical server and the user in the target
 database, over two separate connections with no `USE` between them.
+
+Every connection is **encrypted**, on both engines, with no way to turn that off —
+Azure SQL and Azure Flexible Server refuse plaintext outright, and a JIT credential
+is the last traffic you want in the clear. It is *not* verified by default: a
+function package pins neither the DigiCert root Azure SQL presents, nor the Amazon
+RDS roots, nor Cloud SQL's per-instance server CA, and there is no host trust store
+in the zip to fall back on. `FN_DB_CAFILE` is the opt-in for a deployment that wants
+verification and has a bundle to do it with. The hop is inside your VPC/VNet to a
+private endpoint either way.
 
 The admin password is never a request field, and never a plaintext setting: pass it
 as `secret_environment` (`{"FN_DB_ADMIN_PASSWORD": "<reference>"}`) and each cloud
@@ -543,6 +555,7 @@ Which of the two gates refused you is in the **body**, not the status code:
 | `401`, **empty** body | the Azure host key (or GCP's `run.invoker`, or an AWS Function URL permission) — the front door, before your code ran | re-run Test invoke: it re-fetches the key from ARM. `GET /api/health` returning 200 confirms the app itself is healthy |
 | `401 {"error": "unauthorized"}` | `fnruntime.auth` inside the handler | the bearer secret the dashboard holds is not the one the function verifies — redeploy to mint a matching pair |
 | `500 {"error": "function not configured", ...}` | the workload | the named setting is missing; `POST /check_config` lists all of them |
+| `500 {"error": "internal error", "request_id": ...}` | the workload raised | nothing about the cause is in the body, by design. For `db_grant`, `POST /check_config` opens a real connection and reports what failed — TLS, the firewall, the VNet route, the admin credential — as a sentence. The full detail (driver error code and message) is in the function's own log stream, and `FN_DEBUG=1` adds a traceback there |
 
 The secret is minted at deploy, stored encrypted (`cloudfn/{id}/bearer`), and shown
 via the **Endpoint** button. The handler **fails closed**: if it cannot resolve the

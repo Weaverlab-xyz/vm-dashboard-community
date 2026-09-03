@@ -197,6 +197,13 @@ involved.
    nothing.
 4. Only when that SQL looks right, set `FN_DB_DRY_RUN=0` on the function and
    request again.
+5. **Immediately after arming it, call `POST /check_config`.** A dry run proves the
+   SQL and nothing else — it opens no connection, so it cannot tell you whether the
+   function can reach the database at all. Armed, `check_config` opens one real
+   connection and reports TLS, the firewall, the VNet route or a wrong admin
+   credential as a sentence. Skip this and the first thing you learn is
+   `500 {"error": "internal error"}` on a colleague's real access request, with the
+   reason only in the function's log stream.
 
 **On Azure SQL specifically**, check the dry-run plan has **two** connections —
 the login in `master`, the contained user in the target database. One connection
