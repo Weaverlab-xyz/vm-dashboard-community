@@ -731,117 +731,7 @@ def _validate_backend(backend: str) -> None:
         raise StorageError(f"Backend '{backend}' is not configured.")
 
 
-# ── Signed read URLs ─────────────────────────────────────────────────────────
-# A URL that lets something which is NOT this dashboard read one asset, for a while,
-# without holding a cloud credential. It exists for one caller: an Ansible run on a remote
-# agent, whose job envelope caps at 256 KB and so cannot carry an installer. With a signed
-# URL the target host downloads the file itself and the bytes never enter the envelope --
-# which is exactly what agent_ansible_bundle's own size error already tells operators to
-# do ("move large files into a role the play fetches itself").
-#
-# ONLY the cloud backends can do this, and that is inherent rather than an omission: `local`
-# and `agent_local` are filesystem paths with no signing authority and nothing to serve
-# them over HTTP. `can_presign` is how callers ask, so the refusal can name the reason.
-#
-# TREAT THE RESULT AS A SECRET. It is a bearer token for that object -- anyone holding it
-# reads the file until it expires. Callers must put it in their scrub list; see
-# agent_ansible_bundle.
-
-PRESIGN_BACKENDS = ("s3", "azure_blob", "gcs")
-
-# Long enough for a slow link to pull a few hundred MB, short enough that a URL leaked into
-# a log outlives its usefulness quickly. The download starts within seconds of the agent
-# leasing the job, so this is mostly slack for the transfer itself.
-DEFAULT_PRESIGN_TTL = 3600
-
-
-def can_presign(backend: str) -> bool:
-    """Whether `backend` can mint a signed read URL for an asset."""
-    return backend in PRESIGN_BACKENDS
-
-
-def _s3_presign_sync(name: str, ttl: int) -> str:
-    bucket = _cfg("storage_s3_bucket")
-    client = _s3_client()
-    return client.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": bucket, "Key": f"{_s3_prefix()}/{name}"},
-        ExpiresIn=ttl)
-
-
-def _azure_presign_sync(name: str, ttl: int) -> str:
-    """A user-delegation SAS, signed by Entra rather than by an account key.
-
-    The account key route would be simpler and is deliberately not taken: this backend
-    authenticates with a ClientSecretCredential and the dashboard never holds the key, so
-    asking for one would mean a new secret on every instance for the sake of one URL. A
-    user delegation key is the AAD-native equivalent and needs only the credential already
-    configured -- plus the Storage Blob Data Reader role, which the backend needs to read
-    the blob at all.
-    """
-    from datetime import datetime, timedelta, timezone
-    from azure.storage.blob import BlobSasPermissions, generate_blob_sas
-
-    svc = _azure_blob_client()
-    container = _azure_container()
-    prefix = _azure_prefix()
-    blob_name = f"{prefix}/{name}" if prefix else name
-
-    # Skewed back a little: the service rejects a SAS whose start time is in ITS future,
-    # and the two clocks are not the same clock.
-    start = datetime.now(timezone.utc) - timedelta(minutes=5)
-    expiry = datetime.now(timezone.utc) + timedelta(seconds=ttl)
-    delegation_key = svc.get_user_delegation_key(key_start_time=start, key_expiry_time=expiry)
-    token = generate_blob_sas(
-        account_name=svc.account_name,
-        container_name=container,
-        blob_name=blob_name,
-        user_delegation_key=delegation_key,
-        permission=BlobSasPermissions(read=True),
-        start=start,
-        expiry=expiry)
-    return f"{svc.url.rstrip('/')}/{container}/{blob_name}?{token}"
-
-
-def _gcs_presign_sync(name: str, ttl: int) -> str:
-    from datetime import timedelta
-
-    client = _gcs_client()
-    bucket = client.bucket(_cfg("storage_gcs_bucket"))
-    prefix = _gcs_prefix()
-    blob = bucket.blob(f"{prefix}/{name}" if prefix else name)
-    # v4 signing needs a service account's private key. `_gcp_creds()` returns None when
-    # the instance is on Application Default Credentials, and signing then raises an
-    # AttributeError about a missing signer -- remapped below so the operator is told to
-    # configure the service-account JSON rather than shown a google-cloud traceback.
-    return blob.generate_signed_url(version="v4", expiration=timedelta(seconds=ttl),
-                                    method="GET")
-
-
-_PRESIGN_OPS = {
-    "s3":         _s3_presign_sync,
-    "azure_blob": _azure_presign_sync,
-    "gcs":        _gcs_presign_sync,
-}
-
-
-async def presigned_url(backend: str, name: str, ttl: int = DEFAULT_PRESIGN_TTL) -> str:
-    """A time-limited URL that reads `name` from `backend`. **The result is a secret.**"""
-    if not can_presign(backend):
-        raise StorageError(
-            f"Backend '{backend}' cannot produce a download link: it is a filesystem path, "
-            f"not an object store, so there is nothing to sign and no URL to serve. Move "
-            f"the asset to a cloud backend, or keep it small enough to travel inside the "
-            f"job itself.")
-    _validate_backend(backend)
-    try:
-        return await _to_thread(_PRESIGN_OPS[backend], name, ttl)
-    except StorageError:
-        raise
-    except Exception as e:
-        raise StorageError(
-            f"Could not sign a download link for '{name}' on {backend}: {e}") from e
-
+# ── Asset size ───────────────────────────────────────────────────────────────
 
 async def asset_size(backend: str, name: str) -> int:
     """Size of one asset in bytes, or -1 when the backend does not list it.
@@ -1982,6 +1872,17 @@ _ASSET_PREFIX_FN = {
     "gcs":        _gcs_prefix,
     "oci_object_storage": _oci_prefix,
 }
+
+
+def can_presign(backend: str) -> bool:
+    """Whether `backend` can mint a signed read URL for an asset.
+
+    Answers from `_ASSET_PREFIX_FN`, the same table :func:`asset_key` raises on, so a
+    caller that checks first and a caller that just tries cannot disagree. Filesystem
+    backends are absent from it and always will be: `local` and `agent_local` are paths
+    with no signing authority and nothing serving them over HTTP.
+    """
+    return backend in _ASSET_PREFIX_FN
 
 
 def asset_key(backend: str, name: str) -> str:

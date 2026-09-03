@@ -61,20 +61,35 @@ class _Stub:
         self.presign_backends, self.presign_raises = presign_backends, presign_raises
         self.fetched = []          # anything that read actual BYTES lands here
         self.sized = []
+        self.signed = []
 
     def __enter__(self):
         self._saved = {k: getattr(storage_service, k) for k in
-                       ("asset_size", "can_presign", "presigned_url", "active_backend",
-                        "fetch_asset_in", "fetch_asset_b64")}
+                       ("asset_size", "can_presign", "presigned_url", "asset_key",
+                        "active_backend", "fetch_asset_in", "fetch_asset_b64")}
 
         async def asset_size(backend, name):
             self.sized.append((backend, name))
             return self.size
 
-        async def presigned_url(backend, name, ttl=3600):
+        # Signature mirrors the real one deliberately — a storage KEY and
+        # `expiry_seconds`, not an asset name. A looser stub would accept a call the
+        # module cannot actually make, which is how a duplicate definition of this
+        # function survived a green local run once already.
+        async def presigned_url(backend, key, expiry_seconds=3600, method="GET"):
+            self.signed.append((backend, key, expiry_seconds))
             if self.presign_raises:
                 raise storage_service.StorageError(self.presign_raises)
             return SIGNED
+
+        def asset_key(backend, name):
+            if not self.presign_backends or backend not in self.presign_backends:
+                raise storage_service.StorageError(
+                    f"Backend '{backend}' stores assets on a filesystem, not under a "
+                    f"presignable key. Use a cloud backend for this.")
+            return f"config-mgmt/{name}"
+
+        storage_service.asset_key = asset_key
 
         async def fetch_asset_in(backend, name):
             self.fetched.append(name)
@@ -275,9 +290,44 @@ def test_the_embed_ceiling_leaves_room_for_the_rest_of_the_bundle():
 def test_only_object_stores_can_sign():
     """Inherent, not an omission: a filesystem path has no signing authority and nothing
     serving it over HTTP."""
-    assert storage_service.can_presign("s3")
+    for backend in ("s3", "azure_blob", "gcs", "oci_object_storage"):
+        assert storage_service.can_presign(backend), backend
     assert not storage_service.can_presign("local")
     assert not storage_service.can_presign("agent_local")
+
+
+def test_the_url_is_signed_for_the_storage_KEY_not_the_bare_asset_name():
+    """`presigned_url` takes a key, and the prefix differs per backend. Signing the bare
+    name yields a valid URL for an object that is not there — a 404 on the target, blamed
+    on the network. Caught in CI: this module first grew its OWN presigned_url, which
+    Python silently discarded in favour of the one storage_service already had."""
+    with _Stub(size=BOOTSTRAPPER_BYTES) as st:
+        assert _url(BOOTSTRAPPER) == SIGNED
+        assert st.signed == [("s3", f"config-mgmt/{BOOTSTRAPPER}", 3600)], st.signed
+
+
+def test_storage_service_defines_each_signing_helper_exactly_once():
+    """The repo-wide sweep catches redefinitions, but this says why it matters here."""
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(storage_service))
+    names = [n.name for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for want in ("presigned_url", "asset_key", "can_presign", "asset_size"):
+        assert names.count(want) == 1, f"{want} defined {names.count(want)} times"
+
+
+def test_can_presign_reads_the_same_table_asset_key_does():
+    """Two readers of "can this be signed" that disagree would let a run past the check and
+    fail at the call, so `can_presign` answers from `_ASSET_PREFIX_FN` rather than keeping
+    its own list.
+
+    Asserted against the table and not against `asset_key`'s behaviour, because
+    `_validate_backend` refuses an UNCONFIGURED backend first — on a CI runner with no
+    cloud credentials every backend raises for that reason, which would make the weaker
+    test vacuously pass and call s3 unsignable."""
+    for backend in storage_service.BACKENDS:
+        assert storage_service.can_presign(backend) ==             (backend in storage_service._ASSET_PREFIX_FN), backend
 
 
 if __name__ == "__main__":

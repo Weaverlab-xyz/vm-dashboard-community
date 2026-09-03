@@ -74,6 +74,12 @@ MAX_BUNDLE_BYTES = 256 * 1024
 # nothing the operator can act on.
 MAX_EMBEDDED_ASSET_BYTES = 128 * 1024
 
+# How long the download link stays good. Long enough for a slow link to pull a few hundred
+# MB, short enough that one leaked into a log outlives its usefulness quickly — the
+# download starts within seconds of the agent leasing the job, so most of this is slack for
+# the transfer itself.
+ASSET_URL_TTL_SECONDS = 3600
+
 # Where the agent extracts the run's files. NOT /tmp: the sibling mounts a tmpfs over /tmp
 # at start, which would shadow anything placed there before start and delete it with no
 # diagnostic at all. Stated here because the path is half of a contract with the agent.
@@ -220,8 +226,14 @@ async def _remote_fetch_url(asset: str, asset_backend: str, *, prefetched_b64: s
             f"download link, because it is a filesystem path rather than an object store. "
             f"Move this asset to a cloud backend and re-run.")
 
+    # `asset_key` then `presigned_url` — the pair `packer_build_service` already uses to
+    # hand an EPM-L package to a Packer build. `presigned_url` takes a storage KEY, not an
+    # asset name, and the prefix differs per backend, so calling it with the bare name
+    # would sign a URL for an object that is not there.
     try:
-        return await storage_service.presigned_url(backend, asset)
+        key = storage_service.asset_key(backend, asset)
+        return await storage_service.presigned_url(
+            backend, key, expiry_seconds=ASSET_URL_TTL_SECONDS)
     except storage_service.StorageError as exc:
         raise BundleError(str(exc)) from exc
 
