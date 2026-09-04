@@ -191,9 +191,16 @@ def test_aws_sm() -> dict:
     return {"ok": True, "message": f"Connected to AWS Secrets Manager in region {region}."}
 
 
+def _aws_secret_name(key: str) -> str:
+    """The secret NAME a ``key`` is written under. Extracted so :func:`ref_for` can
+    reproduce it instead of a caller re-concatenating the prefix by hand."""
+    _, prefix = _aws_cfg()
+    return f"{prefix}/{key}".lstrip("/")
+
+
 def write_aws_sm(key: str, value: str) -> str:
-    region, prefix = _aws_cfg()
-    secret_name = f"{prefix}/{key}".lstrip("/")
+    region, _ = _aws_cfg()
+    secret_name = _aws_secret_name(key)
     import boto3
     client = boto3.client("secretsmanager", region_name=region)
     try:
@@ -1319,6 +1326,33 @@ def delete_sync(backend: str, ref: str) -> None:
     if not fn:
         raise ValueError(f"Cannot delete from backend: {backend}")
     fn(ref)
+
+
+# Each writer mangles the key on its way in — an AWS prefix and a slash, a Key Vault
+# name with underscores swapped for dashes, a GCP secret id with a prefix AND that
+# swap. A caller that wrote with `write_sync` and later wants to read or delete needs
+# the same mangling back, and reproducing it by hand is how a delete quietly targets a
+# name nothing was ever written under. These are the writers' OWN helpers, so the two
+# cannot drift.
+_REF_FN = {
+    "aws_sm":   _aws_secret_name,
+    "azure_kv": _kv_name,
+    "gcp_sm":   _gcp_secret_id,
+}
+
+
+def ref_for(backend: str, key: str) -> str:
+    """The backend-specific ref ``write_sync(backend, key, ...)`` would have returned.
+
+    Only for the three cloud stores, whose ref is derived from the key. The others
+    (`bt_secrets_safe`, `wlc`, `database`) return an id the backend mints, which no
+    amount of local computation can reconstruct — they raise here rather than hand
+    back a plausible-looking wrong answer.
+    """
+    fn = _REF_FN.get(backend)
+    if not fn:
+        raise ValueError(f"Cannot derive a ref for backend: {backend}")
+    return fn(key)
 
 
 def write_sync_validated(backend: str, key: str, value: str) -> str:
