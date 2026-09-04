@@ -202,13 +202,31 @@ async def create_actor(request: Request, db: Session = Depends(get_db)):
     logger.info("pov-accessor-rest create_actor pov=%s identity=%s username=%s",
                 env.id, identity, row.username)
     # The credentials ARE the point of create_actor: Entitle hands them to the requester.
+    #
+    # NESTED, not flat. Entitle validates this ``data`` against ``Provisioned Actor
+    # Data``, which has exactly two properties — ``actor`` and ``login_info`` — and is
+    # additionalProperties: False at the top level AND inside ``actor``, where ``email``
+    # is required. The flat version every adapter here shipped was rejected in full
+    # ("Additional properties are not allowed ('database', 'host', 'identifier', ...
+    # were unexpected)"), and in Ephemeral mode that happens AFTER the account exists:
+    # Entitle records the request as failed, the requester is told nothing, and
+    # delete_actor is only driven from what Entitle believes it provisioned — so the
+    # accessor outlives its grant. See functions/fnruntime/entitle.py, which is where
+    # the same fix lives for the adapters that run as cloud functions.
     return {"data": {
-        "identifier": row.username,
-        "name": row.username,
-        "type": "pov_accessor",
-        "username": row.username,
-        "password": password,
-        "expires_at": row.expires_at.isoformat() if row.expires_at else "",
+        "actor": {
+            "identifier": row.username,
+            "name": row.username,
+            "type": "pov_accessor",
+            # The requester's address, not the minted username: it is the only link
+            # back to the person who asked, and the schema requires the field.
+            "email": identity,
+        },
+        "login_info": {
+            "username": row.username,
+            "password": password,
+            "expires_at": row.expires_at.isoformat() if row.expires_at else "",
+        },
     }}
 
 

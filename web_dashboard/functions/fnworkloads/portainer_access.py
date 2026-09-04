@@ -257,10 +257,10 @@ def _create_actor(req, ctx, config):
     logs.emit("info", "create_actor", request_id=ctx.request_id,
               identity=identity, username=username, dry_run=_dry_run())
     if _dry_run():
-        return Response(200, {"data": {
-            "dry_run": True, "identifier": username, "name": username,
-            "type": "portainer_user",
-            "would": f"POST /api/users {username} role=standard, no team"}})
+        return Response(200, {"data": entitle.actor_data(
+            username, "portainer_user", email=identity, login_info={
+                "dry_run": True,
+                "would": f"POST /api/users {username} role=standard, no team"})})
     # STANDARD, and in no team: an actor whose give_access never arrives can reach
     # nothing.
     created = _api(config, "POST", "/api/users", {
@@ -268,12 +268,15 @@ def _create_actor(req, ctx, config):
         "Password": password,
         "Role": _rules.validate_user_role(_rules.USER_ROLE_STANDARD),
     }) or {}
-    return Response(200, {"data": {
-        "identifier": username, "name": username, "type": "portainer_user",
-        "portainer_user_id": created.get("Id"),
-        "username": username, "password": password,
-        "url": config["base"],
-    }})
+    # Nested, not flat: create_actor's data is validated against a CLOSED schema
+    # (fnruntime.entitle), and the flat version was rejected in full — after the
+    # Portainer user existed.
+    return Response(200, {"data": entitle.actor_data(
+        username, "portainer_user", email=identity, login_info={
+            "portainer_user_id": created.get("Id"),
+            "username": username, "password": password,
+            "url": config["base"],
+        })})
 
 
 def _delete_actor(req, ctx, config):

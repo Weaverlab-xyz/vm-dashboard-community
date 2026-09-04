@@ -50,8 +50,29 @@ def _asset_id(database=None):
     return next(i for i in identifiers if i.endswith(f":{database}"))
 
 
+def _report(body):
+    """Where a write route's execution report — ``plan``, ``dry_run``,
+    ``statements_executed`` — lives.
+
+    ``create_actor`` nests it inside ``login_info``, because its ``data`` is
+    validated against a CLOSED schema that admits only ``actor`` and ``login_info``
+    (fnruntime.entitle). The other three write routes have no such schema and keep
+    the report at the top of ``data``. Reading through this helper keeps each test
+    an assertion about the SQL rather than about which envelope carried it — the
+    shape itself is pinned once, in test_entitle_actor_data_shape.py.
+    """
+    data = body["data"]
+    return data.get("login_info", data)
+
+
+def _minted(body):
+    """The account name ``create_actor`` returns, from the nested actor block. This
+    is the identifier Entitle passes to give_access / revoke_access / delete_actor."""
+    return body["data"]["actor"]["identifier"]
+
+
 def _statements(body):
-    return " ".join(s for p in body["data"]["plan"] for s in p["statements"])
+    return " ".join(s for p in _report(body)["plan"] for s in p["statements"])
 
 
 # ── Routing: the verb is the path ────────────────────────────────────────────
@@ -245,7 +266,7 @@ def test_create_actor_makes_an_account_with_no_privileges():
 def test_create_actor_returns_the_identifier_entitle_then_uses():
     _env()
     body = _call("POST", "/create_actor", {"actor": {"email": "alice@example.com"}}).body
-    identifier = body["data"]["identifier"]
+    identifier = _minted(body)
     assert cloud_db_sql_service._IDENT_RE.match(identifier), identifier
     # That identifier is what give_access is called with next.
     give = _call("POST", "/give_access", {
@@ -284,7 +305,7 @@ def test_delete_actor_drops_the_account_idempotently():
 def test_the_azure_sql_split_survives_the_adapter():
     _env(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql")
     create = _call("POST", "/create_actor", {"actor": {"email": "a@example.com"}}).body
-    assert [p["database"] for p in create["data"]["plan"]] == ["master", "appdb"]
+    assert [p["database"] for p in _report(create)["plan"]] == ["master", "appdb"]
     give = _call("POST", "/give_access", {
         "asset": {"identifier": _asset_id()}, "actor_identifier": "jit_a_1",
         "role_code": "read"}).body
@@ -297,13 +318,13 @@ def test_the_azure_sql_split_survives_the_adapter():
 def test_dry_run_is_the_default():
     _env()
     body = _call("POST", "/create_actor", {"actor": {"email": "a@example.com"}}).body
-    assert body["data"]["dry_run"] is True and body["data"]["plan"]
+    assert _report(body)["dry_run"] is True and _report(body)["plan"]
 
 
 def test_dry_run_never_returns_a_credential():
     _env()
     body = _call("POST", "/create_actor", {"actor": {"email": "a@example.com"}}).body
-    assert "password" not in body["data"]
+    assert "password" not in _report(body)
     assert "password" not in json.dumps(body).lower()
 
 
@@ -524,8 +545,8 @@ def test_create_actor_covers_every_served_database():
     """Entitle's create_actor carries no asset, so the account has to exist
     everywhere before anything knows which database the grant is for."""
     _multi(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql")
-    plan = _call("POST", "/create_actor",
-                 {"actor": {"email": "alice@example.com"}}).body["data"]["plan"]
+    plan = _report(_call("POST", "/create_actor",
+                         {"actor": {"email": "alice@example.com"}}).body)["plan"]
     assert [entry["database"] for entry in plan] == [
         "master", "appdb", "reporting", "billing"]
     assert all("CREATE USER" in " ".join(entry["statements"])
@@ -549,8 +570,8 @@ def test_mysql_needs_no_per_database_account_work():
     """CREATE USER is server-scoped on MySQL and only the GRANT is per-database, so
     the multi-database plan is the single-database one."""
     _multi()
-    plan = _call("POST", "/create_actor",
-                 {"actor": {"email": "alice@example.com"}}).body["data"]["plan"]
+    plan = _report(_call("POST", "/create_actor",
+                         {"actor": {"email": "alice@example.com"}}).body)["plan"]
     assert len(plan) == 1 and "CREATE USER" in " ".join(plan[0]["statements"])
 
 
@@ -569,14 +590,14 @@ def test_destructive_routes_refuse_an_account_it_did_not_mint():
                                 "actor_identifier": "app_user", "role_code": "read"})):
         resp = _call("POST", path, payload)
         assert resp.status == 403, (path, resp.body)
-        assert "plan" not in (resp.body.get("data") or {}), (path, resp.body)
+        assert "plan" not in json.dumps(resp.body), (path, resp.body)
 
 
 def test_the_names_this_adapter_mints_pass_its_own_guard():
     """A guard that rejected the adapter's own accounts would break every grant."""
     _multi()
-    identifier = _call("POST", "/create_actor",
-                       {"actor": {"email": "alice@example.com"}}).body["data"]["identifier"]
+    identifier = _minted(_call("POST", "/create_actor",
+                               {"actor": {"email": "alice@example.com"}}).body)
     assert db_grant._is_minted(identifier), identifier
     resp = _call("POST", "/give_access", {
         "asset": {"identifier": _asset_id()}, "actor_identifier": identifier,
@@ -623,7 +644,7 @@ def test_ephemeral_create_actor_reads_provisioning_data_not_actor():
     assert resp.status == 200, resp.body
     # Clipped to MySQL's 32-character account name, so not the whole address — but
     # still enough to say whose it is. See test_the_minted_name_fits_the_engine.
-    assert resp.body["data"]["identifier"].startswith("jit_alice_example")
+    assert _minted(resp.body).startswith("jit_alice_example")
 
 
 def test_the_minted_name_fits_the_engine_it_is_created_on():
@@ -643,7 +664,7 @@ def test_the_minted_name_fits_the_engine_it_is_created_on():
                          "a.very.long.name.indeed@some.subdomain.example.com"):
             body = _call("POST", "/create_actor",
                          _ephemeral(email=identity)).body
-            name = body["data"]["identifier"]
+            name = _minted(body)
             limit = cloud_db_sql_service.max_identifier_length(engine)
             assert len(name) <= limit, (engine, len(name), name)
             # And the statements were actually built for that name, not a longer one.
@@ -657,7 +678,7 @@ def test_the_standing_path_also_passes_its_engine():
     del os.environ["FN_DB_NAME"]
     body = _call("POST", "/create_actor",
                  {"actor": {"email": "karen.walker@weaverlab.xyz"}}).body
-    name = body["data"]["identifier"]
+    name = _minted(body)
     assert len(name) <= cloud_db_sql_service.max_identifier_length("mysql"), name
 
 
@@ -666,7 +687,7 @@ def test_ephemeral_without_a_role_field_takes_the_least_privileged_one():
     that cannot be found must degrade to read — never to readwrite."""
     _env()
     body = _call("POST", "/create_actor", _ephemeral()).body
-    assert body["data"]["role_code"] == "read"
+    assert _report(body)["role_code"] == "read"
     sql = _statements(body)
     assert "GRANT SELECT ON" in sql and "INSERT" not in sql, sql
 
@@ -674,7 +695,7 @@ def test_ephemeral_without_a_role_field_takes_the_least_privileged_one():
 def test_ephemeral_honours_the_role_it_is_given():
     _env()
     body = _call("POST", "/create_actor", _ephemeral(role="readwrite")).body
-    assert body["data"]["role_code"] == "readwrite"
+    assert _report(body)["role_code"] == "readwrite"
     assert "GRANT SELECT, INSERT, UPDATE, DELETE" in _statements(body)
 
 
@@ -717,7 +738,7 @@ def test_ephemeral_scopes_the_account_to_the_database_being_granted():
     _multi()
     body = _call("POST", "/create_actor",
                  _ephemeral(asset=_asset_id("reporting"))).body
-    assert [p["database"] for p in body["data"]["plan"]] == ["reporting"]
+    assert [p["database"] for p in _report(body)["plan"]] == ["reporting"]
     sql = _statements(body)
     assert "`reporting`" in sql
     for other in ("appdb", "billing"):
@@ -738,7 +759,7 @@ def test_an_asset_in_the_request_is_what_selects_the_mode():
 def test_ephemeral_dry_run_still_returns_no_credential():
     _env()
     body = _call("POST", "/create_actor", _ephemeral()).body
-    assert "username" not in body["data"], body
+    assert "username" not in _report(body), body
     assert "password" not in json.dumps(body).lower(), body
 
 
@@ -747,7 +768,7 @@ def test_ephemeral_survives_the_azure_sql_split():
     login in master and a contained user plus role in the database."""
     _env(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql")
     body = _call("POST", "/create_actor", _ephemeral(role="read")).body
-    assert [p["database"] for p in body["data"]["plan"]] == ["master", "appdb"]
+    assert [p["database"] for p in _report(body)["plan"]] == ["master", "appdb"]
     sql = _statements(body)
     assert "CREATE LOGIN" in sql and "CREATE USER" in sql
     assert "ALTER ROLE db_datareader ADD MEMBER" in sql, sql

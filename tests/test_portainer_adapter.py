@@ -195,7 +195,7 @@ def test_create_actor_makes_a_standard_user_in_no_team():
     assert posted and posted[0]["Role"] == rules.USER_ROLE_STANDARD
     assert not [p for m, p in _paths() if p == "/api/team_memberships"], \
         "create_actor put the user in a team"
-    assert rules.is_ephemeral_username(body["identifier"])
+    assert rules.is_ephemeral_username(body["actor"]["identifier"])
 
 
 # ── Idempotence, both directions ─────────────────────────────────────────────
@@ -281,7 +281,9 @@ def test_dry_run_touches_nothing():
                                             "role_code": "Platform"}),
                           ("/delete_actor", {"actor_identifier": "jit-a-1"})):
         body = _call("POST", path, payload).body["data"]
-        assert body["dry_run"] is True, path
+        # create_actor nests its report in login_info (fnruntime.entitle); the other
+        # two routes keep it at the top of data.
+        assert body.get("login_info", body)["dry_run"] is True, path
     assert not [p for m, p in _paths() if m in ("POST", "DELETE")], CALLS
 
 

@@ -363,8 +363,12 @@ def test_create_actor_reads_the_identity_out_of_provisioning_data():
                                "asset": {"identifier": f"pov:{s['env_id']}"}})
     assert r.status_code == 200, r.text
     data = r.json()["data"]
-    assert data["username"].startswith(pov_accessor_service.USERNAME_PREFIX)
-    assert data["password"], "create_actor returned no credentials to hand the requester"
+    # Nested: create_actor's data is the closed Provisioned Actor Data schema, so the
+    # credentials live in login_info (test_entitle_actor_data_shape.py).
+    assert data["actor"]["identifier"].startswith(pov_accessor_service.USERNAME_PREFIX)
+    assert data["actor"]["email"] == "eve@customer.example", data
+    assert data["login_info"]["username"] == data["actor"]["identifier"]
+    assert data["login_info"]["password"],         "create_actor returned no credentials to hand the requester"
 
 
 def test_create_actor_needs_an_asset_naming_a_live_pov():
@@ -408,7 +412,7 @@ def test_delete_actor_is_idempotent():
     r = s["client"].post("/api/pov/accessor/rest/create_actor", headers=s["entitle"],
                          json={"provisioning_data": {"email": "gone@customer.example"},
                                "asset": {"identifier": f"pov:{s['env_id']}"}})
-    username = r.json()["data"]["username"]
+    username = r.json()["data"]["actor"]["identifier"]
     first = s["client"].post("/api/pov/accessor/rest/delete_actor", headers=s["entitle"],
                              json={"actor_identifier": username})
     second = s["client"].post("/api/pov/accessor/rest/delete_actor", headers=s["entitle"],
