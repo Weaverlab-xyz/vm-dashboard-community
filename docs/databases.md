@@ -583,8 +583,15 @@ with no recorded catalog to scope grants to. Full detail in
   Password Safe teardown, because there was never anything to tear down.
 - **Decommission:** tears down the PRA tunnel + Vault account, any Layer-2 Password Safe
   managed systems + functional accounts, any Layer-3 Entitle integration (+ the GCP
-  forwarder), and finally the database instance — accumulating (not swallowing) errors so
-  an orphaned tunnel/vault/instance is visible.
+  forwarder), the database instance, and then the **JIT adapter** — its Cloud Function,
+  that function's Entitle integration, and the admin credential staged for it in the
+  cloud's own secret store (`dashboard-clouddb-<id>-admin` on GCP, `dashboard/clouddb-…`
+  in AWS Secrets Manager, `clouddb-…` in Key Vault). Errors accumulate rather than being
+  swallowed, so an orphaned tunnel/vault/instance is visible. A leftover **credential**
+  fails the job — it is a live database admin password — while a leftover adapter
+  **function** is reported as a warning, since it holds no credential and has its own
+  **Delete** on the Cloud Functions page. A database that was never paired has nothing to
+  retire and records neither.
 
 ---
 

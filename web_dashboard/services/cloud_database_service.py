@@ -3617,6 +3617,47 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
             errors.append(f"GCP orphan sweep: {exc}")
             logger.warning("clouddb GCP orphan sweep for %s failed: %s", db_id, exc)
 
+    # 4c. The db_grant adapter, if this database was ever paired with one: the Cloud
+    #     Function, its Entitle integration, and the admin credential staged in the
+    #     cloud's own secret store for it to read. All three outlive the instance —
+    #     nothing in the destroy above touches any of them.
+    #
+    #     Ordered function-then-credential because the function is its READER, and on
+    #     GCP its Terraform holds the accessor binding on the secret. Same reasoning as
+    #     the regional secret in _teardown_ps_onboarding.
+    #
+    #     Split on what each leftover IS. An orphaned function is billable and can only
+    #     fail now, but it holds no credential and has its own Delete button on the
+    #     Cloud Functions page — a warning, not something to wedge the database row at
+    #     `failed` over. A leftover credential is a live database admin password that
+    #     nothing will ever retry, so it fails the job, as the functional account's
+    #     regional Secret Manager entry does. Never-paired rows return "" from both and
+    #     record neither.
+    job_service.update_progress(db, job_id, 85, "Retiring the JIT adapter…")
+    try:
+        retired_fn = await cloud_db_adapter_service.retire_adapter(db, row)
+        if retired_fn:
+            logger.info("clouddb decommission: adapter function %s retired db_id=%s",
+                        retired_fn, db_id)
+    except Exception as exc:
+        warnings.append(f"JIT adapter teardown: {exc}")
+        logger.warning("clouddb adapter teardown for %s failed (non-fatal): %s",
+                       db_id, exc)
+    try:
+        # ``resource_id``, and the message is already the whole operator-facing
+        # sentence, both for the reason spelled out over the regional secret above:
+        # the value is a NAME the failure path has to print so an operator knows what
+        # to delete, and a variable called `secret` makes CodeQL read it as the
+        # credential. The credential never appears here at all.
+        resource_id = await _to_thread(cloud_db_adapter_service.retire_admin_secret, row)
+        if resource_id:
+            logger.info("clouddb decommission: staged adapter credential %s retired "
+                        "db_id=%s", resource_id, db_id)
+    except Exception as exc:
+        errors.append(str(exc))
+        logger.warning("clouddb adapter credential retirement for %s failed: %s",
+                       db_id, exc)
+
     if errors:
         row.status = "failed"
         db.commit()
