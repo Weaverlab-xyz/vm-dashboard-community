@@ -793,6 +793,21 @@ def max_upload_bytes(backend: str) -> int:
     return MAX_INLINE_UPLOAD_BYTES
 
 
+def max_form_upload_bytes(backend: str) -> int:
+    """Largest file the /storage upload form will accept for `backend`, in bytes.
+
+    Distinct from :func:`max_upload_bytes`, which is the INLINE transport's ceiling and is
+    what :func:`check_inline_upload` enforces. Above that ceiling an object store gets the
+    chunked lane (``services/storage_chunked``), so what the form may accept and what one
+    request may carry stopped being the same number. The page needs this one at file-pick
+    time; the endpoint needs the other one when a body arrives.
+    """
+    from . import storage_chunked
+    if storage_chunked.supports_chunked_upload(backend):
+        return max(max_upload_bytes(backend), storage_chunked.max_chunked_upload_bytes())
+    return max_upload_bytes(backend)
+
+
 class UploadTooLarge(StorageError):
     """Raised when a file exceeds the inline-upload ceiling. A distinct type so the
     endpoints can answer 413 rather than folding it into the 502 that every other

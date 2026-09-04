@@ -112,6 +112,24 @@ def decrypt_value(token: str) -> str:
     return _decrypt(token or "")
 
 
+def decrypt_value_strict(token: str, ttl: Optional[int] = None) -> str:
+    """Like :func:`decrypt_value`, but RAISES rather than falling back to the input.
+
+    The fallback in ``_decrypt`` is right for reading a config row that predates
+    encryption, and wrong wherever the ciphertext is what makes the value trustworthy:
+    handing that reader a hand-written plain-text string gets the string back, so
+    "it decrypted" stops meaning "we minted it". Callers who need Fernet's
+    authentication — ``storage_chunked``'s upload-session handle is the first — use this.
+
+    ``ttl`` is Fernet's own token age check, in seconds. Fernet stamps every token with
+    its mint time, so an expiry needs no field of ours and no clock the caller has to
+    trust.
+    """
+    f = _fernet()
+    raw = (token or "").encode()
+    return (f.decrypt(raw, ttl=ttl) if ttl else f.decrypt(raw)).decode()
+
+
 # ── Cache management ──────────────────────────────────────────────────────────
 
 def _load_cache() -> None:

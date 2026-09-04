@@ -11,6 +11,11 @@ to a self-contained `/storage` page that mirrors the shape of `/secrets`:
   GET    /api/storage/list             — list assets in the active backend
   GET    /api/storage/list/{backend}   — list assets in a specific backend (for migration)
   POST   /api/storage/migrate          — copy assets from source → target
+  POST   /api/storage/upload           — upload one asset inline (base64 in JSON)
+  POST   /api/storage/upload/begin     — open a chunked upload (large files)
+  PUT    /api/storage/upload/part/{n}  — stage one raw part of a chunked upload
+  POST   /api/storage/upload/commit    — commit the staged parts into one object
+  POST   /api/storage/upload/abort     — discard a chunked upload's staged parts
 
 Storage today stores Ansible playbooks/scripts/packages, but is general-purpose.
 Future features that need a small object store can layer on top of it
@@ -18,13 +23,13 @@ without re-introducing per-feature backend configuration.
 """
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
-from ..services import storage_service
+from ..services import storage_chunked, storage_service
 from ..services.storage_service import BACKENDS, StorageError
 from .auth import get_current_user, require_permission
 
@@ -119,11 +124,29 @@ async def list_backends(current_user: User = Depends(get_current_user)):
                 # The UI disables the "active" radio and shows this as the reason.
                 "hub_only":      b in storage_service.ACTIVE_BACKEND_EXCLUSIONS,
                 "hub_only_reason": storage_service.ACTIVE_BACKEND_EXCLUSIONS.get(b, ""),
-                # Largest file this backend accepts through /upload, and why. The upload
+                # Largest file this backend accepts through the upload form, and why. The
                 # form needs both BEFORE it reads the file: an oversize pick that gets as
                 # far as base64 has already cost the tab more memory than it has.
-                "max_upload_bytes":   storage_service.max_upload_bytes(b),
-                "upload_limit_reason": storage_service.upload_ceiling_reason(b),
+                #
+                # For an object store this is the CHUNKED ceiling, because that is what
+                # the form will actually do with a big file — see the three keys below.
+                # `max_upload_bytes` is deliberately the number the page refuses on, so
+                # there is exactly one ceiling in the UI rather than two the operator has
+                # to reconcile.
+                "max_upload_bytes":    storage_service.max_form_upload_bytes(b),
+                "upload_limit_reason": (
+                    storage_chunked.chunked_upload_reason(b)
+                    if storage_chunked.supports_chunked_upload(b)
+                    else storage_service.upload_ceiling_reason(b)),
+                # Whether this backend has the chunked lane at all, the size ABOVE which
+                # the form switches into it, and the part size the server will insist on.
+                # All three come from here rather than being restated in the template, for
+                # the reason the ceiling always has: two readers of one limit drift, and
+                # the part size in particular is not a preference — a part of the wrong
+                # length is refused at the first part.
+                "chunked_upload":     storage_chunked.supports_chunked_upload(b),
+                "inline_upload_bytes": storage_service.max_upload_bytes(b),
+                "chunk_part_bytes":   storage_chunked.part_bytes(),
             }
             for b in BACKENDS
         ],
@@ -530,6 +553,157 @@ async def upload_asset(
         raise HTTPException(status_code=502, detail=str(e))
     return {"ok": True, "filename": req.filename, "size": len(data),
             "secret_findings": findings}
+
+
+# ── Chunked upload (active backend, object stores only) ──────────────────────
+# The lane above `MAX_INLINE_UPLOAD_BYTES`. Four calls rather than one because the point
+# is that no single request — and no single allocation on either side — is the size of the
+# file: begin fixes the layout, each part is staged straight into the object store, and
+# commit stitches them. See services/storage_chunked.py for why the session is an
+# encrypted handle and not a row.
+#
+# Same access decision as the inline `/upload`: any logged-in user. A bigger file is not a
+# more privileged operation, and splitting the permission would mean an operator who can
+# upload a playbook cannot upload the installer it runs.
+
+class BeginChunkedUploadRequest(BaseModel):
+    filename: str
+    size: int
+
+
+class CommitChunkedUploadPart(BaseModel):
+    part: int
+    ref: str = ""
+
+
+class CommitChunkedUploadRequest(BaseModel):
+    handle: str
+    parts: list[CommitChunkedUploadPart]
+
+
+class AbortChunkedUploadRequest(BaseModel):
+    handle: str
+
+
+# The handle travels in a header, not in the path or a query string: it is long, and it
+# carries the object store's own upload reference — for GCS a resumable session URI, which
+# is a write capability. Neither belongs in an access log.
+_HANDLE_HEADER = "X-Upload-Handle"
+
+
+def _upload_handle(request) -> str:
+    handle = request.headers.get(_HANDLE_HEADER) or ""
+    if not handle:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing {_HANDLE_HEADER} — call /api/storage/upload/begin first.")
+    return handle
+
+
+@router.post("/upload/begin", status_code=201)
+async def begin_chunked_upload(
+    req: BeginChunkedUploadRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Open a chunked upload against the active backend.
+
+    Returns the handle every later call quotes, plus the part size and part count the
+    client must slice to. The layout is the server's to decide — see storage_chunked.
+    """
+    backend = storage_service.active_backend()
+    if not backend:
+        raise HTTPException(
+            status_code=400,
+            detail="No active storage backend. Configure one on /storage and select it "
+                   "as active.")
+    try:
+        session = await storage_chunked.begin_upload(
+            backend, req.filename, req.size, username=current_user.username)
+    except storage_service.UploadTooLarge as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    except StorageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return session
+
+
+@router.put("/upload/part/{part_number}")
+async def stage_chunked_upload_part(
+    part_number: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Stage one raw part. Body is the bytes themselves — no base64, no JSON envelope.
+
+    Content-Length is checked BEFORE the body is read. `await request.body()` buffers
+    whatever arrives, so a client that ignored the part size could otherwise make this
+    worker allocate the whole file — the exact failure the chunked lane exists to avoid,
+    moved from the browser to the server.
+    """
+    handle = _upload_handle(request)
+    declared = request.headers.get("content-length")
+    limit = storage_chunked.part_bytes()
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"A part may not exceed {limit} bytes; this one declares {declared}.")
+    data = await request.body()
+    try:
+        result = await storage_chunked.stage_part(
+            handle, part_number, data, username=current_user.username)
+    except StorageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Failed to stage part %s", part_number)
+        raise HTTPException(status_code=502, detail=f"Failed to stage part: {e}")
+    # Advisory secret scan, on the FIRST part only. `secret_scan.scan_bytes` gives up when
+    # it finds a NUL in the first 8 KiB, so for the installers this lane exists for it
+    # answers from part 1 or not at all — and re-scanning 8 MiB at a time for a file that
+    # is by definition too big to hold would cost more than it can find.
+    findings = []
+    if part_number == 1 and data:
+        from ..services import config_service as cs, secret_scan
+        if cs.get_bool("secret_scan_enabled", True):
+            name = storage_chunked.session_filename(handle, current_user.username) or ""
+            findings = secret_scan.scan_bytes(data, name)
+    return {"ok": True, **result, "secret_findings": findings}
+
+
+@router.post("/upload/commit", status_code=201)
+async def commit_chunked_upload(
+    req: CommitChunkedUploadRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Stitch the staged parts into the object. Until this returns, nothing is listable."""
+    try:
+        result = await storage_chunked.commit_upload(
+            req.handle,
+            [{"part": p.part, "ref": p.ref} for p in req.parts],
+            username=current_user.username,
+        )
+    except StorageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Failed to commit chunked upload")
+        raise HTTPException(status_code=502, detail=f"Failed to commit upload: {e}")
+    return {"ok": True, **result}
+
+
+@router.post("/upload/abort")
+async def abort_chunked_upload(
+    req: AbortChunkedUploadRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Discard the staged parts — the Cancel button, and what a failed part triggers.
+
+    Never 502s. An abort that fails has cost nothing: every store here expires an
+    uncommitted upload on its own, and reporting a failure to clean up as an error would
+    leave the page insisting something is wrong when the upload is already gone.
+    """
+    try:
+        return {"ok": True, **await storage_chunked.abort_upload(
+            req.handle, username=current_user.username)}
+    except StorageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── DELETE /api/storage/asset/{name} (active backend only) ───────────────────

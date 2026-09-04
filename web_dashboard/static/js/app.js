@@ -112,12 +112,45 @@ window.API = {
         return resp.json();
     },
 
+    // Send a Blob as the request body, unencoded. For the chunked-upload lane on
+    // /storage: `request()` JSON.stringifies its body, and a 8 MiB slice through
+    // JSON.stringify + base64 is the allocation the chunked lane exists to avoid.
+    //
+    // Not a bare fetch() at the call site, and that is the point of it living here: a
+    // fetch() without this Authorization header is an ANONYMOUS request, which reads as a
+    // 401 on a page the user is plainly logged into.
+    async sendBlob(method, path, blob, extraHeaders = {}) {
+        const token = Alpine.store('auth').token;
+        const resp = await fetch(path, {
+            method,
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+                ...extraHeaders,
+            },
+            body: blob,
+        });
+        if (resp.status === 401) {
+            Alpine.store('auth').logout();
+            return null;
+        }
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+            const detail = err.detail;
+            throw new Error(typeof detail === 'string'
+                ? detail
+                : (detail && detail.message) || `HTTP ${resp.status}`);
+        }
+        return resp.json();
+    },
+
     get:    (path)        => API.request('GET',    path),
     post:   (path, body)  => API.request('POST',   path, body),
     put:    (path, body)  => API.request('PUT',    path, body),
     patch:  (path, body)  => API.request('PATCH',  path, body),
     del:    (path)        => API.request('DELETE', path),
     delete: (path)        => API.request('DELETE', path),  // alias — some templates use API.delete
+    putBlob: (path, blob, headers) => API.sendBlob('PUT', path, blob, headers),
 };
 
 // ── Reusable secret picker ────────────────────────────────────────────────────
