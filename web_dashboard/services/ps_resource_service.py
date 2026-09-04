@@ -27,6 +27,10 @@ Onboarding shapes (``method`` on register_managed_system):
     user (``adminuser``); no private key is pushed (Change Password mints it). ``ssm``,
     ``azurevm`` and ``gcpvm`` are the cloud-API "plugin" methods (see ``_PLUGIN_METHODS``)
     — no SSH reachability required.
+  - ``certificate`` — the "Certificate" custom plugin: the managed credential is a PKCS#12
+    passphrase and the bundle it opens lives in Secrets Safe, so the managed system carries
+    the whole certificate profile (CA backend, key shape, subject, Secrets Safe destination,
+    optional Entra publisher) in ``dns_name`` and nothing is seeded.
 
 Shaped like entitle_registration_service / terraform_pra_service: inline HCL written
 to an ephemeral workdir, ``terraform apply``, ids pulled from outputs, the full
@@ -87,14 +91,19 @@ _REDACTED = "**REDACTED-BY-DASHBOARD**"
 # ``dbgcp`` (cloud-DB via the "GCP Cloud SQL {engine}" plugins) is password-managed as
 # well; unlike its two DB siblings it reaches the instance over Google's control plane
 # rather than a jump host, so there is no key material anywhere in its address.
+# ``certificate`` (the "Certificate" plugin) is password-managed in the same sense as
+# ``k8ssa``: the credential Password Safe holds is the PKCS#12 PASSPHRASE, and the bundle
+# it opens lives in Secrets Safe. Its address is the whole certificate profile — a backend
+# name plus ``?key=value`` options — because a Password Safe Cloud tenant cannot edit the
+# appsettings.json inside the .psplugin, so nothing may be configured anywhere else.
 _PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "dbgcp",
-                             "pravault", "k8ssa"})
+                             "pravault", "k8ssa", "certificate"})
 # Methods whose managed account is password-managed (no SSH DSS key auto-management).
 # ``password`` is the only NON-plugin member: a traditional managed system reached at its
 # own address, whose account Password Safe rotates by password because the caller has a
 # working login and no key material. See the branch in ``register_managed_system``.
 _PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "dbgcp", "pravault", "k8ssa",
-                                       "password"})
+                                       "password", "certificate"})
 
 # Password Safe's managed-system address column is 255 chars. The cloud-DB plugin addresses
 # pack 6-8 fields into it, and the Azure one is close to the ceiling with realistic values
@@ -105,13 +114,32 @@ _PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "dbgcp", "pravault", 
 _MAX_MANAGED_SYSTEM_ADDRESS = 255
 
 
+# What to shorten, per method. Generic advice ("shorten the longest field") is useless on
+# an address whose fields are all load-bearing, and the certificate profile in particular
+# runs long enough that a realistic ADCS address from the plugin's own documentation is
+# 269 characters — 14 over the limit — before anyone has typed a real CA name.
+_ADDRESS_LENGTH_ADVICE = {
+    "certificate": (
+        "Drop every option already at its default (warn=25, key=rsa3072, san=Host, "
+        "bundle=Pkcs12, pbe=Aes256, store=SecretsSafe, retain=1, secret=cert/{system}/"
+        "{account}), shorten folder=, and move per-identity values such as dns= and "
+        "subject= onto the MANAGED ACCOUNT NAME after a '?', where they override the "
+        "system's for that identity alone"),
+}
+_DEFAULT_ADDRESS_LENGTH_ADVICE = (
+    "Shorten the longest field — usually the Resource Broker cert path or the resource "
+    "group")
+
+
 def _check_address_length(dns_name: str, method: str) -> None:
     if len(dns_name) > _MAX_MANAGED_SYSTEM_ADDRESS:
+        advice = _ADDRESS_LENGTH_ADVICE.get(method, _DEFAULT_ADDRESS_LENGTH_ADVICE)
         raise PSResourceError(
-            f"{method} managed-system address is {len(dns_name)} characters, over Password "
-            f"Safe's {_MAX_MANAGED_SYSTEM_ADDRESS}-character limit. Shorten the longest "
-            f"field — usually the Resource Broker cert path or the resource group — since a "
-            f"truncated address fails later inside the plugin as an unparseable field.")
+            f"{method} managed-system address is {len(dns_name)} characters, "
+            f"{len(dns_name) - _MAX_MANAGED_SYSTEM_ADDRESS} over Password Safe's "
+            f"{_MAX_MANAGED_SYSTEM_ADDRESS}-character limit. {advice} — a truncated "
+            f"address fails later inside the plugin as an unparseable field, not as a "
+            f"length problem.")
 
 # The public REST create/update-managed-account path the Terraform provider uses caps
 # ``Password`` at 128 characters (400 "Password cannot exceed 128 characters."). This is a
@@ -244,6 +272,250 @@ def _validate_k8ssa_dns_name(dns_name: str) -> None:
                 f"default namespace {value!r} is not a valid Kubernetes name — lowercase "
                 f"letters, digits and hyphens, starting and ending alphanumeric")
 
+
+# The managed system's ``timeout`` in SECONDS, per the plugin's own configuration
+# table ("Timeout | 60 | Key generation plus a CA round trip is slower than a password
+# change"). Like every custom-plugin platform this is read BY THE PLUGIN rather than
+# used as a socket timeout, and the plugin families disagree on the unit — the AWS SSM
+# DB plugins read milliseconds while this one, the GCP Cloud SQL and the Azure Run
+# Command plugins read seconds. A constant rather than a config key: there is one right
+# answer, and a per-install knob here is a way to get a 60-millisecond timeout by
+# accident.
+_CERTIFICATE_PLUGIN_TIMEOUT_SECONDS = 60
+
+# ── Certificate plugin address grammar ────────────────────────────────────────
+#
+# Transcribed from the Certificate plugin's own documentation (Beekeeper-Certificate.md,
+# "Managed system" / "Certificate profile" / "Backend-specific options"). The address is
+# not a hostname: it is the WHOLE certificate profile — a backend name, optionally
+# followed by '?' and '&'-separated key=value options. That design exists because
+# appsettings.json ships INSIDE the .psplugin, so a Password Safe Cloud tenant cannot edit
+# it and every value has to ride a standard Password Safe field.
+#
+# The plugin logs an unrecognised option as a warning rather than refusing it, which is
+# exactly the failure mode worth catching here instead: a mistyped 'lifetim=30d' has no
+# effect at all and leaves a certificate issued against a default nobody chose, hours
+# later, on a schedule. So this validator rejects what the plugin would merely mention.
+#
+# Values are NEVER percent-decoded, deliberately, so an ADCS CA name's backslashes and
+# spaces, an ARN's colons and slashes, and a literal '%' all survive as typed. ';' is
+# accepted in place of '&' for consoles that treat '&' awkwardly, and a bare option with
+# no '=' reads as true.
+
+# Backend names, normalised by lowercasing and dropping punctuation — the plugin does the
+# same, so 'AWS-PCA' and 'awspca' are one thing.
+_CERT_BACKENDS = {
+    "adcs": "adcs", "ad": "adcs", "microsoftca": "adcs",
+    "awspca": "awspca", "aws": "awspca", "awsprivateca": "awspca", "acmpca": "awspca",
+    "gcpcas": "gcpcas", "gcp": "gcpcas", "cas": "gcpcas", "googlecas": "gcpcas",
+    "selfsigned": "selfsigned", "self": "selfsigned",
+    "selfsignedtest": "selfsignedtest", "test": "selfsignedtest",
+}
+# Options each backend cannot do without. The plugin fails at construction on a missing
+# one; naming it here means the operator sees it while the address is still editable.
+_CERT_REQUIRED = {
+    "adcs": ("ca", "template"),
+    "awspca": ("arn",),
+    "gcpcas": ("project", "location", "pool"),
+    "selfsigned": (),
+    "selfsignedtest": (),
+}
+# Option aliases → canonical key, exactly as the plugin's alias table reads.
+_CERT_ALIASES = {
+    "ttl": "lifetime", "keyalg": "key", "subjectdn": "subject", "sans": "san",
+    "ekus": "eku", "format": "bundle", "warnpercent": "warn", "secretname": "secret",
+    "ownergroup": "owner", "tenantid": "tenant", "applicationid": "appid",
+    "serviceprincipalid": "spid",
+}
+# Profile + store + publisher options, valid on any backend.
+_CERT_COMMON_KEYS = frozenset({
+    "lifetime", "key", "keysize", "curve", "hash", "subject", "dns", "ip", "san", "eku",
+    "bundle", "pbe", "warn", "warndays", "warnminutes",
+    "store", "biurl", "folder", "secret", "owner",
+    "publisher", "tenant", "appid", "spid", "retain",
+})
+# Options the plugin reads only on one backend. Accepting 'region=' on a gcpcas address
+# would silently do nothing, which is the same class of bug the whole validator exists for.
+_CERT_BACKEND_KEYS = {
+    "ca": "adcs", "template": "adcs", "impersonate": "adcs", "validate": "adcs",
+    "arn": "awspca", "region": "awspca", "sigalg": "awspca",
+    "templatearn": "awspca", "wait": "awspca",
+    "project": "gcpcas", "location": "gcpcas", "pool": "gcpcas",
+    "issuer": "gcpcas", "certtemplate": "gcpcas",
+}
+_CERT_KEY_ALGS = frozenset({
+    "rsa2048", "rsa3072", "rsa4096", "ecdsa-p256", "ecdsa-p384", "ecdsa-p521"})
+_CERT_HASHES = frozenset({"sha256", "sha384", "sha512"})
+_CERT_BUNDLES = frozenset({"pkcs12", "pembundle"})
+_CERT_PBE = frozenset({"aes256", "legacy"})
+_CERT_STORES = frozenset({"secretssafe", "filesystem"})
+_CERT_PUBLISHERS = {"none": None, "entraapp": "appid", "app": "appid",
+                    "entrasp": "spid", "sp": "spid"}
+# '12h', '30d', '2w', '1y', '90m'; a bare number means DAYS.
+_CERT_LIFETIME = re.compile(r"^\d+[mhdwy]?$", re.IGNORECASE)
+# The plugin caps the warning percentage at 90; a higher value would fire permanently.
+_CERT_MAX_WARN_PERCENT = 90
+
+
+def _cert_normalise_backend(raw: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (raw or "").strip().lower())
+
+
+def parse_certificate_address(dns_name: str) -> dict:
+    """Split a Certificate-plugin address into ``{"backend": str, "options": dict}``.
+
+    Shared by the validator and by callers that need to read a value back out of an
+    address they did not compose. Option keys are canonicalised through
+    ``_CERT_ALIASES`` and lowercased; VALUES are returned exactly as typed, because the
+    plugin never percent-decodes them and an ADCS CA name or an ARN depends on that."""
+    addr = (dns_name or "").strip()
+    head, sep, tail = addr.partition("?")
+    options: dict = {}
+    if sep:
+        for field in re.split(r"[&;]", tail):
+            field = field.strip()
+            if not field:
+                continue
+            key, eq, value = field.partition("=")
+            key = key.strip().lower()
+            key = _CERT_ALIASES.get(key, key)
+            # A bare option with no '=' reads as true, per the plugin's own parser.
+            options[key] = value if eq else "true"
+    return {"backend": head.strip(), "options": options}
+
+
+def _validate_certificate_dns_name(dns_name: str) -> None:
+    """Raise PSResourceError unless ``dns_name`` is a certificate profile the plugin parses.
+
+    Grammar and value checks only; the shared 255-character cap runs separately in the
+    caller via ``_check_address_length``."""
+    addr = (dns_name or "").strip()
+    if not addr:
+        raise PSResourceError(
+            "Certificate onboarding requires a Network Address carrying the certificate "
+            "profile — a backend name plus options, e.g. "
+            "'gcpcas?project=<p>&location=us-central1&pool=<pool>&lifetime=24h'. The "
+            "package deliberately ships no default backend, so an empty address fails "
+            "with 'No certificate authority backend is configured' at the first action.")
+
+    parsed = parse_certificate_address(addr)
+    raw_backend = parsed["backend"]
+    backend = _CERT_BACKENDS.get(_cert_normalise_backend(raw_backend))
+    if backend is None:
+        raise PSResourceError(
+            f"certificate backend {raw_backend!r} is not recognised — use one of: adcs, "
+            f"awspca, gcpcas, selfsigned (or the aliases ad/microsoft-ca, "
+            f"aws/aws-private-ca/acm-pca, gcp/cas/google-cas, self)")
+    if backend == "selfsignedtest":
+        raise PSResourceError(
+            "the 'selfsignedtest' backend generates and persists its own CA private key "
+            "UNENCRYPTED beside the plugin and is for harness use only — never register a "
+            "managed system against it. Use 'selfsigned' for the Entra publisher case, "
+            "which needs no certificate authority either.")
+
+    options = parsed["options"]
+    for key in sorted(options):
+        if key in _CERT_COMMON_KEYS:
+            continue
+        owner = _CERT_BACKEND_KEYS.get(key)
+        if owner is None:
+            raise PSResourceError(
+                f"{key!r} in the certificate address is not a recognised option. The "
+                f"plugin logs an unrecognised option as a warning and carries on with a "
+                f"DEFAULT, so a mistyped name issues a certificate nobody chose — check "
+                f"the alias table before assuming an option does not exist.")
+        if owner != backend:
+            raise PSResourceError(
+                f"the {key!r} option applies only to a {owner!r} address, but this is a "
+                f"{backend!r} address — the plugin would ignore it")
+
+    missing = [k for k in _CERT_REQUIRED[backend] if not (options.get(k) or "").strip()]
+    if missing:
+        raise PSResourceError(
+            f"a {backend!r} certificate address requires "
+            f"{', '.join(k + '=' for k in missing)} — without it the backend fails at "
+            f"construction rather than mid-rotation")
+
+    _validate_certificate_options(backend, options)
+
+
+def _validate_certificate_options(backend: str, options: dict) -> None:
+    """Value-level checks for a parsed certificate profile."""
+    def _val(key: str) -> str:
+        return (options.get(key) or "").strip()
+
+    lifetime = _val("lifetime")
+    if lifetime and not _CERT_LIFETIME.match(lifetime):
+        raise PSResourceError(
+            f"lifetime {lifetime!r} is not valid — use a number with an optional unit "
+            f"(90m, 12h, 30d, 2w, 1y). A bare number means DAYS.")
+    if lifetime and backend == "adcs":
+        logger.info(
+            "PS: 'lifetime=%s' is set on an ADCS certificate address, where the TEMPLATE "
+            "decides validity — the plugin ignores it", lifetime)
+
+    key_alg = _val("key").lower()
+    if key_alg and key_alg not in _CERT_KEY_ALGS:
+        raise PSResourceError(
+            f"key {key_alg!r} is not valid — use one of: "
+            f"{', '.join(sorted(_CERT_KEY_ALGS))}")
+
+    for name, allowed in (("hash", _CERT_HASHES), ("bundle", _CERT_BUNDLES),
+                          ("pbe", _CERT_PBE), ("store", _CERT_STORES)):
+        value = _val(name).lower()
+        if value and value not in allowed:
+            raise PSResourceError(
+                f"{name} {value!r} is not valid — use one of: {', '.join(sorted(allowed))}")
+
+    warn = _val("warn")
+    if warn and (not warn.isdigit() or int(warn) > _CERT_MAX_WARN_PERCENT):
+        raise PSResourceError(
+            f"warn {warn!r} is not valid — it is a PERCENTAGE of the certificate's own "
+            f"lifetime, 0 to {_CERT_MAX_WARN_PERCENT}. Use warndays= or warnminutes= for "
+            f"an absolute floor.")
+    for name in ("warndays", "warnminutes", "wait", "retain"):
+        value = _val(name)
+        if value and not value.isdigit():
+            raise PSResourceError(f"{name} {value!r} is not a whole number")
+
+    publisher = _val("publisher").lower()
+    if publisher:
+        if publisher not in _CERT_PUBLISHERS:
+            raise PSResourceError(
+                f"publisher {publisher!r} is not valid — use entraapp (or app), entrasp "
+                f"(or sp), or none")
+        target_key = _CERT_PUBLISHERS[publisher]
+        if target_key:
+            if not _val("tenant"):
+                raise PSResourceError(
+                    "an Entra publisher needs tenant= — the directory (tenant) id or a "
+                    "verified domain")
+            if not _val(target_key):
+                what = ("the app registration's OBJECT id, not its application (client) id"
+                        if target_key == "appid" else
+                        "the service principal's OWN object id, which is NOT the object "
+                        "id of its associated application")
+                raise PSResourceError(
+                    f"publisher={publisher} needs {target_key}= — {what}")
+    elif _val("tenant") or _val("appid") or _val("spid") or _val("retain"):
+        raise PSResourceError(
+            "tenant=/appid=/spid=/retain= only do anything with publisher= set; without "
+            "it the publisher is None and the certificate is never registered with the "
+            "relying party")
+
+    # Two values the plugin can also take from appsettings.json, which ships INSIDE the
+    # .psplugin — so on Password Safe Cloud the address is their only possible source.
+    # Warned rather than refused, because an on-premises administrator with filesystem
+    # access on the plugin host may legitimately have set them there.
+    if _val("store").lower() in ("", "secretssafe"):
+        for name, why in (("biurl", "the BeyondInsight base URL the bundle is written to"),
+                          ("owner", "the group id owning created secrets; Secrets Safe "
+                                    "requires an owner")):
+            if not _val(name):
+                logger.warning(
+                    "PS: certificate address sets no %s= (%s). The plugin falls back to "
+                    "appsettings.json, which cannot be edited on a Password Safe Cloud "
+                    "tenant — on Cloud the first credential change will fail.", name, why)
 
 # ── AWS SSM DB plugin address grammar ─────────────────────────────────────────
 #
@@ -1003,6 +1275,17 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     password-managed — the credential IS the bearer token — but a bearer token cannot be
     seeded (see ``initial_password``), so the first rotation is what populates it.
 
+    ``method="certificate"`` uses the "Certificate" plugin: ``dns_name`` carries the whole
+    certificate profile — ``<backend>?key=value&...``, e.g.
+    ``gcpcas?project=<p>&location=us-central1&pool=<pool>&lifetime=24h&biurl=<url>&owner=<gid>``
+    — because the plugin's appsettings.json ships inside the .psplugin and a Password Safe
+    Cloud tenant cannot edit it. ``host_name`` is a human asset label (substituted into
+    ``{system}`` in the bundle's secret title), ``port`` is forced to 0, and the account is
+    password-managed where the "password" IS the PKCS#12 passphrase — which is generated by
+    the account's own password policy on the first Change Password, so it is never seeded
+    here. The certificate itself lands in a Secrets Safe file secret; both halves are needed
+    and both are governed.
+
     ``method="password"`` is the traditional (non-plugin) managed system reached at its own
     ``host_name``/``ip_address``, whose account is PASSWORD-managed: no ``private_key``, no
     DSS auto-management, and none of the SSH client fields — so it serves a Windows guest as
@@ -1199,6 +1482,46 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             application_host_id=application_host_id,
             method="k8ssa", dns_name=dns_name, emit_private_key=False,
             dss_auto_management=False)
+    elif method == "certificate":
+        # "Certificate" plugin: dns_name carries the WHOLE certificate profile — the CA
+        # backend plus its options, the Secrets Safe destination, and any relying-party
+        # publisher — because appsettings.json ships inside the .psplugin and a Password
+        # Safe Cloud tenant cannot edit it. host_name stays a human label (the asset name
+        # the plugin substitutes into {system} in the bundle's secret title) and
+        # ip_address the 127.0.0.1 placeholder, since there is no host to reach: the CA
+        # endpoint is named in the profile's own options.
+        #
+        # Port 0, deliberately — the platform does not use one, and the CLI packager's
+        # 5432 default (inherited from the PostgreSQL plugin it was written for) is the
+        # documented mistake. ``timeout`` is read by the PLUGIN, not as a socket timeout;
+        # key generation plus a CA round trip is slower than a password change.
+        #
+        # Password-managed, and NEVER seeded: the credential is the PKCS#12 passphrase,
+        # which Password Safe generates from the account's password policy and hands to
+        # the plugin on the first Change Password. Seeding one here would hand the account
+        # a passphrase that opens nothing.
+        _validate_certificate_dns_name(dns_name)
+        _check_address_length(dns_name, "certificate")
+        _validate_ip_field(ip_address, "Certificate")
+        if use_own_credentials:
+            # The plugin declares "Change Managed Account Credentials (using own
+            # credentials)" as NotSupported in GetActionDetails: a certificate identity
+            # holds no CA credential and cannot enroll for itself. Setting the flag would
+            # make Password Safe call the action that always fails.
+            raise PSResourceError(
+                "a Certificate managed account cannot change its own credentials — "
+                "enrollment authority belongs to the functional account, and the plugin "
+                "reports NotSupported for the own-credentials action")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=0,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="certificate", dns_name=dns_name, emit_private_key=False,
+            dss_auto_management=False,
+            timeout_value=_CERTIFICATE_PLUGIN_TIMEOUT_SECONDS)
     elif method == "password":
         # Same shape as `ssh` minus the key. A caller with a working login and no key
         # material used to fall through to the branch below and be refused for a "VM

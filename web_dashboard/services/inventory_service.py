@@ -19,7 +19,7 @@ from typing import Optional, Set
 
 from sqlalchemy.orm import Session
 
-from ..database import (CloudDatabase, HypervisorConnection,
+from ..database import (CertLab, CloudDatabase, HypervisorConnection,
                         HypervisorVMCache, Job, K8sCluster, PovEnvironment,
                         VirtualDesktop)
 from . import expiry_policy, hypervisor_view_service
@@ -177,6 +177,30 @@ def _k8s_item(row) -> dict:
         "detail_href": "/k8s",
     }
 
+
+def _certlab_item(row) -> dict:
+    """A private certificate authority as one inventory row.
+
+    Always "provisioned": the row exists only because this dashboard built the CA, so
+    there is no registered variant. `region` carries the CAS location, which is the one
+    thing that matters operationally about where it lives — a pool, its CAs and any
+    certificate template are all location-scoped and must agree.
+    """
+    return {
+        "id": f"certlab:{row.id}",
+        "cloud": row.cloud,
+        "kind": "certlab",
+        "source": "provisioned",
+        "name": f"{row.name} ({row.pool_id})" if row.pool_id else row.name,
+        "region": row.location or "",
+        "state": row.status,
+        "workgroup": row.workgroup,
+        "deployed_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
+        "job_id": row.deploy_job_id,
+        "detail_href": "/cert-lab",
+    }
 
 def _pov_item(row) -> dict:
     """A POV environment as one inventory row.
@@ -427,6 +451,12 @@ def collect(db: Session) -> list:
 
     for row in db.query(K8sCluster).filter(K8sCluster.status != "deleted").all():
         items.append(_k8s_item(row))
+
+    # Queried unconditionally, like the POV rows below and for the same reason: turning
+    # the Certificate Lab feature off hides its page, it does not delete the CA pool, and
+    # a pool left behind keeps billing whether or not anyone can see it.
+    for row in db.query(CertLab).filter(CertLab.status != "deleted").all():
+        items.append(_certlab_item(row))
 
     for row in (db.query(VirtualDesktop)
                 .filter(VirtualDesktop.status.notin_(("deprovisioning", "deleted"))).all()):

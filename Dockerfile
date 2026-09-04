@@ -184,6 +184,12 @@ COPY terraform/k8s_cluster/oci_oke/ ./terraform/k8s_cluster/oci_oke/
 # Function App / Cloud Run function. Same rule as above: a missing COPY here is a
 # _materialize failure at deploy time, in the published image only.
 COPY terraform/cloud_function/ ./terraform/cloud_function/
+# Certificate-authority provisioning modules (driven by cert_lab_service): the GCP CAS
+# pool + root CA + enrollment service account behind the Certificate plugin's `gcpcas`
+# backend. Same rule as above -- a missing COPY here is a _materialize failure at
+# deploy time, in the published image only. The google provider is already pre-cached
+# below, so no new init leg is needed.
+COPY terraform/cert_ca/ ./terraform/cert_ca/
 # Action-level admission-control policies (Rego), evaluated by admission_service
 # via the bundled OPA binary (installed below). Ship the tree so operators can
 # add/edit rules; admission_service reads terraform/policy/admission/ pre-action.

@@ -90,6 +90,7 @@ _FLAG_LABELS = {
     "vdesktops_enabled": "Virtual desktops",
     "cloud_database_enabled": "Cloud databases",
     "cloud_functions_enabled": "Cloud functions",
+    "cert_lab_enabled": "Certificate Lab",
     "k8s_management_enabled": "Kubernetes",
     "portainer_enabled": "Portainer",
     "cost_explorer_enabled": "Cost reporting",
@@ -407,6 +408,17 @@ _DEVOPS = Persona(
             minutes=12,
             docs="design/entitle-user-jit",
             requires_flags=("entitle_enabled", "ansible_enabled"),
+        ),
+        UseCase(
+            id="devops-pipeline-certificate",
+            title="A pipeline that authenticates with a certificate nobody has to renew",
+            summary="Issue a short-lived client certificate under approval, have a build "
+                    "retrieve it over the API, and prove it actually completes an mTLS "
+                    "handshake — then rotate and show the build never notices.",
+            target="/cert-lab",
+            minutes=15,
+            docs="certificates",
+            requires_flags=("cert_lab_enabled",),
         ),
         UseCase(
             id="devops-function-secret",

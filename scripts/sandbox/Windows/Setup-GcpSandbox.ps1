@@ -159,10 +159,10 @@ Write-Section 'Enable APIs'
 # alongside cloudfunctions, and pre-enabling turns that cold enable into a no-op.
 foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com','run.googleapis.com','cloudbuild.googleapis.com','container.googleapis.com',
                    'gkehub.googleapis.com','connectgateway.googleapis.com','gkeconnect.googleapis.com','cloudresourcemanager.googleapis.com','bigquery.googleapis.com',
-                   'cloudfunctions.googleapis.com','artifactregistry.googleapis.com')) {
+                   'cloudfunctions.googleapis.com','artifactregistry.googleapis.com','privateca.googleapis.com')) {
     gcloud services enable $api --project $ProjectId --quiet | Out-Null
 }
-Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager, bigquery, cloudfunctions, artifactregistry'
+Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager, bigquery, cloudfunctions, artifactregistry, privateca'
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 Write-Section 'VPC + subnets'
@@ -418,7 +418,8 @@ foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/iam.roleAdmin',
                     'roles/bigquery.jobUser','roles/bigquery.dataViewer',
                     'roles/cloudfunctions.developer','roles/secretmanager.admin',
-                    'roles/cloudbuild.builds.builder','roles/artifactregistry.writer')) {
+                    'roles/cloudbuild.builds.builder','roles/artifactregistry.writer',
+                    'roles/privateca.admin')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }

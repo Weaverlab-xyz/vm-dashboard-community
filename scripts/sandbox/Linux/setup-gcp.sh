@@ -192,10 +192,10 @@ section "Enable APIs"
 # alongside cloudfunctions, and pre-enabling turns that cold enable into a no-op.
 for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com run.googleapis.com cloudbuild.googleapis.com container.googleapis.com \
            gkehub.googleapis.com connectgateway.googleapis.com gkeconnect.googleapis.com cloudresourcemanager.googleapis.com bigquery.googleapis.com \
-           cloudfunctions.googleapis.com artifactregistry.googleapis.com; do
+           cloudfunctions.googleapis.com artifactregistry.googleapis.com privateca.googleapis.com; do
   gcloud services enable "$api" --project "$PROJECT_ID" --quiet
 done
-ok "Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager, bigquery, cloudfunctions, artifactregistry"
+ok "Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager, bigquery, cloudfunctions, artifactregistry, privateca"
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 section "VPC + subnets"
@@ -492,12 +492,12 @@ for role in roles/compute.admin roles/secretmanager.secretAccessor \
              roles/resourcemanager.projectIamAdmin roles/iam.roleAdmin \
              roles/bigquery.jobUser roles/bigquery.dataViewer \
              roles/cloudfunctions.developer roles/secretmanager.admin \
-             roles/cloudbuild.builds.builder roles/artifactregistry.writer; do
+             roles/cloudbuild.builds.builder roles/artifactregistry.writer roles/privateca.admin; do
   retry 8 5 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
     --condition=None --quiet >/dev/null
 done
-ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, iam.roleAdmin, bigquery.jobUser, bigquery.dataViewer, cloudfunctions.developer, secretmanager.admin, cloudbuild.builds.builder, artifactregistry.writer"
+ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, iam.roleAdmin, bigquery.jobUser, bigquery.dataViewer, cloudfunctions.developer, secretmanager.admin, cloudbuild.builds.builder, artifactregistry.writer, privateca.admin"
 
 SA_KEY_PATH="$(state_dir gcp)/sa-key.json"
 if [[ ! -s "$SA_KEY_PATH" ]]; then

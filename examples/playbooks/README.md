@@ -230,6 +230,7 @@ ansible_password: <bind via Use a secret, or the deploy-time admin password>
 | `win-install-software.yml` | Install packages via Chocolatey (git, 7zip, …) |
 | `win-create-local-admin.yml` | Create a local user + add to Administrators |
 | `win-feature-iis.yml` | Install the IIS web server role |
+| `adcs-pipeline-template.yml` | Create the certificate template + enrollment account on an existing AD CS CA, for the Password Safe [Certificate plugin](certificates/) |
 
 ### Running the Windows samples
 
@@ -246,6 +247,22 @@ that sets `ansible_connection: winrm` in its `vars:` overrides the runner's defa
 SSH connection, so a WinRM run on ACI is now workable. It's newer than the local
 path, so validate it end-to-end for your image before relying on it. (The ECS /
 Cloud Run runners are for Linux SSH targets.)
+
+## Certificates (`certificates/`)
+
+The lab for the Password Safe **Certificate** custom plugin, which makes an x.509
+certificate a managed credential: the managed account holds the PKCS#12 passphrase and
+Secrets Safe holds the bundle it opens.
+
+| File | Purpose |
+|---|---|
+| `nginx-mtls-endpoint.yml` | nginx on :8443 demanding a client certificate, echoing the presented subject DN |
+| `ci-fetch-cert.yml` | Fetch both halves from Password Safe and authenticate to that endpoint |
+
+The subject-DN echo is the point: `curl` succeeding proves TLS completed, but the endpoint
+answering `CN=svc-deploy-pipeline` proves the plugin's certificate authenticated as the
+right *identity*. See [`certificates/README.md`](certificates/README.md) for the order to
+run them in and what each one proves.
 
 ## Kubernetes (`k8s/`)
 

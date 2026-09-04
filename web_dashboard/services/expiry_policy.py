@@ -61,7 +61,13 @@ _DESTROY_FOR = {
 # `suspend_on_idle` after the evaluation ends, and nothing else in the codebase ever
 # notices it is finished. Its teardown is the same `pov_env_destroy` job the DELETE
 # endpoint creates, which is what makes it reapable at all.
-REAPABLE_KINDS = ("vm", "database", "k8s", "pov")
+#
+# "certlab" is a private certificate authority. It is the purest case in this list:
+# a GCP CAS pool bills ~$20/month and an AWS Private CA ~$400/month whether or not
+# either ever issues a certificate, and neither appears on any page the dashboard
+# had before the Certificate Lab. Its teardown is the same `certca_decommission`
+# job the DELETE endpoint creates.
+REAPABLE_KINDS = ("vm", "database", "k8s", "pov", "certlab")
 
 # Clouds whose VM teardown is a claimable job (the keys of _DESTROY_FOR, as inventory
 # `cloud` values).
@@ -85,6 +91,11 @@ _REAPABLE_STATES = {
     "vm":       frozenset({"active"}),
     # cloud_database_service marks a finished provision "available".
     "database": frozenset({"available"}),
+    # cert_lab_service marks a finished CA build "available". "failed" is deliberately
+    # NOT here even though a half-built pool can still bill: a failed apply may have
+    # left a CA mid-creation, and a destroy racing that is how a pool ends up
+    # undeletable. A human looks at a failed CA.
+    "certlab":  frozenset({"available"}),
     # k8s_service lands a finished provision on "registered", and the management-plane
     # path also produces "managed" / "awaiting_agent".
     "k8s":      frozenset({"registered", "managed", "awaiting_agent"}),

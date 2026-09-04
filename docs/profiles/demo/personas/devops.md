@@ -50,6 +50,18 @@ destroyed on completion. There is no build user to audit, rotate or forget about
 
 **Guide:** [Entitle user JIT](../../../design/entitle-user-jit.md)
 
+### A pipeline that authenticates with a certificate nobody has to renew
+
+The credential a build presents to a deployment API is exactly as privileged as the password
+it replaced, and it usually has none of the same governance: issued in 2023 by someone who
+has left, sitting in a CI secret store, expiring on a date nobody recorded.
+
+Issue one under approval instead, have the build retrieve it over the API with no human in
+the loop, and — the step demonstrations skip — prove it completes a real mTLS handshake.
+Then rotate it and show the build never notices.
+
+**Guide:** [Certificates](../../../certificates.md)
+
 ### A serverless function that fetches its secret at cold start
 
 Deploy a cloud function with no environment secret and show it pull what it needs on first
