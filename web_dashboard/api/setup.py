@@ -2282,7 +2282,7 @@ _PREVIEW_FLAGS = {
     # repository is public, and a schedule is BeyondTrust's to announce. Off means the
     # dashboard uses today's static cloud credentials, unchanged.
     # Preview because none of the plugin's four submission paths has been proven against
-    # a live CA yet — the shared core is covered by the plugin's own 286-assertion suite,
+    # a live CA yet — the shared core is covered by the plugin's own 307-assertion suite,
     # but ADCS, AWS Private CA, GCP CAS and the Entra publishers can only be exercised
     # against a real authority, account or tenant. Off means the dashboard behaves exactly
     # as it did before, and no CA pool can be created to bill for.

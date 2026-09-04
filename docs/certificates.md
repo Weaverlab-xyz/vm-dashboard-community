@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a private certificate authority to onboard certificate identities against, and want it gone again when the demo ends.
 
-> **Preview.** The plugin's shared core is covered by its own 286-assertion suite, but
+> **Preview.** The plugin's shared core is covered by its own 307-assertion suite, but
 > **none of its four submission paths has been proven against a live authority** — ADCS,
 > AWS Private CA, GCP CAS and the two Entra publishers can only be exercised against a
 > real CA, cloud account or tenant. That is what this feature exists to make cheap. Off by
@@ -91,20 +91,40 @@ nothing here re-implements any of that.
 4. **A Secrets Safe safe** for the bundles. The dashboard creates the *folder tree* beneath
    it; it never creates the safe, which carries its own ACL.
 
-### Where the plugin runs
+### Where the plugin runs, and the one constraint that decides ADCS
 
-On **Password Safe Cloud** a custom platform plugin runs on a **Resource Broker**, and that
-placement decides what each backend can reach:
+On **Password Safe Cloud** a custom platform plugin runs on a **Resource Broker**. The
+plugin needs nothing inbound — every call it makes is outbound and broker-initiated — so the
+question is not inbound versus outbound. It is whether the traffic stays inside the broker's
+subnet or has to cross the firewall at its edge.
 
-| Backend | What the host running the plugin needs |
-|---|---|
-| `adcs` | **RPC/DCOM to the CA**, and the ability to `LogonUser` the enrollment account. There is no outbound-HTTPS-only transport for `ICertRequest3` — a network-segmented CA would need the Certificate Enrollment Web Service, which the plugin does not implement |
-| `gcpcas` | HTTPS to `privateca.googleapis.com`. No DCOM, no impersonation, no domain |
-| `awspca` | HTTPS to `acm-pca.<region>.amazonaws.com` |
-| all | HTTPS to `biurl=` — the tenant — to write the bundle |
+| Backend | What crosses the subnet firewall | Port |
+|---|---|---|
+| `gcpcas` | `privateca.googleapis.com`, `oauth2.googleapis.com` (the JWT-bearer exchange that authenticates it) | 443 |
+| `awspca` | `acm-pca.<region>.amazonaws.com` | 443 |
+| Entra publishers | `login.microsoftonline.com`, `graph.microsoft.com` | 443 |
+| every backend | the BeyondInsight host from `biurl=`, to write the bundle | 443 |
+| `adcs` | see below — this is the one that is not 443 | 135 + 49152–65535 |
 
-A lab Resource Broker is often more tightly firewalled *outbound* than inbound, so check
-the cloud egress before building a CAS pool against it.
+Four of the five backends need nothing beyond outbound 443, so **a broker that can already
+reach BeyondInsight can usually reach GCP, AWS and Entra with no new rule**. The Certificate
+Lab's GCP path is in that group.
+
+**ADCS is the exception, and it is a subnet question.** `ICertRequest3` is DCOM: the broker
+opens TCP 135 to the CA's endpoint mapper, and the CA answers on a *dynamic high port* in
+49152–65535. Between servers on a subnet, 135 is normally already open alongside 139, 445
+and 3389, so none of that traffic reaches the edge firewall and enrollment simply works.
+Across that firewall it is a different request entirely — 135 plus a 16,000-port range
+through the perimeter, which no network team grants.
+
+So the prerequisite is **put the Resource Broker on the CA's subnet**, not merely in the same
+zone. Microsoft's Certificate Enrollment Web Service exists to turn enrollment into an
+outbound-443 protocol and would remove the constraint; this plugin does not implement it.
+Where the CA is segmented away from every candidate broker, that gap is the blocker and no
+configuration works around it.
+
+This is also the easiest constraint here to miss, because **a single-subnet lab satisfies it
+by accident** — the problem first appears at a customer whose CA is segmented.
 
 ### GCP
 
@@ -132,22 +152,39 @@ managed system.
 
 ### The 255-character budget is real
 
-Password Safe's address column is **255 characters**. The fully spelled-out ADCS profile
-printed in the plugin's own test-case document is **269** — over the limit before anyone has
-typed a real CA name or a Cloud tenant URL. A truncated address does not fail as a length
-problem; it fails later, inside the plugin, as an unparseable field.
+Password Safe's address column is **255 characters**, and real profiles get close: the ADCS
+example in the plugin's test case is **231**, and its own earlier draft was **269** — over
+the limit without looking excessive, before anyone typed a real CA name or a Cloud tenant
+URL. Dropping `secret=` (the default title written out longhand) and shortening `folder=`
+bought those 38 characters back.
 
-So the *Add identity* form shows a live character count, and the dashboard refuses an
-over-long address with the count and what to shorten. Three things buy the most room:
+**The failure is silent.** An address trimmed to fit loses whatever sat at its end, and a
+truncated `&owner=1` reads as an *absent* owner rather than as damage — so the first symptom
+is a rotation failing on something with no obvious connection to length.
 
-- **Drop every option already at its default.** `warn=25`, `key=rsa3072`, `san=Host`,
-  `bundle=Pkcs12`, `pbe=Aes256`, `store=SecretsSafe`, `retain=1` and
-  `secret=cert/{system}/{account}` all cost 10–30 characters each and change nothing.
-- **Shorten `folder=`.**
-- **Move per-identity values onto the managed account name**, after a `?` —
-  `svc-deploy-pipeline?dns=deploy.corp.example.com&lifetime=7d`. Each overrides the system's
-  value for that identity alone, which is also what removes the need for a separate
-  platform instance per SAN set.
+So the *Add identity* form shows a live character count, and the dashboard **refuses** an
+over-long address naming the overage and what to drop. The plugin checks too and warns at or
+over the limit, so this is the earlier of two guards rather than the only one — but a warning
+in an action log arrives after the managed system already exists. Three levers, in the order
+worth trying:
+
+1. **Drop anything already at its default.** `secret=cert/{system}/{account}` (31
+   characters), `retain=1`, `subject=CN={AccountName}`, `warn=25`, `key=rsa3072`,
+   `pbe=Aes256`, `store=SecretsSafe` and `wait=30` all cost characters to say what the
+   plugin would have done anyway. On AWS, `region=` is the same thing — it is the ARN's own
+   fourth field.
+2. **Move per-identity values onto the managed account name**, after a `?` —
+   `svc-deploy-pipeline?dns=deploy.corp.example.com&lifetime=7d`. `dns=`, `ip=`, `subject=`,
+   `lifetime=`, `eku=` and `key=` are all accepted there, where they cost nothing from this
+   budget and stop forcing a managed system per SAN set.
+3. **Shorten `folder=`.** `Certificates/Pipelines` → `Certs/Pipelines` buys 7 and loses
+   nothing: a folder is addressed by path, not read as prose.
+
+The most expensive single field is an AWS `arn=` at **101 characters** with a real account id
+and CA id — which is why an AWS profile in particular wants its subject on the managed
+account. If every option is genuinely doing work, the profile needs splitting across two
+managed systems; a managed system is already the unit that pins one CA and one template, so
+a profile too large for one address is usually two profiles.
 
 ### A mistyped option is refused, not ignored
 

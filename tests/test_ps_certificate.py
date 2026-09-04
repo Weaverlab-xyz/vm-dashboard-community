@@ -219,19 +219,52 @@ def test_both_publisher_aliases_are_accepted():
 
 # ── the address budget ─────────────────────────────────────────────────────────
 
-def test_the_documented_adcs_profile_is_over_the_column_and_says_by_how_much():
-    # Verbatim from the plugin's test-case document, section 3.3. It is 269 characters
-    # against Password Safe's 255-character address column — so the fully-spelled-out
-    # profile does NOT fit, and the error has to say so rather than let Password Safe
-    # truncate it into an unparseable field.
-    documented = (
+def test_every_address_in_the_test_case_document_fits_and_parses():
+    # Verbatim from Certificate-Test-Case.md §3.3, §4.2, §4.3 and §5.3. These are the
+    # profiles an operator copies, so a grammar that rejects one of them is wrong about
+    # the plugin rather than strict. Lengths are asserted too: the whole design is a
+    # length budget, and a silent 20-character growth here is what eventually overruns it.
+    documented = {
+        231: (r"adcs?ca=DC01.corp.example.com\Corp Issuing CA"
+              "&template=CorpPipelineClientAuth"
+              "&subject=CN={AccountName},OU=Service Accounts,DC=corp,DC=example"
+              "&eku=ClientAuth&warn=30&biurl=https://bi01.corp.example.com"
+              "&folder=Certs/Pipelines&owner=1"),
+        214: ("gcpcas?project=<project>&location=us-central1&pool=demo-pipeline-pool"
+              "&lifetime=24h&key=ecdsa-p256&subject=CN={AccountName},O=Example"
+              "&eku=ClientAuth&biurl=https://bi01.corp.example.com"
+              "&folder=Certs/Pipelines&owner=1"),
+        180: ("awspca?arn=arn:aws:acm-pca:us-east-1:<acct>:certificate-authority/<id>"
+              "&lifetime=24h&key=ecdsa-p256&eku=ClientAuth"
+              "&biurl=https://bi01.corp.example.com&folder=Certs/Pipelines&owner=1"),
+        202: ("selfsigned?publisher=entraapp&tenant=contoso.onmicrosoft.com"
+              "&appid=graph-reader:<target app registration OBJECT id>"
+              "&key=rsa2048&warn=30&biurl=https://bi01.corp.example.com"
+              "&folder=Certs/EntraApps&owner=1"),
+    }
+    for expected_len, addr in documented.items():
+        assert len(addr) == expected_len, f"{addr[:20]}… is {len(addr)}, expected {expected_len}"
+        _ok(addr)
+
+
+def test_an_over_long_profile_is_refused_with_the_overage_and_what_to_drop():
+    # This is §3.3's own earlier draft, which the plugin's documentation now cites as the
+    # worked example of overrunning the column: a CA, a template, a subject DN, a
+    # BeyondInsight URL and a Secrets Safe folder reach 269 characters without looking
+    # excessive. It fits today only because `secret=` (the default title written out
+    # longhand) was dropped and `folder=` shortened — together 38 characters.
+    #
+    # The failure it guards against is silent: an address trimmed to fit loses whatever
+    # sat at its end, and a truncated `&owner=1` reads as an ABSENT owner rather than as
+    # damage. So the message has to name the overage, not merely refuse.
+    overlong = (
         r"adcs?ca=DC01.corp.example.com\Corp Issuing CA"
         "&template=CorpPipelineClientAuth"
         "&subject=CN={AccountName},OU=Service Accounts,DC=corp,DC=example"
         "&eku=ClientAuth&warn=30&biurl=https://bi01.corp.example.com"
         "&folder=Certificates/Pipelines&secret=cert/{system}/{account}&owner=1")
-    assert len(documented) == 269
-    msg = _bad(documented, "269", "14", "255")
+    assert len(overlong) == 269
+    msg = _bad(overlong, "269", "14", "255")
     # And the advice has to be about a certificate profile, not about the DB plugins'
     # Resource Broker cert path.
     assert "default" in msg.lower() and "managed account name" in msg.lower()
