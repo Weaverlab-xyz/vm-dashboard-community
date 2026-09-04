@@ -141,7 +141,21 @@ def handle(req: Request, ctx: Context) -> Response:
     if path == "/check_config":
         return Response(200, {"data": {"valid": True}, "observed": observed})
 
-    # create_actor / delete_actor / give_access / revoke_access — acknowledged,
-    # nothing granted.
+    if path == "/create_actor":
+        # This route has the contract's one CLOSED data schema (fnruntime.entitle),
+        # so the {"ok": true} that satisfies the other three write routes is
+        # rejected here — which would make this adapter fail the very path it
+        # exists to prove. Nothing is created; the requester's identity is echoed
+        # into the actor so Entitle gets a well-formed provisioning result and
+        # delete_actor has a name to send back.
+        actor = req.json().get("actor") or {}
+        return Response(200, {
+            "data": entitle.actor_data(
+                f"echo_{ctx.request_id}", "echo_account",
+                email=str(actor.get("email") or actor.get("identifier") or "").strip(),
+                login_info={"granted": False}),
+            "observed": observed})
+
+    # delete_actor / give_access / revoke_access — acknowledged, nothing granted.
     return Response(200, {"data": {"ok": True, "granted": False},
                           "observed": observed})

@@ -250,14 +250,25 @@ def _plan_json(plan) -> list:
     return [{"database": db, "statements": list(stmts)} for db, stmts in plan]
 
 
-def _apply(plan, target: dict, ctx: Context, extra: dict = None) -> Response:
-    """Execute a plan, or describe it in dry run. Every write route ends here."""
+def _apply(plan, target: dict, ctx: Context, extra: dict = None,
+           *, report_into: str = None) -> Response:
+    """Execute a plan, or describe it in dry run. Every write route ends here.
+
+    ``report_into`` names a key INSIDE ``data`` for the execution report, and exists
+    for the one route whose ``data`` is a closed schema. ``create_actor`` must nest
+    everything under ``actor`` / ``login_info`` (fnruntime.entitle), so a
+    ``statements_executed`` written beside them is an additional property that
+    Entitle rejects the whole response for — after the account has been created and
+    granted. The other three write routes have no such schema and keep the report at
+    the top of ``data``, where their tests and the audit log already read it.
+    """
     body = {"data": dict(extra or {})}
+    report = body["data"].setdefault(report_into, {}) if report_into else body["data"]
     if _dry_run():
-        body["data"]["dry_run"] = True
-        body["data"]["plan"] = _plan_json(plan)
+        report["dry_run"] = True
+        report["plan"] = _plan_json(plan)
         return Response(200, body)
-    body["data"]["statements_executed"] = _execute(plan, target)
+    report["statements_executed"] = _execute(plan, target)
     return Response(200, body)
 
 
@@ -548,15 +559,17 @@ def _create_actor(req, ctx, targets):
     # The credentials ARE the point of create_actor — Entitle hands them to the
     # requester. In dry run nothing was created, so returning one would be a secret
     # with no account behind it.
-    extra = {"identifier": username, "name": username, "type": "database_account"}
+    login_info = {}
     if not _dry_run():
-        extra.update({"username": username, "password": password,
-                      "host": server["host"], "port": server["port"]})
+        login_info.update({"username": username, "password": password,
+                           "host": server["host"], "port": server["port"]})
         # One database has an unambiguous answer; several do not, and naming one
         # would tell the requester they have access somewhere they do not.
-        extra.update({"database": databases[0]} if len(databases) == 1
-                     else {"databases": databases})
-    return _apply(plan, server, ctx, extra)
+        login_info.update({"database": databases[0]} if len(databases) == 1
+                          else {"databases": databases})
+    extra = entitle.actor_data(username, "database_account", email=identity,
+                               login_info=login_info)
+    return _apply(plan, server, ctx, extra, report_into="login_info")
 
 
 def _create_actor_with_access(payload: dict, ctx: Context, targets: dict, *,
@@ -587,16 +600,17 @@ def _create_actor_with_access(payload: dict, ctx: Context, targets: dict, *,
               identity=identity, username=username, engine=target["engine"],
               role_code=role, asset=_asset_identifier(target), dry_run=_dry_run())
 
-    extra = {"identifier": username, "name": username,
-             "type": "database_account", "role_code": role}
+    login_info = {"role_code": role}
     if not _dry_run():
         # The credentials ARE the point of create_actor — Entitle hands them to the
         # requester. In dry run nothing was created, so returning one would be a
         # secret with no account behind it.
-        extra.update({"username": username, "password": password,
-                      "host": target["host"], "port": target["port"],
-                      "database": target["database"]})
-    return _apply(plan, target, ctx, extra)
+        login_info.update({"username": username, "password": password,
+                           "host": target["host"], "port": target["port"],
+                           "database": target["database"]})
+    extra = entitle.actor_data(username, "database_account", email=identity,
+                               login_info=login_info)
+    return _apply(plan, target, ctx, extra, report_into="login_info")
 
 
 def _delete_actor(req, ctx, targets):

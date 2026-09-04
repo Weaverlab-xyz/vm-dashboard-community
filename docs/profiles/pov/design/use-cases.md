@@ -174,13 +174,16 @@ POST /api/pov/accessor/rest/check_config
 
 There is deliberately no `give_access`: in Ephemeral mode `create_actor` **is** the grant.
 
-Three things are copied from `functions/fnworkloads/db_grant.py`, each learned expensively
+Four things are copied from `functions/fnworkloads/db_grant.py`, each learned expensively
 there. The identity arrives in `provisioning_data`, not `actor` — reading only `actor` is
 what made every real ephemeral grant come back 400. `delete_actor` refuses any username
 without the `povguest_` prefix, checked on the name in the *request* before any lookup, so
-a row that disagreed could not talk it into deleting an operator's account. And
+a row that disagreed could not talk it into deleting an operator's account.
 `create_actor` returns the credentials, because handing them to the requester is the whole
-point of the call.
+point of the call — and it returns them **nested**, under `data.login_info`, beside a
+`data.actor` block of exactly `identifier`, `name`, `type` and `email`. That shape is the
+whole of `Provisioned Actor Data` and it allows nothing else: the flat version was
+rejected in full, after the accessor had already been minted.
 
 Its secret is its own (`pov_accessor_rest_secret`), fail-closed in the same shape as the
 standing adapter's: 503 when unset, one response for missing and wrong. An endpoint whose

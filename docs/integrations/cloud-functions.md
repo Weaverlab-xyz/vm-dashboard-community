@@ -121,14 +121,28 @@ give_access_path           /give_access
 revoke_access_path         /revoke_access
 ```
 
-`get_all_permissions` is the one response whose shape is not what the definition's
-example shows: both permission fields are **maps keyed by asset id**, not arrays
-(`actors_permissions` is `map[asset_id] -> [{actor_id, role_code, direct_member}]`,
-and `assets_permissions` is the asset-to-asset half, which is `{}` for every target
-here). An array is rejected with *Structure of "Get All Permission Response" is
-invalid* on that route alone — assets and actors keep syncing green, so the only
-symptom is one red line in Entitle's audit log. `fnruntime.entitle.permissions_data`
-builds it; use it rather than a literal.
+Two responses have shapes the definition's own examples do not show, and both are
+built by `fnruntime.entitle` — use the helpers rather than a literal.
+
+`get_all_permissions`: both permission fields are **maps keyed by asset id**, not
+arrays (`actors_permissions` is `map[asset_id] -> [{actor_id, role_code,
+direct_member}]`, and `assets_permissions` is the asset-to-asset half, which is `{}`
+for every target here). An array is rejected with *Structure of "Get All Permission
+Response" is invalid* on that route alone — assets and actors keep syncing green, so
+the only symptom is one red line in Entitle's audit log.
+`fnruntime.entitle.permissions_data` builds it.
+
+`create_actor`: its `data` is **nested**, with exactly two properties and no others
+allowed — `actor` (`identifier`, `name`, `type`, `email`, optional `last_user`, and
+nothing else) and `login_info`, which is free-form and is where the credentials, the
+endpoint and anything else the requester needs go. A flat object with the credentials
+beside the identifier is rejected wholesale, listing `identifier`, `name` and `type`
+among the unexpected properties — the fields were right, the nesting was missing. In
+Ephemeral mode this is the worst route to fail, because the account has already been
+created and granted by the time the response is validated: Entitle records the
+request as failed, the requester is told nothing, and `delete_actor` is only ever
+driven from what Entitle believes it provisioned, so the account outlives its grant.
+`fnruntime.entitle.actor_data` builds it.
 
 Authenticate with the function's shared secret as a custom header — Entitle's
 `headers` config takes `"Authorization": "Bearer <TOKEN>"` verbatim, which is

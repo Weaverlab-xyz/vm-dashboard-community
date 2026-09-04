@@ -146,7 +146,10 @@ def test_entitle_echo_never_grants_anything():
         resp = entitle_webhook_echo.handle(
             Request(method="POST", path=path, headers={}, query={}, body=b"{}",
                     source="aws_function_url"), _ctx())
-        assert resp.body["data"]["granted"] is False, path
+        data = resp.body["data"]
+        # create_actor answers in the closed Provisioned Actor Data envelope, so its
+        # flag is one level down — see test_entitle_actor_data_shape.py.
+        assert data.get("login_info", data)["granted"] is False, path
 
 
 def test_entitle_echo_404s_an_unknown_route_and_lists_the_real_ones():
