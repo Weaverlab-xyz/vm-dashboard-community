@@ -598,6 +598,12 @@ with no recorded catalog to scope grants to. Full detail in
   cloud's deploy key (`aws_ecs_docker_deploy_key` / `azure_aci_docker_deploy_key` /
   `gcp_cloud_run_docker_deploy_key`). On **OCI** there is no auto-jumpoint — you must
   pre-create one in the public subnet.
+- **Decommission fails on `Error deleting item with ID [n] … status: 404`.** The PRA jump
+  item or Vault account was already deleted out of band (in the PRA console, or by an
+  earlier half-finished teardown), and the SRA provider treats a 404 on delete as an error
+  instead of as "already gone". Teardown now drops those items from its state and destroys
+  the rest, so **Delete** completes on the next attempt; if it still fails, the error names
+  something other than a 404 and PRA really does still hold it.
 - **SQL Server: can't create a database at provision.** By design — RDS/Cloud SQL SQL
   Server connect to `master`; create app databases afterward through the tunnel.
 - **Azure: `VnetWithDifferentLocationNotSupported` at apply** ("the virtual network …

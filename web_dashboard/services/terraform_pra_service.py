@@ -227,6 +227,95 @@ def _run_tf(args: list, work_dir: str, timeout: int = 120,
     return _go()
 
 
+# ── Teardown that survives an item PRA no longer has ─────────────────────────
+#
+# The sra provider treats a 404 on DELETE as a failure rather than as "already
+# gone", so one item removed out of band (deleted in the PRA console, or left
+# half-torn-down by an earlier attempt) wedges teardown permanently: every retry
+# of `terraform destroy` fails on the same missing item, and every caller that
+# accumulates that failure — clouddb_decommission is the loud one — keeps
+# reporting an orphan for something that does not exist. A 404 on delete IS the
+# outcome destroy asked for, so the items the error names are dropped from state
+# and whatever genuinely remains is destroyed.
+#
+# Matched on the item ID the provider quotes, not on the resource address in the
+# diagnostic: the ID is what state records too (attributes.id), so mapping it
+# back to an address is exact and does not depend on terraform's diagnostic
+# layout (which omits the "with <address>" block when config declares no such
+# resource — exactly the provider-only destroy below).
+_DELETE_ID_RE = re.compile(r"Error deleting item with ID \[([^\]]+)\]")
+
+
+def _already_deleted_ids(output: str) -> set[str]:
+    """Item IDs a destroy reported a 404 for while deleting — i.e. items PRA does
+    not have. Read per diagnostic block so a 404 in one error is never credited
+    to a different, real failure in another."""
+    ids: set[str] = set()
+    for block in re.split(r"(?=Error: )", output):
+        m = _DELETE_ID_RE.search(block)
+        if m and re.search(r"status:\s*404", block):
+            ids.add(m.group(1).strip())
+    return ids
+
+
+def _state_rm_ids(work_dir: str, ids: set[str],
+                  tenant: Optional[dict] = None) -> list[str]:
+    """``terraform state rm`` every managed instance in ``work_dir``'s state whose
+    id is one of ``ids``; returns the addresses actually removed. Reads the state
+    terraform just wrote back (a failed destroy keeps the resources it could not
+    delete), so an address is only ever derived from something really in state."""
+    try:
+        state = json.loads(Path(work_dir, "terraform.tfstate").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("PRA destroy: could not read state to prune deleted items: %s", exc)
+        return []
+    removed: list[str] = []
+    for res in state.get("resources", []):
+        if res.get("mode") == "data":
+            continue
+        base = ".".join(p for p in (res.get("module"), res.get("type"), res.get("name")) if p)
+        for inst in res.get("instances", []):
+            if str((inst.get("attributes") or {}).get("id", "")) not in ids:
+                continue
+            key = inst.get("index_key")
+            addr = base if key is None else f"{base}[{json.dumps(key)}]"
+            rm = _run_tf(["state", "rm", addr], work_dir, timeout=30, tenant=tenant)
+            if rm.returncode == 0:
+                removed.append(addr)
+            else:
+                logger.warning("PRA destroy: state rm %s failed: %s", addr,
+                               rm.stderr.strip() or rm.stdout.strip())
+    return removed
+
+
+def _destroy_sync(work_dir: str, timeout: int = 120,
+                  tenant: Optional[dict] = None) -> None:
+    """``terraform destroy`` in an already-initialized ``work_dir``, tolerating
+    items PRA no longer has (see above). Raises :class:`TerraformPRAError` if
+    anything real is left undestroyed.
+
+    ``-refresh=false`` because the provider errors on REFRESH as well when an item
+    already 404s, which would fail the run before a single delete is attempted —
+    and a destroy needs nothing from a refresh, it deletes what state records."""
+    args = ["destroy", "-auto-approve", "-refresh=false"]
+    detail = ""
+    # One pass per pruning round, bounded: items can go missing in stages, but a
+    # destroy that keeps failing must surface rather than spin.
+    for _ in range(3):
+        destroy = _run_tf(args, work_dir, timeout=timeout, tenant=tenant)
+        if destroy.returncode == 0:
+            return
+        detail = destroy.stderr.strip() or destroy.stdout.strip()
+        gone = _already_deleted_ids(f"{destroy.stdout}\n{destroy.stderr}")
+        pruned = _state_rm_ids(work_dir, gone, tenant=tenant) if gone else []
+        if not pruned:
+            raise TerraformPRAError(f"terraform destroy failed: {detail}")
+        logger.warning("PRA destroy: %d item(s) already gone in PRA (404 on delete) — "
+                       "dropped from state, destroying the rest: %s",
+                       len(pruned), ", ".join(pruned))
+    raise TerraformPRAError(f"terraform destroy failed: {detail}")
+
+
 def _provision_sync(
     vm_name: str,
     hostname: str,
@@ -332,11 +421,7 @@ def _remove_sync(tf_state_json: str, tenant: Optional[dict] = None) -> None:
                 f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}"
             )
 
-        destroy = _run_tf(["destroy", "-auto-approve"], work_dir, timeout=120)
-        if destroy.returncode != 0:
-            raise TerraformPRAError(
-                f"terraform destroy failed: {destroy.stderr.strip() or destroy.stdout.strip()}"
-            )
+        _destroy_sync(work_dir)
 
 
 # ── Public async API ──────────────────────────────────────────────────────────
@@ -667,13 +752,7 @@ def _destroy_state_only_sync(tf_state_json: str, tenant: Optional[dict] = None) 
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}")
-        # -refresh=false: the provider errors on refresh when an item already
-        # 404s (e.g. deleted in the console), which would block teardown.
-        destroy = _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir,
-                          timeout=120, tenant=tenant)
-        if destroy.returncode != 0:
-            raise TerraformPRAError(
-                f"terraform destroy failed: {destroy.stderr.strip() or destroy.stdout.strip()}")
+        _destroy_sync(work_dir, tenant=tenant)
 
 
 def _remove_db_tunnel_sync(tf_state_json: str) -> None:
@@ -718,12 +797,7 @@ def _remove_db_tunnel_sync(tf_state_json: str) -> None:
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}")
-        # -refresh=false: the provider errors on refresh when an item already
-        # 404s (e.g. deleted in the console), which would block teardown.
-        destroy = _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
-        if destroy.returncode != 0:
-            raise TerraformPRAError(
-                f"terraform destroy failed: {destroy.stderr.strip() or destroy.stdout.strip()}")
+        _destroy_sync(work_dir)
 
 
 async def provision_db_tunnel(
