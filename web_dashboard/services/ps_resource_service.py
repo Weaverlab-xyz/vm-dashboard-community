@@ -119,12 +119,18 @@ _MAX_MANAGED_SYSTEM_ADDRESS = 255
 # runs long enough that a realistic ADCS address from the plugin's own documentation is
 # 269 characters — 14 over the limit — before anyone has typed a real CA name.
 _ADDRESS_LENGTH_ADVICE = {
+    # The three levers, in the order the plugin's own documentation puts them. Each names
+    # what it buys, because "shorten the address" is not actionable on a profile whose
+    # every field is load-bearing.
     "certificate": (
-        "Drop every option already at its default (warn=25, key=rsa3072, san=Host, "
-        "bundle=Pkcs12, pbe=Aes256, store=SecretsSafe, retain=1, secret=cert/{system}/"
-        "{account}), shorten folder=, and move per-identity values such as dns= and "
-        "subject= onto the MANAGED ACCOUNT NAME after a '?', where they override the "
-        "system's for that identity alone"),
+        "Drop every option already at its default — secret=cert/{system}/{account}, "
+        "retain=1, subject=CN={AccountName}, warn=25, key=rsa3072, pbe=Aes256, "
+        "store=SecretsSafe, wait=30, and on AWS region= (it is the ARN's own fourth "
+        "field). Then move per-identity values — dns=, ip=, subject=, lifetime=, eku=, "
+        "key= — onto the MANAGED ACCOUNT NAME after a '?', where they cost nothing from "
+        "this budget and override the system's for that identity alone. Then shorten "
+        "folder=, which is addressed by path rather than read as prose. If every option "
+        "is still doing work, the profile needs splitting across two managed systems"),
 }
 _DEFAULT_ADDRESS_LENGTH_ADVICE = (
     "Shorten the longest field — usually the Resource Broker cert path or the resource "
