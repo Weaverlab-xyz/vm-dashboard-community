@@ -1,5 +1,7 @@
 # Certificates
 
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a private certificate authority to onboard certificate identities against, and want it gone again when the demo ends.
+
 > **Preview.** The plugin's shared core is covered by its own 286-assertion suite, but
 > **none of its four submission paths has been proven against a live authority** — ADCS,
 > AWS Private CA, GCP CAS and the two Entra publishers can only be exercised against a

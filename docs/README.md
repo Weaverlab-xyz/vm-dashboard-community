@@ -38,6 +38,7 @@ demoing, running a lab, or running production.
 | [Image Management](image-management.md) | you are about to build a custom image and need to know how it will reach the other clouds. |
 | [Config Management](config-management.md) | you are about to run an Ansible job and want to know how the runner handles secrets and isolation. |
 | [Secrets Management](secrets-management.md) | you are deciding where to store cloud credentials, and how to evolve that over time. |
+| [Certificates](certificates.md) | you are onboarding certificate identities, and need a private CA to issue them from. |
 | [Storage Management](storage-management.md) | you are enabling a feature that needs a storage backend, which several of them do. |
 | [Remote Agents](remote-agents.md) | your hypervisors, databases or clusters live somewhere the dashboard cannot reach. |
 | [Auto-delete Timer](auto-delete-timer.md) | you want lab resources to clean themselves up — read it before enabling it, because it deletes infrastructure. |
