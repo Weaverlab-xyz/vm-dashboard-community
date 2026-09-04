@@ -432,6 +432,29 @@
       </span>
     </div>
 
+    <!-- Chunked-upload progress. Only rendered in that lane (`total` is 0 otherwise),
+         because a playbook is one request and a bar that flashes to 100% reads as noise.
+         An installer over a corporate link is minutes, and a page with no progress on it
+         is indistinguishable from a hung one. -->
+    <div x-show="chunkUp.total" x-cloak class="mt-4">
+      <div class="flex items-center justify-between text-xs text-gray-600 mb-1">
+        <span>
+          Uploading part <span class="font-mono" x-text="chunkPart()"></span>
+          of <span class="font-mono" x-text="chunkUp.parts"></span>
+          — <span class="font-mono" x-text="formatBytes(chunkUp.sent)"></span>
+          of <span class="font-mono" x-text="formatBytes(chunkUp.total)"></span>
+        </span>
+        <button @click="cancelUpload()" :disabled="chunkUp.cancel"
+                class="text-gray-500 hover:text-red-600 disabled:opacity-50">
+          <span x-show="!chunkUp.cancel">Cancel</span>
+          <span x-show="chunkUp.cancel" x-cloak>Cancelling…</span>
+        </button>
+      </div>
+      <div class="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+        <div class="h-full bg-blue-600 transition-all" :style="'width:' + chunkPct() + '%'"></div>
+      </div>
+    </div>
+
     <!-- The ceiling, stated before the file picker rather than only on refusal. The
          agent-brokered backend's is ~190 KB, which rules out every installer, and an
          operator who learns that from an error has already gone and fetched one. -->
@@ -441,6 +464,13 @@
       <span class="font-medium" x-text="backendLabel(activeBackend)"></span>:
       <span class="font-mono" x-text="formatBytes(activeMaxUpload())"></span>
       — <span x-text="activeUploadReason()"></span>.
+      <span x-show="activeChunked()" x-cloak>
+        Anything over
+        <span class="font-mono" x-text="formatBytes(activeInlineMax())"></span>
+        is sent in
+        <span class="font-mono" x-text="formatBytes(activePartBytes())"></span>
+        parts automatically — there is nothing to switch on.
+      </span>
     </p>
 
     <p class="text-xs text-gray-400 mt-3">
@@ -690,6 +720,9 @@ function storagePage() {
     migrationResult: null,
     pendingFile: null,
     uploading: false,
+    // Chunked-upload progress. `total` of 0 means "not in the chunked lane", which is what
+    // keeps the progress bar off the screen for the playbooks that are still one request.
+    chunkUp: { parts: 0, done: 0, total: 0, sent: 0, cancel: false },
     moveModal: { open: false, name: '', from: '', to: '', busy: false },
     // Bulk-delete state. `selected` holds composite "<backend>|<name>" keys
     // so we can mix assets from different backends in one batch (issue #13).
@@ -929,11 +962,34 @@ function storagePage() {
       return (b && b.upload_limit_reason) || '';
     },
 
+    // Whether the active backend can take a file one part at a time, the size above
+    // which it will, and the part size the server insists on. All three from
+    // /api/storage/backends — the part size especially is not this page's to pick: a
+    // slice of the wrong length is refused at the FIRST part.
+    activeChunked() {
+      const b = this.backends.find(x => x.id === this.activeBackend);
+      return !!(b && b.chunked_upload);
+    },
+
+    activeInlineMax() {
+      const b = this.backends.find(x => x.id === this.activeBackend);
+      return (b && b.inline_upload_bytes) || 0;
+    },
+
+    activePartBytes() {
+      const b = this.backends.find(x => x.id === this.activeBackend);
+      return (b && b.chunk_part_bytes) || 0;
+    },
+
     // Size is checked HERE, at pick time, and not in uploadFile(). By the time
     // uploadFile() runs it has already allocated the ArrayBuffer, the joined binary
     // string and the base64 of it — for a large installer that is several times the
     // file's size in renderer heap, and the tab dies before any request is sent. A
     // server-side limit cannot save a tab that never got to make the call.
+    //
+    // The ceiling compared against is `max_upload_bytes`, which for an object store is
+    // the CHUNKED ceiling — so a 311 MB installer is accepted here and takes the lane
+    // below rather than being refused.
     onFilePick(event) {
       const f = event?.target?.files?.[0];
       const ceiling = this.activeMaxUpload();
@@ -959,25 +1015,21 @@ function storagePage() {
         return;
       }
       this.uploading = true;
+      const name = this.pendingFile.name;
       try {
-        // Read file as base64. Done in two steps so the binary is preserved
-        // even for .deb/.rpm/.exe payloads. Chunked rather than one byte at a
-        // time: a Windows installer is an order of magnitude larger than the
-        // playbooks this started with, and a per-byte loop over a 50 MB .msi
-        // blocks the UI thread long enough to look like a hung page.
-        const buf = await this.pendingFile.arrayBuffer();
-        const bytes = new Uint8Array(buf);
-        const CHUNK = 0x8000;   // below the argument-count limit of .apply()
-        const parts = [];
-        for (let i = 0; i < bytes.length; i += CHUNK) {
-          parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK)));
-        }
-        const b64 = btoa(parts.join(''));
-        const res = await API.post('/api/storage/upload', {
-          filename: this.pendingFile.name,
-          content_b64: b64,
-        });
-        this.showToast(`Uploaded ${this.pendingFile.name}`);
+        // Two lanes, chosen by size and by what the backend can do. Anything the inline
+        // transport comfortably carries keeps taking it — one request, and the secret
+        // scan sees the whole file. Above that an object store gets the chunked lane;
+        // a filesystem backend has none, and onFilePick already refused the file.
+        const big = this.activeChunked()
+          && this.activeInlineMax()
+          && this.pendingFile.size > this.activeInlineMax();
+        const res = big ? await this.uploadChunked() : await this.uploadInline();
+        // `cancelled` is uploadChunked's own signal and it has already toasted. A falsey
+        // result is the 401 path: API.request logged the session out, so saying
+        // "Uploaded" on the way to the login screen would be a lie.
+        if (!res || res.cancelled) return;
+        this.showToast(`Uploaded ${name}`);
         // Advisory secret scan (upload still succeeded — this is a heads-up).
         const findings = res?.secret_findings || [];
         if (findings.length) {
@@ -985,7 +1037,7 @@ function storagePage() {
             .map(f => `${f.rule} (line ${f.line})`).join(', ');
           this.showToast(
             `⚠ Possible hard-coded secret${findings.length > 1 ? 's' : ''} in `
-            + `${this.pendingFile.name}: ${where}${findings.length > 3 ? '…' : ''}. `
+            + `${name}: ${where}${findings.length > 3 ? '…' : ''}. `
             + `Use a vault reference or Ansible Vault instead.`, 'error');
         }
         this.pendingFile = null;
@@ -997,7 +1049,104 @@ function storagePage() {
         this.showToast(e.message || 'Upload failed', 'error');
       } finally {
         this.uploading = false;
+        this.chunkUp = { parts: 0, done: 0, total: 0, sent: 0, cancel: false };
       }
+    },
+
+    // The original lane: whole file, base64 in JSON.
+    async uploadInline() {
+      // Read file as base64. Done in two steps so the binary is preserved
+      // even for .deb/.rpm/.exe payloads. Chunked rather than one byte at a
+      // time: a Windows installer is an order of magnitude larger than the
+      // playbooks this started with, and a per-byte loop over a 50 MB .msi
+      // blocks the UI thread long enough to look like a hung page.
+      const buf = await this.pendingFile.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const CHUNK = 0x8000;   // below the argument-count limit of .apply()
+      const parts = [];
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK)));
+      }
+      const b64 = btoa(parts.join(''));
+      return await API.post('/api/storage/upload', {
+        filename: this.pendingFile.name,
+        content_b64: b64,
+      });
+    },
+
+    // The lane for an installer. `file.slice()` returns a Blob that is a VIEW — the
+    // bytes are read off disk by fetch() as the request streams, so the renderer never
+    // holds the file and never builds a base64 of it. That is the whole difference
+    // between this and uploadInline(), and it is why a 311 MB .exe arrives at all.
+    //
+    // Sequential, one part in flight. Not for politeness: the server computes each
+    // part's byte offset from its number, and GCS resumable uploads are positional, so
+    // parts that overtake each other would land at the wrong offsets. Parallelism here
+    // would buy throughput and cost correctness.
+    async uploadChunked() {
+      const file = this.pendingFile;
+      const session = await API.post('/api/storage/upload/begin',
+        { filename: file.name, size: file.size });
+      // Same 401 guard as inside the loop, one hop earlier: without it the next line
+      // reads part_bytes off null and the operator gets a TypeError for a logged-out
+      // session.
+      if (!session) throw new Error('Session expired — sign in and retry.');
+      const part = session.part_bytes;
+      this.chunkUp = { parts: session.parts, done: 0, total: file.size, sent: 0,
+                       cancel: false };
+      const staged = [];
+      let findings = [];
+      try {
+        for (let n = 1; n <= session.parts; n++) {
+          if (this.chunkUp.cancel) {
+            await API.post('/api/storage/upload/abort', { handle: session.handle })
+              .catch(() => {});
+            this.showToast(`Upload of ${file.name} cancelled — nothing was written.`);
+            return { cancelled: true };
+          }
+          const slice = file.slice((n - 1) * part, Math.min(n * part, file.size));
+          const res = await API.putBlob(
+            `/api/storage/upload/part/${n}`, slice,
+            { 'X-Upload-Handle': session.handle });
+          // A falsey result is API's 401 path: the session was logged out mid-upload.
+          // Stopping here rather than pushing an empty ref means the failure is reported
+          // as the expired session it is, instead of as a commit that lost a part.
+          if (!res) throw new Error('Session expired during upload — sign in and retry.');
+          staged.push({ part: n, ref: res.ref || '' });
+          if (n === 1 && res && res.secret_findings) findings = res.secret_findings;
+          this.chunkUp.done = n;
+          this.chunkUp.sent += slice.size;
+        }
+      } catch (e) {
+        // Abort before re-raising: the staged parts are otherwise invisible bytes the
+        // operator is billed for until the store expires them, and a retry of the same
+        // file would stage a second set.
+        await API.post('/api/storage/upload/abort', { handle: session.handle })
+          .catch(() => {});
+        throw e;
+      }
+      const res = await API.post('/api/storage/upload/commit',
+        { handle: session.handle, parts: staged });
+      if (!res) throw new Error('Session expired before the upload was committed.');
+      return { ...res, secret_findings: findings };
+    },
+
+    cancelUpload() {
+      // Sets a flag rather than aborting in place: the loop checks it between parts, so
+      // the cancel lands on a part boundary and the abort call is made once, from the
+      // one place that holds the handle.
+      this.chunkUp.cancel = true;
+    },
+
+    // The part being sent, not the count already done — the label reads "part 12 of 39"
+    // while 12 is in flight, and must not say "40 of 39" on the last one.
+    chunkPart() {
+      return Math.min(this.chunkUp.done + 1, this.chunkUp.parts);
+    },
+
+    chunkPct() {
+      if (!this.chunkUp.total) return 0;
+      return Math.min(100, Math.round((this.chunkUp.sent / this.chunkUp.total) * 100));
     },
 
     // ── Bulk-selection helpers (issue #13) ─────────────────────────────────
