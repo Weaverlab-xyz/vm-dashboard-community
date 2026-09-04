@@ -350,15 +350,22 @@ def retire_admin_secret(row: CloudDatabase) -> str:
         secrets_backend_service.delete_sync(backend, ref)
     except Exception as exc:
         if _already_gone(exc):
-            logger.info("clouddb adapter: no staged credential %s in %s for db_id=%s",
-                        ref, backend, row.id)
+            logger.info("clouddb adapter: no staged credential to retire for db_id=%s",
+                        row.id)
             return ""
         raise AdapterPairingError(
             f"the adapter's staged admin credential {ref or key} in "
             f"{_BACKEND_LABEL.get(backend, backend)} was not deleted — it holds a "
             f"database password, remove it by hand: {exc}") from exc
-    logger.info("clouddb adapter: retired staged credential %s from %s db_id=%s",
-                ref, backend, row.id)
+    # Neither the ref nor the backend is logged HERE, and that is deliberate rather
+    # than incidental. Both descend from a name CodeQL classifies as sensitive
+    # (`secret_key`, `_SECRET_BACKEND`), so logging either makes
+    # py/clear-text-logging-sensitive-data read the NAME of the secret as the secret —
+    # which it is right to be suspicious of, and which suppressing would waste. Nothing
+    # is lost: the caller in cloud_database_service logs the returned ref as
+    # ``resource_id``, and the failure path above names it in the job, where an
+    # operator with a credential to remove by hand actually looks.
+    logger.info("clouddb adapter: retired the staged credential for db_id=%s", row.id)
     return ref
 
 

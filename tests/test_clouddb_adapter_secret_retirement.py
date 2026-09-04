@@ -23,6 +23,7 @@ Runs under pytest or standalone:
 """
 import asyncio
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -237,6 +238,44 @@ def test_a_real_delete_failure_names_the_secret_and_says_what_it_is():
     assert "by hand" in message
     assert "GCP Secret Manager" in message      # the store, as the Secrets page names it
     assert "403 Permission denied" in message   # and the cause, not just our summary
+
+
+def _logger_calls(body):
+    """Every ``logger.<level>(...)`` in ``body``, each as one whole statement."""
+    out = []
+    for start in (m.end() for m in re.finditer(r"logger\.\w+\(", body)):
+        depth, i = 1, start
+        while depth and i < len(body):
+            depth += {"(": 1, ")": -1}.get(body[i], 0)
+            i += 1
+        out.append(body[start:i - 1])
+    return out
+
+
+def test_the_ref_is_never_written_to_the_log_from_this_module():
+    """CodeQL alerts 124/125 on the first cut of this. `secret_key` and
+    `_SECRET_BACKEND` are name-based sensitive sources, so anything descending from
+    them trips py/clear-text-logging-sensitive-data at a logging sink — the query reads
+    the NAME of the secret as the secret. Naming the value for what it is, and logging
+    it only where it does not descend from such a name, is the same answer the
+    functional account's regional Secret Manager entry already took; a `# nosec` there
+    would have wasted a query that is right to be suspicious.
+
+    Nothing is lost by the omission, which is why this is a guard and not a compromise:
+    the ref reaches the log through the caller (as `resource_id`) and reaches the
+    operator through the raised message. Both are asserted elsewhere in this file."""
+    src = Path(_ROOT, "web_dashboard", "services", "cloud_db_adapter_service.py").read_text(
+        encoding="utf-8")
+    body = src.split("def retire_admin_secret(", 1)[1].split("async def retire_adapter(", 1)[0]
+    calls = _logger_calls(body)
+    assert calls, "the guard stopped finding the logger calls it exists to check"
+    for call in calls:
+        # Whole statements, not lines: these calls wrap, and a regression that put the
+        # ref back on a continuation line is exactly what a per-line check would miss.
+        for tainted in ("ref", "key", "backend"):
+            found = re.search(rf"[(,]\s*{tainted}\b", call)
+            assert found is None, (
+                f"logs a CodeQL-sensitive value: {' '.join(call.split())}")
 
 
 def test_an_underivable_ref_still_names_something_addressable():
