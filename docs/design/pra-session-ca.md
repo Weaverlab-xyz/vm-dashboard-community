@@ -464,6 +464,39 @@ deliberately wider than `VALID_CLOUDS`), the same CA being used beyond DB sessio
 auditor asking whether the issuing CA can be revoked, which has a compliance answer
 independent of likelihood.
 
+### The narrow security claim that does survive — and what it is really worth
+
+§6's rule (validity period, not rotation interval) is what connects that section to this
+one, and the connection is easy to overstate in both directions.
+
+**The sound version of the argument** is mechanical: there is no CRL, so the only bound on a
+leaked subordinate is its validity period; a validity short enough to matter is days; nobody
+reissues a certificate authority by hand every week, so it quietly stops happening. **The
+automation is therefore not the control — it is what makes the control sustainable.** That
+survives scrutiny in a way "we rotate, so the old one goes away" never did.
+
+**It does not fix the premise, though.** It bounds the exposure window from a leaked key
+that, given the isolation above, has nowhere to be presented. Tightening a window on an
+attack that cannot currently be executed is not a reason to build anything.
+
+**Where it does real work is drift.** The isolation assumption lives in Terraform, not in
+anything the database itself enforces, and `VALID_REGISTER_CLOUDS` exists precisely so
+instances can be registered that were never provisioned under those rules. When that
+happens the isolation silently stops being true and nobody re-runs this analysis. A short
+validity bound is the control still standing when the assumption it depended on has lapsed.
+That argument needs no belief that PRA will be compromised — only that architectures drift.
+
+**And its best use is to give the governance story a number.** "If the issuing CA key
+leaked, what is our exposure window?" answers *indefinite*, or "we would have to go look up
+what we set," in almost every organisation. Here it answers **eight days, by policy,
+enforced by the rotation schedule** — a figure that is auditable, controlled, and reportable.
+
+That is a risk-register artifact rather than a preventive control, which makes it governance
+after all: governance with something quantitative under it instead of an assertion about
+hygiene. Pitch it that way round. "We can state our worst-case exposure window and we
+control it" is a stronger sentence than anything in the threat-model framing, and it is
+also true.
+
 ### The reframe that carries the story
 
 **A certificate authority is a privileged account that nobody treats as one.** Look at the
