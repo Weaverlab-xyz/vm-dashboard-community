@@ -1134,16 +1134,29 @@ function wizard() {
     // Neutral is prepended client-side and is the default selection.
     personaOptions: [],
 
+    // The stored VALUE stays 'demo' and the label deliberately does not say so. The
+    // profile is a tenancy gate -- one BeyondTrust tenant of your own, versus a registry
+    // of customers' -- and "demo" names only the first thing it was used for. Somebody
+    // administering the infrastructure they actually run has exactly the same tenancy
+    // shape, and reading "Demo infrastructure" here concluded the tool was not for them,
+    // or picked POV because theirs is not a demo -- which is the one genuinely wrong
+    // answer on this step.
+    //
+    // Renaming the value would be a migration across config rows, compose files, .env
+    // and every doc, for no change in behaviour. Renaming what a human reads costs
+    // nothing and is the part that was lying.
     profileOptions: [
       { value: 'demo',
-        label: 'Demo infrastructure',
-        desc:  'Manage your own demo estate across AWS, Azure, GCP, OCI and on-premises '
-             + 'hypervisors, against one BeyondTrust tenant. This is the usual choice.' },
+        label: 'Your own estate',
+        desc:  'Manage your own infrastructure across AWS, Azure, GCP, OCI and '
+             + 'on-premises hypervisors, against one BeyondTrust tenant — whether that '
+             + 'is a lab you demonstrate from or the environment you actually run. '
+             + 'This is the usual choice.' },
       { value: 'pov',
         label: 'Customer POV / POC environments',
         desc:  'Stand up customer proof-of-value environments on a lab platform, each '
              + 'against its own PRA and Password Safe tenant. No cloud credentials, and '
-             + 'the demo features are switched off.' },
+             + 'the features that reach an estate of your own are switched off.' },
     ],
 
     featureFlags: [

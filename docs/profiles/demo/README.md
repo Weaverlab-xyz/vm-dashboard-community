@@ -9,6 +9,21 @@ That is the difference from the [POV profile](../pov/README.md), where each envi
 belongs to a customer and points at the customer's own BeyondTrust tenant. See
 [the gate](../README.md#the-gate) for why the two cannot be the same instance.
 
+## If you are not demonstrating anything
+
+You are still on this profile, and the pages below are not the ones you want.
+
+`demo` names a tenancy shape — one BeyondTrust tenant of your own — rather than a purpose,
+and administering infrastructure you actually depend on has that same shape. Nothing about
+the profile is pretend: the VMs are real, the accounts are really onboarded, and the
+rotations really run.
+
+What differs is which documentation is yours. **The capability docs at the
+[docs root](../../README.md) are the whole of it** — deploying a VM, onboarding it,
+rotating its credential and reaping it are the same pages whether the estate is a lab or
+production. This folder holds only the material that exists *because* somebody is
+presenting: the per-role narratives and the purpose-built demo environments. Skip it.
+
 ## Pages
 
 | Page | What's in it |

@@ -8,11 +8,20 @@ capability; this folder describes which of the two instances that capability bel
 
 | | I am… | Start here |
 |---|---|---|
-| **demo** | running my own estate — deploying cloud VMs, building images, standing up clusters and databases, showing them to people | [Demo profile](demo/README.md) |
+| **demo** | running my own estate — deploying cloud VMs, building images, standing up clusters and databases, whether to operate them or to show them to people | [Demo profile](demo/README.md) |
 | **pov** | running customer proof-of-value environments, each against the customer's own BeyondTrust tenant | [POV profile](pov/README.md) |
 
 If you are not sure, you are on `demo`: it is the default, and what every existing install
 already is.
+
+**The name is narrower than the profile.** `demo` was named for the first thing it was used
+for, and it has never meant the work is pretend: it deploys real VMs into real cloud
+accounts, onboards real credentials and rotates them on a real schedule. What it actually
+names is a *tenancy shape* — one BeyondTrust tenant, resolved from the global singletons —
+and somebody administering the infrastructure they depend on has exactly that shape. So a
+community operator running their own environment wants `demo`, not a third profile: a
+profile that masked features by purpose rather than by tenancy would be a preference, and
+[the gate](#the-gate) below is the argument for why it must not be one.
 
 Why they are exclusive is **tenancy.** A demo instance resolves its BeyondTrust tenant from
 the global singletons (`bt_api_host`, `pscli_api_url`, `entitle_api_key`). A POV instance

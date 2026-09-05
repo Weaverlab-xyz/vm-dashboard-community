@@ -17,19 +17,23 @@ the dashboard deploys resources into **your** accounts.
 
 Every page under [`docs/`](docs/README.md) opens with the same line: who it is for,
 which install profile it applies to, and the situation that should send you to it.
-Four readers, four ways in:
+Five readers, five ways in:
 
 | You are… | Start here |
 |---|---|
 | **installing or running** the dashboard | [Onboarding](docs/ONBOARDING.md), then the reference table below |
+| **running your own infrastructure** with it | the reference table below — you want the `demo` profile, whatever its name suggests |
 | **showing** it to someone | [Demo profile](docs/profiles/demo/README.md) — one page per role, plus the OT demo cell |
 | running **customer proof-of-value** work | [POV profile](docs/profiles/pov/README.md) |
 | **changing the code** | [CONTRIBUTING.md](CONTRIBUTING.md), then [design notes](docs/design/README.md) |
 
 And pick a profile before you install, because it is a gate rather than a preference:
-`install_profile` is **`demo`** (the default — your own estate, which you show to people)
-or **`pov`** (customer evaluations, each against the customer's own BeyondTrust tenant),
-and the two are mutually exclusive. [Demo and POV profiles](docs/profiles/README.md)
+`install_profile` is **`demo`** (the default — one BeyondTrust tenant of your own, whether
+you run that estate or demonstrate from it) or **`pov`** (customer evaluations, each
+against the customer's own BeyondTrust tenant), and the two are mutually exclusive. The
+gate is about *whose tenant*, not about whether the work is real — so if you are
+administering infrastructure you actually depend on, `demo` is still the profile you
+want. [Demo and POV profiles](docs/profiles/README.md)
 explains why, and which features each one gets.
 
 The full index of every page is [docs/README.md](docs/README.md).
