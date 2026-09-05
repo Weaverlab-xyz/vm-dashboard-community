@@ -7,6 +7,11 @@ before the code so the PKI owners can refuse it on the merits rather than after 
 Facts about the PRA Vault side are marked where they come from the product rather than from
 anything this repo has exercised.
 
+**The case for building it is governance, not threat mitigation** — §11 says so plainly,
+including why the security argument is weak here and what the simpler stopping point is
+(a hand-issued subordinate, in "Why not simply upload the root?" below). Read both before
+pitching this to anyone.
+
 **Scope: cloud CA backends, against services whose trust store the operator controls.** ADCS
 is excluded on policy (§7). For databases: **self-managed PostgreSQL and MySQL now, MongoDB
 when the `sra` provider ships a tunnel resource** — MongoDB being the best authentication fit
@@ -35,6 +40,46 @@ So: Password Safe issues a **subordinate CA**, PRA Vault holds it, PRA mints ses
 beneath it, and Password Safe rotates the subordinate on a schedule. One governed
 credential instead of N, and the leaves become short-lived enough that the plugin's
 documented absence of CRL and OCSP checking stops mattering for them.
+
+### Why not simply upload the root to PRA?
+
+The first question anyone asks, and it deserves a real answer rather than an appeal to
+PKI convention.
+
+**Practically, it may not be available.** Issuing requires the CA's *private key*, and a
+GCP CAS root's key lives in Google's HSM and is not exportable. `ca_chain_pem` (§2) gives
+the public certificates, which is all the trust-store side needs — it is not what PRA
+would need to mint. Uploading a root would mean generating one *outside* CAS specifically
+so it could be exported, trading HSM protection on the anchor for convenience. Confirm
+against the CA in question before assuming either way.
+
+**Conceptually, the root is what every target has decided to believe**, and that decision
+cannot be un-made without visiting every target. A root in PRA is unbounded (it can mint
+anything), unrotatable (rotating means touching every trust store) and effectively
+unrevocable, sitting online in a session-brokering appliance for a decade. A subordinate is
+bounded, replaceable and short-lived, and the root goes back to doing one job.
+
+**But there are three options here, not two, and the middle one is real:**
+
+| | Root in PRA | Sub-CA issued by hand | Sub-CA issued + rotated by Password Safe |
+|---|---|---|---|
+| Root exposure | total | contained | contained |
+| Rotate without touching targets | no | yes, manually | yes, automatically |
+| Practical sub-CA lifetime | n/a | ~a year | days to weeks |
+| Signing-key lifecycle audited | no | no | yes |
+| Moving parts | fewest | few | most |
+
+**Most of the containment is in the middle column** — issue a subordinate by hand, upload
+it, leave the root alone. An afternoon's work, no plugin capability, none of the open
+questions below. Anyone who only needs the security property should stop there, and this
+note should not be read as arguing otherwise.
+
+What the third column adds is that **rotation becomes cheap enough to do often**, and that
+matters here for one specific reason: §6 establishes that a DevOps-tier pool cannot revoke
+a subordinate at all. A short lifetime is then the *only* available mitigation, and short
+lifetimes are only practical when rotation is automated. That is the narrow, honest case
+for the automation — not that it prevents an attack, but that it shrinks a window nothing
+else can close. The broader case for building it is §11, and it is not a security case.
 
 ## 1. Rotating a CA is not rotating a token, and the chain topology is what decides
 
@@ -319,7 +364,7 @@ So the database scope is **certificate authentication to self-managed PostgreSQL
 now, MongoDB when the provider resource exists**, carrying two independent dependencies —
 backend TLS plus a client certificate on the two dedicated tunnel resources, and an
 `sra` MongoDB tunnel resource. Both are bounded external asks rather than design flaws, and
-§1-§7 and §9-§10 stand independently of when either lands.
+§1-§7 and §9-§11 stand independently of when either lands.
 
 ## 9. The credential has to land whole, and the split model does not survive the promotion
 
@@ -358,6 +403,88 @@ Two of its properties matter more here than there:
 was deleted wholesale once the product's own primitive was found. **Do not rebuild it here.**
 Every failure mode that reconciler managed was created by the dashboard being in the data
 path, and the same would be true again.
+
+## 11. What this is actually for — a governance story, not a threat model
+
+The reason to build this is **not** that it stops an attack, and pitching it that way
+collapses under the first informed question. Recording the honest version here so nobody
+has to rediscover it in front of a customer.
+
+**Why the security case is weak.** A PRA compromise is unlikely, and reaching a database
+session through PRA already passes MFA, an approval workflow and session audit. More
+decisively, these databases are unreachable by any other route —
+`terraform/db_postgres/main.tf` makes `publicly_accessible = false` load-bearing, with the
+PRA tunnel as the only path in. So even a stolen subordinate key yields a certificate with
+nowhere to present it. The compensating controls are real and the network isolation closes
+the bypass those controls would otherwise miss.
+
+What *would* change that: a database reachable another way (a peered network, a bastion, or
+an on-prem instance registered rather than provisioned — `VALID_REGISTER_CLOUDS` is
+deliberately wider than `VALID_CLOUDS`), the same CA being used beyond DB sessions, or an
+auditor asking whether the issuing CA can be revoked, which has a compliance answer
+independent of likelihood.
+
+### The reframe that carries the story
+
+**A certificate authority is a privileged account that nobody treats as one.** Look at the
+profile of a signing key: it grants high privilege, is created once and never touched, has
+an unknown number of copies in unknown hands, does not meaningfully expire, sits in no
+vault, is never rotated or checked out, and outlives the person who made it.
+
+That is the profile of the shared local admin password — the exact thing privileged access
+management exists to fix. The category simply never got pointed at PKI. The pitch works
+because it does not ask anyone to accept a new premise: they already believe static, shared,
+unrotated privileged credentials are unacceptable. It shows them one they already hold,
+somewhere they had not looked.
+
+### What the arrangement establishes
+
+- **"Who can issue?" becomes answerable.** Today the honest answer is "whoever holds a copy,
+  and we do not know who that is." After, it is a managed account with an access policy and
+  a checkout record. Answerability is a governance property regardless of whether anyone
+  ever abuses the key.
+- **The authority gets a lifecycle** — issued, held, rotated, retired, each with a date and
+  an actor. CAs conventionally have none; they are created and forgotten.
+- **Separation of duties, with the handoff recorded.** The root stays with the PKI team in
+  the HSM; the subordinate that exercises it day to day lives in PRA; Password Safe brokers
+  between them. No team holds both halves.
+- **Least privilege applied to an issuer** — name constraints (§5) say which identities this
+  authority may assert at all. Most CAs are unconstrained by default.
+- **Time-bounded rather than standing authority** — the JIT argument, applied to an issuer
+  instead of a session.
+- **Revocation becomes an access decision, not a PKI project.** Retire the managed account
+  and the authority is gone at the next rotation.
+- **It closes the top of the audit chain.** PRA answers *who connected*. Nothing today
+  answers *who authorised that identity to exist*. Those are different questions and only
+  the first is currently covered.
+
+### The demonstration
+
+1. The CA is an inventory row — owner, expiry, standing cost. It is on the books.
+2. Its credential is a managed account: approval to check out, retrieval recorded.
+3. **Rotate it.** A new subordinate, sessions keep working, no target touched. This is the
+   moment worth building the demo around — PKI practitioners assume rotating an issuing CA
+   means an estate-wide change, and watching it not be one is the argument.
+4. A live session whose certificate chains back to that governed credential.
+5. Retire it, and the access is gone — the answer conventional PKI gives badly.
+
+### Where the pitch is weak
+
+- It addresses a problem most organisations do not feel yet, which is a slower sale than an
+  incident narrative.
+- The payoff is posture, not prevention. Do not let it drift back toward implying otherwise;
+  that is what fails under scrutiny.
+- It presumes the audience cares about PKI hygiene, which many do not until an auditor asks.
+  The qualifying question is roughly "have you had a certificate-management finding?"
+
+It lands best with regulated customers, anyone carrying such a finding, and anyone whose
+mTLS build quietly multiplied their CA count without assigning an owner to any of them.
+
+**The precedent already shipped.** [k8s ServiceAccount token
+rotation](k8s-sa-token-rotation.md) is this same story with a different credential — a
+bearer token nobody rotated, made into a managed account with Password Safe owning the
+sync. "We already do this for tokens; the CA is the next unmanaged authority" is a much
+easier opening than introducing the pattern cold.
 
 ## Open questions — answer these before writing code
 
