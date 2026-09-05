@@ -8,9 +8,10 @@ Facts about the PRA Vault side are marked where they come from the product rathe
 anything this repo has exercised.
 
 **Scope: cloud CA backends, against services whose trust store the operator controls.** ADCS
-is excluded on policy (§7) and cloud *database* session access — the use case this looks
-like it should serve — is excluded on mechanism (§8). Read §8 before proposing it again;
-the reason it fails is not visible from either product's documentation.
+is excluded on policy (§7). For databases the engines are **PostgreSQL and MySQL only** —
+SQL Server has no client-certificate login type at all — and the binding constraint is PRA's
+tunnel rather than the database (§8). Read §8 before proposing a managed cloud database; the
+reason that fails is not visible from either product's documentation.
 
 ## The problem, and the inversion that makes it tractable
 
@@ -209,50 +210,63 @@ is a defensible story in a way "we turned off approval on the sub-CA template" i
 a feature customers are forbidden to enable, and building it to be refused is worse than not
 building it.
 
-## 8. Cloud database session access is the one place this cannot land
+## 8. Databases: PostgreSQL and MySQL only, and the tunnel is the constraint
 
-The obvious first use case — PRA mints a short-lived certificate that authenticates a
-**cloud database** session — is blocked twice over, and the two blockers are independent.
-This section exists because it is the use case everyone proposes first, and the reason it
-fails is not visible from either product's documentation.
-
-**The engine matrix inverts perfectly.** From [databases.md:92-97](../databases.md) and
-`terraform_pra_service._DB_TUNNEL_RESOURCE`:
+**Engine scope is PostgreSQL and MySQL.** SQL Server is excluded permanently and Oracle is
+excluded for now — neither is a gap to close later:
 
 | Engine | PRA tunnel | Backend TLS | x.509 client auth |
 |---|---|---|---|
 | postgres | `sra_postgresql_tunnel_jump` | **cleartext** | yes |
 | mysql | `sra_my_sql_tunnel_jump` | **cleartext** | yes |
 | sqlserver | `sra_protocol_tunnel_jump` (`mssql`) | TDS-aware, does its own | **none — no client-cert login type** |
-| oracle | `sra_protocol_tunnel_jump` (`tcp`) | raw TCP | only via Oracle Wallet |
+| oracle | `sra_protocol_tunnel_jump` (`tcp`) | raw TCP | only via an Oracle Wallet |
 
-The two engines that support certificate authentication are reached over a tunnel that
-proxies the **cleartext** wire protocol — that is how PRA injects the Vault credential and
-records the session, and the dedicated jumps have no backend-TLS option. All three clouds
-disable transport security to accommodate it: `rds.force_ssl=0`
+From [databases.md:92-97](../databases.md) and `terraform_pra_service._DB_TUNNEL_RESOURCE`.
+SQL Server authenticates by SQL login, Windows auth or Entra; its TLS is for encryption,
+never identity, so no certificate this design issues could ever log into it. Oracle's
+certificate path runs through a Wallet — a different container and a different delivery
+problem, not this one.
+
+**The constraint that actually decides the feature is the tunnel, not the database.** The
+two engines that *do* support certificate authentication are reached over tunnels that proxy
+the **cleartext** wire protocol — that is how PRA injects the Vault credential and records
+the session, and the dedicated jumps have no backend-TLS option. All three clouds disable
+transport security to accommodate it: `rds.force_ssl=0`
 (`terraform/db_postgres/main.tf:85-91`), `ssl_mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED`
 (`db_gcp_postgres/main.tf:96`), `require_secure_transport=OFF`
 (`db_azure_postgres/main.tf:110-120`).
 
-**A client certificate is a TLS handshake artifact.** With no TLS on the jumpoint→DB hop
-there is no handshake in which to present one. This is not a configuration gap that could be
-closed — the cleartext proxy *is* the credential-injection and session-recording mechanism.
+A client certificate is a **TLS handshake artifact**. With no TLS on the jumpoint→DB hop
+there is no handshake in which to present one. That is a property of the tunnel and applies
+whether the database is managed or self-managed, so it is not something a different DB
+deployment fixes.
 
-And the one engine whose tunnel does negotiate backend TLS, SQL Server, has no
-client-certificate login type at all: it authenticates by SQL login, Windows auth or Entra.
-Its TLS is for encryption, never identity.
+There is exactly one escape, and it costs the reason for using PRA: route the engine over
+the generic `sra_protocol_tunnel_jump` with `tunnel_type=tcp`, which forwards raw TCP and
+would let a client negotiate TLS end-to-end and present a certificate. But a raw forwarder
+sees no wire protocol, so it injects no credential and records no session content — and
+`_DB_TUNNEL_RESOURCE` hardcodes the dedicated resources for these two engines, so it is a
+code change rather than a setting. Worth knowing it exists; not worth taking without deciding
+that session recording is expendable.
 
-**The second blocker stands even if the first were solved.** These modules provision
-*managed* services — `aws_db_instance`, `google_sql_database_instance`,
-`azurerm_postgresql_flexible_server` — and managed database services do not accept an
+**Managed services are blocked a second time, independently.** `aws_db_instance`,
+`google_sql_database_instance` and `azurerm_postgresql_flexible_server` do not accept an
 operator-supplied CA for verifying client certificates. Cloud SQL issues client certificates
-from its own CA; RDS and Flexible Server expose no client-verification CA setting. A PRA-held
-subordinate would have nothing to chain into.
+from its own per-instance CA; RDS and Flexible Server expose no client-verification CA
+setting at all. So even over a TLS-capable tunnel, a PRA-held subordinate would have nothing
+to chain into on a managed instance.
 
-So the ground this design actually stands on is **services whose trust store the operator
-controls** — the mTLS endpoint pattern (`examples/playbooks/certificates/nginx-mtls-endpoint.yml`,
-already fed by `ca_chain_pem`), and self-managed engines on a VM. A cloud-database variant
-would need a different tunnel primitive from PRA, not a different certificate.
+**Which leaves self-managed PostgreSQL and MySQL on a VM as the viable database target** —
+where `pg_hba.conf`, `ssl_ca` and `REQUIRE X509` are the operator's to set. That is the same
+property the mTLS endpoint pattern relies on
+(`examples/playbooks/certificates/nginx-mtls-endpoint.yml`, already fed by `ca_chain_pem`):
+the design works exactly where the trust store is ours to configure, and nowhere else.
+
+Reaching such an instance *through PRA* still runs into the tunnel constraint above. So the
+honest statement of scope is: **certificate authentication to self-managed PostgreSQL and
+MySQL, with PRA session brokering as an open question pending a TLS-capable tunnel
+primitive** — not a blocker for the CA design itself, which is what §1-§7 and §9-§10 cover.
 
 ## 9. The credential has to land whole, and the split model does not survive the promotion
 
