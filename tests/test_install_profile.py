@@ -24,6 +24,10 @@ So the properties pinned here are the ones whose absence is invisible:
     was not for them, or pushed them to POV — the one genuinely wrong answer on that step.
     The mismatch between value and label is deliberate, and it looks enough like a bug to
     be worth pinning before somebody tidies it back.
+  * **Neither profile's infrastructure belongs to the customer.** A POV runs on a lab
+    platform or cloud account the OPERATOR owns; what belongs to the customer is the
+    tenant it is wired into. Calling those environments "customer environments" puts the
+    boundary in the wrong place, and the boundary is the whole point of the split.
 
 Pure where it can be: the source-shape assertions parse files and import nothing. The
 behavioural ones import feature_flags, which needs only config_service and settings.
@@ -616,6 +620,27 @@ def test_the_wizard_says_the_default_profile_covers_real_infrastructure():
     demo_desc = options.split("value: 'demo'", 1)[1].split("value: 'pov'", 1)[0]
     assert "actually run" in demo_desc, \
         "the demo option does not tell an operator that a real estate belongs here"
+
+
+def test_the_pov_option_does_not_call_the_sandbox_the_customers():
+    """A POV runs on a lab platform or cloud account the operator owns and pays for. What
+    the customer owns is the tenant at the other end -- which is what the POV instance's
+    nav chip has always said ("Customer tenants", not "Customer environments")."""
+    options = _wizard_profile_options()
+    label = re.search(r"value: 'pov',\s*\n\s*label:\s*'([^']+)'", options)
+    assert label, f"could not find the pov option's label in:\n{options[:400]}"
+    assert "customer" not in label.group(1).lower(), (
+        f"the wizard labels the POV option {label.group(1)!r}, which calls the sandbox "
+        f"the customer's. The sandbox is the operator's; the TENANT is the customer's.")
+
+
+def test_the_pov_option_still_names_whose_tenant_it_reaches():
+    """Dropping "customer" from the label must not drop the distinction it was reaching
+    for -- whose PRA and Password Safe answer at the other end IS the profile."""
+    options = _wizard_profile_options()
+    pov_desc = options.split("value: 'pov'", 1)[1]
+    assert "customer's own" in pov_desc, \
+        "the POV option no longer says whose tenant the sandbox is wired into"
 
 
 def test_the_other_option_does_not_call_the_first_one_the_demo_features():

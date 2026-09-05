@@ -1145,6 +1145,15 @@ function wizard() {
     // Renaming the value would be a migration across config rows, compose files, .env
     // and every doc, for no change in behaviour. Renaming what a human reads costs
     // nothing and is the part that was lying.
+    //
+    // The second option had the mirror of the same fault: it called the environments the
+    // CUSTOMER'S. They are not. A POV runs on a lab platform or a cloud account YOU own
+    // and pay for -- a sandbox you stand up for an evaluation. What belongs to the
+    // customer is the TENANT it is wired into, which is the whole reason this profile
+    // exists and the one thing the nav chip already says ("Customer tenants").
+    //
+    // So the pair is not mine-versus-theirs. Both sandboxes are yours; the difference is
+    // whose PRA and Password Safe answer at the other end.
     profileOptions: [
       { value: 'demo',
         label: 'Your own estate',
@@ -1153,10 +1162,11 @@ function wizard() {
              + 'is a lab you demonstrate from or the environment you actually run. '
              + 'This is the usual choice.' },
       { value: 'pov',
-        label: 'Customer POV / POC environments',
-        desc:  'Stand up customer proof-of-value environments on a lab platform, each '
-             + 'against its own PRA and Password Safe tenant. No cloud credentials, and '
-             + 'the features that reach an estate of your own are switched off.' },
+        label: 'Sandbox POV / POC environments',
+        desc:  'Stand up proof-of-value sandboxes on a lab platform you run, each wired '
+             + "into the customer's own PRA and Password Safe tenant. No cloud "
+             + 'credentials, and the features that reach an estate of your own are '
+             + 'switched off.' },
     ],
 
     featureFlags: [

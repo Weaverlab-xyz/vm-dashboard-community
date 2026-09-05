@@ -9,7 +9,7 @@ capability; this folder describes which of the two instances that capability bel
 | | I am… | Start here |
 |---|---|---|
 | **demo** | running my own estate — deploying cloud VMs, building images, standing up clusters and databases, whether to operate them or to show them to people | [Demo profile](demo/README.md) |
-| **pov** | running customer proof-of-value environments, each against the customer's own BeyondTrust tenant | [POV profile](pov/README.md) |
+| **pov** | running proof-of-value sandboxes for customer evaluations, each wired into the customer's own BeyondTrust tenant | [POV profile](pov/README.md) |
 
 If you are not sure, you are on `demo`: it is the default, and what every existing install
 already is.
@@ -22,6 +22,13 @@ and somebody administering the infrastructure they depend on has exactly that sh
 community operator running their own environment wants `demo`, not a third profile: a
 profile that masked features by purpose rather than by tenancy would be a preference, and
 [the gate](#the-gate) below is the argument for why it must not be one.
+
+**Neither profile's infrastructure belongs to the customer.** A POV runs on a lab platform
+or a cloud account *you* own and pay for — a sandbox you stand up for an evaluation and reap
+afterwards. What belongs to the customer is the **tenant** it is wired into: their PRA
+appliance, their Password Safe. Calling those environments "customer environments" put the
+boundary in the wrong place, and the boundary is the entire point of the split — which is
+why the POV instance's nav chip says *Customer tenants* rather than *Customer environments*.
 
 Why they are exclusive is **tenancy.** A demo instance resolves its BeyondTrust tenant from
 the global singletons (`bt_api_host`, `pscli_api_url`, `entitle_api_key`). A POV instance

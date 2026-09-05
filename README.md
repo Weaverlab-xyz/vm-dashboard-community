@@ -29,8 +29,8 @@ Five readers, five ways in:
 
 And pick a profile before you install, because it is a gate rather than a preference:
 `install_profile` is **`demo`** (the default — one BeyondTrust tenant of your own, whether
-you run that estate or demonstrate from it) or **`pov`** (customer evaluations, each
-against the customer's own BeyondTrust tenant), and the two are mutually exclusive. The
+you run that estate or demonstrate from it) or **`pov`** (evaluation sandboxes you run, each
+wired into the customer's own BeyondTrust tenant), and the two are mutually exclusive. The
 gate is about *whose tenant*, not about whether the work is real — so if you are
 administering infrastructure you actually depend on, `demo` is still the profile you
 want. [Demo and POV profiles](docs/profiles/README.md)
@@ -66,7 +66,7 @@ works:
 | [Cloud Hosting](docs/cloud-hosting.md) | Running the dashboard itself on Azure Container Apps / Cloud Run / ECS instead of Compose: the gateway sidecar that splits the agent endpoint from the UI, why an unset `DATABASE_URL` or `JWT_SECRET_KEY` fails silently, and what on-premises capability you give up. | You want the dashboard reachable from outside your LAN, or fronting remote agents. |
 | [Config Migration](docs/config-migration.md) | Moving Settings configuration between two instances. Why `pg_dump` of the config table restores unreadable ciphertext without erroring, and what deliberately stays behind. | You're standing up a second instance and don't want to re-type months of configuration. |
 | [Personas](docs/profiles/demo/personas/README.md) | One page per role — Cloud Ops, DevOps, hypervisor admin, IT, OT/ICS, DBA, security analyst, SRE — covering what that person owns, the four-layer story in their language (provisioning → PRA → Password Safe → Entitle), the use cases to run, and which integrations each needs. The in-app **Use cases** page is the same catalog, with each card reporting whether this instance can actually run it. | You are presenting to a specific role and want the story and the click path, rather than a feature list. |
-| [POV Instance](docs/profiles/pov/README.md) | Running a **second** dashboard for customer POV/POC environments, across seven pages: the **tenant registry** that replaces the singletons, running POVs on a public cloud, the POV Gateway and Resource Broker, wiring guests into PRA / Password Safe / Entitle, and what the customer sees — the per-POV use-case checklist, the **accessor** login that reaches its own POV and nothing else, and the share link. | You do customer proof-of-value work and don't want it sharing an instance, a database or a BeyondTrust tenant with your demo estate. |
+| [POV Instance](docs/profiles/pov/README.md) | Running a **second** dashboard for sandbox POV/POC environments — a lab you run, wired into the customer's tenant — across seven pages: the **tenant registry** that replaces the singletons, running POVs on a public cloud, the POV Gateway and Resource Broker, wiring guests into PRA / Password Safe / Entitle, and what the customer sees — the per-POV use-case checklist, the **accessor** login that reaches its own POV and nothing else, and the share link. | You do customer proof-of-value work and don't want it sharing an instance, a database or a BeyondTrust tenant with your demo estate. |
 | [Skytap](docs/profiles/pov/skytap.md) | The first POV **lab platform**: the API token (not your password), why 423 is normal rather than an error, why every read carries `keep_idle`, why the Terraform provider is deliberately unused, the **template contract** the broker VM has to satisfy — Skytap hands `user_data` to the guest and nothing executes it — and the **template builder** that now writes that runner for you and bakes the result into a new template. | You're pointing a POV instance at Skytap and want to know what it will and won't do with the account. |
 
 Together they're the philosophy of the tool: **declarative,
