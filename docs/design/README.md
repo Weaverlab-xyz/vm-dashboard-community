@@ -18,6 +18,7 @@ reachable by path, and from here.
 | [Entitle resource registration](entitle-resource-registration.md) | you are changing how built resources register themselves as Entitle integrations. |
 | [Cloud Functions](cloud-functions.md) | you are extending the Cloud Functions preview or its workload catalog. |
 | [k8s ServiceAccount token rotation](k8s-sa-token-rotation.md) | you are touching ServiceAccount token rotation and need the reasoning that is not in the code. |
+| [PRA's session-issuing CA](pra-session-ca.md) | you are considering making Password Safe the issuer and rotator of the CA that PRA Vault uses to mint session certificates. |
 | [The dashboard deploys `bt-dbops`](ps-dbops-cloud-run.md) | you are working on the in-VPC service the Cloud SQL rotation plugin calls. |
 
 Two more design notes sit with the profile they belong to, in
