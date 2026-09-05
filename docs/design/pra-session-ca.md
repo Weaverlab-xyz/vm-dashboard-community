@@ -9,9 +9,9 @@ anything this repo has exercised.
 
 **Scope: cloud CA backends, against services whose trust store the operator controls.** ADCS
 is excluded on policy (§7). For databases the engines are **PostgreSQL and MySQL only** —
-SQL Server has no client-certificate login type at all — and the binding constraint is PRA's
-tunnel rather than the database (§8). Read §8 before proposing a managed cloud database; the
-reason that fails is not visible from either product's documentation.
+SQL Server has no client-certificate login type at all — against self-managed instances, and
+the one carried dependency is backend TLS on PRA's Postgres/MySQL tunnels (§8). Managed cloud
+databases stay out: they accept no operator-supplied client-verification CA.
 
 ## The problem, and the inversion that makes it tractable
 
@@ -228,45 +228,65 @@ never identity, so no certificate this design issues could ever log into it. Ora
 certificate path runs through a Wallet — a different container and a different delivery
 problem, not this one.
 
-**The constraint that actually decides the feature is the tunnel, not the database.** The
-two engines that *do* support certificate authentication are reached over tunnels that proxy
-the **cleartext** wire protocol — that is how PRA injects the Vault credential and records
-the session, and the dedicated jumps have no backend-TLS option. All three clouds disable
-transport security to accommodate it: `rds.force_ssl=0`
+**The blocker is a missing option on two provider resources, not an architectural
+impossibility.** It is worth being precise about this, because the obvious reading of the
+table is wrong in a way that would kill the feature for no reason.
+
+Today the Postgres and MySQL jumps proxy the **cleartext** wire protocol, and all three
+clouds disable transport security to accommodate them: `rds.force_ssl=0`
 (`terraform/db_postgres/main.tf:85-91`), `ssl_mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED`
 (`db_gcp_postgres/main.tf:96`), `require_secure_transport=OFF`
 (`db_azure_postgres/main.tf:110-120`).
 
-A client certificate is a **TLS handshake artifact**. With no TLS on the jumpoint→DB hop
-there is no handshake in which to present one. That is a property of the tunnel and applies
-whether the database is managed or self-managed, so it is not something a different DB
-deployment fixes.
+It does **not** follow that credential injection and session recording require cleartext.
+A TLS-terminating proxy sees the plaintext protocol *inside* the TLS session, and PRA
+already does exactly that on two of its four tunnel types:
 
-There is exactly one escape, and it costs the reason for using PRA: route the engine over
-the generic `sra_protocol_tunnel_jump` with `tunnel_type=tcp`, which forwards raw TCP and
-would let a client negotiate TLS end-to-end and present a certificate. But a raw forwarder
-sees no wire protocol, so it injects no credential and records no session content — and
-`_DB_TUNNEL_RESOURCE` hardcodes the dedicated resources for these two engines, so it is a
-code change rather than a setting. Worth knowing it exists; not worth taking without deciding
-that session recording is expendable.
+- `tunnel_type=mssql` is TDS-aware and negotiates its own backend TLS — injecting and
+  recording the whole time, against databases (Azure SQL) that cannot be set to cleartext
+  at all (`terraform/db_azure_sqlserver/main.tf:77-80`);
+- `tunnel_type=k8s` takes `url` + `ca_certificates` (`terraform_pra_service.py:1459`), so
+  the tunnel does TLS to the backend and verifies it against supplied CA material.
 
-**Managed services are blocked a second time, independently.** `aws_db_instance`,
+So the gap is that `sra_postgresql_tunnel_jump` and `sra_my_sql_tunnel_jump` expose no
+backend-TLS option — a product feature gap with in-product precedent, and the right thing to
+ask BeyondTrust for. Not a reason to abandon the design.
+
+**What the working shape needs is a certificate in two places.** In the TLS-terminating
+proxy model the jumpoint is a *client* of the database, so:
+
+| Where | What it needs | Who issues it |
+|---|---|---|
+| the Jumpoint / gateway | a **client** certificate to present to the DB | PRA, minted per session from the vaulted sub-CA |
+| the database | a **server** certificate, plus our root in `ssl_ca` | the DB's own; the root comes from `ca_chain_pem` |
+
+That is this design working as intended rather than a workaround: the short-lived leaf PRA
+mints *is* the jumpoint's client certificate, the DB validates it against the root it already
+trusts, and §1's rotation safety carries over unchanged.
+
+A raw `tunnel_type=tcp` forward is the other way to get a certificate onto the wire — the
+client negotiates TLS end to end — but a raw forwarder sees no protocol, so it injects no
+credential and records no session content. `_DB_TUNNEL_RESOURCE` hardcodes the dedicated
+resources for both engines, so it is a code change either way. Mentioned because someone
+will propose it; it trades away the reason for using PRA.
+
+**Managed services are blocked separately, and that one is real.** `aws_db_instance`,
 `google_sql_database_instance` and `azurerm_postgresql_flexible_server` do not accept an
-operator-supplied CA for verifying client certificates. Cloud SQL issues client certificates
-from its own per-instance CA; RDS and Flexible Server expose no client-verification CA
-setting at all. So even over a TLS-capable tunnel, a PRA-held subordinate would have nothing
-to chain into on a managed instance.
+operator-supplied CA for verifying client certificates — Cloud SQL issues client certificates
+from its own per-instance CA, and RDS and Flexible Server expose no such setting (product
+behaviour, not verified here). So even over a TLS-capable tunnel a PRA-held subordinate would
+have nothing to chain into on a managed instance.
 
-**Which leaves self-managed PostgreSQL and MySQL on a VM as the viable database target** —
-where `pg_hba.conf`, `ssl_ca` and `REQUIRE X509` are the operator's to set. That is the same
+**Which leaves self-managed PostgreSQL and MySQL on a VM as the target** — where
+`pg_hba.conf`, `ssl_ca` and `REQUIRE X509` are the operator's to set. That is the same
 property the mTLS endpoint pattern relies on
 (`examples/playbooks/certificates/nginx-mtls-endpoint.yml`, already fed by `ca_chain_pem`):
-the design works exactly where the trust store is ours to configure, and nowhere else.
+the design works where the trust store is ours to configure.
 
-Reaching such an instance *through PRA* still runs into the tunnel constraint above. So the
-honest statement of scope is: **certificate authentication to self-managed PostgreSQL and
-MySQL, with PRA session brokering as an open question pending a TLS-capable tunnel
-primitive** — not a blocker for the CA design itself, which is what §1-§7 and §9-§10 cover.
+So the scope is **certificate authentication to self-managed PostgreSQL and MySQL**, with one
+dependency to carry: backend TLS plus a client certificate on the two dedicated tunnel
+resources. That is a bounded product ask, not a design flaw, and §1-§7 and §9-§10 stand
+independently of when it lands.
 
 ## 9. The credential has to land whole, and the split model does not survive the promotion
 
@@ -309,15 +329,21 @@ path, and the same would be true again.
 ## Open questions — answer these before writing code
 
 1. **What does PRA Vault's CA account accept?** PKCS#12, or PEM key plus chain? How is the
-   passphrase supplied? §8 depends entirely on this.
+   passphrase supplied? §9 depends entirely on this.
 2. **Can PRA be pointed at a subordinate whose root is installed separately on targets?**
    Reported yes, via the additional chain upload — this is the load-bearing assumption of
    §1 and deserves one confirmed round trip before anything is built.
-3. **What sub-CA lifetime, against what leaf lifetime?** Drives §6's un-revokable window and
+3. **Will `sra_postgresql_tunnel_jump` / `sra_my_sql_tunnel_jump` gain backend TLS with a
+   client certificate?** The database half of §8 waits on this. Precedent exists inside the
+   product (`mssql` terminates TLS, `k8s` takes `ca_certificates`), so this is a feature
+   request with a worked example rather than a novel ask — and it is worth putting to
+   BeyondTrust on its own merits, since a cleartext jumpoint→DB hop is a finding for
+   plenty of customers who will never use this design.
+4. **What sub-CA lifetime, against what leaf lifetime?** Drives §6's un-revokable window and
    the rotation cadence.
-4. **Does PRA re-read the CA mid-session, or only at session launch?** Decides whether a
+5. **Does PRA re-read the CA mid-session, or only at session launch?** Decides whether a
    rotation landing mid-session is genuinely invisible or merely usually invisible.
-5. **Which tier** for a non-lab deployment, given §6.
+6. **Which tier** for a non-lab deployment, given §6.
 
 ## Operator prerequisites this dashboard cannot automate
 
