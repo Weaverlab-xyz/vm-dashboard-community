@@ -17,6 +17,13 @@ So the properties pinned here are the ones whose absence is invisible:
   * An unknown profile falls back to `demo`, i.e. to today's behaviour — the profile is
     read on the request path, so a typo in one config row must not take the app down.
   * The `pov` profile skips the cloud WRITES, not just the screens.
+  * **The stored value says `demo`; the label a human reads does not.** The gate is about
+    whose BeyondTrust tenant a feature reaches, not about whether the work is real, and an
+    operator administering infrastructure they depend on has the same tenancy shape as a
+    demo estate. Naming that choice "Demo infrastructure" on the wizard told them the tool
+    was not for them, or pushed them to POV — the one genuinely wrong answer on that step.
+    The mismatch between value and label is deliberate, and it looks enough like a bug to
+    be worth pinning before somebody tidies it back.
 
 Pure where it can be: the source-shape assertions parse files and import nothing. The
 behavioural ones import feature_flags, which needs only config_service and settings.
@@ -33,6 +40,8 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-install-profile")
 
 _FLAGS = os.path.join(_ROOT, "web_dashboard", "services", "feature_flags.py")
+_WIZARD = os.path.join(_ROOT, "web_dashboard", "templates", "setup.html")
+_PROFILE_DOC = os.path.join(_ROOT, "docs", "profiles", "README.md")
 _MAIN = os.path.join(_ROOT, "web_dashboard", "main.py")
 _SETUP = os.path.join(_ROOT, "web_dashboard", "api", "setup.py")
 _COMPOSE = os.path.join(_ROOT, "docker-compose.pov.yml")
@@ -568,6 +577,65 @@ def test_the_pov_stack_does_not_mount_the_docker_socket():
             src = vol.get("source") if isinstance(vol, dict) else str(vol)
             assert "docker.sock" not in str(src), \
                 f"{name} mounts the docker socket"
+
+
+
+# ── the value is `demo`; the label is not ────────────────────────────────────
+
+def _wizard_profile_options() -> str:
+    src = _read(_WIZARD)
+    return src.split("profileOptions: [", 1)[1].split("],", 1)[0]
+
+
+def test_the_stored_profile_value_is_still_demo():
+    """Presentation-only. Renaming the value would be a migration across config rows,
+    compose files, .env and every doc for no change in behaviour — and a half-done rename
+    is worse than either end of it."""
+    from web_dashboard.services import feature_flags as ff
+    assert ff.VALID_PROFILES == ("demo", "pov")
+    options = _wizard_profile_options()
+    assert "value: 'demo'" in options and "value: 'pov'" in options
+
+
+def test_the_wizard_does_not_call_the_default_profile_a_demo():
+    """The decisive screen. An operator who runs their own estate reads the label, and
+    "Demo infrastructure" told them to look elsewhere or to pick POV."""
+    options = _wizard_profile_options()
+    label = re.search(r"value: 'demo',\s*\n\s*label:\s*'([^']+)'", options)
+    assert label, f"could not find the demo option's label in:\n{options[:400]}"
+    assert "demo" not in label.group(1).lower(), (
+        f"the wizard labels the default profile {label.group(1)!r}, which reads as a "
+        f"purpose. It is a tenancy shape, and somebody administering real infrastructure "
+        f"has that shape too.")
+
+
+def test_the_wizard_says_the_default_profile_covers_real_infrastructure():
+    """Not merely the absence of the word: the option has to actively tell the operator
+    this is theirs, or they are still guessing."""
+    options = _wizard_profile_options()
+    demo_desc = options.split("value: 'demo'", 1)[1].split("value: 'pov'", 1)[0]
+    assert "actually run" in demo_desc, \
+        "the demo option does not tell an operator that a real estate belongs here"
+
+
+def test_the_other_option_does_not_call_the_first_one_the_demo_features():
+    """"the demo features are switched off" reinstates the same wrong idea from the other
+    side of the choice."""
+    options = _wizard_profile_options()
+    pov_desc = options.split("value: 'pov'", 1)[1]
+    assert "demo features" not in pov_desc, \
+        "the POV option describes the other profile as 'the demo features'"
+
+
+def test_the_profile_doc_says_the_name_is_narrower_than_the_profile():
+    """The wizard is where the choice is made; this is where somebody goes to check they
+    made it right."""
+    doc = _read(_PROFILE_DOC)
+    assert "The name is narrower than the profile" in doc, \
+        "docs/profiles/README.md does not explain that `demo` names a tenancy shape"
+    assert "third profile" in doc, \
+        "the doc does not say why a real-infrastructure operator gets no profile of " \
+        "their own — which is the question the name provokes"
 
 
 if __name__ == "__main__":
