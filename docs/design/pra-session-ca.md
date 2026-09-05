@@ -283,15 +283,15 @@ backend-TLS option — a product feature gap with in-product precedent, and the 
 ask BeyondTrust for. Not a reason to abandon the design.
 
 **What the working shape needs is a certificate in two places.** In the TLS-terminating
-proxy model the jumpoint is a *client* of the database, so:
+proxy model the Gateway is a *client* of the database, so:
 
 | Where | What it needs | Who issues it |
 |---|---|---|
-| the Jumpoint / gateway | a **client** certificate to present to the DB | PRA, minted per session from the vaulted sub-CA |
+| the Gateway host | a **client** certificate to present to the DB | PRA, minted per session from the vaulted sub-CA |
 | the database | a **server** certificate, plus our root in `ssl_ca` | the DB's own; the root comes from `ca_chain_pem` |
 
 That is this design working as intended rather than a workaround: the short-lived leaf PRA
-mints *is* the jumpoint's client certificate, the DB validates it against the root it already
+mints *is* the Gateway's client certificate, the DB validates it against the root it already
 trusts, and §1's rotation safety carries over unchanged.
 
 A raw `tunnel_type=tcp` forward is the other way to get a certificate onto the wire — the
@@ -370,7 +370,7 @@ path, and the same would be true again.
    client certificate?** The database half of §8 waits on this. Precedent exists inside the
    product (`mssql` terminates TLS, `k8s` takes `ca_certificates`), so this is a feature
    request with a worked example rather than a novel ask — and it is worth putting to
-   BeyondTrust on its own merits, since a cleartext jumpoint→DB hop is a finding for
+   BeyondTrust on its own merits, since a cleartext Gateway→DB hop is a finding for
    plenty of customers who will never use this design.
 4. **Will the `beyondtrust/sra` provider ship a MongoDB tunnel resource?** MongoDB is the
    best authentication fit in §8 and is held up only by this — the repo brokers DB tunnels
