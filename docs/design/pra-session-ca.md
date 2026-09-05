@@ -119,6 +119,20 @@ they stay valid until their own short expiry. There is no drain step and no brea
 which is the opposite of [k8s token rotation §6](k8s-sa-token-rotation.md), where the
 revoke is the point.
 
+**The same mechanism means rotation does not revoke, and this is the most important thing
+on this page to get right.** A target validates a leaf by walking its chain to the root it
+trusts; it neither knows nor cares which subordinate was current when the leaf was minted.
+So after a rotation:
+
+- certificates already issued from the previous subordinate **keep working** until that
+  subordinate's own certificate expires; and
+- anyone holding a **copy of the previous subordinate's key** can keep minting new,
+  perfectly valid certificates for exactly as long.
+
+Rotation replaces what PRA *has*. It takes nothing away from anyone else who may have it.
+The k8s token analogy breaks down precisely here — that rotation revokes, this one does
+not. §6 is where the consequence lands.
+
 ## 2. The trust anchor is already an output — this is a second consumer, not new work
 
 `terraform/cert_ca/gcp_cas/main.tf:221-224` already emits exactly what targets need to
@@ -234,6 +248,32 @@ The honest options:
 Whichever is chosen, it belongs in the docs as a stated limitation, in the register of
 [Certificates § What this feature does not do](../certificates.md). "Cannot revoke the
 issuing CA" is not a footnote.
+
+### The rule that makes the short-lifetime option actually work
+
+Because rotation does not revoke (§1), **the security bound is the subordinate's validity
+period, not the rotation interval.** These are easy to conflate and the difference is the
+whole mitigation:
+
+| Sub-CA validity | Rotation every | Concurrently valid authorities | Exposure after a key leak |
+|---|---|---|---|
+| 1 year | 7 days | ~52 | up to a year |
+| 8 days | 7 days | 2 (briefly) | at most 8 days |
+
+Rotating often while issuing long-lived subordinates buys **nothing**. It just accumulates
+valid authorities, each of which can mint anything in scope until its own expiry, and each
+of which is a copy someone might have taken.
+
+So the rule is: **issue the subordinate with a validity just longer than the rotation
+interval** — enough overlap that leaves from the outgoing one stay valid until the new one
+is in place, and no more. Rotate at day 7 of an 8-day subordinate, and the old authority
+dies on its own a day later. That is what turns "we rotate" into an actual bound, and it is
+the answer open question 6 is really asking for.
+
+Note the interaction with §1's graceful-rotation property: the overlap is what keeps
+in-flight sessions working. Too little and rotation breaks live sessions; too much and the
+bound loosens. The overlap should be sized to the longest expected session, not picked
+round.
 
 ## 7. ADCS is out of scope, and the approval requirement is why
 
@@ -451,9 +491,15 @@ somewhere they had not looked.
 - **Least privilege applied to an issuer** — name constraints (§5) say which identities this
   authority may assert at all. Most CAs are unconstrained by default.
 - **Time-bounded rather than standing authority** — the JIT argument, applied to an issuer
-  instead of a session.
-- **Revocation becomes an access decision, not a PKI project.** Retire the managed account
-  and the authority is gone at the next rotation.
+  instead of a session. But the bound is the subordinate's **validity period**, not the
+  rotation interval; §6 has the rule, and getting it wrong makes the property illusory.
+- **Retiring the authority is an access decision — but not an instant one.** Retire the
+  managed account and Password Safe stops issuing, so PRA receives no replacement. The
+  subordinate it already holds keeps working until it expires, and so does any copy of it
+  (§1). Immediate revocation needs a CRL the targets actually consult, and §6 records that
+  a DevOps-tier pool publishes none. This is still better than a conventional deployment,
+  where withdrawing a CA is a change programme — but it is expiry-driven, and saying
+  "revoked" in front of a customer would be wrong.
 - **It closes the top of the audit chain.** PRA answers *who connected*. Nothing today
   answers *who authorised that identity to exist*. Those are different questions and only
   the first is currently covered.
