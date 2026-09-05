@@ -8,10 +8,11 @@ Facts about the PRA Vault side are marked where they come from the product rathe
 anything this repo has exercised.
 
 **Scope: cloud CA backends, against services whose trust store the operator controls.** ADCS
-is excluded on policy (§7). For databases the engines are **PostgreSQL and MySQL only** —
-SQL Server has no client-certificate login type at all — against self-managed instances, and
-the one carried dependency is backend TLS on PRA's Postgres/MySQL tunnels (§8). Managed cloud
-databases stay out: they accept no operator-supplied client-verification CA.
+is excluded on policy (§7). For databases: **self-managed PostgreSQL and MySQL now, MongoDB
+when the `sra` provider ships a tunnel resource** — MongoDB being the best authentication fit
+of the three and the only one that may reach a managed service (Atlas). SQL Server is out
+permanently, having no client-certificate login type at all. Two external dependencies are
+carried rather than fatal; both are in §8.
 
 ## The problem, and the inversion that makes it tractable
 
@@ -210,15 +211,17 @@ is a defensible story in a way "we turned off approval on the sub-CA template" i
 a feature customers are forbidden to enable, and building it to be refused is worse than not
 building it.
 
-## 8. Databases: PostgreSQL and MySQL only, and the tunnel is the constraint
+## 8. Databases: three candidate engines, and the constraints are outside this design
 
-**Engine scope is PostgreSQL and MySQL.** SQL Server is excluded permanently and Oracle is
-excluded for now — neither is a gap to close later:
+**Engine scope is PostgreSQL, MySQL and MongoDB** — the first two available now, MongoDB
+held up by tooling rather than capability. SQL Server is excluded permanently and Oracle is
+excluded for now; neither is a gap to close later:
 
 | Engine | PRA tunnel | Backend TLS | x.509 client auth |
 |---|---|---|---|
 | postgres | `sra_postgresql_tunnel_jump` | **cleartext** | yes |
 | mysql | `sra_my_sql_tunnel_jump` | **cleartext** | yes |
+| mongodb | PRA has one; **no `sra` provider resource** | required by the auth mechanism | **native — the subject DN *is* the identity** |
 | sqlserver | `sra_protocol_tunnel_jump` (`mssql`) | TDS-aware, does its own | **none — no client-cert login type** |
 | oracle | `sra_protocol_tunnel_jump` (`tcp`) | raw TCP | only via an Oracle Wallet |
 
@@ -227,6 +230,33 @@ SQL Server authenticates by SQL login, Windows auth or Entra; its TLS is for enc
 never identity, so no certificate this design issues could ever log into it. Oracle's
 certificate path runs through a Wallet — a different container and a different delivery
 problem, not this one.
+
+### MongoDB is the best fit on authentication and the only one blocked on tooling
+
+Worth separating from the rest of the table, because its exclusion is not about capability
+and could lift without anything changing in PRA's tunnel behaviour.
+
+**On the authentication side it is the strongest candidate here, not a marginal one.**
+`MONGODB-X509` maps the certificate's **subject DN** to a user in the `$external` database:
+the certificate *is* the identity, natively, rather than a credential checked alongside one.
+That is precisely what this design produces. And because MongoDB requires TLS for x.509
+authentication, the cleartext problem that blocks Postgres and MySQL cannot arise by
+construction — if PRA's MongoDB tunnel authenticates by certificate at all, it is already
+doing backend TLS. (Product behaviour, not verified here.)
+
+**It is excluded for a provisioning reason.** PRA has a MongoDB tunnel, but the
+`beyondtrust/sra` Terraform provider ships no resource for it, and this repo brokers DB
+tunnels with the provider and **never `btapi`** — stated in both
+`cloud_database_service.py:18-20` and `database.py:1342-1343`, which is why
+`VALID_ENGINES` is `{postgres, mysql, sqlserver, oracle}`. So MongoDB waits on a provider
+resource, not on a product capability and not on anything in this design.
+
+**It may also be the one engine where a *managed* service works.** MongoDB Atlas supports
+self-managed X.509 authentication with an operator-supplied CA — unlike RDS, Cloud SQL and
+Flexible Server, which accept none (below). If that holds, Atlas is the only managed cloud
+database a PRA-held subordinate could chain into, which would make MongoDB the strongest
+target overall rather than a deferred one. Product knowledge, unverified here, and worth
+confirming before it is relied on.
 
 **The blocker is a missing option on two provider resources, not an architectural
 impossibility.** It is worth being precise about this, because the obvious reading of the
@@ -277,16 +307,19 @@ from its own per-instance CA, and RDS and Flexible Server expose no such setting
 behaviour, not verified here). So even over a TLS-capable tunnel a PRA-held subordinate would
 have nothing to chain into on a managed instance.
 
-**Which leaves self-managed PostgreSQL and MySQL on a VM as the target** — where
+**Which leaves self-managed PostgreSQL and MySQL on a VM as the near-term target** — where
 `pg_hba.conf`, `ssl_ca` and `REQUIRE X509` are the operator's to set. That is the same
 property the mTLS endpoint pattern relies on
 (`examples/playbooks/certificates/nginx-mtls-endpoint.yml`, already fed by `ca_chain_pem`):
-the design works where the trust store is ours to configure.
+the design works where the trust store is ours to configure. MongoDB, if its provider
+resource lands, is the better target and possibly the only one that reaches a managed
+service.
 
-So the scope is **certificate authentication to self-managed PostgreSQL and MySQL**, with one
-dependency to carry: backend TLS plus a client certificate on the two dedicated tunnel
-resources. That is a bounded product ask, not a design flaw, and §1-§7 and §9-§10 stand
-independently of when it lands.
+So the database scope is **certificate authentication to self-managed PostgreSQL and MySQL
+now, MongoDB when the provider resource exists**, carrying two independent dependencies —
+backend TLS plus a client certificate on the two dedicated tunnel resources, and an
+`sra` MongoDB tunnel resource. Both are bounded external asks rather than design flaws, and
+§1-§7 and §9-§10 stand independently of when either lands.
 
 ## 9. The credential has to land whole, and the split model does not survive the promotion
 
@@ -339,11 +372,17 @@ path, and the same would be true again.
    request with a worked example rather than a novel ask — and it is worth putting to
    BeyondTrust on its own merits, since a cleartext jumpoint→DB hop is a finding for
    plenty of customers who will never use this design.
-4. **What sub-CA lifetime, against what leaf lifetime?** Drives §6's un-revokable window and
+4. **Will the `beyondtrust/sra` provider ship a MongoDB tunnel resource?** MongoDB is the
+   best authentication fit in §8 and is held up only by this — the repo brokers DB tunnels
+   with the provider and never `btapi`. Ask alongside question 3; they go to the same team.
+5. **Does MongoDB Atlas's self-managed X.509 accept our subordinate's chain?** If so it is
+   the only managed cloud database this design reaches, which would change the §8 conclusion
+   from "self-managed only" to "self-managed, plus Atlas".
+6. **What sub-CA lifetime, against what leaf lifetime?** Drives §6's un-revokable window and
    the rotation cadence.
-5. **Does PRA re-read the CA mid-session, or only at session launch?** Decides whether a
+7. **Does PRA re-read the CA mid-session, or only at session launch?** Decides whether a
    rotation landing mid-session is genuinely invisible or merely usually invisible.
-6. **Which tier** for a non-lab deployment, given §6.
+8. **Which tier** for a non-lab deployment, given §6.
 
 ## Operator prerequisites this dashboard cannot automate
 
