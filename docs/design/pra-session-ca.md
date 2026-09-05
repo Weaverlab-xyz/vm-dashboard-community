@@ -119,6 +119,20 @@ they stay valid until their own short expiry. There is no drain step and no brea
 which is the opposite of [k8s token rotation §6](k8s-sa-token-rotation.md), where the
 revoke is the point.
 
+**The same mechanism means rotation does not revoke, and this is the most important thing
+on this page to get right.** A target validates a leaf by walking its chain to the root it
+trusts; it neither knows nor cares which subordinate was current when the leaf was minted.
+So after a rotation:
+
+- certificates already issued from the previous subordinate **keep working** until that
+  subordinate's own certificate expires; and
+- anyone holding a **copy of the previous subordinate's key** can keep minting new,
+  perfectly valid certificates for exactly as long.
+
+Rotation replaces what PRA *has*. It takes nothing away from anyone else who may have it.
+The k8s token analogy breaks down precisely here — that rotation revokes, this one does
+not. §6 is where the consequence lands.
+
 ## 2. The trust anchor is already an output — this is a second consumer, not new work
 
 `terraform/cert_ca/gcp_cas/main.tf:221-224` already emits exactly what targets need to
@@ -234,6 +248,32 @@ The honest options:
 Whichever is chosen, it belongs in the docs as a stated limitation, in the register of
 [Certificates § What this feature does not do](../certificates.md). "Cannot revoke the
 issuing CA" is not a footnote.
+
+### The rule that makes the short-lifetime option actually work
+
+Because rotation does not revoke (§1), **the security bound is the subordinate's validity
+period, not the rotation interval.** These are easy to conflate and the difference is the
+whole mitigation:
+
+| Sub-CA validity | Rotation every | Concurrently valid authorities | Exposure after a key leak |
+|---|---|---|---|
+| 1 year | 7 days | ~52 | up to a year |
+| 8 days | 7 days | 2 (briefly) | at most 8 days |
+
+Rotating often while issuing long-lived subordinates buys **nothing**. It just accumulates
+valid authorities, each of which can mint anything in scope until its own expiry, and each
+of which is a copy someone might have taken.
+
+So the rule is: **issue the subordinate with a validity just longer than the rotation
+interval** — enough overlap that leaves from the outgoing one stay valid until the new one
+is in place, and no more. Rotate at day 7 of an 8-day subordinate, and the old authority
+dies on its own a day later. That is what turns "we rotate" into an actual bound, and it is
+the answer open question 6 is really asking for.
+
+Note the interaction with §1's graceful-rotation property: the overlap is what keeps
+in-flight sessions working. Too little and rotation breaks live sessions; too much and the
+bound loosens. The overlap should be sized to the longest expected session, not picked
+round.
 
 ## 7. ADCS is out of scope, and the approval requirement is why
 
@@ -424,6 +464,39 @@ deliberately wider than `VALID_CLOUDS`), the same CA being used beyond DB sessio
 auditor asking whether the issuing CA can be revoked, which has a compliance answer
 independent of likelihood.
 
+### The narrow security claim that does survive — and what it is really worth
+
+§6's rule (validity period, not rotation interval) is what connects that section to this
+one, and the connection is easy to overstate in both directions.
+
+**The sound version of the argument** is mechanical: there is no CRL, so the only bound on a
+leaked subordinate is its validity period; a validity short enough to matter is days; nobody
+reissues a certificate authority by hand every week, so it quietly stops happening. **The
+automation is therefore not the control — it is what makes the control sustainable.** That
+survives scrutiny in a way "we rotate, so the old one goes away" never did.
+
+**It does not fix the premise, though.** It bounds the exposure window from a leaked key
+that, given the isolation above, has nowhere to be presented. Tightening a window on an
+attack that cannot currently be executed is not a reason to build anything.
+
+**Where it does real work is drift.** The isolation assumption lives in Terraform, not in
+anything the database itself enforces, and `VALID_REGISTER_CLOUDS` exists precisely so
+instances can be registered that were never provisioned under those rules. When that
+happens the isolation silently stops being true and nobody re-runs this analysis. A short
+validity bound is the control still standing when the assumption it depended on has lapsed.
+That argument needs no belief that PRA will be compromised — only that architectures drift.
+
+**And its best use is to give the governance story a number.** "If the issuing CA key
+leaked, what is our exposure window?" answers *indefinite*, or "we would have to go look up
+what we set," in almost every organisation. Here it answers **eight days, by policy,
+enforced by the rotation schedule** — a figure that is auditable, controlled, and reportable.
+
+That is a risk-register artifact rather than a preventive control, which makes it governance
+after all: governance with something quantitative under it instead of an assertion about
+hygiene. Pitch it that way round. "We can state our worst-case exposure window and we
+control it" is a stronger sentence than anything in the threat-model framing, and it is
+also true.
+
 ### The reframe that carries the story
 
 **A certificate authority is a privileged account that nobody treats as one.** Look at the
@@ -451,9 +524,15 @@ somewhere they had not looked.
 - **Least privilege applied to an issuer** — name constraints (§5) say which identities this
   authority may assert at all. Most CAs are unconstrained by default.
 - **Time-bounded rather than standing authority** — the JIT argument, applied to an issuer
-  instead of a session.
-- **Revocation becomes an access decision, not a PKI project.** Retire the managed account
-  and the authority is gone at the next rotation.
+  instead of a session. But the bound is the subordinate's **validity period**, not the
+  rotation interval; §6 has the rule, and getting it wrong makes the property illusory.
+- **Retiring the authority is an access decision — but not an instant one.** Retire the
+  managed account and Password Safe stops issuing, so PRA receives no replacement. The
+  subordinate it already holds keeps working until it expires, and so does any copy of it
+  (§1). Immediate revocation needs a CRL the targets actually consult, and §6 records that
+  a DevOps-tier pool publishes none. This is still better than a conventional deployment,
+  where withdrawing a CA is a change programme — but it is expiry-driven, and saying
+  "revoked" in front of a customer would be wrong.
 - **It closes the top of the audit chain.** PRA answers *who connected*. Nothing today
   answers *who authorised that identity to exist*. Those are different questions and only
   the first is currently covered.
