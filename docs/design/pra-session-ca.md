@@ -7,6 +7,11 @@ before the code so the PKI owners can refuse it on the merits rather than after 
 Facts about the PRA Vault side are marked where they come from the product rather than from
 anything this repo has exercised.
 
+**Scope: cloud CA backends, against services whose trust store the operator controls.** ADCS
+is excluded on policy (§7) and cloud *database* session access — the use case this looks
+like it should serve — is excluded on mechanism (§8). Read §8 before proposing it again;
+the reason it fails is not visible from either product's documentation.
+
 ## The problem, and the inversion that makes it tractable
 
 PRA Vault can hold a certificate authority and issue **short-lived x.509 certificates from
@@ -183,7 +188,7 @@ Whichever is chosen, it belongs in the docs as a stated limitation, in the regis
 [Certificates § What this feature does not do](../certificates.md). "Cannot revoke the
 issuing CA" is not a footnote.
 
-## 7. The approval tension is what scopes the feature, and ADCS probably loses
+## 7. ADCS is out of scope, and the approval requirement is why
 
 The Certificate plugin requires `msPKI-Enrollment-Flag = 0` — **no CA certificate manager
 approval** — because otherwise every rotation returns `CR_DISP_UNDER_SUBMISSION` and a
@@ -196,16 +201,60 @@ CA, issued unattended, on a rotation schedule**, it is the thing most PKI teams 
 absolutely — a sub-CA is a delegation of the authority itself, and "no human approves it" is
 a hard no in a lot of organisations regardless of how good the surrounding controls are.
 
-That does not block the cloud backends, where the authorisation is IAM-scoped and auditable
-rather than human-gated: a GCP CAS `certificateRequester` binding or an AWS PCA
-`IssueCertificate` permission is a reviewable, revocable grant with a log. That is a
-defensible story in a way "we turned off approval on the sub-CA template" is not.
+The cloud backends do not have this problem: a GCP CAS `certificateRequester` binding or an
+AWS PCA `IssueCertificate` permission is IAM-scoped, reviewable, revocable and logged, which
+is a defensible story in a way "we turned off approval on the sub-CA template" is not.
 
-**So the scoping this design proposes: cloud CA backends first; ADCS documented as requiring
-a policy exception rather than supported.** Shipping ADCS support here would mostly produce
-a feature customers are forbidden to enable.
+**So this design covers cloud CA backends only.** Shipping ADCS support would mostly produce
+a feature customers are forbidden to enable, and building it to be refused is worse than not
+building it.
 
-## 8. The credential has to land whole, and the split model does not survive the promotion
+## 8. Cloud database session access is the one place this cannot land
+
+The obvious first use case — PRA mints a short-lived certificate that authenticates a
+**cloud database** session — is blocked twice over, and the two blockers are independent.
+This section exists because it is the use case everyone proposes first, and the reason it
+fails is not visible from either product's documentation.
+
+**The engine matrix inverts perfectly.** From [databases.md:92-97](../databases.md) and
+`terraform_pra_service._DB_TUNNEL_RESOURCE`:
+
+| Engine | PRA tunnel | Backend TLS | x.509 client auth |
+|---|---|---|---|
+| postgres | `sra_postgresql_tunnel_jump` | **cleartext** | yes |
+| mysql | `sra_my_sql_tunnel_jump` | **cleartext** | yes |
+| sqlserver | `sra_protocol_tunnel_jump` (`mssql`) | TDS-aware, does its own | **none — no client-cert login type** |
+| oracle | `sra_protocol_tunnel_jump` (`tcp`) | raw TCP | only via Oracle Wallet |
+
+The two engines that support certificate authentication are reached over a tunnel that
+proxies the **cleartext** wire protocol — that is how PRA injects the Vault credential and
+records the session, and the dedicated jumps have no backend-TLS option. All three clouds
+disable transport security to accommodate it: `rds.force_ssl=0`
+(`terraform/db_postgres/main.tf:85-91`), `ssl_mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED`
+(`db_gcp_postgres/main.tf:96`), `require_secure_transport=OFF`
+(`db_azure_postgres/main.tf:110-120`).
+
+**A client certificate is a TLS handshake artifact.** With no TLS on the jumpoint→DB hop
+there is no handshake in which to present one. This is not a configuration gap that could be
+closed — the cleartext proxy *is* the credential-injection and session-recording mechanism.
+
+And the one engine whose tunnel does negotiate backend TLS, SQL Server, has no
+client-certificate login type at all: it authenticates by SQL login, Windows auth or Entra.
+Its TLS is for encryption, never identity.
+
+**The second blocker stands even if the first were solved.** These modules provision
+*managed* services — `aws_db_instance`, `google_sql_database_instance`,
+`azurerm_postgresql_flexible_server` — and managed database services do not accept an
+operator-supplied CA for verifying client certificates. Cloud SQL issues client certificates
+from its own CA; RDS and Flexible Server expose no client-verification CA setting. A PRA-held
+subordinate would have nothing to chain into.
+
+So the ground this design actually stands on is **services whose trust store the operator
+controls** — the mTLS endpoint pattern (`examples/playbooks/certificates/nginx-mtls-endpoint.yml`,
+already fed by `ca_chain_pem`), and self-managed engines on a VM. A cloud-database variant
+would need a different tunnel primitive from PRA, not a different certificate.
+
+## 9. The credential has to land whole, and the split model does not survive the promotion
 
 Today a leaf is split on purpose: the managed account holds the PKCS#12 passphrase, Secrets
 Safe holds the bundle, and both halves are governed. The docs are explicit that the folder
@@ -223,7 +272,7 @@ the implementation**, and it should be answered before any code is written, beca
 side that only accepts the two halves separately would invalidate this section and probably
 the feature.
 
-## 9. Reuse the sync primitive — the lesson from k8s tokens generalises
+## 10. Reuse the sync primitive — the lesson from k8s tokens generalises
 
 `ps_api_service.link_synced_account` (`ps_api_service.py:979`) already does the delivery:
 `POST ManagedAccounts/{id}/SyncedAccounts/{syncedAccountID}` makes one managed account a
