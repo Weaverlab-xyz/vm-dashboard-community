@@ -649,13 +649,33 @@ def test_the_pov_option_still_names_whose_tenant_it_reaches():
         "the POV option no longer says whose tenant the sandbox is wired into"
 
 
+def _wizard_body() -> str:
+    """setup.html's MARKUP -- everything above the Alpine component.
+
+    Two JS comments below the cut discuss the wording rules deliberately (one of them is
+    the argument for the rule right beneath this), so scanning the whole file would fail on
+    its own rationale. What a person reads is the markup, and that is what this returns.
+
+    Whitespace is collapsed because prose in a template is wrapped for the editor, not for
+    the reader: the phrase this guards against sat as "Demo\\n          features" and a
+    contiguous-substring search walked straight past it.
+    """
+    body = _read(_WIZARD).split("\n<script>\n", 1)[0]
+    return re.sub(r"\s+", " ", body)
+
+
 def test_the_other_option_does_not_call_the_first_one_the_demo_features():
     """"the demo features are switched off" reinstates the same wrong idea from the other
-    side of the choice."""
-    options = _wizard_profile_options()
-    pov_desc = options.split("value: 'pov'", 1)[1]
-    assert "demo features" not in pov_desc, \
-        "the POV option describes the other profile as 'the demo features'"
+    side of the choice.
+
+    Scans the whole wizard body rather than the pov option's description. Written against
+    `profileOptions` alone, this test passed for two releases while the amber panel fifty
+    lines above it -- the one a POV installer actually reads -- said "Demo features" in so
+    many words. A rule about wording is worth only as much as the surface it covers.
+    """
+    body = _wizard_body().lower()
+    assert "demo feature" not in body, \
+        "the wizard describes the other profile's features as 'demo features'"
 
 
 def test_the_profile_doc_says_the_name_is_narrower_than_the_profile():
@@ -744,6 +764,44 @@ def test_the_page_header_still_names_the_stored_profile_value():
         f"install_profile value and is not what the prose rename was about")
     for expected in ("docs/kubernetes.md", "docs/databases.md", "docs/cloud-vms.md"):
         assert expected in carriers, f"{expected} no longer names its profile"
+
+
+# ── refusals say it in words ─────────────────────────────────────────────────
+
+def test_a_refusal_names_the_instance_in_words():
+    """The three profile refusals are read by an operator, not by a machine.
+
+    They used to interpolate the stored value -- "not available on an 'demo' instance" --
+    which showed somebody running real infrastructure the one word this whole change is
+    about, and got the article wrong on two of the three sites while doing it. The article
+    ships with the noun so there is nothing left to disagree.
+    """
+    ff = _with_profile("pov")
+    try:
+        assert ff.profile_noun() == "a POV instance"
+        assert ff.profile_noun("demo") == "an estate instance"
+        for noun in (ff.profile_noun("demo"), ff.profile_noun("pov")):
+            assert "'" not in noun, f"{noun!r} still quotes a config value"
+            assert noun.split()[0] in ("a", "an"), f"{noun!r} carries no article"
+        # An unknown value resolves rather than raising: this runs inside a 404 handler on
+        # the request path, so a typo in one config row must not turn a refusal into a 500.
+        assert ff.profile_noun("nonsense") == ff.profile_noun("demo")
+    finally:
+        _with_profile("demo")
+
+
+def test_no_refusal_message_shows_the_raw_profile_value():
+    """The guard. All three sites are f-strings a page apart, and they drift back one at a
+    time -- the next person adding a gate copies whichever one they happened to open."""
+    offenders = []
+    for path in (_MAIN, _SETUP):
+        for n, line in enumerate(_read(path).splitlines(), 1):
+            if "install_profile()" in line and ("detail" in line or "'{" in line):
+                offenders.append(f"{os.path.relpath(path, _ROOT)}:{n}: {line.strip()}")
+    assert not offenders, (
+        "these refusals interpolate the stored profile value into a message somebody "
+        "reads. Use feature_flags.profile_noun(), which carries its own article:\n"
+        + "\n".join(offenders))
 
 
 if __name__ == "__main__":

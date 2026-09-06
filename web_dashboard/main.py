@@ -844,8 +844,8 @@ def _feature_gate(flag: str):
             if feature_flags.profile_masks(flag):
                 raise HTTPException(
                     status_code=404,
-                    detail=f"This integration is not available on an "
-                           f"'{feature_flags.install_profile()}' instance.",
+                    detail=f"This integration is not available on "
+                           f"{feature_flags.profile_noun()}.",
                 )
             raise HTTPException(
                 status_code=404,
@@ -875,8 +875,8 @@ def _profile_page_gate(name: str):
         if not feature_flags.profile_page_allowed(name):
             raise HTTPException(
                 status_code=404,
-                detail=f"This page is not available on a "
-                       f"'{feature_flags.install_profile()}' instance.",
+                detail=f"This page is not available on "
+                       f"{feature_flags.profile_noun()}.",
             )
     return Depends(_check)
 

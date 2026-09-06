@@ -76,7 +76,13 @@ _DEMO_PROD = {
     "slash": "text-blue-400",
     "rail": "",
     "product": "Infrastructure",
-    "chip_label": "Demo",
+    # The edition, not the profile -- see _DEMO_DEV's chip_label below for what this slot
+    # is for. It said "Demo", which was the profile name leaking into an edition's place,
+    # and it is the ONE variant a person running their own estate for real ever sees:
+    # .env.example ships APP_ENV=development, so setting production is a deliberate act by
+    # somebody whose infrastructure is not a demonstration. Telling them otherwise on every
+    # page of the app is the last place the old framing survived.
+    "chip_label": "Production",
     "chip_class": "bg-emerald-500 text-emerald-950",
     "login_icon_bg": "bg-blue-100",
     "login_mark_warp": "text-blue-900",
