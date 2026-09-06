@@ -13,5 +13,6 @@ provider bug may have moved since.
 | Page | Read this when |
 |---|---|
 | [Cloud cost guardrails](cloud-cost-guardrails.md) | your lab cloud bill is higher than the resources you can see explain. |
+| [Feature audit and forward recommendations](feature-audit-2026-09.md) | you are deciding what to build next, or want a map of the current feature surface. |
 | [Sandbox + provisioning cost audit](sandbox-provisioning-cost-audit.md) | you are changing a sandbox bootstrapper or a provisioning path and want to know what leaked cost last time. |
 | [`beyondtrust/sra` blocks `tunnel_type = "k8s"`](sra-provider-k8s-tunnel-bug.md) | a Terraform-managed k8s tunnel is refused by the provider's own schema. |
