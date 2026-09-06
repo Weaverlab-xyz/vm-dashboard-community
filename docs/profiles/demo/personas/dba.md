@@ -70,7 +70,7 @@ schedule with the consumer picking up the new value.
 **Cloud databases**, **Password Safe** and **Entitle**. Add **Privileged Remote Access** for
 the private-endpoint card, and **Kubernetes** for the service-account token card.
 
-**This focus needs a demo instance** for its own cards: cloud databases are demo-owned, so on
+**This focus needs an estate instance** for its own cards: cloud databases are estate-owned, so on
 a [POV instance](../../pov/README.md) they are masked. The cards say so rather than offering a
 link that would 404.
 

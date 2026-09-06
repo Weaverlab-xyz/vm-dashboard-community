@@ -31,8 +31,8 @@ done with them.
 `/aws`, `/azure`, `/gcp`, `/oci`, `/images` and their API routers stay unavailable on a POV
 instance, whatever credentials it holds. That is not an oversight to work around: those
 deploys resolve the **global** BeyondTrust tenant singletons, so a VM built there would
-onboard into the demo tenant rather than into this POV's — silently, because both paths
-"work". It is the same tenancy argument the whole demo/POV split rests on.
+onboard into the estate tenant rather than into this POV's — silently, because both paths
+"work". It is the same tenancy argument the whole estate/POV split rests on.
 
 Everything a POV builds goes through the POV pages, which resolve tenants from the
 registry. That is also what keeps every cloud resource inside the auto-delete timer's

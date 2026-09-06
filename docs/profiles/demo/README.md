@@ -2,8 +2,9 @@
 
 > **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are showing the dashboard to someone and want the story rather than the feature list.
 
-The default profile, and what every existing install already is. A demo instance manages
-**your** estate: your cloud accounts, your hypervisors, your images. You show it to people.
+The default profile, and what every existing install already is. An estate instance manages
+**your** infrastructure: your cloud accounts, your hypervisors, your images. You show it to
+people.
 
 That is the difference from the [POV profile](../pov/README.md), where each environment
 belongs to a customer and points at the customer's own BeyondTrust tenant. See
@@ -34,10 +35,11 @@ presenting: the per-role narratives and the purpose-built demo environments. Ski
 
 ## Everything else is a capability doc
 
-Almost every feature a demo instance has is documented once at the
+Almost every feature an estate instance has is documented once at the
 [docs root](../../README.md) rather than here, because the page describing how to deploy an
 EC2 instance is the same page whether you are demoing or running a lab. Each of those pages
-carries `**Profile:** demo` in its header block.
+carries `**Profile:** demo` in its header block — the config value, not a statement about
+what you are doing with the instance.
 
 What lives *here* is the material that only makes sense as a demo: the per-role narratives,
 and the purpose-built demo environments.

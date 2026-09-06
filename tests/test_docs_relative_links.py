@@ -147,6 +147,48 @@ def test_a_folder_url_serves_that_folders_readme():
         assert r.status_code == 200, f"/docs/{folder} returned {r.status_code}, not its README"
 
 
+def test_a_hub_pages_own_links_resolve_against_its_folder():
+    """A folder URL and the file it serves are not the same path, and the rewriter needs
+    the FILE's.
+
+    ``/docs/profiles/pov`` renders ``docs/profiles/pov/README.md``, but the route used to
+    hand the rewriter the URL -- so ``dirname()`` gave it ``profiles/`` and every relative
+    link on the page resolved one directory too high. ``[Skytap](skytap.md)`` on the POV
+    hub became ``/docs/profiles/skytap``, a 404. That was true of EVERY hub in the tree at
+    once, on the pages whose entire job is linking to their folder, and nothing failed --
+    the reader just landed on a 404 following a link the docs told them to follow.
+
+    Every hub, not a sample: the bug was uniform, so one hub proves nothing the others do
+    not, and a sample would let the next one regress unseen.
+    """
+    try:
+        from fastapi.testclient import TestClient
+        from web_dashboard.main import app
+        from web_dashboard.services import config_service
+    except Exception as exc:
+        print(f"SKIP hub-link check: fastapi absent ({exc})")
+        return
+    import pathlib
+    import re
+    docs = pathlib.Path(_ROOT) / "docs"
+    folders = sorted(p.parent.relative_to(docs).as_posix()
+                     for p in docs.rglob("README.md") if p.parent != docs)
+    c = TestClient(app)
+    c.__enter__()
+    config_service.set("setup_complete", "1")
+    config_service._setup_complete = True
+    broken = []
+    for folder in folders:
+        page = c.get(f"/docs/{folder}")
+        assert page.status_code == 200, f"/docs/{folder} returned {page.status_code}"
+        for href in sorted(set(re.findall(r'<a href="(/docs/[^"#]+)', page.text))):
+            if c.get(href).status_code != 200:
+                broken.append(f"/docs/{folder} -> {href}")
+    assert not broken, (
+        "these links on folder index pages 404 in the dashboard's own viewer -- the "
+        "rewriter is resolving them against the wrong directory:\n" + "\n".join(broken))
+
+
 def test_every_section_heading_on_the_index_resolves():
     """The /docs index hangs each section's heading off that folder's README, so those
     hrefs are the most-clicked links on the page. They are also the easiest to get wrong:

@@ -18,7 +18,7 @@ POV?** — whose answer comes from the three tenant columns on the row, which is
 a Password-Safe-only evaluation differs from an all-three one.
 
 The instance-wide catalog is still there, underneath, collapsed behind one click. Collapsed
-and not removed: nothing on this page is ever hidden from you, and a demo instance opens
+and not removed: nothing on this page is ever hidden from you, and an estate instance opens
 exactly as it always did.
 
 Every role and every card is always on the page. The product mix decides what each card
@@ -30,7 +30,7 @@ Every role and every card is always on the page. The product mix decides what ea
 | Needs wiring | The tenant is set and the artifact is not | What to run, and a link to the Wired tab |
 | Not part of this POV | No tenant for that product on this row | Nothing — the fix is a decision about the evaluation, not a button |
 
-That last row is the one worth reading twice. It is **not** the same state as a demo-only
+That last row is the one worth reading twice. It is **not** the same state as an estate-only
 feature being masked on this instance: nobody can turn it on from Settings, because there
 is nothing wrong. A POV scoped to Password Safe is a normal POV, and a page that greyed
 those cards out as unavailable would say the opposite.

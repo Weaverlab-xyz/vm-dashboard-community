@@ -69,7 +69,7 @@ injected — the platform console that usually has a shared login.
 **Kubernetes**, **Entitle** and **Privileged Remote Access**. Add **Password Safe** for the
 token-rotation card and **Portainer** for the container-platform card.
 
-Kubernetes is demo-owned, so this focus **needs a demo instance**; on a
+Kubernetes is estate-owned, so this focus **needs an estate instance**; on a
 [POV instance](../../pov/README.md) its cards report as unavailable by design.
 
 ## Talking to this buyer

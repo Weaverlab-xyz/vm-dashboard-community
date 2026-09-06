@@ -7,14 +7,18 @@ it applies to, and the situation that should send you to it. This index is the s
 information collected in one place.
 
 The **profile** matters more than it looks. `install_profile` is `demo` or `pov` and the
-two are mutually exclusive, so a page marked `pov` describes features a demo instance does
-not have, and the reverse. See [Demo and POV profiles](profiles/README.md).
+two are mutually exclusive, so a page marked `pov` describes features an estate instance
+does not have, and the reverse. `demo` is a config value naming one BeyondTrust tenant of
+your own, not a claim about what you are doing with the instance — a page marked `demo`
+applies just as much to infrastructure you run in production. See
+[Demo and POV profiles](profiles/README.md).
 
 ## Start here
 
 | You are… | Go to |
 |---|---|
 | **installing or running** the dashboard — an **operator** | [Onboarding](ONBOARDING.md), then the platform reference below |
+| **running your own infrastructure** with it | the platform reference below — you want the `demo` profile, whatever its name suggests |
 | **showing** it to someone — a **presenter** | [Demo profile](profiles/demo/README.md) |
 | running **customer proof-of-value** work | [POV profile](profiles/pov/README.md) |
 | **evaluating** a POV somebody handed you — a **customer** | [What the customer sees](profiles/pov/customer-access.md) |

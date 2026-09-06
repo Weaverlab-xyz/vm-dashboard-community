@@ -6,7 +6,7 @@ The first **lab platform** for POV environments. A POV is a Skytap *template* in
 whole; the dashboard creates those environments and wires their VMs into that POV's PRA,
 Password Safe and Entitle tenants.
 
-Available on a **POV instance only** — see [pov-instance.md](README.md). On a demo
+Available on a **POV instance only** — see [pov-instance.md](README.md). On an estate
 instance the integration is masked off and Settings refuses to enable it.
 
 > **What the dashboard does with an environment.** Create it from a template, power it on
@@ -496,7 +496,7 @@ rather than failing somewhere inside a job.
 |---|---|---|
 | "Skytap rejected the credentials … uses an API token, not your account password" | The account password was pasted into the token field | Use the API security token from the Skytap account page |
 | The POV page says Skytap is not configured | No URL, username or token stored | Settings → Integrations → Skytap |
-| Settings refuses to enable it with a 409 | This is a demo instance | Skytap is POV-only; see [pov-instance.md](README.md) |
+| Settings refuses to enable it with a 409 | This is an estate instance | Skytap is POV-only; see [pov-instance.md](README.md) |
 | No POV nav link at all | `pov_environments_enabled` is off, or the profile is `demo` | The flag must be ON **and** the profile must be `pov` — `GET /api/features` shows `install_profile` |
 | "Skytap is still busy after N retries" | The account is genuinely rate-limited | Expected under heavy concurrent use; retry shortly. Running or suspending many VMs at once makes it more likely |
 | An environment shows a **rate-limited** badge | Skytap set `rate_limited` on it | Operations against it will be slow until it clears |

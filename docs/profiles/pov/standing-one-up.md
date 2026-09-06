@@ -7,7 +7,7 @@ Part of [A POV Instance](README.md). Its own JWT key, its own env file, and the 
 ## Standing one up
 
 ```bash
-# Its own JWT key. Not a copy of the demo stack's — see below.
+# Its own JWT key. Not a copy of the estate stack's — see below.
 openssl rand -hex 32 > .jwt_secret_key.pov
 
 # Its own env file. Start from the example and set only what a POV instance uses.
@@ -16,8 +16,8 @@ cp .env.example .env.pov
 docker compose -p vmdash-pov -f docker-compose.pov.yml up -d
 ```
 
-Then browse `http://localhost:8002` (the demo stack keeps 8001) and walk the wizard: create
-the admin account, choose **Customer POV / POC environments** on the Purpose step, and the
+Then browse `http://localhost:8002` (the estate stack keeps 8001) and walk the wizard: create
+the admin account, choose **Sandbox POV / POC environments** on the Purpose step, and the
 four cloud credential steps disappear.
 
 `-p vmdash-pov` matters. Without an explicit project name Compose derives one from the
@@ -116,7 +116,7 @@ left to paste. A field the POV already carries is never overwritten.
 
 The reason this profile exists, made concrete. **POV page → BeyondTrust tenants.**
 
-A demo instance has one PRA appliance, one Password Safe tenant and one Entitle tenant,
+An estate instance has one PRA appliance, one Password Safe tenant and one Entitle tenant,
 configured in Settings as `bt_api_host`, `pscli_api_url` and `entitle_api_url`. That is the
 right shape when there is exactly one of each. A POV instance runs several POVs at once,
 each for a different customer, each with its own appliance — so "which tenant?" stops
@@ -161,7 +161,7 @@ into another customer's Password Safe with nothing going wrong on the way. Step 
 same rule seen from the other side: guessing between two customers' appliances is much
 worse than refusing.
 
-Step 4 is the compatibility contract. Every existing install, and every demo instance,
+Step 4 is the compatibility contract. Every existing install, and every estate instance,
 keeps working without knowing this table exists.
 
 ### Verify

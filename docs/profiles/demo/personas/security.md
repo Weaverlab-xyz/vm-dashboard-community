@@ -69,7 +69,7 @@ estate nobody can account for.
 **Notifications**, **Admission control** and the **Auto-delete timer** — all three default off,
 and the cards that need them will say so. Add **Secrets scanning** for the discovery card.
 
-Every one of these is profile-neutral, so this focus works identically on a demo instance and a
+Every one of these is profile-neutral, so this focus works identically on an estate instance and a
 [POV instance](../../pov/README.md).
 
 Read [Auto-delete Timer](../../../auto-delete-timer.md) before switching it on. It deletes

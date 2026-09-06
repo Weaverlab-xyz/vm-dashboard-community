@@ -1,11 +1,11 @@
 """The install profile is a GATE, and the two profiles are mutually exclusive.
 
-A demo instance resolves its BeyondTrust tenant from the global singletons
+An estate instance resolves its BeyondTrust tenant from the global singletons
 (`bt_api_host` / `pscli_api_url` / `entitle_api_key`); a POV instance holds a registry of
 many named tenants because several POVs run at once. An instance claiming both roles would
 have two answers to "which tenant?" at every call site, and the wrong answer is silent
-rather than loud — a demo deploy onboarding into a customer's Password Safe, or a POV
-onboarding into the demo tenant. Nothing errors; both paths "work".
+rather than loud — an estate deploy onboarding into a customer's Password Safe, or a POV
+onboarding into the estate tenant. Nothing errors; both paths "work".
 
 So the properties pinned here are the ones whose absence is invisible:
 
@@ -19,11 +19,17 @@ So the properties pinned here are the ones whose absence is invisible:
   * The `pov` profile skips the cloud WRITES, not just the screens.
   * **The stored value says `demo`; the label a human reads does not.** The gate is about
     whose BeyondTrust tenant a feature reaches, not about whether the work is real, and an
-    operator administering infrastructure they depend on has the same tenancy shape as a
-    demo estate. Naming that choice "Demo infrastructure" on the wizard told them the tool
-    was not for them, or pushed them to POV — the one genuinely wrong answer on that step.
+    operator administering infrastructure they depend on has the same tenancy shape as
+    somebody demonstrating. Naming that choice "Demo infrastructure" on the wizard told
+    them the tool was not for them, or pushed them to POV — the one genuinely wrong answer
+    on that step.
     The mismatch between value and label is deliberate, and it looks enough like a bug to
     be worth pinning before somebody tidies it back.
+  * **The prose word and the config value are deliberately different.** The docs call an
+    install on the default profile an *estate instance*; only the config, and the
+    `**Profile:**` line naming it, say `demo`. Both halves are pinned, because the obvious
+    "tidy-up" in either direction — renaming the value, or letting "demo instance" back
+    into the prose — undoes the distinction without anyone noticing.
   * **Neither profile's infrastructure belongs to the customer.** A POV runs on a lab
     platform or cloud account the OPERATOR owns; what belongs to the customer is the
     tenant it is wired into. Calling those environments "customer environments" puts the
@@ -661,6 +667,83 @@ def test_the_profile_doc_says_the_name_is_narrower_than_the_profile():
     assert "third profile" in doc, \
         "the doc does not say why a real-infrastructure operator gets no profile of " \
         "their own — which is the question the name provokes"
+
+
+# ── the docs use the noun, not the value ─────────────────────────────────────
+
+# What an install on the default profile is NOT called in prose. Each of these was in the
+# tree until the docs adopted "estate instance", and each one told a community operator
+# running real infrastructure that this tool thought their estate was pretend.
+#
+# "demo tenant" is deliberately absent: docs/integrations/entra-k8s-federation.md means an
+# ENTRA tenant used for lab work there, which is a different thing wearing the same word.
+_NOT_AN_INSTANCE = ("demo instance", "demo-owned", "demo-only", "demo stack", "demo estate")
+
+
+def _doc_files():
+    """Every markdown page a reader can reach: the docs tree plus the front door."""
+    out = [os.path.join(_ROOT, "README.md")]
+    for base, _dirs, files in os.walk(os.path.join(_ROOT, "docs")):
+        out.extend(os.path.join(base, f) for f in files if f.endswith(".md"))
+    return sorted(out)
+
+
+def test_no_doc_calls_an_install_a_demo_instance():
+    """The regression guard, and the reason this survives the next person to edit a page.
+
+    A sweep rather than a list of known pages: the phrase spread across sixteen files
+    without anyone deciding it should, and it would do so again.
+    """
+    hits = []
+    for path in _doc_files():
+        for n, line in enumerate(_read(path).splitlines(), 1):
+            low = line.lower()
+            for phrase in _NOT_AN_INSTANCE:
+                if phrase in low:
+                    rel = os.path.relpath(path, _ROOT)
+                    hits.append(f"{rel}:{n}: {line.strip()[:100]}")
+    assert not hits, (
+        "these docs call an install on the default profile a demo. It is a tenancy shape, "
+        "not a purpose — say 'estate instance', and keep `demo` for the config value:\n"
+        + "\n".join(hits))
+
+
+def test_the_profile_doc_names_an_install_an_estate_instance():
+    """The sweep above only forbids. Something has to say what the word IS, once, where
+    somebody who meets it on another page will go looking."""
+    doc = _read(_PROFILE_DOC)
+    assert "estate instance" in doc, \
+        "docs/profiles/README.md never introduces 'estate instance', so every other page " \
+        "uses a term the docs do not define"
+    assert "what the config stores" in doc, \
+        "the doc does not say that `demo` is the stored value and 'estate instance' the " \
+        "thing itself — which is the whole reason the two words differ"
+
+
+def test_the_docs_index_has_a_row_for_running_your_own_infrastructure():
+    """The /docs index is the in-app help front door, and it listed presenters, POV
+    operators and contributors — everybody except the community operator running the
+    infrastructure they depend on, who is the largest group of all."""
+    index = _read(os.path.join(_ROOT, "docs", "README.md"))
+    start = index.split("## Start here", 1)[1].split("##", 1)[0]
+    assert "running your own infrastructure" in start.lower(), \
+        "the /docs index offers no way in for somebody running their own estate"
+
+
+def test_the_page_header_still_names_the_stored_profile_value():
+    """The other half of the split, and the one a rename would quietly break.
+
+    Every capability page carries `**Profile:** `demo``, and that is correct: it names the
+    config value the gate reads. Moving the prose to "estate instance" must not drag the
+    header along with it, or the page stops describing anything checkable.
+    """
+    header = "**Profile:** `demo`"
+    carriers = [os.path.relpath(p, _ROOT) for p in _doc_files() if header in _read(p)]
+    assert len(carriers) >= 20, (
+        f"only {len(carriers)} pages carry {header!r}; the header names the stored "
+        f"install_profile value and is not what the prose rename was about")
+    for expected in ("docs/kubernetes.md", "docs/databases.md", "docs/cloud-vms.md"):
+        assert expected in carriers, f"{expected} no longer names its profile"
 
 
 if __name__ == "__main__":
