@@ -75,7 +75,7 @@ the management network, and no credentials stored anywhere the dashboard can rea
 [XCP-ng](../../../integrations/xcpng.md)). Add **Password Safe** for rotation and **Remote agents**
 for the discovery card.
 
-**This focus needs a demo instance.** Every hypervisor integration is demo-owned, because
+**This focus needs an estate instance.** Every hypervisor integration is estate-owned, because
 their deploys and Web Jumps resolve the global BeyondTrust tenant — so on a
 [POV instance](../../pov/README.md) most of these cards report as unavailable. That is a
 deliberate tenancy decision rather than a gap, and the POV plan floats reusing a

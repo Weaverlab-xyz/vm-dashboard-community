@@ -23,6 +23,10 @@ community operator running their own environment wants `demo`, not a third profi
 profile that masked features by purpose rather than by tenancy would be a preference, and
 [the gate](#the-gate) below is the argument for why it must not be one.
 
+Which is why these pages call an install on this profile an **estate instance**. `demo` is
+what the config stores — and what the **Profile:** line at the top of every capability page
+names — while *estate instance* is the thing itself.
+
 **Neither profile's infrastructure belongs to the customer.** A POV runs on a lab platform
 or a cloud account *you* own and pay for — a sandbox you stand up for an evaluation and reap
 afterwards. What belongs to the customer is the **tenant** it is wired into: their PRA
@@ -30,13 +34,13 @@ appliance, their Password Safe. Calling those environments "customer environment
 boundary in the wrong place, and the boundary is the entire point of the split — which is
 why the POV instance's nav chip says *Customer tenants* rather than *Customer environments*.
 
-Why they are exclusive is **tenancy.** A demo instance resolves its BeyondTrust tenant from
+Why they are exclusive is **tenancy.** An estate instance resolves its BeyondTrust tenant from
 the global singletons (`bt_api_host`, `pscli_api_url`, `entitle_api_key`). A POV instance
 holds a *registry* of many named tenants, because several POVs run at once and each has its
 own PRA appliance and Password Safe Cloud tenant. An instance claiming both roles would
 have two answers to "which tenant?" at every call site — and the wrong answer is silent,
-not loud: a demo VM deploy onboarding into a customer's Password Safe, or a POV onboarding
-into your demo tenant. Nothing errors, both paths "work".
+not loud: an estate VM deploy onboarding into a customer's Password Safe, or a POV onboarding
+into your own tenant. Nothing errors, both paths "work".
 
 ## The gate
 
@@ -79,7 +83,7 @@ Two properties worth knowing:
 | Auto-delete timer, notifications, secret scanning, auth/SSO | yes | yes |
 
 The third block is deliberate: a POV instance needs PRA, Password Safe and the agent more
-than a demo instance does, so those are profile-neutral rather than owned by either.
+than an estate instance does, so those are profile-neutral rather than owned by either.
 
 The cloud-console row is the one entry that is **not** a feature flag. Those five pages
 gate on credential *presence*, so there was no flag for the mask to subtract and all five
@@ -95,7 +99,7 @@ a playbook at all — and it has no cloud to put one in. The
 is the answer: a POV already runs an agent inside the customer's environment, and that
 agent can reach a share the dashboard cannot.
 
-A demo-only integration on a POV instance is not merely toggled off — **Settings refuses to
+An estate-only integration on a POV instance is not merely toggled off — **Settings refuses to
 enable it**, with a 409 naming the profile. Accepting the write would store a flag that
 reads back as on while `enabled()` keeps returning `False`: a toggle that saves cleanly,
 shows on, and does nothing. Turning something *off* is always allowed.
@@ -119,4 +123,4 @@ The capability docs at the [docs root](../README.md) are written once and shared
 VMs, Databases, Kubernetes, Image Management and the rest describe what the dashboard
 does, and each one's
 header block names the profile it applies to. This folder covers only what is *specific* to
-running a demo estate or a customer POV.
+running an estate instance or a POV.

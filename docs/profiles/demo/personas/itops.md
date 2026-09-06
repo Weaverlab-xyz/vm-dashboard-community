@@ -74,7 +74,7 @@ broker.
 desktops**. Add **Password Safe** for the local-admin rotation card and **Remote agents** for
 the power-control card.
 
-The workstation and virtual-desktop features are demo-owned, so this focus is
+The workstation and virtual-desktop features are estate-owned, so this focus is
 thinner on a [POV instance](../../pov/README.md) — though the EPM and PRA halves are
 profile-neutral and work on either.
 

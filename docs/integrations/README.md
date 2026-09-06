@@ -52,5 +52,5 @@ Anything the dashboard cannot route to is reached through an agent instead — s
 | [MCP server](mcp-server.md) | you want an AI client to drive the dashboard through its own API. |
 
 The one POV-only integration, Skytap, lives with the rest of the POV material at
-[profiles/pov/skytap.md](../profiles/pov/skytap.md): Settings refuses to enable it on a
-demo instance, so it is not a choice available here.
+[profiles/pov/skytap.md](../profiles/pov/skytap.md): Settings refuses to enable it on an
+estate instance, so it is not a choice available here.

@@ -2,22 +2,22 @@
 
 > **Audience:** operator · **Profile:** `pov` · **Read this when:** you are about to run customer proof-of-value work and want to know why it needs its own dashboard.
 
-A **second** dashboard, next to the one managing your demo estate. Same image, same code,
+A **second** dashboard, next to the one managing your own estate. Same image, same code,
 its own database, its own users, its own agents — and a different set of features.
 
-It exists because of one thing: **tenancy.** A demo instance resolves its BeyondTrust
+It exists because of one thing: **tenancy.** An estate instance resolves its BeyondTrust
 tenant from the global singletons (`bt_api_host`, `pscli_api_url`, `entitle_api_key`). A POV
 instance holds a *registry* of many named tenants, because several POVs run at once and each
 has its own PRA appliance and Password Safe Cloud tenant. An instance claiming both roles
 would have two answers to "which tenant?" at every call site — and the wrong answer is
-silent, not loud: a demo VM deploy onboarding into a customer's Password Safe, or a POV
-onboarding into your demo tenant. Nothing errors, both paths "work".
+silent, not loud: an estate VM deploy onboarding into a customer's Password Safe, or a POV
+onboarding into your own tenant. Nothing errors, both paths "work".
 
 So the two profiles are **mutually exclusive**, and the exclusion is enforced in code rather
 than left to discipline.
 
 The gate that makes them exclusive, and the per-feature matrix, are in
-[Demo and POV profiles](../../../README.md).
+[Demo and POV profiles](../README.md).
 
 A POV instance also needs a **lab platform** — the thing a POV environment actually runs
 on. Skytap is the first one; see [Skytap](skytap.md) for its
@@ -48,8 +48,8 @@ Why two of these subsystems are shaped the way they are is in
 
 ## What this stack deliberately does not mount
 
-Unlike the demo stack, neither service gets `/var/run/docker.sock` or the `runner_work`
-volume. The demo stack needs the socket to launch sibling Ansible and kubectl/helm
+Unlike the estate stack, neither service gets `/var/run/docker.sock` or the `runner_work`
+volume. The estate stack needs the socket to launch sibling Ansible and kubectl/helm
 containers. A POV instance runs Ansible **on the remote agent inside the customer
 environment**, and Kubernetes is masked off entirely, so handing this stack the host's Docker
 daemon would grant a great deal and buy nothing.
@@ -64,7 +64,7 @@ the mechanism belong together. By symptom:
 
 | It looks like | Look in |
 |---|---|
-| A nav link or Settings toggle refuses | [Demo and POV profiles](../../../README.md#failure-modes) |
+| A nav link or Settings toggle refuses | [Demo and POV profiles](../README.md#failure-modes) |
 | A tenant is missing, wrong, or rejected | [Standing up a POV instance](standing-one-up.md#failure-modes) |
 | A tunnel times out, or a broker install hangs | [The Gateway and the Resource Broker](gateway-and-broker.md#failure-modes) |
 | A VM was skipped, or a jump item does not work | [Wiring](wiring.md#failure-modes) |

@@ -408,6 +408,12 @@ async def doc_page(page: str) -> HTMLResponse:
         candidate.relative_to(_DOCS_DIR)
     except ValueError:
         raise HTTPException(status_code=404, detail="doc not found")
+    # The link rewriter resolves relative hrefs against dirname(page), so `page` has to be
+    # the FILE's path and not the URL. They differ on exactly one route -- the folder URL
+    # below -- and there the difference silently broke every relative link on every hub
+    # page in the tree: /docs/profiles/pov resolved `skytap.md` against `profiles/`
+    # instead of `profiles/pov/`, sending the reader to /docs/profiles/skytap and a 404.
+    source = rel
     if not candidate.is_file():
         # A folder URL serves that folder's index, so /docs/profiles/pov works and every
         # link can name the directory the way it does on GitHub. Without this the hub is
@@ -421,8 +427,9 @@ async def doc_page(page: str) -> HTMLResponse:
             raise HTTPException(status_code=404, detail="doc not found")
         if not candidate.is_file():
             raise HTTPException(status_code=404, detail="doc not found")
+        source = f"{rel}/README"
 
-    html = _render_markdown(candidate.read_text(encoding="utf-8"), page=rel)
+    html = _render_markdown(candidate.read_text(encoding="utf-8"), page=source)
     # Escape the page-derived title before reflecting it into the HTML shell —
     # it originates from the request path, so render it as text, not markup
     # (prevents reflected XSS; CodeQL py/reflective-xss).

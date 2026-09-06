@@ -12,7 +12,7 @@ Slice 1 is built. Slices 2 and 3 are designed here and not yet written.
 
 `services/personas.py` ships eight roles and five cards each, and `/use-cases` renders
 them all. Every card resolves its readiness through `feature_flags.enabled()` — an
-instance-wide answer — and every card targets a demo page: `/aws#instances`, `/vsphere`,
+instance-wide answer — and every card targets an estate page: `/aws#instances`, `/vsphere`,
 `/k8s`, `/databases`.
 
 On a POV instance those pages are masked or 404. So every card resolves `masked`, and the
@@ -40,7 +40,7 @@ every Entitle card; it is told they are out of scope for this environment. That 
 same promise the persona axis makes one layer up, and it is the property that keeps this
 from becoming a second `install_profile`.
 
-### Three states, and three words that are not the demo page's
+### Three states, and three words that are not the estate page's
 
 | State | Meaning | Renders |
 |---|---|---|
@@ -246,7 +246,7 @@ neither: you authenticate as one tenant and name another's ids. So `ctx` now rea
 and a test pins both halves.
 
 This was never a live bug. The one caller was `cloud_function_service`, behind
-`cloud_functions_enabled`, which is `_DEMO_ONLY` — on a demo instance the singleton *is*
+`cloud_functions_enabled`, which is `_DEMO_ONLY` — on an estate instance the singleton *is*
 the tenant, and that path is unchanged: with no `ctx` the fallback is exactly what it was.
 
 ### A lighter tenant context
@@ -374,11 +374,11 @@ says why it is all still there. The distance between *collapsed* and *removed* i
 argument this page rests on — a persona or a profile may reorder and emphasise, never
 subtract — so both halves are pinned: the groups assignment may not `.filter(`, and the
 collapse may not use `x-if`, which would take them out of the DOM. That is filtering with
-extra steps. A demo instance opens on exactly what it opened on before.
+extra steps. An estate instance opens on exactly what it opened on before.
 
 No backend. The lead reads `/api/pov/managed` and the same `/api/pov/managed/{id}/use-cases`
 the POV's own page reads, so the two cannot disagree about what a POV can run, and every way
-that read can fail — a demo instance 404s the router, an expired session 401s — is a
+that read can fail — an estate instance 404s the router, an expired session 401s — is a
 non-event rather than an error on a page whose main content loaded fine. It performs no
 writes: ticking a card off stays on the POV's own page, where every other action on that POV
 already lives.
