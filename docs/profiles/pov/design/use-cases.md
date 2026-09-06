@@ -2,11 +2,15 @@
 
 > **Audience:** contributor · **Profile:** `pov` · **Read this when:** you are changing the per-POV use-case checklist or who may tick it off.
 
-Three slices. This note covers all of them, because the first one has to carry the
-columns and the vocabulary the other two need, and deciding that twice is how they end up
-disagreeing.
+Six slices, and one note for all of them, because the first had to carry the columns and
+the vocabulary the rest need — and deciding that twice is how they end up disagreeing.
+Slice 1 has no section of its own: it *is* the first half of this note, up to and including
+[Progress: the checklist](#progress-the-checklist). The five after it get one each, and
+each opens by saying where it stands.
 
-Slice 1 is built. Slices 2 and 3 are designed here and not yet written.
+**All of them are built.** One question is still open — Entitle's Ephemeral-mode
+discriminator, in [slice 2b](#the-open-question-still-open) — and nothing depends on the
+answer, which is why the SE-driven mint path exists.
 
 ## The problem
 
