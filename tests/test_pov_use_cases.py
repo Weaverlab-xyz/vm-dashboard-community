@@ -132,6 +132,38 @@ def test_every_pov_card_docs_path_exists_on_disk():
             f"{p.key}/{c.id} names docs '{c.docs}', which is not a file under docs/"
 
 
+_DESIGN_NOTE = os.path.join(_DOCS, "profiles", "pov", "design", "use-cases.md")
+
+# What the summary is not allowed to say once every slice below it reports Built.
+_UNBUILT = ("not yet written", "not yet built", "and not yet", "still to be written")
+
+
+def test_the_design_note_summary_agrees_with_its_own_slice_sections():
+    """A design note written slice by slice grows a header nobody revisits.
+
+    This one opened with "Slice 1 is built. Slices 2 and 3 are designed here and not yet
+    written" through five more merges, while every section under it said "Built." -- so a
+    contributor skimming the top concluded the accessor and the write path did not exist.
+    The contradiction was inside one file, three paragraphs apart, and survived because
+    nothing compared the two.
+
+    Deliberately SELF-DISABLING while a slice really is unbuilt: during that part of the
+    cycle the summary is supposed to say "not yet", and a guard that fires then is one
+    somebody deletes rather than satisfies. It only has an opinion once the doc claims
+    everything shipped.
+    """
+    doc = _read(_DESIGN_NOTE)
+    states = re.findall(r"^## Slice [^\n]*\n\n(\w+)", doc, re.M)
+    assert states, "no '## Slice ...' sections found; has the note been restructured?"
+    if not all(s == "Built" for s in states):
+        return  # some slice is genuinely unfinished; the summary may say so
+    summary = doc.split("## The problem", 1)[0].lower()
+    for claim in _UNBUILT:
+        assert claim not in summary, (
+            f"all {len(states)} slice sections say 'Built', but the summary still says "
+            f"{claim!r}. The first paragraph is what a contributor reads.")
+
+
 # ── the two catalogs stay apart ──────────────────────────────────────────────
 
 def test_a_pov_card_declares_no_flag_or_cloud():
