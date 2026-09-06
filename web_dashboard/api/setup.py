@@ -2079,8 +2079,8 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
             _feature_to_cfg_key(feature_name)):
         raise HTTPException(
             status_code=409,
-            detail=f"'{feature_name}' is not available on an "
-                   f"'{feature_flags.install_profile()}' instance, so it cannot be "
+            detail=f"'{feature_name}' is not available on "
+                   f"{feature_flags.profile_noun()}, so it cannot be "
                    f"enabled here. Run a separate instance for it.",
         )
     _write_feature(feature_name, filtered, touched=touched)

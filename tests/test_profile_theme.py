@@ -123,6 +123,22 @@ def test_the_community_signal_survived_the_rebrand():
     assert "Community" not in ui_theme.theme_for("demo", "production")["chip_label"]
 
 
+def test_the_production_chip_does_not_call_the_instance_a_demo():
+    """The other app_env, and the one that matters most.
+
+    .env.example ships APP_ENV=development, so "production" is set deliberately -- by
+    somebody running their own estate for real. The chip said "Demo" to exactly that
+    person, on every page of the app, which is the last place the old framing survived
+    after the wizard and the docs moved off it. The slot carries the EDITION; the lockup's
+    product word already says which profile this is.
+    """
+    label = ui_theme.theme_for("demo", "production")["chip_label"]
+    assert "demo" not in label.lower(), (
+        f"the production chip reads {label!r}. `demo` names a tenancy shape, not a "
+        f"purpose, and this is the one variant a real-infrastructure operator sees.")
+    assert label, "the production chip is empty; base.html renders a separator for it"
+
+
 # ── resolution rules ─────────────────────────────────────────────────────────
 
 def test_pov_ignores_app_env():

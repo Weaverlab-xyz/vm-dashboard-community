@@ -100,6 +100,30 @@ def install_profile() -> str:
     return raw if raw in VALID_PROFILES else "demo"
 
 
+# What to call this instance in a sentence somebody reads, article included.
+#
+# The article ships WITH the noun on purpose. Three refusals used to interpolate the raw
+# config value and each wrote its own article -- "not available on an 'demo' instance" --
+# and two of the three were wrong on both profiles. An a/an helper kept apart from the word
+# it has to agree with is the same bug waiting to happen again.
+#
+# And the value is not the word: ``demo`` names a tenancy shape rather than a purpose (see
+# docs/profiles/README.md), so showing it told an operator running the infrastructure they
+# depend on that the dashboard thought their estate was pretend.
+_PROFILE_NOUN = {"demo": "an estate instance", "pov": "a POV instance"}
+
+
+def profile_noun(profile: str | None = None) -> str:
+    """This instance as a person would say it -- ``"an estate instance"``, ``"a POV
+    instance"`` -- for messages, never for logic.
+
+    Falls back to the demo noun on anything unrecognised, mirroring :func:`install_profile`:
+    this is reached from a request-path 404, and a typo in one config row must not turn a
+    refusal into a KeyError.
+    """
+    return _PROFILE_NOUN.get(profile or install_profile(), _PROFILE_NOUN["demo"])
+
+
 def profile_masks(flag: str) -> bool:
     """Whether this instance's profile makes ``flag`` unavailable regardless of config."""
     owner = _PROFILE_OF.get(flag)
