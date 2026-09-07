@@ -149,6 +149,14 @@ class Settings(BaseSettings):
     vm_spend_cap_action: str = "warn"            # "warn" | "suspend"
     vm_spend_warn_percent: int = 80              # clamped to 10..99 by spend_policy
     vm_spend_sweep_interval_minutes: int = 10    # floored at 60s in the service
+    # Automatic retry of transiently-failed jobs (services/retry_policy.py). Off by
+    # default: it changes `_claim_one`'s query, which every worker replica polls every
+    # two seconds, and it makes a failed job non-terminal — both worth opting into rather
+    # than inheriting on upgrade. Only re-entrant job types are ever retried, and only on
+    # recognised transient errors; a deploy is never retried, because the AWS path leaves
+    # a launched instance behind on failure and a second run would launch another.
+    job_retry_enabled: bool = False
+    job_retry_max_attempts: int = 3              # clamped by retry_policy
     # Discovery of cloud VMs this dashboard did not deploy (services/unmanaged_vms.py).
     # Off by default: it lists every instance in the account/subscription/project rather
     # than the identifiers the deploy jobs name, which is more cloud calls and, on a large

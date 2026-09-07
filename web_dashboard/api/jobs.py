@@ -49,6 +49,8 @@ async def list_jobs(
     include_routine: bool = Query(
         False, description="Include completed timer-driven maintenance passes "
                            "(job_service.ROUTINE_JOB_TYPES). Excluded by default."),
+    dead_lettered: bool = Query(
+        False, description="Only jobs that used every retry and failed anyway."),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -62,6 +64,9 @@ async def list_jobs(
     day whether or not it found anything, so a real deploy drops off the first page within
     hours. A *failed* routine pass is never hidden, so the dashboard's failed-jobs panel
     keeps working — see the constant for why that split matters.
+
+    ``dead_lettered=true`` is the retry tail: jobs that used every attempt and failed
+    anyway. Scoped by the same owner filter as everything else here.
     """
     owner_filter = None if can_audit_jobs(current_user) else current_user.username
     jobs, total = job_service.list_jobs(
@@ -73,6 +78,7 @@ async def list_jobs(
         workgroup=workgroup,
         batch_id=batch_id,
         include_routine=include_routine,
+        dead_lettered=dead_lettered,
     )
     return JobListResponse(
         jobs=[_job_to_response(j) for j in jobs],

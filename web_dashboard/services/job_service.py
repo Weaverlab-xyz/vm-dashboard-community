@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import Job, AuditLog
-from . import audit_chain
+from . import audit_chain, retry_policy
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +179,82 @@ def set_completed(db: Session, job_id: str, result: Optional[dict] = None) -> Op
     return job
 
 
+def _retry_enabled() -> bool:
+    """Whether transient failures are requeued. **Never raises.**
+
+    This is read from inside ``set_failed``, which is the path a job takes when something
+    has already gone wrong — and the config store is backed by the same database that may
+    well be the thing going wrong. A config read that throws here would throw out of
+    ``set_failed`` itself and leave the row stuck in ``running`` forever, which is
+    strictly worse than the failure it was trying to record.
+
+    So an unreadable flag means "off", which degrades to exactly the behaviour this
+    codebase had before retry existed.
+    """
+    try:
+        from . import config_service
+        from ..config import settings
+        return config_service.get_bool("job_retry_enabled",
+                                       getattr(settings, "job_retry_enabled", False))
+    except Exception:  # noqa: BLE001 — see the docstring; off is the safe answer
+        return False
+
+
+def _retry_limit():
+    """The configured attempt ceiling, or None for the default. Never raises, for the
+    same reason as :func:`_retry_enabled` — ``retry_policy.max_attempts`` treats None as
+    "use the default"."""
+    try:
+        from . import config_service
+        from ..config import settings
+        return (config_service.get("job_retry_max_attempts")
+                or getattr(settings, "job_retry_max_attempts", None))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _raise_dead_letter(db: Session, job) -> None:
+    """Announce a job that has used every attempt.
+
+    **The error text is deliberately not in here.** ``emit_safe`` queues an outbox row the
+    worker drains to a webhook — Slack, Teams, or an arbitrary HTTP endpoint — and job
+    errors in this codebase routinely echo request parameters from runners that handle SSH
+    keys, deploy keys, PRA client secrets and generated Azure admin passwords. Pushing that
+    to a third party buys nothing: the error is already on the row, already rendered on the
+    job page, and that page is one click away through the URL below.
+
+    (The neighbouring ``notify_job_failed`` does still send ``error_message[:1000]``. That
+    predates this and operators may triage from it, so changing it is its own decision
+    rather than something to smuggle in here.)
+
+    **Called AFTER the caller has committed.** ``emit_safe`` rolls the session back when a
+    notification fails — see its docstring, which states that every emit site sits after
+    the commit of the thing it reports. Called before, a broken webhook would roll back the
+    very writes marking this job failed and leave it ``running`` forever.
+    """
+    try:
+        from . import notification_service, notify_policy
+        label = job.vm_path or job.cloud_resource_id or job.job_type
+        notification_service.emit_safe(db, notify_policy.NotificationEvent(
+            event_type="job.dead_lettered",
+            title=f"{job.job_type} failed after {job.attempts + 1} attempts — {label}",
+            body=("Every retry for this job has been used and the failure persists. "
+                  "Open the job to see the error."),
+            # The routing fields notify_job_failed sets, so a dead letter reaches the same
+            # subscribers a first failure does rather than only the unscoped ones.
+            resource_id=f"job:{job.id}",
+            resource_kind="job",
+            resource_name=label or job.job_type,
+            workgroup=job.workgroup or "",
+            url=f"/jobs/{job.id}",
+            dedupe_bucket=f"job.dead_lettered:{job.id}",
+            fields={"Job type": job.job_type, "Attempts": job.attempts + 1,
+                    "Started by": job.created_by},
+        ))
+    except Exception:  # noqa: BLE001
+        logger.info("could not raise job.dead_lettered for %s", job.id, exc_info=True)
+
+
 def set_failed(db: Session, job_id: str, error: str,
                result: Optional[dict] = None) -> Optional[Job]:
     """Mark a job as failed with an error message and optional result metadata.
@@ -192,16 +268,63 @@ def set_failed(db: Session, job_id: str, error: str,
     """
     job = db.query(Job).filter(Job.id == job_id).first()
     if job:
-        job.status = "failed"
-        job.completed_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        now = datetime.utcnow()
         job.error_message = error
+        job.updated_at = now
         if result:
             existing = job.metadata_dict
             existing.update(result)
             job.metadata_dict = existing
+
+        # The one hook. Every one of the 80-odd runners funnels through here, so retry
+        # needs no change in any of them — the same way `log_audit` grew an ip_address
+        # default without its 75 call sites knowing. `retry_policy` decides; see there
+        # for why a deploy is never on the retryable list.
+        retrying = _retry_enabled()
+        dead_lettered = False
+        if retrying and retry_policy.should_retry(
+                job.job_type, error, job.attempts, limit=_retry_limit()):
+            job.attempts = (job.attempts or 0) + 1
+            job.retry_after = now + timedelta(
+                seconds=retry_policy.backoff_seconds(job.attempts - 1))
+            # Back to `pending`, NOT to a new status — `_claim_one` will pick it up once
+            # `retry_after` passes. `completed_at` is deliberately left alone: the run has
+            # not completed, and stamping it would make a requeued job read as finished to
+            # every duration and staleness check in the tree.
+            job.status = "pending"
+            job.started_at = None
+            # The error text is deliberately NOT in this line, for the same reason
+            # `_raise_dead_letter` leaves it out of the notification: it is the one field
+            # that carries whatever a runner echoed back, and application logs are shipped
+            # to aggregators whose readers are a different set of people from those with
+            # access to this database. Before this, nothing in this module or in
+            # `jobs_worker` had ever logged it. What is here is the decision — which job,
+            # which type, which attempt, how long until the next one — and `error_message`
+            # is on the row, rendered on /jobs/{id}, for the rest.
+            logger.info("job %s (%s) failed transiently, attempt %d — requeued in %ds",
+                        job_id, job.job_type, job.attempts,
+                        retry_policy.backoff_seconds(job.attempts - 1))
+        else:
+            job.status = "failed"
+            job.completed_at = now
+            # `retrying` gates the read as well as the write. With the flag off this
+            # function does not touch `attempts` at all, so its behaviour is byte-identical
+            # to what it was before retry existed — which is what "off by default" has to
+            # mean on a path every one of the 80-odd runners funnels through. It is also
+            # true on its own terms: with no retries, there is no such thing as an
+            # exhausted job to dead-letter.
+            # Exhausted rather than failed first time: the dead-letter tail is exactly this
+            # shape — `failed` with attempts spent — so nothing new has to be taught to any
+            # page. The ANNOUNCEMENT happens after the commit below, not here.
+            dead_lettered = retrying and (job.attempts or 0) > 0
         db.commit()
         db.refresh(job)
+        # After the commit, and that ordering is load-bearing rather than tidy: emit_safe
+        # rolls the session back when a notification fails, so announcing before the commit
+        # would let a broken webhook discard the status/error/completed_at writes above and
+        # leave this job `running` forever. emit_safe's own docstring states the rule.
+        if dead_lettered:
+            _raise_dead_letter(db, job)
         # After the commit, always: the notification is a report on a transition that
         # has already happened, so nothing it does can undo one. Hooked here rather than
         # at the ~221 call sites that reach this function.
@@ -321,6 +444,7 @@ def list_jobs(
     workgroup: Optional[str] = None,
     batch_id: Optional[str] = None,
     include_routine: bool = True,
+    dead_lettered: bool = False,
 ) -> tuple[List[Job], int]:
     """
     List jobs with optional filters.
@@ -331,8 +455,15 @@ def list_jobs(
     It excludes only ``completed`` ones, so a failed sweep still surfaces. Defaults to True
     so this stays a display choice made by the caller that renders a list, not a filter
     silently applied to every count in the app.
+
+    ``dead_lettered=True`` narrows to jobs that used every retry and failed anyway. That is
+    a QUERY, not a status: ``failed`` with ``attempts > 0``. Adding a fourth status would
+    have meant auditing 108 comparisons against ``"failed"`` in this tree, and the first one
+    missed is a job some page quietly stops showing.
     """
     query = db.query(Job)
+    if dead_lettered:
+        query = query.filter(Job.status == "failed", Job.attempts > 0)
     if not include_routine:
         query = query.filter(~and_(Job.job_type.in_(ROUTINE_JOB_TYPES),
                                    Job.status == "completed"))
