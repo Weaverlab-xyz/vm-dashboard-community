@@ -670,6 +670,16 @@ class Job(Base):
     spend_accrued_at = Column(DateTime, nullable=True)
     spend_warned_at = Column(DateTime, nullable=True)        # latch: warned once
     spend_capped_at = Column(DateTime, nullable=True)        # latch: acted on the cap once
+    # ── Retry (services/retry_policy.py) ──────────────────────────────────────
+    # NO new status. `failed` stays terminal and `ACTIVE_STATUSES` is unchanged, because
+    # 108 sites in this tree compare against "failed" and the first one missed would be a
+    # job some page silently stops showing. A requeue writes `pending` back with a
+    # `retry_after`; an exhausted job is `failed` with attempts > 0, so the dead-letter
+    # tail is a QUERY rather than a fourth state everything has to learn.
+    attempts = Column(Integer, nullable=False, default=0)
+    # NULL = claimable now, which is every row that exists today and every row that never
+    # fails. `jobs_worker._claim_one` reads it; nothing else may write it.
+    retry_after = Column(DateTime, nullable=True)
     status = Column(String(20), nullable=False, default="pending", index=True)  # pending, running, completed, failed, cancelled
     progress_pct = Column(Integer, default=0)
     progress_message = Column(Text)
@@ -2446,6 +2456,8 @@ def init_db():
             "ALTER TABLE jobs ADD COLUMN spend_accrued_at TIMESTAMP",
             "ALTER TABLE jobs ADD COLUMN spend_warned_at TIMESTAMP",
             "ALTER TABLE jobs ADD COLUMN spend_capped_at TIMESTAMP",
+            "ALTER TABLE jobs ADD COLUMN attempts INTEGER DEFAULT 0",
+            "ALTER TABLE jobs ADD COLUMN retry_after TIMESTAMP",
             "ALTER TABLE jobs ADD COLUMN cloud_resource_id VARCHAR(255)",
             "ALTER TABLE hypervisor_vm_cache ADD COLUMN guest_os VARCHAR(64)",
             # A workstation VMX path outgrows VARCHAR(128); see HypervisorVMCache.scope.

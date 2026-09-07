@@ -308,6 +308,14 @@ def _claim_one(db: Session, allowed: tuple = HANDLED_TYPES,
     invariant this function cannot enforce. A bound turns a hypothetical hot loop into a
     logged giveup that the next poll tick retries.
 
+    **``job_service.set_failed`` DOES write ``pending`` back onto a row** when
+    ``retry_policy`` says a failure was transient — and it is worth being explicit that
+    this does not touch the invariant above. It writes onto a **failed** row, never a
+    running one, inside its own commit: by the time it runs, this function's UPDATE has
+    long since moved the row through ``running``, so no claim is in flight to lose a race
+    with. The requeued row is also not immediately claimable — ``retry_after`` holds it
+    out of the filter above until its backoff has passed.
+
     NOTE the ordering change a narrowed ``allowed`` introduces: a NEWER light job
     overtakes an OLDER pending heavy one whose tier is full. That is the point — an
     image-export poll must not wait 40 minutes behind a Packer build — so ``created_at``
@@ -319,7 +327,11 @@ def _claim_one(db: Session, allowed: tuple = HANDLED_TYPES,
     for _ in range(max_attempts):
         job = (
             db.query(Job)
-            .filter(Job.status == "pending", Job.job_type.in_(allowed))
+            .filter(Job.status == "pending", Job.job_type.in_(allowed),
+                    # A requeued job waits out its backoff. NULL for every row that has
+                    # never failed, which is almost all of them — see Job.retry_after.
+                    (Job.retry_after.is_(None))
+                    | (Job.retry_after <= datetime.utcnow()))
             .order_by(Job.created_at.asc())
             .first()
         )

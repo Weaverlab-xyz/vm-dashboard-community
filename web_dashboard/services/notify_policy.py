@@ -47,6 +47,10 @@ EVENT_SEVERITY = {
     "vm.spend_warn":         "warning",
     "vm.spend_capped":       "critical",
     "vm.spend_unpriced":     "warning",
+    # Distinct from `job.failed`: that one fires the first time anything fails, this one
+    # only when every retry has been used and the failure is persistent. An operator who
+    # filters for one should not be handed the other.
+    "job.dead_lettered":     "critical",
     "secret.stale":          "warning",
     "config.drift":          "warning",
     # Critical, and the only condition that is never merely informational:
@@ -62,7 +66,7 @@ EVENT_SEVERITY = {
 DEFAULT_EVENT_TYPES = (
     "resource.expiring,resource.reaped,job.failed,"
     "cost.budget_exceeded,secret.stale,config.drift,audit.chain_broken,"
-    "vm.spend_warn,vm.spend_capped,vm.spend_unpriced"
+    "vm.spend_warn,vm.spend_capped,vm.spend_unpriced,job.dead_lettered"
 )
 
 SEVERITY_ORDER = ("info", "warning", "critical")

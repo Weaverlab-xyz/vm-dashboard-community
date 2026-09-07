@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import Job, AuditLog
-from . import audit_chain
+from . import audit_chain, retry_policy
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +179,59 @@ def set_completed(db: Session, job_id: str, result: Optional[dict] = None) -> Op
     return job
 
 
+def _retry_enabled() -> bool:
+    """Whether transient failures are requeued. **Never raises.**
+
+    This is read from inside ``set_failed``, which is the path a job takes when something
+    has already gone wrong — and the config store is backed by the same database that may
+    well be the thing going wrong. A config read that throws here would throw out of
+    ``set_failed`` itself and leave the row stuck in ``running`` forever, which is
+    strictly worse than the failure it was trying to record.
+
+    So an unreadable flag means "off", which degrades to exactly the behaviour this
+    codebase had before retry existed.
+    """
+    try:
+        from . import config_service
+        from ..config import settings
+        return config_service.get_bool("job_retry_enabled",
+                                       getattr(settings, "job_retry_enabled", False))
+    except Exception:  # noqa: BLE001 — see the docstring; off is the safe answer
+        return False
+
+
+def _retry_limit():
+    """The configured attempt ceiling, or None for the default. Never raises, for the
+    same reason as :func:`_retry_enabled` — ``retry_policy.max_attempts`` treats None as
+    "use the default"."""
+    try:
+        from . import config_service
+        from ..config import settings
+        return (config_service.get("job_retry_max_attempts")
+                or getattr(settings, "job_retry_max_attempts", None))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _raise_dead_letter(db: Session, job, error: str) -> None:
+    """Announce a job that has used every attempt. Best-effort by contract — a broken
+    notifier must not stop the row being marked failed, which is the thing that matters."""
+    try:
+        from . import notification_service, notify_policy
+        notification_service.emit_safe(db, notify_policy.NotificationEvent(
+            event_type="job.dead_lettered",
+            title=f"{job.job_type} failed after {job.attempts + 1} attempts",
+            body=(f"Every retry for job {job.id} has been used and the failure persists. "
+                  f"Last error: {error}"),
+            url="/jobs",
+            dedupe_bucket=f"job.dead_lettered:{job.id}",
+            fields={"Job": job.id, "Type": job.job_type,
+                    "Attempts": job.attempts + 1, "Error": error[:200]},
+        ))
+    except Exception:  # noqa: BLE001
+        logger.info("could not raise job.dead_lettered for %s", job.id, exc_info=True)
+
+
 def set_failed(db: Session, job_id: str, error: str,
                result: Optional[dict] = None) -> Optional[Job]:
     """Mark a job as failed with an error message and optional result metadata.
@@ -192,14 +245,47 @@ def set_failed(db: Session, job_id: str, error: str,
     """
     job = db.query(Job).filter(Job.id == job_id).first()
     if job:
-        job.status = "failed"
-        job.completed_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        now = datetime.utcnow()
         job.error_message = error
+        job.updated_at = now
         if result:
             existing = job.metadata_dict
             existing.update(result)
             job.metadata_dict = existing
+
+        # The one hook. Every one of the 80-odd runners funnels through here, so retry
+        # needs no change in any of them — the same way `log_audit` grew an ip_address
+        # default without its 75 call sites knowing. `retry_policy` decides; see there
+        # for why a deploy is never on the retryable list.
+        retrying = _retry_enabled()
+        if retrying and retry_policy.should_retry(
+                job.job_type, error, job.attempts, limit=_retry_limit()):
+            job.attempts = (job.attempts or 0) + 1
+            job.retry_after = now + timedelta(
+                seconds=retry_policy.backoff_seconds(job.attempts - 1))
+            # Back to `pending`, NOT to a new status — `_claim_one` will pick it up once
+            # `retry_after` passes. `completed_at` is deliberately left alone: the run has
+            # not completed, and stamping it would make a requeued job read as finished to
+            # every duration and staleness check in the tree.
+            job.status = "pending"
+            job.started_at = None
+            logger.info("job %s (%s) failed transiently, attempt %d — requeued in %ds: %s",
+                        job_id, job.job_type, job.attempts,
+                        retry_policy.backoff_seconds(job.attempts - 1), error)
+        else:
+            job.status = "failed"
+            job.completed_at = now
+            # `retrying` gates the read as well as the write. With the flag off this
+            # function does not touch `attempts` at all, so its behaviour is byte-identical
+            # to what it was before retry existed — which is what "off by default" has to
+            # mean on a path every one of the 80-odd runners funnels through. It is also
+            # true on its own terms: with no retries, there is no such thing as an
+            # exhausted job to dead-letter.
+            if retrying and (job.attempts or 0) > 0:
+                # Exhausted rather than failed first time: the dead-letter tail is exactly
+                # this shape — `failed` with attempts spent — so nothing new has to be
+                # taught to any page, and the event is raised once, here.
+                _raise_dead_letter(db, job, error)
         db.commit()
         db.refresh(job)
         # After the commit, always: the notification is a report on a transition that
@@ -321,6 +407,7 @@ def list_jobs(
     workgroup: Optional[str] = None,
     batch_id: Optional[str] = None,
     include_routine: bool = True,
+    dead_lettered: bool = False,
 ) -> tuple[List[Job], int]:
     """
     List jobs with optional filters.
@@ -331,8 +418,15 @@ def list_jobs(
     It excludes only ``completed`` ones, so a failed sweep still surfaces. Defaults to True
     so this stays a display choice made by the caller that renders a list, not a filter
     silently applied to every count in the app.
+
+    ``dead_lettered=True`` narrows to jobs that used every retry and failed anyway. That is
+    a QUERY, not a status: ``failed`` with ``attempts > 0``. Adding a fourth status would
+    have meant auditing 108 comparisons against ``"failed"`` in this tree, and the first one
+    missed is a job some page quietly stops showing.
     """
     query = db.query(Job)
+    if dead_lettered:
+        query = query.filter(Job.status == "failed", Job.attempts > 0)
     if not include_routine:
         query = query.filter(~and_(Job.job_type.in_(ROUTINE_JOB_TYPES),
                                    Job.status == "completed"))
