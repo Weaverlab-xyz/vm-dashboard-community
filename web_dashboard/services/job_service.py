@@ -213,20 +213,43 @@ def _retry_limit():
         return None
 
 
-def _raise_dead_letter(db: Session, job, error: str) -> None:
-    """Announce a job that has used every attempt. Best-effort by contract — a broken
-    notifier must not stop the row being marked failed, which is the thing that matters."""
+def _raise_dead_letter(db: Session, job) -> None:
+    """Announce a job that has used every attempt.
+
+    **The error text is deliberately not in here.** ``emit_safe`` queues an outbox row the
+    worker drains to a webhook — Slack, Teams, or an arbitrary HTTP endpoint — and job
+    errors in this codebase routinely echo request parameters from runners that handle SSH
+    keys, deploy keys, PRA client secrets and generated Azure admin passwords. Pushing that
+    to a third party buys nothing: the error is already on the row, already rendered on the
+    job page, and that page is one click away through the URL below.
+
+    (The neighbouring ``notify_job_failed`` does still send ``error_message[:1000]``. That
+    predates this and operators may triage from it, so changing it is its own decision
+    rather than something to smuggle in here.)
+
+    **Called AFTER the caller has committed.** ``emit_safe`` rolls the session back when a
+    notification fails — see its docstring, which states that every emit site sits after
+    the commit of the thing it reports. Called before, a broken webhook would roll back the
+    very writes marking this job failed and leave it ``running`` forever.
+    """
     try:
         from . import notification_service, notify_policy
+        label = job.vm_path or job.cloud_resource_id or job.job_type
         notification_service.emit_safe(db, notify_policy.NotificationEvent(
             event_type="job.dead_lettered",
-            title=f"{job.job_type} failed after {job.attempts + 1} attempts",
-            body=(f"Every retry for job {job.id} has been used and the failure persists. "
-                  f"Last error: {error}"),
-            url="/jobs",
+            title=f"{job.job_type} failed after {job.attempts + 1} attempts — {label}",
+            body=("Every retry for this job has been used and the failure persists. "
+                  "Open the job to see the error."),
+            # The routing fields notify_job_failed sets, so a dead letter reaches the same
+            # subscribers a first failure does rather than only the unscoped ones.
+            resource_id=f"job:{job.id}",
+            resource_kind="job",
+            resource_name=label or job.job_type,
+            workgroup=job.workgroup or "",
+            url=f"/jobs/{job.id}",
             dedupe_bucket=f"job.dead_lettered:{job.id}",
-            fields={"Job": job.id, "Type": job.job_type,
-                    "Attempts": job.attempts + 1, "Error": error[:200]},
+            fields={"Job type": job.job_type, "Attempts": job.attempts + 1,
+                    "Started by": job.created_by},
         ))
     except Exception:  # noqa: BLE001
         logger.info("could not raise job.dead_lettered for %s", job.id, exc_info=True)
@@ -258,6 +281,7 @@ def set_failed(db: Session, job_id: str, error: str,
         # default without its 75 call sites knowing. `retry_policy` decides; see there
         # for why a deploy is never on the retryable list.
         retrying = _retry_enabled()
+        dead_lettered = False
         if retrying and retry_policy.should_retry(
                 job.job_type, error, job.attempts, limit=_retry_limit()):
             job.attempts = (job.attempts or 0) + 1
@@ -281,13 +305,18 @@ def set_failed(db: Session, job_id: str, error: str,
             # mean on a path every one of the 80-odd runners funnels through. It is also
             # true on its own terms: with no retries, there is no such thing as an
             # exhausted job to dead-letter.
-            if retrying and (job.attempts or 0) > 0:
-                # Exhausted rather than failed first time: the dead-letter tail is exactly
-                # this shape — `failed` with attempts spent — so nothing new has to be
-                # taught to any page, and the event is raised once, here.
-                _raise_dead_letter(db, job, error)
+            # Exhausted rather than failed first time: the dead-letter tail is exactly this
+            # shape — `failed` with attempts spent — so nothing new has to be taught to any
+            # page. The ANNOUNCEMENT happens after the commit below, not here.
+            dead_lettered = retrying and (job.attempts or 0) > 0
         db.commit()
         db.refresh(job)
+        # After the commit, and that ordering is load-bearing rather than tidy: emit_safe
+        # rolls the session back when a notification fails, so announcing before the commit
+        # would let a broken webhook discard the status/error/completed_at writes above and
+        # leave this job `running` forever. emit_safe's own docstring states the rule.
+        if dead_lettered:
+            _raise_dead_letter(db, job)
         # After the commit, always: the notification is a report on a transition that
         # has already happened, so nothing it does can undo one. Hooked here rather than
         # at the ~221 call sites that reach this function.

@@ -237,6 +237,142 @@ def test_attempts_exhaust_into_a_dead_letter():
     assert row.completed_at is not None
 
 
+# ── The dead-letter notification ──────────────────────────────────────────────
+
+class _capture:
+    """Capture the NotificationEvent handed to emit_safe instead of queueing it."""
+
+    def __init__(self, boom=False):
+        self.boom, self.events = boom, []
+
+    def __enter__(self):
+        import web_dashboard.services.notification_service as ns
+        self.ns, self.saved = ns, ns.emit_safe
+
+        def _emit(db, event):
+            self.events.append(event)
+            if self.boom:
+                # What the REAL emit_safe does on failure: it rolls the session back. That
+                # is the whole reason the emit has to happen after the commit.
+                db.rollback()
+                return 0
+            return 1
+
+        ns.emit_safe = _emit
+        return self
+
+    def __exit__(self, *exc):
+        self.ns.emit_safe = self.saved
+        return False
+
+    def of_type(self, event_type):
+        """The captured events of one type.
+
+        `set_failed` emits TWO things on this path — the dead letter, then the
+        pre-existing `job.failed` — so `events[-1]` is the wrong one and answering a
+        question about the dead letter with it would pass or fail for the wrong reason.
+        """
+        return [e for e in self.events if e.event_type == event_type]
+
+
+def _dead_letter(job_id, capture, error):
+    """Fail a job until it dead-letters, with emit_safe captured."""
+    with _enabled():
+        for _ in range(5):
+            db = SessionLocal()
+            try:
+                row = db.query(Job).filter(Job.id == job_id).first()
+                if row.status == "failed":
+                    return
+                row.status = "running"
+                db.commit()
+            finally:
+                db.close()
+            job_service.set_failed(SessionLocal(), job_id, error)
+
+
+def test_the_error_text_never_reaches_the_notification():
+    """emit_safe queues an outbox row the worker drains to a WEBHOOK — Slack, Teams, an
+    arbitrary endpoint. Job errors here echo request parameters from runners that handle
+    SSH keys, deploy keys, PRA client secrets and generated Azure admin passwords. The
+    error is already on the row and rendered on the job page, one click away through the
+    URL, so pushing it to a third party buys nothing."""
+    secret = "SENTINEL-ssh-private-key-AKIAEXAMPLE-hunter2"
+    _job("dl1")
+    with _capture() as cap:
+        _dead_letter("dl1", cap, f"ThrottlingException: Rate exceeded [{secret}]")
+
+    letters = cap.of_type("job.dead_lettered")
+    assert letters, "the dead letter must still be announced"
+    # Asserted over the WHOLE serialised event, not named fields: a field added later must
+    # not be able to reintroduce this quietly.
+    blob = repr(vars(letters[-1]))
+    assert secret not in blob, f"the error text reached the notification: {blob[:400]}"
+    assert "Rate exceeded" not in blob, blob[:400]
+
+    # The boundary of this change, stated rather than implied. The pre-existing
+    # `job.failed` that follows still sends `error_message[:1000]` to the same webhooks —
+    # the same class of exposure, in code this change does not touch. Asserting it here
+    # keeps the scope honest: if someone later fixes that too, this line is what tells
+    # them the omission above was deliberate and not an oversight they are undoing.
+    failed = cap.of_type("job.failed")
+    assert failed, "the ordinary failure notification must still be sent"
+    assert secret in repr(vars(failed[-1])), (
+        "notify_job_failed's exposure is pre-existing and out of scope here; if it has "
+        "been fixed, delete this assertion rather than reintroducing the error text")
+
+
+def test_the_dead_letter_still_says_what_an_operator_needs():
+    """Dropping the error must not leave a notification nobody can act on."""
+    _job("dl2", job_type="ec2_power", created_by="alice")
+    with _capture() as cap:
+        _dead_letter("dl2", cap, THROTTLE)
+
+    letters = cap.of_type("job.dead_lettered")
+    assert letters, "the dead letter must still be announced"
+    event = letters[-1]
+    assert "ec2_power" in event.title
+    assert event.url == "/jobs/dl2", event.url
+    assert event.resource_id == "job:dl2", "routing fields make it reach the same subscribers"
+    assert event.resource_kind == "job"
+    assert event.fields.get("Attempts") == retry_policy.DEFAULT_MAX_ATTEMPTS
+    assert event.fields.get("Started by") == "alice"
+
+
+def test_a_failing_notifier_cannot_lose_the_failure():
+    """The bug this ordering exists to prevent. emit_safe ROLLS THE SESSION BACK when a
+    notification fails — its own docstring says every emit site sits after the commit of
+    the thing it reports. Announced before the commit, a broken webhook would discard the
+    status, error and completed_at writes and leave the job `running` forever."""
+    _job("dl3")
+    with _capture(boom=True) as cap:
+        _dead_letter("dl3", cap, THROTTLE)
+
+    assert cap.events, "the emit must have been attempted"
+    row = _read("dl3")
+    assert row.status == "failed", "a broken notifier lost the failure"
+    assert row.error_message == THROTTLE, "…and lost the reason with it"
+    assert row.completed_at is not None
+
+
+def test_the_emit_happens_after_the_commit():
+    """Structural, because the runtime test above only catches it if the stub rolls back
+    exactly as the real one does — and the next person to touch this will be tempted to
+    move the announcement back beside the branch that decides it."""
+    import ast
+    src = open(os.path.join(_ROOT, "web_dashboard/services/job_service.py"),
+               encoding="utf-8").read()
+    fn = next(f for f in ast.walk(ast.parse(src)) if isinstance(f, ast.FunctionDef)
+              and f.name == "set_failed")
+    commits = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+               and isinstance(n.func, ast.Attribute) and n.func.attr == "commit"]
+    emits = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_raise_dead_letter"]
+    assert commits and emits, (commits, emits)
+    assert min(commits) < min(emits), \
+        "_raise_dead_letter must run AFTER db.commit() — emit_safe rolls back on failure"
+
+
 # ── The flag ──────────────────────────────────────────────────────────────────
 
 def test_with_the_flag_off_nothing_changes():
@@ -290,6 +426,14 @@ def test_with_the_flag_off_the_new_columns_are_never_even_read():
         completed_at = None
         updated_at = None
         metadata_dict = {}
+        # Everything the PRE-EXISTING path reads, present. The point of the stub is that
+        # `attempts` and `retry_after` are the ONLY things missing from it — with these
+        # absent too, notify_job_failed swallows an AttributeError of its own and the
+        # assertion below would pass without the flag-off path ever being the reason.
+        vm_path = None
+        cloud_resource_id = None
+        workgroup = ""
+        created_by = "someone"
 
     row = _RowWithoutRetryColumns()
 
@@ -307,6 +451,12 @@ def test_with_the_flag_off_the_new_columns_are_never_even_read():
             pass
 
         def refresh(self, *a):
+            pass
+
+        def add(self, *a):
+            pass
+
+        def rollback(self):
             pass
 
     with _enabled(on=False):
