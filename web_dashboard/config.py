@@ -132,9 +132,10 @@ class Settings(BaseSettings):
     # applied in api/mcp_server._MCPAuth, because a mount takes no dependencies.
     mcp_server_enabled: bool = False
     # Business-hours power windows for cloud VMs (services/suspend_sweeper.py).
-    # AWS and GCP only — see services/vm_suspend_policy for why Azure and OCI are
-    # excluded. Off by default; a schedule is per-VM and NULL on every existing row,
-    # so turning this on selects nothing until somebody sets one.
+    # AWS, GCP and Azure — see services/vm_suspend_policy for why OCI is excluded, and
+    # why an Azure VM's address is pinned before it may carry one. Off by default; a
+    # schedule is per-VM and NULL on every existing row, so turning this on selects
+    # nothing until somebody sets one.
     vm_suspend_schedule_enabled: bool = False
     vm_suspend_sweep_interval_minutes: int = 10   # floored at 1 in the service
     admission_control_enabled: bool = False
