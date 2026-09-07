@@ -6059,6 +6059,8 @@ function settingsPage() {
         desc: 'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules. Adds an Agents page for registering and revoking them. Terminate TLS in front of the dashboard before enabling — this is the only API that serves callers outside your own network.' },
       { key: 'mcp_server',   label: 'MCP Server',                hasConfig: false, enabled: false,
         desc: 'Expose read-only dashboard tools to an MCP-compatible AI client (Claude Desktop, Claude Code, Cursor) at /mcp, authenticated with a Personal Access Token. Each tool returns only what the token owner could see in the UI. Off by default; turning it on serves an endpoint that reads your estate.' },
+      { key: 'cloud_unmanaged_discovery', label: 'Discover unmanaged cloud VMs', hasConfig: false, enabled: false,
+        desc: 'Show cloud VMs this dashboard did not deploy, in a separate list on each cloud console. Discovered VMs can be started and stopped; they can never be destroyed from here. Off by default because it lists every instance in the account, subscription or project rather than the ones the dashboard deployed. A discovered VM is admin-only unless it carries a workgroup tag.' },
       { key: 'multi_region', label: 'Multi-region',            hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
       { key: 'oidc',         label: 'Single sign-on (OIDC)',   hasConfig: true,  enabled: true, configOnly: true,
@@ -6345,6 +6347,7 @@ function settingsPage() {
           notifications: features.notifications,
           remote_agents: features.remote_agents,
           mcp_server: features.mcp_server,
+          cloud_unmanaged_discovery: features.cloud_unmanaged_discovery,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];

@@ -188,6 +188,8 @@ def flags() -> dict:
         "cloud_functions_enabled": enabled("cloud_functions_enabled", settings.cloud_functions_enabled),
         "cert_lab_enabled":     enabled("cert_lab_enabled",      settings.cert_lab_enabled),
         "cost_explorer_enabled": enabled("cost_explorer_enabled", settings.cost_explorer_enabled),
+        "cloud_unmanaged_discovery_enabled": enabled(
+            "cloud_unmanaged_discovery_enabled", settings.cloud_unmanaged_discovery_enabled),
         "remote_agents_enabled": enabled("remote_agents_enabled", settings.remote_agents_enabled),
         # POV environments. Masked off entirely on a demo instance — see _POV_ONLY.
         "pov_environments_enabled": enabled("pov_environments_enabled", settings.pov_environments_enabled),
@@ -320,5 +322,6 @@ def feature_map() -> dict:
         "cert_lab":       raw["cert_lab_enabled"],
         "resource_expiry": raw["resource_expiry_enabled"],
         "remote_agents": raw["remote_agents_enabled"],
+        "cloud_unmanaged_discovery": raw["cloud_unmanaged_discovery_enabled"],
         "notifications": raw["notifications_enabled"],
     }

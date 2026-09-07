@@ -111,6 +111,53 @@ destroy is. A reversible action earns a lighter brake than an irreversible one, 
 change-freeze that forbade *suspending* a VM would forbid the cheapest thing an operator
 can do during one.
 
+### VMs this dashboard did not deploy
+
+Every cloud console here is **job-driven**: it starts from completed `*_deploy` jobs and
+fetches live state for exactly those identifiers. That is what makes the console a record of
+what the dashboard did — and it means a VM somebody launched in the cloud's own console, in
+Terraform, or before this dashboard existed is invisible, and your only lever on it is the
+provider's UI.
+
+Turn on **`cloud_unmanaged_discovery_enabled`** (Settings → Integrations → *Discover unmanaged
+cloud VMs*, off by default) and each cloud gains a second listing:
+
+| | Managed | Discovered |
+|---|---|---|
+| Endpoint | `GET /api/{cloud}/instances` (`/vms` on Azure) | `GET /api/{cloud}/unmanaged` |
+| Source | completed `*_deploy` jobs | every instance in the account / subscription / project / compartment |
+| Power | ✅ | ✅ |
+| Destroy | ✅ | ❌ **never** |
+| Suspend schedule | ✅ | ❌ — a schedule lives on the deploy job row, and there isn't one |
+
+**Off by default** because it lists everything rather than the identifiers the deploy jobs
+name: more cloud calls, and on a real estate a great many more rows.
+
+**A VM is "discovered" when the dashboard has no deploy job for it *and* it carries none of
+the dashboard's own tags.** Both halves matter. The tag half is what keeps a VDI pool seat, or
+a VM whose job row was pruned, in the managed list where it belongs — those are the
+dashboard's, and they still have a Destroy button.
+
+**Who can see one.** A discovered VM has no `Job.workgroup`, so its workgroup comes from a
+`workgroup` tag (or GCP label) if it has one, and otherwise it has none — which makes it
+**admin-only**. That is not a new rule; it is what every cloud module's `_assert_can_act`
+already says about an untagged resource. Tag your own VMs for workgroups and non-admins see
+them; don't, and only admins do.
+
+**Destroy is absent, not hidden.** There is no destroy route on the discovery module and
+nothing in a discovered row resolves into one. Separately, `api/azure`'s destroy fan-out — the
+one path that can terminate a VM with no deploy job, which exists for VDI seats — now asks
+whether the VM carries a dashboard tag before it acts. It did not before: any VM in a listed
+resource group could be destroyed by name, which discovery would have made easy to find.
+
+**How power reaches a discovered VM.** AWS needs a region and Azure a resource group, which
+the deploy job used to supply. Both now take it **from the discovery listing** — never from
+the request, because a caller-supplied resource group would turn `/power/stop` into "deallocate
+any VM of this name anywhere the credentials reach". A VM discovery does not show is still a
+404. (GCP and OCI already accepted a power call with no deploy job: a GCE instance is named by
+zone, which the request carries, and an OCID is globally unique. That behaviour is unchanged
+and is not gated by this flag.)
+
 ### Suspend schedules (all four clouds)
 
 A business-hours power window: suspend at 19:00, resume at 07:00, weekdays only. Set per

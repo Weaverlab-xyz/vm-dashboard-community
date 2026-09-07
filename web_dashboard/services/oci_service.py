@@ -572,6 +572,12 @@ def _instance_to_dict(inst, private_ip=None, public_ip=None) -> dict:
         "public_ip":     public_ip,
         "time_created":  _iso(getattr(inst, "time_created", None)),
         "workgroup":     tags.get("workgroup") or None,
+        # For unmanaged discovery: `tags` decides whether this instance is the
+        # dashboard's, and `instance_ocid` is the field the power endpoint's body takes,
+        # so a discovered row can be handed straight back. `ocid` stays for the existing
+        # consumers of this shape.
+        "instance_ocid": inst.id,
+        "tags":          tags,
     }
 
 
@@ -697,6 +703,36 @@ async def describe_instances(compartment_id: str, instance_ocids: list[str]) -> 
         return []
     return await _to_thread(
         _describe_instances_sync, compartment_id or _compartment(), instance_ocids)
+
+
+def _list_all_instances_sync(compartment_id: str) -> list[dict]:
+    """Every non-terminated instance in the compartment, whoever created it.
+
+    ``list_instances`` rather than a fan-out of ``get_instance``: the counterpart above
+    takes the OCIDs the deploy jobs name and so cannot see anything this dashboard did not
+    launch. The paginator is OCI's own, because a compartment is not a lab.
+    """
+    import oci
+    cfg = _oci_config()
+    compute = oci.core.ComputeClient(cfg)
+    vnet = oci.core.VirtualNetworkClient(cfg)
+    results = []
+    for inst in oci.pagination.list_call_get_all_results(
+            compute.list_instances, compartment_id).data:
+        if getattr(inst, "lifecycle_state", "") in ("TERMINATED", "TERMINATING"):
+            continue
+        try:
+            private_ip, public_ip = _instance_ips_sync(compute, vnet, compartment_id, inst.id)
+        except Exception as exc:      # one unreachable VNIC must not blank the listing
+            logger.warning("OCI address lookup failed for %s: %s", inst.id, exc)
+            private_ip = public_ip = None
+        results.append(_instance_to_dict(inst, private_ip, public_ip))
+    return results
+
+
+async def list_all_instances(compartment_id: str = "") -> list[dict]:
+    """Every non-terminated OCI instance in the compartment, dashboard-deployed or not."""
+    return await _to_thread(_list_all_instances_sync, compartment_id or _compartment())
 
 
 def _terminate_instance_sync(instance_id: str, preserve_boot_volume: bool = False) -> None:

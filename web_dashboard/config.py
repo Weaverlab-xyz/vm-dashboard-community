@@ -138,6 +138,11 @@ class Settings(BaseSettings):
     # nothing until somebody sets one.
     vm_suspend_schedule_enabled: bool = False
     vm_suspend_sweep_interval_minutes: int = 10   # floored at 1 in the service
+    # Discovery of cloud VMs this dashboard did not deploy (services/unmanaged_vms.py).
+    # Off by default: it lists every instance in the account/subscription/project rather
+    # than the identifiers the deploy jobs name, which is more cloud calls and, on a large
+    # estate, a great many more rows. Discovered VMs can be powered, never destroyed.
+    cloud_unmanaged_discovery_enabled: bool = False
     admission_control_enabled: bool = False
     admission_gated_actions: str = ""          # e.g. aws:ec2:deploy,clouddb:provision
     admission_allowed_regions: str = ""        # allow-list; empty = no region restriction

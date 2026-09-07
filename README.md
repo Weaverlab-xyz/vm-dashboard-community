@@ -198,6 +198,7 @@ The wizard turns a flag on; the per-integration fields live in Settings:
 - **Portainer CE** — on-prem Docker host management
 - **Entitle** — approval-workflow integration
 - **MCP server** (`mcp_server_enabled`) — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed. Each tool returns only what the token's owner can see in the UI. See [docs/integrations/mcp-server.md](docs/integrations/mcp-server.md)
+- **Unmanaged VM discovery** (`cloud_unmanaged_discovery_enabled`) — show cloud VMs this dashboard did not deploy, in a separate list per cloud console. Discovered VMs can be started and stopped; they can never be destroyed from here. Off by default because it lists every instance in the account rather than the ones the dashboard deployed. A discovered VM is admin-only unless it carries a `workgroup` tag.
 - **Action Guardrails** — pre-action policy gate (OPA): evaluate every deploy against Rego policies *before* the job starts — allowed regions, blocked instance sizes, change-freeze windows — and block disallowed ones (403, audited). Fails closed. See [docs/policy-guardrails.md](docs/policy-guardrails.md).
 
 ## Docker images

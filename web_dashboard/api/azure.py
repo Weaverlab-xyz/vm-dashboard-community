@@ -39,9 +39,11 @@ from ..models.azure import (
     AzureVMInfo,
 )
 from ..services import (azure_service, azure_listing, deploy_batch, job_service,
-                        cache_service, cloud_stats, region_catalog, workgroup_service)
+                        cache_service, cloud_stats, region_catalog, unmanaged_vms,
+                        workgroup_service)
 from ..services.azure_service import AzureError
 from .auth import require_admin, require_permission
+from . import unmanaged
 
 router = APIRouter(prefix="/api/azure", tags=["azure"])
 
@@ -627,6 +629,42 @@ async def _fetch_vms(db: Session) -> list:
 
 
 
+# ── VMs this dashboard did not deploy ────────────────────────────────────────
+
+async def _fetch_unmanaged_live() -> list:
+    """Every VM in every resource group the listing covers, tag filter dropped.
+
+    Reuses ``_listing_resource_groups`` rather than reading config again: the set of groups
+    worth looking in is the same question the managed listing already answers, and two
+    readers of it would drift the first time somebody adds a region.
+    """
+    from ..database import SessionLocal
+    session = SessionLocal()
+    try:
+        groups = _listing_resource_groups(_deploy_job_meta(session))
+    finally:
+        session.close()
+
+    rows = []
+    for rg in sorted(groups):
+        try:
+            rows.extend(await azure_service.list_all_vms(rg))
+        except AzureError:
+            logger.warning("Unmanaged discovery: could not list VMs in %s", rg, exc_info=True)
+    return rows
+
+
+router.add_api_route(
+    "/unmanaged",
+    unmanaged.unmanaged_endpoint(
+        "azure", job_type="azure_deploy", fetch_live=_fetch_unmanaged_live,
+        accessible_workgroups=_accessible_workgroups,
+        cache_key="azure_unmanaged_vms",
+        user_dep=require_permission("azure", "read")),
+    methods=["GET"],
+    summary="Azure VMs this dashboard did not deploy (power only, never destroy)")
+
+
 async def _fetch_vms_fresh() -> list:
     """Own session, so a stale-while-revalidate background refresh is safe.
 
@@ -1169,22 +1207,34 @@ def _power_endpoint(op: str):
         current_user: User = Depends(require_permission("azure", "write")),
     ):
         deploy_job = _find_deploy_job(db, "azure_deploy", "vm_name", payload.vm_name)
-        if not deploy_job:
-            # Unlike destroy there is no fallback: without the deploy job we do not
-            # know the resource group, and guessing it deallocates the wrong VM.
-            raise HTTPException(
-                status_code=404,
-                detail=f"No active deployment found for VM '{payload.vm_name}'.")
-        rg = deploy_job.metadata_dict.get("resource_group") or _rg()
-        _assert_can_act(current_user, deploy_job.workgroup, f"VM '{payload.vm_name}'")
+        if deploy_job:
+            rg = deploy_job.metadata_dict.get("resource_group") or _rg()
+            workgroup = deploy_job.workgroup
+        else:
+            # No deploy job: this may be a VM the dashboard did not deploy. The resource
+            # group comes from DISCOVERY and never from the request — guessing it, or
+            # taking it from the caller, deallocates the wrong VM, which is what the
+            # comment that used to sit here was refusing to risk. Discovery removes the
+            # guess rather than the caution: not discovered is still a 404.
+            row = await unmanaged.find(
+                "azure", payload.vm_name, job_type="azure_deploy",
+                fetch_live=_fetch_unmanaged_live, cache_key="azure_unmanaged_vms")
+            if not row:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No active deployment found for VM '{payload.vm_name}'.")
+            rg = row.get("resource_group") or _rg()
+            workgroup = row.get("workgroup")
+        _assert_can_act(current_user, workgroup, f"VM '{payload.vm_name}'")
 
         job = job_service.create_job(
             db,
             job_type="azure_power",
             created_by=current_user.username,
-            workgroup=deploy_job.workgroup,
+            workgroup=workgroup,
             metadata={"action": op, "vm_name": payload.vm_name, "resource_group": rg,
-                      "deploy_job_id": deploy_job.id},
+                      "deploy_job_id": deploy_job.id if deploy_job else None,
+                      "unmanaged": deploy_job is None},
         )
         job_service.log_audit(db, current_user.username, "azure_power",
                               details={"action": op, "vm_name": payload.vm_name})
@@ -1264,6 +1314,16 @@ async def _destroy_without_deploy_job(
                    f"({', '.join(candidates) or 'none'}). It may have already been "
                    "terminated, or it lives in a region that is not configured here.",
         )
+
+    # Found a VM by name — but this route reaches VMs with no deploy job, and since
+    # unmanaged discovery that includes ones this dashboard never created. `get_vm`
+    # answers regardless of tags by design, so the ownership question has to be asked
+    # here. A VDI seat and a pruned-job VM both carry the dashboard's tag and pass; a VM
+    # somebody else launched does not, and destroying it was never this tool's to offer.
+    try:
+        unmanaged_vms.assert_not_unmanaged(vm.get("tags"), f"VM '{vm_name}'")
+    except unmanaged_vms.UnmanagedVMError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
     # The ARM id is authoritative for the group; the probe order only tells us which
     # group answered, and ARM's own casing of the id is what later calls should use.

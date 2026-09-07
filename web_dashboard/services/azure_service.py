@@ -1570,13 +1570,16 @@ def _is_dashboard_managed(tags: dict) -> bool:
             or tags.get("ManagedBy") == "vm-cli-dashboard")
 
 
-def _describe_vms_sync(cred, sub_id: str, rg: str) -> list:
+def _describe_vms_sync(cred, sub_id: str, rg: str, managed_only: bool = True) -> list:
+    """VMs in one resource group. ``managed_only=False`` drops the tag filter, which is
+    how unmanaged discovery sees VMs this dashboard did not create — everything else about
+    the row, including the NIC lookups below, is identical either way."""
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
     results = []
     for vm in compute.virtual_machines.list(rg):
         tags = vm.tags or {}
-        if not _is_dashboard_managed(tags):
+        if managed_only and not _is_dashboard_managed(tags):
             continue
         try:
             iv = compute.virtual_machines.instance_view(rg, vm.name)
@@ -1620,6 +1623,14 @@ def _describe_vms_sync(cred, sub_id: str, rg: str) -> list:
                 if vm.storage_profile and vm.storage_profile.os_disk else ""
             ),
             "workgroup": (tags.get("workgroup") or "").lower() or None,
+            # For unmanaged discovery: `tags` is what decides whether a VM is this
+            # dashboard's, `resource_group` is what a power call needs to reach it, and
+            # `vm_name` is the field the power endpoint's request body takes — so a
+            # discovered row can be handed straight back without the caller rebuilding it.
+            # `name` stays for every existing consumer of this listing.
+            "vm_name": vm.name,
+            "resource_group": rg,
+            "tags": tags,
         })
     return results
 
@@ -1632,6 +1643,17 @@ async def describe_vms(rg: str) -> list:
         raise
     except Exception as e:
         raise AzureError(f"Failed to describe VMs in {rg}: {e}") from e
+
+
+async def list_all_vms(rg: str) -> list:
+    """Every VM in one resource group, dashboard-tagged or not."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_describe_vms_sync, cred, sub_id, rg, False)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to list VMs in {rg}: {e}") from e
 
 
 def _get_vm_sync(cred, sub_id: str, rg: str, vm_name: str) -> Optional[dict]:
@@ -1684,6 +1706,11 @@ def _get_vm_sync(cred, sub_id: str, rg: str, vm_name: str) -> Optional[dict]:
             _os_type_str(vm.storage_profile.os_disk.os_type)
             if vm.storage_profile and vm.storage_profile.os_disk else ""
         ),
+        # This function answers regardless of tags, which is what lets the destroy fan-out
+        # find a VDI seat or a VM whose job row was pruned. The caller therefore has to be
+        # able to tell those from a VM that was never this dashboard's at all — so the tags
+        # come back with it. See api/azure._destroy_without_deploy_job.
+        "tags": vm.tags or {},
     }
 
 
