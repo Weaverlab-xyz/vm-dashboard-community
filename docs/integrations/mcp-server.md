@@ -11,7 +11,15 @@ read-only access to your infrastructure data.
 
 The MCP server runs **inside the main `app` container** with no extra services
 or containers required. Access is controlled by a Personal Access Token (PAT)
-that you create in the dashboard settings.
+that you create in the dashboard settings, and **every tool applies that token
+owner's own permissions** — the same filtering the web UI applies to that user.
+
+> **Upgrading from a build before this flag existed?** `/mcp` used to be mounted
+> unconditionally. It is now off by default like every other integration, so an
+> existing Claude Desktop / Cursor config will get a 404 until an admin turns
+> **MCP Server** on under Settings → Integrations. That is one toggle, and it is
+> deliberate: the endpoint reads your estate, so it should be something you chose
+> rather than something you inherited.
 
 ---
 
@@ -32,12 +40,18 @@ that you create in the dashboard settings.
 | Requirement | Notes |
 |---|---|
 | Dashboard running | The MCP server is built into the `app` container — no separate setup |
+| **MCP Server enabled** | **Settings → Integrations → MCP Server.** Off by default; while it is off `/mcp` returns 404 |
 | MCP-compatible client | Claude Desktop, Claude Code, Cursor, Continue, or any MCP HTTP client |
 | Personal Access Token | Created in **Settings → API Tokens** |
 
 ---
 
 ## Setup
+
+### Step 0 — Enable the MCP server
+
+**Settings → Integrations → MCP Server.** Off by default; `/mcp` returns 404
+while it is off, before it looks at your token at all.
 
 ### Step 1 — Create a Personal Access Token
 
@@ -99,15 +113,45 @@ If the dashboard is running on a remote machine (not `localhost`), replace
 All tools are **read-only**. Deploy, start, and stop actions must be performed
 in the web UI or via the REST API.
 
-| Tool | Description |
-|---|---|
-| `dashboard_summary` | Active jobs, today's failures, and enabled integrations |
-| `list_jobs` | Recent jobs — filterable by status and/or workgroup |
-| `get_job` | Full detail for one job by UUID (includes log output) |
-| `list_vms` | VMware VMs (requires VMware integration to be enabled) |
-| `list_ec2_instances` | EC2 instances deployed via this dashboard |
-| `list_amis` | Available AMIs from your configured AWS account |
-| `list_azure_vms` | Azure VMs deployed via this dashboard |
+**Every tool returns only what the token's owner can see in the web UI.** A token
+belonging to a non-admin returns that user's workgroups and their own resources —
+not the estate. So an empty result means *"none visible to you"*, which is not the
+same as *"none exist"*, and the two are deliberately indistinguishable.
+
+| Tool | Description | Who sees what |
+|---|---|---|
+| `dashboard_summary` | Active jobs, today's failures, enabled integrations | Job counts scoped like `/jobs`; integration flags match the unauthenticated `/api/features` |
+| `list_jobs` | Recent jobs — filter by status and/or workgroup | Your own jobs unless you hold `jobs:read` or are an admin |
+| `get_job` | Detail for one job by UUID | Same scope as `list_jobs`; the deploy payload is filtered (below) |
+| `list_inventory` | Every resource, normalised across providers | Your workgroups; resources with no workgroup only if you created them |
+| `list_ec2_instances` | EC2 instances deployed via this dashboard | Your workgroups |
+| `list_azure_vms` | Azure VMs deployed via this dashboard | Your workgroups |
+| `list_gcp_instances` | GCE instances deployed via this dashboard | Your workgroups |
+| `list_oci_instances` | OCI compute instances deployed via this dashboard | Your workgroups |
+| `list_amis` | AMIs owned by the configured AWS account | Requires `aws:read` |
+| `list_vms` | VMware Workstation VMs synced by an agent | Only VMs an admin has tagged into one of your workgroups |
+| `list_containers` | Cached containers for one Portainer endpoint | Requires `containers:read`; takes an `endpoint_id` |
+| `list_databases` | Cloud databases | Your own unless you are an (effective) admin |
+| `list_k8s_clusters` | Kubernetes clusters | Your own unless you are an (effective) admin |
+| `list_functions` | Cloud functions | Your own unless you are an (effective) admin |
+| `list_expiring` | Resources carrying an auto-delete timer, plus the timer's gates | Same rule as `list_inventory` |
+| `config_drift` | Targets unverified or changed since their last Ansible apply | Any authenticated user, as on the Ansible stream |
+| `list_agents` | Registered remote agents and their running-job counts | **Admin only** |
+| `cost_summary` | Per-cloud month-to-date spend and budget alerts | **Admin only.** Reads the cost cache; never forces a billable requery |
+| `secret_staleness` | Per-secret age and staleness | **Admin only** |
+
+### What `get_job` will not return
+
+A deploy job's payload carries operational plumbing — the Terraform state of the VM's
+PRA Shell Jump, its Password Safe registration state, the name of its SSH secret, an
+admin-password reference. None of that belongs in an AI client's context window, so
+`get_job` filters the payload through an **allowlist**: identifiers, placement, image,
+addresses and state come back, and anything unrecognised is dropped. It is an allowlist
+rather than a blocklist because the payload grows every time an integration is added,
+and a blocklist fails open on the next one.
+
+If you need the unfiltered record, use `GET /api/jobs/{id}` — the same token works
+there, subject to the same permission check.
 
 ---
 
@@ -134,6 +178,17 @@ If your AI client runs on a different machine than the dashboard:
 ---
 
 ## Troubleshooting
+
+**404 from `/mcp`, or the client reports the server is missing** — the MCP server
+is off. It is off by default: enable **MCP Server** under Settings → Integrations.
+This is the usual symptom after upgrading from a build where `/mcp` was always
+mounted. The gate is checked before the token is, so a 404 says nothing about
+whether your PAT is valid.
+
+**A tool returns fewer resources than the web UI shows you** — check which user
+the token belongs to. Tools apply that user's permissions, so a token created by
+a non-admin returns their workgroups and their own resources. "None visible to
+you" and "none exist" deliberately look the same.
 
 **"Connection refused"** — verify the dashboard is running:
 `curl http://localhost:8001/api/health`. If it returns `{"status":"ok"}` but

@@ -145,9 +145,15 @@
     </div>
 
     <p class="mt-3 text-xs text-gray-400">
-      Available tools: <code>dashboard_summary</code>, <code>list_jobs</code>, <code>get_job</code>,
-      <code>list_vms</code>, <code>list_ec2_instances</code>, <code>list_amis</code>, <code>list_azure_vms</code>.
-      All tools are read-only — deploy/start/stop actions must be performed through the web UI.
+      Enable <strong>MCP Server</strong> under Integrations first — the endpoint returns 404 while it is off.
+      Tools: <code>dashboard_summary</code>, <code>list_jobs</code>, <code>get_job</code>, <code>list_inventory</code>,
+      <code>list_ec2_instances</code>, <code>list_azure_vms</code>, <code>list_gcp_instances</code>,
+      <code>list_oci_instances</code>, <code>list_amis</code>, <code>list_vms</code>, <code>list_containers</code>,
+      <code>list_databases</code>, <code>list_k8s_clusters</code>, <code>list_functions</code>,
+      <code>list_expiring</code>, <code>config_drift</code>, <code>list_agents</code>, <code>cost_summary</code>,
+      <code>secret_staleness</code>.
+      All tools are read-only, and each returns only what the token's owner can see in the UI —
+      a token belonging to a non-admin sees that user's workgroups, not the estate.
     </p>
   </div>
 
@@ -6051,6 +6057,8 @@ function settingsPage() {
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
       { key: 'remote_agents', label: 'Remote Agents',           hasConfig: true,  enabled: false,
         desc: 'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules. Adds an Agents page for registering and revoking them. Terminate TLS in front of the dashboard before enabling — this is the only API that serves callers outside your own network.' },
+      { key: 'mcp_server',   label: 'MCP Server',                hasConfig: false, enabled: false,
+        desc: 'Expose read-only dashboard tools to an MCP-compatible AI client (Claude Desktop, Claude Code, Cursor) at /mcp, authenticated with a Personal Access Token. Each tool returns only what the token owner could see in the UI. Off by default; turning it on serves an endpoint that reads your estate.' },
       { key: 'multi_region', label: 'Multi-region',            hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
       { key: 'oidc',         label: 'Single sign-on (OIDC)',   hasConfig: true,  enabled: true, configOnly: true,
@@ -6336,6 +6344,7 @@ function settingsPage() {
           // one until now. Pinned by tests/test_settings_integrations.py.
           notifications: features.notifications,
           remote_agents: features.remote_agents,
+          mcp_server: features.mcp_server,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];

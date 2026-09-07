@@ -127,6 +127,10 @@ class Settings(BaseSettings):
     # is the list `admission_gated_actions` (default none). The caps below are injected
     # into policies as input.limits, settable from Settings without writing Rego. All
     # list values accept JSON (["a","b"]) or CSV (a,b).
+    # MCP server (/mcp) for AI clients. Off by default like every other integration —
+    # the mount is unconditional otherwise, and its tools read the estate. The gate is
+    # applied in api/mcp_server._MCPAuth, because a mount takes no dependencies.
+    mcp_server_enabled: bool = False
     admission_control_enabled: bool = False
     admission_gated_actions: str = ""          # e.g. aws:ec2:deploy,clouddb:provision
     admission_allowed_regions: str = ""        # allow-list; empty = no region restriction
