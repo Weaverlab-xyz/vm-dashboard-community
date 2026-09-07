@@ -41,6 +41,12 @@ EVENT_SEVERITY = {
     "resource.reaped":       "critical",
     "job.failed":            "warning",
     "cost.budget_exceeded":  "warning",
+    # Per-VM, and distinct from the account-level budget above: one VM over its own cap is
+    # a different event from the whole estate over its monthly budget, and an operator
+    # filtering for one should not be handed the other.
+    "vm.spend_warn":         "warning",
+    "vm.spend_capped":       "critical",
+    "vm.spend_unpriced":     "warning",
     "secret.stale":          "warning",
     "config.drift":          "warning",
     # Critical, and the only condition that is never merely informational:
@@ -55,7 +61,8 @@ EVENT_SEVERITY = {
 # a thing that ignores the setting.
 DEFAULT_EVENT_TYPES = (
     "resource.expiring,resource.reaped,job.failed,"
-    "cost.budget_exceeded,secret.stale,config.drift,audit.chain_broken"
+    "cost.budget_exceeded,secret.stale,config.drift,audit.chain_broken,"
+    "vm.spend_warn,vm.spend_capped,vm.spend_unpriced"
 )
 
 SEVERITY_ORDER = ("info", "warning", "critical")

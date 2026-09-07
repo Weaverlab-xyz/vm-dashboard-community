@@ -116,6 +116,10 @@ async def lifespan(app: FastAPI):
     warmers.append(
         asyncio.create_task(_suspend_sweeper_loop(), name="suspend_sweeper_loop")
     )
+    # Spend caps. Same contract again; its own loop because it answers to its own flag.
+    warmers.append(
+        asyncio.create_task(_spend_sweeper_loop(), name="spend_sweeper_loop")
+    )
     # POV reconcile — always launched; no-ops while POV environments are off or masked,
     # so turning the feature on activates the next pass without a restart.
     warmers.append(
@@ -260,6 +264,33 @@ async def _ci_sweeper_loop() -> None:
         except Exception:
             interval = 60 * 60
         await asyncio.sleep(interval)
+
+
+async def _spend_sweeper_loop() -> None:
+    """Enqueue one spend-cap sweep per interval.
+
+    Its own loop for the same reason the suspend one is: a different flag governs it, and
+    an operator may want a cost ceiling without a business-hours window or the reverse.
+    Only enqueues; ``jobs_worker._claim_one``'s rowcount decides who runs the pass.
+    """
+    from .database import SessionLocal
+    from .services import spend_sweeper
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                spend_sweeper.enqueue_sweep_if_due(db)
+            finally:
+                db.close()
+        except Exception:                              # noqa: BLE001
+            logger.warning("spend sweep enqueue failed", exc_info=True)
+        try:
+            from .services import spend_sweeper as _s
+            delay = _s.interval_seconds()
+        except Exception:                              # noqa: BLE001
+            delay = 600
+        await asyncio.sleep(delay)
 
 
 # ── Auto-delete timer sweeper loop ───────────────────────────────────────────
@@ -875,6 +906,7 @@ from .api import cloud_functions as cloud_functions_api  # noqa: E402
 from .api import entitle_rest as entitle_rest_api  # noqa: E402
 from .api import pra as pra_api  # noqa: E402
 from .api import audit as audit_api
+from .api import spend as spend_api  # noqa: E402
 from .api import suspend as suspend_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
@@ -972,6 +1004,7 @@ app.include_router(workgroups_api.router)
 app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
 app.include_router(audit_api.router)
+app.include_router(spend_api.router)
 app.include_router(suspend_api.router)
 app.include_router(docs_pages.router)
 # Remote on-prem agents. Gated: this is the only router that accepts requests from

@@ -653,6 +653,23 @@ class Job(Base):
     # 20:00 from having it suspended again four minutes later, forever. NULL means never
     # checked, and due_action refuses to act on that first pass.
     schedule_last_checked_at = Column(DateTime, nullable=True)
+    # ── Spend cap (services/spend_policy.py, swept by services/spend_sweeper.py) ──
+    # The same five attributes PovEnvironment carries, spelled identically for the same
+    # reason the schedule columns are: one pure policy module serves both and never knows
+    # which row it was handed.
+    #
+    # NULL cap = no cap, and the sweep's query filters on `spend_cap_usd IS NOT NULL`. That
+    # is not only a semantic — it is what keeps accrual off this table. `jobs` is polled by
+    # `_claim_one` every two seconds, and an estate that sets no caps must pay nothing for
+    # the feature existing.
+    spend_cap_usd = Column(Float, nullable=True)             # USD; NULL = uncapped
+    spend_estimate_usd = Column(Float, nullable=True, default=0.0)   # accrued list price
+    # NULL means never measured. accrue() returns without billing on that first pass, so
+    # enabling the feature cannot invent a bill for every hour since the row was created —
+    # the same arming rule schedule_last_checked_at follows above.
+    spend_accrued_at = Column(DateTime, nullable=True)
+    spend_warned_at = Column(DateTime, nullable=True)        # latch: warned once
+    spend_capped_at = Column(DateTime, nullable=True)        # latch: acted on the cap once
     status = Column(String(20), nullable=False, default="pending", index=True)  # pending, running, completed, failed, cancelled
     progress_pct = Column(Integer, default=0)
     progress_message = Column(Text)
@@ -1922,7 +1939,7 @@ class PovEnvironment(Base):
     spend_cap_usd = Column(Float, nullable=True)
     # Accrued, not billed. Every reconcile pass adds `rate now × time since the last pass`.
     # A real bill lags a day and costs money to read, so a cap driven off one would report
-    # a runaway rather than stop it — see services/pov_spend for the whole argument. It is
+    # a runaway rather than stop it — see services/spend_policy for the whole argument. It is
     # a LIST-PRICE estimate and everything user-facing says so.
     spend_estimate_usd = Column(Float, nullable=True, default=0.0)
     # When the accrual last ran. NULL = never measured, and the first pass records the time
@@ -2424,6 +2441,11 @@ def init_db():
             "ALTER TABLE jobs ADD COLUMN schedule_timezone VARCHAR(64)",
             "ALTER TABLE jobs ADD COLUMN schedule_days VARCHAR(7)",
             "ALTER TABLE jobs ADD COLUMN schedule_last_checked_at TIMESTAMP",
+            "ALTER TABLE jobs ADD COLUMN spend_cap_usd FLOAT",
+            "ALTER TABLE jobs ADD COLUMN spend_estimate_usd FLOAT",
+            "ALTER TABLE jobs ADD COLUMN spend_accrued_at TIMESTAMP",
+            "ALTER TABLE jobs ADD COLUMN spend_warned_at TIMESTAMP",
+            "ALTER TABLE jobs ADD COLUMN spend_capped_at TIMESTAMP",
             "ALTER TABLE jobs ADD COLUMN cloud_resource_id VARCHAR(255)",
             "ALTER TABLE hypervisor_vm_cache ADD COLUMN guest_os VARCHAR(64)",
             # A workstation VMX path outgrows VARCHAR(128); see HypervisorVMCache.scope.

@@ -1,4 +1,8 @@
-"""The per-POV spend cap: accrual arithmetic, latches, and what must NOT happen.
+"""The spend cap policy: accrual arithmetic, latches, and what must NOT happen.
+
+Promoted from `pov_spend` with the arithmetic unchanged — `pov_reconcile` caps a POV
+environment and `spend_sweeper` caps one estate cloud VM, and both ask this module.
+`tests/test_vm_spend_cap.py` covers the estate half; this covers the policy itself.
 
 The auto-delete timer answers "how long may this POV live?". This answers the question an
 operator on their own cloud account actually loses sleep over — and the design rests on
@@ -19,7 +23,7 @@ What is pinned here:
 Pure policy: no database, no clock, no cloud.
 
 Runs under pytest, or standalone:
-    python tests/test_pov_spend.py
+    python tests/test_spend_policy.py
 """
 import asyncio
 import os
@@ -31,7 +35,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-spend")
 
 from web_dashboard.services import pov_cloud_cost as cost  # noqa: E402
-from web_dashboard.services import pov_spend as spend  # noqa: E402
+from web_dashboard.services import spend_policy as spend  # noqa: E402
 
 _UTC = timezone.utc
 _T0 = datetime(2026, 9, 1, 12, 0, tzinfo=_UTC)
@@ -364,8 +368,8 @@ def test_azure_needs_no_region_name_map_the_way_aws_does():
     """AWS's Pricing API wants a human region NAME this module keeps a map of, so an
     unmapped region has no answer. Azure's takes the region id directly, so every region
     is in scope and a cap works the day a new one opens."""
-    assert cost._priceable("azure", "some-new-region-1") is True
-    assert cost._priceable("aws", "some-new-region-1") is False
+    assert cost.priceable("azure", "some-new-region-1") is True
+    assert cost.priceable("aws", "some-new-region-1") is False
 
 
 def test_the_price_lookups_run_off_the_event_loop():
@@ -404,7 +408,7 @@ def _gcp_index(skus, region="us-central1"):
 
 def test_gcp_is_priced():
     assert cost.priced("gcp") is True
-    assert cost._priceable("gcp", "us-central1") is True
+    assert cost.priceable("gcp", "us-central1") is True
 
 
 def test_a_machine_type_is_cores_plus_memory_not_one_sku():

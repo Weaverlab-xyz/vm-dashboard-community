@@ -138,6 +138,17 @@ class Settings(BaseSettings):
     # nothing until somebody sets one.
     vm_suspend_schedule_enabled: bool = False
     vm_suspend_sweep_interval_minutes: int = 10   # floored at 1 in the service
+    # Per-VM spend caps (services/spend_sweeper.py). Accrued at LIST price from the
+    # provider price catalogues — no reservations, credits, free tier, transfer or
+    # snapshots — so it errs high, which is the only safe direction for a cap. Off by
+    # default, and a cap is per-VM and NULL on every existing row, so turning this on
+    # accrues nothing until somebody sets one. `warn` is the default action for the same
+    # reason the auto-delete timer defaults to a dry run: an estimate that suspends
+    # somebody's infrastructure on its first outing is the last time anyone trusts it.
+    vm_spend_cap_enabled: bool = False
+    vm_spend_cap_action: str = "warn"            # "warn" | "suspend"
+    vm_spend_warn_percent: int = 80              # clamped to 10..99 by spend_policy
+    vm_spend_sweep_interval_minutes: int = 10    # floored at 60s in the service
     # Discovery of cloud VMs this dashboard did not deploy (services/unmanaged_vms.py).
     # Off by default: it lists every instance in the account/subscription/project rather
     # than the identifiers the deploy jobs name, which is more cloud calls and, on a large
@@ -1294,7 +1305,7 @@ class Settings(BaseSettings):
 
     # ── The per-POV spend cap ────────────────────────────────────────────────
     # The money answer to the question the auto-delete timer answers in time. Accrued from
-    # list prices every reconcile pass, never read off a bill — see services/pov_spend for
+    # list prices every reconcile pass, never read off a bill — see services/spend_policy for
     # why a billing API would report a runaway rather than stop one.
     #
     # 0 = don't stamp a cap on new POVs, the same "master switch alone changes nothing"
@@ -1305,7 +1316,7 @@ class Settings(BaseSettings):
     # the last time anybody trusted it. Suspending is reversible in one click, which is
     # why this needs no dry-run and no arming clock of its own.
     pov_spend_cap_action: str = "warn"
-    # Warn at this percentage of the cap. Clamped to 10-99 by pov_spend.warn_percent:
+    # Warn at this percentage of the cap. Clamped to 10-99 by spend_policy.warn_percent:
     # below 10 every POV warns immediately and the warning stops being read, above 99 the
     # warning and the cap arrive together.
     pov_spend_warn_percent: int = 80

@@ -1,7 +1,7 @@
 """Which cloud VMs may carry a suspend schedule, and why the rest may not.
 
 Pure policy — no database, no clock, no cloud — so the reasoning can be tested on a dict
-(mirrors ``expiry_policy``, ``suspend_schedule`` and ``pov_spend``, which split the same
+(mirrors ``expiry_policy``, ``suspend_schedule`` and ``spend_policy``, which split the same
 way). ``suspend_schedule`` answers *when*; this answers *whether*.
 
 The short version: **a scheduled suspend is only safe where the VM comes back at the same
