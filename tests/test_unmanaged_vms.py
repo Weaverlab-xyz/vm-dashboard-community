@@ -251,6 +251,35 @@ def test_the_unmanaged_route_carries_no_destroy_verb():
     assert methods <= {"GET"}, f"discovery is read-only; found {methods}"
 
 
+def test_no_api_route_is_bound_to_a_fetcher():
+    """Building this feature attached `@router.get("/instances")` to the discovery fetcher
+    on two clouds, because the new block was inserted between the decorator and the handler
+    it belonged to. Nothing failed at import — both listings simply started returning the
+    wrong thing. A decorator separated from its function is invisible in review and cheap
+    to assert against."""
+    from web_dashboard.main import app
+
+    misbound = [(r.path, r.name) for r in app.routes
+                if getattr(r, "path", "").startswith("/api/")
+                and getattr(r, "name", "").startswith(("_fetch", "_discovery"))]
+    assert not misbound, f"routes bound to a helper rather than a handler: {misbound}"
+
+    # And the four listings each still answer with their own handler.
+    by_path = {getattr(r, "path", ""): getattr(r, "name", "") for r in app.routes}
+    for path, expected in (("/api/aws/instances", "list_instances"),
+                           ("/api/azure/vms", "list_vms"),
+                           ("/api/gcp/instances", "list_instances"),
+                           ("/api/oci/instances", "list_instances")):
+        assert by_path.get(path) == expected, (path, by_path.get(path))
+
+
+def test_all_four_clouds_expose_discovery():
+    from web_dashboard.main import app
+    paths = {getattr(r, "path", "") for r in app.routes}
+    for cloud in ("aws", "azure", "gcp", "oci"):
+        assert f"/api/{cloud}/unmanaged" in paths, cloud
+
+
 # ── The flag ──────────────────────────────────────────────────────────────────
 
 def test_the_flag_exists_default_off_and_is_served_to_the_ui():
