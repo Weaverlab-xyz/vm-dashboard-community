@@ -232,6 +232,7 @@ class FeaturesSetup(BaseModel):
     k8s_management_enabled: bool = False
     remote_agents_enabled: bool = False
     mcp_server_enabled: bool = False
+    cloud_unmanaged_discovery_enabled: bool = False
 
 
 class ProfileSetup(BaseModel):
@@ -535,6 +536,8 @@ def _apply_config(payload: SetupPayload) -> None:
         "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
         "remote_agents_enabled":    "1" if payload.features.remote_agents_enabled else "0",
         "mcp_server_enabled":       "1" if payload.features.mcp_server_enabled else "0",
+        "cloud_unmanaged_discovery_enabled":
+            "1" if payload.features.cloud_unmanaged_discovery_enabled else "0",
     })
 
     config_service.set_many(pairs)
@@ -806,6 +809,17 @@ class MCPServerFeatureConfig(BaseModel):
     Keyed "mcp_server" so _feature_to_cfg_key derives `mcp_server_enabled`, the key
     config.py and feature_flags.flags() both read. Renaming it would silently point
     the toggle at a key nothing reads.
+    """
+    enabled: bool = False
+
+
+class CloudUnmanagedDiscoveryFeatureConfig(BaseModel):
+    """Discovery of cloud VMs this dashboard did not deploy. Enabled-only — the scope
+    comes from the cloud credentials and region config that are already set.
+
+    Keyed "cloud_unmanaged_discovery" so _feature_to_cfg_key derives
+    `cloud_unmanaged_discovery_enabled`, the key config.py and feature_flags.flags() both
+    read. Renaming it would silently point the toggle at a key nothing reads.
     """
     enabled: bool = False
 
@@ -1854,6 +1868,7 @@ _FEATURE_MODELS = {
     # start writing a different config key and the toggle would stop doing anything.
     "remote_agents": RemoteAgentsFeatureConfig,
     "mcp_server":   MCPServerFeatureConfig,
+    "cloud_unmanaged_discovery": CloudUnmanagedDiscoveryFeatureConfig,
     # The three BeyondTrust products, split out of a single "beyondtrust" panel.
     # These keys must stay exactly as-is: _feature_to_cfg_key suffixes "_enabled" to
     # derive the config key, so renaming one silently repoints its toggle at a key

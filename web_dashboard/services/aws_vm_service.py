@@ -459,6 +459,10 @@ async def _run_deploy(
 
         instance_id = result["instance_id"]
         hostname = result.get("private_ip") or result.get("public_ip") or instance_id
+        # The address handed to PRA, Entitle and Password Safe. Recorded because
+        # `vm_suspend_policy` has to know which one it was: three runners prefer the
+        # private address and OCI prefers the public one, so it cannot be inferred.
+        result["wired_address"] = hostname
         job_service.update_progress(
             db, job_id, 70,
             f"Instance {instance_id} launched ({hostname}), provisioning Shell Jump…"

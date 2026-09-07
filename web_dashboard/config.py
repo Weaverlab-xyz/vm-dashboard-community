@@ -132,12 +132,17 @@ class Settings(BaseSettings):
     # applied in api/mcp_server._MCPAuth, because a mount takes no dependencies.
     mcp_server_enabled: bool = False
     # Business-hours power windows for cloud VMs (services/suspend_sweeper.py).
-    # AWS, GCP and Azure — see services/vm_suspend_policy for why OCI is excluded, and
-    # why an Azure VM's address is pinned before it may carry one. Off by default; a
+    # All four clouds, but never unconditionally — services/vm_suspend_policy decides per
+    # VM on whether the address its wire-up used survives a stop. Off by default; a
     # schedule is per-VM and NULL on every existing row, so turning this on selects
     # nothing until somebody sets one.
     vm_suspend_schedule_enabled: bool = False
     vm_suspend_sweep_interval_minutes: int = 10   # floored at 1 in the service
+    # Discovery of cloud VMs this dashboard did not deploy (services/unmanaged_vms.py).
+    # Off by default: it lists every instance in the account/subscription/project rather
+    # than the identifiers the deploy jobs name, which is more cloud calls and, on a large
+    # estate, a great many more rows. Discovered VMs can be powered, never destroyed.
+    cloud_unmanaged_discovery_enabled: bool = False
     admission_control_enabled: bool = False
     admission_gated_actions: str = ""          # e.g. aws:ec2:deploy,clouddb:provision
     admission_allowed_regions: str = ""        # allow-list; empty = no region restriction
@@ -1684,6 +1689,27 @@ class Settings(BaseSettings):
     # BeyondTrust PRA per-cloud overrides (fall back to the shared bt_* keys).
     oci_bt_jump_group_name: str = ""      # BT jump group for OCI Shell Jumps (falls back to bt_jump_group_name)
     oci_jumpoint_name: str = ""           # Jumpoint name for OCI Shell Jumps (falls back to bt_jumpoint_name)
+    # Shared, ref-counted gateway host inside the VCN (services/jumpoint_host_service).
+    # "none" keeps the historical bring-your-own behaviour — no host is created and the
+    # wire-up targets the PUBLIC address, because nothing in the VCN can broker a private
+    # one. "shared" makes OCI behave like the other three clouds: a gateway instance is
+    # ensured on deploy, torn down when the last resource using it goes, and the wire-up
+    # targets the PRIVATE address — which is also what lets an OCI VM carry a suspend
+    # schedule (see services/vm_suspend_policy). Default "none": turning it on creates a
+    # billable instance, which an upgrade must never do on its own.
+    oci_vm_jumpoint_mode: str = "none"    # "none" | "shared"
+    # The gateway host's own compute display name. DELIBERATELY NOT oci_jumpoint_name,
+    # which above means the PRA Gateway the Shell Jump binds to — a different thing that
+    # happens to share the word. Reusing it would point the launcher at a PRA display name
+    # and the jump items at an instance.
+    oci_jumpoint_host_name: str = "oci-shared-jumpoint"
+    oci_jumpoint_subnet_ocid: str = ""    # gateway VNIC subnet; blank → oci_default_subnet_ocid
+    oci_jumpoint_image_ocid: str = ""     # blank → newest Oracle Linux platform image
+    oci_jumpoint_shape: str = "VM.Standard.E4.Flex"
+    oci_jumpoint_ocpus: float = 1.0
+    oci_jumpoint_memory_gbs: float = 6.0
+    oci_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"   # gateway container image
+    oci_jumpoint_docker_deploy_key: str = ""   # BT gateway deploy key (encrypted at rest)
 
     # Entitle integration — shared API credentials (used by machine-identity
     # JIT, user-JIT, and resource registration below).

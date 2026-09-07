@@ -141,6 +141,8 @@ def _ui_jumpoint_region(cloud: str) -> str:
         return _cfg("gcp_region") or ""
     if cloud == "azure":
         return _cfg("azure_location") or ""
+    if cloud == "oci":
+        return _cfg("oci_region") or ""
     return _cfg("aws_region") or _cfg("aws_default_region") or ""
 
 
@@ -278,6 +280,8 @@ def managed_host_name(cloud: str) -> str:
         return _gcp_jumpoint_name()
     if cloud == "azure":
         return _AZURE_JUMPOINT_VM_NAME
+    if cloud == "oci":
+        return _oci_jumpoint_host_name()
     return _cfg("bt_ecs_host_name") or "dashboard-sandbox-jumpoint-host"
 
 
@@ -308,6 +312,8 @@ async def ensure_jumpoint_host(cloud: str, region: str, name: str = "",
         host_id = await _ensure_jumpoint_host_gcp(region, name, placement=placement)
     elif cloud == "azure":
         host_id = await _ensure_jumpoint_host_azure(region, name, placement=placement)
+    elif cloud == "oci":
+        host_id = await _ensure_jumpoint_host_oci(region, name, placement=placement)
     else:
         host_id = await _ensure_jumpoint_host_aws(region, name, placement=placement)
     if host_id and not requested:
@@ -513,6 +519,12 @@ async def find_gateway_host_id(cloud: str, region: str, name: str) -> str:
             from . import azure_service
             rg = azure_host_resource_group(region)
             return name if await azure_service.get_vm(rg, name) else ""
+        if cloud == "oci":
+            # OCI's host id IS its OCID, not its name — unlike GCP and Azure, where the
+            # name is the handle. So this returns what the launcher returned, which is
+            # also what a teardown needs.
+            from . import oci_service
+            return await oci_service.find_instance_by_name(_oci_compartment(), name)
         from . import aws_service
         hosts = await aws_service.find_instances_by_tag(
             region, name_tag=name, states=["pending", "running", "stopping", "stopped"])
@@ -579,6 +591,21 @@ async def live_gateway_hosts(cloud: str, targets) -> dict:
                 if vm:
                     out[name] = {"host_id": name, "state": (vm.get("state") or "").lower(),
                                  "egress_ip": vm.get("public_ip") or ""}
+        return out
+
+    if cloud == "oci":
+        # One compartment-wide listing covers every gateway, and it RAISES on failure —
+        # the contract this function is written to. `list_all_instances` skips terminated
+        # instances, so a name absent from it really is gone.
+        from . import oci_service
+        wanted = {n for names in by_region.values() for n in names}
+        out: dict = {}
+        for inst in await oci_service.list_all_instances(_oci_compartment()):
+            name = inst.get("display_name")
+            if name in wanted:
+                out[name] = {"host_id": inst.get("instance_ocid") or inst.get("ocid"),
+                             "state": (inst.get("lifecycle_state") or "").lower(),
+                             "egress_ip": inst.get("public_ip") or ""}
         return out
 
     from . import aws_service
@@ -659,6 +686,9 @@ async def teardown_gateway(cloud: str, region: str, name: str, zone: str = "") -
     elif cloud == "azure":
         from . import azure_service
         await azure_service.stop_vm_jumpoint(azure_host_resource_group(region), name)
+    elif cloud == "oci":
+        from . import oci_service
+        await oci_service.stop_oci_jumpoint(_oci_compartment(), name)
     else:
         from . import aws_service
         cluster = _aws_region_cfg(region)["ecs_cluster"]
@@ -811,6 +841,8 @@ async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
     it. Dispatches per cloud. Best-effort; logs and returns on error."""
     if cloud == "gcp":
         return await _teardown_jumpoint_host_if_idle_gcp(db, region)
+    if cloud == "oci":
+        return await _teardown_jumpoint_host_if_idle_oci(db, region)
     if cloud == "azure":
         return await _teardown_jumpoint_host_if_idle_azure(db, region)
     return await _teardown_jumpoint_host_if_idle_aws(db, region)
@@ -866,6 +898,152 @@ async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
 # so the tunnel host is a Container-Optimised-OS GCE instance running the
 # gateway container PRIVILEGED (gcp_service sets securityContext.privileged).
 # One shared, ref-counted instance, mirroring the AWS host lifecycle.
+
+# ── OCI ──────────────────────────────────────────────────────────────────────
+# The last cloud to get one. Until now OCI was "bring your own gateway", and that gap
+# reached further than it looked: with nothing in the VCN to broker a session,
+# `oci_vm_service` had to wire the PUBLIC address into every jump item — and an
+# auto-assigned public address does not survive a stop, which is why `vm_suspend_policy`
+# then refused those instances a suspend schedule. Closing the gap closes all three.
+#
+# Off by default (`oci_vm_jumpoint_mode`), because turning it on creates a billable
+# instance and an upgrade must never do that on its own.
+
+
+def _oci_compartment() -> str:
+    return _cfg("oci_compartment_ocid") or ""
+
+
+def _oci_jumpoint_host_name() -> str:
+    """Display name of the shared gateway INSTANCE.
+
+    Reads ``oci_jumpoint_host_name``, never ``oci_jumpoint_name`` — that one is the PRA
+    Gateway a Shell Jump binds to, a different thing that happens to share the word. GCP
+    carries the same hazard and resolves it the other way round (there ``gcp_jumpoint_name``
+    IS the instance), so the two must not be reasoned about by analogy.
+    """
+    return (_cfg("oci_jumpoint_host_name") or "oci-shared-jumpoint").strip()
+
+
+def _oci_jumpoint_subnet() -> str:
+    """Subnet for the gateway VNIC — its own key, falling back to the VM subnet."""
+    return _cfg("oci_jumpoint_subnet_ocid") or _cfg("oci_default_subnet_ocid") or ""
+
+
+def oci_shared_gateway_enabled() -> bool:
+    """Whether OCI runs a dashboard-managed gateway, or the operator brings their own.
+
+    One reader, because three things branch on it: whether a deploy ensures a host,
+    whether a destroy tries to reap one, and — the consequential one — whether
+    ``oci_vm_service`` wires the private or the public address.
+    """
+    return (_cfg("oci_vm_jumpoint_mode") or "none").strip().lower() == "shared"
+
+
+async def _resolve_oci_deploy_key() -> str:
+    """BeyondTrust gateway deploy key for OCI launches — resolved through whichever
+    secrets backend the operator picked on /secrets."""
+    from . import config_service
+    return (config_service.get("oci_jumpoint_docker_deploy_key")
+            or config_service.get("bt_jumpoint_docker_deploy_key")
+            or "")
+
+
+async def _ensure_jumpoint_host_oci(region: str, name: str = "",
+                                    placement: Optional[dict] = None) -> Optional[str]:
+    """Ensure the shared OCI gateway instance is up; return its OCID.
+
+    Best-effort like every sibling: prerequisites missing means log and return None, and
+    the deploy carries on without a jump rather than failing over one.
+    """
+    compartment = _oci_compartment()
+    if not compartment:
+        logger.warning("gateway-host(oci): oci_compartment_ocid not set — cannot start a gateway.")
+        return None
+    subnet = _oci_jumpoint_subnet()
+    if not subnet:
+        logger.warning("gateway-host(oci): no gateway subnet (oci_jumpoint_subnet_ocid / "
+                       "oci_default_subnet_ocid) — tunnels unavailable until configured.")
+        return None
+    deploy_key = await _resolve_oci_deploy_key()
+    if not deploy_key:
+        logger.warning("gateway-host(oci): gateway deploy key not set "
+                       "(oci_jumpoint_docker_deploy_key) — tunnels unavailable until configured.")
+        return None
+
+    requested = bool(name)
+    name = name or _oci_jumpoint_host_name()
+    from . import oci_service
+    try:
+        meta = await oci_service.run_oci_jumpoint(
+            compartment_id=compartment,
+            subnet_ocid=subnet,
+            name=name,
+            container_image=_cfg("oci_jumpoint_image") or "beyondtrust/sra-jumpoint:latest",
+            deploy_key=deploy_key,
+            shape=_cfg("oci_jumpoint_shape") or "VM.Standard.E4.Flex",
+            image_ocid=_cfg("oci_jumpoint_image_ocid"),
+            ocpus=float(_cfg("oci_jumpoint_ocpus") or 1),
+            memory_gb=float(_cfg("oci_jumpoint_memory_gbs") or 6),
+        )
+        logger.info("gateway-host(oci): gateway %s %s", name,
+                    "reused" if meta.get("reused") else "started")
+        if placement is not None:
+            # No zone: an OCI availability domain is chosen at launch and is not a handle
+            # anything here needs, unlike a GCE zone which the teardown must name.
+            placement.update({"zone": "", "egress_ip": meta.get("public_ip") or ""})
+        _persist_jumpoint_egress_ip(meta.get("public_ip"), "oci", name,
+                                    managed=not requested)
+        return meta.get("ocid") or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gateway-host(oci): ensure failed (non-fatal): %s", exc)
+        return None
+
+
+def _active_oci_count(db) -> int:
+    """Live OCI VM deploys holding a reference to the shared gateway.
+
+    The counterpart to ``_active_gce_count`` and ``_active_azure_vm_count``, and
+    load-bearing for the same reason those are: without it a cloud-database decommission
+    would reap the gateway from under every running OCI VM that borrowed it.
+    """
+    from ..database import Job
+    total = 0
+    for job in (db.query(Job)
+                .filter(Job.job_type == "oci_deploy", Job.status == "completed").all()):
+        if not job.metadata_dict.get("destroyed"):
+            total += 1
+    return total
+
+
+async def _teardown_jumpoint_host_if_idle_oci(db, region: str) -> None:
+    """Terminate the *managed* OCI gateway iff nothing is left using it.
+
+    Safe against a user-deployed gateway by construction: it terminates one instance by
+    the managed name, which ``teardown_gateway`` refuses to let a requested gateway take.
+    """
+    from . import oci_service
+    try:
+        active = (_active_oci_count(db) + _active_db_count(db, "oci")
+                  + _active_k8s_count(db, "oci") + _active_vdesktop_count(db, "oci")
+                  + _active_web_jump_count("oci") + _active_ot_tunnel_count("oci"))
+        if active > 0:
+            logger.info("gateway-host(oci): keeping gateway (%d active resource(s))", active)
+            return
+        compartment = _oci_compartment()
+        if not compartment:
+            # Without the compartment nothing can be deleted OR verified, so the registry
+            # row is left alone rather than retired on a guess — the same choice the GCP
+            # teardown makes when the project is unset.
+            logger.warning("gateway-host(oci): compartment not set — leaving the gateway alone.")
+            return
+        name = _oci_jumpoint_host_name()
+        await oci_service.stop_oci_jumpoint(compartment, name)
+        _clear_managed_egress_ip("oci", name)
+        logger.info("gateway-host(oci): gateway %s terminated (nothing left using it)", name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gateway-host(oci): idle teardown failed (non-fatal): %s", exc)
+
 
 def _gcp_jumpoint_name() -> str:
     """GCE *instance* name for the shared gateway VM — must be a valid GCE

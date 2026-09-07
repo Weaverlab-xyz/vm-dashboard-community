@@ -44,6 +44,7 @@ from ..services import (
     workgroup_service,
 )
 from .auth import require_permission
+from . import unmanaged
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +362,24 @@ async def _oci_instances_unfiltered(db, compartment: str) -> list:
     if cached:
         return (cached.get("data") or {}).get("instances") or []
     return await _build_oci_instances(db, compartment)
+
+
+# ── Instances this dashboard did not deploy ──────────────────────────────────
+
+async def _fetch_unmanaged_live() -> list:
+    """Every instance in the configured compartment."""
+    return await oci_service.list_all_instances(_compartment())
+
+
+router.add_api_route(
+    "/unmanaged",
+    unmanaged.unmanaged_endpoint(
+        "oci", job_type="oci_deploy", fetch_live=_fetch_unmanaged_live,
+        accessible_workgroups=_accessible_workgroups,
+        cache_key="oci_unmanaged_instances",
+        user_dep=require_permission("oci", "read")),
+    methods=["GET"],
+    summary="OCI instances this dashboard did not deploy (power only, never destroy)")
 
 
 @router.get("/instances", response_model=OCIInstanceListResponse)

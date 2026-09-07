@@ -33,6 +33,7 @@ from ..models.gcp import (
 from ..services import cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
 from ..services import gcp_service
 from .auth import require_admin, require_permission
+from . import unmanaged
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +418,30 @@ async def gcp_dashboard_stats(
     except gcp_service.GCPError:
         pass
     return out
+
+
+# ── Instances this dashboard did not deploy ──────────────────────────────────
+
+async def _fetch_unmanaged_live() -> list:
+    """Every instance in the project. One aggregated call rather than a zone fan-out: the
+    zones the dashboard knows about are the ones it deployed into, which is precisely the
+    set that cannot contain somebody else's VM."""
+    project_id = _gcp_project()
+    if not project_id:
+        raise HTTPException(status_code=400,
+                            detail="GCP project ID not configured — run the setup wizard.")
+    return await gcp_service.list_all_instances(project_id)
+
+
+router.add_api_route(
+    "/unmanaged",
+    unmanaged.unmanaged_endpoint(
+        "gcp", job_type="gce_deploy", fetch_live=_fetch_unmanaged_live,
+        accessible_workgroups=_accessible_workgroups,
+        cache_key="gcp_unmanaged_instances",
+        user_dep=require_permission("gcp", "read")),
+    methods=["GET"],
+    summary="GCE instances this dashboard did not deploy (power only, never destroy)")
 
 
 @router.get("/instances", response_model=GCPInstanceListResponse)

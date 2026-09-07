@@ -467,14 +467,15 @@ Phase 0 has standalone value and should be judged on its own. An operator who wa
 overnight currently uses the cloud console, which puts the dashboard's inventory out of step
 with reality.
 
-> **Phase 1 shipped, AWS and GCP first, Azure since.** `pov_schedule` promoted to
-> `suspend_schedule` (profile-neutral; the policy was never POV-specific), five
-> schedule columns on `jobs`, a `suspend_sweep` job type with its own loop — not
-> folded into `expiry_sweep`, which is gated on the destructive timer's flag — and
-> `vm_suspend_policy`, a pure predicate that refuses OCI for the reason below plus
-> two more the audit missed: a VM wired at its public address, and one under Password
-> Safe auto-management, whose `ssm`/`gcpvm`/`azurevm` plugins cannot reach a stopped
-> instance. Every refusal returns its reason. Phase 2 (spend caps) remains.
+> **Phase 1 shipped, all four clouds.** `pov_schedule` promoted to `suspend_schedule`
+> (profile-neutral; the policy was never POV-specific), five schedule columns on
+> `jobs`, a `suspend_sweep` job type with its own loop — not folded into
+> `expiry_sweep`, which is gated on the destructive timer's flag — and
+> `vm_suspend_policy`, a pure predicate asking one question per VM: does the address
+> its wire-up used survive a stop? Plus two refusals the audit missed: a VM wired at
+> its public address, and one under Password Safe auto-management, whose
+> `ssm`/`gcpvm`/`azurevm`/`ssh` methods cannot reach a stopped instance. Every refusal
+> returns its reason. Phase 2 (spend caps) remains.
 >
 > **Azure's addressing is fixed rather than worked around.** Not POV's way — it picks
 > an address (`_next_free_ip` scans the resource group for the lowest free one), which
@@ -510,10 +511,21 @@ the part to know before starting:
   `remove_jump` (`:459`) and no update — and the same provision/remove-only pair
   repeats for every other jump type in the module. A changed address can only be fixed by destroy-and-recreate,
   which mints a new Shell Jump and drops the association.
-- **OCI is worse, and it is a security break rather than a usability one.**
-  `oci_vm_service.py:119` prefers the **public** address. An OCI ephemeral public IP is
-  released on stop, so after one suspend/resume cycle a PRA jump item can point at an address
-  that now belongs to somebody else's instance.
+- **OCI prefers the public address, and it is the only one of the four that does.**
+  `oci_vm_service`'s `hostname` is `public_ip or private_ip`; the other three are
+  `private_ip or public_ip`. Not an oversight — OCI is the one cloud where the dashboard
+  provisions no gateway inside the VCN ("bring your own"), so it cannot assume the gateway
+  reaches a private address.
+
+  > **Resolved, and it turned out to be a policy bug rather than an OCI limitation.** The
+  > refusal was written as "OCI cannot be scheduled", implemented as "does this VM have a
+  > private address?" — which is the right question on three clouds and the wrong one here,
+  > because an OCI instance has both addresses and was wired at the public one. Runners now
+  > record `wired_address`, older rows are reconstructed by replaying each runner's fixed
+  > preference, and the refusal asks the exact question. An OCI instance deployed with
+  > `assign_public_ip=False` was always safe to schedule and is now allowed; one with a
+  > public address is refused with no invented remedy, because the address is already inside
+  > a jump item that has no update path.
 - **Password Safe rotation runs on its own clock.** AWS onboarding defaults to the SSM
   method, whose `dns_name` is stop/start-stable — but `SendCommand` against a stopped
   instance fails. A nightly schedule produces a nightly rotation failure in the customer's

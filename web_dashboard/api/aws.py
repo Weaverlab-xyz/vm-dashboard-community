@@ -43,6 +43,7 @@ from ..models.aws import (
 from ..services import aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
 from .auth import require_admin, require_permission
+from . import unmanaged
 
 from pydantic import BaseModel
 
@@ -364,6 +365,47 @@ async def _fetch_instances_fresh() -> list:
         return await _fetch_instances(s)
     finally:
         s.close()
+
+# ── VMs this dashboard did not deploy ────────────────────────────────────────
+
+def _discovery_regions() -> list:
+    """Regions unmanaged discovery covers: every configured one, plus the default.
+
+    The managed listing derives its regions from the deploy jobs, which by definition
+    cannot name a region holding only somebody else's instances. So this reads the
+    operator's configured region set instead — the same source the Azure listing fans out
+    over — and falls back to the default when none is configured.
+    """
+    from ..services.region_config import load_region_configs
+    regions = {region_catalog.normalize("aws", r) for r in load_region_configs("aws")}
+    regions.discard("")
+    regions.add(_aws_region())
+    return sorted(r for r in regions if r)
+
+
+async def _fetch_unmanaged_live() -> list:
+    rows = []
+    for region in _discovery_regions():
+        try:
+            rows.extend(await aws_service.list_all_instances(region))
+        except AWSError:
+            # One unreachable region must not blank the whole list — the same posture the
+            # Azure listing takes per resource group.
+            logger.warning("Unmanaged discovery: could not list instances in %s", region,
+                           exc_info=True)
+    return rows
+
+
+router.add_api_route(
+    "/unmanaged",
+    unmanaged.unmanaged_endpoint(
+        "aws", job_type="ec2_deploy", fetch_live=_fetch_unmanaged_live,
+        accessible_workgroups=_accessible_workgroups,
+        cache_key="aws_unmanaged_instances",
+        user_dep=require_permission("aws", "read")),
+    methods=["GET"],
+    summary="EC2 instances this dashboard did not deploy (power only, never destroy)")
+
 
 @router.get("/dashboard-stats")
 async def aws_dashboard_stats(
@@ -995,20 +1037,34 @@ def _power_endpoint(op: str):
         current_user: User = Depends(require_permission("aws", "write")),
     ):
         deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", payload.instance_id)
-        if not deploy_job:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No active deployment found for instance {payload.instance_id}.")
-        region = deploy_job.metadata_dict.get("region") or _aws_region()
-        _assert_can_act(current_user, deploy_job.workgroup, f"Instance {payload.instance_id}")
+        if deploy_job:
+            region = deploy_job.metadata_dict.get("region") or _aws_region()
+            workgroup = deploy_job.workgroup
+        else:
+            # No deploy job: this may be an instance the dashboard did not deploy. The
+            # region comes from DISCOVERY, never from the request — a caller-supplied one
+            # would make this "stop any instance of this id in any region the credentials
+            # reach". Not discovered means not actionable, which keeps what you can act on
+            # equal to what you can see.
+            row = await unmanaged.find(
+                "aws", payload.instance_id, job_type="ec2_deploy",
+                fetch_live=_fetch_unmanaged_live, cache_key="aws_unmanaged_instances")
+            if not row:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No active deployment found for instance {payload.instance_id}.")
+            region = row.get("region") or _aws_region()
+            workgroup = row.get("workgroup")
+        _assert_can_act(current_user, workgroup, f"Instance {payload.instance_id}")
 
         job = job_service.create_job(
             db,
             job_type="ec2_power",
             created_by=current_user.username,
-            workgroup=deploy_job.workgroup,
+            workgroup=workgroup,
             metadata={"action": op, "instance_id": payload.instance_id, "region": region,
-                      "deploy_job_id": deploy_job.id},
+                      "deploy_job_id": deploy_job.id if deploy_job else None,
+                      "unmanaged": deploy_job is None},
         )
         job_service.log_audit(db, current_user.username, "ec2_power",
                               details={"action": op, "instance_id": payload.instance_id})

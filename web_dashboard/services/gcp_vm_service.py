@@ -383,6 +383,11 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
 
         final_meta = {
+            # The address handed to PRA, Entitle and Password Safe. Recorded because
+            # `vm_suspend_policy` has to know which one it was: three runners prefer
+            # the private address and OCI prefers the public one — it cannot be
+            # inferred from which addresses exist.
+            "wired_address": hostname,
             "instance_name": result["instance_name"],
             "zone":          result["zone"],
             "machine_type":  result["machine_type"],

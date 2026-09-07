@@ -11,45 +11,47 @@ statically on purpose. An estate VM is neither.
 
 Three refusals, each one a thing that breaks quietly rather than loudly:
 
-1. **A VM whose address does not survive a deallocate.**
-   AWS and GCP keep the private address across a stop, so both are schedulable as
-   deployed. Azure does not: ARM allocates the private address dynamically and releases it
-   on deallocate, so the VM can return on a different one — and by then the wire-up has
-   written the old address into a PRA jump item, a Password Safe managed system and an
-   Entitle integration, none of which have an update path (``terraform_pra_service``
-   exposes ``provision_jump`` and ``remove_jump`` and nothing between). So an Azure VM is
-   schedulable **once its address is pinned** and refused until then;
-   ``azure_service.pin_private_address`` does the pinning, new deploys pin themselves, and
-   ``api/suspend.py`` pins an older VM the first time somebody schedules it. Pinning
+1. **A VM wired into BeyondTrust at its PUBLIC address**, on any cloud.
+   The wire-up writes one address into a PRA jump item, a Password Safe managed system and
+   an Entitle integration, and ``terraform_pra_service`` exposes ``provision_jump`` and
+   ``remove_jump`` and nothing between — so an address that moves cannot be repaired short
+   of destroy-and-recreate, which mints a new Shell Jump and drops the association. None of
+   the four clouds guarantees an auto-assigned public address across a stop, so a VM
+   reached on one is refused. A private address survives a stop on all four.
+
+   **Which address was wired is recorded, not inferred** — see :func:`wired_address`. That
+   distinction is the whole reason OCI can be scheduled at all: three runners prefer the
+   private address and OCI prefers the public one, so "does it have a private address?"
+   answers the question for three clouds and the wrong question for the fourth. An OCI
+   instance deployed with ``assign_public_ip=False`` is wired privately and is safe; one
+   with a public address is refused, and honestly has no remedy short of redeploying,
+   because moving it to a reserved public IP would change the address that has already been
+   written into all three systems.
+
+2. **An Azure VM whose private address is not pinned.**
+   ARM allocates it dynamically and releases it on deallocate, so the VM can return on a
+   different one. Azure is schedulable **once its address is pinned** and refused until
+   then; ``azure_service.pin_private_address`` does the pinning, new deploys pin themselves,
+   and ``api/suspend.py`` pins an older VM the first time somebody schedules it. Pinning
    ratifies the address ARM already chose, so it changes nothing that has been told it.
-
-   OCI is different and cannot be fixed the same way: ``oci_vm_service`` wires the
-   **public** address, and an OCI ephemeral public IP is released on stop. After one cycle
-   the jump item can point at an address that now belongs to somebody else's instance.
-   That is a security break, not an inconvenience, and pinning a private address does not
-   touch it.
-
-2. **A VM whose wire-up used its public address is excluded on every cloud.**
-   All three prefer ``private_ip`` and fall back to ``public_ip``. The private address
-   survives a stop; an auto-assigned public one does not.
 
 3. **A VM under Password Safe auto-management is excluded.**
    AWS onboards via the ``ssm`` plugin, GCP via ``gcpvm`` and Azure via ``azurevm`` — all
    three reach the instance through the cloud's own agent, and none can reach a stopped
-   one. Password Safe rotates on its own clock, which this dashboard does not know and
-   cannot pause, so a nightly suspend produces a nightly rotation failure in somebody's
-   Password Safe. The operator who wants this VM scheduled can detach auto-management;
-   that is their call to make deliberately, not ours to make for them by staying quiet.
+   one. (OCI uses plain ``ssh``, which has the same problem for the same reason: a stopped
+   instance answers nothing.) Password Safe rotates on its own clock, which this dashboard
+   does not know and cannot pause, so a nightly suspend produces a nightly rotation failure
+   in somebody's Password Safe. The operator who wants this VM scheduled can detach
+   auto-management; that is their call to make deliberately, not ours to make for them by
+   staying quiet.
 
 Every refusal returns a reason, because a greyed-out control with no explanation is the
 thing an operator files a bug about.
 """
 
-# The clouds whose address survives a stop, given how this dashboard provisions them.
-# Azure is here on the strength of the pin — see refusal 1 and the ``private_ip_static``
-# check below, which is what actually holds it to that. OCI is excluded for a reason that
-# pinning does not reach.
-SCHEDULABLE_CLOUDS = ("aws", "gcp", "azure")
+# All four. None of them is schedulable unconditionally — the refusals below decide, per
+# VM, on facts the deploy recorded. A cloud listed here is one whose VMs *can* qualify.
+SCHEDULABLE_CLOUDS = ("aws", "gcp", "azure", "oci")
 
 # deploy job_type → cloud, for the four that can carry a schedule at all.
 _CLOUD_OF = {
@@ -63,6 +65,37 @@ _CLOUD_OF = {
 def cloud_of(job_type: str) -> str:
     """The cloud a deploy job belongs to, or ``""`` if it is not a cloud VM deploy."""
     return _CLOUD_OF.get(job_type or "", "")
+
+
+# Each runner's fixed preference when it chose the address to hand PRA, Entitle and
+# Password Safe. Used only to reconstruct rows written before `wired_address` was
+# recorded — every runner sets it now.
+_LEGACY_PREFERENCE = {
+    "aws":   ("private_ip", "public_ip"),
+    "gcp":   ("private_ip", "public_ip"),
+    "azure": ("private_ip", "public_ip"),
+    "oci":   ("public_ip", "private_ip"),      # the odd one out, and the reason this exists
+}
+
+
+def wired_address(job_type: str, meta: dict) -> str:
+    """The address this VM's wire-up actually wrote into PRA, Entitle and Password Safe.
+
+    Recorded by every runner as ``wired_address``. For rows written before that — the
+    fleet as it stands — it is **reconstructed rather than guessed**: each runner had one
+    fixed preference and the recorded addresses are still there, so replaying the
+    preference gives the same answer the runner gave.
+
+    Returns ``""`` when neither address is recorded. Note the runners fall back to an
+    instance id or name when neither address came back; such a VM is not reachable at a
+    public address either, so ``""`` is treated as "not public" by the caller.
+    """
+    meta = meta or {}
+    recorded = meta.get("wired_address")
+    if recorded:
+        return recorded
+    first, second = _LEGACY_PREFERENCE.get(cloud_of(job_type), ("private_ip", "public_ip"))
+    return meta.get(first) or meta.get(second) or ""
 
 
 def deploy_types_for(clouds) -> tuple:
@@ -87,23 +120,25 @@ def schedulable(job_type: str, meta: dict) -> tuple:
     if not cloud:
         return (False, "Only cloud VMs can carry a suspend schedule.")
 
-    if cloud == "oci":
-        return (False,
-                "OCI instances are excluded: their wire-up uses the public address, and "
-                "an ephemeral public IP is released on stop. After one suspend the jump "
-                "item could point at an address that now belongs to somebody else.")
     if cloud not in SCHEDULABLE_CLOUDS:      # pragma: no cover — defensive
         return (False, f"{cloud} VMs cannot be scheduled.")
 
-    # Wired into PRA / Entitle / Password Safe at a PUBLIC address? Then the address does
-    # not survive the stop on any of these clouds.
+    # Wired into PRA / Entitle / Password Safe at a PUBLIC address? Then the address the
+    # jump item holds does not survive the stop, on any of the four. Asked of the address
+    # that was actually wired — inferring it from "does a private address exist?" answers
+    # the right question on three clouds and the wrong one on OCI, which wires the public
+    # address by preference because it has no dashboard-provisioned gateway in the VCN.
     wired = any(meta.get(k) for k in
                 ("bt_tf_state", "ps_registration_tf_state", "entitle_registration_tf_state"))
-    if wired and not meta.get("private_ip"):
+    public = meta.get("public_ip")
+    if wired and public and wired_address(job_type, meta) == public:
         return (False,
-                "This VM was wired into BeyondTrust at its public address, which is "
-                "released when it stops. Only VMs reached on a private address can be "
-                "scheduled.")
+                "This VM was wired into BeyondTrust at its public address, which is not "
+                "guaranteed to survive a stop. Only VMs reached on a private address can "
+                "be scheduled, and the address already written into the jump item, "
+                "Password Safe system and Entitle registration cannot be changed in "
+                "place — so this one would have to be redeployed without a public "
+                "address to carry a schedule.")
 
     # Password Safe auto-management reaches the instance through the cloud's own agent
     # (ssm on AWS, gcpvm on GCP, azurevm on Azure) and cannot reach a stopped one.

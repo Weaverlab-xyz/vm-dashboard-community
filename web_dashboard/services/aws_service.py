@@ -472,6 +472,36 @@ def _format_instance(inst: dict) -> dict:
     }
 
 
+def _list_all_instances_sync(region: str) -> list:
+    """Every non-terminated instance in one region, whoever created it.
+
+    The counterpart to ``_describe_instances_sync``, which takes the identifiers the
+    deploy jobs name and is therefore blind to anything this dashboard did not launch.
+    Paginated because an estate region is not a lab one, and terminated instances are
+    dropped because EC2 keeps them visible for about an hour after they stop existing —
+    listing them would offer a power button on a corpse.
+    """
+    ec2 = _get_ec2(region)
+    instances = []
+    paginator = ec2.get_paginator("describe_instances")
+    for page in paginator.paginate(Filters=[{
+        "Name": "instance-state-name",
+        "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
+    }]):
+        for reservation in page.get("Reservations", []):
+            for inst in reservation.get("Instances", []):
+                instances.append({**_format_instance(inst), "region": region})
+    return instances
+
+
+async def list_all_instances(region: str) -> list:
+    """Every non-terminated EC2 instance in one region, dashboard-deployed or not."""
+    try:
+        return await _to_thread(_list_all_instances_sync, region)
+    except ClientError as e:
+        raise AWSError(f"Could not list instances in {region}: {e}") from e
+
+
 async def describe_instances(region: str, instance_ids: list) -> list:
     """Return live state for a list of instance IDs."""
     try:

@@ -20,7 +20,7 @@ as [Databases](databases.md) and [Kubernetes](kubernetes.md):
 | **AWS** | EC2 (Linux + Windows) | ✅ | ✅ `ssm` plugin (or `ssh`) | ✅ SSH ephemeral |
 | **Azure** | VM (Linux + Windows) | ✅ (Linux; Windows → RDP jump) | ✅ `azurevm` plugin (or `ssh`) | ✅ SSH ephemeral |
 | **GCP** | GCE (Linux) | ✅ | ✅ `gcpvm` plugin (or `ssh`) | ✅ SSH ephemeral |
-| **OCI** | Compute (Linux) | ✅ (bring your own gateway¹) | ⚠️ `ssh` method only | ✅ SSH ephemeral |
+| **OCI** | Compute (Linux) | ✅ (shared gateway, or bring your own¹) | ⚠️ `ssh` method only | ✅ SSH ephemeral |
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
 
@@ -57,9 +57,10 @@ deploy still succeeds):
 
 1. **Ensure the gateway host** (only when `pra_enabled`) — AWS uses a shared
    ref-counted ECS host, Azure the shared `clouddb-jumpoint` VM (see
-   `azure_vm_jumpoint_mode`), GCP the shared COS host (see `gcp_vm_jumpoint_mode`);
-   **OCI does nothing here** (bring your own). In a batch this happens once for the
-   whole run.
+   `azure_vm_jumpoint_mode`), GCP the shared COS host (see `gcp_vm_jumpoint_mode`), and
+   OCI a shared Oracle Linux instance when `oci_vm_jumpoint_mode` is `shared` —
+   **`none` by default**, which keeps OCI's historical bring-your-own behaviour. In a
+   batch this happens once for the whole run.
 2. **Ensure on-demand egress** — AWS: the shared **NAT instance** (`aws_nat_instance_enabled`)
    plus **SSM interface endpoints** (`aws_ssm_endpoints_enabled`). GCP: a **Cloud NAT**
    gateway for the VM subnet plus the egress allow rule (`gcp_vm_nat_enabled`). Both are
@@ -111,7 +112,95 @@ destroy is. A reversible action earns a lighter brake than an irreversible one, 
 change-freeze that forbade *suspending* a VM would forbid the cheapest thing an operator
 can do during one.
 
-### Suspend schedules (AWS, GCP and Azure)
+### VMs this dashboard did not deploy
+
+Every cloud console here is **job-driven**: it starts from completed `*_deploy` jobs and
+fetches live state for exactly those identifiers. That is what makes the console a record of
+what the dashboard did — and it means a VM somebody launched in the cloud's own console, in
+Terraform, or before this dashboard existed is invisible, and your only lever on it is the
+provider's UI.
+
+Turn on **`cloud_unmanaged_discovery_enabled`** (Settings → Integrations → *Discover unmanaged
+cloud VMs*, off by default) and each cloud gains a second listing:
+
+| | Managed | Discovered |
+|---|---|---|
+| Endpoint | `GET /api/{cloud}/instances` (`/vms` on Azure) | `GET /api/{cloud}/unmanaged` |
+| Source | completed `*_deploy` jobs | every instance in the account / subscription / project / compartment |
+| Power | ✅ | ✅ |
+| Destroy | ✅ | ❌ **never** |
+| Suspend schedule | ✅ | ❌ — a schedule lives on the deploy job row, and there isn't one |
+
+**Off by default** because it lists everything rather than the identifiers the deploy jobs
+name: more cloud calls, and on a real estate a great many more rows.
+
+**A VM is "discovered" when the dashboard has no deploy job for it *and* it carries none of
+the dashboard's own tags.** Both halves matter. The tag half is what keeps a VDI pool seat, or
+a VM whose job row was pruned, in the managed list where it belongs — those are the
+dashboard's, and they still have a Destroy button.
+
+**Who can see one.** A discovered VM has no `Job.workgroup`, so its workgroup comes from a
+`workgroup` tag (or GCP label) if it has one, and otherwise it has none — which makes it
+**admin-only**. That is not a new rule; it is what every cloud module's `_assert_can_act`
+already says about an untagged resource. Tag your own VMs for workgroups and non-admins see
+them; don't, and only admins do.
+
+**Destroy is absent, not hidden.** There is no destroy route on the discovery module and
+nothing in a discovered row resolves into one. Separately, `api/azure`'s destroy fan-out — the
+one path that can terminate a VM with no deploy job, which exists for VDI seats — now asks
+whether the VM carries a dashboard tag before it acts. It did not before: any VM in a listed
+resource group could be destroyed by name, which discovery would have made easy to find.
+
+**How power reaches a discovered VM.** AWS needs a region and Azure a resource group, which
+the deploy job used to supply. Both now take it **from the discovery listing** — never from
+the request, because a caller-supplied resource group would turn `/power/stop` into "deallocate
+any VM of this name anywhere the credentials reach". A VM discovery does not show is still a
+404. (GCP and OCI already accepted a power call with no deploy job: a GCE instance is named by
+zone, which the request carries, and an OCID is globally unique. That behaviour is unchanged
+and is not gated by this flag.)
+
+### OCI's shared gateway
+
+OCI was the one cloud where the dashboard provisioned nothing inside the VCN — you brought
+your own gateway. That gap reached further than it looked. With nothing in the VCN to broker
+a session, the OCI deploy could not assume a private address was reachable, so it wired the
+**public** one into every jump item, Password Safe system and Entitle registration; and
+because an auto-assigned public address does not survive a stop, those instances could not
+carry a suspend schedule either. One missing host, three consequences.
+
+Set **`oci_vm_jumpoint_mode = shared`** and OCI behaves like the other three: a small Oracle
+Linux instance runs the BeyondTrust gateway container privileged with `/dev/net/tun` (the
+capabilities a protocol tunnel needs), reference-counted by `jumpoint_host_service` so it is
+created on the first deploy that needs it and terminated when the last resource using it
+goes.
+
+**`none` is the default**, because turning this on creates a billable instance and an upgrade
+must never do that on its own. Left at `none`, nothing changes: no host, public-first
+wire-up, exactly as before.
+
+| Key | Default | What it is |
+|---|---|---|
+| `oci_vm_jumpoint_mode` | `none` | `none` (bring your own) or `shared` (dashboard-managed) |
+| `oci_jumpoint_host_name` | `oci-shared-jumpoint` | the gateway **instance's** display name |
+| `oci_jumpoint_subnet_ocid` | — | gateway VNIC subnet; falls back to `oci_default_subnet_ocid` |
+| `oci_jumpoint_docker_deploy_key` | — | BeyondTrust gateway deploy key; falls back to `bt_jumpoint_docker_deploy_key` |
+| `oci_jumpoint_image_ocid` | — | blank resolves the newest Oracle Linux platform image |
+| `oci_jumpoint_shape` / `_ocpus` / `_memory_gbs` | `VM.Standard.E4.Flex` / 1 / 6 | the gateway instance's size |
+
+**Watch the name.** `oci_jumpoint_host_name` is the compute instance; **`oci_jumpoint_name`**
+is the PRA Gateway a Shell Jump binds to. They are different things that share a word, and
+GCP resolves the same collision the other way round (there `gcp_jumpoint_name` *is* the
+instance), so do not reason about one from the other.
+
+**What changes when you turn it on.** New OCI deploys are wired at their **private** address
+instead of their public one — which is what makes them schedulable (below). Instances
+deployed before you turned it on keep the address they were wired at; `terraform_pra_service`
+has no update path, so there is nothing to migrate them with short of redeploying.
+
+The gateway instance carries the dashboard's `managed-by` tag, so it appears in the managed
+listing rather than in unmanaged discovery.
+
+### Suspend schedules (all four clouds)
 
 A business-hours power window: suspend at 19:00, resume at 07:00, weekdays only. Set per
 VM; off until you set one, and the feature itself is behind
@@ -132,31 +221,45 @@ later crossing wins, so the VM ends where the schedule says it should be now.
 A schedule that has never been evaluated acts on nothing. Setting one cannot suspend a VM
 for boundaries crossed before it existed — the same arming rule the auto-delete timer uses.
 
-**An Azure VM's address is pinned first; OCI cannot be scheduled at all.** Both reasons are
-about how this dashboard provisions and wires those clouds, not about the clouds themselves:
+**No cloud is schedulable unconditionally.** The rule is one question asked per VM: *does the
+address this VM was wired at survive a stop?* Everything below is that question.
+
+**That address is recorded, not inferred.** Each runner picks one and hands it to the PRA jump
+item, the Password Safe managed system and the Entitle registration; it is stored as
+`wired_address`. Three runners prefer the **private** address; **OCI prefers the public one**,
+because OCI is the one cloud where the dashboard provisions no gateway in the VCN (see step 1
+above — "bring your own"). So "does this VM have a private address?" answers the right question
+on three clouds and the wrong one on the fourth. Rows written before `wired_address` existed
+are *reconstructed* by replaying the runner's fixed preference, which gives the same answer
+that runner gave rather than a guess.
 
 | Cloud | What happens |
 |---|---|
-| **Azure** | ARM releases a `Dynamic` private address when a VM is deallocated, so it can return on a different one — and by then the address is written into a PRA jump item, a Password Safe managed system and an Entitle integration, none of which have an update path. So the address is **pinned** before a schedule is allowed: `Dynamic` → `Static` at the address the NIC already has. New deploys pin themselves; an older VM is pinned the first time somebody schedules it, which is a write to its NIC, audited as `azure_address_pinned` and named in the response. **The address does not change** — only ARM's freedom to reclaim it does. A static *private* address is free on Azure. |
-| **OCI** | Its wire-up uses the **public** address, and an ephemeral public IP is released on stop. After one cycle a jump item could point at an address that now belongs to somebody else's instance. Pinning a private address does not reach this, so OCI stays out. |
+| **AWS, GCP** | Schedulable as deployed. The private address survives a stop, and it is the one the wire-up used. |
+| **Azure** | ARM releases a `Dynamic` private address when a VM is deallocated, so it can return on a different one. The address is **pinned** before a schedule is allowed: `Dynamic` → `Static` at the address the NIC already has. New deploys pin themselves; an older VM is pinned the first time somebody schedules it, audited as `azure_address_pinned` and named in the response. **The address does not change** — only ARM's freedom to reclaim it does. A static *private* address is free on Azure. |
+| **OCI** | Schedulable when the wire-up used the private address — which is either a deploy with `assign_public_ip=False`, or **any** deploy made while `oci_vm_jumpoint_mode = shared` (see above). Wired publicly, it is refused. |
 
-Note what the pin does **not** do: it never picks an address. `pov_cloud_azure` does pick one
-— scan the resource group, take the lowest free — which is safe because each POV environment
-owns its resource group. An estate shares one and deploys in bulk, so two deploys in flight
-would choose the same address and the second would fail. Ratifying the allocation ARM has
-already made cannot collide with anything.
+Note what the Azure pin does **not** do: it never picks an address. `pov_cloud_azure` does pick
+one — scan the resource group, take the lowest free — which is safe because each POV
+environment owns its resource group. An estate shares one and deploys in bulk, so two deploys
+in flight would choose the same address and the second would fail. Ratifying the allocation ARM
+has already made cannot collide with anything.
 
-Two cases where the pin cannot help, and a VM is refused anyway: an Azure VM that is currently
+Two cases where the pin cannot help, and an Azure VM is refused anyway: one currently
 **deallocated** has no address to pin (start it, then set the schedule), and one deployed
 before the NIC name was recorded has to be set to Static in the Azure portal by hand.
 
-Two more refusals apply on all three clouds, each with the reason returned to the caller:
+Two more refusals apply on all four clouds, each with the reason returned to the caller:
 
-- **A VM wired into BeyondTrust at its public address.** All three prefer the private
-  address and fall back to the public one; only the private one survives a stop.
+- **A VM wired into BeyondTrust at its public address.** None of the four guarantees an
+  auto-assigned public address across a stop. This one has **no remedy short of redeploying**
+  without a public address: the address is already inside a jump item, a Password Safe system
+  and an Entitle registration, and none of the three can be updated in place. It applies only
+  to a VM that was actually registered somewhere — an unregistered VM has told nothing its
+  address, so nothing breaks when it moves.
 - **A VM under Password Safe auto-management.** AWS onboards via the `ssm` plugin, GCP via
-  `gcpvm` and Azure via `azurevm`; all three reach the guest through the cloud's own agent
-  and none can reach a stopped instance. Password Safe rotates on its own clock, which this dashboard cannot
+  `gcpvm`, Azure via `azurevm` and OCI via plain `ssh`; all four reach the guest through
+  something that cannot reach a stopped instance. Password Safe rotates on its own clock, which this dashboard cannot
   pause, so a nightly suspend would mean a nightly rotation failure. Detach
   auto-management if you want the VM scheduled — that is a decision for you to make, not
   one for this to make quietly on your behalf.

@@ -191,7 +191,8 @@ def _install_stubs(vms, regions=("centralus", "westus2"), errors=()):
         if rg in errors:
             raise azure.AzureError(f"Failed to get VM {vm_name}: no access to {rg}")
         if vm_name in vms.get(rg, ()):
-            return {"vm_id": _arm_id(rg, vm_name), "name": vm_name, "state": "VM running"}
+            return {"vm_id": _arm_id(rg, vm_name), "name": vm_name, "state": "VM running",
+                    "tags": {"managed-by": "vm-dashboard"}}
         return None
 
     azure.azure_service.get_vm = _get_vm
@@ -256,7 +257,8 @@ def test_destroy_records_the_group_from_the_arm_id_not_the_probe():
         if rg != WESTUS2_RG:
             return None
         # Same group, ARM's casing.
-        return {"vm_id": _arm_id(WESTUS2_RG.upper(), vm_name), "name": vm_name}
+        return {"vm_id": _arm_id(WESTUS2_RG.upper(), vm_name), "name": vm_name,
+                "tags": {"managed-by": "vm-dashboard"}}
 
     azure.azure_service.get_vm = _get_vm
     r = _make_client(_FakeDB()).delete("/api/azure/vms/vm-eu")
@@ -268,7 +270,9 @@ def test_destroy_falls_back_to_the_answering_group_without_an_arm_id():
     _install_stubs({})
 
     async def _get_vm(rg, vm_name):
-        return {"name": vm_name} if rg == WESTUS2_RG else None   # no vm_id at all
+        # No vm_id at all — but tagged, because every VM this route legitimately reaches is.
+        return ({"name": vm_name, "tags": {"managed-by": "vm-dashboard"}}
+                if rg == WESTUS2_RG else None)
 
     azure.azure_service.get_vm = _get_vm
     r = _make_client(_FakeDB()).delete("/api/azure/vms/vm-eu")
@@ -284,6 +288,27 @@ def test_destroy_covers_a_group_only_another_vms_deploy_job_knows():
     r = _make_client(db).delete("/api/azure/vms/orphan-vm")
     assert r.status_code == 200, (r.status_code, r.text)
     assert _CAPTURED["metadata"]["resource_group"] == "rg-from-a-job"
+
+
+def test_destroy_refuses_a_vm_this_dashboard_never_created():
+    """The fan-out finds VMs by name with no deploy job — which is the point, for a VDI
+    seat or a pruned job row. `azure_service.get_vm` answers regardless of tags, so before
+    the guard ANY VM sitting in a probed resource group could be destroyed by name. That
+    was reachable without unmanaged discovery; discovery is only what makes the name easy
+    to find."""
+    _install_stubs({})
+
+    async def _get_vm(rg, vm_name):
+        # Somebody else's VM: real, findable, and carrying none of the dashboard's tags.
+        return ({"vm_id": _arm_id(rg, vm_name), "name": vm_name,
+                 "tags": {"Name": "prod-db-01", "owner": "dba-team"}}
+                if rg == DEFAULT_RG else None)
+
+    azure.azure_service.get_vm = _get_vm
+    r = _make_client(_FakeDB()).delete("/api/azure/vms/prod-db-01")
+    assert r.status_code == 403, (r.status_code, r.text)
+    assert "not deployed by this dashboard" in r.text
+    assert "job_type" not in _CAPTURED, "no destroy job may be created for it"
 
 
 def test_destroy_probes_a_desktop_seats_own_group_first():

@@ -572,6 +572,12 @@ def _instance_to_dict(inst, private_ip=None, public_ip=None) -> dict:
         "public_ip":     public_ip,
         "time_created":  _iso(getattr(inst, "time_created", None)),
         "workgroup":     tags.get("workgroup") or None,
+        # For unmanaged discovery: `tags` decides whether this instance is the
+        # dashboard's, and `instance_ocid` is the field the power endpoint's body takes,
+        # so a discovered row can be handed straight back. `ocid` stays for the existing
+        # consumers of this shape.
+        "instance_ocid": inst.id,
+        "tags":          tags,
     }
 
 
@@ -697,6 +703,237 @@ async def describe_instances(compartment_id: str, instance_ocids: list[str]) -> 
         return []
     return await _to_thread(
         _describe_instances_sync, compartment_id or _compartment(), instance_ocids)
+
+
+# ── Tunnel-capable BeyondTrust gateway on an OCI compute instance ────────────
+# OCI was the one cloud where the dashboard provisioned no gateway inside the VCN —
+# "bring your own" — and that single gap set the shape of everything downstream. With no
+# broker in the VCN, `oci_vm_service` could not assume a private address was reachable, so
+# it wired the PUBLIC one; and because an auto-assigned public address does not survive a
+# stop, `vm_suspend_policy` then had to refuse those instances a suspend schedule.
+#
+# The gateway is a small Oracle Linux instance running the BT gateway container privileged
+# with /dev/net/tun — the capabilities a protocol tunnel needs, and the same shape
+# `azure_service.run_vm_jumpoint` uses for the same reason. One shared instance per
+# compartment, reference-counted by `jumpoint_host_service`, so it is not a standing cost.
+
+_JUMPOINT_MANAGED_TAGS = {"managed-by": "vm-dashboard", "purpose": "clouddb-jumpoint"}
+
+# Lifecycle states in which an instance is worth reusing rather than launching beside.
+# TERMINATED and TERMINATING are excluded deliberately: a name match on a corpse is what
+# makes an idempotent launcher report a gateway that is not there.
+_LIVE_STATES = ("RUNNING", "STARTING", "PROVISIONING", "STOPPED", "STOPPING")
+
+
+def _jumpoint_cloud_init(container_image: str, deploy_key: str) -> str:
+    """Base64 cloud-init: install Docker, then run the BT gateway container privileged
+    with /dev/net/tun. The deploy key is an opaque token, single-quoted for the shell.
+
+    Oracle Linux rather than Ubuntu, so Docker comes from the OL repos and starts through
+    systemd. ``modprobe tun`` runs first: the tunnel device is not loaded by default on a
+    fresh OL image, and without it the container starts and silently cannot broker a
+    tunnel — exactly the quiet failure this path exists to avoid.
+    """
+    import base64
+    runcmd = [
+        "modprobe tun || true",
+        "dnf install -y docker-engine podman-docker || dnf install -y docker || "
+        "yum install -y docker",
+        "systemctl enable --now docker",
+        "docker run -d --restart always --name jumpoint "
+        "--privileged --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW "
+        f"-e DEPLOY_KEY='{deploy_key}' {container_image}",
+    ]
+    lines = ["#cloud-config", "package_update: true", "runcmd:"]
+    lines += [f"  - [ sh, -c, {json.dumps(c)} ]" for c in runcmd]
+    return base64.b64encode(("\n".join(lines) + "\n").encode()).decode()
+
+
+def _find_instance_by_name_sync(compartment_id: str, display_name: str):
+    """The live instance with this display name, or None.
+
+    OCI display names are **not** unique, so this takes the newest live match — what a
+    person reading the console would do.
+    """
+    import oci
+    compute = oci.core.ComputeClient(_oci_config())
+    matches = [
+        i for i in oci.pagination.list_call_get_all_results(
+            compute.list_instances, compartment_id, display_name=display_name).data
+        if getattr(i, "lifecycle_state", "") in _LIVE_STATES
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda i: getattr(i, "time_created", None) or 0, reverse=True)
+    return matches[0]
+
+
+def _resolve_jumpoint_image_sync(compartment_id: str) -> str:
+    """The newest Oracle Linux platform image, for the gateway instance.
+
+    OCI has no image family to point at the way GCP does — a launch needs a concrete
+    OCID, which would otherwise be one more thing an operator has to look up and keep
+    current. Resolved rather than configured, with ``oci_jumpoint_image_ocid`` available
+    to override when a specific image is wanted.
+    """
+    candidates = [
+        img for img in _list_images_sync(compartment_id)
+        if img["source"] == "platform"
+        and "oracle linux" in (img["operating_system"] or "").lower()
+        # ARM images carry aarch64 in the name; the default shape is x86, and the
+        # mismatch is a launch error that reads like a quota problem.
+        and "aarch64" not in (img["display_name"] or "").lower()
+    ]
+    if not candidates:
+        raise OCIError(
+            "no Oracle Linux platform image found in this compartment — set "
+            "oci_jumpoint_image_ocid to the image the gateway should run.")
+    return candidates[0]["ocid"]      # _list_images_sync sorts newest first
+
+
+def _run_oci_jumpoint_sync(compartment_id: str, subnet_ocid: str, name: str,
+                           container_image: str, deploy_key: str, shape: str,
+                           image_ocid: str = "", ocpus: float = 1, memory_gb: float = 6,
+                           availability_domain: str = "") -> dict:
+    """Find-or-create an OCI instance running the BT gateway container.
+
+    Idempotent on display name, which is what makes it safe to call on every deploy: an
+    existing live instance comes back with ``reused=True``. A STOPPED one is started
+    rather than replaced — cloud-init has already run and the container carries
+    ``--restart always``, so it returns on boot.
+
+    A public address is assigned. The gateway has to reach the BeyondTrust appliance to
+    register, and a bare VCN subnet has no egress of its own; this is the same reason
+    every other cloud's gateway host gets one.
+    """
+    import oci
+    cfg = _oci_config()
+    compute = oci.core.ComputeClient(cfg)
+    vnet = oci.core.VirtualNetworkClient(cfg)
+
+    existing = _find_instance_by_name_sync(compartment_id, name)
+    if existing is not None:
+        if getattr(existing, "lifecycle_state", "") in ("STOPPED", "STOPPING"):
+            logger.info("gateway(oci): starting stopped gateway %s", name)
+            compute.instance_action(existing.id, "START")
+            try:
+                existing = oci.wait_until(
+                    compute, compute.get_instance(existing.id),
+                    "lifecycle_state", "RUNNING", max_wait_seconds=300).data
+            except Exception as exc:      # noqa: BLE001 — report what we have
+                logger.warning("gateway(oci): %s did not reach RUNNING: %s", name, exc)
+        private_ip, public_ip = _instance_ips_sync(compute, vnet, compartment_id,
+                                                   existing.id)
+        return {"ocid": existing.id, "name": name, "reused": True,
+                "private_ip": private_ip, "public_ip": public_ip}
+
+    if not availability_domain:
+        ads = _list_availability_domains_sync(compartment_id)
+        if not ads:
+            raise OCIError("no availability domains found in the compartment")
+        availability_domain = ads[0]
+
+    details = oci.core.models.LaunchInstanceDetails(
+        availability_domain=availability_domain,
+        compartment_id=compartment_id,
+        shape=shape,
+        display_name=name,
+        source_details=oci.core.models.InstanceSourceViaImageDetails(
+            image_id=image_ocid or _resolve_jumpoint_image_sync(compartment_id)),
+        create_vnic_details=oci.core.models.CreateVnicDetails(
+            subnet_id=subnet_ocid, assign_public_ip=True),
+        metadata={"user_data": _jumpoint_cloud_init(container_image, deploy_key)},
+        freeform_tags=dict(_JUMPOINT_MANAGED_TAGS),
+    )
+    if ocpus:
+        details.shape_config = oci.core.models.LaunchInstanceShapeConfigDetails(
+            ocpus=float(ocpus),
+            memory_in_gbs=float(memory_gb) if memory_gb else None)
+
+    instance = compute.launch_instance(details).data
+    try:
+        instance = oci.wait_until(
+            compute, compute.get_instance(instance.id),
+            "lifecycle_state", "RUNNING", max_wait_seconds=600).data
+    except Exception as exc:      # noqa: BLE001
+        logger.warning("gateway(oci): %s did not reach RUNNING in time: %s", name, exc)
+
+    private_ip, public_ip = _instance_ips_sync(compute, vnet, compartment_id, instance.id)
+    logger.info("gateway(oci): launched %s (%s)", name, instance.id)
+    return {"ocid": instance.id, "name": name, "reused": False,
+            "private_ip": private_ip, "public_ip": public_ip}
+
+
+async def run_oci_jumpoint(compartment_id: str, subnet_ocid: str, name: str,
+                           container_image: str, deploy_key: str, shape: str,
+                           image_ocid: str = "", ocpus: float = 1, memory_gb: float = 6,
+                           availability_domain: str = "") -> dict:
+    """Ensure the shared BT gateway instance is up. Idempotent on name."""
+    try:
+        return await _to_thread(
+            _run_oci_jumpoint_sync, compartment_id or _compartment(), subnet_ocid, name,
+            container_image, deploy_key, shape, image_ocid, ocpus, memory_gb,
+            availability_domain)
+    except OCIError:
+        raise
+    except Exception as e:
+        raise OCIError(f"Failed to start OCI gateway '{name}': {e}") from e
+
+
+def _stop_oci_jumpoint_sync(compartment_id: str, name: str) -> None:
+    import oci
+    existing = _find_instance_by_name_sync(compartment_id, name)
+    if existing is None:
+        return
+    compute = oci.core.ComputeClient(_oci_config())
+    compute.terminate_instance(existing.id, preserve_boot_volume=False)
+    logger.info("gateway(oci): terminated %s (%s)", name, existing.id)
+
+
+async def stop_oci_jumpoint(compartment_id: str, name: str) -> None:
+    """Terminate the shared gateway instance. Quiet no-op when it is already gone."""
+    try:
+        await _to_thread(_stop_oci_jumpoint_sync, compartment_id or _compartment(), name)
+    except Exception as e:
+        raise OCIError(f"Failed to stop OCI gateway '{name}': {e}") from e
+
+
+async def find_instance_by_name(compartment_id: str, display_name: str) -> str:
+    """The OCID of the live instance with this display name, or ``""``."""
+    def _run():
+        found = _find_instance_by_name_sync(compartment_id or _compartment(), display_name)
+        return found.id if found is not None else ""
+    return await _to_thread(_run)
+
+
+def _list_all_instances_sync(compartment_id: str) -> list[dict]:
+    """Every non-terminated instance in the compartment, whoever created it.
+
+    ``list_instances`` rather than a fan-out of ``get_instance``: the counterpart above
+    takes the OCIDs the deploy jobs name and so cannot see anything this dashboard did not
+    launch. The paginator is OCI's own, because a compartment is not a lab.
+    """
+    import oci
+    cfg = _oci_config()
+    compute = oci.core.ComputeClient(cfg)
+    vnet = oci.core.VirtualNetworkClient(cfg)
+    results = []
+    for inst in oci.pagination.list_call_get_all_results(
+            compute.list_instances, compartment_id).data:
+        if getattr(inst, "lifecycle_state", "") in ("TERMINATED", "TERMINATING"):
+            continue
+        try:
+            private_ip, public_ip = _instance_ips_sync(compute, vnet, compartment_id, inst.id)
+        except Exception as exc:      # one unreachable VNIC must not blank the listing
+            logger.warning("OCI address lookup failed for %s: %s", inst.id, exc)
+            private_ip = public_ip = None
+        results.append(_instance_to_dict(inst, private_ip, public_ip))
+    return results
+
+
+async def list_all_instances(compartment_id: str = "") -> list[dict]:
+    """Every non-terminated OCI instance in the compartment, dashboard-deployed or not."""
+    return await _to_thread(_list_all_instances_sync, compartment_id or _compartment())
 
 
 def _terminate_instance_sync(instance_id: str, preserve_boot_volume: bool = False) -> None:

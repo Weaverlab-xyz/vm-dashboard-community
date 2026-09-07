@@ -1101,6 +1101,58 @@ async def describe_instances(project_id: str, zone: str, instance_names: list[st
     return await _to_thread(_describe_instances_sync, project_id, zone, instance_names)
 
 
+def _list_all_instances_sync(project_id: str) -> list[dict]:
+    """Every instance in the project, whoever created it.
+
+    Aggregated rather than per-zone: an operator's own VMs are wherever they put them, and
+    a zone list would have to be guessed from the dashboard's own config — which is
+    exactly the set that cannot contain them. One aggregated call covers the project and
+    reports the zone each instance is actually in.
+
+    GCP has labels, not tags (``tags`` on a GCE instance is the firewall-target list, a
+    different thing entirely). They are surfaced under ``tags`` because that is the key the
+    cloud-neutral policy reads; the value is the label map.
+    """
+    _require_compute()
+    from google.cloud import compute_v1
+
+    client = compute_v1.InstancesClient(credentials=_gcp_creds())
+    results = []
+    for zone_path, scoped in client.aggregated_list(project=project_id):
+        for info in getattr(scoped, "instances", None) or []:
+            if (info.status or "").upper() == "TERMINATED":
+                # GCE keeps a deleted instance listed briefly; a power button on one is a
+                # button that cannot work.
+                continue
+            public_ip = private_ip = None
+            for nic in info.network_interfaces:
+                private_ip = nic.network_i_p
+                for ac in nic.access_configs:
+                    if ac.nat_i_p:
+                        public_ip = ac.nat_i_p
+            labels = dict(info.labels) if info.labels else {}
+            results.append({
+                "instance_name": info.name,
+                # "zones/us-central1-a" -> "us-central1-a"; the aggregated key carries the
+                # scope prefix and every power call wants the bare zone.
+                "zone":          zone_path.split("/")[-1],
+                "machine_type":  info.machine_type.split("/")[-1],
+                "status":        info.status,
+                "public_ip":     public_ip,
+                "private_ip":    private_ip,
+                "self_link":     info.self_link,
+                "creation_timestamp": info.creation_timestamp or "",
+                "workgroup":     labels.get("workgroup") or None,
+                "tags":          labels,
+            })
+    return results
+
+
+async def list_all_instances(project_id: str) -> list[dict]:
+    """Every non-terminated GCE instance in the project, dashboard-deployed or not."""
+    return await _to_thread(_list_all_instances_sync, project_id)
+
+
 def _set_workgroup_label_sync(project_id: str, zone: str, instance_name: str, workgroup: str) -> None:
     """Merge a `workgroup` label into the instance (preserves other labels).
     Compute Engine requires the current `label_fingerprint` for optimistic

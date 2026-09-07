@@ -35,7 +35,7 @@ demoing, running a lab, or running production.
 | [Infrastructure as Code](infrastructure-as-code.md) | you are about to deploy your first cloud resource and want to know what is actually running underneath. |
 | [Onboarding Guide](ONBOARDING.md) | you are setting the dashboard up for the first time and want the shortest path to a running instance. |
 | [Cloud Sandbox Guide](CLOUD_SANDBOX.md) | you want an isolated cloud account for the dashboard's labs, bootstrapped rather than hand-built. |
-| [Cloud VMs](cloud-vms.md) | you are deploying cloud VMs and want the full access and onboarding story. |
+| [Cloud VMs](cloud-vms.md) | you are deploying cloud VMs, or want the dashboard to see and power ones it did not deploy. |
 | [Databases](databases.md) | you are standing up a managed database, or want to manage one you already run. |
 | [Kubernetes](kubernetes.md) | you are managing Kubernetes clusters and the privileged access into them. |
 | [Cloud Containers](cloud-containers.md) | you want a containerised app on a cloud runtime without standing up Portainer. |

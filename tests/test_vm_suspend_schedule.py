@@ -59,6 +59,9 @@ Base.metadata.create_all(bind=engine)
 CLEAN_AWS = {"instance_id": "i-1", "region": "us-east-1", "private_ip": "10.0.0.4"}
 CLEAN_GCP = {"instance_name": "vm-1", "zone": "us-central1-a", "project_id": "p",
              "private_ip": "10.0.0.5"}
+# An OCI instance deployed without a public address: its wire-up used the private one.
+CLEAN_OCI = {"instance_ocid": "ocid1.instance.oc1..aaa", "instance_name": "oci-1",
+             "private_ip": "10.0.1.5", "region": "us-ashburn-1"}
 # An Azure VM as deployed since pinning shipped: address read back from the NIC and frozen.
 CLEAN_AZURE = {"vm_name": "az-1", "resource_group": "vm-cli-rg", "nic_name": "az-1-nic",
                "private_ip": "10.0.0.6", "private_ip_static": True}
@@ -66,10 +69,11 @@ CLEAN_AZURE = {"vm_name": "az-1", "resource_group": "vm-cli-rg", "nic_name": "az
 
 # ── Who may carry a schedule ──────────────────────────────────────────────────
 
-def test_aws_gcp_and_a_pinned_azure_vm_may_be_scheduled():
+def test_all_four_clouds_can_qualify():
     assert vm_suspend_policy.schedulable("ec2_deploy", CLEAN_AWS) == (True, "")
     assert vm_suspend_policy.schedulable("gce_deploy", CLEAN_GCP) == (True, "")
     assert vm_suspend_policy.schedulable("azure_deploy", CLEAN_AZURE) == (True, "")
+    assert vm_suspend_policy.schedulable("oci_deploy", CLEAN_OCI) == (True, "")
 
 
 def test_azure_is_refused_until_its_address_is_pinned():
@@ -108,7 +112,7 @@ def test_needs_address_pin_defers_to_schedulable():
     assert vm_suspend_policy.needs_address_pin("azure_deploy", unpinned) is True
     assert vm_suspend_policy.needs_address_pin("azure_deploy", CLEAN_AZURE) is False
     for job_type, meta in (("ec2_deploy", CLEAN_AWS), ("gce_deploy", CLEAN_GCP),
-                           ("oci_deploy", {"public_ip": "203.0.113.7"}),
+                           ("oci_deploy", CLEAN_OCI),
                            ("expiry_sweep", {}), ("", {})):
         assert vm_suspend_policy.needs_address_pin(job_type, meta) is False, job_type
 
@@ -120,14 +124,70 @@ def test_describe_says_a_pin_is_coming_before_it_happens():
     assert vm_suspend_policy.describe("ec2_deploy", CLEAN_AWS)["needs_address_pin"] is False
 
 
-def test_oci_is_still_refused_because_pinning_does_not_reach_it():
-    """Azure's fix is a *private* address pin. OCI's problem is its *public* one, so a
-    pinned private address changes nothing about it — including when it has one."""
-    for meta in ({"public_ip": "203.0.113.7"},
-                 {"public_ip": "203.0.113.7", "private_ip_static": True}):
-        ok, reason = vm_suspend_policy.schedulable("oci_deploy", meta)
-        assert not ok
-        assert "public address" in reason.lower(), reason
+def test_an_oci_instance_without_a_public_address_may_be_scheduled():
+    """OCI's runner prefers the PUBLIC address — the only one of the four that does,
+    because OCI has no dashboard-provisioned gateway in the VCN ("bring your own"). So an
+    instance deployed with assign_public_ip=False is wired at its private address, which
+    survives a stop exactly as it does on the other three."""
+    assert vm_suspend_policy.schedulable("oci_deploy", CLEAN_OCI) == (True, "")
+
+
+def test_an_oci_instance_wired_at_its_public_address_is_refused():
+    ok, reason = vm_suspend_policy.schedulable(
+        "oci_deploy", {**CLEAN_OCI, "public_ip": "203.0.113.7", "bt_tf_state": "{}"})
+    assert not ok
+    assert "public address" in reason.lower(), reason
+    # No invented remedy: the address is already inside a jump item that cannot be
+    # updated, so redeploying is genuinely the only way out and the reason says so.
+    assert "redeployed" in reason.lower(), reason
+
+
+def test_the_wired_address_is_recorded_not_inferred():
+    """The bug this replaces: "does it have a private address?" answers the right question
+    on three clouds and the wrong one on OCI. An OCI instance has BOTH addresses and was
+    wired at the public one, so the old proxy passed it."""
+    both = {**CLEAN_OCI, "public_ip": "203.0.113.7", "bt_tf_state": "{}"}
+    assert both.get("private_ip"), "the old proxy would have said yes on this row"
+    assert vm_suspend_policy.schedulable("oci_deploy", both)[0] is False
+
+    # Recorded wins over the reconstruction, so a runner that changes its preference does
+    # not silently reinterpret rows written under the old one.
+    pinned_private = {**both, "wired_address": both["private_ip"]}
+    assert vm_suspend_policy.schedulable("oci_deploy", pinned_private)[0] is True
+
+    # And the refusal is about the wire-up, not about having a public address: an instance
+    # that was never registered anywhere has told nothing its address, so nothing breaks
+    # when it moves.
+    unwired = {**CLEAN_OCI, "public_ip": "203.0.113.7"}
+    assert vm_suspend_policy.schedulable("oci_deploy", unwired)[0] is True
+
+
+def test_the_reconstruction_replays_each_runners_actual_preference():
+    """For rows written before `wired_address` existed — which is the whole fleet. Each
+    runner had one fixed preference, so replaying it gives the answer that runner gave;
+    this is reconstruction, not a guess."""
+    both = {"private_ip": "10.0.0.4", "public_ip": "203.0.113.7"}
+    assert vm_suspend_policy.wired_address("oci_deploy", both) == "203.0.113.7"
+    for job_type in ("ec2_deploy", "gce_deploy", "azure_deploy"):
+        assert vm_suspend_policy.wired_address(job_type, both) == "10.0.0.4", job_type
+
+    # And the source of truth, when present, is the record.
+    assert vm_suspend_policy.wired_address(
+        "oci_deploy", {**both, "wired_address": "10.0.0.4"}) == "10.0.0.4"
+    # Neither address recorded: the runners fall back to an instance id or name, which is
+    # not a public address either — so "" must not read as "wired publicly".
+    assert vm_suspend_policy.wired_address("ec2_deploy", {}) == ""
+    assert vm_suspend_policy.schedulable("ec2_deploy", {"bt_tf_state": "{}"})[0] is True
+
+
+def test_every_runner_records_the_address_it_wired():
+    """Four runners, one fact. A runner that computes `hostname`, hands it to PRA and then
+    does not record it puts this policy back to inferring."""
+    for name in ("aws_vm_service", "gcp_vm_service", "azure_vm_service", "oci_vm_service"):
+        src = open(os.path.join(_ROOT, f"web_dashboard/services/{name}.py"),
+                   encoding="utf-8").read()
+        assert "wired_address" in src, name
+        assert "hostname" in src, name
 
 
 def test_a_vm_wired_at_its_public_address_is_refused_even_on_aws():
@@ -156,7 +216,9 @@ def test_a_non_vm_job_is_refused():
 
 def test_every_refusal_explains_itself():
     """A greyed-out control with no reason is a bug report waiting to happen."""
-    for job_type, meta in (("azure_deploy", {}), ("oci_deploy", {}),
+    for job_type, meta in (("azure_deploy", {}),
+                           ("oci_deploy", {**CLEAN_OCI, "public_ip": "203.0.113.7",
+                                           "bt_tf_state": "{}"}),
                            ("azure_deploy", {"vm_name": "az-1", "private_ip": "10.0.0.6"}),
                            ("ec2_deploy", {**CLEAN_AWS, "ps_managed_system_id": "1"}),
                            ("nonsense", {})):
@@ -438,7 +500,48 @@ def test_the_sweep_enqueues_azure_with_the_keys_its_runner_reads():
     # And the selection filter is derived, not restated: a cloud that can be powered but
     # is missing from the query is never even looked at.
     assert "azure_deploy" in suspend_sweeper._DEPLOY_TYPES
-    assert "oci_deploy" not in suspend_sweeper._DEPLOY_TYPES
+    assert "oci_deploy" in suspend_sweeper._DEPLOY_TYPES
+
+
+def test_the_sweep_enqueues_oci_with_the_keys_its_runner_reads():
+    """OCI's power job needs only an OCID — no region, no resource group. The GCP branch
+    was the fallback for every non-AWS cloud, so this would have been enqueued with
+    `instance_name`/`zone` and failed inside the worker."""
+    _reset()
+    now = datetime.now(timezone.utc)
+    crossed = (now - timedelta(minutes=1)).strftime("%H:%M")
+    _vm("oci-job", job_type="oci_deploy", meta=CLEAN_OCI,
+        suspend_at_local=crossed, schedule_timezone="UTC",
+        schedule_days=suspend_schedule.DAYS_ALL,
+        schedule_last_checked_at=(now - timedelta(hours=1)).replace(tzinfo=None))
+    out = _sweep()
+    assert len(out["acted"]) == 1, out
+
+    db = SessionLocal()
+    try:
+        power = db.query(Job).filter(Job.job_type == "oci_power").all()
+        assert len(power) == 1, [j.job_type for j in db.query(Job).all()]
+        meta = power[0].metadata_dict
+        assert meta["action"] == "stop"
+        assert meta["instance_ocid"] == "ocid1.instance.oc1..aaa"
+        assert meta["deploy_job_id"] == "oci-job"
+        assert power[0].workgroup == "team-a"
+    finally:
+        db.close()
+
+
+def test_every_schedulable_cloud_has_a_power_job_and_a_metadata_shape():
+    """The two halves that must move together. A cloud added to the policy but not to the
+    sweeper's map raises a KeyError mid-pass; one with no metadata branch silently gets
+    another cloud's keys, which is worse because it fails later and elsewhere."""
+    for cloud in vm_suspend_policy.SCHEDULABLE_CLOUDS:
+        assert cloud in suspend_sweeper._POWER_JOB, cloud
+    row = type("R", (), {"id": "r1"})()
+    shapes = {c: set(suspend_sweeper._power_meta(c, row, {}, "stop"))
+              for c in vm_suspend_policy.SCHEDULABLE_CLOUDS}
+    # Each cloud names its instance differently; two clouds sharing a shape means one of
+    # them fell through to another's branch.
+    assert len({frozenset(v) for v in shapes.values()}) == len(shapes), shapes
 
 
 class _Admin:

@@ -19,8 +19,9 @@ itself:
   * **The two features drifting apart.** They share one implementation, so their config
     keys are derived from one rule; asserting the derivation is what stops one of them
     growing a private spelling.
-  * **The picker disagreeing with Gateways.** Both offer "which cloud hosts this
-    managed container", so they list the same clouds from one definition.
+  * **The picker offering a cloud it cannot place into.** The node list must stay a
+    subset of the gateway list — a node needs a gateway to broker into — but not equal
+    to it: OCI can host a gateway and has no node placement.
 
 No DB or cloud SDK is needed — config reads are replaced with a dict-backed spy.
 
@@ -99,13 +100,27 @@ def _api_src() -> str:
 
 # ── the cloud list ───────────────────────────────────────────────────────────
 
-def test_the_node_picker_offers_the_same_clouds_as_the_gateway_picker():
-    """Both answer "which cloud hosts this managed container", on the same page. Two
-    lists would eventually disagree, and the one that is short is the one that silently
-    stops offering a cloud the backend supports."""
-    assert tuple(mns.CLOUDS) == tuple(gateway_service.CLOUDS), (
-        f"managed_node_service.CLOUDS {mns.CLOUDS} != gateway_service.CLOUDS "
-        f"{gateway_service.CLOUDS}")
+def test_every_node_cloud_can_also_host_a_gateway():
+    """These two were equal for as long as they happened to have the same answer, and the
+    equality was asserted as though it were the rule. It is not: they ask different
+    questions. ``gateway_service.CLOUDS`` is where a BeyondTrust gateway can run;
+    ``mns.CLOUDS`` is where a managed container node can be placed. OCI gained a gateway
+    without gaining ``run_vm_container_node`` or a ``_placement_oci``, so equality would
+    now force one of two wrong things — offer an OCI node the backend cannot place (the
+    failure ``test_an_unimplemented_cloud_refuses_placement`` exists to catch), or refuse
+    an OCI gateway that works.
+
+    The real relation is containment, and it is the one that matters: a managed node needs
+    a gateway to broker into, so every node cloud must be a gateway cloud. The reverse was
+    never required."""
+    missing = [c for c in mns.CLOUDS if c not in gateway_service.CLOUDS]
+    assert not missing, (
+        f"these clouds can host a managed node but not a gateway to broker into it: "
+        f"{missing}")
+    # And each node cloud really has a placement, so the list is not aspirational.
+    for cloud in mns.CLOUDS:
+        assert hasattr(mns, f"_placement_{cloud}"), (
+            f"{cloud} is offered by the node picker with no placement implementation")
 
 
 def test_both_deploy_requests_accept_a_cloud():
