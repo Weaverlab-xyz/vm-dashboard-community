@@ -1,10 +1,16 @@
-"""When a POV should be asleep: the suspend schedule, as pure policy.
+"""When something should be asleep: the suspend schedule, as pure policy.
+
+**Profile-neutral, and it was not always.** This shipped as ``pov_schedule`` because a POV
+was the first thing that needed it, and it now also decides when an estate cloud VM sleeps.
+Nothing about the policy was POV-specific — it takes a ``row`` and a clock and returns a
+verb — so promoting it was a rename plus this paragraph. Its callers are POV
+(``pov_reconcile``) and the estate suspend sweep; neither owns it.
 
 Skytap suspends an environment on its own idle timer, and its docs call that the single
 biggest lever on lab spend. No public cloud has one. So for a platform whose
-``idle_suspend`` capability is False, the dashboard has to *be* the timer — and this
-module is the part of that with no I/O in it, so the decision can be tested without a
-clock, a database or a cloud.
+``idle_suspend`` capability is False — and for every cloud VM — the dashboard has to *be*
+the timer. This module is the part of that with no I/O in it, so the decision can be
+tested without a clock, a database or a cloud.
 
 **A schedule, not an inactivity timer.** "Idle" on a cloud has no honest definition from
 outside the guest. A PRA session says nothing about a customer clicking around a console;
@@ -115,12 +121,12 @@ def validate(*, suspend_at: str, resume_at: str, tz_name: str, days: str) -> dic
     resume = parse_hhmm(resume_at)
     if resume is not None and suspend is None:
         raise ScheduleError(
-            "a resume time with no suspend time would wake a POV that nothing ever puts "
-            "to sleep; set a suspend time too, or clear both")
+            "a resume time with no suspend time would wake something that nothing ever "
+            "puts to sleep; set a suspend time too, or clear both")
     if suspend is not None and suspend == resume:
         raise ScheduleError(
             "the suspend and resume times are the same, so the schedule would both stop "
-            "and start the POV at that moment")
+            "and start it at that moment")
     resolve_timezone(tz_name)
     normalized_days = normalize_days(days) if suspend is not None else ""
     return {

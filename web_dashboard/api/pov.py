@@ -70,7 +70,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
                         pov_ps_config, pov_resource_broker,
-                        pov_schedule, pov_share, pov_spend, pov_summary,
+                        suspend_schedule, pov_share, pov_spend, pov_summary,
                         pov_use_cases, pov_wireup)
 from .auth import get_current_user
 
@@ -1376,10 +1376,10 @@ async def set_schedule(env_id: str, payload: ScheduleRequest,
             detail=f"{env.platform} has no scheduled suspend.")
 
     try:
-        fields = pov_schedule.validate(
+        fields = suspend_schedule.validate(
             suspend_at=payload.suspend_at_local, resume_at=payload.resume_at_local,
             tz_name=payload.schedule_timezone, days=payload.schedule_days)
-    except pov_schedule.ScheduleError as exc:
+    except suspend_schedule.ScheduleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
     for field, value in fields.items():
@@ -1388,7 +1388,7 @@ async def set_schedule(env_id: str, payload: ScheduleRequest,
     db.commit()
     logger.info("POV %s: schedule set by %s", env.name,
                 getattr(current_user, "username", "?"))
-    return {"schedule": pov_schedule.describe(env)}
+    return {"schedule": suspend_schedule.describe(env)}
 
 
 class SpendCapRequest(BaseModel):

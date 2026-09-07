@@ -88,18 +88,15 @@ def _forbidden(scope: str, level: str) -> dict:
 
 
 def _has_permission(user: User, scope: str, level: str) -> bool:
-    """Mirror of ``api.auth.require_permission``'s check, as a predicate.
+    """The permission check, delegated to the one implementation in ``api.auth``.
 
-    Including its backward-compatibility clause: an empty ``effective_permissions_dict``
-    means unrestricted (pre-OIDC / pre-admin-set users). Being stricter here than the UI
-    would lock those users out of a surface they can already reach through the REST API.
+    This used to mirror ``require_permission``'s logic here. It now calls the predicate
+    that dependency also calls, so the HTTP surface and this one cannot answer the same
+    question differently — including the backward-compatibility clause where an empty
+    ``effective_permissions_dict`` means unrestricted.
     """
-    if getattr(user, "is_effective_admin", False):
-        return True
-    perms = user.effective_permissions_dict or {}
-    if not perms:
-        return True
-    return level in perms.get(scope, [])
+    from .auth import has_permission
+    return has_permission(user, scope, level)
 
 
 # ── Scoping helpers — each delegates, none re-derives ──────────────────────────

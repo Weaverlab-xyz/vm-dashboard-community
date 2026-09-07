@@ -296,7 +296,7 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
     the arbiter, so a platform that grows one later stops being driven from here without
     this function learning its name.
     """
-    from . import pov_env_service, pov_schedule
+    from . import pov_env_service, suspend_schedule
 
     now = datetime.now(timezone.utc)
     acted = 0
@@ -304,12 +304,12 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
               .filter(PovEnvironment.status == pov_env_service.STATUS_ACTIVE)
               .all())
     for env in rows:
-        if not pov_schedule.has_schedule(env):
+        if not suspend_schedule.has_schedule(env):
             continue
         try:
             if lab_platforms.supports(env.platform, "idle_suspend"):
                 continue
-            wanted = pov_schedule.due_action(env, now)
+            wanted = suspend_schedule.due_action(env, now)
         except Exception as exc:  # noqa: BLE001 — one bad row never stops the sweep
             logger.warning("POV %s: could not evaluate its schedule", env.id,
                            exc_info=True)
@@ -556,17 +556,17 @@ def describe(env: PovEnvironment) -> dict:
     what this module exists to stop, and replacing "never asked" with "asked 40 minutes
     ago, silently" would be a smaller version of the same lie.
     """
-    from . import pov_cloud_cost, pov_schedule, pov_spend
+    from . import pov_cloud_cost, suspend_schedule, pov_spend
     action, percent = _spend_config()
     spend = pov_spend.describe(env, warn_at_percent=percent, action=action)
     priced = pov_cloud_cost.priced(env.platform)
     try:
-        schedule = pov_schedule.describe(env)
-    except pov_schedule.ScheduleError:
+        schedule = suspend_schedule.describe(env)
+    except suspend_schedule.ScheduleError:
         # A stored schedule that no longer parses — a timezone the image dropped, say.
         # Rendered as "none" rather than failing the row: the POV is running either way,
         # and the sweep logs the same refusal against the row that owns it.
-        schedule = pov_schedule.describe(object())
+        schedule = suspend_schedule.describe(object())
     return {
         "platform_seen_at": (env.platform_seen_at.isoformat()
                              if env.platform_seen_at else ""),

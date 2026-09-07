@@ -467,6 +467,15 @@ Phase 0 has standalone value and should be judged on its own. An operator who wa
 overnight currently uses the cloud console, which puts the dashboard's inventory out of step
 with reality.
 
+> **Phase 1 shipped, AWS and GCP only.** `pov_schedule` promoted to
+> `suspend_schedule` (profile-neutral; the policy was never POV-specific), five
+> schedule columns on `jobs`, a `suspend_sweep` job type with its own loop — not
+> folded into `expiry_sweep`, which is gated on the destructive timer's flag — and
+> `vm_suspend_policy`, a pure predicate that refuses Azure and OCI for the reasons
+> below plus two more the audit missed: a VM wired at its public address, and one
+> under Password Safe auto-management, whose `ssm`/`gcpvm` plugins cannot reach a
+> stopped instance. Every refusal returns its reason. Phase 2 (spend caps) remains.
+
 **Phases 1 and 2 — schedules, then spend caps — have a prerequisite POV did not.** This is
 the part to know before starting:
 

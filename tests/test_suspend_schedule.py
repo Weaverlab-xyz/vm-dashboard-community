@@ -30,7 +30,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-schedule")
 
-from web_dashboard.services import pov_schedule as sch  # noqa: E402
+from web_dashboard.services import suspend_schedule as sch  # noqa: E402
 
 _UTC = timezone.utc
 

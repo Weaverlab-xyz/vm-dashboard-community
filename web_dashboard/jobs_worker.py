@@ -72,7 +72,7 @@ HANDLED_TYPES = (
     "aws_export_image", "gcp_export_image", "azure_export_image", "oci_export_image",
     "image_promote_aws", "image_promote_azure", "image_promote_gcp", "image_promote_oci",
     "ec2_deploy", "ec2_bulk_deploy", "ec2_destroy", "ec2_create_image", "ami_copy",
-    "ec2_power", "azure_power", "gce_power", "oci_power",
+    "ec2_power", "azure_power", "gce_power", "oci_power", "suspend_sweep",
     "oci_deploy", "oci_bulk_deploy", "oci_destroy",
     "azure_deploy", "azure_bulk_deploy", "azure_destroy", "azure_create_image",
     "gce_deploy", "gce_bulk_deploy", "gce_capture_image", "gce_destroy",
@@ -185,6 +185,9 @@ LIGHT_TYPES = (
     "gateway_deploy", "gateway_teardown",              # pure cloud SDK (jumpoint_host_service)
     "epml_sync",                                       # HTTP download + storage upload
     "expiry_sweep",                                    # pure DB, sub-second
+    # Pure DB as well: it evaluates schedules and enqueues *_power rows,
+    # and powers nothing itself.
+    "suspend_sweep",
     # One start/stop call per instance and nothing else. Lighter than the
     # destroys (MEDIUM), which unpick PRA, Password Safe and Entitle on the way
     # out — and a suspend schedule can fan out a few of these at once, which is
@@ -227,6 +230,7 @@ SINGLETON_TYPES = frozenset((
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "expiry_sweep",
+    "suspend_sweep",
     "epml_sync",
 ))
 
@@ -584,6 +588,13 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # worker replicas are up.
             from .services import expiry_reaper
             await expiry_reaper.run(db, job_id=job_id, meta=meta)
+        elif job_type == "suspend_sweep":
+            # One suspend-schedule pass. Its own type rather than folded into the
+            # auto-delete sweep: that one is gated on resource_expiry_enabled, and a
+            # power window must work for an operator who never turned the destructive
+            # timer on.
+            from .services import suspend_sweeper
+            await suspend_sweeper.run(db, job_id=job_id, meta=meta)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)
     finally:

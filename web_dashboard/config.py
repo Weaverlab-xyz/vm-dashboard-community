@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     # the mount is unconditional otherwise, and its tools read the estate. The gate is
     # applied in api/mcp_server._MCPAuth, because a mount takes no dependencies.
     mcp_server_enabled: bool = False
+    # Business-hours power windows for cloud VMs (services/suspend_sweeper.py).
+    # AWS and GCP only — see services/vm_suspend_policy for why Azure and OCI are
+    # excluded. Off by default; a schedule is per-VM and NULL on every existing row,
+    # so turning this on selects nothing until somebody sets one.
+    vm_suspend_schedule_enabled: bool = False
+    vm_suspend_sweep_interval_minutes: int = 10   # floored at 1 in the service
     admission_control_enabled: bool = False
     admission_gated_actions: str = ""          # e.g. aws:ec2:deploy,clouddb:provision
     admission_allowed_regions: str = ""        # allow-list; empty = no region restriction

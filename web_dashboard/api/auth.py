@@ -225,6 +225,25 @@ def can_audit_jobs(user: User) -> bool:
     return "read" in perms.get("jobs", [])
 
 
+def has_permission(user: User, scope: str, level: str) -> bool:
+    """Does this user hold ``scope:level``? The predicate form of the rule.
+
+    Split out so the dependency below and the callers that are not FastAPI dependencies
+    (the MCP tools, the suspend-schedule API) share ONE implementation. Two copies of a
+    permission rule drift, and the drift is invisible in both directions.
+
+    Includes the backward-compatibility clause deliberately: an empty
+    ``effective_permissions_dict`` means unrestricted, for pre-OIDC users who never had one
+    set. Being stricter here than the UI would lock them out of things they can already do.
+    """
+    if getattr(user, "is_effective_admin", False):
+        return True
+    perms = user.effective_permissions_dict or {}
+    if not perms:
+        return True
+    return level in perms.get(scope, [])
+
+
 def require_permission(scope: str, level: str):
     """
     Returns a FastAPI dependency that checks the user has the specified
@@ -236,39 +255,35 @@ def require_permission(scope: str, level: str):
     OIDC group membership counts. See docs/design/entitle-user-jit.md.
     """
     async def _check(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.is_effective_admin:
+        if has_permission(current_user, scope, level):
             return current_user
-        perms = current_user.effective_permissions_dict  # {} if NULL → full access
-        if not perms:
-            return current_user  # NULL = unrestricted (existing users unaffected)
-        if level not in perms.get(scope, []):
-            # Phase 4 UI affordances: attach a deep-link payload when
-            # user-JIT is on so the frontend can render a one-click
-            # request-access link.
-            detail: object = f"Requires '{scope}:{level}' permission."
-            try:
-                deep_link = _build_request_access_link(scope, level)
-            except Exception:
-                # Deliberately broad: a malformed deep-link config (bad JSON,
-                # an unreachable secrets backend) must never turn a clean 403
-                # into a 500 on the permission check itself. But log it —
-                # this branch silently hid a NameError in the builder for the
-                # entire life of the feature, so failures have to be visible.
-                logger.warning(
-                    "request-access deep link unavailable for %s:%s", scope, level, exc_info=True
-                )
-                deep_link = None
-            if deep_link:
-                detail = {
-                    "message": f"Requires '{scope}:{level}' permission.",
-                    "missing_scope": scope,
-                    "missing_level": level,
-                    "request_access_url": deep_link,
-                }
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=detail,
+        # Phase 4 UI affordances: attach a deep-link payload when
+        # user-JIT is on so the frontend can render a one-click
+        # request-access link.
+        detail: object = f"Requires '{scope}:{level}' permission."
+        try:
+            deep_link = _build_request_access_link(scope, level)
+        except Exception:
+            # Deliberately broad: a malformed deep-link config (bad JSON,
+            # an unreachable secrets backend) must never turn a clean 403
+            # into a 500 on the permission check itself. But log it —
+            # this branch silently hid a NameError in the builder for the
+            # entire life of the feature, so failures have to be visible.
+            logger.warning(
+                "request-access deep link unavailable for %s:%s", scope, level, exc_info=True
             )
+            deep_link = None
+        if deep_link:
+            detail = {
+                "message": f"Requires '{scope}:{level}' permission.",
+                "missing_scope": scope,
+                "missing_level": level,
+                "request_access_url": deep_link,
+            }
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail,
+        )
         return current_user
     return _check
 
