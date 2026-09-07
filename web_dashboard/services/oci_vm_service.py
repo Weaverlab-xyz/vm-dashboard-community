@@ -141,6 +141,11 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
 
         hostname = result.get("public_ip") or result.get("private_ip") or payload.instance_name
         final_meta = {
+            # The address handed to PRA, Entitle and Password Safe. Recorded because
+            # `vm_suspend_policy` has to know which one it was: three runners prefer
+            # the private address and OCI prefers the public one — it cannot be
+            # inferred from which addresses exist.
+            "wired_address": hostname,
             "instance_ocid":  result["ocid"],
             "instance_name":  result["display_name"],
             "shape":          result.get("shape"),

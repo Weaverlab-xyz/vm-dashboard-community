@@ -48,12 +48,14 @@ def _guard(cloud: str):
         from .gcp import _assert_can_act
     elif cloud == "azure":
         from .azure import _assert_can_act
+    elif cloud == "oci":
+        from .oci import _assert_can_act
     else:                                  # pragma: no cover — schedulable() refuses first
         raise HTTPException(status_code=400, detail=f"{cloud} VMs cannot be scheduled.")
     return _assert_can_act
 
 
-_PERM_SCOPE = {"aws": "aws", "gcp": "gcp", "azure": "azure"}
+_PERM_SCOPE = {"aws": "aws", "gcp": "gcp", "azure": "azure", "oci": "oci"}
 
 
 async def _pin_azure_address(db: Session, job: Job, user: User) -> dict:

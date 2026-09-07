@@ -46,12 +46,13 @@ _ENQUEUE_LOCK_ID = 20260401
 _LAST_SWEEP_KEY = "vm_suspend_last_sweep"
 
 # The power job each cloud's deploy job maps to.
-_POWER_JOB = {"aws": "ec2_power", "gcp": "gce_power", "azure": "azure_power"}
+_POWER_JOB = {"aws": "ec2_power", "gcp": "gce_power", "azure": "azure_power",
+              "oci": "oci_power"}
 
 # The deploy types worth selecting: those whose cloud can power a VM at all. Derived from
 # vm_suspend_policy rather than listed again — `schedulable()` still refuses row by row,
 # but a cloud missing from this filter is never even looked at, which is a silent way for
-# a schedule to do nothing. OCI has no entry in _POWER_JOB and so is never selected.
+# a schedule to do nothing. A cloud with no _POWER_JOB entry is never selected.
 _DEPLOY_TYPES = vm_suspend_policy.deploy_types_for(_POWER_JOB)
 
 
@@ -155,7 +156,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
             acted.append({"job_id": row.id, "action": verb, "power_job_id": child.id})
             job_service.append_job_log(
                 db, job_id,
-                f"{verb} {m.get('instance_name') or m.get('vm_name') or m.get('instance_id')} "
+                f"{verb} {m.get('instance_name') or m.get('vm_name') or m.get('instance_id') or m.get('instance_ocid')} "
                 f"(job {child.id})")
 
         db.commit()
@@ -174,6 +175,11 @@ def _power_meta(cloud: str, row, meta: dict, verb: str) -> dict:
     if cloud == "aws":
         return {"action": verb, "instance_id": meta.get("instance_id"),
                 "region": meta.get("region"), "deploy_job_id": row.id}
+    if cloud == "oci":
+        # api/oci's power endpoint persists exactly this, and its runner needs no more:
+        # an OCID identifies the instance globally, with no region or group to resolve.
+        return {"action": verb, "instance_ocid": meta.get("instance_ocid"),
+                "deploy_job_id": row.id}
     if cloud == "azure":
         # azure_vm_service._run_power reads exactly these three, and api/azure's power
         # endpoint persists the same — including its `_rg()` fallback, because a deploy
