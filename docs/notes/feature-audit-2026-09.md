@@ -490,6 +490,16 @@ with reality.
 > Safe never has its NIC written to. OCI is unchanged — its problem is a *public*
 > address released on stop, which a private pin does not reach.
 
+> **Phase 2 shipped.** `pov_spend` promoted to `spend_policy` (profile-neutral; the
+> arithmetic was never POV-specific), five `spend_*` columns on `jobs`, a `spend_sweep`
+> job type with its own loop and flag, and `api/spend` reusing `api/suspend`'s ownership
+> pair rather than restating it. **The price gap below was the substance of the work,
+> not a footnote to it**: AWS region names now resolve from AWS's own public parameter
+> store instead of a 13-entry map, and — the part that matters — `spend_policy.cappable`
+> refuses a cap the price source cannot serve rather than storing one that accrues zero
+> forever. A cap that stops being priceable after it was set is reported every sweep.
+> `warn` is the default action, and the latch gap is inherited knowingly.
+
 **Phases 1 and 2 — schedules, then spend caps — have a prerequisite POV did not.** This is
 the part to know before starting:
 
@@ -535,6 +545,14 @@ the part to know before starting:
   `:56`). An estate VM in a region outside that map gets no price, therefore no accrual,
   therefore a cap that silently never fires. On a curated POV region set that is fine; on an
   estate it is a cap that lies.
+
+  > **Resolved, in both directions.** Region names resolve from
+  > `/aws/service/global-infrastructure/regions/<r>/longName` — the same public SSM
+  > namespace the ECS AMI lookup already reads, so no new permission — with the static map
+  > as the fast path. And because widening coverage can never be complete, the cap is now
+  > *refused* where even that cannot answer: `spend_policy.cappable` is asked before the
+  > value is stored, and its reason names the cloud and the region. Widening alone would
+  > have left the same silent hole in fewer places.
 
 So the honest ordering is: fix addressing first (and migrate already-deployed VMs, whose NICs
 would need reconfiguring), or scope Phase 1 to clouds where the address survives a stop, and

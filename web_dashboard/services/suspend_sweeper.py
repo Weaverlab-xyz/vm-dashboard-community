@@ -12,7 +12,7 @@ is real, but ``expiry_sweep`` is gated on ``resource_expiry_enabled`` — and a 
 schedule must work for an operator who has never turned the destructive timer on. Sharing
 the pass would have made the reversible feature depend on the irreversible one's flag.
 
-**Two gates, not the timer's four.** ``pov_spend`` already made this argument and it holds
+**Two gates, not the timer's four.** ``spend_policy`` already made this argument and it holds
 here: the action is reversible, so it earns a lighter brake than something that destroys.
 What it does NOT skip is the NULL latch — a schedule that has never been evaluated acts on
 nothing, so enabling this on an existing fleet cannot suspend a backlog of boundaries that

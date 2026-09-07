@@ -1,10 +1,14 @@
-"""The per-POV spend cap: accrual arithmetic and what to do when it is reached.
+"""The spend cap: accrual arithmetic and what to do when it is reached.
 
-The auto-delete timer answers "how long may this POV live?". This answers the question an
+Profile-neutral. Written for POV environments, promoted here because the question is not a
+POV question — ``suspend_schedule`` moved the same way in Phase 1, and for the same reason:
+the policy was never POV-specific, only its first caller was. ``pov_reconcile`` caps a POV
+environment, ``spend_sweeper`` caps one estate cloud VM, and both ask this module.
+
+The auto-delete timer answers "how long may this live?". This answers the question an
 operator on their own cloud account actually loses sleep over: **"how much may it cost?"**
 A clock is a poor proxy — the same fortnight is twenty dollars or two thousand depending
-on what the template asked for, and the second only becomes visible on an invoice weeks
-later.
+on what was asked for, and the second only becomes visible on an invoice weeks later.
 
 **The number is ACCRUED, not read off a bill.** Every reconcile pass adds
 ``rate now × time since the last pass`` to a running total on the row. That is deliberate
@@ -28,8 +32,15 @@ and dry-run mode. The worst outcome is a POV somebody has to start again, and th
 action is `warn` regardless — the "master switch alone changes nothing" brake this codebase
 applies to anything that acts on its own.
 
-Pure: stdlib only, no I/O, no app imports beyond config. ``pov_reconcile`` supplies the
-rate and enqueues the job.
+**A cap that cannot be priced is refused, not stored.** :func:`cappable` is the gate, and it
+exists because the alternative is the worst failure this feature has: ``accrue`` treats a
+missing rate as *move the clock on, bill nothing*, which is right for a blind interval and
+catastrophic for a cap. Without the gate an operator sets $500 on a VM in a region the
+price source cannot reach, is told nothing, and is not protected. Every refusal names the
+cloud and the region so the answer is actionable rather than a shrug.
+
+Pure: stdlib only, no I/O, no app imports beyond config. Callers supply the rate and
+enqueue the job.
 """
 from __future__ import annotations
 
@@ -111,6 +122,46 @@ def validate_cap(value) -> float | None:
             f"a cap under ${MIN_CAP_USD:.0f} would be reached within the hour by a POV of "
             f"any size. Leave it blank for no cap.")
     return round(cap, 2)
+
+
+def cappable(cloud: str, region: str, *, priceable=None,
+             suspendable: tuple = (True, "")) -> tuple:
+    """``(ok, reason)`` — can a spend cap on this VM actually work?
+
+    Asked BEFORE a cap is stored, because a cap that cannot fire is worse than no cap: the
+    operator believes they are protected and is not. :func:`accrue` treats a missing rate as
+    *move the clock on, bill nothing* — correct for a temporarily blind interval, and
+    silence for a permanent one.
+
+    ``priceable`` is injected rather than imported so this module stays pure and testable on
+    two strings; ``spend_sweeper`` and ``api/spend`` pass ``pov_cloud_cost.priceable``.
+
+    ``suspendable`` is the answer ``vm_suspend_policy.schedulable`` gave for this VM, and it
+    only matters when the configured action is ``suspend``: a cap that promises to suspend a
+    VM which cannot be suspended — an unpinned Azure address, a publicly-wired OCI instance —
+    is a promise the sweep cannot keep. The caller decides whether to refuse or to accept it
+    warn-only; this reports which it is.
+    """
+    cloud = (cloud or "").strip().lower()
+    region = (region or "").strip()
+    if not cloud:
+        return (False, "This job records no cloud, so its spend cannot be estimated.")
+    if not region:
+        return (False,
+                f"This {cloud.upper()} VM records no region, and a price is per-region — "
+                f"so nothing could be accrued against a cap. Redeploy, or set the cap on a "
+                f"VM whose region was recorded.")
+    if priceable is not None and not priceable(cloud, region):
+        return (False,
+                f"There is no price source for {cloud.upper()} in {region}, so a cap here "
+                f"would never accrue and never fire. On AWS this usually means the "
+                f"dashboard's credentials lack `pricing:GetProducts` or cannot read the "
+                f"public region-name parameter; on the other clouds it means the region is "
+                f"not one the price catalogue serves.")
+    ok, why = suspendable
+    if not ok:
+        return (False, f"A cap set to suspend cannot act on this VM: {why}")
+    return (True, "")
 
 
 def accrue(previous_usd, accrued_at, rate_usd_per_hour, now_utc: datetime) -> tuple:

@@ -515,7 +515,7 @@ def wake_view(db: Session, env: PovEnvironment) -> dict:
     act on — "ask your contact" is the answer to most of them, and saying so is better
     than a control that fails when pressed.
     """
-    from . import lab_platforms, pov_env_service, pov_spend
+    from . import lab_platforms, pov_env_service, spend_policy
 
     out = {"can_wake": False, "reason": "", "running": False, "starting": False}
     runstate = (env.runstate or "").lower()
@@ -544,7 +544,7 @@ def wake_view(db: Session, env: PovEnvironment) -> dict:
     # re-suspending underneath them — which means a prospect who woke it would leave it
     # running past its cap indefinitely, and the one control the account owner has would
     # be the one anybody could undo.
-    if pov_spend.describe(env).get("over"):
+    if spend_policy.describe(env).get("over"):
         out["reason"] = ("This environment has reached the spend limit set for it. Ask "
                          "your contact to raise it before starting it again.")
         return out

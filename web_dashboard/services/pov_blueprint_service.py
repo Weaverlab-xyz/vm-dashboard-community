@@ -104,10 +104,10 @@ def _spend_cap(value) -> float | None:
     only failed when a POV was provisioned from it would move a form error into somebody
     else's provision job, weeks later.
     """
-    from . import pov_spend
+    from . import spend_policy
     try:
-        return pov_spend.validate_cap(value)
-    except pov_spend.SpendError as exc:
+        return spend_policy.validate_cap(value)
+    except spend_policy.SpendError as exc:
         raise BlueprintError(str(exc)) from None
 
 

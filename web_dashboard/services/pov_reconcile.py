@@ -246,7 +246,7 @@ async def reconcile(db: Session, platform: str, *, job_id: str = "") -> dict:
 
         # The spend accrual, from the read this pass ALREADY made. No extra platform call
         # and no billing API: the live environment dict carries every VM's shape, disk and
-        # runstate, which is all a list-price rate needs. See services/pov_spend.
+        # runstate, which is all a list-price rate needs. See services/spend_policy.
         await _accrue_spend(db, env, raw)
 
         if changed:
@@ -348,7 +348,7 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
 def _spend_config() -> tuple:
     """``(action, warn_percent)`` as configured, both already normalised."""
     from ..config import settings
-    from . import config_service, pov_spend
+    from . import config_service, spend_policy
     try:
         action = (config_service.get("pov_spend_cap_action")
                   or getattr(settings, "pov_spend_cap_action", ""))
@@ -356,7 +356,7 @@ def _spend_config() -> tuple:
                    or getattr(settings, "pov_spend_warn_percent", None))
     except Exception:  # noqa: BLE001 — a sweep never fails on a config read
         action, percent = "", None
-    return pov_spend.normalize_action(action), pov_spend.warn_percent(percent)
+    return spend_policy.normalize_action(action), spend_policy.warn_percent(percent)
 
 
 async def _accrue_spend(db: Session, env: PovEnvironment,
@@ -371,12 +371,12 @@ async def _accrue_spend(db: Session, env: PovEnvironment,
     there is none the clock still moves on, so a rate that appears later does not then bill
     for the blind period.
     """
-    from . import pov_cloud_cost, pov_spend
+    from . import pov_cloud_cost, spend_policy
 
     try:
         rate = await pov_cloud_cost.rate_usd_per_hour(raw, env.region or "",
                                                      env.platform)
-        total, at, _added = pov_spend.accrue(
+        total, at, _added = spend_policy.accrue(
             env.spend_estimate_usd, env.spend_accrued_at, rate,
             datetime.now(timezone.utc))
         env.spend_estimate_usd = total
@@ -397,7 +397,7 @@ def sweep_spend(db: Session, *, job_id: str = "") -> int:
     it only ever ENQUEUES a `pov_env_power` job, so the action has a /jobs row, Live Output
     and a place in the failed-jobs panel.
     """
-    from . import pov_env_service, pov_spend
+    from . import pov_env_service, spend_policy
 
     action, percent = _spend_config()
     now = datetime.now(timezone.utc)
@@ -407,7 +407,7 @@ def sweep_spend(db: Session, *, job_id: str = "") -> int:
                   .filter(PovEnvironment.status == pov_env_service.STATUS_ACTIVE)
                   .all()):
         try:
-            reached = pov_spend.state(env, warn_at_percent=percent)
+            reached = spend_policy.state(env, warn_at_percent=percent)
         except Exception:  # noqa: BLE001 — one bad row never stops the sweep
             logger.warning("POV %s: could not evaluate its spend cap", env.id,
                            exc_info=True)
@@ -433,7 +433,7 @@ def sweep_spend(db: Session, *, job_id: str = "") -> int:
         # been told once and does not need telling every pass.
         env.spend_capped_at = now.replace(tzinfo=None)
         acted += 1
-        if action != pov_spend.ACTION_SUSPEND:
+        if action != spend_policy.ACTION_SUSPEND:
             logger.info("POV %s: over its spend cap, action is warn-only", env.name)
             _log(db, job_id,
                  f"{env.name}: estimated ${spent:,.2f} is OVER its ${cap:,.2f} cap. "
@@ -556,9 +556,9 @@ def describe(env: PovEnvironment) -> dict:
     what this module exists to stop, and replacing "never asked" with "asked 40 minutes
     ago, silently" would be a smaller version of the same lie.
     """
-    from . import pov_cloud_cost, suspend_schedule, pov_spend
+    from . import pov_cloud_cost, suspend_schedule, spend_policy
     action, percent = _spend_config()
-    spend = pov_spend.describe(env, warn_at_percent=percent, action=action)
+    spend = spend_policy.describe(env, warn_at_percent=percent, action=action)
     priced = pov_cloud_cost.priced(env.platform)
     try:
         schedule = suspend_schedule.describe(env)

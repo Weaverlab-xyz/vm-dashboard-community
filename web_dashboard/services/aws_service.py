@@ -735,6 +735,18 @@ def _get_ssm_parameter_sync(region: str, name: str) -> str:
     return ssm.get_parameter(Name=name)["Parameter"]["Value"]
 
 
+def get_ssm_parameter_sync(region: str, name: str) -> str:
+    """Read an SSM parameter value from a synchronous caller.
+
+    The public face of ``_get_ssm_parameter_sync``, added for ``pov_cloud_cost``, which
+    resolves Pricing API region names inside a price lookup that is already running in a
+    worker thread and has no event loop to await on. Same call, same permission — the
+    alternative was a second module reaching into this one's private, which is how a
+    private stops being one.
+    """
+    return _get_ssm_parameter_sync(region, name)
+
+
 async def get_ssm_parameter(region: str, name: str) -> str:
     """Read an SSM parameter value (used to resolve the ECS-optimized AMI id)."""
     try:

@@ -50,9 +50,10 @@ _GP3 = "gp3"
 # about. Getting this wrong yields an endpoint error that reads like a credential problem.
 _PRICING_REGION = "us-east-1"
 
-# `location` in the Pricing API is a human region NAME, not a region id. There is an
-# endpoint that maps them, and it needs its own permission — so the common ones are here
-# and anything else degrades to "no price", which is a smaller lie than guessing.
+# `location` in the Pricing API is a human region NAME, not a region id. These are the
+# common ones, and `_location_for` resolves anything else from AWS's own public parameter
+# store rather than degrading to "no price" — see that function for why the fallback alone
+# was not good enough once a spend CAP started depending on it.
 _LOCATIONS = {
     "us-east-1": "US East (N. Virginia)",
     "us-east-2": "US East (Ohio)",
@@ -68,6 +69,56 @@ _LOCATIONS = {
     "ca-central-1": "Canada (Central)",
     "sa-east-1": "South America (Sao Paulo)",
 }
+
+# Region names resolved from AWS at runtime. A resolved name is permanent reference data —
+# a region does not get renamed — but a FAILURE is not: SSM being briefly unreachable, or a
+# credential rotating, must not turn into "this region can never be capped" for the life of
+# the process. So successes are cached forever and failures expire, keyed the same
+# (timestamp, value) way `_prices` is.
+_resolved_locations: dict = {}
+_NEGATIVE_TTL_S = 600
+
+
+def _location_for(region: str) -> str:
+    """The Pricing API's human region NAME for ``region``, or ``""``.
+
+    Static map first, then AWS's own answer: the public SSM parameter
+    ``/aws/service/global-infrastructure/regions/<region>/longName``, read through
+    ``aws_service.get_ssm_parameter_sync``. Same public namespace the ECS-optimized AMI
+    lookup already reads, so this adds no permission the dashboard does not already need.
+
+    **Why it was not enough to keep the static map.** Thirteen regions was a fine bound
+    when the only consumer was a POV cost *estimate* — a missing price showed a footprint
+    without a number, which is honest. A spend CAP is different: no price means no accrual
+    means a cap that never fires, and an operator who was told nothing. Resolving the name
+    turns "we have not heard of your region" from a silent hole into a working lookup, and
+    `spend_policy.cappable` refuses the cap outright where even this cannot answer.
+
+    Returns ``""`` rather than raising: a lookup failure must leave the caller free to say
+    "no price for this region", which is a sentence it already knows how to say.
+    """
+    region = (region or "").strip()
+    if not region:
+        return ""
+    if region in _LOCATIONS:
+        return _LOCATIONS[region]
+    cached = _resolved_locations.get(region)
+    if cached is not None:
+        at, name = cached
+        # A name never expires; a failure does — see _NEGATIVE_TTL_S.
+        if name or (time.time() - at) < _NEGATIVE_TTL_S:
+            return name
+    try:
+        from . import aws_service
+        name = aws_service.get_ssm_parameter_sync(
+            _PRICING_REGION,
+            f"/aws/service/global-infrastructure/regions/{region}/longName") or ""
+    except Exception:  # noqa: BLE001 — no name is a normal answer here
+        logger.info("cost: could not resolve a Pricing API name for region %s", region,
+                    exc_info=True)
+        name = ""
+    _resolved_locations[region] = (time.time(), name)
+    return name
 
 
 # The clouds a price can be looked up for. **Built, not planned** — the same discipline
@@ -111,7 +162,7 @@ def hourly_for_vm(cloud: str, region: str, vm: dict) -> float:
     return hourly
 
 
-def _priceable(cloud: str, region: str) -> bool:
+def priceable(cloud: str, region: str) -> bool:
     """Whether a price lookup can even be attempted for this cloud and region.
 
     Separate from ``priced``: that answers "is there a client at all", this answers "will
@@ -121,7 +172,7 @@ def _priceable(cloud: str, region: str) -> bool:
     if not priced(cloud):
         return False
     if cloud == "aws":
-        return region in _LOCATIONS
+        return bool(_location_for(region))
     # Azure and GCP both key on the region id itself, so every region is in scope and a
     # cap works the day a new one opens.
     return bool(region)
@@ -146,7 +197,7 @@ def _rate_sync(environment: dict, region: str, cloud: str):
 async def rate_usd_per_hour(environment: dict, region: str, cloud: str = "aws"):
     """What this environment costs per hour, right now, at list price. None if unknown.
 
-    The accrual rate behind the spend cap — see ``pov_spend``. Compute counts only for VMs
+    The accrual rate behind the spend cap — see ``spend_policy``. Compute counts only for VMs
     that are RUNNING; storage counts for all of them, because a disk bills whether its
     instance is up or not. That second half is the one that matters: without it a POV left
     suspended for a month would accrue nothing and its cap would never trip, which would
@@ -157,7 +208,7 @@ async def rate_usd_per_hour(environment: dict, region: str, cloud: str = "aws"):
     first pass makes a real HTTP call per distinct shape, and doing it inline would block
     the worker's event loop and every other job queued behind it.
     """
-    if not _priceable(cloud, region):
+    if not priceable(cloud, region):
         return None
     from . import cloud_executor
     try:
@@ -227,7 +278,7 @@ def _f(field: str, value: str) -> dict:
 
 def instance_hourly(region: str, instance_type: str, os_family: str = "linux"):
     """On-demand USD/hour for one instance shape, or None."""
-    location = _LOCATIONS.get(region)
+    location = _location_for(region)
     if not location or not instance_type:
         return None
     key = f"ec2:{region}:{instance_type}:{os_family}"
@@ -259,7 +310,7 @@ def instance_hourly(region: str, instance_type: str, os_family: str = "linux"):
 
 def storage_gb_month(region: str):
     """On-demand USD per GB-month of gp3, or None."""
-    location = _LOCATIONS.get(region)
+    location = _location_for(region)
     if not location:
         return None
     key = f"ebs:{region}"
@@ -883,7 +934,7 @@ async def estimate(environments: list, region: str, cloud: str = "aws") -> dict:
         return {"available": False, "reason": no_price_reason(cloud), "currency": "USD",
                 "running_hourly": 0.0, "monthly_if_left": 0.0, "storage_monthly": 0.0,
                 "priced_vms": 0, "unpriced_vms": 0}
-    if not _priceable(cloud, region):
+    if not priceable(cloud, region):
         return {"available": False, "currency": "USD",
                 "reason": (f"No list prices are published here for {region}, so only the "
                            f"footprint is shown."),

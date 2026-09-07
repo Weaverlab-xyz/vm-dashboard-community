@@ -73,6 +73,7 @@ HANDLED_TYPES = (
     "image_promote_aws", "image_promote_azure", "image_promote_gcp", "image_promote_oci",
     "ec2_deploy", "ec2_bulk_deploy", "ec2_destroy", "ec2_create_image", "ami_copy",
     "ec2_power", "azure_power", "gce_power", "oci_power", "suspend_sweep",
+    "spend_sweep",
     "oci_deploy", "oci_bulk_deploy", "oci_destroy",
     "azure_deploy", "azure_bulk_deploy", "azure_destroy", "azure_create_image",
     "gce_deploy", "gce_bulk_deploy", "gce_capture_image", "gce_destroy",
@@ -188,6 +189,9 @@ LIGHT_TYPES = (
     # Pure DB as well: it evaluates schedules and enqueues *_power rows,
     # and powers nothing itself.
     "suspend_sweep",
+    # Accrues against spend caps and enqueues *_power rows the same way. The price
+    # lookups it makes are memoised reference data, not per-VM calls.
+    "spend_sweep",
     # One start/stop call per instance and nothing else. Lighter than the
     # destroys (MEDIUM), which unpick PRA, Password Safe and Entitle on the way
     # out — and a suspend schedule can fan out a few of these at once, which is
@@ -231,6 +235,9 @@ SINGLETON_TYPES = frozenset((
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "expiry_sweep",
     "suspend_sweep",
+    # Singleton for the same reason the other sweeps are: two concurrent passes would
+    # both accrue the same interval onto the same rows, double-billing every capped VM.
+    "spend_sweep",
     "epml_sync",
 ))
 
@@ -595,6 +602,12 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # timer on.
             from .services import suspend_sweeper
             await suspend_sweeper.run(db, job_id=job_id, meta=meta)
+        elif job_type == "spend_sweep":
+            # One spend-cap pass: accrue every capped VM, act on any that newly reached a
+            # threshold. Its own type rather than folded into suspend_sweep — different
+            # flag, and a different set of rows.
+            from .services import spend_sweeper
+            await spend_sweeper.run(db, job_id=job_id, meta=meta)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)
     finally:

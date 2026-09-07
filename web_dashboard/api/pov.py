@@ -70,7 +70,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
                         pov_ps_config, pov_resource_broker,
-                        suspend_schedule, pov_share, pov_spend, pov_summary,
+                        suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_cases, pov_wireup)
 from .auth import get_current_user
 
@@ -570,8 +570,8 @@ async def provision(payload: ProvisionRequest,
                   if blueprint is not None and (blueprint.spend_cap_usd or 0) > 0
                   else configured_cap)
         try:
-            env.spend_cap_usd = pov_spend.validate_cap(chosen)
-        except pov_spend.SpendError:
+            env.spend_cap_usd = spend_policy.validate_cap(chosen)
+        except spend_policy.SpendError:
             # A stored default that cannot be read is not worth failing a provision over,
             # and refusing silently would leave a POV with a cap nobody asked for.
             logger.warning("POV %s: ignoring an unusable default spend cap %r",
@@ -1420,8 +1420,8 @@ async def set_spend_cap(env_id: str, payload: SpendCapRequest,
             status_code=409, detail=pov_cloud_cost.no_price_reason(env.platform))
 
     try:
-        cap = pov_spend.validate_cap(payload.cap_usd)
-    except pov_spend.SpendError as exc:
+        cap = spend_policy.validate_cap(payload.cap_usd)
+    except spend_policy.SpendError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
     previous = float(env.spend_cap_usd or 0.0)

@@ -156,7 +156,7 @@ def test_power_is_write_not_delete():
 
 def test_power_is_deliberately_not_behind_admission_control():
     """Destroy is gated; power is not, and that is a decision rather than an oversight.
-    A reversible action earns a lighter brake — services/pov_spend.py makes the same
+    A reversible action earns a lighter brake — services/spend_policy.py makes the same
     argument — and a change-freeze that forbade suspending a VM would forbid the cheapest
     thing an operator can do during one. If this ever changes, change it deliberately."""
     for name, (mod, _) in CONSOLES.items():

@@ -272,6 +272,49 @@ anything itself: it enqueues the identical `*_power` job the Suspend button crea
 the audit row, the `/jobs` entry and the workgroup all come out the same either way.
 
 
+### Spend caps
+
+The suspend schedule above answers *"when may this be off?"*. This answers the question an
+operator on their own cloud account actually loses sleep over: **"how much may it cost?"** A
+clock is a poor proxy — the same fortnight is twenty dollars or two thousand depending on
+what was deployed, and the second only becomes visible on an invoice weeks later.
+
+Behind **`vm_spend_cap_enabled`** (Settings → Integrations → *VM spend caps*, off by
+default). `PUT /api/spend/{deploy_job_id}` with `cap_usd`; `GET` reads it back with what has
+accrued; `DELETE` clears it — and keeps the accrued total, because that is a record of what
+this VM has cost, and zeroing it would let a clear-and-re-add reset the meter by accident.
+
+**The number is accrued, not read off a bill.** Every sweep adds *rate now × time since the
+last sweep* to a running total on the deploy row. A bill lags a day on all four clouds, so a
+cap that read one would report a runaway rather than stop one; and Cost Explorer bills per
+request. Accrual reacts within one sweep, works identically on every cloud, and needs no new
+API or permission.
+
+**It is a list-price estimate.** No Savings Plans, reservations, credits, free tier, data
+transfer or snapshots. It **errs high**, which is the only safe direction for a cap.
+
+**`warn` is the default action.** Reaching the cap suspends only if you set it to — and
+suspending is reversible, which is what lets this feature exist without the auto-delete
+timer's arming clocks and dry-run mode. The worst outcome is a VM somebody starts again.
+
+| Behaviour | Why |
+|---|---|
+| A cap is **refused** on a VM whose region has no price source | `accrue` treats a missing rate as *move the clock on, bill nothing*. Stored anyway, such a cap reads `$0.00 of $500.00` forever and the operator believes they are protected. The refusal names the cloud and region. |
+| A cap that stops being priceable later is **reported** each sweep | Same lie, arriving after the fact. |
+| A cap set to `suspend` on a VM that cannot be suspended is refused | An unpinned Azure address or a publicly-wired OCI instance — see the schedule refusals above. Under `warn` the same cap is accepted, because a warning does work. |
+| The first sweep after a cap is set **accrues nothing** | A NULL "last measured" means never measured, and billing an unbounded interval would charge for every hour since deploy. The same arming rule the schedule latch uses. |
+| A long outage accrues at most `MAX_ACCRUAL_HOURS` (24h) in one step | A dashboard that was down for days cannot know the VM ran the whole time, and a restart must not invent a bill big enough to trip every cap at once. |
+| A VM the dashboard has suspended stops accruing compute | Read from the dashboard's own `*_power` jobs, not a live cloud call. A VM stopped in the cloud's own console still counts as running — wrong in the safe direction. |
+
+**Known gap, inherited deliberately from the POV implementation:** the cap latches, so
+restarting a VM that was suspended by its cap leaves it running past that cap. Raise the cap
+to re-arm it.
+
+The sweep runs every `vm_spend_sweep_interval_minutes` (default 10) and, like the schedule
+sweep, powers nothing itself — it enqueues the identical `*_power` job the Suspend button
+creates. Its query is scoped to rows that carry a cap, so an estate that sets none does no
+writes at all.
+
 ## Provisioning — per cloud
 
 Each cloud reads its credentials + a default subnet + an SSH-keypair secret from config

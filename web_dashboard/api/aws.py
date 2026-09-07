@@ -1021,7 +1021,7 @@ async def destroy_instance(
 #
 # `write`, not `delete`: stopping a VM changes its state, it does not remove it.
 #
-# Deliberately NOT behind admission control, where destroy is. `services/pov_spend.py`
+# Deliberately NOT behind admission control, where destroy is. `services/spend_policy.py`
 # already made the argument this leans on — a reversible action earns a lighter brake than
 # an irreversible one — and a change-freeze that forbade *suspending* a VM would forbid
 # the cheapest thing an operator can do during one. Ownership is the gate here.
