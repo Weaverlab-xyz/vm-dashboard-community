@@ -467,26 +467,45 @@ Phase 0 has standalone value and should be judged on its own. An operator who wa
 overnight currently uses the cloud console, which puts the dashboard's inventory out of step
 with reality.
 
-> **Phase 1 shipped, AWS and GCP only.** `pov_schedule` promoted to
+> **Phase 1 shipped, AWS and GCP first, Azure since.** `pov_schedule` promoted to
 > `suspend_schedule` (profile-neutral; the policy was never POV-specific), five
 > schedule columns on `jobs`, a `suspend_sweep` job type with its own loop — not
 > folded into `expiry_sweep`, which is gated on the destructive timer's flag — and
-> `vm_suspend_policy`, a pure predicate that refuses Azure and OCI for the reasons
-> below plus two more the audit missed: a VM wired at its public address, and one
-> under Password Safe auto-management, whose `ssm`/`gcpvm` plugins cannot reach a
-> stopped instance. Every refusal returns its reason. Phase 2 (spend caps) remains.
+> `vm_suspend_policy`, a pure predicate that refuses OCI for the reason below plus
+> two more the audit missed: a VM wired at its public address, and one under Password
+> Safe auto-management, whose `ssm`/`gcpvm`/`azurevm` plugins cannot reach a stopped
+> instance. Every refusal returns its reason. Phase 2 (spend caps) remains.
+>
+> **Azure's addressing is fixed rather than worked around.** Not POV's way — it picks
+> an address (`_next_free_ip` scans the resource group for the lowest free one), which
+> is safe only because each POV owns its resource group; the estate shares one and
+> ships `azure_bulk_deploy`, so two deploys in flight would pick the same address.
+> Instead the address ARM **already assigned** is pinned `Dynamic` → `Static` at its
+> current value: collision-free by construction, free of charge for a private address,
+> and it changes nothing that has already been told the address. New deploys pin
+> themselves at NIC creation, before the VM exists; an older VM is pinned on demand
+> when somebody schedules it, audited as `azure_address_pinned`. `needs_address_pin`
+> is checked after every other refusal, so a VM that will be turned away for Password
+> Safe never has its NIC written to. OCI is unchanged — its problem is a *public*
+> address released on stop, which a private pin does not reach.
 
 **Phases 1 and 2 — schedules, then spend caps — have a prerequisite POV did not.** This is
 the part to know before starting:
 
-- **Estate Azure VMs get dynamic addresses; POV Azure VMs do not.** `azure_service.py:1246`
-  is `private_ip_address_allocation="Dynamic"` and `:1235` is
-  `public_ip_allocation_method="Dynamic"`. `pov_cloud_azure.py:381` and `:366` are both
-  `"Static"`. `docs/profiles/pov/public-cloud.md:146` says why, in a sentence that reads like
-  it was written to pre-empt this proposal: a deallocated VM with a dynamic private address
-  can return on a different one, and by then the wire-up has written the old address into a
-  PRA jump item, a Password Safe managed system and an Entitle integration — *"every
-  scheduled suspend would silently invalidate all three."*
+- **Estate Azure VMs get dynamic addresses; POV Azure VMs do not.** `pov_cloud_azure.py:381`
+  and `:366` are both `"Static"`; the estate deploy path was neither, and — a detail this
+  audit got wrong and the fix uncovered — not for the reason stated here. The line read
+  `private_ip_address_allocation="Dynamic"`, which is **not an attribute of the SDK's
+  `NetworkInterfaceIPConfiguration`**: the model warns and discards it. The address was
+  dynamic because that is ARM's default, and the line asking for it had never applied. The
+  same misspelling appeared at `:1830` and `:2566`, equally inert for the same reason.
+  Harmless in all three places — until a *pin* is written with it, which would silently not
+  pin and pass every test that does not talk to Azure. `docs/profiles/pov/public-cloud.md:146`
+  states the consequence, in a sentence that reads like it was written to pre-empt this
+  proposal: a deallocated VM with a dynamic private address can return on a different one,
+  and by then the wire-up has written the old address into a PRA jump item, a Password Safe
+  managed system and an Entitle integration — *"every scheduled suspend would silently
+  invalidate all three."*
 - **There is no repair path.** `terraform_pra_service` exposes `provision_jump` (`:433`) and
   `remove_jump` (`:459`) and no update — and the same provision/remove-only pair
   repeats for every other jump type in the module. A changed address can only be fixed by destroy-and-recreate,
@@ -507,7 +526,9 @@ the part to know before starting:
 
 So the honest ordering is: fix addressing first (and migrate already-deployed VMs, whose NICs
 would need reconfiguring), or scope Phase 1 to clouds where the address survives a stop, and
-say which in the UI.
+say which in the UI. Both, in the event: Phase 1 shipped scoped, then addressing was fixed —
+and the migration turned out not to need a fleet-wide pass, because a VM nobody schedules does
+not need pinning and one somebody schedules can be pinned right then.
 
 **Two structural notes.** First, `install_profile` is exclusive and *"the mask only ever
 subtracts"* — every `pov_*` module is `_POV_ONLY`-masked on an estate instance. This is not a

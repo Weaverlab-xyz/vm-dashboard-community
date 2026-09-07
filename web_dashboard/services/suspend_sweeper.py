@@ -46,7 +46,13 @@ _ENQUEUE_LOCK_ID = 20260401
 _LAST_SWEEP_KEY = "vm_suspend_last_sweep"
 
 # The power job each cloud's deploy job maps to.
-_POWER_JOB = {"aws": "ec2_power", "gcp": "gce_power"}
+_POWER_JOB = {"aws": "ec2_power", "gcp": "gce_power", "azure": "azure_power"}
+
+# The deploy types worth selecting: those whose cloud can power a VM at all. Derived from
+# vm_suspend_policy rather than listed again — `schedulable()` still refuses row by row,
+# but a cloud missing from this filter is never even looked at, which is a silent way for
+# a schedule to do nothing. OCI has no entry in _POWER_JOB and so is never selected.
+_DEPLOY_TYPES = vm_suspend_policy.deploy_types_for(_POWER_JOB)
 
 
 def _utcnow() -> datetime:
@@ -104,7 +110,7 @@ def enqueue_sweep_if_due(db: Session) -> "str | None":
 def scheduled_vms(db: Session) -> list:
     """Deploy job rows that carry a schedule and are still live."""
     return (db.query(Job)
-            .filter(Job.job_type.in_(("ec2_deploy", "gce_deploy")),
+            .filter(Job.job_type.in_(_DEPLOY_TYPES),
                     Job.status == "completed",
                     Job.suspend_at_local.isnot(None))
             .all())
@@ -148,8 +154,9 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
             )
             acted.append({"job_id": row.id, "action": verb, "power_job_id": child.id})
             job_service.append_job_log(
-                db, job_id, f"{verb} {m.get('instance_name') or m.get('instance_id')} "
-                            f"(job {child.id})")
+                db, job_id,
+                f"{verb} {m.get('instance_name') or m.get('vm_name') or m.get('instance_id')} "
+                f"(job {child.id})")
 
         db.commit()
         job_service.set_completed(db, job_id, {
@@ -167,6 +174,20 @@ def _power_meta(cloud: str, row, meta: dict, verb: str) -> dict:
     if cloud == "aws":
         return {"action": verb, "instance_id": meta.get("instance_id"),
                 "region": meta.get("region"), "deploy_job_id": row.id}
+    if cloud == "azure":
+        # azure_vm_service._run_power reads exactly these three, and api/azure's power
+        # endpoint persists the same — including its `_rg()` fallback, because a deploy
+        # that recorded no resource group would otherwise deallocate nothing.
+        return {"action": verb, "vm_name": meta.get("vm_name"),
+                "resource_group": meta.get("resource_group") or _azure_rg(),
+                "deploy_job_id": row.id}
     return {"action": verb, "instance_name": meta.get("instance_name"),
             "zone": meta.get("zone"), "project_id": meta.get("project_id"),
             "deploy_job_id": row.id}
+
+
+def _azure_rg() -> str:
+    from . import config_service
+    from ..config import settings
+    return (config_service.get("azure_resource_group")
+            or getattr(settings, "azure_resource_group", "") or "vm-cli-rg")

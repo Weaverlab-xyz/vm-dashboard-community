@@ -111,7 +111,7 @@ destroy is. A reversible action earns a lighter brake than an irreversible one, 
 change-freeze that forbade *suspending* a VM would forbid the cheapest thing an operator
 can do during one.
 
-### Suspend schedules (AWS and GCP)
+### Suspend schedules (AWS, GCP and Azure)
 
 A business-hours power window: suspend at 19:00, resume at 07:00, weekdays only. Set per
 VM; off until you set one, and the feature itself is behind
@@ -132,24 +132,37 @@ later crossing wins, so the VM ends where the schedule says it should be now.
 A schedule that has never been evaluated acts on nothing. Setting one cannot suspend a VM
 for boundaries crossed before it existed — the same arming rule the auto-delete timer uses.
 
-**Azure and OCI cannot be scheduled**, and the reasons are about how this dashboard
-provisions and wires them rather than about the clouds:
+**An Azure VM's address is pinned first; OCI cannot be scheduled at all.** Both reasons are
+about how this dashboard provisions and wires those clouds, not about the clouds themselves:
 
-| Cloud | Why not |
+| Cloud | What happens |
 |---|---|
-| **Azure** | Estate VMs get a `Dynamic` private address (POV's get `Static`, deliberately). A deallocated VM can return on a different one — and by then the address is written into a PRA jump item, a Password Safe managed system and an Entitle integration, none of which have an update path. Repair means destroy-and-recreate, which mints a new Shell Jump and drops the association. |
-| **OCI** | Its wire-up uses the **public** address, and an ephemeral public IP is released on stop. After one cycle a jump item could point at an address that now belongs to somebody else's instance. |
+| **Azure** | ARM releases a `Dynamic` private address when a VM is deallocated, so it can return on a different one — and by then the address is written into a PRA jump item, a Password Safe managed system and an Entitle integration, none of which have an update path. So the address is **pinned** before a schedule is allowed: `Dynamic` → `Static` at the address the NIC already has. New deploys pin themselves; an older VM is pinned the first time somebody schedules it, which is a write to its NIC, audited as `azure_address_pinned` and named in the response. **The address does not change** — only ARM's freedom to reclaim it does. A static *private* address is free on Azure. |
+| **OCI** | Its wire-up uses the **public** address, and an ephemeral public IP is released on stop. After one cycle a jump item could point at an address that now belongs to somebody else's instance. Pinning a private address does not reach this, so OCI stays out. |
 
-Two more refusals apply even on AWS and GCP, each with the reason returned to the caller:
+Note what the pin does **not** do: it never picks an address. `pov_cloud_azure` does pick one
+— scan the resource group, take the lowest free — which is safe because each POV environment
+owns its resource group. An estate shares one and deploys in bulk, so two deploys in flight
+would choose the same address and the second would fail. Ratifying the allocation ARM has
+already made cannot collide with anything.
 
-- **A VM wired into BeyondTrust at its public address.** Both clouds prefer the private
+Two cases where the pin cannot help, and a VM is refused anyway: an Azure VM that is currently
+**deallocated** has no address to pin (start it, then set the schedule), and one deployed
+before the NIC name was recorded has to be set to Static in the Azure portal by hand.
+
+Two more refusals apply on all three clouds, each with the reason returned to the caller:
+
+- **A VM wired into BeyondTrust at its public address.** All three prefer the private
   address and fall back to the public one; only the private one survives a stop.
-- **A VM under Password Safe auto-management.** AWS onboards via the `ssm` plugin and GCP
-  via `gcpvm`; both reach the guest through the cloud's own agent and neither can reach a
-  stopped instance. Password Safe rotates on its own clock, which this dashboard cannot
+- **A VM under Password Safe auto-management.** AWS onboards via the `ssm` plugin, GCP via
+  `gcpvm` and Azure via `azurevm`; all three reach the guest through the cloud's own agent
+  and none can reach a stopped instance. Password Safe rotates on its own clock, which this dashboard cannot
   pause, so a nightly suspend would mean a nightly rotation failure. Detach
   auto-management if you want the VM scheduled — that is a decision for you to make, not
   one for this to make quietly on your behalf.
+
+Both are checked **before** the Azure pin, so a VM that is going to be refused for one of
+them never has its NIC written to on the way to being told no.
 
 The sweep runs every `vm_suspend_sweep_interval_minutes` (default 10) and never powers
 anything itself: it enqueues the identical `*_power` job the Suspend button creates, so

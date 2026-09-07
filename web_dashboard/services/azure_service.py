@@ -1239,11 +1239,22 @@ def _deploy_vm_sync(
         public_ip_id = pip.id
 
     # Step 2: Create NIC
+    #
+    # Created Dynamic, then immediately pinned. ARM assigns the private address when the
+    # NIC is created — before any VM exists — so pinning here ratifies an allocation
+    # ARM has already made rather than choosing one. That is the whole difference from
+    # `pov_cloud_azure._next_free_ip`, which scans a resource group for the lowest free
+    # address: that is safe when every environment owns its resource group, and a race
+    # on an estate, which shares one and deploys in bulk.
     nic_name = f"{vm_name}-nic"
     ip_config = NetworkInterfaceIPConfiguration(
         name="ipconfig1",
         subnet={"id": subnet_id},
-        private_ip_address_allocation="Dynamic",
+        # `private_ip_allocation_method`, NOT `private_ip_address_allocation`: the latter
+        # is not an attribute of this model and the SDK discards it with a warning. This
+        # line read that way for its whole life and was inert — the address was Dynamic
+        # because that is ARM's default. Harmless there, silent breakage in the pin below.
+        private_ip_allocation_method="Dynamic",
     )
     if public_ip_id:
         ip_config.public_ip_address = {"id": public_ip_id}
@@ -1257,6 +1268,20 @@ def _deploy_vm_sync(
         nic_params.network_security_group = {"id": nsg_ids[0]}
 
     nic = network.network_interfaces.begin_create_or_update(rg, nic_name, nic_params).result()
+
+    # Pin it, so this VM can carry a suspend schedule. Its own try/except, and NOT inside
+    # the block below that calls `_best_effort_cleanup`: a VM that deployed perfectly must
+    # never be torn down because an optional follow-up write failed. Unpinned simply means
+    # `vm_suspend_policy` refuses a schedule until someone asks for one, at which point
+    # `api/suspend.py` retries this same pin.
+    private_ip_static = False
+    try:
+        _pin_nic_private_address_sync(network, rg, nic_name)
+        private_ip_static = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Azure deploy %s: could not pin the private address of %s (%s) — "
+                       "the VM is fine, but it cannot carry a suspend schedule until it "
+                       "is pinned", vm_name, nic_name, exc)
 
     # Step 3: Build image reference (marketplace or managed)
     if image_publisher and image_offer and image_sku and image_version:
@@ -1367,6 +1392,10 @@ def _deploy_vm_sync(
         "vm_name": vm_name,
         "private_ip": private_ip,
         "public_ip": public_ip_addr,
+        # Read by `vm_suspend_policy`: an Azure VM may carry a suspend schedule only once
+        # its private address survives a deallocate. `azure_vm_service` needs no code for
+        # this — it merges this dict straight into the deploy job's metadata.
+        "private_ip_static": private_ip_static,
         "nic_name": nic_name,
         "pip_name": pip_name if create_public_ip else None,
         "resource_group": rg,
@@ -1744,6 +1773,76 @@ async def power_vm(rg: str, vm_name: str, action: str) -> None:
         raise AzureError(f"Failed to {action} VM {vm_name}: {e}") from e
 
 
+# ── Pinning a private address, so a suspend can be scheduled ──────────────────
+# An Azure VM's private address is Dynamic by ARM default, and a Dynamic address is
+# RELEASED when the VM is deallocated. The VM can therefore come back on a different one
+# — by which point the wire-up has written the old address into a PRA jump item, a
+# Password Safe managed system and an Entitle integration, none of which has an update
+# path (`terraform_pra_service` exposes provision and remove and nothing between). That
+# is why `vm_suspend_policy` refused Azure outright, and this is the refusal's cause.
+#
+# **Pin the address ARM already chose; never choose one.** `pov_cloud_azure._next_free_ip`
+# takes the other route — scan the resource group's NICs, take the lowest address not in
+# use — which is correct there because each POV environment owns its resource group. An
+# estate shares one (`azure_resource_group`) and ships `azure_bulk_deploy`, so two deploys
+# in flight would read the same lowest-free address and the second create would fail with
+# an ARM conflict naming nothing useful. Ratifying an allocation ARM has already made
+# cannot collide with anything, and a static private address is free on Azure.
+
+
+def _pin_nic_private_address_sync(network, rg: str, nic_name: str) -> dict:
+    """Freeze the private address this NIC already has. ``{"address", "already_static"}``.
+
+    **Read-modify-write.** The NIC is fetched, its one field flipped, and the object that
+    came back is PUT as-is. Building a fresh ``NetworkInterface`` here would post a NIC
+    without the NSG association, the public IP reference or accelerated networking — ARM
+    treats a PUT as the whole desired state, so everything absent is removed.
+
+    The address does not change, so nothing that has been told it is invalidated: this
+    only stops ARM reclaiming it on deallocate.
+
+    Idempotent — an already-static NIC is left alone rather than rewritten, so scheduling
+    a VM twice issues one write.
+    """
+    nic = network.network_interfaces.get(rg, nic_name)
+    configs = nic.ip_configurations or []
+    if not configs:
+        raise AzureError(f"NIC {nic_name} has no IP configuration to pin.")
+    cfg = configs[0]
+
+    if (cfg.private_ip_allocation_method or "").lower() == "static":
+        return {"address": cfg.private_ip_address, "already_static": True}
+
+    address = cfg.private_ip_address
+    if not address:
+        # A deallocated VM's Dynamic configuration may report no address at all. Pinning
+        # nothing is not a thing, and pinning the last address we remember could claim one
+        # that now belongs to somebody else's instance — the exact failure this prevents.
+        raise AzureError(
+            f"NIC {nic_name} has no private address to pin — the VM is deallocated. "
+            f"Start it, then set the schedule.")
+
+    cfg.private_ip_allocation_method = "Static"
+    network.network_interfaces.begin_create_or_update(rg, nic_name, nic).result()
+    logger.info("Azure: pinned %s private address %s (Dynamic -> Static)", nic_name, address)
+    return {"address": address, "already_static": False}
+
+
+def _pin_private_address_sync(cred, sub_id: str, rg: str, nic_name: str) -> dict:
+    return _pin_nic_private_address_sync(_get_network(cred, sub_id), rg, nic_name)
+
+
+async def pin_private_address(rg: str, nic_name: str) -> dict:
+    """Pin one NIC's private address so its VM can carry a suspend schedule."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_pin_private_address_sync, cred, sub_id, rg, nic_name)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to pin the private address of {nic_name}: {e}") from e
+
+
 # ── Tunnel-capable BeyondTrust Jumpoint on an Azure VM ────────────────────────
 # Azure Container Instances (the run_aci_jumpoint_task path) is serverless and
 # CANNOT do protocol tunneling — a BT Jumpoint needs NET_ADMIN + NET_RAW +
@@ -1827,7 +1926,7 @@ def _run_vm_jumpoint_sync(
     nic_name = f"{name}-nic"
     ip_config = NetworkInterfaceIPConfiguration(
         name="ipconfig1", subnet={"id": subnet_id},
-        private_ip_address_allocation="Dynamic",
+        private_ip_allocation_method="Dynamic",
         public_ip_address={"id": pip.id},
     )
     nic = network.network_interfaces.begin_create_or_update(
@@ -2563,7 +2662,7 @@ def _run_vm_container_node_sync(
          "public_ip_allocation_method": "Static", "tags": tags},
     ).result()
     ip_config = {"name": "ipconfig1", "subnet": {"id": subnet_id},
-                 "private_ip_address_allocation": "Dynamic",
+                 "private_ip_allocation_method": "Dynamic",
                  "public_ip_address": {"id": pip.id}}
     nic_params = {"location": location, "ip_configurations": [ip_config], "tags": tags}
     if nsg_id:
