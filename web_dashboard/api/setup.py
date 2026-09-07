@@ -229,6 +229,7 @@ class FeaturesSetup(BaseModel):
     cloud_database_enabled: bool = False
     k8s_management_enabled: bool = False
     remote_agents_enabled: bool = False
+    mcp_server_enabled: bool = False
 
 
 class ProfileSetup(BaseModel):
@@ -531,6 +532,7 @@ def _apply_config(payload: SetupPayload) -> None:
         "cloud_database_enabled":   "1" if payload.features.cloud_database_enabled else "0",
         "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
         "remote_agents_enabled":    "1" if payload.features.remote_agents_enabled else "0",
+        "mcp_server_enabled":       "1" if payload.features.mcp_server_enabled else "0",
     })
 
     config_service.set_many(pairs)
@@ -794,6 +796,17 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
 
 class VMwareFeatureConfig(BaseModel):
     enabled: bool = False
+
+class MCPServerFeatureConfig(BaseModel):
+    """The /mcp endpoint for AI clients. Enabled-only — auth is a Personal Access
+    Token, so there is nothing else to configure.
+
+    Keyed "mcp_server" so _feature_to_cfg_key derives `mcp_server_enabled`, the key
+    config.py and feature_flags.flags() both read. Renaming it would silently point
+    the toggle at a key nothing reads.
+    """
+    enabled: bool = False
+
 
 class RemoteAgentsFeatureConfig(BaseModel):
     """Remote on-prem agents.
@@ -1836,6 +1849,7 @@ _FEATURE_MODELS = {
     # `remote_agents_enabled` with no special-casing. Renaming this key would silently
     # start writing a different config key and the toggle would stop doing anything.
     "remote_agents": RemoteAgentsFeatureConfig,
+    "mcp_server":   MCPServerFeatureConfig,
     # The three BeyondTrust products, split out of a single "beyondtrust" panel.
     # These keys must stay exactly as-is: _feature_to_cfg_key suffixes "_enabled" to
     # derive the config key, so renaming one silently repoints its toggle at a key

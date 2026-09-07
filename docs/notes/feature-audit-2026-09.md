@@ -92,6 +92,9 @@ The architecture has habits worth naming, because the recommendations lean on th
 
 ### The MCP server does not apply the permission model
 
+*(Fixed — see [Recommendation 1](#1-make-the-mcp-server-obey-the-permission-model).
+Kept in the present tense because it is the finding, not the fix.)*
+
 `api/mcp_server.py` authenticates properly. `_validate_pat` (`:328`) hashes the bearer token,
 looks up the `PersonalAccessToken` row, checks `is_active` and `expires_at`, and resolves a
 `User`. The middleware sets that user into a ContextVar at `:391`.
@@ -287,6 +290,14 @@ dependency without a clear reason. All four work with zero BeyondTrust products 
 and add no packages.
 
 ### 1. Make the MCP server obey the permission model
+
+> **Shipped.** Every tool now resolves the calling user and applies its HTTP twin's
+> rule; `get_job`'s payload goes through an allowlist; `/mcp` sits behind
+> `mcp_server_enabled`, default off, gated inside `_MCPAuth` because a mount takes
+> no dependencies. The tool surface went from 7 to 19. `tests/test_mcp_rbac.py`
+> pins the behaviour, including that a tool with no caller returns nothing —
+> discovered by reflection, so a tool added later cannot skip the check. The
+> paragraphs below are left as written; they are why the change happened.
 
 **The finding:** `_mcp_user` is set and never read; the mount is ungated; `get_job` returns
 raw `extra_data`.

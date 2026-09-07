@@ -197,7 +197,7 @@ The wizard turns a flag on; the per-integration fields live in Settings:
 - **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/epml.md](docs/integrations/epml.md).
 - **Portainer CE** — on-prem Docker host management
 - **Entitle** — approval-workflow integration
-- **MCP server** — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed
+- **MCP server** (`mcp_server_enabled`) — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed. Each tool returns only what the token's owner can see in the UI. See [docs/integrations/mcp-server.md](docs/integrations/mcp-server.md)
 - **Action Guardrails** — pre-action policy gate (OPA): evaluate every deploy against Rego policies *before* the job starts — allowed regions, blocked instance sizes, change-freeze windows — and block disallowed ones (403, audited). Fails closed. See [docs/policy-guardrails.md](docs/policy-guardrails.md).
 
 ## Docker images

@@ -59,7 +59,12 @@ azure-keyvault-secrets>=4.7.0,<5
 azure-mgmt-automation>=1.0.0,<2
 
 # MCP (Model Context Protocol) server — exposes dashboard tools to AI clients
-mcp>=1.2.0
+# Upper bound is load-bearing: mcp 2.x renamed FastMCP to MCPServer and dropped
+# mcp.server.fastmcp, which api/mcp_server.py imports at module level — and
+# main.py imports that module unconditionally, so a 2.x resolution would fail the
+# whole app at startup, not just /mcp. A clean install resolves 1.6.0 today only
+# because of co-constraints in this file; pin it rather than rely on them.
+mcp>=1.2.0,<2
 
 # Google Cloud SDK
 google-cloud-compute>=1.14.0
