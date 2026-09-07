@@ -293,9 +293,17 @@ def set_failed(db: Session, job_id: str, error: str,
             # every duration and staleness check in the tree.
             job.status = "pending"
             job.started_at = None
-            logger.info("job %s (%s) failed transiently, attempt %d — requeued in %ds: %s",
+            # The error text is deliberately NOT in this line, for the same reason
+            # `_raise_dead_letter` leaves it out of the notification: it is the one field
+            # that carries whatever a runner echoed back, and application logs are shipped
+            # to aggregators whose readers are a different set of people from those with
+            # access to this database. Before this, nothing in this module or in
+            # `jobs_worker` had ever logged it. What is here is the decision — which job,
+            # which type, which attempt, how long until the next one — and `error_message`
+            # is on the row, rendered on /jobs/{id}, for the rest.
+            logger.info("job %s (%s) failed transiently, attempt %d — requeued in %ds",
                         job_id, job.job_type, job.attempts,
-                        retry_policy.backoff_seconds(job.attempts - 1), error)
+                        retry_policy.backoff_seconds(job.attempts - 1))
         else:
             job.status = "failed"
             job.completed_at = now

@@ -373,6 +373,38 @@ def test_the_emit_happens_after_the_commit():
         "_raise_dead_letter must run AFTER db.commit() — emit_safe rolls back on failure"
 
 
+def test_no_logging_call_in_job_service_takes_the_error_text():
+    """The retry path added the first line in this module ever to log a job error.
+
+    Application logs go to aggregators — Splunk, CloudWatch, Loki — whose readers are a
+    different set of people from those with access to this database, so writing the error
+    there at INFO on every transient failure is the same exposure the dead letter was just
+    fixed for, through a quieter door. Structural rather than behavioural because a log
+    line has no return value to assert on: the next person to add `%s` for a nicer log
+    message will be told here, not by a scanner three commits later.
+
+    `error_message` is on the row and rendered on /jobs/{id}; nothing is lost.
+    """
+    import ast
+    src = open(os.path.join(_ROOT, "web_dashboard/services/job_service.py"),
+               encoding="utf-8").read()
+    banned = {"error", "error_message"}
+    offenders = []
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "logger"):
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            for sub in ast.walk(arg):
+                name = (sub.id if isinstance(sub, ast.Name)
+                        else sub.attr if isinstance(sub, ast.Attribute) else None)
+                if name in banned:
+                    offenders.append(f"line {node.lineno}: logger.{node.func.attr}(… {name} …)")
+    assert not offenders, (
+        "job error text must not reach the application log: " + "; ".join(offenders))
+
+
 # ── The flag ──────────────────────────────────────────────────────────────────
 
 def test_with_the_flag_off_nothing_changes():
