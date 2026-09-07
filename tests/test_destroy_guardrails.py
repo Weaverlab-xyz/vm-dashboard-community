@@ -91,7 +91,7 @@ class _User:
 
 def _denied(mod, user, workgroup) -> bool:
     try:
-        mod._assert_can_destroy(user, workgroup, "Thing")
+        mod._assert_can_act(user, workgroup, "Thing")
         return False
     except HTTPException as exc:
         assert exc.status_code == 403, exc.status_code
@@ -168,7 +168,7 @@ def test_every_destroy_handler_checks_the_workgroup_and_the_policy():
     for path, action in DESTROY_ACTIONS.items():
         name = "destroy_vm" if path.endswith("azure.py") else "destroy_instance"
         dumped = ast.dump(_handler(path, name))
-        assert "'_assert_can_destroy'" in dumped, f"{path}: destroy has no workgroup check"
+        assert "'_assert_can_act'" in dumped, f"{path}: destroy has no workgroup check"
         assert "'enforce'" in dumped, f"{path}: destroy does not reach the admission gate"
         assert repr(action) in dumped or action in dumped, \
             f"{path}: expected admission action {action!r}"

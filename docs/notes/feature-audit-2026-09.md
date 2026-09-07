@@ -440,6 +440,16 @@ ranks fourth rather than first. The appeal is real: `pov_schedule.due_action(row
 and `pov_spend.accrue(prev, at, rate, now)` are pure, clock-free and duck-typed on `row`, so
 the policy genuinely ports. The cost is everywhere else.
 
+> **Phase 0 shipped.** `/power/start` and `/power/stop` on all four clouds, with the
+> identifier in the body (the shape every other `/power/*` route uses, and the only
+> one that survives OCI's greedy `:path` OCID converter). New `*_power` job types in
+> the LIGHT tier; `write` rather than `delete`; the same ownership guard destroy uses,
+> renamed `_assert_can_act` now that it covers two verbs; and `_find_deploy_job`
+> extracted so power and destroy cannot disagree about what an active deployment is.
+> Deliberately not behind admission control — see `tests/test_cloud_power.py`, which
+> also pins each cloud's verb, the wrong one being expensive and silent in all four
+> cases. Phases 1–2 remain; the blockers below are unchanged.
+
 **Phase 0 — the primitive.** `/power/start` and `/power/stop` on the four cloud routers using
 the `_power_endpoint` shape, backed by new `*_power` job types, with the workgroup check
 Recommendation 2 adds to destroy. `api/vms.py:257` is the best template, because it

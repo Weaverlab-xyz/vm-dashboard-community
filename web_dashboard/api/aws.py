@@ -69,8 +69,11 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
-def _assert_can_destroy(user: User, workgroup, what: str) -> None:
-    """Refuse a teardown of something this user cannot see.
+def _assert_can_act(user: User, workgroup, what: str) -> None:
+    """Refuse acting on something this user cannot see.
+
+    Guards both teardown and power: the question is ownership, which does not
+    change with the verb.
 
     Reads this module's own :func:`_accessible_workgroups`, so the Destroy button and
     the instance list cannot disagree about who owns what — "you may destroy what you
@@ -94,6 +97,22 @@ def _assert_can_destroy(user: User, workgroup, what: str) -> None:
     if wg not in accessible:
         raise HTTPException(
             status_code=403, detail=f"Access denied to workgroup '{wg}'")
+
+
+def _find_deploy_job(db: Session, job_type: str, meta_key: str, value: str):
+    """The completed, not-yet-destroyed deploy job for one resource, or None.
+
+    Shared by destroy and power so the two cannot disagree about what counts as an active
+    deployment — they resolve the same row, and therefore the same workgroup.
+    """
+    for job in (db.query(Job)
+                .filter(Job.job_type == job_type, Job.status == "completed")
+                .order_by(Job.created_at.desc())
+                .all()):
+        meta = job.metadata_dict
+        if meta.get(meta_key) == value and not meta.get("destroyed"):
+            return job
+    return None
 
 
 def _aws_cfg(key: str, fallback: str = "") -> str:
@@ -894,20 +913,7 @@ async def destroy_instance(
     Terminate a dashboard-deployed EC2 instance via the AWS API.
     Only instances tracked in the dashboard DB can be terminated here.
     """
-    # Find the deploy job for this instance
-    deploy_jobs = (
-        db.query(Job)
-        .filter(Job.job_type == "ec2_deploy", Job.status == "completed")
-        .all()
-    )
-
-    deploy_job = None
-    for job in deploy_jobs:
-        meta = job.metadata_dict
-        if meta.get("instance_id") == instance_id and not meta.get("destroyed"):
-            deploy_job = job
-            break
-
+    deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", instance_id)
     if not deploy_job:
         raise HTTPException(
             status_code=404,
@@ -915,7 +921,7 @@ async def destroy_instance(
                    "It may have already been terminated or was not deployed from this dashboard.",
         )
 
-    _assert_can_destroy(current_user, deploy_job.workgroup, f"Instance {instance_id}")
+    _assert_can_act(current_user, deploy_job.workgroup, f"Instance {instance_id}")
 
     # Terminate in the region the instance was deployed into (fall back to default
     # for instances deployed before multi-region support recorded a region).
@@ -955,6 +961,67 @@ async def destroy_instance(
         status="pending",
         message=f"EC2 instance {instance_id} termination queued",
     )
+
+
+
+
+
+
+# ── Power (start / suspend) ──────────────────────────────────────────────────
+# Parity with the six surfaces that have always had it — the five hypervisors plus VMware
+# Workstation. A cloud VM was deploy-or-destroy, so an operator who wanted one off
+# overnight used the cloud console, which puts this dashboard's inventory out of step with
+# reality.
+#
+# The identifier travels in the BODY, not the path, matching every existing /power/* route
+# here. It is also the only shape that works across all four clouds: api/oci.py binds an
+# OCID with a greedy `:path` converter, which would swallow a `/power/start` suffix whole.
+#
+# `write`, not `delete`: stopping a VM changes its state, it does not remove it.
+#
+# Deliberately NOT behind admission control, where destroy is. `services/pov_spend.py`
+# already made the argument this leans on — a reversible action earns a lighter brake than
+# an irreversible one — and a change-freeze that forbade *suspending* a VM would forbid
+# the cheapest thing an operator can do during one. Ownership is the gate here.
+
+class PowerOpRequest(BaseModel):
+    instance_id: str
+
+
+def _power_endpoint(op: str):
+    async def _handler(
+        payload: PowerOpRequest,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(require_permission("aws", "write")),
+    ):
+        deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", payload.instance_id)
+        if not deploy_job:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active deployment found for instance {payload.instance_id}.")
+        region = deploy_job.metadata_dict.get("region") or _aws_region()
+        _assert_can_act(current_user, deploy_job.workgroup, f"Instance {payload.instance_id}")
+
+        job = job_service.create_job(
+            db,
+            job_type="ec2_power",
+            created_by=current_user.username,
+            workgroup=deploy_job.workgroup,
+            metadata={"action": op, "instance_id": payload.instance_id, "region": region,
+                      "deploy_job_id": deploy_job.id},
+        )
+        job_service.log_audit(db, current_user.username, "ec2_power",
+                              details={"action": op, "instance_id": payload.instance_id})
+        verb = "Start" if op == "start" else "Suspend"
+        return {"job_id": job.id, "status": "pending", "message": f"{verb} queued"}
+
+    return _handler
+
+
+router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
+                     summary="Start a stopped instance")
+router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
+                     summary="Stop an instance (a plain stop, never Hibernate)")
 
 
 # ── Export AMI to portable VHD on hub backend ────────────────────────────────

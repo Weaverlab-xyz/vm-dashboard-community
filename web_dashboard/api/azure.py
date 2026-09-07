@@ -64,8 +64,11 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
-def _assert_can_destroy(user: User, workgroup, what: str) -> None:
-    """Refuse a teardown of something this user cannot see.
+def _assert_can_act(user: User, workgroup, what: str) -> None:
+    """Refuse acting on something this user cannot see.
+
+    Guards both teardown and power: the question is ownership, which does not
+    change with the verb.
 
     Reads this module's own :func:`_accessible_workgroups`, so the Destroy button and
     the VM list cannot disagree about who owns what. An untagged resource is admin-only,
@@ -95,6 +98,22 @@ def _cfg(key: str, fallback: str = "") -> str:
 
 
 
+
+
+def _find_deploy_job(db: Session, job_type: str, meta_key: str, value: str):
+    """The completed, not-yet-destroyed deploy job for one resource, or None.
+
+    Shared by destroy and power so the two cannot disagree about what counts as an active
+    deployment — they resolve the same row, and therefore the same workgroup.
+    """
+    for job in (db.query(Job)
+                .filter(Job.job_type == job_type, Job.status == "completed")
+                .order_by(Job.created_at.desc())
+                .all()):
+        meta = job.metadata_dict
+        if meta.get(meta_key) == value and not meta.get("destroyed"):
+            return job
+    return None
 
 
 def _rg():
@@ -1079,28 +1098,18 @@ async def destroy_vm(
     ``azure_deploy`` job) and cloud-recovered VMs ("deployed by: unknown") have no
     such job — for those we FALL BACK: confirm the VM still exists in Azure and
     terminate it anyway, so the Azure-tab Destroy button isn't a dead 404."""
-    deploy_jobs = (
-        db.query(Job)
-        .filter(Job.job_type == "azure_deploy", Job.status == "completed")
-        .all()
-    )
-    deploy_job = None
-    for job in deploy_jobs:
-        meta = job.metadata_dict
-        if meta.get("vm_name") == vm_name and not meta.get("destroyed"):
-            deploy_job = job
-            break
+    deploy_job = _find_deploy_job(db, "azure_deploy", "vm_name", vm_name)
 
     if not deploy_job:
         # No deploy job means no workgroup to check against, so this path is
         # admin-only by construction — the listing hides these from non-admins too.
-        _assert_can_destroy(current_user, None, f"VM '{vm_name}'")
+        _assert_can_act(current_user, None, f"VM '{vm_name}'")
         return await _destroy_without_deploy_job(vm_name, db, current_user)
 
     # Resolve the resource group here and persist it: the runner rebuilds the call from
     # metadata, and re-deriving it there would read whatever `azure_resource_group` is
     # configured at run time rather than the group the VM was actually deployed into.
-    _assert_can_destroy(current_user, deploy_job.workgroup, f"VM '{vm_name}'")
+    _assert_can_act(current_user, deploy_job.workgroup, f"VM '{vm_name}'")
 
     rg = deploy_job.metadata_dict.get("resource_group") or _rg()
 
@@ -1129,6 +1138,66 @@ async def destroy_vm(
     )
 
     return {"job_id": destroy_job.id, "status": "pending", "message": f"Azure VM '{vm_name}' termination queued"}
+
+
+
+# ── Power (start / suspend) ──────────────────────────────────────────────────
+# Parity with the six surfaces that have always had it — the five hypervisors plus VMware
+# Workstation. A cloud VM was deploy-or-destroy, so an operator who wanted one off
+# overnight used the cloud console, which puts this dashboard's inventory out of step with
+# reality.
+#
+# The identifier travels in the BODY, not the path, matching every existing /power/* route
+# here. It is also the only shape that works across all four clouds: api/oci.py binds an
+# OCID with a greedy `:path` converter, which would swallow a `/power/start` suffix whole.
+#
+# `write`, not `delete`: stopping a VM changes its state, it does not remove it.
+#
+# Deliberately NOT behind admission control, where destroy is. `services/pov_spend.py`
+# already made the argument this leans on — a reversible action earns a lighter brake than
+# an irreversible one — and a change-freeze that forbade *suspending* a VM would forbid
+# the cheapest thing an operator can do during one. Ownership is the gate here.
+
+class PowerOpRequest(BaseModel):
+    vm_name: str
+
+
+def _power_endpoint(op: str):
+    async def _handler(
+        payload: PowerOpRequest,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(require_permission("azure", "write")),
+    ):
+        deploy_job = _find_deploy_job(db, "azure_deploy", "vm_name", payload.vm_name)
+        if not deploy_job:
+            # Unlike destroy there is no fallback: without the deploy job we do not
+            # know the resource group, and guessing it deallocates the wrong VM.
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active deployment found for VM '{payload.vm_name}'.")
+        rg = deploy_job.metadata_dict.get("resource_group") or _rg()
+        _assert_can_act(current_user, deploy_job.workgroup, f"VM '{payload.vm_name}'")
+
+        job = job_service.create_job(
+            db,
+            job_type="azure_power",
+            created_by=current_user.username,
+            workgroup=deploy_job.workgroup,
+            metadata={"action": op, "vm_name": payload.vm_name, "resource_group": rg,
+                      "deploy_job_id": deploy_job.id},
+        )
+        job_service.log_audit(db, current_user.username, "azure_power",
+                              details={"action": op, "vm_name": payload.vm_name})
+        verb = "Start" if op == "start" else "Suspend"
+        return {"job_id": job.id, "status": "pending", "message": f"{verb} queued"}
+
+    return _handler
+
+
+router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
+                     summary="Start a stopped instance")
+router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
+                     summary="Deallocate a VM (never a plain power-off, which keeps billing compute)")
 
 
 async def _destroy_without_deploy_job(

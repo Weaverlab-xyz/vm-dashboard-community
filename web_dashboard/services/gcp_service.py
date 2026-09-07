@@ -1027,6 +1027,36 @@ async def launch_instance(
     )
 
 
+
+# ── Power (start / suspend) ───────────────────────────────────────────────────
+# A cloud VM was deploy-or-destroy until this. The per-cloud verb is not interchangeable —
+# each cloud has a wrong choice that looks right and costs money.
+
+
+def _power_instance_sync(project_id: str, zone: str, instance_name: str, action: str) -> None:
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    if action == "start":
+        client.start(project=project_id, zone=zone, instance=instance_name).result()
+        return
+    # `stop`, not `suspend`. GCE's suspend preserves RAM to disk and CHARGES for that
+    # storage plus the reserved resources; stop lands on TERMINATED, where only the disks
+    # bill. TERMINATED is what a suspend schedule is actually aiming at, despite the word.
+    client.stop(project=project_id, zone=zone, instance=instance_name).result()
+
+
+async def power_instance(project_id: str, zone: str, instance_name: str,
+                         action: str) -> None:
+    """Start or stop one GCE instance."""
+    try:
+        await _to_thread(_power_instance_sync, project_id, zone, instance_name, action)
+    except Exception as e:
+        raise GCPError(f"Failed to {action} {instance_name}: {e}") from e
+
+
 def _describe_instances_sync(project_id: str, zone: str, instance_names: list[str]) -> list[dict]:
     _require_compute()
     from google.cloud import compute_v1

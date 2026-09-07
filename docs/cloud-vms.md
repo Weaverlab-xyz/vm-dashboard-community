@@ -78,6 +78,39 @@ and `/vms` (unified cross-cloud inventory).
 
 ---
 
+## Power (start and suspend)
+
+A cloud VM used to be deploy-or-destroy. Every on-prem hypervisor here has had power
+control for its whole life; the four clouds had none, so an operator who wanted a VM off
+overnight used the cloud console — which puts this dashboard's inventory out of step with
+reality.
+
+`POST /api/{aws,azure,gcp,oci}/power/start` and `/power/stop`, with the instance
+identifier in the **body**, matching every other `/power/*` route here. Each queues a job,
+so the action gets an audit row, a `/jobs` entry and Live Output like any other.
+
+Requires `write` on that cloud, not `delete` — stopping a VM changes its state, it does
+not remove it — plus the same ownership check destroy uses: you can power what you can
+see, and an untagged VM is admin-only.
+
+**What "stop" means is not the same word on every cloud**, and the wrong choice is
+expensive and silent:
+
+| Cloud | What the dashboard calls | Why not the obvious one |
+|---|---|---|
+| AWS | `StopInstances` | Never Hibernate: it must be enabled at launch, is unsupported on most families, and silently degrades to a plain stop where it is not |
+| Azure | `begin_deallocate` | `begin_power_off` leaves the VM "Stopped" and **still billing for compute** |
+| GCP | `instances.stop` | `suspend` preserves RAM to disk and charges for that storage plus the reserved resources; `stop` reaches TERMINATED, where only disks bill |
+| OCI | `SOFTSTOP` | A hard `STOP` pulls the cord and risks a dirty filesystem on resume |
+
+**Stopping saves compute and nothing else.** Disks, public addresses and reserved capacity
+keep billing. A stopped VM is cheaper, not free.
+
+Power is deliberately **not** behind [Action Guardrails](policy-guardrails.md), where
+destroy is. A reversible action earns a lighter brake than an irreversible one, and a
+change-freeze that forbade *suspending* a VM would forbid the cheapest thing an operator
+can do during one.
+
 ## Provisioning — per cloud
 
 Each cloud reads its credentials + a default subnet + an SSH-keypair secret from config

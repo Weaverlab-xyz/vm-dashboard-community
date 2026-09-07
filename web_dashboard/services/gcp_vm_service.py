@@ -58,12 +58,35 @@ def _region_from_zone(zone: str) -> str:
 
 # ── Job-runner entry point ────────────────────────────────────────────────────
 
+
+async def _run_power(job_id: str, action: str, instance_name: str, zone: str, project_id: str) -> None:
+    """Start or suspend one instance. Short by design: a power change is one API call,
+    and the job exists for the audit row, the /jobs entry and the schedule sweep that
+    enqueues the identical row a human's button does."""
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, job_id)
+        job_service.update_progress(db, job_id, 40,
+                                    f"{'Starting' if action == 'start' else 'Suspending'}…")
+        await gcp_service.power_instance(project_id, zone, instance_name, action)
+        job_service.set_completed(db, job_id, {"instance_name": instance_name, "zone": zone, "action": action})
+        await cache_service.invalidate_prefix("gcp_instances")
+    except Exception as exc:
+        logger.error("%s power (%s) failed for job %s: %s", "GCE", action, job_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+    finally:
+        db.close()
+
+
 async def run(job_id: str, job_type: str, meta: dict) -> None:
     """Run one GCP job. Every argument comes from the metadata the endpoint persisted.
 
     ``project_id`` and ``zone`` are read from the job, never from ``_gcp_project()`` /
     ``_gcp_zone()``: those return whatever is configured *now*, so a destroy would aim
     at the wrong project if the default changed after the deploy."""
+    if job_type == "gce_power":
+        await _run_power(job_id, meta["action"], meta["instance_name"], meta["zone"], meta["project_id"])
+        return
     if job_type == "gce_deploy":
         req = GCPDeployRequest(**meta["req"])
         await _run_deploy(job_id, req, meta["project_id"], meta["zone"])

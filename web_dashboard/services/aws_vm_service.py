@@ -45,9 +45,32 @@ def _aws_region() -> str:
 
 # ── Job-runner entry point ────────────────────────────────────────────────────
 
+
+async def _run_power(job_id: str, action: str, instance_id: str, region: str) -> None:
+    """Start or suspend one instance. Short by design: a power change is one API call,
+    and the job exists for the audit row, the /jobs entry and the schedule sweep that
+    enqueues the identical row a human's button does."""
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, job_id)
+        job_service.update_progress(db, job_id, 40,
+                                    f"{'Starting' if action == 'start' else 'Suspending'}…")
+        await aws_service.power_instance(region, instance_id, action)
+        job_service.set_completed(db, job_id, {"instance_id": instance_id, "region": region, "action": action})
+        await cache_service.invalidate(cache_service.key_global("aws_instances"))
+    except Exception as exc:
+        logger.error("%s power (%s) failed for job %s: %s", "EC2", action, job_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+    finally:
+        db.close()
+
+
 async def run(job_id: str, job_type: str, meta: dict) -> None:
     """Run one AWS job. Every argument comes from the metadata the endpoint persisted —
     the worker has no request object to hand over."""
+    if job_type == "ec2_power":
+        await _run_power(job_id, meta["action"], meta["instance_id"], meta["region"])
+        return
     if job_type == "ec2_deploy":
         await _run_deploy(
             job_id,

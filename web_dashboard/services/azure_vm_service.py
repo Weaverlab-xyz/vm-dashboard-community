@@ -44,9 +44,32 @@ def _rg():
 
 # ── Job-runner entry point ────────────────────────────────────────────────────
 
+
+async def _run_power(job_id: str, action: str, vm_name: str, resource_group: str) -> None:
+    """Start or suspend one instance. Short by design: a power change is one API call,
+    and the job exists for the audit row, the /jobs entry and the schedule sweep that
+    enqueues the identical row a human's button does."""
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, job_id)
+        job_service.update_progress(db, job_id, 40,
+                                    f"{'Starting' if action == 'start' else 'Suspending'}…")
+        await azure_service.power_vm(resource_group, vm_name, action)
+        job_service.set_completed(db, job_id, {"vm_name": vm_name, "resource_group": resource_group, "action": action})
+        await cache_service.invalidate(cache_service.key_global("azure_vms"))
+    except Exception as exc:
+        logger.error("%s power (%s) failed for job %s: %s", "Azure VM", action, job_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+    finally:
+        db.close()
+
+
 async def run(job_id: str, job_type: str, meta: dict) -> None:
     """Run one Azure job. Every argument comes from the metadata the endpoint
     persisted — the worker has no request object to hand over."""
+    if job_type == "azure_power":
+        await _run_power(job_id, meta["action"], meta["vm_name"], meta["resource_group"])
+        return
     if job_type == "azure_deploy":
         req = AzureDeployRequest(**meta["req"])
         await _run_deploy(job_id, req, meta["resource_group"], meta["location"])

@@ -59,8 +59,31 @@ def _ssh_key_secret(payload: OCIDeployRequest) -> str:
 
 # ── Job-runner entry point ────────────────────────────────────────────────────
 
+
+async def _run_power(job_id: str, action: str, instance_ocid: str) -> None:
+    """Start or suspend one instance. Short by design: a power change is one API call,
+    and the job exists for the audit row, the /jobs entry and the schedule sweep that
+    enqueues the identical row a human's button does."""
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, job_id)
+        job_service.update_progress(db, job_id, 40,
+                                    f"{'Starting' if action == 'start' else 'Suspending'}…")
+        await oci_service.power_instance(instance_ocid, action)
+        job_service.set_completed(db, job_id, {"instance_ocid": instance_ocid, "action": action})
+        await cache_service.invalidate_prefix("oci_instances")
+    except Exception as exc:
+        logger.error("%s power (%s) failed for job %s: %s", "OCI", action, job_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+    finally:
+        db.close()
+
+
 async def run(job_id: str, job_type: str, meta: dict) -> None:
     """Run one OCI job. Every argument comes from the metadata the endpoint persisted."""
+    if job_type == "oci_power":
+        await _run_power(job_id, meta["action"], meta["instance_ocid"])
+        return
     if job_type == "oci_deploy":
         await _run_deploy(job_id, OCIDeployRequest(**meta["req"]), meta["compartment_ocid"])
     elif job_type == "oci_bulk_deploy":
