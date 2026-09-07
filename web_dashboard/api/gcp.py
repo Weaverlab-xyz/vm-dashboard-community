@@ -171,6 +171,29 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
+def _assert_can_destroy(user: User, workgroup, what: str) -> None:
+    """Refuse a teardown of something this user cannot see.
+
+    Reads this module's own :func:`_accessible_workgroups`, so the Destroy button and
+    the instance list cannot disagree about who owns what. A resource with no deploy job has
+    no workgroup, which makes it admin-only — the same answer the listing gives. Keys on
+    ``is_admin`` like the rest of this module, NOT ``is_effective_admin``; see api/vms.py
+    for the other rule and tests/test_dashboard_stats_api.py for why they stay separate.
+    """
+    accessible = _accessible_workgroups(user)
+    if accessible is None:
+        return
+    wg = (workgroup or "").strip().lower()
+    if not wg:
+        raise HTTPException(
+            status_code=403,
+            detail=(f"{what} is not assigned to a workgroup, so only an admin can "
+                    "destroy it."))
+    if wg not in accessible:
+        raise HTTPException(
+            status_code=403, detail=f"Access denied to workgroup '{wg}'")
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/public-images", response_model=GCPImageListResponse)
@@ -889,10 +912,26 @@ async def destroy_instance(
             deploy_job = j
             break
 
+    _assert_can_destroy(current_user, deploy_job.workgroup if deploy_job else None,
+                        f"Instance '{instance_name}'")
+
+    # Pre-action policy gate (inert unless enabled + this action is gated).
+    from ..services import admission_service
+    admission_service.enforce(
+        "gcp:gce:destroy",
+        request={"region": resolved_zone, "name": instance_name,
+                 "workgroup": deploy_job.workgroup if deploy_job else None,
+                 "has_deploy_job": deploy_job is not None},
+        actor=current_user, db=db,
+    )
+
     job = job_service.create_job(
         db,
         job_type="gce_destroy",
         created_by=current_user.username,
+        # Carried from the deploy row so the teardown is scoped like the thing it tears
+        # down; None when the instance has no deploy job, which is admin-only above.
+        workgroup=deploy_job.workgroup if deploy_job else None,
         metadata={
             "instance_name": instance_name,
             "zone": resolved_zone,

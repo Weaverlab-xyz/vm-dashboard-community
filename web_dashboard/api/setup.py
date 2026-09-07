@@ -11,6 +11,8 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
+from ..services import notify_policy
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/setup", tags=["setup"])
 
@@ -1783,9 +1785,11 @@ class NotificationsFeatureConfig(BaseModel):
     """
     enabled: bool = False
     notify_dry_run: bool = True
-    notify_event_types: str = (
-        "resource.expiring,resource.reaped,job.failed,"
-        "cost.budget_exceeded,secret.stale,config.drift")
+    # Read from the policy rather than restated here. These two defaults must agree or
+    # a fresh install silently drops events depending on which one wins, and restating
+    # the list is how they came to disagree — adding `audit.chain_broken` to the policy
+    # left this copy behind, which tests/test_notifications_settings_panel.py caught.
+    notify_event_types: str = notify_policy.DEFAULT_EVENT_TYPES
     notify_min_severity: str = "warning"
     # Absolute origin (e.g. https://dash.corp.example). The worker has no request
     # context, so without this every message ships with no link at all.

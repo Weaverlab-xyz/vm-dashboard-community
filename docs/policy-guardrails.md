@@ -36,8 +36,35 @@ actions:
 | `aws:ec2:deploy` | `POST /api/aws/deploy` |
 | `azure:vm:deploy` | `POST /api/azure/deploy` |
 | `gcp:gce:deploy` | `POST /api/gcp/deploy` |
+| `oci:compute:deploy` | `POST /api/oci/deploy` |
 | `clouddb:provision` | `POST /api/databases` |
 | `k8s:provision` | `POST /api/k8s/clusters/provision` |
+| `aws:ec2:destroy` | `DELETE /api/aws/instances/{id}` |
+| `azure:vm:destroy` | `DELETE /api/azure/vms/{name}` |
+| `gcp:gce:destroy` | `DELETE /api/gcp/instances/{name}` |
+| `oci:compute:destroy` | `DELETE /api/oci/instances/{ocid}` |
+
+### Creates and teardowns are not the same question
+
+The teardown actions were added because the asymmetry was hard to defend: the
+[auto-delete timer](auto-delete-timer.md) needs four gates and two arming clocks before it
+will delete a VM, while a human pressing **Destroy** on the same VM passed through none of
+them. The reaper was more constrained than the operator.
+
+That does not mean every policy should apply to both. **`allowed_regions` and
+`instance_size_caps` are exempt from teardowns**, matched on the action's verb
+(`destroy`, `decommission`, `delete`, `teardown`). They cap what you may *build*, and
+applying them to a destroy strands resources: an instance deployed into a region you later
+removed from the allow-list could no longer be cleaned up through the dashboard, which is
+the opposite of what a guardrail is for.
+
+`prod_window` **does** apply to teardowns, deliberately. "No changes on a Sunday" that let
+the destroys through would be half a freeze.
+
+A teardown's `request` document carries `region`, `name`, `workgroup`, and
+`has_deploy_job` — the last is false for a VM the dashboard did not provision (a VDI pool
+seat, or one recovered from the cloud), which is the hook for a policy like *never destroy
+something we did not build*.
 
 Each request is turned into a policy **input** document:
 
@@ -102,6 +129,9 @@ become the caller's `reasons`.
 | `allowed_regions.rego` | target region not in the allow-list | `admission_allowed_regions` |
 | `instance_size_caps.rego` | requested size/class is blocked | `admission_denied_instance_types` |
 | `prod_window.rego` | the current UTC weekday is frozen | `admission_prod_window` |
+
+The first two are **inert for teardown actions** (see above); `prod_window` applies to
+everything gated.
 
 Each policy is inert when its limit is empty, so you can enable the feature and turn
 on one control at a time.

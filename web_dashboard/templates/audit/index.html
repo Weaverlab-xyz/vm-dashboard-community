@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+
+{% block content %}
+<div x-data="auditLog()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Audit Log</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        <span x-text="total.toLocaleString()"></span> entr<span x-text="total === 1 ? 'y' : 'ies'"></span>
+        matching. Append-only and hash-chained &mdash; entries cannot be edited from here or anywhere else.
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="verify()" :disabled="verifying"
+              class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        <span x-text="verifying ? 'Verifying…' : 'Verify chain'"></span>
+      </button>
+      <a :href="exportUrl('csv')"
+         class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">CSV</a>
+      <a :href="exportUrl('json')"
+         class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">JSON</a>
+    </div>
+  </div>
+
+  <!-- Integrity. Silent until asked, then loud either way: an intact chain is the
+       thing an auditor wants stated, not assumed. -->
+  <div x-show="chain.ok === true" x-cloak
+       class="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+    <span class="font-semibold">Chain intact.</span>
+    <span x-text="chain.count.toLocaleString() + ' entries recompute cleanly.'"></span>
+  </div>
+  <div x-show="chain.ok === false" x-cloak
+       class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+    <span class="font-semibold">Chain BROKEN.</span>
+    First bad entry is seq <span class="font-mono" x-text="chain.first_broken_seq"></span>,
+    of <span x-text="chain.count.toLocaleString()"></span> checked. Entries at or after that
+    point cannot be trusted as written &mdash; this is database corruption or someone
+    editing history.
+  </div>
+
+  <!-- Filters -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-6">
+    <div class="flex flex-wrap items-end gap-4">
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Actor</label>
+        <input x-model="f.username" @keydown.enter="reload()" placeholder="username"
+               class="border border-gray-300 rounded-lg px-3 py-2 text-sm w-40">
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Action</label>
+        <select x-model="f.action" @change="reload()"
+                class="border border-gray-300 rounded-lg px-3 py-2 text-sm w-56">
+          <option value="">All actions</option>
+          <template x-for="a in actions" :key="a">
+            <option :value="a" x-text="a"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Target contains</label>
+        <input x-model="f.target" @keydown.enter="reload()" placeholder="i-0abc…"
+               class="border border-gray-300 rounded-lg px-3 py-2 text-sm w-44">
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">From</label>
+        <input type="date" x-model="f.since" @change="reload()"
+               class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">To</label>
+        <input type="date" x-model="f.until" @change="reload()"
+               class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+      </div>
+      <div class="flex-1 min-w-[10rem]">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Search</label>
+        <input x-model="f.q" @keydown.enter="reload()" placeholder="anything in action / target / details"
+               class="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full">
+      </div>
+      <button @click="reload()"
+              class="text-sm bg-gray-900 text-white hover:bg-gray-800 px-4 py-2 rounded-lg font-medium transition">Apply</button>
+      <button @click="clearFilters()"
+              class="text-sm text-gray-600 hover:text-gray-900 px-2 py-2">Clear</button>
+    </div>
+  </div>
+
+  <div x-show="error" x-cloak class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
+       x-text="error"></div>
+
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-gray-600">
+          <tr>
+            <th class="text-left font-medium px-4 py-3 w-20">Seq</th>
+            <th class="text-left font-medium px-4 py-3 w-44">When (UTC)</th>
+            <th class="text-left font-medium px-4 py-3 w-32">Actor</th>
+            <th class="text-left font-medium px-4 py-3 w-48">Action</th>
+            <th class="text-left font-medium px-4 py-3">Target</th>
+            <th class="text-left font-medium px-4 py-3 w-32">From</th>
+            <th class="text-left font-medium px-4 py-3 w-24">Details</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="e in entries" :key="e.id">
+            <tr class="hover:bg-gray-50 align-top">
+              <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="e.seq"></td>
+              <td class="px-4 py-3 whitespace-nowrap" x-text="(e.timestamp || '').replace('T', ' ').slice(0, 19)"></td>
+              <td class="px-4 py-3" x-text="e.username || '—'"></td>
+              <td class="px-4 py-3 font-mono text-xs" x-text="e.action"></td>
+              <td class="px-4 py-3 break-all text-gray-700" x-text="e.target_vm || '—'"></td>
+              <!-- Blank for anything the job worker did: a job has no client address,
+                   and its actor is the user recorded on the job row. -->
+              <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="e.ip_address || '—'"></td>
+              <td class="px-4 py-3">
+                <button x-show="Object.keys(e.details || {}).length"
+                        @click="open = (open === e.id ? null : e.id)"
+                        class="text-xs text-blue-700 hover:underline"
+                        x-text="open === e.id ? 'Hide' : 'Show'"></button>
+                <span x-show="!Object.keys(e.details || {}).length" class="text-xs text-gray-400">—</span>
+              </td>
+            </tr>
+          </template>
+          <template x-for="e in entries" :key="'d-' + e.id">
+            <tr x-show="open === e.id" x-cloak class="bg-gray-50">
+              <td colspan="7" class="px-4 py-3">
+                <pre class="text-xs text-gray-700 whitespace-pre-wrap" x-text="JSON.stringify(e.details, null, 2)"></pre>
+                <p class="mt-2 text-[11px] text-gray-400 font-mono break-all">
+                  entry_hash <span x-text="e.entry_hash"></span>
+                </p>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!loading && !entries.length" x-cloak>
+            <td colspan="7" class="px-4 py-10 text-center text-gray-500">
+              No entries match these filters.
+            </td>
+          </tr>
+          <tr x-show="loading" x-cloak>
+            <td colspan="7" class="px-4 py-10 text-center text-gray-500">Loading…</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50 text-sm">
+      <span class="text-gray-500">
+        Page <span x-text="page"></span> of <span x-text="Math.max(1, Math.ceil(total / pageSize))"></span>
+      </span>
+      <div class="flex gap-2">
+        <button @click="go(page - 1)" :disabled="page <= 1"
+                class="px-3 py-1.5 rounded-lg border border-gray-300 bg-white disabled:opacity-40">Previous</button>
+        <button @click="go(page + 1)" :disabled="page >= Math.ceil(total / pageSize)"
+                class="px-3 py-1.5 rounded-lg border border-gray-300 bg-white disabled:opacity-40">Next</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function auditLog() {
+  return {
+    entries: [], actions: [], total: 0, page: 1, pageSize: 50,
+    loading: false, verifying: false, error: '', open: null,
+    chain: { ok: null, count: 0, first_broken_seq: null },
+    f: { username: '', action: '', target: '', since: '', until: '', q: '' },
+
+    async init() {
+      await this.load();
+      try {
+        const r = await API.get('/api/audit/actions');
+        this.actions = r.actions || [];
+      } catch (e) { /* the filter degrades to "All actions"; the table still works */ }
+    },
+
+    // The filters the API understands, minus the blanks — so a cleared box means
+    // "no constraint" rather than "match the empty string".
+    params() {
+      const p = {};
+      for (const [k, v] of Object.entries(this.f)) if (v) p[k] = v;
+      // A date input gives a bare day; the API wants ISO. `until` covers the whole day.
+      if (p.since) p.since = p.since + 'T00:00:00';
+      if (p.until) p.until = p.until + 'T23:59:59';
+      return p;
+    },
+
+    query(extra = {}) {
+      return new URLSearchParams({ ...this.params(), ...extra }).toString();
+    },
+
+    exportUrl(fmt) { return '/api/audit/export?' + this.query({ fmt }); },
+
+    async load() {
+      this.loading = true; this.error = '';
+      try {
+        const r = await API.get('/api/audit?' + this.query({ page: this.page, page_size: this.pageSize }));
+        this.entries = r.entries || [];
+        this.total = r.total || 0;
+      } catch (e) {
+        this.error = (e && e.message) || 'Could not load the audit log.';
+        this.entries = []; this.total = 0;
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    reload() { this.page = 1; this.open = null; return this.load(); },
+    go(n) {
+      const last = Math.max(1, Math.ceil(this.total / this.pageSize));
+      if (n < 1 || n > last) return;
+      this.page = n; this.open = null; this.load();
+    },
+    clearFilters() {
+      this.f = { username: '', action: '', target: '', since: '', until: '', q: '' };
+      this.reload();
+    },
+
+    async verify() {
+      this.verifying = true;
+      try {
+        this.chain = await API.get('/api/audit/verify');
+      } catch (e) {
+        this.error = (e && e.message) || 'Verification failed to run.';
+      } finally {
+        this.verifying = false;
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

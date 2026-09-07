@@ -132,6 +132,9 @@ Two aggravating factors:
 
 ### Destroy is the least-governed write
 
+*(Fixed — see [Recommendation 2](#2-govern-the-destroy-seams-with-the-engine-that-already-ships).
+Kept in the present tense because it is the finding, not the fix.)*
+
 `api/aws.py:860`:
 
 ```python
@@ -167,6 +170,9 @@ Destroy on the same VM passes through none of them, and no change-freeze window 
 **The reaper is more constrained than the operator.**
 
 ### The audit log is write-only, and the chain has a hole
+
+*(Fixed — see [Recommendation 3](#3-make-the-audit-log-readable-and-close-the-chain).
+Kept in the present tense because it is the finding, not the fix.)*
 
 `services/audit_chain.py` gives every row a `seq`, a `prev_hash` and an `entry_hash`, so any
 edit, delete or reorder is detectable. **75 `log_audit` call sites** feed it — agent
@@ -336,6 +342,18 @@ when that gate exists.
 
 ### 2. Govern the destroy seams with the engine that already ships
 
+> **Shipped.** All four cloud consoles now check the workgroup before tearing a VM
+> down, reading each module's own `_accessible_workgroups` so the Destroy button and
+> the instance list cannot drift; an untagged resource is admin-only, as the listings
+> already treat one. `admission_service.enforce()` gained four teardown seams
+> (`aws:ec2:destroy`, `azure:vm:destroy`, `gcp:gce:destroy`, `oci:compute:destroy`),
+> and destroy jobs now carry the workgroup of the thing they tear down. The Rego
+> needed splitting to match: `allowed_regions` and `instance_size_caps` are exempt
+> from teardown verbs — capping them would have stranded any resource in a region
+> since removed from the allow-list — while `prod_window` covers teardowns on
+> purpose. `tests/test_destroy_guardrails.py` pins all of it, including the Rego
+> against a real OPA binary where one is present.
+
 **The finding:** `destroy_instance` has no workgroup check, and admission control has never
 seen a teardown.
 
@@ -361,6 +379,19 @@ synchronous deny on a single-tenant estate destroy during a change-freeze window
 community-edition admission control doing exactly what it already does, one seam over.
 
 ### 3. Make the audit log readable, and close the chain
+
+> **Shipped.** `ip_address` is inside the hash (chain v2) and populated from a
+> request-scoped context variable rather than through ~75 call sites; the upgrade
+> verifies the old chain under v1 **before** re-hashing and refuses a table that is
+> already broken, because re-blessing one is exactly what an attacker who edited a
+> row would want. `verify_audit_chain` streams instead of `.all()`, and stays a full
+> walk — resuming from a checkpoint would step over tampering in older rows, which
+> corrected the incremental plan sketched below. `notify_scanner` runs it on the
+> hourly pass and raises `audit.chain_broken` (critical, bucketed on the offending
+> seq). List/filter/actions/export endpoints and an admin-only `/audit` page ship
+> with it; the export carries the hashes and reads oldest-first so a receiver can
+> recompute the chain. See [audit-log.md](../audit-log.md);
+> `tests/test_audit_readable.py` pins it, the refusal most of all.
 
 **The finding:** 75 write sites, one boolean read, no page, no export, nothing scheduled —
 and `ip_address` sits outside the hash.

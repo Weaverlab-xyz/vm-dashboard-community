@@ -43,6 +43,10 @@ EVENT_SEVERITY = {
     "cost.budget_exceeded":  "warning",
     "secret.stale":          "warning",
     "config.drift":          "warning",
+    # Critical, and the only condition that is never merely informational:
+    # a tamper-evident log that stopped verifying is either corruption or
+    # someone editing history, and both want a human today.
+    "audit.chain_broken":    "critical",
     "notification.test":     "info",
 }
 
@@ -51,7 +55,7 @@ EVENT_SEVERITY = {
 # a thing that ignores the setting.
 DEFAULT_EVENT_TYPES = (
     "resource.expiring,resource.reaped,job.failed,"
-    "cost.budget_exceeded,secret.stale,config.drift"
+    "cost.budget_exceeded,secret.stale,config.drift,audit.chain_broken"
 )
 
 SEVERITY_ORDER = ("info", "warning", "critical")

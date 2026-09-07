@@ -69,6 +69,33 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
+def _assert_can_destroy(user: User, workgroup, what: str) -> None:
+    """Refuse a teardown of something this user cannot see.
+
+    Reads this module's own :func:`_accessible_workgroups`, so the Destroy button and
+    the instance list cannot disagree about who owns what — "you may destroy what you
+    can see" holds by construction rather than by two rules being kept in step.
+
+    An untagged resource is admin-only, which is exactly what the list endpoint already
+    does with it (``inst_wg is None`` is filtered out for non-admins). Note this keys on
+    ``is_admin`` like the rest of this module, NOT ``is_effective_admin`` — see
+    api/vms.py for the other rule and tests/test_dashboard_stats_api.py for why the two
+    must not be unified.
+    """
+    accessible = _accessible_workgroups(user)
+    if accessible is None:
+        return
+    wg = (workgroup or "").strip().lower()
+    if not wg:
+        raise HTTPException(
+            status_code=403,
+            detail=(f"{what} is not assigned to a workgroup, so only an admin can "
+                    "destroy it."))
+    if wg not in accessible:
+        raise HTTPException(
+            status_code=403, detail=f"Access denied to workgroup '{wg}'")
+
+
 def _aws_cfg(key: str, fallback: str = "") -> str:
     """Read a config key from config_service first, fall back to settings env var."""
     from ..services import config_service
@@ -888,14 +915,29 @@ async def destroy_instance(
                    "It may have already been terminated or was not deployed from this dashboard.",
         )
 
+    _assert_can_destroy(current_user, deploy_job.workgroup, f"Instance {instance_id}")
+
     # Terminate in the region the instance was deployed into (fall back to default
     # for instances deployed before multi-region support recorded a region).
     region = deploy_job.metadata_dict.get("region") or _aws_region()
+
+    # Pre-action policy gate (inert unless enabled + this action is gated). Destroy is
+    # the higher-blast-radius half of the pair and was ungated for its whole life.
+    from ..services import admission_service
+    admission_service.enforce(
+        "aws:ec2:destroy",
+        request={"region": region, "name": instance_id,
+                 "workgroup": deploy_job.workgroup, "has_deploy_job": True},
+        actor=current_user, db=db,
+    )
 
     destroy_job = job_service.create_job(
         db,
         job_type="ec2_destroy",
         created_by=current_user.username,
+        # Carried from the deploy row so the teardown is scoped like the thing it tears
+        # down; without it the destroy job belongs to no workgroup at all.
+        workgroup=deploy_job.workgroup,
         metadata={
             "instance_id": instance_id,
             "deploy_job_id": deploy_job.id,
