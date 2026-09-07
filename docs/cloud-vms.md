@@ -78,6 +78,84 @@ and `/vms` (unified cross-cloud inventory).
 
 ---
 
+## Power (start and suspend)
+
+A cloud VM used to be deploy-or-destroy. Every on-prem hypervisor here has had power
+control for its whole life; the four clouds had none, so an operator who wanted a VM off
+overnight used the cloud console — which puts this dashboard's inventory out of step with
+reality.
+
+`POST /api/{aws,azure,gcp,oci}/power/start` and `/power/stop`, with the instance
+identifier in the **body**, matching every other `/power/*` route here. Each queues a job,
+so the action gets an audit row, a `/jobs` entry and Live Output like any other.
+
+Requires `write` on that cloud, not `delete` — stopping a VM changes its state, it does
+not remove it — plus the same ownership check destroy uses: you can power what you can
+see, and an untagged VM is admin-only.
+
+**What "stop" means is not the same word on every cloud**, and the wrong choice is
+expensive and silent:
+
+| Cloud | What the dashboard calls | Why not the obvious one |
+|---|---|---|
+| AWS | `StopInstances` | Never Hibernate: it must be enabled at launch, is unsupported on most families, and silently degrades to a plain stop where it is not |
+| Azure | `begin_deallocate` | `begin_power_off` leaves the VM "Stopped" and **still billing for compute** |
+| GCP | `instances.stop` | `suspend` preserves RAM to disk and charges for that storage plus the reserved resources; `stop` reaches TERMINATED, where only disks bill |
+| OCI | `SOFTSTOP` | A hard `STOP` pulls the cord and risks a dirty filesystem on resume |
+
+**Stopping saves compute and nothing else.** Disks, public addresses and reserved capacity
+keep billing. A stopped VM is cheaper, not free.
+
+Power is deliberately **not** behind [Action Guardrails](policy-guardrails.md), where
+destroy is. A reversible action earns a lighter brake than an irreversible one, and a
+change-freeze that forbade *suspending* a VM would forbid the cheapest thing an operator
+can do during one.
+
+### Suspend schedules (AWS and GCP)
+
+A business-hours power window: suspend at 19:00, resume at 07:00, weekdays only. Set per
+VM; off until you set one, and the feature itself is behind
+`vm_suspend_schedule_enabled` (default off).
+
+`PUT /api/suspend/{deploy_job_id}` with `suspend_at`, optional `resume_at`, an IANA
+`timezone` and a 7-character `days` mask (Monday first). `GET` reads it back along with
+whether the VM may have one; `DELETE` clears it — clearing never changes the VM's current
+power state, only stops it happening again.
+
+**The rule is BOUNDARY CROSSED, not "should it be asleep now."** Those differ in exactly
+the case that matters: start a VM by hand at 20:00 for a call, and a state check would
+suspend it again on the next sweep four minutes later, forever. A boundary check leaves it
+alone until tomorrow's suspend time — your action wins until the schedule next has
+something new to say. After an outage that swallowed both a suspend and a resume, the
+later crossing wins, so the VM ends where the schedule says it should be now.
+
+A schedule that has never been evaluated acts on nothing. Setting one cannot suspend a VM
+for boundaries crossed before it existed — the same arming rule the auto-delete timer uses.
+
+**Azure and OCI cannot be scheduled**, and the reasons are about how this dashboard
+provisions and wires them rather than about the clouds:
+
+| Cloud | Why not |
+|---|---|
+| **Azure** | Estate VMs get a `Dynamic` private address (POV's get `Static`, deliberately). A deallocated VM can return on a different one — and by then the address is written into a PRA jump item, a Password Safe managed system and an Entitle integration, none of which have an update path. Repair means destroy-and-recreate, which mints a new Shell Jump and drops the association. |
+| **OCI** | Its wire-up uses the **public** address, and an ephemeral public IP is released on stop. After one cycle a jump item could point at an address that now belongs to somebody else's instance. |
+
+Two more refusals apply even on AWS and GCP, each with the reason returned to the caller:
+
+- **A VM wired into BeyondTrust at its public address.** Both clouds prefer the private
+  address and fall back to the public one; only the private one survives a stop.
+- **A VM under Password Safe auto-management.** AWS onboards via the `ssm` plugin and GCP
+  via `gcpvm`; both reach the guest through the cloud's own agent and neither can reach a
+  stopped instance. Password Safe rotates on its own clock, which this dashboard cannot
+  pause, so a nightly suspend would mean a nightly rotation failure. Detach
+  auto-management if you want the VM scheduled — that is a decision for you to make, not
+  one for this to make quietly on your behalf.
+
+The sweep runs every `vm_suspend_sweep_interval_minutes` (default 10) and never powers
+anything itself: it enqueues the identical `*_power` job the Suspend button creates, so
+the audit row, the `/jobs` entry and the workgroup all come out the same either way.
+
+
 ## Provisioning — per cloud
 
 Each cloud reads its credentials + a default subnet + an SSH-keypair secret from config

@@ -415,6 +415,34 @@ async def list_amis(region: str) -> list:
 
 # ── EC2 instance operations ────────────────────────────────────────────────────
 
+
+# ── Power (start / suspend) ───────────────────────────────────────────────────
+# A cloud VM was deploy-or-destroy until this: every on-prem hypervisor here has had
+# /power/* for its whole life, and the only lifecycle lever the four clouds offered was
+# the irreversible one. The per-cloud verbs are not interchangeable — each has a wrong
+# choice that looks right and costs money, so they are spelled out where they are made.
+
+
+def _power_instance_sync(region: str, instance_id: str, action: str) -> None:
+    ec2 = _get_ec2(region)
+    if action == "start":
+        ec2.start_instances(InstanceIds=[instance_id])
+        return
+    # A plain stop, never Hibernate: hibernation has to be enabled at launch, is
+    # unsupported on most instance families and every Windows AMI here, and silently
+    # falls back to a stop where it is not — so asking for it would make the resume path
+    # depend on which family the instance happened to be launched from.
+    ec2.stop_instances(InstanceIds=[instance_id])
+
+
+async def power_instance(region: str, instance_id: str, action: str) -> None:
+    """Start or stop one EC2 instance. Returns as soon as AWS accepts the transition."""
+    try:
+        await _to_thread(_power_instance_sync, region, instance_id, action)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to {action} {instance_id}: {e}") from e
+
+
 def _describe_instances_sync(region: str, instance_ids: list) -> list:
     if not instance_ids:
         return []

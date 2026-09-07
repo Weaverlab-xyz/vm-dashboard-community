@@ -22,6 +22,7 @@ import logging
 import uuid
 from typing import List, Optional
 
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -58,6 +59,22 @@ def _oci_cfg(key: str, fallback: str = "") -> str:
 
 def _compartment() -> str:
     return _oci_cfg("oci_compartment_ocid") or _oci_cfg("oci_tenancy_ocid")
+
+
+def _find_deploy_job(db: Session, job_type: str, meta_key: str, value: str):
+    """The completed, not-yet-destroyed deploy job for one resource, or None.
+
+    Shared by destroy and power so the two cannot disagree about what counts as an active
+    deployment — they resolve the same row, and therefore the same workgroup.
+    """
+    for job in (db.query(Job)
+                .filter(Job.job_type == job_type, Job.status == "completed")
+                .order_by(Job.created_at.desc())
+                .all()):
+        meta = job.metadata_dict
+        if meta.get(meta_key) == value and not meta.get("destroyed"):
+            return job
+    return None
 
 
 def _region() -> str:
@@ -110,8 +127,11 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
-def _assert_can_destroy(user: User, workgroup, what: str) -> None:
-    """Refuse a teardown of something this user cannot see.
+def _assert_can_act(user: User, workgroup, what: str) -> None:
+    """Refuse acting on something this user cannot see.
+
+    Guards both teardown and power: the question is ownership, which does not
+    change with the verb.
 
     Reads this module's own :func:`_accessible_workgroups`, so the Destroy button and
     the instance list cannot disagree about who owns what. A resource with no deploy job has
@@ -522,6 +542,62 @@ async def _fan_out_batch(
     )
 
 
+
+# ── Power (start / suspend) ──────────────────────────────────────────────────
+# Parity with the six surfaces that have always had it — the five hypervisors plus VMware
+# Workstation. A cloud VM was deploy-or-destroy, so an operator who wanted one off
+# overnight used the cloud console, which puts this dashboard's inventory out of step with
+# reality.
+#
+# The identifier travels in the BODY, not the path, matching every existing /power/* route
+# here. It is also the only shape that works across all four clouds: api/oci.py binds an
+# OCID with a greedy `:path` converter, which would swallow a `/power/start` suffix whole.
+#
+# `write`, not `delete`: stopping a VM changes its state, it does not remove it.
+#
+# Deliberately NOT behind admission control, where destroy is. `services/pov_spend.py`
+# already made the argument this leans on — a reversible action earns a lighter brake than
+# an irreversible one — and a change-freeze that forbade *suspending* a VM would forbid
+# the cheapest thing an operator can do during one. Ownership is the gate here.
+
+class PowerOpRequest(BaseModel):
+    instance_ocid: str
+
+
+def _power_endpoint(op: str):
+    async def _handler(
+        payload: PowerOpRequest,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(require_permission("oci", "write")),
+    ):
+        if not _configured():
+            raise HTTPException(status_code=400,
+                                detail="OCI not configured — run the setup wizard.")
+        deploy_job = _find_deploy_job(db, "oci_deploy", "instance_ocid", payload.instance_ocid)
+        _assert_can_act(current_user, deploy_job.workgroup if deploy_job else None, "This instance")
+
+        job = job_service.create_job(
+            db,
+            job_type="oci_power",
+            created_by=current_user.username,
+            workgroup=deploy_job.workgroup if deploy_job else None,
+            metadata={"action": op, "instance_ocid": payload.instance_ocid,
+                      "deploy_job_id": deploy_job.id if deploy_job else None},
+        )
+        job_service.log_audit(db, current_user.username, "oci_power",
+                              details={"action": op, "instance_ocid": payload.instance_ocid})
+        verb = "Start" if op == "start" else "Suspend"
+        return {"job_id": job.id, "status": "pending", "message": f"{verb} queued"}
+
+    return _handler
+
+
+router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
+                     summary="Start a stopped instance")
+router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
+                     summary="Soft-stop an instance (asks the guest first, then falls back)")
+
+
 # ── Bulk Deploy (multi-select: one instance per selected image) ───────────────
 
 @router.post("/bulk-deploy", response_model=OCIBulkDeployResponse)
@@ -786,15 +862,9 @@ async def destroy_instance(
     if not _configured():
         raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
 
-    deploy_job = None
-    for j in (db.query(Job)
-              .filter(Job.job_type == "oci_deploy", Job.status == "completed").all()):
-        meta = j.metadata_dict
-        if meta.get("instance_ocid") == instance_ocid and not meta.get("destroyed"):
-            deploy_job = j
-            break
+    deploy_job = _find_deploy_job(db, "oci_deploy", "instance_ocid", instance_ocid)
 
-    _assert_can_destroy(current_user, deploy_job.workgroup if deploy_job else None,
+    _assert_can_act(current_user, deploy_job.workgroup if deploy_job else None,
                         "This instance")
 
     # Pre-action policy gate (inert unless enabled + this action is gated).

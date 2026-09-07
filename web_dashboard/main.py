@@ -111,6 +111,11 @@ async def lifespan(app: FastAPI):
     warmers.append(
         asyncio.create_task(_expiry_sweeper_loop(), name="expiry_sweeper_loop")
     )
+    # Suspend schedules. Same "always launched, no-ops while off" contract as the two
+    # above, so enabling it in Settings activates the next pass without a restart.
+    warmers.append(
+        asyncio.create_task(_suspend_sweeper_loop(), name="suspend_sweeper_loop")
+    )
     # POV reconcile — always launched; no-ops while POV environments are off or masked,
     # so turning the feature on activates the next pass without a restart.
     warmers.append(
@@ -258,6 +263,36 @@ async def _ci_sweeper_loop() -> None:
 
 
 # ── Auto-delete timer sweeper loop ───────────────────────────────────────────
+
+async def _suspend_sweeper_loop() -> None:
+    """Enqueue one suspend-schedule sweep per interval.
+
+    Same shape and the same reasoning as :func:`_expiry_sweeper_loop`: this ONLY enqueues,
+    and ``jobs_worker._claim_one``'s rowcount decides which of the two app workers and
+    three worker replicas actually runs the pass. Its own loop rather than a branch inside
+    the auto-delete one because that is gated on ``resource_expiry_enabled``, and a power
+    window must work without the destructive timer.
+    """
+    from .database import SessionLocal
+    from .services import suspend_sweeper
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                suspend_sweeper.enqueue_sweep_if_due(db)
+            finally:
+                db.close()
+        except Exception:                              # noqa: BLE001
+            logger.warning("suspend sweep enqueue failed", exc_info=True)
+        # Re-read live, so a Settings change lands on the next pass without a restart.
+        try:
+            from .services import suspend_sweeper as _s
+            delay = _s.interval_seconds()
+        except Exception:                              # noqa: BLE001
+            delay = 600
+        await asyncio.sleep(delay)
+
 
 async def _expiry_sweeper_loop() -> None:
     """Enqueue one auto-delete (resource expiry) sweep per interval.
@@ -839,7 +874,8 @@ from .api import cert_lab as cert_lab_api  # noqa: E402
 from .api import cloud_functions as cloud_functions_api  # noqa: E402
 from .api import entitle_rest as entitle_rest_api  # noqa: E402
 from .api import pra as pra_api  # noqa: E402
-from .api import audit as audit_api  # noqa: E402
+from .api import audit as audit_api
+from .api import suspend as suspend_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
@@ -936,6 +972,7 @@ app.include_router(workgroups_api.router)
 app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
 app.include_router(audit_api.router)
+app.include_router(suspend_api.router)
 app.include_router(docs_pages.router)
 # Remote on-prem agents. Gated: this is the only router that accepts requests from
 # outside the dashboard's own trust domain, so it must be off unless asked for.

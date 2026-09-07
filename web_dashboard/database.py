@@ -634,6 +634,25 @@ class Job(Base):
     # the dashboard's "Needs attention" item, which is derived client-side on every
     # poll and has its own per-browser dismissal.
     expiry_warned_at = Column(DateTime, nullable=True)
+    # ── Suspend schedule ──────────────────────────────────────────────────────
+    # Business-hours power windows for a cloud VM. On the deploy job row for the same
+    # reason expires_at is: a VM has no inventory table, so its deploy job IS its record
+    # of existence. NULL throughout = no schedule, which is what every existing row
+    # backfills to — enabling the feature on an existing fleet selects nothing, by
+    # construction rather than by a guard.
+    #
+    # Read by services/suspend_schedule.py, which is duck-typed on exactly these five
+    # attributes and shares them with PovEnvironment. Keeping the names identical is what
+    # lets one policy module serve both without knowing which it was handed.
+    suspend_at_local = Column(String(5), nullable=True)      # "HH:MM", local to the tz below
+    resume_at_local = Column(String(5), nullable=True)       # "HH:MM"; NULL = never wake it
+    schedule_timezone = Column(String(64), nullable=True)    # IANA, e.g. Europe/London
+    schedule_days = Column(String(7), nullable=True)         # 7 chars, Monday first, '1' = on
+    # When the schedule was last evaluated. The rule is BOUNDARY CROSSED, not "should it
+    # be asleep now" — so this latch is what stops an operator who starts a VM by hand at
+    # 20:00 from having it suspended again four minutes later, forever. NULL means never
+    # checked, and due_action refuses to act on that first pass.
+    schedule_last_checked_at = Column(DateTime, nullable=True)
     status = Column(String(20), nullable=False, default="pending", index=True)  # pending, running, completed, failed, cancelled
     progress_pct = Column(Integer, default=0)
     progress_message = Column(Text)
@@ -2400,6 +2419,11 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN accessor_integration_id VARCHAR(64)",
             "ALTER TABLE pov_environments ADD COLUMN accessor_tf_state TEXT",
             "ALTER TABLE oauth_group_mappings ADD COLUMN default_permissions TEXT",
+            "ALTER TABLE jobs ADD COLUMN suspend_at_local VARCHAR(5)",
+            "ALTER TABLE jobs ADD COLUMN resume_at_local VARCHAR(5)",
+            "ALTER TABLE jobs ADD COLUMN schedule_timezone VARCHAR(64)",
+            "ALTER TABLE jobs ADD COLUMN schedule_days VARCHAR(7)",
+            "ALTER TABLE jobs ADD COLUMN schedule_last_checked_at TIMESTAMP",
             "ALTER TABLE jobs ADD COLUMN cloud_resource_id VARCHAR(255)",
             "ALTER TABLE hypervisor_vm_cache ADD COLUMN guest_os VARCHAR(64)",
             # A workstation VMX path outgrows VARCHAR(128); see HypervisorVMCache.scope.

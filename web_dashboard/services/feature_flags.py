@@ -198,6 +198,8 @@ def flags() -> dict:
         # on an estate one. Read by api/mcp_server._MCPAuth, which cannot use
         # main._feature_gate because /mcp is a mount rather than a router.
         "mcp_server_enabled":   enabled("mcp_server_enabled",    settings.mcp_server_enabled),
+        "vm_suspend_schedule_enabled": enabled("vm_suspend_schedule_enabled",
+                                               settings.vm_suspend_schedule_enabled),
         "admission_control_enabled": enabled("admission_control_enabled", settings.admission_control_enabled),
         # Auto-delete timer — gates the Expires column on /inventory and the dashboard's
         # "expiring soon" warning. Deletion has its own second gate
@@ -311,6 +313,7 @@ def feature_map() -> dict:
         # api/setup._FEATURE_MODELS's, since the toggle hydrates from
         # map[intg.key] and PATCHes /api/setup/feature/<intg.key>.
         "mcp_server":   raw["mcp_server_enabled"],
+        "vm_suspend_schedule": raw["vm_suspend_schedule_enabled"],
         "cloud_database": raw["cloud_database_enabled"],
         "k8s_management": raw["k8s_management_enabled"],
         "cloud_functions": raw["cloud_functions_enabled"],

@@ -1713,6 +1713,37 @@ async def terminate_vm(rg: str, vm_name: str) -> None:
         raise AzureError(f"Failed to terminate VM {vm_name}: {e}") from e
 
 
+
+# ── Power (start / suspend) ───────────────────────────────────────────────────
+# A cloud VM was deploy-or-destroy until this: every on-prem hypervisor here has had
+# /power/* for its whole life, and the only lifecycle lever the four clouds offered was
+# the irreversible one. The per-cloud verbs are not interchangeable — each has a wrong
+# choice that looks right and costs money, so they are spelled out where they are made.
+
+
+def _power_vm_sync(cred, sub_id: str, rg: str, vm_name: str, action: str) -> None:
+    compute = _get_compute(cred, sub_id)
+    if action == "start":
+        compute.virtual_machines.begin_start(rg, vm_name).result()
+        return
+    # DEALLOCATE, never begin_power_off. Power-off leaves the VM "Stopped" and still
+    # billing for its compute, so a schedule built on it would pay the full bill every
+    # night while every page reported the fleet asleep. Only deallocate reaches
+    # "Stopped (deallocated)".
+    compute.virtual_machines.begin_deallocate(rg, vm_name).result()
+
+
+async def power_vm(rg: str, vm_name: str, action: str) -> None:
+    """Start or deallocate one Azure VM."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        await _to_thread(_power_vm_sync, cred, sub_id, rg, vm_name, action)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to {action} VM {vm_name}: {e}") from e
+
+
 # ── Tunnel-capable BeyondTrust Jumpoint on an Azure VM ────────────────────────
 # Azure Container Instances (the run_aci_jumpoint_task path) is serverless and
 # CANNOT do protocol tunneling — a BT Jumpoint needs NET_ADMIN + NET_RAW +

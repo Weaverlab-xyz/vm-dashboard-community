@@ -118,11 +118,11 @@ def _schedule_fields(suspend_at: str, resume_at: str, tz_name: str, days: str) -
     schedule that only fails when the sweep reads it would move a form error into a
     background job, three weeks later, against a POV that is already running.
     """
-    from . import pov_schedule
+    from . import suspend_schedule
     try:
-        return pov_schedule.validate(suspend_at=suspend_at, resume_at=resume_at,
+        return suspend_schedule.validate(suspend_at=suspend_at, resume_at=resume_at,
                                      tz_name=tz_name, days=days)
-    except pov_schedule.ScheduleError as exc:
+    except suspend_schedule.ScheduleError as exc:
         raise BlueprintError(str(exc)) from None
 
 

@@ -391,6 +391,30 @@ def _list_subnets_sync(compartment_id: str, vcn_id: str = "") -> list[dict]:
     return subnets
 
 
+
+# ── Power (start / suspend) ───────────────────────────────────────────────────
+# A cloud VM was deploy-or-destroy until this. The per-cloud verb is not interchangeable —
+# each cloud has a wrong choice that looks right and costs money.
+
+
+def _power_instance_sync(instance_ocid: str, action: str) -> None:
+    import oci
+
+    compute = oci.core.ComputeClient(_oci_config())
+    # SOFTSTOP asks the guest to shut down and falls back to a hard stop after a timeout.
+    # A plain STOP is the pull-the-cord version and risks a dirty filesystem on a VM
+    # somebody resumes the next morning.
+    compute.instance_action(instance_ocid, "START" if action == "start" else "SOFTSTOP")
+
+
+async def power_instance(instance_ocid: str, action: str) -> None:
+    """Start or soft-stop one OCI compute instance."""
+    try:
+        await _to_thread(_power_instance_sync, instance_ocid, action)
+    except Exception as e:
+        raise OCIError(f"Failed to {action} instance: {e}") from e
+
+
 def _get_network_options_sync(compartment_id: str, vcn_id: str,
                               availability_domain: str = "",
                               image_ocid: str = "") -> dict:

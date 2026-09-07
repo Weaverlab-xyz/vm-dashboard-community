@@ -440,6 +440,16 @@ ranks fourth rather than first. The appeal is real: `pov_schedule.due_action(row
 and `pov_spend.accrue(prev, at, rate, now)` are pure, clock-free and duck-typed on `row`, so
 the policy genuinely ports. The cost is everywhere else.
 
+> **Phase 0 shipped.** `/power/start` and `/power/stop` on all four clouds, with the
+> identifier in the body (the shape every other `/power/*` route uses, and the only
+> one that survives OCI's greedy `:path` OCID converter). New `*_power` job types in
+> the LIGHT tier; `write` rather than `delete`; the same ownership guard destroy uses,
+> renamed `_assert_can_act` now that it covers two verbs; and `_find_deploy_job`
+> extracted so power and destroy cannot disagree about what an active deployment is.
+> Deliberately not behind admission control — see `tests/test_cloud_power.py`, which
+> also pins each cloud's verb, the wrong one being expensive and silent in all four
+> cases. Phases 1–2 remain; the blockers below are unchanged.
+
 **Phase 0 — the primitive.** `/power/start` and `/power/stop` on the four cloud routers using
 the `_power_endpoint` shape, backed by new `*_power` job types, with the workgroup check
 Recommendation 2 adds to destroy. `api/vms.py:257` is the best template, because it
@@ -456,6 +466,15 @@ per-VM power primitive in the POV code to reuse; Phase 0 writes one.
 Phase 0 has standalone value and should be judged on its own. An operator who wants a VM off
 overnight currently uses the cloud console, which puts the dashboard's inventory out of step
 with reality.
+
+> **Phase 1 shipped, AWS and GCP only.** `pov_schedule` promoted to
+> `suspend_schedule` (profile-neutral; the policy was never POV-specific), five
+> schedule columns on `jobs`, a `suspend_sweep` job type with its own loop — not
+> folded into `expiry_sweep`, which is gated on the destructive timer's flag — and
+> `vm_suspend_policy`, a pure predicate that refuses Azure and OCI for the reasons
+> below plus two more the audit missed: a VM wired at its public address, and one
+> under Password Safe auto-management, whose `ssm`/`gcpvm` plugins cannot reach a
+> stopped instance. Every refusal returns its reason. Phase 2 (spend caps) remains.
 
 **Phases 1 and 2 — schedules, then spend caps — have a prerequisite POV did not.** This is
 the part to know before starting:
