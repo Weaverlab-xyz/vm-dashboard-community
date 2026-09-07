@@ -27,7 +27,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-CLOUDS = ("aws", "azure", "gcp")
+CLOUDS = ("aws", "azure", "gcp", "oci")
 
 # Statuses a reconcile pass may overwrite. A row in any other state belongs to the job
 # driving it: `provisioning` legitimately has no host yet and `deleting` is about to have

@@ -1689,6 +1689,27 @@ class Settings(BaseSettings):
     # BeyondTrust PRA per-cloud overrides (fall back to the shared bt_* keys).
     oci_bt_jump_group_name: str = ""      # BT jump group for OCI Shell Jumps (falls back to bt_jump_group_name)
     oci_jumpoint_name: str = ""           # Jumpoint name for OCI Shell Jumps (falls back to bt_jumpoint_name)
+    # Shared, ref-counted gateway host inside the VCN (services/jumpoint_host_service).
+    # "none" keeps the historical bring-your-own behaviour — no host is created and the
+    # wire-up targets the PUBLIC address, because nothing in the VCN can broker a private
+    # one. "shared" makes OCI behave like the other three clouds: a gateway instance is
+    # ensured on deploy, torn down when the last resource using it goes, and the wire-up
+    # targets the PRIVATE address — which is also what lets an OCI VM carry a suspend
+    # schedule (see services/vm_suspend_policy). Default "none": turning it on creates a
+    # billable instance, which an upgrade must never do on its own.
+    oci_vm_jumpoint_mode: str = "none"    # "none" | "shared"
+    # The gateway host's own compute display name. DELIBERATELY NOT oci_jumpoint_name,
+    # which above means the PRA Gateway the Shell Jump binds to — a different thing that
+    # happens to share the word. Reusing it would point the launcher at a PRA display name
+    # and the jump items at an instance.
+    oci_jumpoint_host_name: str = "oci-shared-jumpoint"
+    oci_jumpoint_subnet_ocid: str = ""    # gateway VNIC subnet; blank → oci_default_subnet_ocid
+    oci_jumpoint_image_ocid: str = ""     # blank → newest Oracle Linux platform image
+    oci_jumpoint_shape: str = "VM.Standard.E4.Flex"
+    oci_jumpoint_ocpus: float = 1.0
+    oci_jumpoint_memory_gbs: float = 6.0
+    oci_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"   # gateway container image
+    oci_jumpoint_docker_deploy_key: str = ""   # BT gateway deploy key (encrypted at rest)
 
     # Entitle integration — shared API credentials (used by machine-identity
     # JIT, user-JIT, and resource registration below).

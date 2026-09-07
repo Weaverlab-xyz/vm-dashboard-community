@@ -123,6 +123,17 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
                 except Exception as exc:
                     logger.warning("Could not fetch OCI SSH key: %s", exc)
 
+        # Ensure the shared gateway BEFORE launching, so the address decision below is
+        # made on a fact rather than a hope. Best-effort by contract, like every other
+        # cloud's: no gateway means the deploy still happens, wired publicly.
+        gateway_host_id = None
+        if _cfg_svc.get_bool("pra_enabled"):
+            from ..services import jumpoint_host_service
+            if jumpoint_host_service.oci_shared_gateway_enabled():
+                job_service.update_progress(db, job_id, 20, "Ensuring the shared gateway…")
+                gateway_host_id = await jumpoint_host_service.ensure_jumpoint_host(
+                    "oci", _region())
+
         job_service.update_progress(db, job_id, 25, "Launching compute instance…")
         result = await oci_service.launch_instance(
             compartment_id=compartment,
@@ -139,13 +150,26 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
             workgroup=payload.workgroup,
         )
 
-        hostname = result.get("public_ip") or result.get("private_ip") or payload.instance_name
+        # WHICH address the wire-up targets follows whether there is a gateway in the
+        # VCN to broker it. With `oci_vm_jumpoint_mode = shared` the dashboard runs one,
+        # so the private address is reachable and is preferred — as on the other three
+        # clouds, and it is what lets this instance carry a suspend schedule, because a
+        # private address survives a stop where an auto-assigned public one does not.
+        # Left at "none" (the default) nothing brokers a private address, so the historical
+        # public-first order stands and existing installs are untouched.
+        if gateway_host_id:
+            hostname = (result.get("private_ip") or result.get("public_ip")
+                        or payload.instance_name)
+        else:
+            hostname = (result.get("public_ip") or result.get("private_ip")
+                        or payload.instance_name)
         final_meta = {
             # The address handed to PRA, Entitle and Password Safe. Recorded because
             # `vm_suspend_policy` has to know which one it was: three runners prefer
             # the private address and OCI prefers the public one — it cannot be
             # inferred from which addresses exist.
             "wired_address": hostname,
+            "jumpoint_host_id": gateway_host_id,
             "instance_ocid":  result["ocid"],
             "instance_name":  result["display_name"],
             "shape":          result.get("shape"),
@@ -282,6 +306,19 @@ async def _run_destroy(job_id: str, instance_ocid: str, deploy_job_id: Optional[
             deploy_meta["destroyed"] = True
             if job_service.get_job(db, deploy_job_id):
                 job_service.set_completed(db, deploy_job_id, deploy_meta)
+
+        # Release the shared gateway, DELIBERATELY after the `destroyed` flag above:
+        # _active_oci_count counts live rows and takes no "exclude me" argument, so
+        # reaping first would let the row being destroyed count itself and the gateway
+        # would never be reclaimed. aws/gcp/azure_vm_service order it the same way for
+        # the same reason.
+        try:
+            from ..services import jumpoint_host_service
+            if jumpoint_host_service.oci_shared_gateway_enabled():
+                await jumpoint_host_service.teardown_jumpoint_host_if_idle(
+                    db, "oci", _region())
+        except Exception as exc:      # noqa: BLE001 — never fail a destroy over cleanup
+            result["jumpoint_host_teardown_error"] = str(exc)
 
         job_service.set_completed(db, job_id, result)
         # Prefix, not an exact key: the instance list is cached per region+compartment

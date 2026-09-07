@@ -29,8 +29,11 @@ from . import config_service, region_catalog, region_config
 
 logger = logging.getLogger(__name__)
 
-# Clouds a managed node can be hosted on. Same order as gateway_service.CLOUDS so
-# the two pickers list identically.
+# Clouds a managed node can be hosted on — meaning a `_placement_<cloud>` exists below.
+# A SUBSET of gateway_service.CLOUDS, in the same order: a node needs a gateway to broker
+# into, so every cloud here must be one there, but not the reverse. OCI can host a gateway
+# and cannot yet host a node. Adding a cloud here without a placement gets it offered in
+# the picker and refused at deploy time.
 CLOUDS = ("aws", "azure", "gcp")
 
 # Plain-HTTP echo endpoints used to learn the dashboard's own public egress IP.

@@ -20,7 +20,7 @@ as [Databases](databases.md) and [Kubernetes](kubernetes.md):
 | **AWS** | EC2 (Linux + Windows) | ✅ | ✅ `ssm` plugin (or `ssh`) | ✅ SSH ephemeral |
 | **Azure** | VM (Linux + Windows) | ✅ (Linux; Windows → RDP jump) | ✅ `azurevm` plugin (or `ssh`) | ✅ SSH ephemeral |
 | **GCP** | GCE (Linux) | ✅ | ✅ `gcpvm` plugin (or `ssh`) | ✅ SSH ephemeral |
-| **OCI** | Compute (Linux) | ✅ (bring your own gateway¹) | ⚠️ `ssh` method only | ✅ SSH ephemeral |
+| **OCI** | Compute (Linux) | ✅ (shared gateway, or bring your own¹) | ⚠️ `ssh` method only | ✅ SSH ephemeral |
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
 
@@ -57,9 +57,10 @@ deploy still succeeds):
 
 1. **Ensure the gateway host** (only when `pra_enabled`) — AWS uses a shared
    ref-counted ECS host, Azure the shared `clouddb-jumpoint` VM (see
-   `azure_vm_jumpoint_mode`), GCP the shared COS host (see `gcp_vm_jumpoint_mode`);
-   **OCI does nothing here** (bring your own). In a batch this happens once for the
-   whole run.
+   `azure_vm_jumpoint_mode`), GCP the shared COS host (see `gcp_vm_jumpoint_mode`), and
+   OCI a shared Oracle Linux instance when `oci_vm_jumpoint_mode` is `shared` —
+   **`none` by default**, which keeps OCI's historical bring-your-own behaviour. In a
+   batch this happens once for the whole run.
 2. **Ensure on-demand egress** — AWS: the shared **NAT instance** (`aws_nat_instance_enabled`)
    plus **SSM interface endpoints** (`aws_ssm_endpoints_enabled`). GCP: a **Cloud NAT**
    gateway for the VM subnet plus the egress allow rule (`gcp_vm_nat_enabled`). Both are
@@ -158,6 +159,47 @@ any VM of this name anywhere the credentials reach". A VM discovery does not sho
 zone, which the request carries, and an OCID is globally unique. That behaviour is unchanged
 and is not gated by this flag.)
 
+### OCI's shared gateway
+
+OCI was the one cloud where the dashboard provisioned nothing inside the VCN — you brought
+your own gateway. That gap reached further than it looked. With nothing in the VCN to broker
+a session, the OCI deploy could not assume a private address was reachable, so it wired the
+**public** one into every jump item, Password Safe system and Entitle registration; and
+because an auto-assigned public address does not survive a stop, those instances could not
+carry a suspend schedule either. One missing host, three consequences.
+
+Set **`oci_vm_jumpoint_mode = shared`** and OCI behaves like the other three: a small Oracle
+Linux instance runs the BeyondTrust gateway container privileged with `/dev/net/tun` (the
+capabilities a protocol tunnel needs), reference-counted by `jumpoint_host_service` so it is
+created on the first deploy that needs it and terminated when the last resource using it
+goes.
+
+**`none` is the default**, because turning this on creates a billable instance and an upgrade
+must never do that on its own. Left at `none`, nothing changes: no host, public-first
+wire-up, exactly as before.
+
+| Key | Default | What it is |
+|---|---|---|
+| `oci_vm_jumpoint_mode` | `none` | `none` (bring your own) or `shared` (dashboard-managed) |
+| `oci_jumpoint_host_name` | `oci-shared-jumpoint` | the gateway **instance's** display name |
+| `oci_jumpoint_subnet_ocid` | — | gateway VNIC subnet; falls back to `oci_default_subnet_ocid` |
+| `oci_jumpoint_docker_deploy_key` | — | BeyondTrust gateway deploy key; falls back to `bt_jumpoint_docker_deploy_key` |
+| `oci_jumpoint_image_ocid` | — | blank resolves the newest Oracle Linux platform image |
+| `oci_jumpoint_shape` / `_ocpus` / `_memory_gbs` | `VM.Standard.E4.Flex` / 1 / 6 | the gateway instance's size |
+
+**Watch the name.** `oci_jumpoint_host_name` is the compute instance; **`oci_jumpoint_name`**
+is the PRA Gateway a Shell Jump binds to. They are different things that share a word, and
+GCP resolves the same collision the other way round (there `gcp_jumpoint_name` *is* the
+instance), so do not reason about one from the other.
+
+**What changes when you turn it on.** New OCI deploys are wired at their **private** address
+instead of their public one — which is what makes them schedulable (below). Instances
+deployed before you turned it on keep the address they were wired at; `terraform_pra_service`
+has no update path, so there is nothing to migrate them with short of redeploying.
+
+The gateway instance carries the dashboard's `managed-by` tag, so it appears in the managed
+listing rather than in unmanaged discovery.
+
 ### Suspend schedules (all four clouds)
 
 A business-hours power window: suspend at 19:00, resume at 07:00, weekdays only. Set per
@@ -195,7 +237,7 @@ that runner gave rather than a guess.
 |---|---|
 | **AWS, GCP** | Schedulable as deployed. The private address survives a stop, and it is the one the wire-up used. |
 | **Azure** | ARM releases a `Dynamic` private address when a VM is deallocated, so it can return on a different one. The address is **pinned** before a schedule is allowed: `Dynamic` → `Static` at the address the NIC already has. New deploys pin themselves; an older VM is pinned the first time somebody schedules it, audited as `azure_address_pinned` and named in the response. **The address does not change** — only ARM's freedom to reclaim it does. A static *private* address is free on Azure. |
-| **OCI** | Schedulable when deployed **without** a public address (`assign_public_ip=False`), because then the wire-up used the private one. Deployed *with* one, it was wired publicly and is refused. |
+| **OCI** | Schedulable when the wire-up used the private address — which is either a deploy with `assign_public_ip=False`, or **any** deploy made while `oci_vm_jumpoint_mode = shared` (see above). Wired publicly, it is refused. |
 
 Note what the Azure pin does **not** do: it never picks an address. `pov_cloud_azure` does pick
 one — scan the resource group, take the lowest free — which is safe because each POV
