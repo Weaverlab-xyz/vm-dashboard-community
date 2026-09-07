@@ -1,13 +1,16 @@
 """Periodic condition scan: the events that are a *state*, not a moment.
 
 A job failing is an event — something happened, and the code that made it happen can
-say so. A cost budget being over, a secret being stale, a host having drifted are
-*conditions*: nothing transitions, they are simply true until they aren't. Nobody was
-going to call ``emit`` for them, so this walks them on a timer.
+say so. A cost budget being over, a secret being stale, a host having drifted, an audit
+chain no longer verifying are *conditions*: nothing transitions, they are simply true
+until they aren't. Nobody was going to call ``emit`` for them, so this walks them on a
+timer.
 
-All three already had an evaluator and no delivery path. ``cost_monthly_budget`` has
+Every one of them already had an evaluator and no delivery path. ``cost_monthly_budget``
 sat in config.py labelled "for alerts" with nothing reading it; ``secret_hygiene``
-computes ``stale_count`` for a page you have to open; ``config_drift`` the same.
+computes ``stale_count`` for a page you have to open; ``config_drift`` the same; and
+``verify_audit_chain`` ran only when an administrator remembered to call it, which makes
+a tamper-evident log evidence nobody ever checks.
 
 Two design points worth keeping:
 
@@ -58,7 +61,8 @@ async def scan_once(db) -> dict:
     out = {}
     for name, fn in (("cost", _scan_cost),
                      ("secrets", _scan_secrets),
-                     ("drift", _scan_drift)):
+                     ("drift", _scan_drift),
+                     ("audit", _scan_audit)):
         try:
             out[name] = await fn(db, bucket)
         except Exception:                              # noqa: BLE001
@@ -169,6 +173,44 @@ async def _scan_secrets(db, bucket: str) -> int:
         bucket=bucket, url="/settings",
         fields={"Stale": report["stale_count"],
                 "Threshold": f"{report.get('max_age_days')} days"})
+
+
+# ── Audit chain ──────────────────────────────────────────────────────────────
+
+async def _scan_audit(db, bucket: str) -> int:
+    """Verify the audit chain and shout if it stopped verifying.
+
+    Nothing called `verify_audit_chain` on a schedule before this: the chain was checked
+    only when an administrator remembered to open `/api/audit/verify`. A tamper-evident
+    log nobody checks has the *property* without the *practice* — the detection exists
+    and just never runs.
+
+    Bucketed on the offending seq as well as the day, so a NEW break notifies straight
+    away instead of being swallowed by a message about the old one. A standing break
+    still repeats daily rather than once ever, matching every other condition here.
+    """
+    from . import job_service
+
+    # Called on this thread, not via to_thread: a SQLAlchemy Session belongs to the
+    # thread that made it, and handing this one to another is a correctness bug in
+    # exchange for a latency win we do not need. The walk is streamed sha256 over a
+    # table this pass already reads once an hour. `_scan_secrets` calls its collector
+    # the same way.
+    result = job_service.verify_audit_chain(db)
+    if result.get("ok"):
+        return 0
+    seq = result.get("first_broken_seq")
+    return _emit(
+        db, "audit.chain_broken",
+        title="Audit log integrity check FAILED",
+        body=("The audit log is hash-chained so that any edit, deletion or reordering "
+              f"is detectable. It no longer recomputes: the first bad entry is seq "
+              f"{seq}, of {result.get('count')} checked.\n\n"
+              "Entries at or after that point cannot be trusted as written. This is "
+              "either database corruption or someone editing history — both want "
+              "looking at today."),
+        bucket=f"{bucket}:{seq}", url="/audit",
+        fields={"First broken seq": seq, "Entries checked": result.get("count")})
 
 
 # ── Config drift ─────────────────────────────────────────────────────────────

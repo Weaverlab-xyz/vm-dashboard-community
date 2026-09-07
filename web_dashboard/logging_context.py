@@ -41,6 +41,26 @@ def reset_correlation_id(token: "contextvars.Token[str]") -> None:
     _correlation_id.reset(token)
 
 
+# The requesting client's address, for the audit log. Set by main.py's middleware from
+# `request.client.host` AFTER ProxyHeadersMiddleware has rewritten it, so it honours
+# X-Forwarded-For only from a peer in `trusted_proxy_hosts` (loopback by default).
+# Empty outside an HTTP request — the job worker audits too, and it has no client.
+_client_ip: contextvars.ContextVar[str] = contextvars.ContextVar("client_ip", default="")
+
+
+def get_client_ip() -> str:
+    """The current request's client address, or "" outside a request."""
+    return _client_ip.get()
+
+
+def set_client_ip(value: str) -> "contextvars.Token[str]":
+    return _client_ip.set(value or "")
+
+
+def reset_client_ip(token: "contextvars.Token[str]") -> None:
+    _client_ip.reset(token)
+
+
 def new_request_id() -> str:
     """A short, log-friendly id for a request with no inbound X-Request-ID."""
     return uuid.uuid4().hex[:12]

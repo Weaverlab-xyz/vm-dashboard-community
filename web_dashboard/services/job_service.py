@@ -431,7 +431,16 @@ def log_audit(
     Appends are serialized with :func:`_audit_lock` so concurrent workers can't fork
     the chain; the unique ``seq`` index is the backstop, and a brief retry absorbs
     the rare SQLite write race. Callers are unchanged from the pre-chain signature.
+
+    ``ip_address`` defaults to the current request's client address rather than being
+    threaded through ~75 call sites, most of which are services with no ``Request`` in
+    scope. It is empty in the job worker, which has no client — a job's actor is
+    recorded as ``created_by`` instead. The address is inside the hash (chain V2), so
+    it cannot be altered after the fact without breaking verification.
     """
+    if ip_address is None:
+        from ..logging_context import get_client_ip
+        ip_address = get_client_ip() or None
     for attempt in range(3):
         try:
             _audit_lock(db)
@@ -458,7 +467,8 @@ def log_audit(
             # Hash the STORED details string (set above), so verify recomputes it
             # from the same value without re-serializing.
             entry.entry_hash = audit_chain.compute_entry_hash(
-                seq, entry.timestamp, username, action, target_vm, entry.details, prev_hash
+                seq, entry.timestamp, username, action, target_vm, entry.details,
+                prev_hash, ip_address
             )
             db.add(entry)
             db.commit()
@@ -535,14 +545,25 @@ def verify_audit_chain(db: Session) -> dict:
     Returns ``{"ok": bool, "count": int, "first_broken_seq": int | None}``.
     ``ok`` is False (with the offending ``seq``) if any row was edited, deleted,
     or reordered since it was written."""
-    rows = (
+    # Streamed, not `.all()`. `audit_log` has no retention and cannot have one —
+    # pruning any row breaks the chain by construction — so this table only grows, and
+    # the check that proves it is intact must not need it all in memory at once.
+    q = (
         db.query(AuditLog)
         .filter(AuditLog.seq.isnot(None))
         .order_by(AuditLog.seq.asc())
-        .all()
+        .yield_per(1000)
     )
-    ok, broken = audit_chain.verify_chain(rows)
-    return {"ok": ok, "count": len(rows), "first_broken_seq": broken}
+    count = 0
+
+    def _counted():
+        nonlocal count
+        for row in q:
+            count += 1
+            yield row
+
+    ok, broken = audit_chain.verify_chain(_counted())
+    return {"ok": ok, "count": count, "first_broken_seq": broken}
 
 
 def backfill_audit_chain(db: Session) -> int:
@@ -565,11 +586,75 @@ def backfill_audit_chain(db: Session) -> int:
         e.seq = i
         e.prev_hash = prev
         e.entry_hash = audit_chain.compute_entry_hash(
-            i, e.timestamp, e.username, e.action, e.target_vm, e.details, prev
+            i, e.timestamp, e.username, e.action, e.target_vm, e.details, prev,
+            e.ip_address
         )
         prev = e.entry_hash
     db.commit()
     return len(rows)
+
+
+_CHAIN_VERSION_KEY = "audit_chain_version"
+
+
+def rechain_audit_log(db: Session) -> dict:
+    """One-time: move an existing chain from the V1 hash form to V2 (which covers
+    ``ip_address``). Returns ``{"status": …}``; never raises.
+
+    **Verify before rewriting.** Recomputing every hash is exactly what an attacker who
+    had edited a row would want us to do — the new chain would be internally consistent
+    with the altered content and the tampering would become undetectable. So the old
+    chain is verified under V1 first, and a table that does not verify is left exactly as
+    it is, with the break reported. Re-blessing it is the one thing this must not do.
+
+    A chain that fails V1 but passes V2 is a marker that went missing (a restored
+    database, a rolled-back image); that is recorded, not rewritten.
+    """
+    from . import config_service
+    _audit_lock(db)
+    try:
+        try:
+            # int, not string: "10" >= "2" is False as strings, and this key is the
+            # only thing standing between an upgrade and a needless full re-hash.
+            stored = int(config_service.get(_CHAIN_VERSION_KEY, "") or 0)
+        except (TypeError, ValueError):
+            stored = 0
+        if stored >= audit_chain.CHAIN_VERSION:
+            db.commit()
+            return {"status": "current"}
+
+        rows = (db.query(AuditLog)
+                .filter(AuditLog.seq.isnot(None))
+                .order_by(AuditLog.seq.asc())
+                .all())
+        if not rows:
+            db.commit()
+            config_service.set(_CHAIN_VERSION_KEY, str(audit_chain.CHAIN_VERSION))
+            return {"status": "empty"}
+
+        ok, broken = audit_chain.verify_chain_v1(rows)
+        if not ok:
+            # Already migrated, marker lost? Then there is nothing to do and nothing wrong.
+            ok_v2, _ = audit_chain.verify_chain(rows)
+            db.commit()
+            if ok_v2:
+                config_service.set(_CHAIN_VERSION_KEY, str(audit_chain.CHAIN_VERSION))
+                return {"status": "current"}
+            return {"status": "refused", "first_broken_seq": broken, "count": len(rows)}
+
+        prev = audit_chain.GENESIS_PREV
+        for e in rows:
+            e.prev_hash = prev
+            e.entry_hash = audit_chain.compute_entry_hash(
+                e.seq, e.timestamp, e.username, e.action, e.target_vm, e.details, prev,
+                e.ip_address)
+            prev = e.entry_hash
+        db.commit()
+        config_service.set(_CHAIN_VERSION_KEY, str(audit_chain.CHAIN_VERSION))
+        return {"status": "rechained", "count": len(rows)}
+    except Exception:
+        db.rollback()
+        raise
 
 
 def append_job_log(db: Session, job_id: str, line: str) -> None:

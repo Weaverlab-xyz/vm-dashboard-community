@@ -2644,6 +2644,22 @@ def init_db():
         except Exception as e:  # never block startup on backfill
             print(f"Audit chain backfill skipped: {e}")
 
+    # One-time: move an existing chain onto the V2 hash form, which covers ip_address.
+    # Verifies under the old form BEFORE rewriting and refuses a table that is already
+    # broken — see job_service.rechain_audit_log for why re-blessing one would be worse
+    # than leaving it alone.
+    with SessionLocal() as _rechain_db:
+        try:
+            r = job_service.rechain_audit_log(_rechain_db)
+            if r.get("status") == "rechained":
+                print(f"Audit chain: re-hashed {r['count']} entries onto chain v2.")
+            elif r.get("status") == "refused":
+                print("Audit chain: NOT migrated — the existing chain does not verify "
+                      f"(first broken seq {r.get('first_broken_seq')}). Left untouched; "
+                      "check GET /api/audit/verify.")
+        except Exception as e:  # never block startup
+            print(f"Audit chain migration skipped: {e}")
+
     # One-time: copy each provisioned cloud database's catalog out of its provisioning
     # job onto the row itself. Here rather than in the migration block above for the
     # reason spelled out at the hypervisor seed: this is data, not DDL, and it must stay

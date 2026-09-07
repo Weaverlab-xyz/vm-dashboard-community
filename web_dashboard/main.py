@@ -21,7 +21,7 @@ from slowapi.util import get_remote_address
 from .config import settings
 from .logging_context import (
     LOG_FORMAT, install_log_correlation, new_request_id,
-    reset_correlation_id, set_correlation_id,
+    reset_client_ip, reset_correlation_id, set_client_ip, set_correlation_id,
 )
 from .database import SessionLocal, User, create_admin_user, init_db
 from .services import cache_service
@@ -638,6 +638,29 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # TRUSTED_PROXY_HOSTS to the proxy's literal IP when you put one in front; it must be a
 # literal, because uvicorn 0.27 compares strings and understands neither hostnames nor
 # CIDR.
+@app.middleware("http")
+async def capture_client_ip(request: Request, call_next):
+    """Put the requesting address where the audit log can find it.
+
+    ``log_audit`` is called from ~75 places, most of them services with no ``Request``
+    in scope, so the address travels in a contextvar rather than through every
+    signature — the same shape as the correlation id below.
+
+    **Registered BEFORE ProxyHeadersMiddleware on purpose.** Starlette makes the
+    most-recently-added middleware outermost, so adding this first puts it INSIDE the
+    proxy layer, and ``request.client.host`` here is the value ProxyHeaders resolved —
+    honouring X-Forwarded-For only from a peer in ``trusted_proxy_hosts`` (loopback by
+    default). The middlewares added after it, like the forwarded-header auditor, sit
+    outside and deliberately see the raw peer instead. Move this below that line and the
+    audit log starts recording the proxy's own address for every request.
+    """
+    token = set_client_ip(request.client.host if request.client else "")
+    try:
+        return await call_next(request)
+    finally:
+        reset_client_ip(token)
+
+
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts)
 
 _forwarded_auditor = public_url.ForwardedHeaderAuditor(settings.trusted_proxy_hosts)
@@ -1349,6 +1372,14 @@ async def containers_page(request: Request):
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
 async def jobs_page(request: Request):
     return templates.TemplateResponse("jobs/list.html", {"request": request})
+
+
+@app.get("/audit", response_class=HTMLResponse, include_in_schema=False)
+async def audit_page(request: Request):
+    """The audit trail. Admin-only, enforced by the API the page reads — the shell
+    renders for anyone who guesses the URL and then shows them nothing, which is the
+    same shape every other admin page here has."""
+    return templates.TemplateResponse("audit/index.html", {"request": request})
 
 
 @app.get("/inventory", response_class=HTMLResponse, include_in_schema=False)
