@@ -110,6 +110,29 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
+def _assert_can_destroy(user: User, workgroup, what: str) -> None:
+    """Refuse a teardown of something this user cannot see.
+
+    Reads this module's own :func:`_accessible_workgroups`, so the Destroy button and
+    the instance list cannot disagree about who owns what. A resource with no deploy job has
+    no workgroup, which makes it admin-only — the same answer the listing gives. Keys on
+    ``is_admin`` like the rest of this module, NOT ``is_effective_admin``; see api/vms.py
+    for the other rule and tests/test_dashboard_stats_api.py for why they stay separate.
+    """
+    accessible = _accessible_workgroups(user)
+    if accessible is None:
+        return
+    wg = (workgroup or "").strip().lower()
+    if not wg:
+        raise HTTPException(
+            status_code=403,
+            detail=(f"{what} is not assigned to a workgroup, so only an admin can "
+                    "destroy it."))
+    if wg not in accessible:
+        raise HTTPException(
+            status_code=403, detail=f"Access denied to workgroup '{wg}'")
+
+
 # ── Free-tier usage from this dashboard's own deploys ─────────────────────────
 
 def _existing_freetier_usage(db: Session, exclude_job_id: str = "") -> dict:
@@ -771,8 +794,25 @@ async def destroy_instance(
             deploy_job = j
             break
 
+    _assert_can_destroy(current_user, deploy_job.workgroup if deploy_job else None,
+                        "This instance")
+
+    # Pre-action policy gate (inert unless enabled + this action is gated).
+    from ..services import admission_service
+    admission_service.enforce(
+        "oci:compute:destroy",
+        request={"region": (deploy_job.metadata_dict.get("region", "") if deploy_job else ""),
+                 "name": instance_ocid,
+                 "workgroup": deploy_job.workgroup if deploy_job else None,
+                 "has_deploy_job": deploy_job is not None},
+        actor=current_user, db=db,
+    )
+
     job = job_service.create_job(
         db, job_type="oci_destroy", created_by=current_user.username,
+        # Carried from the deploy row so the teardown is scoped like the thing it tears
+        # down; None when the instance has no deploy job, which is admin-only above.
+        workgroup=deploy_job.workgroup if deploy_job else None,
         metadata={"instance_ocid": instance_ocid, "deploy_job_id": deploy_job.id if deploy_job else None},
     )
     job_service.log_audit(db, current_user.username, "oci_destroy", details={"instance_ocid": instance_ocid})

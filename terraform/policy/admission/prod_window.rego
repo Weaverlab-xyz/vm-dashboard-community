@@ -1,6 +1,8 @@
-# Action-level admission control (pre-deploy gate) — change-freeze window.
+# Action-level admission control (pre-action gate) — change-freeze window.
 #
-# Deny deploys on frozen weekdays. The operator sets the frozen days from Settings
+# Deny gated actions on frozen weekdays. Unlike the other two policies this one
+# deliberately applies to teardowns as well: "no changes on a Sunday" means no
+# destroys either, and a freeze that only stopped deploys would be half a freeze. The operator sets the frozen days from Settings
 # (`admission_prod_window`, e.g. `sat,sun` or `fri,sat,sun`), injected as
 # `input.limits.prod_window`; empty ⇒ inert. The dashboard computes the current
 # UTC weekday in Python and passes it as `input.now.weekday` (lowercase `mon`..`sun`),
@@ -15,5 +17,5 @@ frozen := {d | some d in input.limits.prod_window}
 deny contains msg if {
 	count(input.limits.prod_window) > 0
 	frozen[input.now.weekday]
-	msg := sprintf("deploys are frozen on %s (change-freeze window %v)", [input.now.weekday, input.limits.prod_window])
+	msg := sprintf("%s is frozen on %s (change-freeze window %v)", [input.action, input.now.weekday, input.limits.prod_window])
 }

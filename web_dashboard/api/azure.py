@@ -64,6 +64,29 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
+def _assert_can_destroy(user: User, workgroup, what: str) -> None:
+    """Refuse a teardown of something this user cannot see.
+
+    Reads this module's own :func:`_accessible_workgroups`, so the Destroy button and
+    the VM list cannot disagree about who owns what. An untagged resource is admin-only,
+    matching what the listing already does with it. Keys on ``is_admin`` like the rest of
+    this module, NOT ``is_effective_admin`` — see api/vms.py for the other rule and
+    tests/test_dashboard_stats_api.py for why the two must not be unified.
+    """
+    accessible = _accessible_workgroups(user)
+    if accessible is None:
+        return
+    wg = (workgroup or "").strip().lower()
+    if not wg:
+        raise HTTPException(
+            status_code=403,
+            detail=(f"{what} is not assigned to a workgroup, so only an admin can "
+                    "destroy it."))
+    if wg not in accessible:
+        raise HTTPException(
+            status_code=403, detail=f"Access denied to workgroup '{wg}'")
+
+
 def _cfg(key: str, fallback: str = "") -> str:
     """Read a value from config_service (DB/wizard) with env-var fallback."""
     from ..services import config_service
@@ -1069,17 +1092,34 @@ async def destroy_vm(
             break
 
     if not deploy_job:
+        # No deploy job means no workgroup to check against, so this path is
+        # admin-only by construction — the listing hides these from non-admins too.
+        _assert_can_destroy(current_user, None, f"VM '{vm_name}'")
         return await _destroy_without_deploy_job(vm_name, db, current_user)
 
     # Resolve the resource group here and persist it: the runner rebuilds the call from
     # metadata, and re-deriving it there would read whatever `azure_resource_group` is
     # configured at run time rather than the group the VM was actually deployed into.
+    _assert_can_destroy(current_user, deploy_job.workgroup, f"VM '{vm_name}'")
+
     rg = deploy_job.metadata_dict.get("resource_group") or _rg()
+
+    # Pre-action policy gate (inert unless enabled + this action is gated).
+    from ..services import admission_service
+    admission_service.enforce(
+        "azure:vm:destroy",
+        request={"region": deploy_job.metadata_dict.get("location", ""), "name": vm_name,
+                 "workgroup": deploy_job.workgroup, "has_deploy_job": True},
+        actor=current_user, db=db,
+    )
 
     destroy_job = job_service.create_job(
         db,
         job_type="azure_destroy",
         created_by=current_user.username,
+        # Carried from the deploy row so the teardown is scoped like the thing it tears
+        # down; without it the destroy job belongs to no workgroup at all.
+        workgroup=deploy_job.workgroup,
         metadata={"vm_name": vm_name, "deploy_job_id": deploy_job.id, "resource_group": rg},
     )
 
