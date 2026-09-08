@@ -80,8 +80,17 @@
         - firewalld_active.stdout != "active"
         - ufw_status.rc != 0 or 'inactive' in ufw_status.stdout
 
+    # Say what actually happened. Reporting "the host firewall allows tcp/8081" on a host
+    # with no host firewall reads as though a rule was written, and the next person to
+    # debug a timeout will trust it and look in the wrong place.
     - name: What is now reachable
       ansible.builtin.debug:
         msg:
-          - "Host firewall allows tcp/{{ bind_port }} from {{ spire_source_cidr | default('any source', true) }}."
+          - >-
+            {{ ('Host firewall allows tcp/' ~ bind_port ~ ' from '
+                ~ (spire_source_cidr | default('any source', true)) ~ '.')
+               if (firewalld_active.stdout == 'active'
+                   or (ufw_status.rc == 0 and 'inactive' not in ufw_status.stdout))
+               else ('No host firewall is running, so nothing here restricts tcp/'
+                     ~ bind_port ~ ' and no rule was written.') }}
           - "The cloud NSG / VPC firewall / security group is a SEPARATE gate. Open it too."

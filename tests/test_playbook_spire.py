@@ -219,6 +219,48 @@ def test_seed_population_matches_the_documented_counts():
     assert discoverable == 8, f"expected discovery to return 8 accounts, computed {discoverable}"
 
 
+def test_the_version_guard_reads_stderr():
+    """`spire-server --version` writes to STDERR. Guarding the download on stdout alone
+    left the condition permanently true, so every run re-downloaded and re-unpacked the
+    release — and a version bump would have overwritten in place while looking guarded.
+    Caught by running the play twice against a real host, not by any static check."""
+    play = yaml.safe_load(
+        open(os.path.join(_SPIRE_DIR, "spire-server-install.yml"), encoding="utf-8").read())[0]
+    guard = None
+    for task in _tasks(play):
+        facts = task.get("ansible.builtin.set_fact") or task.get("set_fact") or {}
+        if "_installed" in facts:
+            guard = str(facts["_installed"])
+            break
+    assert guard, "no task computes the installed-version fact"
+    assert "stderr" in guard, (
+        "the installed-version fact ignores stderr, which is where spire-server "
+        "actually prints its version")
+
+    gated = [t for t in _tasks(play)
+             if "_installed" in yaml.safe_dump(t.get("when") or "")]
+    assert len(gated) >= 2, (
+        f"expected the download and the unpack to be gated on the installed version; "
+        f"found {len(gated)} task(s)")
+
+
+def test_the_conf_dir_is_not_fought_over_with_the_tarball():
+    """conf/ ships 0755 in the release tarball, so unarchive resets it. Forcing 0750
+    made the two flip-flop and the play report changed on every run forever."""
+    play = yaml.safe_load(
+        open(os.path.join(_SPIRE_DIR, "spire-server-install.yml"), encoding="utf-8").read())[0]
+    for task in _tasks(play):
+        if "directories" not in (task.get("name") or ""):
+            continue
+        modes = {i["path"].split("/")[-1]: i["mode"] for i in task["loop"]}
+        assert modes.get("conf") == "0755", (
+            f"conf/ is created {modes.get('conf')!r}; the tarball ships 0755 and will "
+            f"reset anything stricter on every unpack")
+        assert modes.get("{{ spire_data }}".split("/")[-1], "0750") == "0750"
+        return
+    raise AssertionError("no task creates the SPIRE directories")
+
+
 def test_seed_is_idempotent_on_an_existing_entry():
     """`entry create` fails on a duplicate. Re-running the seed must not fail the job,
     and must not report changed either."""

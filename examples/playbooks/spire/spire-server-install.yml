@@ -77,15 +77,28 @@
       changed_when: false
       failed_when: false
 
+    # spire-server prints its version to STDERR, not stdout. Reading only stdout left the
+    # guard below permanently true, so every run re-downloaded and re-unpacked the release
+    # — and on a version bump it would have overwritten in place while looking guarded.
+    - name: Note the version already installed
+      ansible.builtin.set_fact:
+        _installed: "{{ (spire_installed.stdout | default('')) ~ (spire_installed.stderr | default('')) }}"
+
+    # conf/ is 0755 inside the release tarball, so unarchive resets it every time it
+    # runs. Forcing 0750 here made the two fight and the play report changed forever;
+    # the mode below is the one the tarball actually ships. data/ is ours, not the
+    # tarball's, and stays 0750 — it holds the datastore and the CA keys.
     - name: Create the SPIRE directories
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ item.path }}"
         state: directory
-        mode: "0750"
+        mode: "{{ item.mode }}"
       loop:
-        - "{{ spire_root }}"
-        - "{{ spire_root }}/conf"
-        - "{{ spire_data }}"
+        - {path: "{{ spire_root }}", mode: "0750"}
+        - {path: "{{ spire_root }}/conf", mode: "0755"}
+        - {path: "{{ spire_data }}", mode: "0750"}
+      loop_control:
+        label: "{{ item.path }}"
 
     - name: Download the SPIRE release
       ansible.builtin.get_url:
@@ -94,7 +107,7 @@
         dest: "/tmp/spire-{{ spire_version }}.tar.gz"
         checksum: "{{ ('sha256:' ~ spire_sha256) if spire_sha256 | length > 0 else omit }}"
         mode: "0640"
-      when: spire_version not in (spire_installed.stdout | default(''))
+      when: spire_version not in _installed
 
     - name: Warn when the download was not checksummed
       ansible.builtin.debug:
@@ -103,7 +116,7 @@
           page publishes a checksum — set it for anything you intend to keep.
       when:
         - spire_sha256 | length == 0
-        - spire_version not in (spire_installed.stdout | default(''))
+        - spire_version not in _installed
 
     - name: Unpack SPIRE
       ansible.builtin.unarchive:
@@ -111,7 +124,7 @@
         dest: "{{ spire_root }}"
         remote_src: true
         extra_opts: ["--strip-components=1"]
-      when: spire_version not in (spire_installed.stdout | default(''))
+      when: spire_version not in _installed
 
     - name: Remove the downloaded tarball
       ansible.builtin.file:
