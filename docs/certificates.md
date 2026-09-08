@@ -199,8 +199,13 @@ without its target id.
 
 ## Building a CA
 
-**Certificate Lab → Build a CA.** One Terraform module creates a CAS pool on the DevOps
-tier, a self-signed root CA, and the enrollment service account the plugin authenticates as.
+**Certificate Lab → Build a CA.** Pick a cloud; one Terraform module per cloud does the
+rest. On **GCP** that is a CAS pool on the DevOps tier, a self-signed root CA, and the
+enrollment service account the plugin authenticates as. On **AWS** it is a Private CA, its
+self-signed root certificate, and the IAM user the plugin authenticates as.
+
+The cloud selector only appears when more than one module is built — the list comes from
+the modules that actually exist, so a cloud can never be offered without one behind it.
 
 Teardown is the part worth understanding, because **CAS resists deletion by default in three
 separate ways**, and each one leaves a pool that goes on billing:
@@ -215,6 +220,13 @@ The module sets all three. **Prove destroy before create**: apply the module, de
 immediately, and confirm in the console that the pool and CA are *gone* rather than pending
 deletion.
 
+AWS resists teardown differently and less: a deleted Private CA is restorable for
+`permanent_deletion_time_in_days`, which **defaults to 30**. The module asks for 7, the
+floor the API accepts, because this lab exists to get rid of the thing. The IAM user carries
+`force_destroy` so a key or inline policy added in the console cannot wedge the destroy.
+Prove destroy before create there too — confirm the CA is gone rather than merely disabled,
+and that the IAM user went with it.
+
 The CA's **chain PEM** is on the row's *Chain* button. It is a public document by
 construction — it is what every client has to trust — and it is what the mTLS endpoint
 playbook takes as `ca_chain_pem`.
@@ -225,6 +237,18 @@ Every CA built here is stamped with the default auto-delete TTL at provision tim
 provision's own transaction. `NULL` means *never*, never "inherit the default", so nothing
 that already exists is retroactively armed. Extending or pinning a timer is the ordinary
 **Inventory → Extend** path.
+
+**On AWS the timer is not optional.** At ~$400/month standing against ~$20/month for a CAS
+pool, a Private CA nobody remembers is a different order of mistake — so a build is
+*refused* on an instance where the reaper would stamp nothing at all, which is the case when
+`resource_expiry_enabled` is off or `resource_expiry_default_hours` is `0`. GCP is
+deliberately not held to this: at a twentieth of the cost the same trade does not hold, and
+tightening it would change behaviour somebody already relies on.
+
+A stamped timer is necessary and not sufficient — the reaper only *deletes* when
+`resource_expiry_enforce` is on and `resource_expiry_dry_run` is off. That half is reported
+on the build form's **missing** list rather than refused, because arming enforcement is
+something an operator may be part-way through.
 
 A timer that runs out enqueues **exactly the job the Destroy button creates** — there is one
 teardown path, exercised both ways. A *failed* teardown deliberately does **not** re-arm the
@@ -346,10 +370,6 @@ Being straight about the boundary is more persuasive than eliding it.
   and rotation would otherwise break the identity.
 - **No discovery.** Certificates already deployed across the estate are invisible. The
   plugin manages what it issued.
-- **AWS Private CA is not provisioned here.** The Terraform module would be a near-copy of
-  the CAS one, but at ~$400/month standing it should be created for a demonstration and
-  destroyed immediately after. The plugin's `awspca` backend works against a CA you build
-  yourself — the address grammar is validated the same way.
 - **Entra app registrations are not created here.** The dashboard consumes app registrations
   but has no create-app-registration path. The Password Safe half is unchanged —
   `selfsigned?publisher=entraapp&…` is just another address — but the two registrations, the
@@ -369,6 +389,6 @@ Being straight about the boundary is more persuasive than eliding it.
 | CA lifecycle | `web_dashboard/services/cert_lab_service.py` |
 | Address + Password Safe objects | `web_dashboard/services/cert_ps_service.py` |
 | Address grammar + registration | `web_dashboard/services/ps_resource_service.py` (`method="certificate"`) |
-| Terraform | `terraform/cert_ca/gcp_cas/main.tf` |
+| Terraform | `terraform/cert_ca/gcp_cas/main.tf`, `terraform/cert_ca/aws_pca/main.tf` |
 | Playbooks | [`examples/playbooks/certificates/`](../examples/playbooks/certificates/README.md) |
-| Tests | `tests/test_ps_certificate.py`, `tests/test_cert_lab_wiring.py` |
+| Tests | `tests/test_ps_certificate.py`, `tests/test_cert_lab_wiring.py`, `tests/test_cert_lab_clouds.py` |

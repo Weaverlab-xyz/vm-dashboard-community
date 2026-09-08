@@ -1494,6 +1494,11 @@ class CertLab(Base):
     project = Column(String(120), nullable=True)                # GCP project / AWS account
     location = Column(String(64), nullable=True)                # CAS region — location-scoped
     pool_id = Column(String(120), nullable=True)                # the `pool=` on the address
+    # The `arn=` on an awspca address, and the AWS half of what `pool_id` is for GCP. Its
+    # own column rather than reusing pool_id: an ARN is not a pool, nothing on the AWS
+    # side has a pool, and a field whose meaning depends on a sibling column is how a
+    # reader two years from now gets it wrong. NULL until the apply returns it.
+    ca_arn = Column(String(255), nullable=True)
     status = Column(String(32), nullable=False, default="provisioning", index=True)
 
     # Terraform state lives in the active storage backend under terraform-state/<job id>,
@@ -2549,6 +2554,9 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN accessor_integration_id VARCHAR(64)",
             "ALTER TABLE pov_environments ADD COLUMN accessor_tf_state TEXT",
             "ALTER TABLE oauth_group_mappings ADD COLUMN default_permissions TEXT",
+            # The `arn=` an awspca certificate address is built from. See CertLab.ca_arn
+            # for why it is not pool_id wearing a second hat.
+            "ALTER TABLE cert_labs ADD COLUMN ca_arn VARCHAR(255)",
             "ALTER TABLE jobs ADD COLUMN suspend_at_local VARCHAR(5)",
             "ALTER TABLE jobs ADD COLUMN resume_at_local VARCHAR(5)",
             "ALTER TABLE jobs ADD COLUMN schedule_timezone VARCHAR(64)",

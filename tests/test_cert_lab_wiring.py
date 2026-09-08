@@ -51,6 +51,67 @@ def test_the_pool_defaults_to_the_devops_tier():
     assert re.search(r'variable "tier"\s*\{[^}]*default\s*=\s*"DEVOPS"', tf, re.S)
 
 
+def test_the_aws_pca_module_exists_and_declares_the_aws_provider():
+    tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
+    assert 'source  = "hashicorp/aws"' in tf
+    for resource in ("aws_acmpca_certificate_authority", "aws_acmpca_certificate",
+                     "aws_acmpca_certificate_authority_certificate",
+                     "aws_iam_user", "aws_iam_user_policy", "aws_iam_access_key"):
+        assert f'resource "{resource}"' in tf, resource
+
+
+def test_the_aws_module_pins_the_provider_version_the_image_already_caches():
+    # The image pre-caches `aws ~> 5.0` into a READ-ONLY provider mirror. A module that
+    # pins anything else needs its own pre-cache leg, and without one the build's own
+    # "provider mirror MISS" check fails — or worse, a provision dies months later with
+    # "was not found in any of the search locations".
+    tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
+    assert re.search(r'aws\s*=\s*\{[^}]*version\s*=\s*"~> 5\.0"', tf, re.S)
+    assert 'aws = { source = "hashicorp/aws", version = "~> 5.0" }' in _read("Dockerfile")
+
+
+def test_the_aws_ca_asks_for_the_shortest_deletion_window():
+    # `permanent_deletion_time_in_days` defaults to 30, which leaves a destroyed CA
+    # restorable for a month. 7 is the floor the API accepts, and this module exists to
+    # get rid of the thing.
+    tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
+    assert "permanent_deletion_time_in_days = 7" in tf
+    # An IAM user with a stray key or inline policy fails the destroy; terraform removes
+    # the key it made, force_destroy covers one added in the console.
+    assert "force_destroy = true" in tf
+
+
+def test_the_aws_root_is_self_signed_with_the_root_ca_template():
+    # With the end-entity template the certificate is issued but the CA refuses to
+    # install it, and the apply fails after the CA already exists — i.e. already billing.
+    tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
+    assert "template/RootCACertificate/V1" in tf
+    assert 'type       = "ROOT"' in tf
+
+
+def test_the_aws_chain_is_read_off_the_signing_resource_not_the_ca():
+    # The CA's own `certificate` attribute is populated by a refresh AFTER activation, so
+    # on the apply that creates it the output would be empty — and an empty chain is
+    # stored on the row and only noticed when the mTLS endpoint refuses every client.
+    tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
+    chain = tf[tf.index('output "ca_chain_pem"'):]
+    chain = chain[:chain.index("}")]
+    assert "aws_acmpca_certificate.root.certificate" in chain, chain
+
+
+def test_the_enrollment_policy_is_scoped_to_this_ca_and_to_issuance():
+    # The GCP module grants certificateRequester, which covers creating certificates and
+    # nothing else. A wildcard Resource here would hand the plugin every CA in the
+    # account, which is the kind of thing nobody notices until an audit.
+    tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
+    policy = tf[tf.index('resource "aws_iam_user_policy"'):]
+    policy = policy[:policy.index("\nresource ")]
+    assert "aws_acmpca_certificate_authority.this.arn" in policy
+    assert '"*"' not in policy, "the enrollment policy must not be account-wide"
+    for action in ("acm-pca:IssueCertificate", "acm-pca:GetCertificate"):
+        assert action in policy, action
+
+
 def test_the_module_is_copied_into_the_image_and_reincluded_in_the_dockerignore():
     # A COPY without the .dockerignore re-include FAILS THE BUILD; a re-include without
     # the COPY fails only at deploy time, in the published image. Both, or neither.
@@ -62,8 +123,12 @@ def test_the_service_declares_the_module_path_the_shipped_modules_guard_can_see(
     # tests/test_terraform_modules_shipped.py regexes this exact construction out of
     # web_dashboard/services/*.py. Build the path any other way and the guard stops
     # seeing it, silently, and the COPY above can be deleted without failing anything.
+    # EVERY cloud, not just the first: a path built another way degrades the guard's view
+    # to the parent `terraform/cert_ca`, which still satisfies the existence and COPY
+    # checks vacuously — so nothing fails and the specific module stops being covered.
     svc = _read("web_dashboard", "services", "cert_lab_service.py")
-    assert 'os.path.join(_REPO_ROOT, "terraform", "cert_ca", "gcp_cas")' in svc
+    for module in ("gcp_cas", "aws_pca"):
+        assert f'os.path.join(_REPO_ROOT, "terraform", "cert_ca", "{module}")' in svc, module
 
 
 # ── the worker will actually claim the jobs ───────────────────────────────────

@@ -39,7 +39,19 @@ _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."
 # and a missing COPY fails only in the PUBLISHED image, at deploy time.
 _TEMPLATE_DIRS = {
     "gcp": os.path.join(_REPO_ROOT, "terraform", "cert_ca", "gcp_cas"),
+    "aws": os.path.join(_REPO_ROOT, "terraform", "cert_ca", "aws_pca"),
 }
+
+# The plugin's backend name per cloud: what lands in ``CertLab.backend`` and what
+# ``cert_ps_service.build_address`` dispatches on. Both names come from
+# ``ps_resource_service._CERT_BACKENDS``, which has known ``awspca`` all along — which is
+# why the address half of the AWS path needed no change to reach it.
+_BACKENDS = {"gcp": "gcpcas", "aws": "awspca"}
+
+# Derived, never maintained beside the registry — the move `vdesktop_service`'s
+# PROVISIONING_CLOUDS makes for the same reason. A cloud advertised on the build form
+# without a module behind it is exactly the bug this feature's audit item named.
+PROVISIONING_CLOUDS = tuple(sorted(_TEMPLATE_DIRS))
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
 PROVISION_JOB_TYPE = "certca_provision"
@@ -71,10 +83,8 @@ def template_dir(cloud: str) -> str:
     path = _TEMPLATE_DIRS.get((cloud or "").lower())
     if not path:
         raise CertLabError(
-            f"no certificate-authority module for cloud {cloud!r} — GCP CAS is the only "
-            f"one built. AWS Private CA is a near-copy of it, deliberately not shipped: "
-            f"at ~$400/month standing it should be created for a demonstration and "
-            f"destroyed immediately after.")
+            f"no certificate-authority module for cloud {cloud!r} — "
+            f"built: {', '.join(sorted(_TEMPLATE_DIRS))}.")
     return path
 
 
@@ -94,9 +104,23 @@ def get_lab(db: Session, lab_id: str) -> Optional[CertLab]:
 
 
 def _tf_variables(row: CertLab) -> dict:
-    """The -var set. ``terraform destroy`` evaluates the module config too, so it needs
-    the identical set — a required variable left unset fails the destroy with "No value
-    for required variable", which is the worst possible time to find out."""
+    """The -var set for this row's cloud. ``terraform destroy`` evaluates the module
+    config too, so it needs the identical set — a required variable left unset fails the
+    destroy with "No value for required variable", which is the worst possible time to
+    find out.
+
+    Split per cloud rather than unioned, because terraform treats an UNDECLARED -var as a
+    hard error before it touches anything: a union would fail on whichever module did not
+    declare the other's variables, and it would fail the destroy as readily as the apply.
+    The two modules share nothing but the subject's common name.
+    """
+    if (row.cloud or "").lower() == "aws":
+        # No project (a Private CA is account-scoped) and no pool (there is no such thing
+        # — the CA's own ARN is what an address names). `region` carries what `location`
+        # carries on the GCP side, which is why the row needs no extra column for it.
+        return {"region": row.location or "",
+                "ca_common_name": f"{row.name} Root CA",
+                "tags": {"managed-by": "vm-dashboard", "purpose": "certificate-lab"}}
     return {"project": row.project or "",
             "location": row.location or "",
             "pool_id": row.pool_id or "",
@@ -104,6 +128,27 @@ def _tf_variables(row: CertLab) -> dict:
             "ca_id": f"{row.pool_id}-root",
             "ca_common_name": f"{row.name} Root CA",
             "labels": {"managed-by": "vm-dashboard", "purpose": "certificate-lab"}}
+
+
+def _read_outputs(row: CertLab, outputs: dict) -> None:
+    """Copy an apply's outputs onto the row, per cloud.
+
+    The two modules deliberately do not emit the same names. Making the AWS module output
+    a ``service_account_email`` holding an IAM access key id would put a wrong word in
+    the one field an operator reads back when a rotation fails, so the mapping lives here
+    instead.
+    """
+    # Public by definition — a CA certificate is not a secret — and the mTLS endpoint
+    # playbook needs it as an extra_var, so it is stored rather than re-fetched.
+    row.ca_chain_pem = str(outputs.get("ca_chain_pem") or "")
+    if (row.cloud or "").lower() == "aws":
+        row.ca_arn = str(outputs.get("ca_arn") or row.ca_arn or "")
+        row.location = str(outputs.get("region") or row.location or "")
+        row.enroll_account = str(outputs.get("enroll_access_key_id") or "")
+        return
+    row.pool_id = str(outputs.get("pool_id") or row.pool_id or "")
+    row.location = str(outputs.get("location") or row.location or "")
+    row.enroll_account = str(outputs.get("service_account_email") or "")
 
 
 def provision(db: Session, *, name: str, project: str, created_by: str,
@@ -115,22 +160,56 @@ def provision(db: Session, *, name: str, project: str, created_by: str,
     name = (name or "").strip()
     if not name:
         raise CertLabError("a certificate authority needs a name")
-    if not project:
-        raise CertLabError("a GCP project id is required — CAS pools are project-scoped")
+    # NULL would mean "never" and never "inherit the default", so the timer is resolved
+    # here, in the provision's own transaction. Extending or pinning it afterwards is the
+    # existing /api/expiry/set path.
+    expires_at = expiry_policy.default_expiry_for_kind(INVENTORY_KIND)
 
-    location = location or _cfg("cert_gcp_cas_location", "us-central1")
-    # The pool id is what ends up in `pool=` on every managed-system address built
-    # against this CA, so it is deterministic rather than random: an operator reading an
-    # address back should recognise the pool it names.
-    pool_id = (pool_id or f"{name}-pool").strip().lower()
+    if cloud == "aws":
+        # An AWS Private CA bills ~$400/month standing, against ~$20/month for a GCP CAS
+        # DevOps pool — the figures expiry_policy records — and it bills whether or not it
+        # ever issues a certificate. On an instance where the reaper would stamp nothing,
+        # building one means creating a resource this dashboard will never take down, so
+        # it is refused rather than created and hoped about.
+        #
+        # GCP is deliberately not held to this: at a twentieth of the cost the same trade
+        # does not hold, and tightening it would change behaviour somebody already has.
+        #
+        # A stamped timer is necessary and not sufficient — the reaper only DELETES when
+        # `resource_expiry_enforce` is on and dry-run is off. That half is reported by
+        # /api/cert-lab/options rather than refused here, because it is a setting an
+        # operator may be part-way through arming, not a reason to have no timer at all.
+        if expires_at is None:
+            raise CertLabError(
+                "an AWS Private CA bills ~$400/month standing, and this instance would "
+                "stamp no expiry on it — so nothing here would ever take it down. Set "
+                "resource_expiry_enabled with a non-zero resource_expiry_default_hours "
+                "before building one. GCP CAs are unaffected.")
+        # Regional and account-scoped: no project, and no pool at all — an awspca address
+        # names the CA's own ARN, which does not exist until the apply returns it.
+        location = location or _cfg("aws_region", "us-east-2")
+        pool_id = ""
+    elif cloud == "gcp":
+        if not project:
+            raise CertLabError("a GCP project id is required — CAS pools are project-scoped")
+        location = location or _cfg("cert_gcp_cas_location", "us-central1")
+        # The pool id is what ends up in `pool=` on every managed-system address built
+        # against this CA, so it is deterministic rather than random: an operator reading
+        # an address back should recognise the pool it names.
+        pool_id = (pool_id or f"{name}-pool").strip().lower()
+    else:
+        # `template_dir` above proved a module exists, so reaching here means somebody
+        # added one and stopped. Loud, because the alternative is a row shaped like a CAS
+        # pool on a cloud that has never heard of pools — which fails in the worker, after
+        # the record exists.
+        raise CertLabError(
+            f"{cloud!r} has a module but no provisioning rules — add its branch to "
+            f"cert_lab_service.provision alongside _tf_variables and _read_outputs")
 
-    row = CertLab(name=name, cloud=cloud, backend="gcpcas", project=project,
+    row = CertLab(name=name, cloud=cloud, backend=_BACKENDS[cloud], project=project or "",
                   location=location, pool_id=pool_id, status="provisioning",
                   workgroup=workgroup, created_by=created_by,
-                  # NULL would mean "never" and never "inherit the default", so the timer
-                  # is stamped here, in the provision's own transaction. Extending or
-                  # pinning it afterwards is the existing /api/expiry/set path.
-                  expires_at=expiry_policy.default_expiry_for_kind(INVENTORY_KIND))
+                  expires_at=expires_at)
     db.add(row)
     db.flush()
 
@@ -140,7 +219,8 @@ def provision(db: Session, *, name: str, project: str, created_by: str,
                   "project": project, "location": location, "pool_id": pool_id})
     row.deploy_job_id = job.id
     db.commit()
-    logger.info("cert-lab: queued %s CA %r (pool %s) as job %s", cloud, name, pool_id, job.id)
+    logger.info("cert-lab: queued %s CA %r (%s) as job %s", cloud, name,
+                pool_id or location, job.id)
     return {"lab_id": row.id, "job_id": job.id}
 
 
@@ -153,18 +233,14 @@ async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
         return
     job_service.set_running(db, job_id)
     try:
-        await broadcast_progress(job_id, 10, "Creating the CA pool and root CA…")
+        await broadcast_progress(job_id, 10, "Creating the certificate authority…")
         outputs = await terraform.apply(
             _deploy_dir(job_id), _tf_variables(row),
             template_dir=template_dir(row.cloud),
             env=terraform_provider_env.provider_env(row.cloud),
-            on_line=_job_stream(job_id, 10, "Creating the CA pool and root CA…"))
-        row.pool_id = str(outputs.get("pool_id") or row.pool_id or "")
-        row.location = str(outputs.get("location") or row.location or "")
-        # Public by definition — a CA certificate is not a secret — and the mTLS endpoint
-        # playbook needs it as an extra_var, so it is stored rather than re-fetched.
-        row.ca_chain_pem = str(outputs.get("ca_chain_pem") or "")
-        row.enroll_account = str(outputs.get("service_account_email") or "")
+            on_line=_job_stream(job_id, 10, "Creating the certificate authority…",
+                                row.cloud))
+        _read_outputs(row, outputs)
         row.status = "available"
         row.error_message = None
         row.updated_at = datetime.utcnow()
@@ -181,17 +257,38 @@ async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
         job_service.set_failed(db, job_id, str(exc))
 
 
-# Coarse progress milestones, matched against lowercased terraform output.
-_CA_MILESTONES = (
-    ("google_privateca_ca_pool", 30, "Creating the CA pool\u2026"),
-    ("google_privateca_certificate_authority", 50, "Creating the root CA\u2026"),
-    ("google_service_account", 70, "Creating the enrollment service account\u2026"),
+# Coarse progress milestones, matched against lowercased terraform output. Per cloud,
+# because they are resource names: an AWS apply matched against `google_*` needles would
+# sit at the starting percentage for the whole build, which reads as a hung job.
+_BUILD_MILESTONES = {
+    "gcp": (
+        ("google_privateca_ca_pool", 30, "Creating the CA pool\u2026"),
+        ("google_privateca_certificate_authority", 50, "Creating the root CA\u2026"),
+        ("google_service_account", 70, "Creating the enrollment service account\u2026"),
+    ),
+    "aws": (
+        # Ordered as terraform reaches them, and the first two needles cannot swallow the
+        # third: `aws_acmpca_certificate_authority_certificate` continues past the point
+        # where `aws_acmpca_certificate_authority.` ends, so it never matches that one.
+        ("aws_acmpca_certificate_authority.", 30, "Creating the private CA\u2026"),
+        ("aws_acmpca_certificate.", 50, "Signing the root certificate\u2026"),
+        ("aws_acmpca_certificate_authority_certificate", 60, "Activating the CA\u2026"),
+        ("aws_iam_user", 70, "Creating the enrollment identity\u2026"),
+    ),
+}
+
+# Terraform's own words rather than a provider's, so both clouds share them.
+_TEARDOWN_MILESTONES = (
     ("destroying", 40, "Destroying the CA\u2026"),
     ("destruction complete", 85, "Destroyed\u2026"),
 )
 
 
-def _job_stream(job_id: str, start_pct: int, start_msg: str):
+def _milestones(cloud: str) -> tuple:
+    return _BUILD_MILESTONES.get((cloud or "").lower(), ()) + _TEARDOWN_MILESTONES
+
+
+def _job_stream(job_id: str, start_pct: int, start_msg: str, cloud: str = ""):
     """``on_line`` callback streaming terraform output to the job's Live Output and
     advancing a coarse progress bar. The per-line broadcast also heartbeats the job row,
     which the startup reconcile uses to tell a live job from a dead one."""
@@ -201,7 +298,7 @@ def _job_stream(job_id: str, start_pct: int, start_msg: str):
     async def on_line(line: str) -> None:
         job_service.cancel_check(job_id, state)
         low = line.lower()
-        for needle, pct, msg in _CA_MILESTONES:
+        for needle, pct, msg in _milestones(cloud):
             if needle in low:
                 state["pct"], state["msg"] = max(state["pct"], pct), msg
                 break
@@ -266,7 +363,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
                     job_id, 15,
                     f"Password Safe deregister failed, continuing to the CA: {exc}")
 
-        await broadcast_progress(job_id, 25, "Destroying the CA pool\u2026")
+        await broadcast_progress(job_id, 25, "Destroying the certificate authority\u2026")
         await terraform.destroy(
             _deploy_dir(row.deploy_job_id or job_id),
             variables=_tf_variables(row),
@@ -274,7 +371,8 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
             # after a container recreate wiped the original deploy dir.
             template_dir=template_dir(row.cloud),
             env=terraform_provider_env.provider_env(row.cloud),
-            on_line=_job_stream(job_id, 25, "Destroying the CA pool\u2026"))
+            on_line=_job_stream(job_id, 25, "Destroying the certificate authority\u2026",
+                                row.cloud))
         row.status = "deleted"
         row.error_message = None
         row.updated_at = datetime.utcnow()
@@ -298,12 +396,27 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
 def address_for(row: CertLab, overrides: Optional[dict] = None) -> str:
     """The managed-system address for a certificate identity issued by THIS CA.
 
-    Composed from the row rather than typed, so `project=`, `location=` and `pool=` can
-    never drift from the pool that was actually built — a mismatch there is a CAS 404 at
-    the first rotation and reads like a permissions problem."""
+    Composed from the row rather than typed, so the keys that identify the CA — `project=`,
+    `location=` and `pool=` on gcpcas, `arn=` and `region=` on awspca — can never drift
+    from what was actually built. A mismatch there is a 404 at the first rotation and
+    reads like a permissions problem."""
     from . import cert_ps_service
-    if row.backend != "gcpcas":
-        raise CertLabError(f"no address builder for backend {row.backend!r}")
+    backend = row.backend or ""
+    if backend == "awspca":
+        # `arn=` is the one option an awspca address cannot be built without, and it is
+        # not known until the apply returns it — so a row still building has nothing to
+        # compose from. Saying that beats composing an address the plugin refuses hours
+        # later at the first rotation.
+        if not row.ca_arn:
+            raise CertLabError(
+                f"{row.name} has no CA ARN yet — an awspca address is built from it, and "
+                f"it is only known once the build finishes")
+        return cert_ps_service.build_address(
+            "awspca",
+            {"arn": row.ca_arn, "region": row.location or ""},
+            overrides)
+    if backend != "gcpcas":
+        raise CertLabError(f"no address builder for backend {backend!r}")
     return cert_ps_service.build_address(
         "gcpcas",
         {"project": row.project or "", "location": row.location or "",
