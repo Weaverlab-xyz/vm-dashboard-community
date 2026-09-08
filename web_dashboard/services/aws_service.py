@@ -2056,6 +2056,130 @@ async def set_desktop_pool_tag(region: str, instance_id: str, pool_name: str) ->
         raise AWSError("AWS credentials not configured.")
 
 
+# ── Budgets (services/provider_budget.py decides WHAT; these only carry it) ────
+# The AWS Budgets API is global: it lives at us-east-1 regardless of where anything else
+# runs, and is scoped to an ACCOUNT rather than a region. Passing the configured region
+# would work by accident on a us-east-1 deployment and fail everywhere else.
+_BUDGETS_REGION = "us-east-1"
+
+
+def _get_budgets():
+    _require_boto3()
+    return boto3.client("budgets", **_aws_kwargs(_BUDGETS_REGION))
+
+
+def _account_id_sync() -> str:
+    _require_boto3()
+    sts = boto3.client("sts", **_aws_kwargs(_BUDGETS_REGION))
+    return sts.get_caller_identity()["Account"]
+
+
+async def account_id() -> str:
+    """The account these credentials belong to. Budgets are keyed on it."""
+    try:
+        return await _to_thread(_account_id_sync)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Could not resolve the AWS account id: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _from_aws(budget: dict, subscribers: list) -> dict:
+    """An AWS budget in the provider-neutral shape ``provider_budget.diff`` compares."""
+    limit = (budget.get("BudgetLimit") or {})
+    thresholds = [n.get("Threshold") for n in (budget.get("_notifications") or [])]
+    return {
+        "name": budget.get("BudgetName") or "",
+        "limit": float(limit.get("Amount") or 0),
+        "currency": limit.get("Unit") or "USD",
+        "time_unit": budget.get("TimeUnit") or "MONTHLY",
+        "threshold_percent": int(thresholds[0]) if thresholds else 0,
+        "emails": sorted(subscribers or []),
+    }
+
+
+def _get_budget_sync(account: str, name: str):
+    client = _get_budgets()
+    try:
+        budget = client.describe_budget(AccountId=account, BudgetName=name)["Budget"]
+    except client.exceptions.NotFoundException:
+        # Absent is an ANSWER — the caller is asking whether to create or update — so it
+        # comes back as None rather than as an exception the endpoint has to translate.
+        return None
+    notes = client.describe_notifications_for_budget(
+        AccountId=account, BudgetName=name).get("Notifications") or []
+    budget["_notifications"] = notes
+    emails: list = []
+    for note in notes:
+        subs = client.describe_subscribers_for_notification(
+            AccountId=account, BudgetName=name, Notification=note).get("Subscribers") or []
+        emails += [s.get("Address") for s in subs if s.get("SubscriptionType") == "EMAIL"]
+    return _from_aws(budget, emails)
+
+
+async def get_budget(account: str, name: str):
+    """The named budget in the provider-neutral shape, or ``None`` when it does not exist."""
+    try:
+        return await _to_thread(_get_budget_sync, account, name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Could not read AWS budget '{name}': {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _budget_payload(want: dict) -> dict:
+    return {
+        "BudgetName": want["name"],
+        "BudgetLimit": {"Amount": str(want["limit"]), "Unit": want["currency"]},
+        "TimeUnit": want["time_unit"],
+        "BudgetType": "COST",
+    }
+
+
+def _notification_payload(want: dict) -> tuple:
+    note = {
+        "NotificationType": "ACTUAL",
+        "ComparisonOperator": "GREATER_THAN",
+        "Threshold": float(want["threshold_percent"]),
+        "ThresholdType": "PERCENTAGE",
+    }
+    subs = [{"SubscriptionType": "EMAIL", "Address": a} for a in want["emails"]]
+    return note, subs
+
+
+def _put_budget_sync(account: str, want: dict, exists: bool) -> str:
+    client = _get_budgets()
+    note, subs = _notification_payload(want)
+    if exists:
+        client.update_budget(AccountId=account, NewBudget=_budget_payload(want))
+        # Notifications are separate objects from the budget; an update must replace the
+        # subscriber set or an address removed in Settings keeps receiving alerts. Delete
+        # then recreate, because there is no "set subscribers" call — and this is the only
+        # delete in this feature, of a NOTIFICATION on a budget the dashboard owns, never
+        # of a budget.
+        for old in (client.describe_notifications_for_budget(
+                AccountId=account, BudgetName=want["name"]).get("Notifications") or []):
+            client.delete_notification(AccountId=account, BudgetName=want["name"],
+                                       Notification=old)
+        action = "updated"
+    else:
+        client.create_budget(AccountId=account, Budget=_budget_payload(want))
+        action = "created"
+    client.create_notification(AccountId=account, BudgetName=want["name"],
+                               Notification=note, Subscribers=subs)
+    return action
+
+
+async def put_budget(account: str, want: dict, exists: bool) -> str:
+    """Create or update the budget. Returns "created" or "updated"."""
+    try:
+        return await _to_thread(_put_budget_sync, account, want, exists)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Could not write AWS budget '{want.get('name')}': {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 # ── Network options (for deploy form dropdowns) ────────────────────────────────
 
 def _get_network_options_sync(region: str) -> dict:

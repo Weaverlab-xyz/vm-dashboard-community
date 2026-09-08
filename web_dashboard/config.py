@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     cost_budget_azure: float = 0.0
     cost_budget_gcp: float = 0.0
     cost_budget_oci: float = 0.0
+    # Pushing a budget INTO the cloud (services/provider_budget.py). The address the
+    # PROVIDER notifies — not a dashboard endpoint. A cloud budget cannot POST to a
+    # webhook this app hosts, and the point of pushing one is that it still alerts when
+    # this app is not running, so it needs a destination that does not pass through here.
+    cost_budget_notify_emails: str = ""   # comma-separated; required to push a budget
+    cost_budget_alert_percent: int = 80   # notify at this % of the limit; clamped 1..100
     gcp_billing_export_table: str = ""    # BigQuery billing-export table for GCP cost (project.dataset.table); blank = GCP cost off
     # Durable cost cache (services/cost_cache.py). Env/config.py only — deliberately not
     # on the Setup panel: they are throttle-safety knobs, not features, and a panel field

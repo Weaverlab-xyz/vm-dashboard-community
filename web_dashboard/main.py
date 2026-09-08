@@ -890,6 +890,7 @@ from .api import pra as pra_api  # noqa: E402
 from .api import audit as audit_api
 from .api import spend as spend_api  # noqa: E402
 from .api import preflight as preflight_api  # noqa: E402
+from .api import budgets as budgets_api  # noqa: E402
 from .api import suspend as suspend_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
@@ -989,6 +990,7 @@ app.include_router(jobs.router)
 app.include_router(audit_api.router)
 app.include_router(spend_api.router)
 app.include_router(preflight_api.router)
+app.include_router(budgets_api.router)
 app.include_router(suspend_api.router)
 app.include_router(docs_pages.router)
 # Remote on-prem agents. Gated: this is the only router that accepts requests from
