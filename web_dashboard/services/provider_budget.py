@@ -37,7 +37,50 @@ MAX_ALERT_PERCENT = 100
 
 
 class BudgetError(Exception):
-    """Raised when a push cannot proceed, with a reason meant for an operator."""
+    """Raised when a push cannot proceed, with a reason meant for an operator.
+
+    ``code`` names WHICH refusal this is, so a caller can render the wording from
+    ``REFUSALS`` rather than from ``str(exc)``. The message stays on the exception for
+    logs and for tests; it is not what an HTTP response carries. See ``reason_for``.
+    """
+
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code
+
+
+# The operator-facing wording for each refusal, addressed by code.
+#
+# The API renders FROM THIS TABLE rather than from a caught exception's text, and the
+# indirection is the point rather than ceremony. Every ``BudgetError`` raised today carries
+# wording written by hand right here, so nothing internal leaks — but a response body must
+# not depend on every future raise site remembering that, and the obvious next edit is to
+# wrap one of these around a provider's error, at which point whatever the SDK put in its
+# message would travel to a browser. CodeQL flags the shape (``py/stack-trace-exposure``)
+# and is right to.
+REFUSALS = {
+    "no_limit": (
+        "No budget is configured for this cloud. Set one in Settings → Cloud Costs "
+        "first; clearing it here does not remove a budget already in the cloud."),
+    "no_emails": (
+        "Set at least one notification email. The whole point of a budget in the "
+        "provider is that it alerts when this dashboard is not running, so it needs "
+        "an address that does not go through here."),
+    "not_owned": (
+        "That budget was not created by this dashboard (its budgets are named "
+        f"'{NAME_PREFIX}…'), so it will not be modified. Rename or remove it in the "
+        "cloud console if you want the dashboard to manage a budget here."),
+}
+
+# Answered for a code nothing recognises. Generic on purpose: the caller is already
+# handling a refusal when it asks, and a KeyError here would turn a 400 into a 500.
+UNKNOWN_REFUSAL = "This budget cannot be set from here."
+
+
+def reason_for(code: str) -> str:
+    """The wording for a refusal code: a constant from ``REFUSALS``, never
+    exception text."""
+    return REFUSALS.get(code) or UNKNOWN_REFUSAL
 
 
 def budget_name(cloud: str, scope: str = "monthly") -> str:
@@ -91,15 +134,10 @@ def desired(cloud: str, limit, currency="USD", emails=None,
     except (TypeError, ValueError):
         amount = 0.0
     if amount <= 0:
-        raise BudgetError(
-            "No budget is configured for this cloud. Set one in Settings → Cloud Costs "
-            "first; clearing it here does not remove a budget already in the cloud.")
+        raise BudgetError(REFUSALS["no_limit"], "no_limit")
     to = parse_emails(emails)
     if not to:
-        raise BudgetError(
-            "Set at least one notification email. The whole point of a budget in the "
-            "provider is that it alerts when this dashboard is not running, so it needs "
-            "an address that does not go through here.")
+        raise BudgetError(REFUSALS["no_emails"], "no_emails")
     return {
         "name": budget_name(cloud, scope),
         "limit": round(amount, 2),
@@ -146,7 +184,4 @@ def assert_writable(name: str) -> None:
     raises rather than returning a bool nobody checks.
     """
     if not owned(name):
-        raise BudgetError(
-            f"'{name}' was not created by this dashboard (its budgets are named "
-            f"'{NAME_PREFIX}…'), so it will not be modified. Rename or remove it in the "
-            "cloud console if you want the dashboard to manage a budget here.")
+        raise BudgetError(f"'{name}': {REFUSALS['not_owned']}", "not_owned")

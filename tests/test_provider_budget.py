@@ -202,6 +202,47 @@ def test_the_read_reports_instead_of_failing_when_nothing_is_configured():
         "the read should answer 200 with a reason rather than raising")
 
 
+def test_a_refusal_reaches_the_browser_as_a_constant_not_as_exception_text():
+    """What the handlers return is looked up by code, never taken from the exception.
+
+    Every BudgetError raised today carries wording written by hand in `provider_budget`,
+    so nothing internal leaks as things stand. The point is that the guarantee should not
+    rest on every future raise site remembering that: wrap one of these around a
+    provider's error — the obvious next edit — and whatever the SDK put in its message
+    would travel to a browser. CodeQL flagged the earlier shape on #793 and again on #800.
+
+    Checked on the AST rather than by scanning for the text, because the comment that
+    explains the rule contains the very thing a substring scan would look for.
+    """
+    tree = ast.parse(_API_SRC)
+    caught = {n.name for n in ast.walk(tree)
+              if isinstance(n, ast.ExceptHandler) and n.name}
+    assert caught, "api/budgets.py catches nothing by name — has the shape changed?"
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "str" and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in caught):
+            raise AssertionError(
+                "a caught exception is stringified in api/budgets.py; a response must "
+                "carry a constant from provider_budget.REFUSALS instead")
+
+    # Every refusal names its code, or it would silently render as the generic wording.
+    raises = [n for n in ast.walk(ast.parse(_PB_SRC))
+              if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+              and getattr(n.exc.func, "id", "") == "BudgetError"]
+    assert len(raises) == 3, f"{len(raises)} BudgetError raise sites, expected 3"
+    for node in raises:
+        assert len(node.exc.args) == 2, "a refusal was raised without a code"
+
+    for code in ("no_limit", "no_emails", "not_owned"):
+        assert pb.reason_for(code) == pb.REFUSALS[code]
+    # An unrecognised code answers generically. Raising here would turn a 400 into a 500,
+    # inside the path that exists to explain a refusal.
+    assert pb.reason_for("nope") == pb.UNKNOWN_REFUSAL
+    assert pb.reason_for("") == pb.UNKNOWN_REFUSAL
+
+
 # ── Azure ─────────────────────────────────────────────────────────────────────
 
 def test_the_azure_notification_carries_plain_emails_not_an_action_group():

@@ -125,7 +125,14 @@ async def read_budget(cloud: str,
     try:
         want = _wanted(cloud.lower(), backend["currency"])
     except provider_budget.BudgetError as exc:
-        return {"cloud": cloud, "configured": False, "reason": str(exc),
+        # The wording comes from `provider_budget.REFUSALS`, addressed by the refusal's
+        # code — never from `str(exc)`. Today every one of them was written by hand, so
+        # nothing internal would leak; the table exists so that stays true after somebody
+        # wraps a BudgetError around a provider's error. The exception itself goes to the
+        # log, which is where a message with an internal detail in it belongs.
+        logger.info("%s budget is not configured: %s", cloud, exc)
+        return {"cloud": cloud, "configured": False,
+                "reason": provider_budget.reason_for(exc.code),
                 "existing": None, "diff": None}
 
     scope = await backend["scope_id"]()
@@ -149,7 +156,10 @@ async def push_budget(cloud: str,
         want = _wanted(cloud.lower(), backend["currency"])
         provider_budget.assert_writable(want["name"])
     except provider_budget.BudgetError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        # Same rule as the read: a constant out of `REFUSALS`, the exception to the log.
+        logger.info("%s budget push refused: %s", cloud, exc)
+        raise HTTPException(status_code=400,
+                            detail=provider_budget.reason_for(exc.code))
 
     scope = await backend["scope_id"]()
     existing = await backend["get"](scope, want["name"], want["currency"])
