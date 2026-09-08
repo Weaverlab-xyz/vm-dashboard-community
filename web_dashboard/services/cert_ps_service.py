@@ -108,6 +108,10 @@ _OPTION_ORDER = (
     "ca", "template", "impersonate", "validate",
     "arn", "region", "sigalg", "templatearn", "wait",
     "project", "location", "pool", "issuer", "certtemplate",
+    # what KIND of thing is being issued — first, because isca= changes the meaning of
+    # everything after it, and an operator reading the address back should see that
+    # before the certificate's shape rather than appended at the tail
+    "isca", "pathlen", "permitdns", "permitemail", "permitip", "excludedns",
     # what the certificate is
     "lifetime", "key", "keysize", "curve", "hash", "subject", "dns", "ip", "san", "eku",
     "bundle", "pbe", "warn", "warndays", "warnminutes",
@@ -184,6 +188,19 @@ def build_address(backend: str, backend_options: dict,
     options.update(store_options())
     options.update(backend_options or {})
     options.update(overrides or {})
+
+    # A subordinate CA carries no extended key usage — the plugin asserts none, because an
+    # EKU on a CA certificate constrains everything issued beneath it. The validator
+    # refuses eku= alongside isca=true for that reason, and rightly: on a hand-typed
+    # address it is a visible mistake. But `cert_default_eku` is a CONFIG default that
+    # applies to every profile, so left alone it would block the sub-CA path with an
+    # option the operator never chose for it. Drop it from the defaults layer only — an
+    # eku= passed explicitly in backend_options or overrides still reaches the validator
+    # and is still refused, because there it is a real contradiction.
+    if str(options.get("isca", "")).strip().lower() == "true" and \
+            "eku" not in (backend_options or {}) and "eku" not in (overrides or {}):
+        options.pop("eku", None)
+
     address = compose_address(backend, options)
     ps_resource_service._validate_certificate_dns_name(address)
     ps_resource_service._check_address_length(address, "certificate")

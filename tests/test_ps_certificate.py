@@ -18,6 +18,7 @@ below so the budget cannot quietly regress.
 Imports ps_resource_service with a stubbed web_dashboard.config (no app deps).
 Runs under pytest or standalone:  python tests/test_ps_certificate.py
 """
+import logging
 import os
 import sys
 import types
@@ -185,6 +186,212 @@ def test_warn_is_a_percentage_capped_at_ninety():
     _ok(f"{base}&warn=90")
     msg = _bad(f"{base}&warn=91", "warn", "percentage")
     assert "warndays" in msg
+
+
+# ── subordinate-CA issuance ────────────────────────────────────────────────────
+# With isca=true the managed credential stops being a leaf and becomes the ISSUER: some
+# other system holds it and mints its own certificates beneath it. That inverts what a
+# mistake costs, so this block is the strictest in the file. See
+# docs/design/pra-session-ca.md.
+
+_SUBCA = f"gcpcas?project=p&location=l&pool=q&isca=true&{_STORE}"
+
+
+def test_the_subordinate_ca_options_are_accepted_on_both_cloud_backends():
+    # The reason these cannot live in _CERT_BACKEND_KEYS: that table maps a key to
+    # exactly ONE owning backend, and 'isca=' is legitimate on two.
+    for base in (f"gcpcas?project=p&location=l&pool=q&{_STORE}",
+                 f"awspca?arn=arn:aws:acm-pca:us-east-1:1:certificate-authority/x&{_STORE}"):
+        _ok(f"{base}&isca=true")
+        _ok(f"{base}&isca=true&pathlen=0&permitdns=db.corp.example.com")
+        _ok(f"{base}&isca=true&permitemail=corp.example.com&excludedns=lab.example.com")
+
+
+def test_a_bare_isca_reads_as_true_like_every_other_flag():
+    _ok(f"gcpcas?project=p&location=l&pool=q&isca&permitdns=db.example.com&{_STORE}")
+
+
+def test_the_verbatim_topology_d_address_fits_and_parses():
+    # Verbatim from the plugin's test-case document §6.3 — the profile an operator copies
+    # for the PRA session-CA topology. Pinned at its length for the same reason as the
+    # four leaf addresses: bundle=PemBundle is MANDATORY there and costs 17 characters
+    # that cannot be dropped as a default, and two more permitdns= entries would overrun.
+    addr = ("gcpcas?project=<project>&location=us-central1&pool=demo-subca-pool"
+            "&isca=true&lifetime=8d&bundle=PemBundle&permitdns=db.corp.example.com"
+            "&biurl=https://bi01.corp.example.com&folder=Certs/SubCA&owner=1")
+    assert len(addr) == 198, len(addr)
+    _ok(addr)
+
+
+def test_isca_is_refused_on_the_two_backends_the_plugin_refuses_it_on():
+    # Both are policy positions rather than gaps, and a customer asks about each — so the
+    # reason has to travel with the refusal.
+    msg = _bad(f"adcs?ca=X&template=T&isca=true&{_STORE}", "isca", "adcs")
+    assert "approval" in msg.lower() and "cr_disp_under_submission" in msg.lower()
+    msg = _bad(f"selfsigned?isca=true&{_STORE}", "isca", "selfsigned")
+    assert "trust root" in msg.lower()
+    # And a constraint option alone is enough to trip it — isca= need not be present.
+    _bad(f"adcs?ca=X&template=T&permitdns=x.example.com&{_STORE}", "permitdns", "adcs")
+
+
+def test_isca_must_be_a_boolean_the_plugin_can_actually_read():
+    # The sharpest edge in the grammar: a value that does not parse as a boolean issues
+    # an END-ENTITY certificate where an authority was asked for, and that surfaces at
+    # the relying party as an untrusted issuer rather than anywhere near the cause.
+    msg = _bad(f"gcpcas?project=p&location=l&pool=q&isca=yes&{_STORE}", "isca", "true")
+    assert "end-entity" in msg.lower()
+    _ok(f"gcpcas?project=p&location=l&pool=q&isca=false&{_STORE}")
+
+
+def test_subordinate_options_without_isca_are_refused_as_silent_no_ops():
+    # Same class as the publisher options above: present, plausible, and doing nothing.
+    base = f"gcpcas?project=p&location=l&pool=q&{_STORE}"
+    _bad(f"{base}&permitdns=db.example.com", "permitdns=", "isca=true")
+    _bad(f"{base}&pathlen=1", "pathlen=", "isca=true")
+    # pathlen=0 is a MEANINGFUL value, so presence is the test and not truthiness.
+    _bad(f"{base}&pathlen=0", "pathlen=", "isca=true")
+    _bad(f"{base}&isca=false&permitip=10.0.0.0/8", "permitip=", "isca=true")
+
+
+def test_pathlen_is_a_number_and_aws_stops_at_its_last_template():
+    _bad(f"{_SUBCA}&pathlen=deep", "pathlen", "whole number")
+    _ok(f"{_SUBCA}&pathlen=9")  # gcpcas honours the CSR, subject to the pool's policy
+    aws = f"awspca?arn=arn:aws:acm-pca:us-east-1:1:certificate-authority/x&isca=true&{_STORE}"
+    _ok(f"{aws}&pathlen=3")
+    msg = _bad(f"{aws}&pathlen=4", "pathlen", "template")
+    assert "subordinatecacertificate_pathlen3" in msg.lower().replace(" ", "")
+
+
+def test_a_permitted_ip_subtree_must_be_a_network_not_an_address_inside_one():
+    # The plugin says so explicitly: 10.0.0.0/8, not 10.1.2.3/8. Getting it wrong
+    # constrains the subordinate to something other than what was meant, and nothing
+    # downstream can detect that.
+    _ok(f"{_SUBCA}&permitip=10.0.0.0/8,192.168.0.0/16")
+    _ok(f"{_SUBCA}&permitip=2001:db8::/32")
+    msg = _bad(f"{_SUBCA}&permitip=10.1.2.3/8", "permitip", "host bits")
+    assert "10.0.0.0/8" in msg          # names the network they probably meant
+    _bad(f"{_SUBCA}&permitip=not-a-cidr", "permitip", "cidr")
+    _bad(f"{_SUBCA}&permitip=10.0.0.0/33", "permitip", "cidr")
+
+
+def test_an_eku_on_a_subordinate_ca_is_refused_because_the_plugin_drops_it():
+    # The plugin asserts NO extended key usage on a CA, deliberately — an EKU there
+    # constrains the whole subtree beneath it and implementations disagree on how. So
+    # eku= would be silently dropped, which is precisely what this validator exists for.
+    msg = _bad(f"{_SUBCA}&eku=ClientAuth", "eku=", "isca=true")
+    assert "beneath" in msg.lower()
+    # ...and it stays valid on a leaf, which is the common case.
+    _ok(f"gcpcas?project=p&location=l&pool=q&eku=ClientAuth&{_STORE}")
+
+
+class _LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def _warnings_from(addr):
+    """Validate ``addr`` while capturing ps_resource_service's warnings+."""
+    handler = _LogCapture()
+    level = ps.logger.level
+    ps.logger.addHandler(handler)
+    ps.logger.setLevel(logging.DEBUG)
+    try:
+        _ok(addr)
+    finally:
+        ps.logger.setLevel(level)
+        ps.logger.removeHandler(handler)
+    return " ".join(r.getMessage() for r in handler.records
+                    if r.levelno >= logging.WARNING).lower()
+
+
+def test_an_unconstrained_subordinate_is_allowed_but_cautioned():
+    # Allowed because the constraints belong on the PARENT pool's issuance policy where
+    # they are inherited and cost nothing against the address — so their absence here is
+    # not necessarily a mistake. Cautioned because it might be.
+    msg = _warnings_from(f"gcpcas?project=p&location=l&pool=q&isca=true&{_STORE}")
+    assert "name constraints" in msg and "issuance policy" in msg
+    # And silence once any one of them is set.
+    msg = _warnings_from(f"{_SUBCA}&permitdns=db.example.com")
+    assert "name constraints" not in msg
+
+
+def test_a_long_lived_subordinate_is_cautioned_because_rotation_does_not_revoke():
+    # The bound on a leaked signing key is the subordinate's own validity, NOT the
+    # rotation interval — a year-long subordinate rotated weekly just accumulates ~52
+    # concurrently valid authorities. Warned rather than refused for the plugin's own
+    # reason: the rotation interval lives in an account policy this cannot see.
+    msg = _warnings_from(f"{_SUBCA}&permitdns=db.example.com&lifetime=1y")
+    assert "rotation does not revoke" in msg and "365" in msg
+    # 8d against a 7-day policy is the documented pairing, and must stay quiet.
+    assert "rotation does not revoke" not in _warnings_from(
+        f"{_SUBCA}&permitdns=db.example.com&lifetime=8d")
+    # The caution is about the SUBORDINATE's validity, so a long-lived LEAF is silent.
+    assert "rotation does not revoke" not in _warnings_from(
+        f"gcpcas?project=p&location=l&pool=q&lifetime=1y&{_STORE}")
+
+
+def test_the_aws_template_and_isca_may_not_contradict_each_other():
+    # ACM PCA ignores the CSR's basic constraints and builds from a template, so these
+    # two naming different things is not a preference to resolve — one of them is a lie,
+    # and the request SUCCEEDS while returning the wrong kind of certificate.
+    aws = f"awspca?arn=arn:aws:acm-pca:us-east-1:1:certificate-authority/x&{_STORE}"
+    sub = "arn:aws:acm-pca:::template/SubordinateCACertificate_PathLen0/V1"
+    leaf = "arn:aws:acm-pca:::template/EndEntityCertificate/V1"
+    _ok(f"{aws}&isca=true&templatearn={sub}")
+    _ok(f"{aws}&templatearn={leaf}")
+    msg = _bad(f"{aws}&isca=true&templatearn={leaf}", "templatearn", "disagree")
+    assert "end-entity" in msg.lower()
+    msg = _bad(f"{aws}&templatearn={sub}", "templatearn", "isca")
+    assert "authority" in msg.lower()
+
+
+# ── the composer's side of the sub-CA grammar ──────────────────────────────────
+# cert_ps_service builds addresses from config defaults + form values and validates the
+# result, so a refusal added above can be triggered by a value the operator never chose
+# for that profile. These two pin the seam.
+
+from web_dashboard.services import cert_ps_service as cps  # noqa: E402
+
+
+def test_the_subordinate_options_compose_before_the_certificate_shape():
+    # Not cosmetic: isca= changes the meaning of every option after it, and an unknown
+    # key would otherwise be appended at the tail, after owner=.
+    addr = cps.compose_address("gcpcas", {"owner": "1", "lifetime": "8d",
+                                          "isca": "true", "pathlen": "0",
+                                          "permitdns": "db.example.com"})
+    assert addr.index("isca=") < addr.index("lifetime=") < addr.index("owner=")
+    assert addr.index("isca=") < addr.index("permitdns=") < addr.index("lifetime=")
+
+
+def test_a_config_default_eku_does_not_block_a_subordinate_ca():
+    # cert_default_eku applies to EVERY profile, so if it survived into a sub-CA address
+    # the validator's eku=/isca= refusal would block the path with an option nobody chose
+    # for it. Dropped from the DEFAULTS layer only.
+    base = {"project": "p", "location": "l", "pool": "q"}
+    store = {"biurl": "https://b", "owner": "1"}
+    real_defaults = cps.profile_defaults
+    cps.profile_defaults = lambda: {"eku": "ClientAuth", "key": "rsa3072"}
+    try:
+        addr = cps.build_address("gcpcas", {**base, "isca": "true",
+                                            "permitdns": "db.example.com"}, store)
+        assert "eku=" not in addr and "isca=true" in addr and "key=rsa3072" in addr
+        # A leaf still gets it — this must not have disabled the default outright.
+        assert "eku=ClientAuth" in cps.build_address("gcpcas", base, store)
+        # And an EXPLICIT eku= alongside isca=true is still a contradiction, because
+        # there it is the operator's own value rather than a global default.
+        try:
+            cps.build_address("gcpcas", {**base, "isca": "true", "eku": "ClientAuth"},
+                              store)
+        except ps.PSResourceError as exc:
+            assert "eku=" in str(exc)
+        else:
+            raise AssertionError("an explicit eku= with isca=true must still be refused")
+    finally:
+        cps.profile_defaults = real_defaults
 
 
 # ── the Entra publisher's own preconditions ────────────────────────────────────

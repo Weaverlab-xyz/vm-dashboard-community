@@ -30,7 +30,9 @@ Onboarding shapes (``method`` on register_managed_system):
   - ``certificate`` — the "Certificate" custom plugin: the managed credential is a PKCS#12
     passphrase and the bundle it opens lives in Secrets Safe, so the managed system carries
     the whole certificate profile (CA backend, key shape, subject, Secrets Safe destination,
-    optional Entra publisher) in ``dns_name`` and nothing is seeded.
+    optional Entra publisher) in ``dns_name`` and nothing is seeded. With ``isca=true`` on
+    a cloud backend the issued credential is a subordinate CA rather than a leaf — see
+    ``_CERT_SUBCA_KEYS`` and docs/design/pra-session-ca.md.
 
 Shaped like entitle_registration_service / terraform_pra_service: inline HCL written
 to an ephemeral workdir, ``terraform apply``, ids pulled from outputs, the full
@@ -349,6 +351,48 @@ _CERT_BACKEND_KEYS = {
     "project": "gcpcas", "location": "gcpcas", "pool": "gcpcas",
     "issuer": "gcpcas", "certtemplate": "gcpcas",
 }
+# ── subordinate-CA issuance ('isca=true') ─────────────────────────────────────
+#
+# With isca=true the plugin issues a subordinate CERTIFICATE AUTHORITY instead of an
+# end-entity certificate: the managed credential becomes the issuer, some other system
+# (PRA Vault, in the design note) holds it and mints its own short-lived leaves beneath
+# it, and Password Safe rotates the subordinate on a schedule. See
+# docs/design/pra-session-ca.md.
+#
+# These deliberately do NOT live in _CERT_BACKEND_KEYS. That table maps each key to
+# exactly ONE owning backend and refuses it on every other, which cannot express "either
+# cloud backend" — it would refuse 'isca=' on whichever of awspca/gcpcas was not named.
+_CERT_SUBCA_KEYS = frozenset({
+    "isca", "pathlen", "permitdns", "permitemail", "permitip", "excludedns"})
+# Name-constraint subtrees, separately: these are the options that bound what the
+# subordinate may assert, and the ones the plugin only warns about when absent.
+_CERT_SUBCA_CONSTRAINTS = ("permitdns", "permitemail", "permitip", "excludedns")
+# The plugin refuses isca=true on the remaining backends, and both refusals are policy
+# positions rather than gaps — so the reason travels with the error instead of the
+# operator discovering it at the first rotation. ('selfsignedtest' never reaches this:
+# the backend itself is refused further up.)
+_CERT_SUBCA_REFUSED = {
+    "adcs": ("a subordinate-CA template that issues unattended means turning OFF CA "
+             "certificate manager approval, which many organisations forbid outright — "
+             "and with approval ON every rotation returns CR_DISP_UNDER_SUBMISSION and "
+             "can never complete. Use a cloud backend, where the equivalent permission "
+             "is IAM-scoped, reviewable, revocable and logged"),
+    "selfsigned": ("a self-signed CA certificate is a new TRUST ROOT, not a subordinate "
+                   "— nothing above it constrains what it may assert, and every relying "
+                   "party would have to be visited to trust it and visited again to "
+                   "stop. Sign the subordinate from a real CA instead"),
+}
+# ACM PCA builds the certificate from one of its own templates rather than from the CSR's
+# extensions, and the subordinate templates stop at PathLen3.
+_CERT_AWS_MAX_PATHLEN = 3
+_CERT_AWS_SUBCA_TEMPLATE = "subordinatecacertificate"
+# The plugin cautions above this rather than enforcing a ratio it has half the inputs
+# for: it cannot see the rotation schedule, which Password Safe holds.
+_CERT_SUBCA_CAUTION_DAYS = 45
+# For turning a lifetime= into days, to compare against that caution. Approximate on
+# purpose — this drives a log line, never a refusal.
+_CERT_LIFETIME_UNIT_DAYS = {"m": 1 / 1440, "h": 1 / 24, "d": 1.0, "w": 7.0, "y": 365.0}
+
 _CERT_KEY_ALGS = frozenset({
     "rsa2048", "rsa3072", "rsa4096", "ecdsa-p256", "ecdsa-p384", "ecdsa-p521"})
 _CERT_HASHES = frozenset({"sha256", "sha384", "sha512"})
@@ -423,6 +467,13 @@ def _validate_certificate_dns_name(dns_name: str) -> None:
     for key in sorted(options):
         if key in _CERT_COMMON_KEYS:
             continue
+        if key in _CERT_SUBCA_KEYS:
+            why = _CERT_SUBCA_REFUSED.get(backend)
+            if why:
+                raise PSResourceError(
+                    f"{key!r} asks for subordinate-CA issuance, which the plugin refuses "
+                    f"on a {backend!r} address — {why}")
+            continue
         owner = _CERT_BACKEND_KEYS.get(key)
         if owner is None:
             raise PSResourceError(
@@ -443,6 +494,23 @@ def _validate_certificate_dns_name(dns_name: str) -> None:
             f"construction rather than mid-rotation")
 
     _validate_certificate_options(backend, options)
+
+
+def _cert_lifetime_days(value: str) -> float | None:
+    """``lifetime=`` as approximate days, or None if it is not a shape we can measure.
+
+    Only ever used to decide whether to LOG a caution, so the year length is nominal and
+    a value this cannot read is simply not cautioned about — ``_CERT_LIFETIME`` has
+    already refused anything malformed by the time this runs."""
+    value = (value or "").strip().lower()
+    if not value:
+        return None
+    unit = _CERT_LIFETIME_UNIT_DAYS.get(value[-1])
+    try:
+        # A bare number means DAYS, which is why the no-unit case multiplies by 1.
+        return float(value[:-1]) * unit if unit else float(value)
+    except ValueError:
+        return None
 
 
 def _validate_certificate_options(backend: str, options: dict) -> None:
@@ -484,6 +552,8 @@ def _validate_certificate_options(backend: str, options: dict) -> None:
         if value and not value.isdigit():
             raise PSResourceError(f"{name} {value!r} is not a whole number")
 
+    _validate_certificate_subca(backend, options)
+
     publisher = _val("publisher").lower()
     if publisher:
         if publisher not in _CERT_PUBLISHERS:
@@ -522,6 +592,132 @@ def _validate_certificate_options(backend: str, options: dict) -> None:
                     "PS: certificate address sets no %s= (%s). The plugin falls back to "
                     "appsettings.json, which cannot be edited on a Password Safe Cloud "
                     "tenant — on Cloud the first credential change will fail.", name, why)
+
+def _validate_certificate_subca(backend: str, options: dict) -> None:
+    """Value-level checks for the ``isca=`` subordinate-CA options.
+
+    Reached only on ``awspca`` and ``gcpcas``; the caller refuses the other backends with
+    the plugin's own reasoning before any of this runs."""
+    def _val(key: str) -> str:
+        return (options.get(key) or "").strip()
+
+    isca = _val("isca").lower()
+    if isca and isca not in ("true", "false"):
+        raise PSResourceError(
+            f"isca {isca!r} is not valid — use true or false (a bare 'isca' with no '=' "
+            f"reads as true). This is the one option worth being strictest about: a "
+            f"value the plugin cannot read as a boolean issues an END-ENTITY certificate "
+            f"where a certificate authority was asked for, and that surfaces at the "
+            f"relying party as an untrusted issuer, a long way from the cause")
+    issuing_ca = isca == "true"
+
+    constraints = [k for k in _CERT_SUBCA_CONSTRAINTS if _val(k)]
+
+    # pathlen= and the constraint options do nothing at all without isca=true — the same
+    # class of silent no-op as the publisher options, and refused for the same
+    # reason. Note pathlen='0' is meaningful, so this tests presence and not truthiness.
+    if not issuing_ca:
+        stray = constraints + (["pathlen"] if _val("pathlen") else [])
+        if stray:
+            raise PSResourceError(
+                f"{', '.join(k + '=' for k in sorted(stray))} only does anything with "
+                f"isca=true — without it the plugin issues an end-entity certificate and "
+                f"never asserts the basic-constraints or name-constraints extensions "
+                f"these describe")
+
+    pathlen = _val("pathlen")
+    if pathlen:
+        if not pathlen.isdigit():
+            raise PSResourceError(
+                f"pathlen {pathlen!r} is not a whole number — it is how many further CAs "
+                f"may appear beneath the subordinate, and 0 (end-entity certificates "
+                f"only) is almost always right")
+        if backend == "awspca" and int(pathlen) > _CERT_AWS_MAX_PATHLEN:
+            raise PSResourceError(
+                f"pathlen {pathlen!r} is out of range on an awspca address — ACM PCA "
+                f"ignores the CSR's basic constraints and builds the certificate from "
+                f"one of its own templates, and those stop at "
+                f"SubordinateCACertificate_PathLen{_CERT_AWS_MAX_PATHLEN}")
+
+    # A permitted-IP subtree is a NETWORK, and the plugin says so: 10.0.0.0/8, never
+    # 10.1.2.3/8. Getting this wrong constrains the subordinate to something other than
+    # what was meant, which no later action can detect.
+    for value in [v.strip() for v in _val("permitip").split(",") if v.strip()]:
+        try:
+            ipaddress.ip_network(value, strict=True)
+        except ValueError as exc:
+            try:
+                network = ipaddress.ip_network(value, strict=False)
+            except ValueError:
+                raise PSResourceError(
+                    f"permitip {value!r} is not a valid CIDR range: {exc}") from exc
+            raise PSResourceError(
+                f"permitip {value!r} has host bits set — a name-constraint subtree is a "
+                f"NETWORK, so give the network address ({network}), not an address "
+                f"inside it") from exc
+
+    if not issuing_ca:
+        # The same contradiction from the other side, and the more insidious direction:
+        # a subordinate template with no isca= produces a real CA certificate that the
+        # rest of the profile was never written for.
+        template = _val("templatearn").lower()
+        if template and _CERT_AWS_SUBCA_TEMPLATE in template:
+            raise PSResourceError(
+                f"templatearn= names a SubordinateCACertificate template but isca= is "
+                f"not set — ACM PCA would issue a certificate AUTHORITY while the rest "
+                f"of this profile describes an end-entity certificate. Set isca=true if "
+                f"a subordinate CA is what you want, and let pathlen= select the template")
+        return
+
+    # An EKU on a CA certificate constrains the whole subtree beneath it, and
+    # implementations disagree about whether it applies to the CA itself or to what it
+    # issues — so the plugin asserts NONE on a subordinate. Which means eku= here is
+    # silently dropped, and a silently dropped option is what this validator is for.
+    if _val("eku"):
+        raise PSResourceError(
+            "eku= cannot be combined with isca=true — the plugin asserts NO extended key "
+            "usage on a subordinate CA, deliberately, because an EKU on a CA certificate "
+            "constrains everything issued beneath it and implementations disagree on how. "
+            "So this value would be dropped without effect; drop it here instead")
+
+    if not constraints:
+        logger.warning(
+            "PS: certificate address sets isca=true with no name constraints "
+            "(permitdns=/permitemail=/permitip=). The plugin allows this and warns: a "
+            "vaulted CA key is not a credential to one system, it is the authority to "
+            "mint an identity for ANYTHING the CA may assert. Prefer the parent CA pool's "
+            "issuance policy, where the subordinate inherits a boundary it cannot widen "
+            "and the constraints cost nothing against the %d-character address.",
+            _MAX_MANAGED_SYSTEM_ADDRESS)
+
+    # Rotation does not REVOKE: a relying party walks the chain to the root and neither
+    # knows nor cares which subordinate was current when a leaf was minted. So the bound
+    # on a leaked signing key is the subordinate's own validity, not the rotation
+    # interval, and a long-lived subordinate rotated often just accumulates concurrently
+    # valid authorities. Warned rather than refused, for the plugin's own reason: the
+    # rotation interval lives in Password Safe's account policy, which is not visible here.
+    days = _cert_lifetime_days(_val("lifetime"))
+    if days is not None and days > _CERT_SUBCA_CAUTION_DAYS:
+        logger.warning(
+            "PS: certificate address issues a SUBORDINATE CA with lifetime=%s (~%d "
+            "days). Rotation does not revoke, so this — not the rotation interval — is "
+            "the exposure window if the signing key leaks. Issue the subordinate just "
+            "longer than the interval it is rotated on, sizing the overlap to the "
+            "longest expected session. The plugin itself cautions above %d days.",
+            _val("lifetime"), round(days), _CERT_SUBCA_CAUTION_DAYS)
+
+    # ACM PCA's template decides what comes back, so isca= and templatearn= naming
+    # different things is not a preference to resolve — one of them is a lie. Without
+    # this, asking for a CA returns a perfectly valid end-entity certificate.
+    template = _val("templatearn").lower()
+    if template and _CERT_AWS_SUBCA_TEMPLATE not in template:
+        raise PSResourceError(
+            f"templatearn= and isca=true disagree — {_val('templatearn')!r} is not a "
+            f"SubordinateCACertificate template, and ACM PCA builds the certificate from "
+            f"the template rather than from the CSR. The request would succeed and return "
+            f"an END-ENTITY certificate, which fails later at the relying party as an "
+            f"untrusted issuer. Drop templatearn= and let pathlen= select the template")
+
 
 # ── AWS SSM DB plugin address grammar ─────────────────────────────────────────
 #
