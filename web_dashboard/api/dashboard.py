@@ -215,6 +215,20 @@ def _db_tiles(db: Session, user: User) -> dict:
         return _tile(len(rows))
     _safe("k8s_clusters", _clusters)
 
+    def _functions():
+        from ..services import cloud_function_service
+        rows = cloud_function_service.list_functions(db)
+        # Creator-scoped like the two above, and for the same reason: a cloud_functions
+        # row carries no workgroup.
+        if not user.is_effective_admin:
+            rows = [r for r in rows if r.get("created_by") == user.username]
+        # Secondary counts the ones actually callable. A function still `deploying`, or one
+        # whose apply failed, has no endpoint — the page's own status column says so, and a
+        # tile reading "3" while every one of them is dead would be the worse lie.
+        available = sum(1 for r in rows if r.get("status") == "available")
+        return _tile(len(rows), secondary=available)
+    _safe("cloud_functions", _functions)
+
     def _workstation():
         from . import vms as vms_api
         rows = vms_api._agent_workstation_vms(db, vms_api._accessible(user))

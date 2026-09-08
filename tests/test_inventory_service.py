@@ -23,8 +23,9 @@ def _install_stubs():
     # does not fail this file -- it makes the import below raise and the whole thing
     # SKIP, silently, which is how PovEnvironment went unnoticed here for as long as it
     # did. If you add a model to that import, add it here.
-    for name in ("Job", "CertLab", "CloudDatabase", "K8sCluster", "VirtualDesktop",
-                 "HypervisorConnection", "HypervisorVMCache", "PovEnvironment"):
+    for name in ("Job", "CertLab", "CloudDatabase", "CloudFunction", "K8sCluster",
+                 "VirtualDesktop", "HypervisorConnection", "HypervisorVMCache",
+                 "PovEnvironment"):
         setattr(db, name, type(name, (), {}))
     sys.modules["web_dashboard.database"] = db
 
@@ -156,6 +157,42 @@ def test_a_registered_row_reports_its_source():
     # A K8sCluster row predating the `source` column defaults to registered, which is
     # the safe direction: unknown provenance is never auto-deleted.
     assert svc._k8s_item(_k8s_row(source=None))["source"] == "registered"
+
+
+def _fn_row(**kw):
+    base = dict(id="f1", cloud="gcp", name="jit-mysql-40222f70", workload="db_grant",
+                region="us-east1", status="available", deploy_job_id="j7",
+                created_by="bob", created_at=_TS)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_function_item_shape():
+    it = svc._function_item(_fn_row())
+    assert it["cloud"] == "gcp" and it["kind"] == "function"
+    assert it["state"] == "available" and it["region"] == "us-east1"
+    assert it["job_id"] == "j7" and it["detail_href"] == "/functions"
+    assert it["id"] == "f1" or it["id"] == "cloudfn:f1"
+
+
+def test_function_item_names_the_workload_as_well_as_the_function():
+    """The function name alone does not say what is running inside it, which is the
+    question an inventory row is asked about a function."""
+    it = svc._function_item(_fn_row())
+    assert "jit-mysql-40222f70" in it["name"] and "db_grant" in it["name"]
+
+
+def test_a_function_never_carries_an_expiry():
+    """cloud_functions has no expires_at column, so the mapper hardcodes None rather
+    than reading an attribute that does not exist — the same contract as a desktop seat.
+    An idle function also bills nothing, so there is no cost argument for a timer."""
+    it = svc._function_item(_fn_row())
+    assert it["expires_at"] is None and it["source"] == "provisioned"
+    capable, why = svc.expiry_policy.ttl_capable(it)
+    assert capable is False
+    # And the refusal must not borrow the virtual-desktop reason, which was what every
+    # non-reapable kind used to be told.
+    assert "pool" not in why
 
 
 def test_desktop_item_includes_assignee():

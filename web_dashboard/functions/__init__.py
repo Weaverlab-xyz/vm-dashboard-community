@@ -1,4 +1,4 @@
-"""Deployable cloud-function source (Cloud Functions preview feature).
+"""Deployable cloud-function source (Cloud Functions feature).
 
 Unlike every other package under ``web_dashboard/``, the code in here does NOT run
 in the dashboard process — it is packaged into a zip by

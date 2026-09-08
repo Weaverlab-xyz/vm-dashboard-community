@@ -1008,7 +1008,7 @@ $cfg = @(
     "# On-demand SSM interface endpoints — created on the first EC2 deploy / AWS cloud-DB provision, removed with the last one (private-subnet SSM reach for Password Safe onboarding; ~`$7/mo each while up, `$0 idle):",
     "aws_ssm_endpoints_enabled=true",
     "",
-    "# Cloud Functions (preview) — Lambda lifecycle. Packages reuse the image-hub bucket:",
+    "# Cloud Functions — Lambda lifecycle. Packages reuse the image-hub bucket:",
     "cloud_functions_enabled=true",
     "function_package_s3_bucket=$StorageBucket                        # Same bucket as the image hub, under function-packages/",
     "aws_functions_subnet_ids=$PrivateSubnetId                      # network_mode=vpc: the Lambda's ENIs land here",

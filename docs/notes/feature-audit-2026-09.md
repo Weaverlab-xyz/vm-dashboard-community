@@ -64,7 +64,7 @@ pages.
 | **Config mgmt** | Ansible runner (local or one-shot in-cloud), asset storage on S3/Blob/GCS/local-UNC, upload-time secret scanning, apply-time drift fingerprinting |
 | **Databases** | Postgres/MySQL/SQL Server on AWS/Azure/GCP, Oracle on OCI; or register one you already run |
 | **Kubernetes** | EKS/AKS/GKE/OKE provision or import, Rancher management plane, ESO secret delivery, PRA tunnels, Entra→RBAC federation |
-| **Containers / functions** | ECS/ACI/GCE-COS from a stored Compose file, Portainer CE; one Python handler deployed unchanged to Lambda/Function App/Cloud Run *(preview)* |
+| **Containers / functions** | ECS/ACI/GCE-COS from a stored Compose file, Portainer CE; one Python handler deployed unchanged to Lambda/Function App/Cloud Run |
 | **Remote agents** | Outbound-dialing container, self-generated Ed25519 key, per-job credential sealing, hypervisor discovery, agent-executed config runs |
 | **Identity** | Local auth, WebAuthn/FIDO2, Entra OAuth, generic OIDC, PATs, workgroup RBAC, Entitle-granted time-boxed dashboard permissions |
 | **BeyondTrust** | PRA (jump items, protocol tunnels, Vault, Gateways), Password Safe (managed systems/accounts, checkout, rotate-on-check-in), EPM-L, Entitle |

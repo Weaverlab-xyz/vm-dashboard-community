@@ -1,9 +1,11 @@
-# Cloud Functions (preview) — design
+# Cloud Functions — design
 
-> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are extending the Cloud Functions preview or its workload catalog.
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are extending Cloud Functions or its workload catalog.
 
-Status: **preview** (`cloud_functions_enabled`). Phase 1 = the modular function
-lifecycle + a catalog of standalone workloads. Phase 2 = using those functions as
+Status: **GA** (`cloud_functions_enabled`, a Settings → Integrations toggle).
+Graduated from preview once a dashboard-authored handler was deployed and invoked
+end-to-end against both a MySQL and a SQL Server managed database on GCP. Phase 1 =
+the modular function lifecycle + a catalog of standalone workloads. Phase 2 = using those functions as
 Entitle REST integrations (see §7).
 
 ## 1. Why
@@ -216,7 +218,7 @@ invoke fails with an ENI error.
   integration**, so Phase 2 is impossible on it. Allowed as an opt-in `sku_name`
   for public-only demos; the module has a `precondition` that fails at plan time if
   Y1 is paired with a subnet.
-- *Elastic Premium (EP1)* — works, ~10× the cost of B1 for a preview feature.
+- *Elastic Premium (EP1)* — works, ~10× the cost of B1 for a demo feature.
 - **B1** — supports VNet integration *and* run-from-package, fully declarative, no
   cold-start surprises, and one variable moves an operator up to `EP1`/`P0v3`.
 

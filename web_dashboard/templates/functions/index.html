@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Functions{% endblock %}
 
-{# Cloud Functions page (PREVIEW, gated by cloud_functions_enabled).
+{# Cloud Functions page (gated by cloud_functions_enabled).
    Deploys a dashboard-authored handler from web_dashboard/functions/fnworkloads/
    as an AWS Lambda / Azure Linux Function App / GCP Cloud Run function, optionally
    attached to a VPC/VNet. Backed by /api/functions. #}
@@ -10,10 +10,7 @@
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="functionsPage()" x-init="init()">
 
   <div class="flex items-center justify-between mb-1">
-    <div class="flex items-center gap-2">
-      <h1 class="text-2xl font-bold text-gray-800">Cloud Functions</h1>
-      <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Preview</span>
-    </div>
+    <h1 class="text-2xl font-bold text-gray-800">Cloud Functions</h1>
     <button @click="openDeploy()"
             class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
       Deploy function

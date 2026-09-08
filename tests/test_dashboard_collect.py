@@ -75,6 +75,7 @@ NOT_COLLECTED = {
     "registered_images":  "registered_images table",
     "cloud_databases":    "dashboard DB, creator-scoped",
     "k8s_clusters":       "dashboard DB, creator-scoped",
+    "cloud_functions":    "dashboard DB, creator-scoped",
     "workstation_vms":    "HypervisorVMCache rows an agent synced",
     "gateways":           "gateway registry table (reconcile=false on the tile)",
     "ot_cells":           "Job rows (the cell's deploy child IS its inventory record)",

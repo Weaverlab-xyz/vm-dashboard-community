@@ -1,5 +1,5 @@
 """
-Cloud Functions API — preview (gated by the ``cloud_functions_enabled`` flag).
+Cloud Functions API — gated by the ``cloud_functions_enabled`` flag.
 
   POST   /api/functions              — deploy a workload (record + schedule apply)
   GET    /api/functions              — list dashboard-deployed functions

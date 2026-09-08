@@ -5368,7 +5368,8 @@
         </div>
       </template>
 
-      <!-- Cloud Functions (preview): package stores + optional VPC/VNet attachment -->
+      <!-- Cloud Functions (config panel; enable/disable via the feature toggle):
+           package stores + optional VPC/VNet attachment -->
       <template x-if="panel?.key === 'cloud_functions' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -5376,8 +5377,8 @@
             <code>web_dashboard/functions/</code>, uploads it to an object store
             <strong>in the same cloud as the function</strong>, and Terraform references it by
             content hash. Configure the store for each cloud you want to deploy to — a cloud
-            without one is offered but blocked in the deploy form. Enable/disable the feature
-            with the Preview toggle.
+            without one is offered but blocked in the deploy form. Enable or disable the
+            feature with its toggle in the integrations list above.
             <a href="/docs/integrations/cloud-functions" target="_blank"
                class="text-blue-600 hover:text-blue-800 underline">Integration guide</a>.
           </p>
@@ -6055,6 +6056,8 @@ function settingsPage() {
         desc: 'Provision private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, or register ones you already run — on-premises or in a cloud. PRA tunnel for the private ones.' },
       { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
+      { key: 'cloud_functions', label: 'Cloud Functions',        hasConfig: true,  enabled: false,
+        desc: 'Deploy a dashboard-authored handler as an AWS Lambda, an Azure Function App, or a GCP Cloud Run function — optionally attached to a VPC/VNet so it can reach private resources. Each gets a stable HTTPS endpoint protected by a shared bearer secret.' },
       { key: 'remote_agents', label: 'Remote Agents',           hasConfig: true,  enabled: false,
         desc: 'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules. Adds an Agents page for registering and revoking them. Terminate TLS in front of the dashboard before enabling — this is the only API that serves callers outside your own network.' },
       { key: 'mcp_server',   label: 'MCP Server',                hasConfig: false, enabled: false,
@@ -6343,6 +6346,7 @@ function settingsPage() {
           resource_expiry: features.resource_expiry,
           cloud_database: features.cloud_database,
           k8s_management: features.k8s_management,
+          cloud_functions: features.cloud_functions,
           // Miss an entry here and the toggle renders permanently OFF however the flag
           // is really set — silent, because nothing errors. Notifications was missing
           // one until now. Pinned by tests/test_settings_integrations.py.

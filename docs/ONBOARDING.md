@@ -256,7 +256,7 @@ that is maintained.
 | Entitle | [integrations/entitle.md](integrations/entitle.md) |
 | Portainer CE | [integrations/portainer.md](integrations/portainer.md) |
 | Remote Worker (Ansible + k8s runners) | [integrations/ansible.md](integrations/ansible.md) |
-| Cloud Functions (preview) | [integrations/cloud-functions.md](integrations/cloud-functions.md) |
+| Cloud Functions | [integrations/cloud-functions.md](integrations/cloud-functions.md) |
 | MCP server (AI clients) | [integrations/mcp-server.md](integrations/mcp-server.md) |
 | Single sign-on (any IdP) | [integrations/oidc.md](integrations/oidc.md) |
 | Sign in with Microsoft (legacy Entra) | [integrations/entra-oauth.md](integrations/entra-oauth.md) |

@@ -43,7 +43,8 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TMPDB}"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-dashboard-stats-api-tests")
 
 try:
-    from web_dashboard.database import (Base, DashboardStatCache, SessionLocal, engine)
+    from web_dashboard.database import (Base, CloudFunction, DashboardStatCache,
+                                      SessionLocal, engine)
     from web_dashboard.api import dashboard as api
     from web_dashboard.services import dashboard_stat_cache as store
 except Exception as exc:  # pragma: no cover — app deps missing
@@ -319,6 +320,47 @@ def test_one_failing_source_does_not_blank_the_page():
     assert tiles["active_jobs"]["value"] == 0, (
         "one broken source took its neighbours with it — each is wrapped separately so the "
         "rest of the page still paints")
+
+
+def test_the_cloud_functions_tile_is_creator_scoped_and_counts_the_callable_ones():
+    """A cloud_functions row carries no workgroup, so the only honest scope for a
+    non-admin is the one they created — the same rule the databases and clusters tiles
+    use. And `secondary` is the count with a live endpoint: a row still `deploying`, or
+    one whose apply failed, cannot be invoked, so a tile reporting all three as usable
+    would be the worse lie."""
+    _reset()
+    db = SessionLocal()
+    try:
+        db.query(CloudFunction).delete()
+        db.add_all([
+            CloudFunction(id="f1", name="a", workload="db_grant", cloud="gcp",
+                          status="available", created_by="bob"),
+            CloudFunction(id="f2", name="b", workload="db_grant", cloud="gcp",
+                          status="deploying", created_by="bob"),
+            CloudFunction(id="f3", name="c", workload="db_grant", cloud="gcp",
+                          status="available", created_by="alice"),
+        ])
+        db.commit()
+
+        admin = asyncio.run(api.dashboard_stats(
+            db=db, current_user=_User(username="root", is_admin=True)))
+        tile = admin["tiles"]["cloud_functions"]
+        assert tile["value"] == 3 and tile["secondary"] == 2
+
+        # A JIT-granted admin resolves through the EFFECTIVE rule here, like the other
+        # two DB tiles — see test_the_two_admin_rules_are_kept_apart.
+        jit = asyncio.run(api.dashboard_stats(
+            db=db, current_user=_User(username="carol", is_admin=False, effective=True)))
+        assert jit["tiles"]["cloud_functions"]["value"] == 3
+
+        mine = asyncio.run(api.dashboard_stats(
+            db=db, current_user=_User(username="bob")))
+        tile = mine["tiles"]["cloud_functions"]
+        assert tile["value"] == 2 and tile["secondary"] == 1
+    finally:
+        db.query(CloudFunction).delete()
+        db.commit()
+        db.close()
 
 
 def test_the_response_shape_matches_what_the_client_renders():

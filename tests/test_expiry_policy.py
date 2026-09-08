@@ -455,10 +455,15 @@ def test_ttl_capable_explains_itself():
     """The reason string is what the page shows on hover instead of the operator
     finding out from a 400, so every refusal must carry one."""
     assert pol.ttl_capable(_item()) == (True, "")
-    for bad in (_item(kind="desktop"), _item(source="registered"),
-                _item(cloud="proxmox")):
+    for bad in (_item(kind="desktop"), _item(kind="function"),
+                _item(source="registered"), _item(cloud="proxmox")):
         ok, why = pol.ttl_capable(bad)
         assert ok is False and why, bad
+    # And the reason has to be this kind's own. Every non-reapable kind used to be told
+    # the virtual-desktop one, which sends the operator looking for a pool that a cloud
+    # function does not have.
+    assert "pool" in pol.ttl_capable(_item(kind="desktop"))[1]
+    assert "pool" not in pol.ttl_capable(_item(kind="function"))[1]
 
 
 # ── parse_ts ─────────────────────────────────────────────────────────────────

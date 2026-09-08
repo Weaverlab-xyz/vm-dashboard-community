@@ -635,7 +635,7 @@ _cfg=(
   "secrets_azure_kv_url=$KV_URL                            # Same vault — the key the Cloud Functions path reads"
   "azure_ssh_keypair_secret_name=$SSH_SECRET               # JSON {public_key, private_key}"
   ""
-  "# Cloud Functions (preview) — Linux Function Apps on the sandbox storage account:"
+  "# Cloud Functions — Linux Function Apps on the sandbox storage account:"
   "cloud_functions_enabled=true"
   "function_package_azure_container=function-packages      # Blob container on $SA_NAME (the app creates it)"
   "azure_functions_plan_sku=B1                             # Cheapest SKU doing BOTH VNet integration and run-from-package (Y1 cannot)"

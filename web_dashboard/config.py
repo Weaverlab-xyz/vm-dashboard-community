@@ -642,14 +642,14 @@ class Settings(BaseSettings):
     pra_config_api_client_id: str = ""
     pra_config_api_client_secret: str = ""          # encrypted at rest
 
-    # ── Cloud Functions (PREVIEW) ─────────────────────────────────────────────
+    # ── Cloud Functions ───────────────────────────────────────────────────────
     # Lambda / Function App / Cloud Run function lifecycle. The deployable handler
     # source lives in web_dashboard/functions/; the dashboard builds a deterministic
     # zip, uploads it to an object store IN THE SAME CLOUD as the function, and
     # terraform references it by bucket + key + content hash. GCP forces that shape
     # (cloudfunctions2 accepts only storage_source), so AWS/Azure match it to keep
-    # one transport. The on/off is the `cloud_functions_enabled` PREVIEW flag; these
-    # are the connection knobs its config-only panel writes.
+    # one transport. The on/off is the `cloud_functions_enabled` flag, owned by the
+    # feature's own Settings toggle; these are the connection knobs its panel writes.
     function_package_s3_bucket: str = ""    # AWS: S3 bucket for lambda zips (required for cloud=aws)
     function_package_gcs_bucket: str = ""   # GCP: GCS bucket for function sources (required for cloud=gcp)
     # Azure reuses the dashboard's storage account (storage_azure_account) with a
@@ -1895,8 +1895,8 @@ class Settings(BaseSettings):
     # Operator prerequisites (manual): import the .psplugin, create the platform, create
     # the functional account, and create the Secrets Safe folder's parent safe.
     # See docs/certificates.md.
-    # PREVIEW flag, alongside cloud_functions_enabled / vdesktops_enabled /
-    # workload_credentials_enabled in setup._PREVIEW_FLAGS: none of the plugin's four
+    # PREVIEW flag, alongside vdesktops_enabled / workload_credentials_enabled in
+    # setup._PREVIEW_FLAGS: none of the plugin's four
     # submission paths has been proven against a live CA yet. Off means the dashboard
     # behaves exactly as before, and no CA pool can be created to bill for.
     cert_lab_enabled: bool = False                   # master gate: page, nav, router

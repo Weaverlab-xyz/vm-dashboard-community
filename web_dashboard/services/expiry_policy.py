@@ -618,8 +618,17 @@ def ttl_capable(item: dict) -> tuple:
                        "dashboard — there is no teardown to run, so it can never be "
                        "auto-deleted. Delete it from its hypervisor instead.")
     if kind not in REAPABLE_KINDS:
-        return False, (f"{kind!r} resources have no auto-delete timer — a virtual-desktop "
-                       f"seat is torn down with its pool, not individually.")
+        # Per-kind, because the reason is not the same one twice and a wrong reason is
+        # worse than a bare refusal: a desktop seat is torn down WITH its pool, while a
+        # cloud function simply has no expires_at column to stamp (and bills nothing
+        # while idle, unlike everything in REAPABLE_KINDS).
+        why = {
+            "desktop": ("a virtual-desktop seat is torn down with its pool, not "
+                        "individually."),
+            "function": ("a deployed function bills only when it runs, so it carries no "
+                         "timer — destroy it from the Cloud Functions page."),
+        }.get(kind, "there is no queued teardown for this kind.")
+        return False, f"{kind!r} resources have no auto-delete timer — {why}"
     # A POV is always dashboard-provisioned (the row only exists because this dashboard
     # created the environment) and its `cloud` is a lab platform rather than one of the
     # four VM clouds, so it must skip both tests below. Checked here rather than by

@@ -3,9 +3,9 @@ resource the dashboard has deployed, assembled from its own DB records (no live
 cloud calls).
 
 Cloud VMs + on-prem Proxmox/Nutanix VMs come from completed, non-destroyed deploy
-Jobs; cloud databases, K8s clusters, and virtual-desktop seats come from their
-inventory tables; and every VM a remote agent has synced comes from the hypervisor
-cache, whether the dashboard deployed it or not. Each row is normalized to one dict
+Jobs; cloud databases, K8s clusters, cloud functions and virtual-desktop seats come
+from their inventory tables; and every VM a remote agent has synced comes from the
+hypervisor cache, whether the dashboard deployed it or not. Each row is normalized to one dict
 shape. RBAC filtering is the API layer's job (see :func:`visible_to`), not the
 collector's.
 
@@ -19,9 +19,9 @@ from typing import Optional, Set
 
 from sqlalchemy.orm import Session
 
-from ..database import (CertLab, CloudDatabase, HypervisorConnection,
-                        HypervisorVMCache, Job, K8sCluster, PovEnvironment,
-                        VirtualDesktop)
+from ..database import (CertLab, CloudDatabase, CloudFunction,
+                        HypervisorConnection, HypervisorVMCache, Job, K8sCluster,
+                        PovEnvironment, VirtualDesktop)
 from . import expiry_policy, hypervisor_view_service
 
 logger = logging.getLogger(__name__)
@@ -175,6 +175,36 @@ def _k8s_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
         "detail_href": "/k8s",
+    }
+
+
+def _function_item(row) -> dict:
+    """A deployed cloud function as one inventory row.
+
+    Always "provisioned": the row exists only because this dashboard deployed the
+    function, so there is no registered variant. `name` carries the workload as well as
+    the function name because the name alone does not say what is running inside it, and
+    that is the question an inventory row is asked about a function.
+
+    No auto-delete timer: `cloud_functions` has no `expires_at` column, so nothing can be
+    stamped here that the sweeper would honour. Cost is the reason that is defensible
+    rather than an oversight — an idle Lambda / Cloud Run function bills nothing, unlike
+    the CA pool and the databases in this list.
+    """
+    return {
+        "id": f"cloudfn:{row.id}",
+        "cloud": row.cloud,
+        "kind": "function",
+        "source": "provisioned",
+        "name": f"{row.name} ({row.workload})",
+        "region": row.region or "",
+        "state": row.status,
+        "workgroup": None,
+        "deployed_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "expires_at": None,
+        "job_id": row.deploy_job_id,
+        "detail_href": "/functions",
     }
 
 
@@ -451,6 +481,14 @@ def collect(db: Session) -> list:
 
     for row in db.query(K8sCluster).filter(K8sCluster.status != "deleted").all():
         items.append(_k8s_item(row))
+
+    # Queried unconditionally, like the Certificate Lab and POV rows below: turning the
+    # Cloud Functions feature off hides its page, it does not destroy the functions, and
+    # a live function is a live HTTPS endpoint into the network whether or not anyone can
+    # see the page that lists it.
+    for row in (db.query(CloudFunction)
+                .filter(CloudFunction.status != "deleted").all()):
+        items.append(_function_item(row))
 
     # Queried unconditionally, like the POV rows below and for the same reason: turning
     # the Certificate Lab feature off hides its page, it does not delete the CA pool, and
