@@ -46,7 +46,8 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..database import CertLab, CloudDatabase, Job, JobLog, K8sCluster, PovEnvironment
+from ..database import (CertLab, CloudDatabase, Job, JobLog, K8sCluster,
+                        PovEnvironment, SpireLab)
 from . import expiry_policy, job_service
 
 logger = logging.getLogger(__name__)
@@ -552,7 +553,8 @@ def _reap_vm(db: Session, target: dict) -> str:
 
 
 def _reap_row(db: Session, target: dict) -> str:
-    """Start the teardown for one expired database, cluster, CA or POV, returning the job id.
+    """Start the teardown for one expired database, cluster, CA, trust domain or POV,
+    returning the job id.
 
     Goes through the same ``start_decommission`` the DELETE endpoints call, which already
     refuses to start a second teardown while one is in flight and flips the row's status
@@ -578,6 +580,10 @@ def _reap_row(db: Session, target: dict) -> str:
         from . import cert_lab_service
         out = cert_lab_service.start_decommission(db, lab_id=rid, created_by=REAPER_ACTOR)
         model, jid = CertLab, out.get("job_id")
+    elif kind == "spirelab":
+        from . import spire_lab_service
+        out = spire_lab_service.start_decommission(db, lab_id=rid, created_by=REAPER_ACTOR)
+        model, jid = SpireLab, out.get("job_id")
     elif kind == "pov":
         # The identical job row DELETE /api/pov/managed/{id} creates. Going through the
         # queue rather than calling the teardown directly is what makes the share link,
@@ -882,6 +888,12 @@ def _resolve_row(db: Session, inv_id: str):
     The id scheme is inventory_service's, so this stays the one place that knows a
     ``job:`` prefix means the deploy Job row carries the timer.
 
+    **Every prefix in ``expiry_policy.REAPABLE_KINDS`` needs a branch here.** The kind
+    check in ``ttl_capable`` is what makes the page RENDER the Extend control, so a
+    reapable kind missing from this map is a row the sweep will happily destroy and the
+    operator cannot postpone — the write just lands in ``failed``. ``certlab`` and
+    ``spirelab`` were exactly that.
+
     ``hv:`` is absent deliberately, not by omission. A synced hypervisor VM has no
     dashboard row to stamp a timer on and no teardown to run, so there is nothing to
     resolve — ``expiry_policy.ttl_capable`` refuses it first, and this is the second of
@@ -898,6 +910,10 @@ def _resolve_row(db: Session, inv_id: str):
         row = db.query(K8sCluster).filter(K8sCluster.id == rid).first()
     elif prefix == "pov":
         row = db.query(PovEnvironment).filter(PovEnvironment.id == rid).first()
+    elif prefix == "certlab":
+        row = db.query(CertLab).filter(CertLab.id == rid).first()
+    elif prefix == "spirelab":
+        row = db.query(SpireLab).filter(SpireLab.id == rid).first()
     else:
         return None
     if row is None:

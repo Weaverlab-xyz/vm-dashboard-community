@@ -4130,3 +4130,97 @@ async def deploy_compose_ecs(
         raise AWSError(f"Failed to deploy compose to ECS: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
+
+
+# ── Inbound access to an instance the dashboard already launched ──────────────
+# `ensure_node_security_group` above converges a group the LAUNCHER then attaches to a
+# new node. This is the other case: an instance that already exists, whose groups we did
+# not create and must not replace. It is what the SPIRE lab needs — the runbook's "cloud
+# gate" — and unlike the other two clouds there is no separate resource to make or
+# delete, because a security group attached to a running instance cannot be removed.
+
+
+def _instance_security_groups_sync(region: str, instance_id: str) -> list:
+    """The instance's security group ids, in the order EC2 reports them."""
+    ec2 = _get_ec2(region)
+    reservations = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"]
+    for res in reservations:
+        for inst in res.get("Instances") or []:
+            groups = [g["GroupId"] for g in (inst.get("SecurityGroups") or [])
+                      if g.get("GroupId")]
+            if not groups:
+                raise AWSError(f"EC2 instance {instance_id} has no security group")
+            return groups
+    raise AWSError(f"EC2 instance {instance_id} not found in {region}")
+
+
+def _ensure_instance_inbound_rule_sync(region: str, instance_id: str, ports: list,
+                                       source_cidrs: list) -> dict:
+    """Converge ingress on ``ports`` for an existing instance.
+
+    **Which group gets the rule matters.** An instance may carry several, and any one of
+    them permitting the traffic is enough for EC2 — so the group already holding a rule
+    for these ports is preferred, and only otherwise the first. Writing to a different
+    group on every call would accumulate the same permission in several places and make
+    the close path miss one.
+
+    Fail-closed on an empty ``source_cidrs`` means revoking across **every** attached
+    group rather than just the chosen one: closing has to be thorough or it has not
+    happened. Only the managed ports are touched — a rule someone added by hand on
+    another port is theirs (see `_current_node_ingress`).
+    """
+    ec2 = _get_ec2(region)
+    group_ids = _instance_security_groups_sync(region, instance_id)
+    groups = ec2.describe_security_groups(GroupIds=group_ids)["SecurityGroups"]
+
+    if not source_cidrs:
+        closed = []
+        for sg in groups:
+            have = _current_node_ingress(sg, ports)
+            if have:
+                ec2.revoke_security_group_ingress(
+                    GroupId=sg["GroupId"],
+                    IpPermissions=_node_ingress_permissions(have))
+                closed.append(sg["GroupId"])
+        return {"group_id": ",".join(closed), "opened": False, "created": False,
+                "groups_closed": closed}
+
+    chosen = next((sg for sg in groups if _current_node_ingress(sg, ports)), groups[0])
+    have = _current_node_ingress(chosen, ports)
+    want = {(int(p), c) for p in ports for c in source_cidrs}
+    to_add, to_remove = want - have, have - want
+    if to_add:
+        ec2.authorize_security_group_ingress(
+            GroupId=chosen["GroupId"], IpPermissions=_node_ingress_permissions(to_add))
+    if to_remove:
+        ec2.revoke_security_group_ingress(
+            GroupId=chosen["GroupId"], IpPermissions=_node_ingress_permissions(to_remove))
+    return {"group_id": chosen["GroupId"], "opened": True, "created": False,
+            "groups_closed": []}
+
+
+async def ensure_instance_inbound_rule(region: str, instance_id: str, *, ports: list,
+                                       source_cidrs: list,
+                                       description: str = "") -> dict:
+    """Open (or close) ``ports`` inbound to an existing instance from ``source_cidrs``.
+
+    ``description`` is accepted for shape parity with the Azure and GCP calls, which
+    name a rule resource. EC2 has no such resource — a permission belongs to the group —
+    so it is deliberately unused rather than written into an IpRange description, where
+    it would make otherwise-identical permissions compare unequal on the close path.
+
+    Fail-closed: an empty ``source_cidrs`` revokes the managed ports on every attached
+    group and returns ``opened: False``.
+    """
+    _ = description
+    try:
+        return await _to_thread(
+            _ensure_instance_inbound_rule_sync, region, instance_id,
+            list(ports), list(source_cidrs))
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(
+            f"Failed to apply inbound rule for instance {instance_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")

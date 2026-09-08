@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..database import (CertLab, CloudDatabase, CloudFunction,
                         HypervisorConnection, HypervisorVMCache, Job, K8sCluster,
-                        PovEnvironment, VirtualDesktop)
+                        PovEnvironment, SpireLab, VirtualDesktop)
 from . import expiry_policy, hypervisor_view_service
 
 logger = logging.getLogger(__name__)
@@ -231,6 +231,34 @@ def _certlab_item(row) -> dict:
         "job_id": row.deploy_job_id,
         "detail_href": "/cert-lab",
     }
+
+def _spirelab_item(row) -> dict:
+    """A SPIRE trust domain as one inventory row.
+
+    Always "provisioned": the row exists only because this dashboard stood the lab up.
+    `name` carries the TRUST DOMAIN rather than just the lab's label, because the trust
+    domain is the thing that is governed — it is what the Managed System models, and two
+    labs with tidy names and the same trust domain are a mistake worth seeing here.
+
+    The host VM is NOT this row. It appears separately as its own `vm` row with its own
+    timer, which is deliberate: reaping the lab closes tcp/8081 and leaves the VM alone.
+    """
+    return {
+        "id": f"spirelab:{row.id}",
+        "cloud": row.cloud,
+        "kind": "spirelab",
+        "source": "provisioned",
+        "name": f"{row.name} ({row.trust_domain})" if row.trust_domain else row.name,
+        "region": row.region or "",
+        "state": row.status,
+        "workgroup": row.workgroup,
+        "deployed_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
+        "job_id": row.deploy_job_id,
+        "detail_href": "/spire-lab",
+    }
+
 
 def _pov_item(row) -> dict:
     """A POV environment as one inventory row.
@@ -495,6 +523,12 @@ def collect(db: Session) -> list:
     # a pool left behind keeps billing whether or not anyone can see it.
     for row in db.query(CertLab).filter(CertLab.status != "deleted").all():
         items.append(_certlab_item(row))
+
+    # Queried unconditionally for the same reason, with a different cost: turning the
+    # SPIRE Lab feature off hides its page, it does not close tcp/8081 — and a trust
+    # domain nobody can see is still minting identities for anyone who can reach it.
+    for row in db.query(SpireLab).filter(SpireLab.status != "deleted").all():
+        items.append(_spirelab_item(row))
 
     for row in (db.query(VirtualDesktop)
                 .filter(VirtualDesktop.status.notin_(("deprovisioning", "deleted"))).all()):

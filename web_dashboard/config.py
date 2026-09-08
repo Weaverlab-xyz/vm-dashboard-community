@@ -1931,6 +1931,44 @@ class Settings(BaseSettings):
     cert_gcp_cas_location: str = "us-central1"       # CAS is regional; the pool, its CAs and any template all share this
     cert_gcp_cas_tier: str = "DEVOPS"                # DEVOPS (~$20/mo/pool) | ENTERPRISE. DevOps keeps no certificate records
 
+
+    # ── SPIRE lab (the "SPIFFE SVID" custom plugin) ──────────────────────────
+    # A SPIRE trust domain the dashboard stands up on a Linux VM it already deployed, so
+    # the SPIFFE SVID plugin has something to govern: registration entries discovered as
+    # managed accounts, attestation findings on every verify, and a guarded JWT-SVID mint
+    # for consumers that cannot run a SPIRE agent.
+    #
+    # There is no Terraform module. A SPIRE server is a Go binary and a sqlite file, so
+    # the lab is four Ansible playbooks (examples/playbooks/spire/) against an ordinary
+    # VM — which already carries its own auto-delete timer and its own Destroy. What this
+    # feature owns is the trust domain: the cloud ACL on tcp/8081, the seeded entries and
+    # the administrative credential.
+    #
+    # PREVIEW flag, alongside cert_lab_enabled in setup._PREVIEW_FLAGS, and DEMO-ONLY for
+    # the same tenancy reason: the credential is written through the global pscli_*
+    # singletons, so on a POV instance it would land in the wrong customer's tenant.
+    # See docs/spiffe.md and docs/runbooks/spire-lab-standup.md.
+    spire_lab_enabled: bool = False                  # master gate: page, nav, router
+    # WHO MAY REACH tcp/8081. Blank means no cloud ACL change is made at all — NOT open
+    # to the world: 8081 is an API that mints identities, so "I did not say who" can only
+    # mean "nobody new". Pin every address the caller actually egresses from; corporate
+    # egress commonly rotates between two, and a rule holding one of them fails on about
+    # half the connections, which presents as an intermittent credential fault.
+    spire_lab_source_cidrs: str = ""                 # comma-separated CIDRs
+    spire_lab_version: str = "1.15.3"                # the SPIRE release the playbook fetches
+    # ca_ttl CAPS every SVID the server issues, the admin credential included: a 720h
+    # mint against this 168h default yields ~7 days, and SPIRE says so rather than
+    # failing. Raise it for a lab that has to outlive a week.
+    spire_lab_ca_ttl: str = "168h"
+    spire_lab_admin_ttl: str = "720h"                # what the mint ASKS for; ca_ttl decides
+    # Where the administrative credential lands. The playbook writes four titles under
+    # <secret_root>/<lab>: the PKCS#12, its passphrase, and — public, for the dashboard to
+    # read back as VALUES rather than by parsing a log — the trust bundle and the granted
+    # expiry. The safe must already exist; the playbook creates no safe.
+    spire_lab_ps_safe: str = "Automation"
+    spire_lab_secret_root: str = "spire"
+    spire_lab_asset_backend: str = ""                # blank → the active storage backend
+
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md
