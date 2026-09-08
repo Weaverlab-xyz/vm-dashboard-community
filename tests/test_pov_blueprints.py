@@ -142,6 +142,27 @@ def test_a_tenant_id_that_does_not_exist_is_refused_at_save_time():
         db.close()
 
 
+def test_an_unchosen_tenant_is_stored_as_null_not_an_empty_string():
+    """All three tenant columns are foreign keys into `beyondtrust_tenants`.
+
+    "" is a VALUE, so PostgreSQL checks it against the parent table, finds no row with an
+    empty id and refuses the INSERT — which is a 500 on saving a blueprint with any one of
+    the three left unchosen, and the same 500 on creating a POV, since `api/pov` hands the
+    same dict to `PovEnvironment`. SQLite does not enforce foreign keys at all, so this
+    assertion is the only place in the suite that can see the difference.
+    """
+    db = _session()
+    try:
+        _clean(db)
+        row = _blueprint(db)
+        assert row.pra_tenant_id is None, row.pra_tenant_id
+        assert row.ps_tenant_id is None, row.ps_tenant_id
+        assert row.entitle_tenant_id is None, row.entitle_tenant_id
+    finally:
+        _clean(db)
+        db.close()
+
+
 # ── apply_to: the request wins ───────────────────────────────────────────────
 
 def test_a_blueprint_fills_only_what_the_request_left_blank():
