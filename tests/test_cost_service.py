@@ -16,9 +16,17 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 # Parsing fixtures the stubbed clients return (set once; one scenario each).
+# Gross (UnblendedCost) and net (NetUnblendedCost) come back from ONE Cost Explorer
+# request — it bills per request, not per metric — so the split costs nothing extra.
 _AWS_CE_RESULT = {"ResultsByTime": [
+    {"Total": {"UnblendedCost": {"Amount": "10.50", "Unit": "USD"},
+               "NetUnblendedCost": {"Amount": "8.50", "Unit": "USD"}}},
+    {"Total": {"UnblendedCost": {"Amount": "4.25", "Unit": "USD"},
+               "NetUnblendedCost": {"Amount": "4.25", "Unit": "USD"}}},
+]}
+# An account whose Cost Explorer does not return the net metric at all.
+_AWS_CE_GROSS_ONLY = {"ResultsByTime": [
     {"Total": {"UnblendedCost": {"Amount": "10.50", "Unit": "USD"}}},
-    {"Total": {"UnblendedCost": {"Amount": "4.25", "Unit": "USD"}}},
 ]}
 _AZURE_QUERY_RESULT = {"properties": {
     "columns": [{"name": "Cost"}, {"name": "Currency"}],
@@ -53,7 +61,10 @@ _AZURE_GROUPED_RESULT = {"properties": {
 # GCP BigQuery billing-export fake rows (a Row supports r["col"]; dicts suffice).
 # The sandbox row is deliberately UNDERSCORED — that's what setup-gcp.sh used to
 # emit, and immutable billing history means those rows never go away.
-_BQ_SUMMARY = [{"net": 42.5, "currency": "USD"}]
+_BQ_SUMMARY = [{"net": 42.5, "gross": 50.0, "currency": "USD"}]
+# The credit cliff from docs/notes/cloud-cost-guardrails.md, month 3: gross usage FELL
+# while net rose, because the trial credit expired on its 90-day clock.
+_BQ_CREDIT_CLIFF = [{"net": 8.96, "gross": 13.73, "currency": "USD"}]
 _BQ_GROUPED = [
     {"managed_by": "vm-dashboard", "service": "Compute Engine", "amount": 30.0, "currency": "USD"},
     {"managed_by": "dashboard_sandbox", "service": "Cloud Storage", "amount": 0.5, "currency": "USD"},
@@ -346,6 +357,87 @@ def test_summary_both_ok_sums_total():
     assert by["azure"]["status"] == "ok" and by["azure"]["amount"] == 50.0
 
 
+# ── Gross vs net ──────────────────────────────────────────────────────────────
+# From docs/notes/cloud-cost-guardrails.md: an audit started from "my GCP cost is climbing"
+# and nothing had changed — gross usage had FALLEN 56%, and the trial credit had expired on
+# its 90-day clock. A tile showing only net reports that as an infrastructure problem.
+
+def test_a_two_tuple_fetcher_still_works():
+    """The back-compat guarantee `MtdCost`'s defaults exist for.
+
+    Azure and OCI still return plain `(amount, currency)` pairs, as do most stubs in this
+    file. They must keep working and report the split as UNKNOWN rather than as zero.
+    """
+    _restore()
+
+    async def aws(): return (100.0, "USD")
+    async def azure(): return (50.0, "USD")
+    svc.get_aws_mtd_cost, svc.get_azure_mtd_cost = aws, azure
+    by = _by_cloud(_run(svc.get_cost_summary()))
+    assert by["aws"]["amount"] == 100.0
+    assert by["aws"]["gross"] is None, "a 2-tuple must not imply a measured gross"
+    assert by["aws"]["credits"] is None
+
+
+def test_gross_is_none_not_zero_where_a_cloud_cannot_split_it():
+    """`0.0` would say "this account has no credits". `None` says "this API cannot tell
+    me". Rendering them alike is the same collapse `_scoped_breakdown_result` refuses."""
+    _restore()
+
+    async def azure(): return (50.0, "USD")
+    svc.get_azure_mtd_cost = azure
+    by = _by_cloud(_run(svc.get_cost_summary()))
+    assert by["azure"]["gross"] is None
+    assert by["azure"]["gross"] != 0.0
+
+
+def test_the_account_gross_total_waits_for_every_cloud_to_report_one():
+    """A gross total mixing measured gross with net-only clouds is neither number, and
+    understates exactly the gap this feature exists to show."""
+    _restore()
+
+    async def aws(): return svc.MtdCost(80.0, "USD", gross=100.0, credits=-20.0)
+    async def azure(): return (50.0, "USD")          # no split available
+    svc.get_aws_mtd_cost, svc.get_azure_mtd_cost = aws, azure
+    s = _run(svc.get_cost_summary())
+    assert s["total_mtd"] == 130.0
+    assert s["gross_mtd"] is None, "one cloud without gross must not yield a partial total"
+    assert s["credits_mtd"] is None
+
+
+def test_the_account_gross_total_sums_when_every_cloud_reports_one():
+    _restore()
+
+    async def aws(): return svc.MtdCost(80.0, "USD", gross=100.0, credits=-20.0)
+    async def azure(): return svc.MtdCost(45.0, "USD", gross=50.0, credits=-5.0)
+    async def gcp(): return svc.MtdCost(10.0, "USD", gross=10.0, credits=0.0)
+    async def oci(): return svc.MtdCost(5.0, "USD", gross=5.0, credits=0.0)
+    svc.get_aws_mtd_cost, svc.get_azure_mtd_cost = aws, azure
+    svc.get_gcp_mtd_cost, svc.get_oci_mtd_cost = gcp, oci
+    s = _run(svc.get_cost_summary())
+    assert s["total_mtd"] == 140.0
+    assert s["gross_mtd"] == 165.0
+    assert s["credits_mtd"] == -25.0, "credits are negative, like the provider's own line"
+
+
+def test_a_credit_cliff_reads_as_a_credit_cliff():
+    """The incident, as a test. Gross DOWN and net UP in the same month is a credit
+    expiring, not infrastructure growing — and both numbers have to be on the page for
+    anyone to tell the difference."""
+    _restore()
+
+    async def gcp(): return svc.MtdCost(8.96, "USD", gross=13.73, credits=-4.77)
+    svc.get_gcp_mtd_cost = gcp
+    by = _by_cloud(_run(svc.get_cost_summary()))
+    row = by["gcp"]
+    assert row["amount"] == 8.96, "net, which rose"
+    assert row["gross"] == 13.73, "gross, which fell — invisible before this"
+    assert row["credits"] == -4.77
+    # The tell: net exceeds nothing on its own, but gross minus credits reconstructs it,
+    # so a reader can see the rise came from the credit and not from usage.
+    assert round(row["gross"] + row["credits"], 2) == row["amount"]
+
+
 def test_summary_one_unavailable_excludes_it_from_total():
     async def aws(): raise svc.aws_service.AWSError("no ce:GetCostAndUsage")
     async def azure(): return (50.0, "USD")
@@ -381,9 +473,47 @@ def test_gcp_unavailable_without_export_table():
 
 def test_aws_parsing_sums_results_by_time():
     _restore()  # undo any reassignment from the summary tests
-    amount, currency = _run(svc.get_aws_mtd_cost())  # stubbed boto3 → _AWS_CE_RESULT
-    assert round(amount, 2) == 14.75  # 10.50 + 4.25
-    assert currency == "USD"
+    cost = _run(svc.get_aws_mtd_cost())  # stubbed boto3 → _AWS_CE_RESULT
+    # `amount` is NET now, on every cloud: it is what the account pays, and it is what
+    # evaluate_budget compares against cost_monthly_budget.
+    assert round(cost.amount, 2) == 12.75   # net 8.50 + 4.25
+    assert round(cost.gross, 2) == 14.75    # gross 10.50 + 4.25
+    assert round(cost.credits, 2) == -2.0   # negative, like the provider's own line
+    assert cost.currency == "USD"
+
+
+def test_aws_asks_for_both_metrics_in_one_request():
+    """Cost Explorer bills per REQUEST, so the split must not become a second call."""
+    _restore()
+    _run(svc.get_aws_mtd_cost())
+    kw = _last_call("aws_summary")
+    assert kw["Metrics"] == ["UnblendedCost", "NetUnblendedCost"]
+    assert len([n for n, _ in CALLS if n == "aws_summary"]) == 1
+
+
+def test_aws_without_the_net_metric_degrades_to_todays_behaviour():
+    """NetUnblendedCost needs billing features some accounts do not have enabled.
+
+    Failing there would take the whole cost tile down over a column. Instead `amount`
+    falls back to the gross figure — exactly what this returned before the split — and
+    the split itself reports None, which the page renders as no split rather than as zero
+    credits.
+    """
+    _restore()
+    import boto3 as _boto3
+    orig = _boto3.client
+
+    class _CE:
+        def get_cost_and_usage(self, **kw):
+            return _AWS_CE_GROSS_ONLY
+
+    _boto3.client = lambda name, **kw: _CE()
+    try:
+        cost = _run(svc.get_aws_mtd_cost())
+    finally:
+        _boto3.client = orig
+    assert round(cost.amount, 2) == 10.50
+    assert cost.gross is None and cost.credits is None
 
 
 def test_azure_parsing_reads_cost_and_currency_columns():
@@ -1099,8 +1229,10 @@ def test_gcp_mtd_parsing_net_cost():
     _restore()
     CONF["gcp_billing_export_table"] = "proj.ds.gcp_billing_export_v1_ABC"
     try:
-        amount, currency = _run(svc.get_gcp_mtd_cost())  # stubbed BQ → _BQ_SUMMARY
-        assert amount == 42.5 and currency == "USD"
+        cost = _run(svc.get_gcp_mtd_cost())  # stubbed BQ → _BQ_SUMMARY
+        assert cost.amount == 42.5 and cost.currency == "USD"
+        assert cost.gross == 50.0
+        assert cost.credits == -7.5
     finally:
         CONF.clear()
 

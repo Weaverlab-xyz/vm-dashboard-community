@@ -92,6 +92,28 @@ def test_stale_figures_are_visually_distinct():
         "stale figures render in the same colour as fresh ones")
 
 
+# ── Gross vs net ──────────────────────────────────────────────────────────────
+
+def test_the_card_shows_gross_beside_the_net_headline():
+    """The headline is net. Without gross beside it, a credit expiring reads as growth —
+    the false lead that consumed the GCP audit in cloud-cost-guardrails.md."""
+    src = _src(_COSTS)
+    assert "c.gross" in src and "c.credits" in src, (
+        "the per-cloud card shows only net; a credit cliff is invisible on it")
+    assert "summary.gross_mtd" in src, "the account total should split too"
+
+
+def test_the_split_is_hidden_where_a_cloud_cannot_measure_it():
+    """`gross: null` means "this API cannot separate credits" — Azure and OCI. Rendering
+    that as a gross of zero would be a confident wrong answer, so the row must be gated on
+    a non-null gross rather than on truthiness alone."""
+    src = _src(_COSTS)
+    assert "c.gross != null" in src, (
+        "gate the split on gross being present, not on it being non-zero — 0.0 is a real "
+        "measurement and null is not")
+    assert "summary.gross_mtd != null" in src
+
+
 # ── The unattributed breakdown ────────────────────────────────────────────────
 
 def _unattributed_block(src, strip_comments=False):
