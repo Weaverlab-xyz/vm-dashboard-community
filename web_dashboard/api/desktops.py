@@ -127,9 +127,35 @@ def _aws_spec(payload: PoolCreateRequest) -> dict:
     }
 
 
+def _gcp_spec(payload: PoolCreateRequest) -> dict:
+    """The gcp_service.launch_instance spec built from the pool request.
+
+    Project and zone fall back to the configured ``gcp_project`` / ``gcp_zone``, matching
+    how the Azure and AWS builders fall back. Machine type and image also accept the
+    generic ``size`` / ``image`` fields.
+
+    No default subnetwork, for the same reason AWS has no default subnet: there is no
+    desktops-subnetwork setting to fall back to, and guessing puts desktops on a network
+    nobody chose. ``_GcpSeats.validate_spec`` refuses a missing one by name.
+    """
+    return {
+        "project_id": payload.project_id or _cfg("gcp_project"),
+        "zone": payload.zone or _cfg("gcp_zone") or "us-central1-a",
+        "machine_type": payload.machine_type or payload.size,
+        "image_self_link": payload.image_self_link or payload.image,
+        "subnetwork": payload.subnetwork,
+        "create_external_ip": payload.create_external_ip,
+        "disk_size_gb": payload.disk_size_gb,
+        "network_tags": payload.network_tags,
+        "os_type": payload.os_type,
+        "ssh_username": payload.ssh_username,
+        "ssh_public_key": payload.ssh_public_key,
+    }
+
+
 # Which builder makes a spec for which cloud. A cloud absent here sends `spec=None`,
-# which is what a records-only cloud (GCP today) wants.
-_SPEC_BUILDERS = {"azure": _azure_spec, "aws": _aws_spec}
+# which is what a records-only cloud wants — there are none left.
+_SPEC_BUILDERS = {"azure": _azure_spec, "aws": _aws_spec, "gcp": _gcp_spec}
 
 
 @router.post("/pools", status_code=201)
@@ -138,12 +164,13 @@ async def create_pool(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Create a desktop pool. Azure and AWS provision one private VM per seat (durable,
-    via the job runner, tagged for the pool); GCP creates records only.
+    """Create a desktop pool. All three clouds now provision one private VM per seat,
+    durably via the job runner and tagged for the pool.
 
-    AWS pools are Linux-only — EC2 hands back Windows credentials as password data
-    encrypted to the launch key pair, which nothing here decrypts yet, so a Windows AWS
-    pool is refused with that reason rather than provisioned into unusable seats."""
+    Only Azure supports Windows seats. EC2 hands back Windows credentials as password
+    data encrypted to the launch key pair and GCE delivers them through windows-keys
+    instance metadata; neither is wired here yet, so an AWS or GCP Windows pool is
+    refused with that reason rather than provisioned into seats nobody can sign into."""
     builder = _SPEC_BUILDERS.get((payload.cloud or "").lower())
     spec = builder(payload) if builder else None
     try:

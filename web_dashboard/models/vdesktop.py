@@ -43,6 +43,17 @@ class PoolCreateRequest(BaseModel):
     security_group_ids: list[str] = []
     iam_instance_profile: Optional[str] = None   # e.g. for SSM access
 
+    # ── GCP deploy spec (required when cloud == "gcp") ──
+    # `os_type` and `ssh_public_key` above are shared. GCP pools are Linux-only.
+    project_id: Optional[str] = None        # falls back to the configured gcp_project
+    zone: Optional[str] = None              # falls back to the configured gcp_zone
+    machine_type: Optional[str] = None      # OR `size` above
+    image_self_link: Optional[str] = None   # OR `image` above
+    subnetwork: Optional[str] = None
+    create_external_ip: bool = False        # desktops are private + brokered
+    disk_size_gb: int = 20
+    network_tags: list[str] = []
+
 
 class PoolScaleRequest(BaseModel):
     count: int                       # desired seat count

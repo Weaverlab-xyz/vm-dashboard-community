@@ -476,6 +476,118 @@ def test_an_aws_seat_is_tagged_with_its_instance_id_not_its_name():
     assert tagged == ["us-east-2/i-0abcdef"], tagged
 
 
+# ── GCP seats ─────────────────────────────────────────────────────────────────
+
+GCP_SPEC = {
+    "project_id": "proj-1",
+    "zone": "us-central1-a",
+    "machine_type": "e2-standard-2",
+    "image_self_link": "projects/debian-cloud/global/images/family/debian-12",
+    "subnetwork": "default",
+    "ssh_public_key": "ssh-ed25519 AAAA",
+    "os_type": "Linux",
+}
+
+
+def _install_gcp_stubs(*, launch_fails_on=()):
+    _install_stubs()
+    g = types.ModuleType("web_dashboard.services.gcp_service")
+
+    async def launch_instance(**kw):
+        CALLS.append(("launch_instance", kw["instance_name"]))
+        if kw["instance_name"] in launch_fails_on:
+            raise RuntimeError("ZONE_RESOURCE_POOL_EXHAUSTED")
+        g.launch_kwargs.append(kw)
+        return {"instance_name": kw["instance_name"], "zone": kw["zone"],
+                "status": "RUNNING", "private_ip": "10.2.0.9",
+                "public_ip": None, "self_link": "https://…"}
+
+    async def terminate_instance(project_id, zone, instance_name):
+        CALLS.append(("terminate_vm", f"{project_id}/{zone}/{instance_name}"))
+
+    g.launch_kwargs = []
+    g.launch_instance = launch_instance
+    g.terminate_instance = terminate_instance
+    sys.modules["web_dashboard.services.gcp_service"] = g
+    import web_dashboard.services as pkg
+    pkg.gcp_service = g
+    return g
+
+
+def test_the_gcp_pool_label_key_is_not_the_shared_constant():
+    """The trap this stage was warned about: `dashboard:desktop_pool` is a valid Azure
+    tag key and a valid EC2 tag key, and GCP rejects it — a colon is not permitted in a
+    label key. Inheriting the constant would have failed every launch."""
+    assert vd._GcpSeats.pool_tag_key != vd.POOL_TAG
+    assert ":" not in vd._GcpSeats.pool_tag_key
+
+
+def test_a_gcp_seat_labels_the_pool_at_launch_not_afterwards():
+    """GCE takes labels on the create call, so there is no window where a seat exists
+    unattributed — unlike Azure and AWS, which tag after the VM is up."""
+    g = _install_gcp_stubs()
+    ids = _seed(pool="pool-a", n=1, cloud="gcp")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(GCP_SPEC)))
+
+    labels = g.launch_kwargs[0]["labels"]
+    assert labels == {"dashboard_desktop_pool": "pool-a"}, labels
+    # And nothing tags afterwards.
+    assert "set_pool_tag" not in _names()
+
+
+def test_a_pool_name_gcp_would_reject_is_sanitised_for_the_label():
+    """Pool names are free text; GCP label VALUES have the same character rules as keys.
+    Without this the launch is rejected over the pool's capitalisation."""
+    g = _install_gcp_stubs()
+    ids = _seed(pool="Pool A!", n=1, cloud="gcp")
+    asyncio.run(vd.provision_seats("Pool A!", None, ids, dict(GCP_SPEC)))
+    value = g.launch_kwargs[0]["labels"]["dashboard_desktop_pool"]
+    import re
+    assert re.fullmatch(r"[a-z0-9_-]+", value), value
+
+
+def test_a_gcp_seat_stores_project_zone_and_name():
+    """Terminate needs all three and is handed only `vm_resource_id`."""
+    _install_gcp_stubs()
+    ids = _seed(n=1, cloud="gcp")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(GCP_SPEC)))
+    row = _read(ids[0])
+    assert row.status == "running"
+    assert row.vm_resource_id.startswith("proj-1/us-central1-a/")
+
+
+def test_a_gcp_seat_is_torn_down_in_its_own_project_and_zone():
+    _install_gcp_stubs()
+    ids = _seed(n=1, cloud="gcp")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(GCP_SPEC)))
+    rid = _read(ids[0]).vm_resource_id
+    CALLS.clear()
+    asyncio.run(vd.teardown_seats(ids))
+    assert ("terminate_vm", rid) in CALLS, CALLS
+    assert _read(ids[0]) is None
+
+
+def test_a_gcp_pool_refuses_windows():
+    try:
+        vd._GcpSeats.validate_spec(dict(GCP_SPEC, os_type="Windows"))
+    except vd.VDesktopError as exc:
+        assert "Linux-only" in str(exc)
+        assert "windows-keys" in str(exc), "name the mechanism that is missing"
+    else:
+        raise AssertionError("a Windows GCP pool was accepted")
+
+
+def test_a_gcp_pool_names_every_missing_field_at_once():
+    try:
+        vd._GcpSeats.validate_spec({"project_id": "p"})
+    except vd.VDesktopError as exc:
+        for field in ("zone", "machine_type", "image_self_link", "subnetwork",
+                      "ssh_public_key"):
+            assert field in str(exc), f"{field} missing from {exc}"
+    else:
+        raise AssertionError("an empty GCP spec was accepted")
+
+
 # ── The staging guard ─────────────────────────────────────────────────────────
 
 def test_no_cloud_is_advertised_without_a_backend_behind_it():
@@ -484,9 +596,9 @@ def test_no_cloud_is_advertised_without_a_backend_behind_it():
     maintained, so this asserts the derivation rather than a hand-written list."""
     assert set(vd.PROVISIONING_CLOUDS) == set(vd._SEAT_BACKENDS)
     assert set(vd.PROVISIONING_CLOUDS) <= set(vd.VALID_CLOUDS)
-    # GCP is still records-only — Stage 3.
-    assert "gcp" not in vd.PROVISIONING_CLOUDS
-    assert vd.seat_backend("gcp") is None
+    # All three now provision. The derivation is what this asserts, so this line does
+    # not need editing again when a fourth cloud lands.
+    assert set(vd.PROVISIONING_CLOUDS) == set(vd.VALID_CLOUDS)
 
 
 def test_every_backend_implements_the_whole_interface():
@@ -496,12 +608,19 @@ def test_every_backend_implements_the_whole_interface():
                       "default_username", "pra_tag")
     required_methods = ("validate_spec", "deploy", "terminate", "tag_pool",
                         "generate_password", "store_password", "reap_idle_gateway")
+    import inspect
     for cloud, backend in vd._SEAT_BACKENDS.items():
         for attr in required_attrs:
             assert hasattr(backend, attr), f"{cloud} backend has no {attr}"
         for meth in required_methods:
             assert callable(getattr(backend, meth, None)), f"{cloud} backend has no {meth}()"
         assert backend.cloud == cloud, f"{cloud} backend disagrees about its own name"
+        # The shared path calls these positionally; a backend whose signature drifted
+        # would fail on a real pool, mid-provision.
+        assert list(inspect.signature(backend.deploy).parameters) == [
+            "spec", "vm_name", "admin_password", "pool_name"], cloud
+        assert list(inspect.signature(backend.tag_pool).parameters) == [
+            "spec", "vm_name", "vm_resource_id", "pool_name"], cloud
 
 
 def test_the_pool_tag_key_is_legal_for_its_cloud():
