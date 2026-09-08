@@ -19,6 +19,7 @@ reachable by path.
 | Page | Read this when |
 |---|---|
 | [Cloud-DB Password Safe plugin setup](clouddb-password-safe-plugin-setup.md) | you are standing up database credential rotation and need the one-time manual setup. |
+| [SPIRE lab standup + the attribute probe](spire-lab-standup.md) | you are standing up the SPIFFE SVID plugin's lab on a cloud VM, and need to settle whether BeyondInsight populates plugin attributes. |
 
 ## Cloud-identity JIT
 

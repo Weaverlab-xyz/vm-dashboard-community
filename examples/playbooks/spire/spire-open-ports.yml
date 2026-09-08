@@ -1,0 +1,87 @@
+# Open the SPIRE Server API port on the host firewall
+# Target: the SPIRE server VM. Idempotent.
+#
+# SPIRE needs one port for this lab:
+#   8081/tcp   the server API — gRPC over mTLS, which is what the plugin dials
+#
+# THIS IS THE HOST FIREWALL ONLY, and it is the second of two gates. On a cloud VM it
+# is usually not the one blocking you: the cloud's own network ACL is. Open that too,
+# from wherever the Password Safe worker or Resource Broker actually egresses:
+#
+#   Azure   the VM's Network Security Group — an inbound allow on tcp/8081
+#   GCP     a VPC firewall rule on the network, targeting the VM's network tag
+#   AWS     an inbound rule on the VM's security group
+#
+# A closed cloud ACL and a closed host firewall present identically to the plugin: a
+# gRPC timeout on Verify Functional Account, which reads like a credential problem and
+# is not. Check both before suspecting admin_ids.
+#
+# SCOPE: spire_source_cidr is empty by default, which opens the port to any source.
+# That suits a throwaway lab on a private subnet and is wrong anywhere else — 8081 is
+# an API that mints identities, so set it to the broker's range when you know it.
+#
+# Handles firewalld (RHEL/Rocky/Alma) and ufw (Debian/Ubuntu). A host running neither
+# is reported and skipped; iptables/nftables rules are never written directly.
+#
+# extra_vars (optional):
+#   bind_port: 8081
+#   spire_source_cidr: 10.0.0.0/24     # restrict the rule to this source range
+- name: Open the SPIRE Server API port
+  hosts: all
+  become: true
+  vars:
+    bind_port: 8081
+    spire_source_cidr: ""
+  tasks:
+    - name: Detect firewalld
+      ansible.builtin.command: systemctl is-active firewalld
+      register: firewalld_active
+      changed_when: false
+      failed_when: false
+
+    - name: Detect ufw
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+
+    # ── firewalld (RHEL / Rocky / Alma) ──────────────────────────────────────
+    - name: Open the SPIRE API port (firewalld)
+      ansible.posix.firewalld:
+        port: "{{ bind_port }}/tcp"
+        permanent: true
+        immediate: true
+        state: enabled
+        source: "{{ spire_source_cidr | default(omit, true) }}"
+      when: firewalld_active.stdout == "active"
+
+    # ── ufw (Debian / Ubuntu) ────────────────────────────────────────────────
+    # community.general.ufw is not in the runner image's documented collection set,
+    # so this shells out, exactly as k3s-open-ports.yml does. `ufw allow` is itself
+    # idempotent — a duplicate reports "Skipping adding existing rule".
+    - name: Open the SPIRE API port (ufw)
+      ansible.builtin.command: >-
+        ufw allow {{ ('from ' ~ spire_source_cidr ~ ' to any port ' ~ bind_port ~ ' proto tcp')
+                     if spire_source_cidr | length > 0
+                     else (bind_port ~ '/tcp') }}
+      register: ufw_rule
+      changed_when: "'existing rule' not in ufw_rule.stdout"
+      when:
+        - ufw_status.rc == 0
+        - "'inactive' not in ufw_status.stdout"
+
+    - name: Report a host with neither firewall
+      ansible.builtin.debug:
+        msg: >-
+          Neither firewalld nor an active ufw is present, so nothing was changed. If
+          the plugin still cannot reach :{{ bind_port }}, the cloud network ACL is the
+          remaining gate — see the header of this file.
+      when:
+        - firewalld_active.stdout != "active"
+        - ufw_status.rc != 0 or 'inactive' in ufw_status.stdout
+
+    - name: What is now reachable
+      ansible.builtin.debug:
+        msg:
+          - "Host firewall allows tcp/{{ bind_port }} from {{ spire_source_cidr | default('any source', true) }}."
+          - "The cloud NSG / VPC firewall / security group is a SEPARATE gate. Open it too."

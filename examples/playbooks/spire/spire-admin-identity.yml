@@ -1,0 +1,230 @@
+# Mint the SPIRE administrative credential the SPIFFE SVID plugin authenticates with
+# Target: the SPIRE server VM, after spire-server-install.yml. Idempotent by default —
+# an existing credential is left alone unless you pass remint=true.
+#
+# This is the one playbook here that handles a private key, so read how it moves before
+# running it.
+#
+# NOTHING SECRET IS PRINTED. The PKCS#12 and its passphrase are written straight into
+# Password Safe with beyondtrust.secrets_safe.secrets_create under no_log, exactly as
+# k3s-kubeconfig.yml moves a cluster-admin kubeconfig. The job log gets the Secrets
+# Safe TITLES and nothing else. There is no output-as-value channel in this runner —
+# a job's "output" is a captured log — so a private key must never be returned that way.
+#
+# THE PASSPHRASE IS GENERATED ON THE VM, not supplied. That keeps it out of the run
+# form, the job record and your shell history. You will never need to type it: it goes
+# into Password Safe beside the PKCS#12, and both are pasted into the functional
+# account once.
+#
+# THE TRUST BUNDLE IS NOT SECRET and is printed deliberately. It is what every consumer
+# of the trust domain has to trust, in the same sense as a CA chain. You need it for
+# the managed system's SpiffeTrustBundlePem — and note that `-certfile` below ALSO
+# embeds it in the PKCS#12, so the credential carries its own chain.
+#
+# WHAT YOU GET IS SHORTER THAN WHAT YOU ASK FOR. SPIRE clamps a minted SVID to the
+# server's ca_ttl, so `-ttl 720h` against the default 168h yields a ~7-day credential
+# and says "X509-SVID lifetime was capped shorter than specified ttl". That is not an
+# error. The real notAfter is printed at the end — schedule off THAT number, because
+# once it lapses every action fails PERMISSION_DENIED and reads like an admin_ids
+# problem instead of an expiry.
+#
+# WRITING REQUIRES CREATE RIGHTS on ps_safe, and the safe must already exist —
+# password-safe/onboard-safe-and-account.yml creates one.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test              # REQUIRED
+#   admin_secret_folder: spire/weaverlab      # REQUIRED — folder for the two secrets
+#   ps_safe: Automation
+#   admin_ttl: 720h
+#   remint: false                             # true = replace an existing credential
+- name: Mint the SPIRE administrative credential
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    admin_spiffe_id: ""
+    admin_secret_folder: ""
+    ps_safe: "Automation"
+    admin_ttl: "720h"
+    remint: false
+    spire_root: /opt/spire
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+  tasks:
+    - name: Validate the inputs
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - admin_secret_folder | length > 0
+          - ps_api_url | length > 0
+        fail_msg: >-
+          trust_domain and admin_secret_folder are required, and writing needs the
+          PASSWORD_SAFE_* credentials (auto-injected when BeyondTrust is configured).
+          Without a Password Safe destination this playbook has nowhere safe to put a
+          private key, and it will not print one.
+
+    - name: Resolve the administrative SPIFFE ID
+      ansible.builtin.set_fact:
+        _admin_id: >-
+          {{ admin_spiffe_id | default('spiffe://' ~ trust_domain ~ '/password-safe/admin', true) }}
+        _work: /root/.spire-admin-mint
+
+    - name: Confirm openssl is present
+      ansible.builtin.command: openssl version
+      register: openssl_version
+      changed_when: false
+
+    - name: Look for a credential already recorded in Password Safe
+      ansible.builtin.set_fact:
+        _ps_existing_pfx: >-
+          {{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+            api_url=ps_api_url,
+            api_version='3.1',
+            retrieval_type='SECRET',
+            client_id=ps_client_id,
+            client_secret=ps_client_secret,
+            secret_list=(ps_safe ~ '/' ~ admin_secret_folder ~ '/admin-pfx-b64'),
+            verify_ca=ps_verify_ca,
+            decrypt=True,
+            errors='ignore',
+            wantlist=False) | default('', true) }}
+      no_log: true
+      when: not remint | bool
+
+    - name: Skip when a credential is already stored
+      ansible.builtin.debug:
+        msg: >-
+          A credential already exists at
+          '{{ admin_secret_folder }}/admin-pfx-b64' in safe '{{ ps_safe }}'. Nothing
+          was minted. Pass remint=true to replace it — and note that re-minting does
+          not revoke the old SVID, which stays valid until it expires.
+      when:
+        - not remint | bool
+        - (_ps_existing_pfx | default('')) | length > 0
+
+    - name: Decide whether to mint
+      ansible.builtin.set_fact:
+        _mint: "{{ remint | bool or (_ps_existing_pfx | default('')) | length == 0 }}"
+
+    # ── Mint ────────────────────────────────────────────────────────────────
+    - name: Create a private working directory
+      ansible.builtin.file:
+        path: "{{ _work }}"
+        state: directory
+        mode: "0700"
+      when: _mint | bool
+
+    - name: Mint the administrative X509-SVID
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-server x509 mint
+        -spiffeID {{ _admin_id }}
+        -ttl {{ admin_ttl }}
+        -write {{ _work }}
+      register: mint_result
+      changed_when: mint_result.rc == 0
+      when: _mint | bool
+
+    - name: Generate the PKCS#12 passphrase on the host
+      ansible.builtin.shell: "set -o pipefail && openssl rand -base64 24 | tr -d '\\n'"
+      args:
+        executable: /bin/bash
+      register: pfx_pass
+      changed_when: true
+      no_log: true
+      when: _mint | bool
+
+    # -certfile embeds the trust bundle in the PKCS#12, so the credential carries its
+    # own chain and Windows can build it without a separate artefact.
+    - name: Pack the SVID, its key and the bundle into a PKCS#12
+      ansible.builtin.command: >-
+        openssl pkcs12 -export
+        -inkey {{ _work }}/key.pem
+        -in {{ _work }}/svid.pem
+        -certfile {{ _work }}/bundle.pem
+        -passout env:PFXPASS
+        -out {{ _work }}/admin.pfx
+      environment:
+        PFXPASS: "{{ pfx_pass.stdout }}"
+      register: pack_result
+      changed_when: pack_result.rc == 0
+      no_log: true
+      when: _mint | bool
+
+    - name: Read the PKCS#12 back as base64
+      ansible.builtin.slurp:
+        src: "{{ _work }}/admin.pfx"
+      register: pfx_raw
+      no_log: true
+      when: _mint | bool
+
+    - name: Read the SVID expiry that SPIRE actually granted
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        openssl x509 -in {{ _work }}/svid.pem -noout -enddate | cut -d= -f2
+      args:
+        executable: /bin/bash
+      register: svid_expiry
+      changed_when: false
+      when: _mint | bool
+
+    # ── Store in Password Safe ──────────────────────────────────────────────
+    # delegate_to: localhost is load-bearing — secrets_create is a MODULE, and only the
+    # runner container has beyondtrust-bips-library.
+    - name: Store the PKCS#12 in Password Safe
+      beyondtrust.secrets_safe.secrets_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        safe_name: "{{ ps_safe }}"
+        folder_name: "{{ admin_secret_folder }}"
+        title: admin-pfx-b64
+        secret_type: "text"
+        text: "{{ pfx_raw.content }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when: _mint | bool
+
+    - name: Store the PKCS#12 passphrase in Password Safe
+      beyondtrust.secrets_safe.secrets_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        safe_name: "{{ ps_safe }}"
+        folder_name: "{{ admin_secret_folder }}"
+        title: admin-pfx-pass
+        secret_type: "text"
+        text: "{{ pfx_pass.stdout }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when: _mint | bool
+
+    - name: Shred the working directory
+      ansible.builtin.file:
+        path: "{{ _work }}"
+        state: absent
+
+    # ── The public half ─────────────────────────────────────────────────────
+    - name: Read the trust bundle
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server bundle show"
+      register: bundle_show
+      changed_when: false
+
+    - name: What to configure in Password Safe
+      ansible.builtin.debug:
+        msg:
+          - "Functional account NAME (it is a SPIFFE ID, not a username): {{ _admin_id }}"
+          - "  DSS key        = the text secret '{{ admin_secret_folder }}/admin-pfx-b64'"
+          - "  DSS passphrase = the text secret '{{ admin_secret_folder }}/admin-pfx-pass'"
+          - "  both in safe '{{ ps_safe }}'. Paste them into the functional account once."
+          - "SVID expires: {{ svid_expiry.stdout | default('unchanged — nothing was minted') | trim }}"
+          - "Set SpiffeTrustBundlePem on the managed system to the PEM below."
+          - "--- trust bundle (public) ---"
+          - "{{ bundle_show.stdout }}"

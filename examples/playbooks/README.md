@@ -264,6 +264,26 @@ answering `CN=svc-deploy-pipeline` proves the plugin's certificate authenticated
 right *identity*. See [`certificates/README.md`](certificates/README.md) for the order to
 run them in and what each one proves.
 
+## SPIFFE / SPIRE (`spire/`)
+
+The lab for the Password Safe **SPIFFE SVID** custom plugin, which brings a SPIRE trust
+domain into BeyondInsight as a Managed System. Cloud-agnostic — only the VM creation and
+the network ACL differ between Azure, GCP and AWS.
+
+| File | Purpose |
+|---|---|
+| `spire-server-install.yml` | SPIRE 1.15.3 under systemd: one trust domain, sqlite datastore, and `admin_ids` |
+| `spire-open-ports.yml` | Open tcp/8081 on the host firewall — the cloud ACL is a separate gate |
+| `spire-seed-entries.yml` | 11 registration entries, of which discovery should return 8 |
+| `spire-admin-identity.yml` | Mint the admin X509-SVID and write its PKCS#12 into Password Safe |
+
+Discovery returning **8 of 11** is the assertion, not "discovery succeeded": the three
+exclusions are one node/agent entry and two privileged ones, and the plugin once shipped
+with a filter bug that silently narrowed the inventory while still reporting success. The
+admin credential moves one way only — into Password Safe under `no_log`, never back
+through the job log. See [`spire/README.md`](spire/README.md) for the order to run them
+in and what each one proves.
+
 ## Kubernetes (`k8s/`)
 
 Localhost plays (`- hosts: localhost`, `connection: local`) using `kubernetes.core`.
