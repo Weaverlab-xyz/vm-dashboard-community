@@ -41,6 +41,7 @@ PROVISIONING_CLOUDS: tuple = ()
 
 _AZURE_REQUIRED = ("location", "resource_group", "subnet_id", "vm_size")
 _AWS_REQUIRED = ("region", "ami_id", "instance_type", "subnet_id")
+_GCP_REQUIRED = ("project_id", "zone", "machine_type", "image_self_link", "subnetwork")
 
 
 class VDesktopError(Exception):
@@ -198,8 +199,12 @@ class _AzureSeats:
             azure_service.store_windows_admin_password, vm_name, seat_id[:8], password)
 
     @staticmethod
-    async def deploy(spec: dict, vm_name: str, admin_password: str) -> dict:
-        """``{"vm_id", "private_ip"}``. The only shape the orchestration depends on."""
+    async def deploy(spec: dict, vm_name: str, admin_password: str, pool_name: str) -> dict:
+        """``{"vm_id", "private_ip"}``. The only shape the orchestration depends on.
+
+        ``pool_name`` is unused here — Azure stamps its pool tag through `tag_pool`
+        after the VM exists. GCP needs it at launch, which is why it is in the
+        signature at all."""
         from . import azure_service
         return await azure_service.deploy_vm(
             rg=spec["resource_group"], location=spec["location"], vm_name=vm_name,
@@ -281,7 +286,9 @@ class _AwsSeats:
         raise VDesktopError("AWS desktop pools are Linux-only.")
 
     @staticmethod
-    async def deploy(spec: dict, vm_name: str, admin_password: str) -> dict:
+    async def deploy(spec: dict, vm_name: str, admin_password: str, pool_name: str) -> dict:
+        # `pool_name` unused: EC2 takes no general tags at launch, so the pool tag is
+        # applied by `tag_pool` afterwards.
         from . import aws_service
         res = await aws_service.launch_instance(
             region=spec["region"], ami_id=spec["ami_id"], instance_name=vm_name,
@@ -330,12 +337,119 @@ class _AwsSeats:
             db, "aws", _cfg("aws_region"))
 
 
+class _GcpSeats:
+    """GCE seat provisioning. **Linux only** — see ``supports_windows``."""
+
+    cloud = "gcp"
+    gateway_cloud = "gcp"
+    # NOT ``POOL_TAG``. A colon is legal in an Azure tag key and an EC2 tag key and is
+    # ILLEGAL in a GCP label key, which allows a leading lowercase letter followed by
+    # lowercase letters, digits, ``-`` and ``_`` only. Inheriting the shared constant
+    # here would have produced instances the API rejects — and it is the kind of thing
+    # that reads fine in review, which is why `test_the_pool_tag_key_is_legal_for_its_cloud`
+    # exists. `cost_service._GCP_LABEL_KEYS` carries both forms of `managed-by` for the
+    # same reason.
+    pool_tag_key = "dashboard_desktop_pool"
+    # GCE delivers a Windows password through `windows-keys` instance metadata and an
+    # RSA exchange — a third mechanism again, after Azure's vaulted password and AWS's
+    # key-pair-encrypted password data. Linux only until that is built.
+    supports_windows = False
+    default_username = "gcpuser"
+    pra_tag = "GCP VDI"
+
+    @staticmethod
+    def _label_value(raw: str) -> str:
+        """A GCP label VALUE has the same character rules as a key.
+
+        Pool names do not: ``create_pool`` accepts any string. `_vm_name_for` already
+        sanitizes for the instance name; the label needs the same treatment or the whole
+        launch is rejected over the pool's capitalisation.
+        """
+        cleaned = re.sub(r"[^a-z0-9_-]", "-", (raw or "").lower()).strip("-_")
+        return cleaned[:63] or "pool"
+
+    @staticmethod
+    def validate_spec(spec: dict) -> dict:
+        spec = dict(spec or {})
+        if (spec.get("os_type") or "Linux").lower() == "windows":
+            raise VDesktopError(
+                "GCP desktop pools are Linux-only for now: GCE delivers Windows "
+                "credentials through windows-keys instance metadata, which this does "
+                "not yet perform. Use an Azure pool for Windows.")
+        missing = [k for k in _GCP_REQUIRED if not spec.get(k)]
+        if not spec.get("ssh_public_key"):
+            missing.append("ssh_public_key")
+        if missing:
+            raise VDesktopError(f"GCP pool requires: {', '.join(missing)}.")
+        return spec
+
+    @staticmethod
+    def generate_password() -> str:                    # pragma: no cover - unreachable
+        raise VDesktopError("GCP desktop pools are Linux-only.")
+
+    @staticmethod
+    async def store_password(vm_name, seat_id, password):  # pragma: no cover - unreachable
+        raise VDesktopError("GCP desktop pools are Linux-only.")
+
+    @staticmethod
+    async def deploy(spec: dict, vm_name: str, admin_password: str, pool_name: str) -> dict:
+        from . import gcp_service
+        res = await gcp_service.launch_instance(
+            project_id=spec["project_id"], zone=spec["zone"], instance_name=vm_name,
+            machine_type=spec["machine_type"],
+            image_self_link=spec["image_self_link"],
+            subnetwork=spec["subnetwork"],
+            create_external_ip=bool(spec.get("create_external_ip", False)),
+            ssh_username=spec.get("ssh_username") or _GcpSeats.default_username,
+            ssh_public_key=spec.get("ssh_public_key") or "",
+            disk_size_gb=int(spec.get("disk_size_gb") or 20),
+            network_tags=spec.get("network_tags") or None,
+            # The pool label goes on AT LAUNCH rather than through a follow-up call, and
+            # `_launch_instance_sync` merges it over `managed-by` rather than replacing
+            # it. That makes GCP the only one of the three where a crash between create
+            # and tag cannot leave an unattributable seat — so `tag_pool` below has
+            # nothing left to do.
+            labels={_GcpSeats.pool_tag_key: _GcpSeats._label_value(pool_name)},
+        )
+        # project/zone/name: terminate needs all three and gets only this string.
+        return {"vm_id": f"{spec['project_id']}/{spec['zone']}/{res['instance_name']}",
+                "private_ip": res.get("private_ip")}
+
+    @staticmethod
+    def _split(vm_resource_id: str):
+        """``project/zone/name`` → the three parts, or ``("", "", raw)``."""
+        parts = (vm_resource_id or "").strip("/").split("/")
+        if len(parts) == 3:
+            return parts[0], parts[1], parts[2]
+        return "", "", (parts[-1] if parts else "")
+
+    @staticmethod
+    async def tag_pool(spec: dict, vm_name: str, vm_resource_id: str, pool_name: str) -> None:
+        """No-op: the label was applied at launch. See `deploy`."""
+        return None
+
+    @staticmethod
+    async def terminate(vm_resource_id: str) -> str:
+        from . import gcp_service
+        project, zone, name = _GcpSeats._split(vm_resource_id)
+        if project and zone and name:
+            await gcp_service.terminate_instance(project, zone, name)
+        return name or vm_resource_id
+
+    @staticmethod
+    async def reap_idle_gateway(db) -> None:
+        from . import jumpoint_host_service
+        await jumpoint_host_service.teardown_jumpoint_host_if_idle(
+            db, "gcp", _cfg("gcp_zone"))
+
+
 # Keyed by cloud. A cloud in VALID_CLOUDS but absent here creates seat RECORDS only —
 # which is exactly what AWS and GCP do today, and why PROVISIONING_CLOUDS is derived
 # from this rather than maintained beside it: the two cannot drift.
 _SEAT_BACKENDS = {
     "azure": _AzureSeats,
     "aws": _AwsSeats,
+    "gcp": _GcpSeats,
 }
 
 
@@ -579,7 +693,7 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                     # before this refactor, in the same scope.
                     admin_password = backend.generate_password()
                     pw_backend, ref = await backend.store_password(vm_name, sid, admin_password)
-                res = await backend.deploy(spec, vm_name, admin_password)
+                res = await backend.deploy(spec, vm_name, admin_password, pool_name)
                 row.vm_resource_id = res.get("vm_id") or vm_name
                 row.status = "running"
                 db.commit()
