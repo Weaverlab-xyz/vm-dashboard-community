@@ -334,6 +334,26 @@ def test_a_long_lived_subordinate_is_cautioned_because_rotation_does_not_revoke(
         f"gcpcas?project=p&location=l&pool=q&lifetime=1y&{_STORE}")
 
 
+def test_a_pkcs12_subordinate_is_cautioned_because_pra_takes_pem_only():
+    # PRA Vault's X.509 Parent Certificate Authority account takes a PEM key, a
+    # passphrase and a PEM certificate as three separate fields — a PKCS#12 has to be
+    # unpacked with openssl before any of it can be pasted in. Warned rather than
+    # refused: a subordinate could be destined for something else, and this cannot know.
+    #
+    # The default is Pkcs12, so the case worth catching is the address that says NOTHING.
+    msg = _warnings_from(f"{_SUBCA}&permitdns=db.example.com")
+    assert "pembundle" in msg and "default pkcs12" in msg
+    # Explicitly named, same caution — and it names what was actually set.
+    msg = _warnings_from(f"{_SUBCA}&permitdns=db.example.com&bundle=Pkcs12")
+    assert "pembundle" in msg and "default" not in msg
+    # PemBundle is silent, which is the whole point.
+    assert "pembundle" not in _warnings_from(
+        f"{_SUBCA}&permitdns=db.example.com&bundle=PemBundle")
+    # And a LEAF is never cautioned about this — PKCS#12 is the right default there.
+    assert "pembundle" not in _warnings_from(
+        f"gcpcas?project=p&location=l&pool=q&{_STORE}")
+
+
 def test_the_aws_template_and_isca_may_not_contradict_each_other():
     # ACM PCA ignores the CSR's basic constraints and builds from a template, so these
     # two naming different things is not a preference to resolve — one of them is a lie,

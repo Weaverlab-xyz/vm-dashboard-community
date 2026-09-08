@@ -706,6 +706,21 @@ def _validate_certificate_subca(backend: str, options: dict) -> None:
             "longest expected session. The plugin itself cautions above %d days.",
             _val("lifetime"), round(days), _CERT_SUBCA_CAUTION_DAYS)
 
+    # PRA Vault's X.509 Parent Certificate Authority account — the consumer this path
+    # exists for — takes PEM only, in three separate fields, and its key box says so:
+    # "Only PEM encoding is valid". A PKCS#12 has to be taken apart with openssl before
+    # any of it can be pasted in. Warned rather than refused because a subordinate could
+    # be destined for something else entirely and this cannot know the consumer; note the
+    # default is Pkcs12, so the common case is an address that simply says nothing.
+    if (_val("bundle").lower() or "pkcs12") == "pkcs12":
+        logger.warning(
+            "PS: certificate address issues a SUBORDINATE CA as %s. If PRA Vault is the "
+            "consumer, set bundle=PemBundle — its X.509 Parent Certificate Authority "
+            "account takes a PEM key, a passphrase and a PEM certificate as three "
+            "separate fields, and a PKCS#12 has to be unpacked with openssl first. "
+            "Ignore this if the subordinate is going somewhere else.",
+            _val("bundle") or "the default Pkcs12")
+
     # ACM PCA's template decides what comes back, so isca= and templatearn= naming
     # different things is not a preference to resolve — one of them is a lie. Without
     # this, asking for a CA returns a perfectly valid end-entity certificate.
