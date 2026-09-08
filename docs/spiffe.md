@@ -1,0 +1,121 @@
+# SPIFFE and SPIRE
+
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a SPIRE trust domain to govern non-human identities against, and want it gone again when the demo ends.
+
+> **Preview.** The plugin's own suite covers everything above the SPIRE API, and its
+> 16-step harness runs green against a live SPIRE 1.15.3 server — but **nothing here has
+> been proven through a live BeyondInsight**. The single open question is whether the
+> gateway populates managed system and managed account *attributes* at all, and the
+> whole configuration model turns on the answer. That is what this lab exists to settle
+> cheaply. Off by default; enable it under **Settings → Preview features**.
+
+This page is about the lab for the Password Safe **SPIFFE SVID** custom platform plugin,
+which brings a SPIRE trust domain into BeyondInsight as a Managed System. **There is no
+human in this workflow by design** — every identity here belongs to a machine, and the
+consumer is a pipeline, not a person.
+
+The companion docs:
+
+- [`examples/playbooks/spire/`](../examples/playbooks/spire/README.md) — the playbooks
+  that build the lab, and what each one is actually proving
+- [Config Management](config-management.md) — how those playbooks get run
+- [Cloud VMs](cloud-vms.md) — where the SPIRE server lives
+- [Certificates](certificates.md) — the sibling feature, for a plugin that has a human
+  approval in its path
+
+---
+
+## What the plugin does, in one paragraph
+
+SPIRE is an issuance engine and a very good one. It is **not** an identity governance
+system and does not claim to be: it has no inventory, no ownership model, no review
+workflow, and `spire-server entry show` is a CLI dump on a box most of the people who
+need the answer cannot log into. The plugin does two separate jobs with very different
+risk. **Governance** discovers every registration entry as a Managed Account and raises
+attestation-policy findings on every verification — it mints nothing and holds no
+workload credential, so there is no trade-off to weigh. **Distribution** mints an
+audience-scoped JWT-SVID for consumers that cannot run a SPIRE agent, and stores it as
+the Managed Account credential.
+
+Deploy the governance half first. It stands on its own.
+
+## Minting is a deliberate downgrade, and the honest version matters
+
+Minting **bypasses SPIRE node attestation and workload attestation**. That is SPIFFE's
+core security property, set aside on purpose. A vault-issued SVID is an exportable
+bearer token at rest in a database rather than a non-exportable, attested,
+continuously-rotating one — so **if a workload can reach the Workload API, it should use
+the Workload API**, and using this plugin instead is a strict downgrade.
+
+It is legitimate for three cases: consumers that genuinely cannot be attested
+(mainframes, appliances, SaaS-hosted CI, partner systems), break-glass and debugging,
+and a phased SPIFFE rollout. It is not legitimate for any workload that can be attested,
+for any SPIFFE ID also issued to attested workloads, or for control-plane identities.
+The plugin enforces that structurally: `SpiffeMintablePathPrefix` is unset by default and
+**unset means refuse**, so minting is inert until an operator names the namespace that
+may be minted.
+
+## What the lab is for
+
+Standing a SPIRE server up by hand takes an afternoon and produces something that lives
+on one laptop and disappears on reboot. The plugin was developed against exactly that,
+which is why every Password Safe interaction it documents is expected behaviour rather
+than observed.
+
+The lab replaces it with one Linux VM built from playbooks, seeded with the population a
+real trust domain accumulates — weak selectors, inflated TTLs, a leftover `-admin` entry
+— so the findings have something to catch. Unlike a private CA, the lab has **no standing
+cost beyond the VM itself**, which the auto-delete timer already reaps. The reason it
+still gets its own record and its own timer is different: a forgotten trust domain keeps
+minting identities that relying services keep accepting, and it appears on no other page.
+
+## Building it
+
+Full detail, including what each playbook proves, is in
+[`examples/playbooks/spire/`](../examples/playbooks/spire/README.md). In short:
+
+1. Deploy a Linux VM from the normal cloud page, on a subnet the Password Safe worker or
+   Resource Broker can reach.
+2. `spire-server-install.yml` — SPIRE under systemd, one trust domain, and `admin_ids`.
+3. `spire-open-ports.yml`, then open the cloud ACL. **Both** are gates.
+4. `spire-seed-entries.yml` — 11 entries, of which discovery should return **8**.
+5. `spire-admin-identity.yml` — mints the admin credential into Password Safe.
+
+Then onboard it: an Asset for the host, a Managed System on the `SPIFFE SVID` platform
+at port 8081, and a Functional Account whose **name is a SPIFFE ID**
+(`spiffe://<trust-domain>/password-safe/admin`), carrying the PKCS#12 as its DSS key.
+
+## Two numbers to check, because both have already been wrong
+
+**Discovery must return 8 of 11.** Not "discovery succeeded" — the count. The plugin
+shipped with discovery defaulting its path filter to the mintable prefix, so configuring
+minting silently narrowed the governance inventory to the vaulted namespace and the two
+showcase findings disappeared, while every run still reported success. Read the exclusion
+counts in the activity record: node/agent, admin, downstream, and outside-prefix are
+reported separately, and that is what tells you which one bit.
+
+**The admin credential is shorter than you asked for.** `ca_ttl` caps every SVID the
+server issues, so `-ttl 720h` against the default 168h gives a ~7-day credential and
+SPIRE says so rather than failing. Once it lapses, every action fails
+`PERMISSION_DENIED`, which reads exactly like an `admin_ids` misconfiguration. Schedule
+off the real expiry the playbook prints.
+
+## Boundaries
+
+- **No revocation.** Deleting a registration entry stops renewal; an SVID already in a
+  consumer's memory stays valid until it expires. Containment is only as fast as the
+  TTL. That is SPIRE's design, not the plugin's.
+- **No kill switch.** The plugin implements neither Enable nor Disable Managed Account,
+  so removing the Managed System — or the entry in SPIRE — is how an identity is stopped.
+- **No self-rotation, permanently.** A workload cannot mint its own replacement: the
+  server API requires an admin caller, and the Workload API is reachable only from the
+  attested workload's own machine. The action is declared unsupported so BeyondInsight
+  refuses it early.
+- **No just-in-time issuance.** Password Safe returns what is stored rather than calling
+  the plugin at retrieval time, so TTL planning is scheduling arithmetic:
+  `jwt_svid_ttl >= rotation_interval + max_checkout_duration + clock skew`.
+- **JWT-SVIDs only.** An X509-SVID is three artefacts and the credential field has
+  nowhere to put the bundle.
+- **No discovery of SVIDs already in circulation.** The plugin inventories registration
+  entries, which is what SPIRE knows about. A JWT-SVID pasted into a config file two
+  years ago is invisible to it and to SPIRE alike.

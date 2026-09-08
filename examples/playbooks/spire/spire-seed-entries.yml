@@ -1,0 +1,131 @@
+# Seed the lab SPIRE Server with registration entries worth governing
+# Target: the SPIRE server VM, after spire-server-install.yml. Idempotent.
+#
+# A demo against three tidy entries proves nothing. This seeds the population a real
+# trust domain accumulates: ordinary attested workloads, identities meant for vaulting,
+# and deliberate governance smells for the plugin's findings to catch.
+#
+# 11 entries go in and DISCOVERY SHOULD RETURN 8 — the plugin excludes one node/agent
+# entry and the two privileged ones. Those three exclusions are the talking point, not
+# an inconvenience: the counts are reported separately in the activity record, and a
+# number that climbs means somebody granted control-plane rights to something.
+#
+#   /ns/payments/sa/ledger-api      attested. MUST be refused for minting
+#   /ns/payments/sa/settlement      ordinary, bulk for the inventory
+#   /ns/billing/sa/invoicer         ordinary, second namespace — proves Smart Rule grouping
+#   /vaulted/partner/acme-etl       the partner ETL job; the mint target
+#   /vaulted/mainframe/batch        second mintable identity, proves it is not a one-off
+#   /vaulted/team_alpha/svc.one-2   a deep punctuated path, to exercise the name codec
+#   /legacy/root-runner             unix:uid:0 — fires the root-selector finding
+#   /ops/long-lived                 x509 172800 / jwt 7200 — fires two TTL findings
+#   /ops/spire-admin                -admin      — discovery MUST exclude it
+#   /ops/intermediate               -downstream — discovery MUST exclude it
+#   /node/worker-01                 the parent node entry — discovery MUST exclude it
+#
+# SPIRE RESTRICTS PATH SEGMENTS to letters, numbers, dots, dashes and underscores. An
+# entry carrying "~" or "!" is refused by the server outright, so the account-name
+# codec's !HH escaping is unreachable in practice — only the "/" -> "~" separator rule
+# and the optional @label suffix ever apply. An earlier version of this seed used a "~"
+# path and sent stderr to /dev/null, so it failed silently for months and the entry
+# count was only ever right by coincidence. Hence: failures here are loud.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test       # REQUIRED, and must match the running server
+#   parent_id: ""                      # default spiffe://<trust_domain>/node/worker-01
+- name: Seed the lab SPIRE registration entries
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    parent_id: ""
+    spire_root: /opt/spire
+  tasks:
+    - name: Require a trust domain
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - "'/' not in trust_domain"
+        fail_msg: "trust_domain is required, as a bare name such as 'weaverlab.test'."
+
+    - name: Resolve the parent node id
+      ansible.builtin.set_fact:
+        _parent: "{{ parent_id | default('spiffe://' ~ trust_domain ~ '/node/worker-01', true) }}"
+
+    - name: Confirm the server is up
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server healthcheck"
+      register: seed_health
+      changed_when: false
+
+    # The node entry every workload entry is parented to. No agent actually runs in
+    # this lab — the plugin only talks to the server API — so this exists to give the
+    # workload entries a parent and to give discovery a node entry to exclude.
+    - name: Create the parent node entry
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-server entry create
+        -spiffeID {{ _parent }}
+        -selector join_token:bootstrap
+        -node
+      register: node_entry
+      changed_when: "'already exists' not in (node_entry.stdout + node_entry.stderr)"
+      failed_when:
+        - node_entry.rc != 0
+        - "'already exists' not in (node_entry.stdout + node_entry.stderr)"
+
+    - name: Create the workload entries
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-server entry create
+        -parentID {{ _parent }}
+        -spiffeID spiffe://{{ trust_domain }}{{ item.path }}
+        -selector {{ item.selector }}
+        {{ item.extra | default('') }}
+      register: seeded
+      changed_when: "'already exists' not in (seeded.stdout + seeded.stderr)"
+      failed_when:
+        - seeded.rc != 0
+        - "'already exists' not in (seeded.stdout + seeded.stderr)"
+      loop: "{{ _entries }}"
+      loop_control:
+        label: "{{ item.path }}"
+      vars:
+        _entries:
+          # Ordinary attested workloads.
+          - path: /ns/payments/sa/ledger-api
+            selector: k8s:ns:payments
+          - path: /ns/payments/sa/settlement
+            selector: k8s:ns:payments
+          - path: /ns/billing/sa/invoicer
+            selector: k8s:ns:billing
+          # Identities intended for vaulting — consumers that cannot run a SPIRE agent.
+          - path: /vaulted/partner/acme-etl
+            selector: unix:uid:1001
+          - path: /vaulted/mainframe/batch
+            selector: unix:uid:1002
+          # A deep, punctuated path, to exercise the account-name codec's separators.
+          - path: /vaulted/team_alpha/svc.one-2
+            selector: unix:uid:1006
+          # Deliberate governance smells.
+          - path: /legacy/root-runner
+            selector: unix:uid:0
+          - path: /ops/long-lived
+            selector: unix:uid:1003
+            extra: "-x509SVIDTTL 172800 -jwtSVIDTTL 7200"
+          # Privileged entries. Discovery must exclude both.
+          - path: /ops/spire-admin
+            selector: unix:uid:1004
+            extra: "-admin"
+          - path: /ops/intermediate
+            selector: unix:uid:1005
+            extra: "-downstream"
+
+    - name: Count what is registered
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server entry count"
+      register: entry_count
+      changed_when: false
+
+    - name: What discovery should now return
+      ansible.builtin.debug:
+        msg:
+          - "{{ entry_count.stdout | trim }}"
+          - "Discovery should report 8 accounts, excluding 1 node/agent and 2 admin/downstream."
+          - "If it reports fewer, read the exclusion counts in the activity record before"
+          - "assuming entries are missing — SpiffeDiscoveryPathPrefix narrows the inventory."

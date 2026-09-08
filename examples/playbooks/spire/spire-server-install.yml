@@ -1,0 +1,212 @@
+# Install a SPIRE Server for the Password Safe SPIFFE SVID plugin's lab
+# Target: a Linux VM the Password Safe worker or Resource Broker can reach on 8081.
+# Idempotent — a host already running the service keeps its datastore and its CA.
+#
+# This builds the lab the plugin is developed against: one trust domain, a sqlite
+# datastore, the join_token node attestor and a disk key manager. It is a THROWAWAY
+# lab, not a production topology — no HA, no upstream CA, and no agent, because the
+# plugin only ever talks to the server's API.
+#
+# NEEDS EGRESS to github.com to fetch the release tarball.
+#
+# admin_ids IS THE LINE PEOPLE GET WRONG, so this playbook writes it for you. Setting
+# `-admin` on a registration entry grants admin rights to SVIDs the AGENT issues for
+# that entry; it does nothing for an SVID produced by `spire-server x509 mint`, which
+# is how the functional account credential is made. Only admin_ids covers that, and a
+# missing entry here surfaces later as PERMISSION_DENIED on Verify Functional Account.
+#
+# ca_ttl CAPS EVERY SVID THE SERVER ISSUES. The admin credential is minted with
+# `-ttl 720h`, but SPIRE clamps it to ca_ttl and says so ("X509-SVID lifetime was
+# capped shorter than specified ttl"). At the 168h default that is a 7-day admin
+# credential, which is exactly when the plugin starts warning. Raise ca_ttl here if
+# you want a lab that outlives a week.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test        # REQUIRED — the Managed System models one of these
+#   spire_version: 1.15.3
+#   spire_sha256: ""                    # tarball checksum from the release page; blank skips
+#   bind_port: 8081
+#   ca_ttl: 168h
+#   admin_spiffe_id: ""                 # default spiffe://<trust_domain>/password-safe/admin
+- name: Install a SPIRE Server
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    spire_version: "1.15.3"
+    spire_sha256: ""
+    bind_port: 8081
+    ca_ttl: "168h"
+    default_x509_svid_ttl: "1h"
+    default_jwt_svid_ttl: "5m"
+    admin_spiffe_id: ""
+    spire_root: /opt/spire
+    spire_data: /opt/spire/data
+  tasks:
+    - name: Require a trust domain
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - "'/' not in trust_domain"
+        fail_msg: >-
+          trust_domain is required, and is a bare DNS-style name such as
+          'weaverlab.test' — not a spiffe:// URI. The Managed System in Password Safe
+          models exactly one of these, and the plugin asserts it on every connect.
+
+    - name: Resolve the administrative SPIFFE ID
+      ansible.builtin.set_fact:
+        _admin_id: >-
+          {{ admin_spiffe_id | default('spiffe://' ~ trust_domain ~ '/password-safe/admin', true) }}
+
+    - name: Map the CPU architecture to a SPIRE release asset
+      ansible.builtin.set_fact:
+        _arch: "{{ _arch_map[ansible_facts['architecture']] | default('') }}"
+      vars:
+        _arch_map:
+          x86_64: amd64
+          aarch64: arm64
+
+    - name: Fail on an architecture SPIRE does not publish
+      ansible.builtin.fail:
+        msg: "no SPIRE release asset for architecture {{ ansible_facts['architecture'] }}"
+      when: _arch | length == 0
+
+    - name: Detect an existing install
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server --version"
+      register: spire_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Create the SPIRE directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0750"
+      loop:
+        - "{{ spire_root }}"
+        - "{{ spire_root }}/conf"
+        - "{{ spire_data }}"
+
+    - name: Download the SPIRE release
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/spiffe/spire/releases/download/v{{ spire_version }}/spire-{{ spire_version }}-linux-{{ _arch }}-musl.tar.gz
+        dest: "/tmp/spire-{{ spire_version }}.tar.gz"
+        checksum: "{{ ('sha256:' ~ spire_sha256) if spire_sha256 | length > 0 else omit }}"
+        mode: "0640"
+      when: spire_version not in (spire_installed.stdout | default(''))
+
+    - name: Warn when the download was not checksummed
+      ansible.builtin.debug:
+        msg: >-
+          spire_sha256 was blank, so the tarball was taken on TLS alone. The release
+          page publishes a checksum — set it for anything you intend to keep.
+      when:
+        - spire_sha256 | length == 0
+        - spire_version not in (spire_installed.stdout | default(''))
+
+    - name: Unpack SPIRE
+      ansible.builtin.unarchive:
+        src: "/tmp/spire-{{ spire_version }}.tar.gz"
+        dest: "{{ spire_root }}"
+        remote_src: true
+        extra_opts: ["--strip-components=1"]
+      when: spire_version not in (spire_installed.stdout | default(''))
+
+    - name: Remove the downloaded tarball
+      ansible.builtin.file:
+        path: "/tmp/spire-{{ spire_version }}.tar.gz"
+        state: absent
+
+    # data_dir and keys_path are inside spire_data and are NOT touched here: rewriting
+    # server.conf must never re-key a server that already has a CA and issued SVIDs.
+    - name: Write the server configuration
+      ansible.builtin.copy:
+        dest: "{{ spire_root }}/conf/server.conf"
+        mode: "0640"
+        content: |
+          server {
+              bind_address = "0.0.0.0"
+              bind_port    = "{{ bind_port }}"
+              trust_domain = "{{ trust_domain }}"
+              data_dir     = "{{ spire_data }}"
+              log_level    = "INFO"
+              ca_ttl       = "{{ ca_ttl }}"
+              default_x509_svid_ttl = "{{ default_x509_svid_ttl }}"
+              default_jwt_svid_ttl  = "{{ default_jwt_svid_ttl }}"
+
+              # An entry-level admin=true does NOT apply to an SVID produced by
+              # "spire-server x509 mint". Only admin_ids grants administrative rights
+              # to a minted SVID, which is what the plugin authenticates with.
+              admin_ids = ["{{ _admin_id }}"]
+          }
+
+          plugins {
+              DataStore "sql" {
+                  plugin_data {
+                      database_type     = "sqlite3"
+                      connection_string = "{{ spire_data }}/datastore.sqlite3"
+                  }
+              }
+              NodeAttestor "join_token" { plugin_data {} }
+              KeyManager  "disk"        { plugin_data { keys_path = "{{ spire_data }}/keys.json" } }
+          }
+      notify: Restart spire-server
+
+    - name: Install the systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/spire-server.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=SPIRE Server (Password Safe SPIFFE SVID plugin lab)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          ExecStart={{ spire_root }}/bin/spire-server run -config {{ spire_root }}/conf/server.conf
+          WorkingDirectory={{ spire_root }}
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart spire-server
+
+    - name: Enable and start spire-server
+      ansible.builtin.systemd:
+        name: spire-server
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply any pending restart before probing the API
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the API port to accept connections
+      ansible.builtin.wait_for:
+        port: "{{ bind_port }}"
+        host: 127.0.0.1
+        timeout: 60
+
+    - name: Health check
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server healthcheck"
+      register: spire_health
+      changed_when: false
+      retries: 5
+      delay: 3
+      until: spire_health.rc == 0
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "SPIRE {{ spire_version }} serving trust domain '{{ trust_domain }}' on :{{ bind_port }}."
+          - "Administrative identity in admin_ids: {{ _admin_id }}"
+          - "ca_ttl is {{ ca_ttl }} and it CAPS the admin credential, whatever x509 mint asks for."
+          - "Next: spire-open-ports.yml, spire-seed-entries.yml, then spire-admin-identity.yml."
+  handlers:
+    - name: Restart spire-server
+      ansible.builtin.systemd:
+        name: spire-server
+        state: restarted
+        daemon_reload: true
