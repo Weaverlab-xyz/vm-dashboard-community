@@ -25,10 +25,21 @@ SSH — so GCP and AWS differ only in §1 and §2. Those sections name what chan
 - **The Resource Broker must be able to reach the VM on tcp/8081.** The plugin dials the
   SPIRE server API with mutual TLS, so it needs a route in. Note which subnet the broker
   sits on — you need its egress address in §2.
-- **Not SE-Prod.** `Microsoft.Compute` is unregistered in the SE-Prod subscription
-  (`RG-CWeaver`) and cannot be registered at resource-group scope, so no VM can be
-  created there at all. Use whichever subscription the dashboard's Azure deploys already
-  target.
+- **Check which subscription you are on.** `Microsoft.Compute` is *unregistered* in
+  **SE-Prod** and cannot be registered at resource-group scope, so no VM can be created
+  there at all — and SE-Prod is the default in a fresh `az login`. The VM belongs in the
+  subscription the dashboard's Azure integration targets, which needs `Microsoft.Compute`
+  and `Microsoft.Network` both `Registered`. Confirm before deploying:
+
+  ```bash
+  az provider show -n Microsoft.Compute --subscription "<sub-id>" --query registrationState -o tsv
+  ```
+
+  A `MissingSubscriptionRegistration` failure on deploy is this, not a quota or a
+  permission problem. If that command returns `AADSTS50076` instead of a registration
+  state, the subscription is in a **different tenant** from your current `az` session and
+  needs its own `az login --tenant <id> --use-device-code` first — that is an auth
+  failure, not an answer about the provider.
 - **A Secrets Safe safe to write into**, with create rights. §4 stores two secrets in it.
   `examples/playbooks/password-safe/onboard-safe-and-account.yml` creates one.
 - Decide the trust domain name now. It is baked into the server config, every SPIFFE ID,
