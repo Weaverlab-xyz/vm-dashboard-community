@@ -1680,6 +1680,49 @@ async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_
             "admin_username": admin_username, "client_image": image, "port": port}
 
 
+def _iam_db_user_to_register(engine: str, sa_email: str) -> str:
+    """The name to hand ``users.insert`` when registering IAM service account
+    ``sa_email`` as a database principal — which is **not** always the email.
+
+    **PostgreSQL rejects the email outright.** A Postgres role name is capped at
+    NAMEDATALEN-1 = 63 characters and the Admin API validates against the target
+    engine, so a perfectly ordinary service account overflows on length alone::
+
+        bt-rotator@project-4e93c8e3-4e96-4bc0-9d1.iam.gserviceaccount.com   (65)
+
+    which came back as ``HTTP 400 ... User name "..." to be created is too long
+    (max 63)`` and failed the whole Register in Password Safe job at 25%. Google's
+    documented form for PostgreSQL is the email with the ``.gserviceaccount.com``
+    suffix dropped, which is both under the cap and the name the database then
+    stores — so this is a correction, not a workaround for our own naming.
+
+    MySQL is deliberately left as the email. Cloud SQL performs that engine's
+    truncation itself (``users.list`` reads back ``bt-rotator`` / host ``%``, proven
+    against a live instance), so pre-truncating here would swap a working call for an
+    untested one. SQL Server never reaches this path — it has no IAM database
+    authentication at all, see :func:`_iam_db_auth`."""
+    email = (sa_email or "").strip()
+    if engine == "postgres":
+        return email.split(".gserviceaccount.com")[0]
+    return email
+
+
+def _derived_iam_db_user(engine: str, sa_email: str) -> str:
+    """The in-database name Cloud SQL is *documented* to store for ``sa_email`` — the
+    last-resort answer when :func:`_observed_iam_db_user` could not read the catalog.
+
+    A different question from :func:`_iam_db_user_to_register`, and the two disagree on
+    MySQL: there the email is what gets SENT and ``bt-rotator`` is what gets STORED.
+    Deriving the sent name instead would name a principal the database does not have,
+    which fails Verify with an unhelpful message. Prefer the read-back always; this is
+    the branch that logs a warning."""
+    email = (sa_email or "").strip()
+    if engine == "mysql":
+        # Local part, lowercased, capped at MySQL's 32-character username limit.
+        return email.split("@")[0].lower()[:32]
+    return _iam_db_user_to_register(engine, email)
+
+
 def _observed_iam_db_user(users: list, sa_email: str) -> str:
     """Pick, from a ``users.list`` response, the in-database name Cloud SQL actually
     stored for IAM service account ``sa_email``.
@@ -2086,8 +2129,12 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
     if not iam_db_auth:
         fa_db_user = admin_username
     elif rotator:
-        await gcp_service.create_cloudsql_user(project, instance, rotator,
-                                               iam_service_account=True)
+        # The registered name is engine-dependent and PostgreSQL will not take the
+        # email — see _iam_db_user_to_register. Not the same question as what the
+        # database then STORES, which is read back below.
+        await gcp_service.create_cloudsql_user(
+            project, instance, _iam_db_user_to_register(engine, rotator),
+            iam_service_account=True)
         try:
             fa_db_user = _observed_iam_db_user(
                 await gcp_service.list_cloudsql_users(project, instance), rotator)
@@ -2095,7 +2142,7 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
             logger.warning("clouddb: could not read back the IAM database user for %s "
                            "on %s: %s", rotator, instance, exc)
         if not fa_db_user:
-            fa_db_user = rotator.split(".gserviceaccount.com")[0]
+            fa_db_user = _derived_iam_db_user(engine, rotator)
             logger.warning("clouddb: IAM database user for %s not found in users.list on "
                            "%s — falling back to the derived name %r, which Verify will "
                            "reject if the database stored something else",
