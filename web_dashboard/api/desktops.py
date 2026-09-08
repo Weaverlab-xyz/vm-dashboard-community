@@ -102,16 +102,50 @@ def _azure_spec(payload: PoolCreateRequest) -> dict:
     }
 
 
+def _aws_spec(payload: PoolCreateRequest) -> dict:
+    """The aws_service.launch_instance spec built from the pool request.
+
+    Region falls back to the configured ``aws_region`` the same way ``_azure_spec``
+    falls back to ``azure_location``, so a single-region setup can leave it blank. AMI
+    and instance type also accept the generic ``image`` / ``size`` fields, so a caller
+    that does not care which cloud it is talking to can fill those two and be understood
+    by either backend.
+
+    No default subnet: unlike Azure there is no desktops-subnet setting to fall back to,
+    and guessing one would put desktops somewhere nobody chose. ``_AwsSeats.validate_spec``
+    refuses a missing one by name.
+    """
+    return {
+        "region": payload.region or _cfg("aws_region") or "us-east-1",
+        "ami_id": payload.ami_id or payload.image,
+        "instance_type": payload.instance_type or payload.size,
+        "subnet_id": payload.subnet_id,
+        "security_group_ids": payload.security_group_ids,
+        "iam_instance_profile": payload.iam_instance_profile,
+        "os_type": payload.os_type,
+        "ssh_public_key": payload.ssh_public_key,
+    }
+
+
+# Which builder makes a spec for which cloud. A cloud absent here sends `spec=None`,
+# which is what a records-only cloud (GCP today) wants.
+_SPEC_BUILDERS = {"azure": _azure_spec, "aws": _aws_spec}
+
+
 @router.post("/pools", status_code=201)
 async def create_pool(
     payload: PoolCreateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Create a desktop pool. Azure provisions one private VM per seat (durable,
-    via the job runner, tagged for the pool); AWS/GCP create records only
-    (Phase 1 is Azure)."""
-    spec = _azure_spec(payload) if payload.cloud == "azure" else None
+    """Create a desktop pool. Azure and AWS provision one private VM per seat (durable,
+    via the job runner, tagged for the pool); GCP creates records only.
+
+    AWS pools are Linux-only — EC2 hands back Windows credentials as password data
+    encrypted to the launch key pair, which nothing here decrypts yet, so a Windows AWS
+    pool is refused with that reason rather than provisioned into unusable seats."""
+    builder = _SPEC_BUILDERS.get((payload.cloud or "").lower())
+    spec = builder(payload) if builder else None
     try:
         result = vdesktop_service.create_pool(
             db, cloud=payload.cloud, name=payload.name, count=payload.count,

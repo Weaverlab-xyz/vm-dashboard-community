@@ -2028,6 +2028,34 @@ async def set_workgroup_tag(region: str, instance_id: str, workgroup: str) -> No
         raise AWSError("AWS credentials not configured.")
 
 
+def _set_desktop_pool_tag_sync(region: str, instance_id: str, pool_name: str) -> None:
+    ec2 = _get_ec2(region)
+    ec2.create_tags(
+        Resources=[instance_id],
+        Tags=[{"Key": "dashboard:desktop_pool", "Value": pool_name}],
+    )
+
+
+async def set_desktop_pool_tag(region: str, instance_id: str, pool_name: str) -> None:
+    """Tag an EC2 instance as a member of a virtual-desktop pool (VDI) so the pool's
+    live state is recoverable from the cloud. Tag key is ``dashboard:desktop_pool``.
+
+    A separate call rather than a ``TagSpecifications`` entry at launch because
+    ``launch_instance`` takes no general tags argument — it builds a fixed list plus
+    ``Workgroup`` and ``EntitleRequestId``. ``create_tags`` is upsert, so this is safe to
+    repeat, which matters: the caller treats it as best-effort and may retry a seat.
+
+    Mirrors ``azure_service.set_desktop_pool_tag`` in name and shape on purpose; the two
+    are reached through the same seat-backend method.
+    """
+    try:
+        await _to_thread(_set_desktop_pool_tag_sync, region, instance_id, pool_name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to set desktop_pool tag on {instance_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 # ── Network options (for deploy form dropdowns) ────────────────────────────────
 
 def _get_network_options_sync(region: str) -> dict:

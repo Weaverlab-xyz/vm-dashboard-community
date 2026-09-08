@@ -40,6 +40,7 @@ VALID_CLOUDS = ("aws", "azure", "gcp")
 PROVISIONING_CLOUDS: tuple = ()
 
 _AZURE_REQUIRED = ("location", "resource_group", "subnet_id", "vm_size")
+_AWS_REQUIRED = ("region", "ami_id", "instance_type", "subnet_id")
 
 
 class VDesktopError(Exception):
@@ -215,7 +216,9 @@ class _AzureSeats:
         )
 
     @staticmethod
-    async def tag_pool(spec: dict, vm_name: str, pool_name: str) -> None:
+    async def tag_pool(spec: dict, vm_name: str, vm_resource_id: str, pool_name: str) -> None:
+        # Azure addresses a VM by resource group + name, so the id is unused here. AWS
+        # addresses one by instance id, which is why the id is in the signature at all.
         from . import azure_service
         await azure_service.set_desktop_pool_tag(spec["resource_group"], vm_name, pool_name)
 
@@ -235,11 +238,104 @@ class _AzureSeats:
             db, "azure", _cfg("azure_location"))
 
 
+class _AwsSeats:
+    """EC2 seat provisioning. **Linux only** — see ``supports_windows``."""
+
+    cloud = "aws"
+    gateway_cloud = "aws"
+    # A colon is a legal character in an EC2 tag key, so the shared constant is usable
+    # here unchanged. It is NOT legal in a GCP label key, which is why this is per
+    # backend rather than read from the module.
+    pool_tag_key = POOL_TAG
+    # AWS hands back Windows credentials as password data encrypted to the launch key
+    # pair, decrypted client-side — nothing like Azure's "generate one and vault it".
+    # Wiring that properly is its own change, so a Windows pool is REFUSED here rather
+    # than provisioned into a seat nobody can sign into. `validate_spec` says so.
+    supports_windows = False
+    default_username = "ec2-user"
+    pra_tag = "AWS VDI"
+
+    @staticmethod
+    def validate_spec(spec: dict) -> dict:
+        spec = dict(spec or {})
+        if (spec.get("os_type") or "Linux").lower() == "windows":
+            raise VDesktopError(
+                "AWS desktop pools are Linux-only for now: EC2 returns Windows "
+                "credentials as password data encrypted to the launch key pair, which "
+                "this does not yet decrypt or vault. Use an Azure pool for Windows.")
+        missing = [k for k in _AWS_REQUIRED if not spec.get(k)]
+        # Linux-only, so a key is always required — there is no password path to fall
+        # back to the way Azure's Windows seats have.
+        if not spec.get("ssh_public_key"):
+            missing.append("ssh_public_key")
+        if missing:
+            raise VDesktopError(f"AWS pool requires: {', '.join(missing)}.")
+        return spec
+
+    @staticmethod
+    def generate_password() -> str:                    # pragma: no cover - unreachable
+        raise VDesktopError("AWS desktop pools are Linux-only.")
+
+    @staticmethod
+    async def store_password(vm_name, seat_id, password):  # pragma: no cover - unreachable
+        raise VDesktopError("AWS desktop pools are Linux-only.")
+
+    @staticmethod
+    async def deploy(spec: dict, vm_name: str, admin_password: str) -> dict:
+        from . import aws_service
+        res = await aws_service.launch_instance(
+            region=spec["region"], ami_id=spec["ami_id"], instance_name=vm_name,
+            instance_type=spec["instance_type"],
+            public_key=spec.get("ssh_public_key") or "",
+            subnet_id=spec["subnet_id"],
+            security_group_ids=spec.get("security_group_ids") or [],
+            iam_instance_profile=spec.get("iam_instance_profile") or "",
+            os_type=spec.get("os_type") or "Linux",
+            workgroup=spec.get("workgroup") or "",
+        )
+        # `vm_resource_id` carries the REGION as well as the instance id, because
+        # teardown gets only this string — it has no spec to read a region from, and an
+        # instance id alone does not say which regional endpoint owns it. Azure's ARM id
+        # embeds its resource group for exactly the same reason.
+        return {"vm_id": f"{spec['region']}/{res['instance_id']}",
+                "private_ip": res.get("private_ip")}
+
+    @staticmethod
+    def _split(vm_resource_id: str):
+        """``region/i-abc`` → ``("region", "i-abc")``."""
+        raw = (vm_resource_id or "").strip()
+        region, _, instance_id = raw.partition("/")
+        return (region, instance_id) if instance_id else ("", raw)
+
+    @staticmethod
+    async def tag_pool(spec: dict, vm_name: str, vm_resource_id: str, pool_name: str) -> None:
+        from . import aws_service
+        region, instance_id = _AwsSeats._split(vm_resource_id)
+        if instance_id:
+            await aws_service.set_desktop_pool_tag(
+                region or spec.get("region", ""), instance_id, pool_name)
+
+    @staticmethod
+    async def terminate(vm_resource_id: str) -> str:
+        from . import aws_service
+        region, instance_id = _AwsSeats._split(vm_resource_id)
+        if region and instance_id:
+            await aws_service.terminate_instance(region, instance_id)
+        return instance_id or vm_resource_id
+
+    @staticmethod
+    async def reap_idle_gateway(db) -> None:
+        from . import jumpoint_host_service
+        await jumpoint_host_service.teardown_jumpoint_host_if_idle(
+            db, "aws", _cfg("aws_region"))
+
+
 # Keyed by cloud. A cloud in VALID_CLOUDS but absent here creates seat RECORDS only —
 # which is exactly what AWS and GCP do today, and why PROVISIONING_CLOUDS is derived
 # from this rather than maintained beside it: the two cannot drift.
 _SEAT_BACKENDS = {
     "azure": _AzureSeats,
+    "aws": _AwsSeats,
 }
 
 
@@ -434,6 +530,17 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
         db.close()
         return
     is_windows = (spec.get("os_type") or "Linux").lower() == "windows"
+    if is_windows and not backend.supports_windows:
+        # `validate_spec` refuses this at create time, so reaching here means a spec
+        # stored before a backend's Windows support changed. Fail loudly rather than
+        # call a `generate_password` that raises halfway through the pool.
+        logger.warning("desktop pool %s: %s seats cannot be Windows; refusing",
+                       pool_name, cloud)
+        if job_id:
+            job_service.set_failed(
+                db, job_id, f"{cloud} desktop pools are Linux-only.")
+        db.close()
+        return
     seat_passwords: dict = {}
     errors: list = []
     try:
@@ -509,7 +616,7 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                         "username": spec.get("ssh_username") or backend.default_username,
                     }
                 try:
-                    await backend.tag_pool(spec, vm_name, pool_name)
+                    await backend.tag_pool(spec, vm_name, row.vm_resource_id, pool_name)
                 except Exception as tag_err:
                     logger.warning("desktop pool tag failed vm=%s: %s", vm_name, tag_err)
                 ok += 1

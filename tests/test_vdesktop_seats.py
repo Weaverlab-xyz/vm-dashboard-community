@@ -357,13 +357,164 @@ def test_teardown_drops_the_row_even_when_terminate_fails():
     assert _read(ids[0]) is None
 
 
+# ── AWS seats ─────────────────────────────────────────────────────────────────
+
+AWS_SPEC = {
+    "region": "us-east-2",
+    "ami_id": "ami-0abc",
+    "instance_type": "t3.medium",
+    "subnet_id": "subnet-123",
+    "security_group_ids": ["sg-1"],
+    "ssh_public_key": "ssh-ed25519 AAAA",
+    "os_type": "Linux",
+}
+
+
+def _install_aws_stubs(*, launch_fails_on=()):
+    _install_stubs()          # keeps jumpoint/pra/config in place
+    aws = types.ModuleType("web_dashboard.services.aws_service")
+
+    async def launch_instance(**kw):
+        CALLS.append(("launch_instance", kw["instance_name"]))
+        if kw["instance_name"] in launch_fails_on:
+            raise RuntimeError("InsufficientInstanceCapacity")
+        aws.launch_kwargs.append(kw)
+        return {"instance_id": "i-0abcdef", "state": "pending",
+                "private_ip": "10.1.2.3", "public_ip": None}
+
+    async def set_desktop_pool_tag(region, instance_id, pool_name):
+        CALLS.append(("set_pool_tag", f"{region}/{instance_id}"))
+
+    async def terminate_instance(region, instance_id):
+        CALLS.append(("terminate_vm", f"{region}/{instance_id}"))
+        return {}
+
+    aws.launch_kwargs = []
+    aws.launch_instance = launch_instance
+    aws.set_desktop_pool_tag = set_desktop_pool_tag
+    aws.terminate_instance = terminate_instance
+    sys.modules["web_dashboard.services.aws_service"] = aws
+    import web_dashboard.services as pkg
+    pkg.aws_service = aws
+    return aws
+
+
+def test_an_aws_seat_launches_an_ec2_instance_from_the_spec():
+    aws = _install_aws_stubs()
+    ids = _seed(n=2, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+
+    assert len(aws.launch_kwargs) == 2
+    kw = aws.launch_kwargs[0]
+    assert kw["region"] == AWS_SPEC["region"]
+    assert kw["ami_id"] == AWS_SPEC["ami_id"]
+    assert kw["instance_type"] == AWS_SPEC["instance_type"]
+    assert kw["security_group_ids"] == ["sg-1"]
+    assert kw["public_key"] == AWS_SPEC["ssh_public_key"]
+
+
+def test_an_aws_seat_stores_its_region_with_the_instance_id():
+    """Teardown gets only `vm_resource_id` — no spec, so no region. An instance id
+    alone does not say which regional endpoint owns it."""
+    _install_aws_stubs()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    row = _read(ids[0])
+    assert row.status == "running"
+    assert row.vm_resource_id == "us-east-2/i-0abcdef"
+
+
+def test_an_aws_seat_is_torn_down_in_its_own_region():
+    _install_aws_stubs()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    CALLS.clear()
+    asyncio.run(vd.teardown_seats(ids))
+    assert ("terminate_vm", "us-east-2/i-0abcdef") in CALLS, CALLS
+    assert _read(ids[0]) is None
+
+
+def test_an_aws_pool_refuses_windows_rather_than_shipping_a_seat_nobody_can_use():
+    """EC2 returns Windows credentials as password data encrypted to the launch key
+    pair. Until that is decrypted and vaulted, a Windows seat would provision fine and
+    be unusable — so the pool is refused at create time, with the reason."""
+    try:
+        vd._AwsSeats.validate_spec(dict(AWS_SPEC, os_type="Windows"))
+    except vd.VDesktopError as exc:
+        assert "Linux-only" in str(exc), exc
+        assert "Azure" in str(exc), "the refusal should name what DOES work"
+    else:
+        raise AssertionError("a Windows AWS pool was accepted")
+
+
+def test_an_aws_pool_names_every_missing_field_at_once():
+    try:
+        vd._AwsSeats.validate_spec({"region": "us-east-2"})
+    except vd.VDesktopError as exc:
+        for field in ("ami_id", "instance_type", "subnet_id", "ssh_public_key"):
+            assert field in str(exc), f"{field} missing from {exc}"
+    else:
+        raise AssertionError("an empty AWS spec was accepted")
+
+
+def test_one_bad_aws_seat_does_not_abort_the_others():
+    ids = _seed(n=3, cloud="aws")
+    _install_aws_stubs(launch_fails_on=(vd._vm_name_for("pool-a", ids[1]),))
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    statuses = [_read(i).status for i in ids]
+    assert statuses.count("running") == 2, statuses
+    assert statuses.count("failed") == 1, statuses
+
+
+def test_an_aws_seat_is_tagged_with_its_instance_id_not_its_name():
+    """The interface passes the resource id precisely because EC2 addresses instances
+    by id — tagging by name would silently tag nothing."""
+    _install_aws_stubs()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    tagged = [v for n, v in CALLS if n == "set_pool_tag"]
+    assert tagged == ["us-east-2/i-0abcdef"], tagged
+
+
 # ── The staging guard ─────────────────────────────────────────────────────────
 
-def test_only_azure_is_advertised_as_provisioning():
-    """Stage 1 is a refactor. Adding a cloud here without a backend behind it gives an
-    operator seat records and no VMs, which is the bug this whole item exists to fix."""
-    assert vd.PROVISIONING_CLOUDS == ("azure",), vd.PROVISIONING_CLOUDS
-    assert set(vd.VALID_CLOUDS) == {"aws", "azure", "gcp"}
+def test_no_cloud_is_advertised_without_a_backend_behind_it():
+    """The bug this whole item exists to fix: a cloud that accepts a pool and then
+    creates seat records with no VMs. `PROVISIONING_CLOUDS` is derived rather than
+    maintained, so this asserts the derivation rather than a hand-written list."""
+    assert set(vd.PROVISIONING_CLOUDS) == set(vd._SEAT_BACKENDS)
+    assert set(vd.PROVISIONING_CLOUDS) <= set(vd.VALID_CLOUDS)
+    # GCP is still records-only — Stage 3.
+    assert "gcp" not in vd.PROVISIONING_CLOUDS
+    assert vd.seat_backend("gcp") is None
+
+
+def test_every_backend_implements_the_whole_interface():
+    """A backend missing a method fails at provision time, on a real pool, halfway
+    through — which is the worst possible place to discover a typo."""
+    required_attrs = ("cloud", "gateway_cloud", "pool_tag_key", "supports_windows",
+                      "default_username", "pra_tag")
+    required_methods = ("validate_spec", "deploy", "terminate", "tag_pool",
+                        "generate_password", "store_password", "reap_idle_gateway")
+    for cloud, backend in vd._SEAT_BACKENDS.items():
+        for attr in required_attrs:
+            assert hasattr(backend, attr), f"{cloud} backend has no {attr}"
+        for meth in required_methods:
+            assert callable(getattr(backend, meth, None)), f"{cloud} backend has no {meth}()"
+        assert backend.cloud == cloud, f"{cloud} backend disagrees about its own name"
+
+
+def test_the_pool_tag_key_is_legal_for_its_cloud():
+    """`dashboard:desktop_pool` is a fine Azure and AWS tag key. It is an INVALID GCP
+    label key — lowercase letters, digits, `-` and `_` only — so Stage 3 must not
+    inherit this constant, and this test is what will say so."""
+    import re
+    for cloud, backend in vd._SEAT_BACKENDS.items():
+        key = backend.pool_tag_key
+        assert key, f"{cloud} has no pool tag key"
+        if cloud == "gcp":
+            assert re.fullmatch(r"[a-z][a-z0-9_-]*", key), (
+                f"{key!r} is not a valid GCP label key")
 
 
 def _run_tests():
