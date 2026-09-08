@@ -67,7 +67,13 @@ _DESTROY_FOR = {
 # either ever issues a certificate, and neither appears on any page the dashboard
 # had before the Certificate Lab. Its teardown is the same `certca_decommission`
 # job the DELETE endpoint creates.
-REAPABLE_KINDS = ("vm", "database", "k8s", "pov", "certlab")
+#
+# "spirelab" is a SPIRE trust domain, and it is the one kind here whose argument is
+# NOT cost — the host VM has its own timer and is reaped separately. A forgotten
+# trust domain keeps MINTING: tcp/8081 is an API that issues identities, so a lab
+# nobody remembers is an identity provider nobody is watching. Its teardown closes
+# that port, which is the reachability kill switch.
+REAPABLE_KINDS = ("vm", "database", "k8s", "pov", "certlab", "spirelab")
 
 # Clouds whose VM teardown is a claimable job (the keys of _DESTROY_FOR, as inventory
 # `cloud` values).
@@ -96,6 +102,10 @@ _REAPABLE_STATES = {
     # left a CA mid-creation, and a destroy racing that is how a pool ends up
     # undeletable. A human looks at a failed CA.
     "certlab":  frozenset({"available"}),
+    # spire_lab_service marks a finished standup "available". "failed" is excluded
+    # for the same reason as certlab: a half-built lab may have an ACL open and a
+    # server part-configured, and a human should decide which.
+    "spirelab": frozenset({"available"}),
     # k8s_service lands a finished provision on "registered", and the management-plane
     # path also produces "managed" / "awaiting_agent".
     "k8s":      frozenset({"registered", "managed", "awaiting_agent"}),

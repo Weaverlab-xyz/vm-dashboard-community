@@ -62,6 +62,25 @@ Then rotate it and show the build never notices.
 
 **Guide:** [Certificates](../../../certificates.md)
 
+### Every workload identity in a trust domain, inventoried and governed
+
+The certificate above governs one identity at a time. A platform team running SPIFFE has
+hundreds, issued automatically on attestation, and no list of them anywhere a security
+team can read — which is the point of the model and also its blind spot.
+
+Stand up a SPIRE trust domain and discover every registration entry as a managed account.
+The number is the demonstration: eleven entries go in and eight come back, because an
+agent identity is not a thing to vault and control-plane privileges sitting in a workload
+entry are almost always a leftover. Those exclusions are counted separately, so a number
+that climbs is somebody granting rights nobody reviewed.
+
+Then mint an audience-scoped JWT-SVID for the one consumer that cannot run an agent —
+deliberately bypassing attestation, deliberately inert until an operator names the
+namespace it may mint in, and deliberately the only part of this that touches a private
+key.
+
+**Guide:** [SPIFFE and SPIRE](../../../spiffe.md)
+
 ### A serverless function that fetches its secret at cold start
 
 Deploy a cloud function with no environment secret and show it pull what it needs on first

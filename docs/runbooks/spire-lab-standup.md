@@ -13,10 +13,19 @@ Playbooks: [`examples/playbooks/spire/`](../../examples/playbooks/spire/README.m
 **Scope: Azure.** The playbooks are cloud-agnostic — they configure a Linux host over
 SSH — so GCP and AWS differ only in §1 and §2. Those sections name what changes.
 
-> **Nothing below has been run.** The plugin is proven against a live SPIRE server (83
-> unit assertions, a 16-step harness) and against nothing else. Every Password Safe
-> interaction here is expected behaviour, not observed. That is what §5 exists to fix,
-> and it is why it comes before any dashboard code that assumes an answer.
+> **§1–§4 can be done for you.** The **SPIRE** page (preview: `spire_lab_enabled`) runs
+> all four playbooks as one job and opens the cloud ACL first, on any of the three
+> clouds — see [SPIFFE and SPIRE](../spiffe.md#building-it-from-the-dashboard). Its
+> *Onboarding* panel then resolves every value §5 asks you to paste. This runbook remains
+> the by-hand path and the explanation of *why* each step is what it is; read §0, §2 and
+> §5 either way.
+>
+> **What is proven, and what is not.** The playbooks and the plugin have been run
+> end-to-end against a live SPIRE server on a cloud VM: 16/16 harness steps, discovery
+> returning 8 accounts, both mints, every guardrail terminated. **Every Password Safe
+> interaction below is still expected behaviour rather than observed.** That is what §5
+> exists to fix, and it is why no dashboard code writes the managed system or the
+> functional account yet.
 
 ---
 
@@ -54,6 +63,12 @@ reach, and set an auto-delete timer.
 Nothing SPIRE-specific happens here: it is an ordinary VM, so it already gets the
 auto-delete timer, ref-counted NAT and Password Safe VM onboarding.
 
+**Deploy it from the cloud page, not by hand in the portal or the CLI.** The Ansible
+runner resolves the host's SSH key from that VM's own *deploy job* metadata, so a VM the
+dashboard did not create is one no run can log in to — and the SPIRE page will not offer
+it as a host at all, because it re-derives the host from those same rows rather than
+trusting the name it is given.
+
 **Pass:** the VM reaches `running` and Config Management lists it as a target.
 
 > **GCP / AWS:** the same step on the GCP or AWS tab. Everything from §3 onwards is
@@ -66,6 +81,12 @@ There are two, and they fail identically.
 **The cloud gate.** On the VM's Network Security Group, add an inbound allow for
 tcp/8081, sourced from the broker's address rather than `*`. 8081 is an API that mints
 identities.
+
+> The SPIRE page does both gates from one setting, `spire_lab_source_cidrs`, so they
+> cannot end up disagreeing — and its **Re-apply ACL** button exists because corporate
+> egress rotates: a rule pinned to one of two addresses fails on about half the
+> connections, which presents as an intermittent *credential* fault. **Pin both.** A
+> blank setting opens nothing rather than opening `*`.
 
 **The host gate.** Config Management → run `spire-open-ports.yml` against the VM's IP,
 runner image **`ansible-winrm`**, with:
@@ -117,6 +138,12 @@ ps_safe: Automation
 `spire/weaverlab/admin-pfx-b64`, `spire/weaverlab/admin-pfx-pass`, and the trust bundle
 PEM. **Grep the job output for `MII`**; if it appears, the credential leaked into the
 log and something is wrong with the `no_log` guards.
+
+The play also writes the trust bundle and the granted expiry into Secrets Safe as
+`trust-bundle-pem` and `admin-svid-expires` in the same folder. Both are public — a
+bundle is what every consumer has to trust, and an expiry is a date — and they are stored
+because Secrets Safe is the only channel out of a run that carries a *value*: a job's
+"output" is a captured log. That is what the SPIRE page reads instead of parsing one.
 
 Note the printed **SVID expires** line. `ca_ttl` caps the request, so a `-ttl 720h` ask
 becomes ~7 days. Once it lapses every action fails `PERMISSION_DENIED`, which reads

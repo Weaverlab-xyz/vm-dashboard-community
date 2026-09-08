@@ -1792,6 +1792,34 @@ class CertLabFeatureConfig(BaseModel):
     cert_gcp_cas_tier: str = "DEVOPS"
 
 
+class SpireLabFeatureConfig(BaseModel):
+    """Config-only panel (no `enabled`) for the SPIRE Lab PREVIEW feature. The preview
+    toggle owns `spire_lab_enabled`; this panel holds the lab's defaults and — the one
+    that matters — who may reach the SPIRE server API. See _CONFIG_ONLY_FEATURES.
+
+    None of these is a secret. The administrative credential never passes through the
+    dashboard at all: the playbook mints it ON the VM and writes it straight into Secrets
+    Safe under `no_log`, using the dashboard's existing pscli_* OAuth client. This panel
+    only names the safe it lands in.
+    """
+    # WHO MAY REACH tcp/8081. Blank makes NO cloud ACL change — not "open to the world":
+    # 8081 is an API that mints identities. Pin every address the caller actually
+    # egresses from; corporate egress commonly rotates between two, and a rule holding
+    # one of them fails on about half the connections, which reads as an intermittent
+    # credential fault rather than a network one.
+    spire_lab_source_cidrs: str = ""
+    spire_lab_version: str = "1.15.3"
+    # ca_ttl CAPS every SVID the server issues, the admin credential included: a 720h
+    # mint against this 168h default yields ~7 days, and SPIRE says so rather than
+    # failing. Raise it for a lab that has to outlive a week.
+    spire_lab_ca_ttl: str = "168h"
+    spire_lab_admin_ttl: str = "720h"
+    # The safe must already exist — the playbook creates no safe.
+    spire_lab_ps_safe: str = "Automation"
+    spire_lab_secret_root: str = "spire"
+    spire_lab_asset_backend: str = ""
+
+
 class NotificationsFeatureConfig(BaseModel):
     """Outbound notifications. Two brakes, both deliberate.
 
@@ -1914,6 +1942,7 @@ _FEATURE_MODELS = {
     "oidc":           OidcFeatureConfig,
     "cloud_functions": CloudFunctionsFeatureConfig,
     "cert_lab": CertLabFeatureConfig,
+    "spire_lab": SpireLabFeatureConfig,
     "workload_credentials": WorkloadCredentialsFeatureConfig,
     "worker":         WorkerFeatureConfig,
 }
@@ -1925,7 +1954,7 @@ _FEATURE_MODELS = {
 # "worker" is here because the job worker has no off position at all: it is the process
 # that runs every queued job, so an enable toggle could only ever mislead.
 _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker",
-                         "cert_lab",
+                         "cert_lab", "spire_lab",
                          "workload_credentials"}
 
 _SECRET_FEATURE_KEYS = frozenset({
@@ -2336,6 +2365,18 @@ _PREVIEW_FLAGS = {
         "onboard certificate identities onto the Password Safe \"Certificate\" custom "
         "plugin — the managed account holds the PKCS#12 passphrase, Secrets Safe holds "
         "the bundle."),
+    # Preview because the load-bearing question is still open: the SPIFFE SVID plugin
+    # takes its whole configuration from BeyondInsight ATTRIBUTES, and whether the
+    # gateway populates those for a plugin action has not been observed once. See
+    # docs/runbooks/spire-lab-standup.md section 5 — the lab exists to answer it. Off
+    # means the dashboard behaves exactly as before and no port is opened.
+    "spire_lab_enabled": (
+        "SPIRE Lab",
+        "Preview. Stand a SPIRE trust domain up on a VM this dashboard already "
+        "deployed — install the server, seed the registration entries and mint the "
+        "administrative credential — so the Password Safe \"SPIFFE SVID\" custom plugin "
+        "has a trust domain to govern. Opens tcp/8081 to the sources you name, and "
+        "closing it again is the teardown."),
     # Preview because the product is not yet generally available and its API may still
     # change. Deliberately no release dates here or in any operator-facing text: this
     # repository is public, and a schedule is BeyondTrust's to announce. Off means the
@@ -2354,6 +2395,7 @@ _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
     "workload_credentials_enabled": "workload_credentials",
     "cert_lab_enabled": "cert_lab",
+    "spire_lab_enabled": "spire_lab",
 }
 
 

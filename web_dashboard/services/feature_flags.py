@@ -53,6 +53,10 @@ _DEMO_ONLY = (
     # singletons, so on a POV instance this would onboard certificate identities into
     # the wrong customer's Password Safe while appearing to work.
     "cert_lab_enabled",
+    # Demo-only for exactly the same tenancy reason: the SPIRE lab's administrative
+    # credential is written into Secrets Safe through the global pscli_* singletons,
+    # so on a POV instance it would land in the wrong customer's tenant.
+    "spire_lab_enabled",
     "cost_explorer_enabled",
 )
 
@@ -187,6 +191,7 @@ def flags() -> dict:
         "k8s_management_enabled": enabled("k8s_management_enabled", settings.k8s_management_enabled),
         "cloud_functions_enabled": enabled("cloud_functions_enabled", settings.cloud_functions_enabled),
         "cert_lab_enabled":     enabled("cert_lab_enabled",      settings.cert_lab_enabled),
+        "spire_lab_enabled":    enabled("spire_lab_enabled",     settings.spire_lab_enabled),
         "cost_explorer_enabled": enabled("cost_explorer_enabled", settings.cost_explorer_enabled),
         "cloud_unmanaged_discovery_enabled": enabled(
             "cloud_unmanaged_discovery_enabled", settings.cloud_unmanaged_discovery_enabled),
@@ -322,6 +327,7 @@ def feature_map() -> dict:
         "k8s_management": raw["k8s_management_enabled"],
         "cloud_functions": raw["cloud_functions_enabled"],
         "cert_lab":       raw["cert_lab_enabled"],
+        "spire_lab":      raw["spire_lab_enabled"],
         "resource_expiry": raw["resource_expiry_enabled"],
         "remote_agents": raw["remote_agents_enabled"],
         "cloud_unmanaged_discovery": raw["cloud_unmanaged_discovery_enabled"],

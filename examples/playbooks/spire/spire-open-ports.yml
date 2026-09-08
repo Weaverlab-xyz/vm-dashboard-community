@@ -25,14 +25,30 @@
 #
 # extra_vars (optional):
 #   bind_port: 8081
-#   spire_source_cidr: 10.0.0.0/24     # restrict the rule to this source range
+#   spire_source_cidrs: [10.0.0.0/24, 203.0.113.7/32]   # restrict to these sources
+#   spire_source_cidr: 10.0.0.0/24     # one source; kept for back-compat
+#
+# TAKE THE LIST FORM WHEN YOU HAVE MORE THAN ONE SOURCE. Corporate egress commonly
+# rotates between two addresses, so a rule pinned to one of them fails on roughly
+# half the connections and reads as an intermittent credential problem. The
+# dashboard's /spire-lab page passes whatever it opened on the cloud ACL, so both
+# gates end up carrying the same source set.
 - name: Open the SPIRE Server API port
   hosts: all
   become: true
   vars:
     bind_port: 8081
     spire_source_cidr: ""
+    spire_source_cidrs: []
   tasks:
+    # One list, however the caller expressed it. An empty result means "any
+    # source", which is what the unrestricted tasks below key off.
+    - name: Resolve the source list
+      ansible.builtin.set_fact:
+        _sources: >-
+          {{ (spire_source_cidrs | default([], true) | list)
+             + ([spire_source_cidr] if (spire_source_cidr | length > 0) else []) }}
+
     - name: Detect firewalld
       ansible.builtin.command: systemctl is-active firewalld
       register: firewalld_active
@@ -46,29 +62,51 @@
       failed_when: false
 
     # ── firewalld (RHEL / Rocky / Alma) ──────────────────────────────────────
-    - name: Open the SPIRE API port (firewalld)
+    - name: Open the SPIRE API port to each source (firewalld)
       ansible.posix.firewalld:
         port: "{{ bind_port }}/tcp"
         permanent: true
         immediate: true
         state: enabled
-        source: "{{ spire_source_cidr | default(omit, true) }}"
-      when: firewalld_active.stdout == "active"
+        source: "{{ item }}"
+      loop: "{{ _sources }}"
+      when:
+        - firewalld_active.stdout == "active"
+        - _sources | length > 0
+
+    - name: Open the SPIRE API port to any source (firewalld)
+      ansible.posix.firewalld:
+        port: "{{ bind_port }}/tcp"
+        permanent: true
+        immediate: true
+        state: enabled
+      when:
+        - firewalld_active.stdout == "active"
+        - _sources | length == 0
 
     # ── ufw (Debian / Ubuntu) ────────────────────────────────────────────────
     # community.general.ufw is not in the runner image's documented collection set,
     # so this shells out, exactly as k3s-open-ports.yml does. `ufw allow` is itself
     # idempotent — a duplicate reports "Skipping adding existing rule".
-    - name: Open the SPIRE API port (ufw)
+    - name: Open the SPIRE API port to each source (ufw)
       ansible.builtin.command: >-
-        ufw allow {{ ('from ' ~ spire_source_cidr ~ ' to any port ' ~ bind_port ~ ' proto tcp')
-                     if spire_source_cidr | length > 0
-                     else (bind_port ~ '/tcp') }}
+        ufw allow from {{ item }} to any port {{ bind_port }} proto tcp
       register: ufw_rule
       changed_when: "'existing rule' not in ufw_rule.stdout"
+      loop: "{{ _sources }}"
       when:
         - ufw_status.rc == 0
         - "'inactive' not in ufw_status.stdout"
+        - _sources | length > 0
+
+    - name: Open the SPIRE API port to any source (ufw)
+      ansible.builtin.command: "ufw allow {{ bind_port }}/tcp"
+      register: ufw_rule_any
+      changed_when: "'existing rule' not in ufw_rule_any.stdout"
+      when:
+        - ufw_status.rc == 0
+        - "'inactive' not in ufw_status.stdout"
+        - _sources | length == 0
 
     - name: Report a host with neither firewall
       ansible.builtin.debug:
@@ -88,7 +126,7 @@
         msg:
           - >-
             {{ ('Host firewall allows tcp/' ~ bind_port ~ ' from '
-                ~ (spire_source_cidr | default('any source', true)) ~ '.')
+                ~ (_sources | join(', ') if _sources | length > 0 else 'any source') ~ '.')
                if (firewalld_active.stdout == 'active'
                    or (ufw_status.rc == 0 and 'inactive' not in ufw_status.stdout))
                else ('No host firewall is running, so nothing here restricts tcp/'

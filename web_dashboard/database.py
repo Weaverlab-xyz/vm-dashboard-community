@@ -1526,6 +1526,109 @@ class CertLab(Base):
     expires_at = Column(DateTime, nullable=True, index=True)
     expiry_warned_at = Column(DateTime, nullable=True)
 
+class SpireLab(Base):
+    """Inventory of dashboard-provisioned SPIRE trust domains for the Password Safe
+    SPIFFE SVID plugin's lab.
+
+    One row per **trust domain**, because that is what the plugin's Managed System
+    models — not per VM. Unlike the Certificate Lab there is no Terraform module and no
+    standing cost of its own: a SPIRE server is a Go binary and a sqlite file on an
+    ordinary Linux VM the dashboard already deploys and reaps.
+
+    **The argument for a timer here is not cost, it is that a forgotten trust domain
+    keeps minting.** 8081 is an API that issues identities, so a lab nobody remembers
+    is an identity provider nobody is watching. Deregistering the managed system is
+    the kill switch, since the plugin implements no Enable/Disable Managed Account.
+
+    **Nothing secret lives on this row.** The admin credential is a PKCS#12 that
+    ``spire-admin-identity.yml`` writes straight into Secrets Safe under ``no_log``;
+    this row carries only the two TITLES that name it. ``trust_bundle_pem`` is public
+    by construction — it is what every consumer of the trust domain has to trust, in
+    the same sense as a CA chain — and it is stored because the operator has to paste
+    it into the managed system and it fits nowhere else.
+    """
+    __tablename__ = "spire_labs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(120), nullable=False)
+    # The bare DNS-style name ('weaverlab.test'), never a spiffe:// URI. Baked into the
+    # server config, every SPIFFE ID and the Managed System, so it is immutable once the
+    # server is installed — which is why the build form asks for it before anything else.
+    trust_domain = Column(String(255), nullable=False)
+    cloud = Column(String(20), nullable=False, default="azure")
+    region = Column(String(64), nullable=True)
+
+    # The provider's own id, carrying everything teardown needs and nothing else: an ARM
+    # id on Azure, "<region>/<instance-id>" on AWS, "<project>/<zone>/<name>" on GCP.
+    # `terminate` gets only this string — an instance id alone does not say which
+    # regional endpoint owns it. See the per-cloud host backends in spire_lab_service.
+    vm_resource_id = Column(String(500), nullable=True)
+    vm_name = Column(String(120), nullable=True)
+    # BOTH, because they answer different questions and confusing them is the whole of
+    # the reachability trap: `private_ip` is what the Resource Broker dials on 8081, and
+    # `public_ip` is what the Ansible runner SSHes to when the runner is not in-subnet.
+    # Either may be blank.
+    private_ip = Column(String(64), nullable=True)
+    public_ip = Column(String(64), nullable=True)
+    bind_port = Column(Integer, nullable=False, default=8081)
+    status = Column(String(32), nullable=False, default="provisioning", index=True)
+
+    # The cloud ACL actually applied, as a comma-joined CIDR list, plus the rule's name.
+    # Recorded rather than recomputed so teardown closes exactly what provision opened,
+    # and so an operator can see why the broker cannot reach the server: corp egress
+    # rotates between two Cloudflare addresses, so a rule pinned to one fails
+    # intermittently and looks like a credential problem.
+    source_cidrs = Column(Text, nullable=True)
+    firewall_name = Column(String(120), nullable=True)
+
+    # Progress through the four playbooks, as the names of the ones that finished. The
+    # provision is a sequence of separate `ansible_local` job rows, so this is what tells
+    # a resumed or half-failed lab apart from one that never started.
+    stages_done = Column(Text, nullable=True)
+    # The `ansible_local` job ids, in order, so the page can link each stage's Live
+    # Output. A failed stage's log is the only place its Ansible error exists.
+    stage_job_ids = Column(Text, nullable=True)
+
+    # What the seed put in and what discovery should return. 11 in, 8 out — and the
+    # count IS the assertion, not "discovery succeeded". The plugin shipped with
+    # discovery defaulting its path filter to the MINTABLE prefix, which silently
+    # narrowed the inventory to 2 while still reporting success.
+    entries_seeded = Column(Integer, nullable=True)
+    discovery_expected = Column(Integer, nullable=True)
+
+    # Secrets Safe coordinates of the admin credential — TITLES only, never values.
+    admin_secret_folder = Column(String(255), nullable=True)
+    admin_spiffe_id = Column(String(255), nullable=True)
+    ps_safe = Column(String(120), nullable=True)
+    # Public by construction, and ~900 B for one authority / ~1.8 KB across a CA
+    # rotation. It is 7x Password Safe's 255-character address column, which is why it
+    # is held here and pasted rather than composed into an address like every other
+    # custom plugin's configuration.
+    trust_bundle_pem = Column(Text, nullable=True)
+    # The REAL notAfter of the minted admin SVID, which is shorter than what was asked
+    # for: SPIRE clamps a mint to the server's `ca_ttl`, so a 720h request against the
+    # 168h default yields ~7 days. Once it lapses every plugin action fails
+    # PERMISSION_DENIED and reads exactly like an admin_ids problem, so the date is
+    # stored and surfaced rather than left in a job log.
+    admin_svid_expires_at = Column(DateTime, nullable=True)
+
+    # Password Safe onboarding is deliberately NOT written by this feature yet — see
+    # docs/runbooks/spire-lab-standup.md section 5. These are recorded so a lab onboarded
+    # by hand can still be recognised, and so the destroy path has somewhere to look.
+    ps_system_id = Column(String(36), nullable=True)
+    ps_account_id = Column(String(36), nullable=True)
+
+    error_message = Column(Text, nullable=True)
+    deploy_job_id = Column(String(36), nullable=True)
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    # Auto-delete timer — NULL = never, never "inherit the default" (see Job.expires_at).
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
+
+
 class CloudFunction(Base):
     """Inventory of dashboard-deployed cloud functions — Cloud Functions, Phase 1
     (docs/design/cloud-functions.md).

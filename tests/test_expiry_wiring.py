@@ -289,6 +289,35 @@ def test_every_reapable_kind_has_a_reap_path():
         assert f'"{kind}"' in row or f"'{kind}'" in row, f"_reap_row ignores {kind}"
 
 
+def test_every_reapable_kind_can_also_be_postponed():
+    """The other half of a reapable kind, and it failed SILENTLY for two of them.
+
+    ``ttl_capable`` gates on ``kind in REAPABLE_KINDS``, and that is what makes the
+    inventory page RENDER the Extend control. But ``set_expiry`` writes through
+    ``_resolve_row``, which is a separate prefix map — so a kind in one and not the other
+    is a resource the sweep will destroy on schedule and an operator cannot postpone: the
+    write just lands in ``failed``. ``certlab`` and ``spirelab`` were both in exactly
+    that state.
+
+    Derived from REAPABLE_KINDS rather than listed, so the next kind added cannot repeat
+    it.
+    """
+    policy = _src(_POLICY)
+    kinds = re.search(r"REAPABLE_KINDS = \(([^)]*)\)", policy).group(1)
+    kinds = re.findall(r'"(\w+)"', kinds)
+    assert "spirelab" in kinds and "certlab" in kinds, kinds
+
+    resolve = ast.unparse(_fn(_REAPER, "_resolve_row"))
+    # `vm` is the one kind whose inventory id is not its kind: a VM's timer lives on the
+    # deploy Job row, so inventory_service emits `job:<id>`.
+    prefixes = {"vm": "job", "database": "clouddb"}
+    for kind in kinds:
+        prefix = prefixes.get(kind, kind)
+        assert f'"{prefix}"' in resolve or f"'{prefix}'" in resolve, (
+            f"_resolve_row has no {prefix!r} branch, so a {kind} timer cannot be "
+            f"extended even though the page offers the control")
+
+
 def test_at_most_once_is_a_write_not_a_hope():
     """Enqueueing a destroy must clear expires_at in the same commit. Without that the
     next pass sees the same overdue resource and enqueues a second destroy — the failure

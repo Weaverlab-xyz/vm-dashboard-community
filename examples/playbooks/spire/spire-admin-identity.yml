@@ -217,6 +217,50 @@
       register: bundle_show
       changed_when: false
 
+    # Both of the values below are PUBLIC — the trust bundle is what every consumer of
+    # the trust domain has to trust, and an expiry date is a date. They are written into
+    # Secrets Safe anyway, because it is the only channel out of this run that is a
+    # VALUE rather than a log: the debug task below prints them for a human, and a
+    # caller that parsed that back out would be parsing Ansible's callback formatting.
+    # The dashboard's /spire-lab page reads these two titles instead.
+    #
+    # no_log is for `ps_client_secret` in the module args, NOT for the payload: a failed
+    # task dumps its arguments, and the OAuth secret is in them.
+    - name: Publish the trust bundle for the dashboard to read back
+      beyondtrust.secrets_safe.secrets_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        safe_name: "{{ ps_safe }}"
+        folder_name: "{{ admin_secret_folder }}"
+        title: trust-bundle-pem
+        secret_type: "text"
+        text: "{{ bundle_show.stdout }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    # Only when something was minted: on a no-op re-run there is no new expiry to
+    # report, and overwriting the stored one with a blank would age the lab backwards.
+    - name: Publish the granted SVID expiry for the dashboard to read back
+      beyondtrust.secrets_safe.secrets_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        safe_name: "{{ ps_safe }}"
+        folder_name: "{{ admin_secret_folder }}"
+        title: admin-svid-expires
+        secret_type: "text"
+        text: "{{ svid_expiry.stdout | trim }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when: _mint | bool
+
     - name: What to configure in Password Safe
       ansible.builtin.debug:
         msg:
