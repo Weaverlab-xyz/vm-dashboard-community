@@ -631,6 +631,53 @@ def test_both_pages_filter_to_what_the_preflight_will_accept():
         assert r"/\.(exe|msi)$/i" in _pov_template(name), f"{name}: wrong asset filter"
 
 
+def test_the_picker_does_not_read_through_a_feature_gated_router():
+    """The asset list must come from /api/storage, not from /api/config-mgmt.
+
+    `/api/config-mgmt/assets` and `/api/storage/list-all` return the same rows, but the
+    config-mgmt router is mounted behind ``_feature_gate("ansible_enabled")`` while the
+    storage router is mounted unconditionally. Both POV pickers used the gated one and
+    soft-failed to an empty list, so on an instance with Configuration Management toggled
+    off the field said "No Windows installer is staged" about an .exe that was staged --
+    visible on the Storage page, in the same browser, at the same moment.
+    """
+    with open(os.path.join(_ROOT, "web_dashboard", "main.py"), encoding="utf-8") as fh:
+        main_src = fh.read()
+    assert 'config_mgmt.router, dependencies=[_feature_gate("ansible_enabled")]' in main_src, (
+        "the config-mgmt gate moved -- recheck whether this test still has a subject")
+    assert "app.include_router(storage.router)" in main_src, (
+        "the storage router is no longer mounted ungated, so it is no longer the safe "
+        "source for the installer picker")
+    for name in _POV_PAGES:
+        src = _pov_template(name)
+        picker = src.split("async loadWinAssets()", 1)[1].split(chr(10) + "    },", 1)[0]
+        assert "/api/storage/list-all" in picker, f"{name}: picker does not read storage"
+        assert "/api/config-mgmt" not in picker, (
+            f"{name}: picker reads the feature-gated config-mgmt router again")
+
+
+def test_the_picker_offers_only_the_backend_the_install_fetches_from():
+    """`queue` sets ``asset_backend=active_backend()``, so an .exe on any other backend is
+    a run that fails when the agent fetches the bundle. The picker filters to the active
+    backend and reports the others separately -- "staged on the wrong backend" and "not
+    staged at all" have different remedies, and the field used to give the second answer
+    to both."""
+    assert "asset_backend=storage_service.active_backend()" in pathlib_read(
+        os.path.join(_ROOT, "web_dashboard", "services", "pov_resource_broker.py")), (
+        "the install no longer fetches from the active backend -- the picker's filter "
+        "was justified by that and needs rechecking")
+    for name in _POV_PAGES:
+        src = _pov_template(name)
+        assert "winAssetsElsewhere" in src, f"{name}: wrong-backend case not surfaced"
+        assert "winAssetsError" in src, f"{name}: a failed read still reads as 'not staged'"
+        assert "/api/storage/backends" in src, f"{name}: nothing reads the active backend"
+
+
+def pathlib_read(path: str) -> str:
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
 def test_the_staging_hint_points_at_the_page_that_can_actually_upload():
     """Both pages tell an SE where to stage the installer, and the link has been wrong
     twice. First it was `/config-management`, which 404s. Then it was `/config-mgmt`,

@@ -543,7 +543,21 @@
             <option :value="a" x-text="a"></option>
           </template>
         </select>
-        <span x-show="!winAssets.length" x-cloak class="mt-1 block text-xs text-amber-700">
+        <span x-show="winAssetsError" x-cloak class="mt-1 block text-xs text-red-700">
+          <span x-text="winAssetsError"></span>
+          Nothing is wrong with the blueprint — the installer list could not be read, so
+          this picker cannot say whether one is staged.
+        </span>
+        <span x-show="!winAssetsError && !winAssets.length && winAssetsElsewhere.length"
+              x-cloak class="mt-1 block text-xs text-amber-700">
+          A Windows installer is staged, but not on the active storage backend
+          (<span x-text="activeBackendLabel"></span>) the install fetches from:
+          <span class="font-mono" x-text="winAssetsElsewhere.join(', ')"></span>. Use
+          <em>Move</em> on <a href="/storage" class="underline hover:no-underline">Storage</a>
+          to relocate it, then reload this page.
+        </span>
+        <span x-show="!winAssetsError && !winAssets.length && !winAssetsElsewhere.length"
+              x-cloak class="mt-1 block text-xs text-amber-700">
           No Windows installer is staged, so this picker is empty. Upload the Resource
           Broker bootstrapper — an <code class="bg-gray-100 px-0.5 rounded">.exe</code> — on
           <a href="/storage" class="underline hover:no-underline">Storage</a> first; it runs
@@ -641,6 +655,12 @@ function templatesPage() {
     runnerScript: '',
     verifyResult: null,
     winAssets: [],
+    // Why the picker is empty, when it is: a failed read and an installer staged on the
+    // wrong backend are different problems with different remedies, and the field said
+    // "nothing is staged" for all three.
+    winAssetsElsewhere: [],
+    winAssetsError: '',
+    activeBackendLabel: '',
     _poll: null,
     form: { base_template_id: '', name: '', description: '', broker_vm_name: '',
             project_id: '', install_runner: true, keep_build_environment: false },
@@ -853,22 +873,61 @@ function templatesPage() {
       } catch (e) { this.runnerScript = ''; }
     },
 
-    // The staged Windows installers, for the blueprint's Resource Broker asset picker.
-    // Same call and same filter as pov/index.html's RB editor, deliberately: the two
-    // fields write the same storage key, and a text box here was the one place the pages
-    // disagreed -- a typo saved fine and only surfaced at Install time as "no Resource
-    // Broker installer is staged". Soft-fails to an empty list, which the field explains.
+    // The staged Windows installers, for the Resource Broker asset picker. Read from
+    // /api/storage/list-all and NOT from /api/config-mgmt/assets: the two serve the same
+    // rows, but the config-mgmt router is mounted behind _feature_gate("ansible_enabled")
+    // (main.py), so with Configuration Management toggled off the request 404s, this list
+    // soft-failed to empty, and the field then told an SE that no installer was staged
+    // while the .exe was sitting on the Storage page in front of them. The storage router
+    // is ungated, and is the right dependency anyway -- whether an installer is staged is
+    // a storage question, not an Ansible one.
+    //
+    // Only assets on the ACTIVE backend may be offered: the install job is queued with
+    // asset_backend=active_backend() (pov_resource_broker.queue), so an .exe on any other
+    // backend is a run that fails when the agent fetches the bundle. Those are collected
+    // separately rather than dropped, so the field can name the backend and point at Move
+    // instead of claiming nothing is staged. Same call, same filter and same three-way
+    // message in pov/index.html's RB editor, deliberately: the two fields write the same
+    // storage key, and the one place they disagreed was the bug.
     async loadWinAssets() {
+      this.winAssetsError = '';
+      this.winAssetsElsewhere = [];
       try {
-        const res = await this.apiFetch('/api/config-mgmt/assets');
-        if (!res.ok) { this.winAssets = []; return; }
-        const data = await res.json();
-        // /api/config-mgmt/assets returns a bare list; tolerate {assets: [...]} too.
-        const rows = data.assets || data || [];
-        this.winAssets = rows
-          .map(a => (typeof a === 'string' ? a : (a.name || a.key || '')))
-          .filter(n => /\.(exe|msi)$/i.test(n));
-      } catch (e) { this.winAssets = []; }
+        const [listRes, bkRes] = await Promise.all([
+          this.apiFetch('/api/storage/list-all'),
+          this.apiFetch('/api/storage/backends'),
+        ]);
+        if (!listRes.ok || !bkRes.ok) {
+          this.winAssets = [];
+          this.winAssetsError = 'Could not read the staged assets from Storage ' +
+            `(HTTP ${listRes.ok ? bkRes.status : listRes.status}).`;
+          return;
+        }
+        const data = await listRes.json();
+        const bk = await bkRes.json();
+        const active = bk.active || '';
+        const labels = {};
+        for (const b of (bk.backends || [])) labels[b.id] = b.label || b.id;
+        this.activeBackendLabel = labels[active] || active || 'no active backend';
+        // /api/storage/list-all answers {items: [...]}; tolerate the bare list and
+        // {assets: [...]} shapes the same data has been served in elsewhere.
+        const rows = data.items || data.assets || data || [];
+        const wins = rows
+          .map(a => (typeof a === 'string'
+                       ? { name: a, backend: active }
+                       : { name: a.name || a.key || '', backend: a.backend || '' }))
+          .filter(a => /\.(exe|msi)$/i.test(a.name));
+        // With no active backend there is nothing to compare against, so filtering would
+        // empty the picker for the wrong reason -- offer everything and let preflight talk.
+        const onActive = wins.filter(a => !active || !a.backend || a.backend === active);
+        this.winAssets = [...new Set(onActive.map(a => a.name))];
+        this.winAssetsElsewhere = [...new Set(wins
+          .filter(a => !this.winAssets.includes(a.name))
+          .map(a => `${a.name} (on ${labels[a.backend] || a.backend})`))];
+      } catch (e) {
+        this.winAssets = [];
+        this.winAssetsError = 'Could not read the staged assets from Storage.';
+      }
     },
 
     async verify() {
