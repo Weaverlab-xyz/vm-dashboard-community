@@ -206,12 +206,12 @@ async def build_options(db: Session = Depends(get_db),
                 f"{', '.join(absent)} — upload them from examples/playbooks/spire/ on "
                 f"the Config Management page. A run fetches assets by filename from "
                 f"storage; the repo copy is a sample, not a source.")
-    except Exception as exc:  # noqa: BLE001 — the backend's own error is the message
+    except Exception as exc:  # noqa: BLE001 — log backend errors; avoid exposing internals to clients
         logger.info("spire-lab: could not list assets on %r: %s", backend_name, exc)
         missing.append(
             f"could not check whether the four spire-*.yml playbooks are staged "
-            f"({backend_name or 'no backend'}: {exc}). A run fetches them by filename "
-            f"from storage, so verify on the Config Management page before building.")
+            f"on {backend_name or 'no backend'}. A run fetches them by filename from "
+            f"storage, so verify on the Config Management page before building.")
 
     return {"clouds": list(spire_lab_service.PROVISIONING_CLOUDS),
             "hosts": hosts,
