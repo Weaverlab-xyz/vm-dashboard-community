@@ -235,6 +235,48 @@ def _bootstrap_first_run_admin() -> None:
         logger.error("First-run admin bootstrap failed: %s", exc)
 
 
+# ── The sweeper loop primitive ───────────────────────────────────────────────
+
+async def _sweeper_loop(name: str, work, interval_fn, *, fallback: int) -> None:
+    """One enqueue pass per interval, forever, with the pass OFF the event loop.
+
+    Six loops below share this shape, and the sharing is not cosmetic. Each pass opens a
+    session and calls a SYNCHRONOUS ``enqueue_*`` function, and those are not merely
+    queries: ``spend_sweeper`` and ``suspend_sweeper`` take ``pg_advisory_xact_lock``
+    first, which BLOCKS until the lock is granted, then run two SELECTs and an INSERT.
+    Awaited directly on the event loop that stalls every HTTP request this worker is
+    serving — so ``asyncio.to_thread`` lives HERE, where a loop cannot forget it.
+
+    It was forgotten twice. ``_spend_sweeper_loop`` and ``_suspend_sweeper_loop`` were both
+    written against ``_expiry_sweeper_loop``'s docstring, both said so, and both hand-rolled
+    the mechanics without the ``to_thread`` that docstring's own body has. Nothing raised;
+    the app just served requests slower on the tick, and only once the feature was switched
+    on. ``tests/test_sweeper_loop_parity.py`` now pins it.
+
+    ``interval_fn`` is read live every pass, so a Settings change lands on the next one
+    without an app restart. It may therefore also fail — a config backend can be briefly
+    unreachable — so a raise degrades to ``fallback`` rather than ending the loop. Same for
+    the pass itself: each of these is launched once at startup and never restarted, so an
+    escaping exception would disable that feature until the process is bounced.
+    """
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(work, db)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("%s failed: %s", name, exc)
+        try:
+            interval = int(interval_fn())
+        except Exception:                              # noqa: BLE001
+            interval = fallback
+        await asyncio.sleep(interval)
+
+
 # ── Cloud-identity JIT sweeper loop (Phase 4a) ───────────────────────────────
 
 async def _ci_sweeper_loop() -> None:
@@ -245,25 +287,16 @@ async def _ci_sweeper_loop() -> None:
     is off; loop is launched unconditionally so a runtime flag flip
     activates the next pass without an app restart.
     """
-    from .database import SessionLocal
-    from .services import cloud_identity_sweeper_service as ci_sweeper
+    def work(db):
+        from .services import cloud_identity_sweeper_service as ci_sweeper
+        ci_sweeper.sweep_once(db)
 
-    while True:
-        try:
-            db = SessionLocal()
-            try:
-                await asyncio.to_thread(ci_sweeper.sweep_once, db)
-            finally:
-                db.close()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("cloud-identity sweeper iteration failed: %s", exc)
-        try:
-            interval = ci_sweeper.sweep_interval_seconds()
-        except Exception:
-            interval = 60 * 60
-        await asyncio.sleep(interval)
+    def interval():
+        from .services import cloud_identity_sweeper_service as ci_sweeper
+        return ci_sweeper.sweep_interval_seconds()
+
+    await _sweeper_loop("cloud-identity sweeper iteration", work, interval,
+                        fallback=60 * 60)
 
 
 async def _spend_sweeper_loop() -> None:
@@ -273,24 +306,15 @@ async def _spend_sweeper_loop() -> None:
     an operator may want a cost ceiling without a business-hours window or the reverse.
     Only enqueues; ``jobs_worker._claim_one``'s rowcount decides who runs the pass.
     """
-    from .database import SessionLocal
-    from .services import spend_sweeper
+    def work(db):
+        from .services import spend_sweeper
+        spend_sweeper.enqueue_sweep_if_due(db)
 
-    while True:
-        try:
-            db = SessionLocal()
-            try:
-                spend_sweeper.enqueue_sweep_if_due(db)
-            finally:
-                db.close()
-        except Exception:                              # noqa: BLE001
-            logger.warning("spend sweep enqueue failed", exc_info=True)
-        try:
-            from .services import spend_sweeper as _s
-            delay = _s.interval_seconds()
-        except Exception:                              # noqa: BLE001
-            delay = 600
-        await asyncio.sleep(delay)
+    def interval():
+        from .services import spend_sweeper
+        return spend_sweeper.interval_seconds()
+
+    await _sweeper_loop("spend sweep enqueue", work, interval, fallback=600)
 
 
 # ── Auto-delete timer sweeper loop ───────────────────────────────────────────
@@ -304,25 +328,16 @@ async def _suspend_sweeper_loop() -> None:
     the auto-delete one because that is gated on ``resource_expiry_enabled``, and a power
     window must work without the destructive timer.
     """
-    from .database import SessionLocal
-    from .services import suspend_sweeper
+    def work(db):
+        from .services import suspend_sweeper
+        suspend_sweeper.enqueue_sweep_if_due(db)
 
-    while True:
-        try:
-            db = SessionLocal()
-            try:
-                suspend_sweeper.enqueue_sweep_if_due(db)
-            finally:
-                db.close()
-        except Exception:                              # noqa: BLE001
-            logger.warning("suspend sweep enqueue failed", exc_info=True)
-        # Re-read live, so a Settings change lands on the next pass without a restart.
-        try:
-            from .services import suspend_sweeper as _s
-            delay = _s.interval_seconds()
-        except Exception:                              # noqa: BLE001
-            delay = 600
-        await asyncio.sleep(delay)
+    # Re-read live, so a Settings change lands on the next pass without a restart.
+    def interval():
+        from .services import suspend_sweeper
+        return suspend_sweeper.interval_seconds()
+
+    await _sweeper_loop("suspend sweep enqueue", work, interval, fallback=600)
 
 
 async def _expiry_sweeper_loop() -> None:
@@ -339,25 +354,15 @@ async def _expiry_sweeper_loop() -> None:
     Cadence is read live each iteration so a Settings change takes effect on the next
     pass without an app restart (same contract as _ci_sweeper_loop).
     """
-    from .database import SessionLocal
-    from .services import expiry_policy, expiry_reaper
+    def work(db):
+        from .services import expiry_reaper
+        expiry_reaper.enqueue_sweep_if_due(db)
 
-    while True:
-        try:
-            db = SessionLocal()
-            try:
-                await asyncio.to_thread(expiry_reaper.enqueue_sweep_if_due, db)
-            finally:
-                db.close()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("auto-delete sweep enqueue failed: %s", exc)
-        try:
-            interval = expiry_policy.sweep_interval_seconds()
-        except Exception:
-            interval = 30 * 60
-        await asyncio.sleep(interval)
+    def interval():
+        from .services import expiry_policy
+        return expiry_policy.sweep_interval_seconds()
+
+    await _sweeper_loop("auto-delete sweep enqueue", work, interval, fallback=30 * 60)
 
 
 # ── POV reconcile loop ───────────────────────────────────────────────────────
@@ -377,25 +382,13 @@ async def _pov_reconcile_loop() -> None:
     Always launched, and a no-op when POV environments are off or masked by the profile, so
     turning the feature on activates the next pass with no restart.
     """
-    from .database import SessionLocal
     from .services import pov_reconcile
 
-    while True:
-        try:
-            db = SessionLocal()
-            try:
-                await asyncio.to_thread(pov_reconcile.enqueue_if_due, db)
-            finally:
-                db.close()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("POV reconcile enqueue failed: %s", exc)
-        try:
-            interval = pov_reconcile.interval_seconds()
-        except Exception:
-            interval = pov_reconcile.DEFAULT_INTERVAL_S
-        await asyncio.sleep(interval)
+    def work(db):
+        pov_reconcile.enqueue_if_due(db)
+
+    await _sweeper_loop("POV reconcile enqueue", work, pov_reconcile.interval_seconds,
+                        fallback=pov_reconcile.DEFAULT_INTERVAL_S)
 
 
 # ── Hypervisor inventory sync loop ───────────────────────────────────────────
@@ -413,29 +406,18 @@ async def _hypervisor_sync_loop() -> None:
     Always launched, and a no-op when remote agents are off or no connection is bound to
     one, so flipping the flag in Settings activates the next pass with no restart.
     """
-    from .database import SessionLocal
-    from .services import hypervisor_sync_service
+    def work(db):
+        from .services import hypervisor_sync_service
+        queued = hypervisor_sync_service.enqueue_due_syncs(db)
+        if queued:
+            logger.info("queued %d hypervisor inventory sync(s)", queued)
 
-    while True:
-        try:
-            db = SessionLocal()
-            try:
-                queued = await asyncio.to_thread(
-                    hypervisor_sync_service.enqueue_due_syncs, db)
-                if queued:
-                    logger.info("queued %d hypervisor inventory sync(s)", queued)
-            finally:
-                db.close()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("hypervisor sync enqueue failed: %s", exc)
-        try:
-            interval = max(60, int(config_service.get("hypervisor_sync_poll_seconds")
-                                   or 300))
-        except (TypeError, ValueError):
-            interval = 300
-        await asyncio.sleep(interval)
+    # Floored at 60s: this one polls a config key rather than a service's own accessor,
+    # so a hand-typed 0 would otherwise spin.
+    def interval():
+        return max(60, int(config_service.get("hypervisor_sync_poll_seconds") or 300))
+
+    await _sweeper_loop("hypervisor sync enqueue", work, interval, fallback=300)
 
 
 # ── Background cache warmers ──────────────────────────────────────────────────
