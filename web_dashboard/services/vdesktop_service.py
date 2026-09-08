@@ -1,11 +1,16 @@
 """Virtual-desktop pool lifecycle.
 
 Phase 0 shipped the DB scaffold. **Phase 1 wires Azure** pool provisioning to the
-existing VM path: ``create_pool`` fans out to ``azure_service.deploy_vm`` (one
-**private** VM per seat, tagged ``POOL_TAG=<pool>``) and fills ``vm_resource_id``;
-``scale_pool`` / ``delete_pool`` provision / terminate via ``azure_service``.
-AWS / GCP create seat *records* only (not provisioned until their Phase 1).
+existing VM path: ``create_pool`` fans out to a per-cloud SEAT BACKEND (one **private**
+VM per seat, tagged with the backend's pool-tag key) and fills ``vm_resource_id``;
+``scale_pool`` / ``delete_pool`` provision / terminate through the same backend.
+AWS / GCP create seat *records* only — they have no backend yet, which is precisely
+what ``_SEAT_BACKENDS`` records and what ``PROVISIONING_CLOUDS`` is derived from.
 Phase 2 registers each seat on the PRA Gateway (``pra_jump_id``).
+
+The backend split is what makes those two clouds addable without a branch per cloud
+through the middle of ``provision_seats``; see the section comment above
+``_AzureSeats`` for the three things they will not be able to share.
 
 Provisioning + teardown are **async** (``deploy_vm`` / ``terminate_vm`` are slow)
 and **durable**: the API enqueues a ``vdesktop_pool_provision`` /
@@ -28,10 +33,14 @@ logger = logging.getLogger(__name__)
 POOL_TAG = "dashboard:desktop_pool"
 
 VALID_CLOUDS = ("aws", "azure", "gcp")
-# Clouds that actually provision VMs in Phase 1 (others create records only).
-PROVISIONING_CLOUDS = ("azure",)
+# Clouds that actually provision VMs (others create seat records only). DERIVED from
+# `_SEAT_BACKENDS` at the bottom of the backend section, not maintained beside it: a
+# cloud listed here with no backend behind it hands an operator seat rows and no VMs,
+# which is the exact bug this whole item exists to fix.
+PROVISIONING_CLOUDS: tuple = ()
 
 _AZURE_REQUIRED = ("location", "resource_group", "subnet_id", "vm_size")
+_AWS_REQUIRED = ("region", "ami_id", "instance_type", "subnet_id")
 
 
 class VDesktopError(Exception):
@@ -86,21 +95,6 @@ def list_pools(db: Session) -> list[dict]:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _validate_azure_spec(spec: dict) -> dict:
-    spec = dict(spec or {})
-    missing = [k for k in _AZURE_REQUIRED if not spec.get(k)]
-    # Windows seats authenticate with generated per-seat passwords, not SSH keys.
-    if (spec.get("os_type") or "Linux").lower() != "windows" and not spec.get("ssh_public_key"):
-        missing.append("ssh_public_key")
-    if missing:
-        raise VDesktopError(f"Azure pool requires: {', '.join(missing)}.")
-    has_image = spec.get("image_id") or (
-        spec.get("image_publisher") and spec.get("image_offer") and spec.get("image_sku"))
-    if not has_image:
-        raise VDesktopError("Azure pool requires image_id or a marketplace image (publisher/offer/sku).")
-    return spec
-
-
 def _vm_name_for(pool_name: str, seat_id: str) -> str:
     base = re.sub(r"[^a-z0-9-]", "-", (pool_name or "").lower()).strip("-")[:40] or "desktop"
     return f"{base}-{seat_id[:8]}"
@@ -116,6 +110,15 @@ def _parse_vm_id(vm_resource_id: str):
     return rg, (parts[-1] if parts else None)
 
 
+def _pool_cloud(db: Session, seat_ids: list) -> str:
+    """The cloud these seats belong to. Every seat in a pool shares one."""
+    for sid in seat_ids or []:
+        row = db.query(VirtualDesktop).filter(VirtualDesktop.id == sid).first()
+        if row is not None:
+            return (row.cloud or "").lower()
+    return ""
+
+
 def _pool_spec(db: Session, name: str):
     """The Azure spec + job id stored at create-time, for scale-up. (None, None) if absent."""
     from ..database import Job
@@ -126,6 +129,222 @@ def _pool_spec(db: Session, name: str):
         if md.get("pool_name") == name and md.get("spec"):
             return md["spec"], j.id
     return None, None
+
+
+# ── Per-cloud seat backends ──────────────────────────────────────────────────
+# Everything below this comment that differs between clouds lives HERE, so the
+# orchestration in `provision_seats` / `teardown_seats` — job lifecycle, progress,
+# gateway warm-up ordering, per-seat error collection, PRA registration — is written
+# once and does not grow a branch per cloud.
+#
+# Azure is the only implementation today and this extraction is deliberately a MOVE:
+# `tests/test_vdesktop_seats.py` was written against the pre-extraction code and passes
+# unchanged, which is what makes "no behaviour change" checkable rather than asserted.
+#
+# Three things the next two backends will not be able to share, found by reading the
+# SDKs rather than assumed, and the reason this is an interface rather than a few `if`s:
+#
+#   * **The pool tag key is not portable.** ``dashboard:desktop_pool`` is a fine Azure tag
+#     and a fine AWS tag. It is an INVALID GCP label key — GCP allows lowercase letters,
+#     digits, ``-`` and ``_`` only. ``cost_service._GCP_LABEL_KEYS`` already carries both
+#     hyphen and underscore forms of ``managed-by`` for exactly this reason, so the key
+#     belongs per backend rather than as one module constant.
+#   * **Windows is a different mechanism on each cloud.** Azure generates and vaults a
+#     password; AWS returns encrypted password data decrypted with the launch key pair;
+#     GCP uses ``windows-keys`` metadata. A backend declares whether it can do Windows at
+#     all, so a cloud that cannot refuses the pool instead of handing somebody a seat they
+#     cannot sign into.
+#   * **The deploy signatures do not line up.** Azure takes ``rg``/``vm_size``/``subnet_id``,
+#     AWS ``region``/``instance_type``/``security_group_ids``, GCP
+#     ``project_id``/``zone``/``machine_type``. Only the RESULT is common, so that is what
+#     the interface fixes: ``{"vm_id", "private_ip"}``.
+
+
+class _AzureSeats:
+    """Azure seat provisioning. Extracted verbatim from `provision_seats`."""
+
+    cloud = "azure"
+    gateway_cloud = "azure"          # what `ensure_jumpoint_host` is keyed on
+    pool_tag_key = POOL_TAG
+    supports_windows = True
+    default_username = "azureuser"
+    pra_tag = "Azure VDI"
+
+    @staticmethod
+    def validate_spec(spec: dict) -> dict:
+        spec = dict(spec or {})
+        missing = [k for k in _AZURE_REQUIRED if not spec.get(k)]
+        # Windows seats authenticate with generated per-seat passwords, not SSH keys.
+        if (spec.get("os_type") or "Linux").lower() != "windows" and not spec.get("ssh_public_key"):
+            missing.append("ssh_public_key")
+        if missing:
+            raise VDesktopError(f"Azure pool requires: {', '.join(missing)}.")
+        has_image = spec.get("image_id") or (
+            spec.get("image_publisher") and spec.get("image_offer") and spec.get("image_sku"))
+        if not has_image:
+            raise VDesktopError("Azure pool requires image_id or a marketplace image (publisher/offer/sku).")
+        return spec
+
+    @staticmethod
+    def generate_password() -> str:
+        from . import azure_service
+        return azure_service.generate_windows_admin_password()
+
+    @staticmethod
+    async def store_password(vm_name: str, seat_id: str, password: str):
+        import asyncio
+        from . import azure_service
+        return await asyncio.to_thread(
+            azure_service.store_windows_admin_password, vm_name, seat_id[:8], password)
+
+    @staticmethod
+    async def deploy(spec: dict, vm_name: str, admin_password: str) -> dict:
+        """``{"vm_id", "private_ip"}``. The only shape the orchestration depends on."""
+        from . import azure_service
+        return await azure_service.deploy_vm(
+            rg=spec["resource_group"], location=spec["location"], vm_name=vm_name,
+            vm_size=spec["vm_size"], image_id=spec.get("image_id", "") or "",
+            subnet_id=spec["subnet_id"], nsg_ids=spec.get("nsg_ids") or [],
+            create_public_ip=bool(spec.get("create_public_ip", False)),
+            ssh_username=spec.get("ssh_username") or "azureuser",
+            ssh_public_key=spec.get("ssh_public_key") or "",
+            image_publisher=spec.get("image_publisher"), image_offer=spec.get("image_offer"),
+            image_sku=spec.get("image_sku"), image_version=spec.get("image_version"),
+            os_type=spec.get("os_type") or "Linux",
+            admin_password=admin_password,
+            trusted_launch=bool(spec.get("trusted_launch")),
+        )
+
+    @staticmethod
+    async def tag_pool(spec: dict, vm_name: str, vm_resource_id: str, pool_name: str) -> None:
+        # Azure addresses a VM by resource group + name, so the id is unused here. AWS
+        # addresses one by instance id, which is why the id is in the signature at all.
+        from . import azure_service
+        await azure_service.set_desktop_pool_tag(spec["resource_group"], vm_name, pool_name)
+
+    @staticmethod
+    async def terminate(vm_resource_id: str) -> str:
+        """Terminate and return the VM's display name for the error message."""
+        from . import azure_service
+        rg, name = _parse_vm_id(vm_resource_id)
+        if rg and name:
+            await azure_service.terminate_vm(rg, name)
+        return name or vm_resource_id
+
+    @staticmethod
+    async def reap_idle_gateway(db) -> None:
+        from . import jumpoint_host_service
+        await jumpoint_host_service.teardown_jumpoint_host_if_idle(
+            db, "azure", _cfg("azure_location"))
+
+
+class _AwsSeats:
+    """EC2 seat provisioning. **Linux only** — see ``supports_windows``."""
+
+    cloud = "aws"
+    gateway_cloud = "aws"
+    # A colon is a legal character in an EC2 tag key, so the shared constant is usable
+    # here unchanged. It is NOT legal in a GCP label key, which is why this is per
+    # backend rather than read from the module.
+    pool_tag_key = POOL_TAG
+    # AWS hands back Windows credentials as password data encrypted to the launch key
+    # pair, decrypted client-side — nothing like Azure's "generate one and vault it".
+    # Wiring that properly is its own change, so a Windows pool is REFUSED here rather
+    # than provisioned into a seat nobody can sign into. `validate_spec` says so.
+    supports_windows = False
+    default_username = "ec2-user"
+    pra_tag = "AWS VDI"
+
+    @staticmethod
+    def validate_spec(spec: dict) -> dict:
+        spec = dict(spec or {})
+        if (spec.get("os_type") or "Linux").lower() == "windows":
+            raise VDesktopError(
+                "AWS desktop pools are Linux-only for now: EC2 returns Windows "
+                "credentials as password data encrypted to the launch key pair, which "
+                "this does not yet decrypt or vault. Use an Azure pool for Windows.")
+        missing = [k for k in _AWS_REQUIRED if not spec.get(k)]
+        # Linux-only, so a key is always required — there is no password path to fall
+        # back to the way Azure's Windows seats have.
+        if not spec.get("ssh_public_key"):
+            missing.append("ssh_public_key")
+        if missing:
+            raise VDesktopError(f"AWS pool requires: {', '.join(missing)}.")
+        return spec
+
+    @staticmethod
+    def generate_password() -> str:                    # pragma: no cover - unreachable
+        raise VDesktopError("AWS desktop pools are Linux-only.")
+
+    @staticmethod
+    async def store_password(vm_name, seat_id, password):  # pragma: no cover - unreachable
+        raise VDesktopError("AWS desktop pools are Linux-only.")
+
+    @staticmethod
+    async def deploy(spec: dict, vm_name: str, admin_password: str) -> dict:
+        from . import aws_service
+        res = await aws_service.launch_instance(
+            region=spec["region"], ami_id=spec["ami_id"], instance_name=vm_name,
+            instance_type=spec["instance_type"],
+            public_key=spec.get("ssh_public_key") or "",
+            subnet_id=spec["subnet_id"],
+            security_group_ids=spec.get("security_group_ids") or [],
+            iam_instance_profile=spec.get("iam_instance_profile") or "",
+            os_type=spec.get("os_type") or "Linux",
+            workgroup=spec.get("workgroup") or "",
+        )
+        # `vm_resource_id` carries the REGION as well as the instance id, because
+        # teardown gets only this string — it has no spec to read a region from, and an
+        # instance id alone does not say which regional endpoint owns it. Azure's ARM id
+        # embeds its resource group for exactly the same reason.
+        return {"vm_id": f"{spec['region']}/{res['instance_id']}",
+                "private_ip": res.get("private_ip")}
+
+    @staticmethod
+    def _split(vm_resource_id: str):
+        """``region/i-abc`` → ``("region", "i-abc")``."""
+        raw = (vm_resource_id or "").strip()
+        region, _, instance_id = raw.partition("/")
+        return (region, instance_id) if instance_id else ("", raw)
+
+    @staticmethod
+    async def tag_pool(spec: dict, vm_name: str, vm_resource_id: str, pool_name: str) -> None:
+        from . import aws_service
+        region, instance_id = _AwsSeats._split(vm_resource_id)
+        if instance_id:
+            await aws_service.set_desktop_pool_tag(
+                region or spec.get("region", ""), instance_id, pool_name)
+
+    @staticmethod
+    async def terminate(vm_resource_id: str) -> str:
+        from . import aws_service
+        region, instance_id = _AwsSeats._split(vm_resource_id)
+        if region and instance_id:
+            await aws_service.terminate_instance(region, instance_id)
+        return instance_id or vm_resource_id
+
+    @staticmethod
+    async def reap_idle_gateway(db) -> None:
+        from . import jumpoint_host_service
+        await jumpoint_host_service.teardown_jumpoint_host_if_idle(
+            db, "aws", _cfg("aws_region"))
+
+
+# Keyed by cloud. A cloud in VALID_CLOUDS but absent here creates seat RECORDS only —
+# which is exactly what AWS and GCP do today, and why PROVISIONING_CLOUDS is derived
+# from this rather than maintained beside it: the two cannot drift.
+_SEAT_BACKENDS = {
+    "azure": _AzureSeats,
+    "aws": _AwsSeats,
+}
+
+
+PROVISIONING_CLOUDS = tuple(c for c in VALID_CLOUDS if c in _SEAT_BACKENDS)
+
+
+def seat_backend(cloud: str):
+    """The backend for this cloud, or None when it provisions records only."""
+    return _SEAT_BACKENDS.get((cloud or "").lower())
 
 
 # ── Create / scale / delete (sync DB part; API schedules the async cloud work) ──
@@ -147,9 +366,10 @@ def create_pool(db: Session, *, cloud: str, name: str, count: int, created_by: s
     if get_pool(db, name):
         raise VDesktopError(f"Pool '{name}' already exists.")
 
-    provision = cloud in PROVISIONING_CLOUDS
+    backend = seat_backend(cloud)
+    provision = backend is not None
     if provision:
-        spec = _validate_azure_spec(spec)
+        spec = backend.validate_spec(spec)
 
     # Generate the seat ids first so the provision job's metadata can name them.
     seat_ids = []
@@ -278,8 +498,13 @@ def _resolve_pra_targets(spec: dict) -> dict:
 # ── Async cloud work (scheduled by the API as background tasks) ─────────────────
 
 async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dict) -> None:
-    """Provision an Azure VM per seat via ``azure_service.deploy_vm`` (private),
-    fill ``vm_resource_id`` + ``running``, and tag the VM with ``POOL_TAG``.
+    """Provision one VM per seat through the pool's cloud backend (private), fill
+    ``vm_resource_id`` + ``running``, and stamp the backend's pool tag.
+
+    Everything here is cloud-NEUTRAL: the job lifecycle, the progress reporting, the
+    gateway warm-up that must happen before any seat registers, the per-seat error
+    collection that keeps one bad seat from aborting the pool, and the PRA brokering.
+    The cloud calls themselves are the backend's — see ``_SEAT_BACKENDS``.
 
     Windows pools get a generated per-seat admin password, vaulted via the
     secrets backend before the seat's VM is created; the (backend, ref) pairs
@@ -287,11 +512,35 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
     ``GET /api/azure/vms/{name}/admin-password`` can resolve them. The spec
     itself stays credential-free (it is persisted in job metadata for
     scale-up; see ``_pool_spec``)."""
-    import asyncio
     from ..database import SessionLocal
-    from . import azure_service, job_service
+    from . import job_service
     db = SessionLocal()
+    # The cloud comes from the seats themselves rather than a new parameter: every seat
+    # in a pool shares one, `jobs_worker` calls this with the metadata it was given at
+    # create time, and adding an argument would strand jobs enqueued by a running
+    # deployment before the upgrade.
+    cloud = _pool_cloud(db, seat_ids)
+    backend = seat_backend(cloud)
+    if backend is None:
+        # Records-only cloud — AWS and GCP today. Reaching here means work was scheduled
+        # for a backend that does not exist yet, which is worth a line in the log rather
+        # than a traceback.
+        logger.warning("desktop pool %s: no seat backend for cloud %r; nothing provisioned",
+                       pool_name, cloud)
+        db.close()
+        return
     is_windows = (spec.get("os_type") or "Linux").lower() == "windows"
+    if is_windows and not backend.supports_windows:
+        # `validate_spec` refuses this at create time, so reaching here means a spec
+        # stored before a backend's Windows support changed. Fail loudly rather than
+        # call a `generate_password` that raises halfway through the pool.
+        logger.warning("desktop pool %s: %s seats cannot be Windows; refusing",
+                       pool_name, cloud)
+        if job_id:
+            job_service.set_failed(
+                db, job_id, f"{cloud} desktop pools are Linux-only.")
+        db.close()
+        return
     seat_passwords: dict = {}
     errors: list = []
     try:
@@ -310,7 +559,8 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                 job_service.update_progress(db, job_id, 0, "Ensuring PRA Gateway host is online…")
             try:
                 from . import jumpoint_host_service
-                await jumpoint_host_service.ensure_jumpoint_host("azure", spec.get("location") or "")
+                await jumpoint_host_service.ensure_jumpoint_host(
+                    backend.gateway_cloud, spec.get("location") or "")
             except Exception as jp_err:
                 logger.warning("desktop pool %s: ensure gateway host failed (non-fatal): %s",
                                pool_name, jp_err)
@@ -323,23 +573,13 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
             try:
                 admin_password = ""
                 if is_windows:
-                    admin_password = azure_service.generate_windows_admin_password()
-                    backend, ref = await asyncio.to_thread(
-                        azure_service.store_windows_admin_password, vm_name, sid[:8], admin_password,
-                    )
-                res = await azure_service.deploy_vm(
-                    rg=spec["resource_group"], location=spec["location"], vm_name=vm_name,
-                    vm_size=spec["vm_size"], image_id=spec.get("image_id", "") or "",
-                    subnet_id=spec["subnet_id"], nsg_ids=spec.get("nsg_ids") or [],
-                    create_public_ip=bool(spec.get("create_public_ip", False)),
-                    ssh_username=spec.get("ssh_username") or "azureuser",
-                    ssh_public_key=spec.get("ssh_public_key") or "",
-                    image_publisher=spec.get("image_publisher"), image_offer=spec.get("image_offer"),
-                    image_sku=spec.get("image_sku"), image_version=spec.get("image_version"),
-                    os_type=spec.get("os_type") or "Linux",
-                    admin_password=admin_password,
-                    trusted_launch=bool(spec.get("trusted_launch")),
-                )
+                    # Vaulted BEFORE the VM exists, so the password survives a failure
+                    # anywhere after this point. `pw_backend` is the SECRETS backend
+                    # name, not the seat backend — they were both called `backend`
+                    # before this refactor, in the same scope.
+                    admin_password = backend.generate_password()
+                    pw_backend, ref = await backend.store_password(vm_name, sid, admin_password)
+                res = await backend.deploy(spec, vm_name, admin_password)
                 row.vm_resource_id = res.get("vm_id") or vm_name
                 row.status = "running"
                 db.commit()
@@ -357,8 +597,8 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                         jump = await pra.provision_rdp_jump(
                             name=vm_name, hostname=private_ip,
                             jump_group_name=tgt["jump_group"], jumpoint_name=tgt["jumpoint"],
-                            rdp_username=spec.get("ssh_username") or "azureuser",
-                            tag="Azure VDI",
+                            rdp_username=spec.get("ssh_username") or backend.default_username,
+                            tag=backend.pra_tag,
                             admin_password=admin_password,
                             vault_account_name=f"{vm_name}-admin",
                             vault_account_group_id=tgt["vault_group_id"],
@@ -372,11 +612,11 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                                        pool_name, sid, pra_err)
                 if is_windows:
                     seat_passwords[vm_name] = {
-                        "backend": backend, "ref": ref,
-                        "username": spec.get("ssh_username") or "azureuser",
+                        "backend": pw_backend, "ref": ref,
+                        "username": spec.get("ssh_username") or backend.default_username,
                     }
                 try:
-                    await azure_service.set_desktop_pool_tag(spec["resource_group"], vm_name, pool_name)
+                    await backend.tag_pool(spec, vm_name, row.vm_resource_id, pool_name)
                 except Exception as tag_err:
                     logger.warning("desktop pool tag failed vm=%s: %s", vm_name, tag_err)
                 ok += 1
@@ -423,32 +663,40 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
 
 
 async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
-    """Terminate the Azure VM behind each seat (best-effort) then drop the row.
+    """Terminate the VM behind each seat through its cloud's backend (best-effort),
+    then drop the row. A seat on a records-only cloud has no VM and is just dropped.
 
     Runs on the durable worker (scale-down / pool-delete schedule a
     ``vdesktop_pool_teardown`` job). When given the claiming ``job_id`` it owns
     that job's running/completed lifecycle so the worker's claim doesn't leak as
     ``running``; called with no ``job_id`` it just does the work (back-compat)."""
     from ..database import SessionLocal
-    from . import azure_service, job_service
+    from . import job_service
     db = SessionLocal()
     try:
         if job_id:
             job_service.set_running(db, job_id)
         dropped = 0
         errors: list = []
+        # Remembered for the gateway reap below, which runs AFTER the rows are gone and
+        # so cannot read the cloud back off them.
+        last_cloud = ""
         for sid in seat_ids:
             row = db.query(VirtualDesktop).filter(VirtualDesktop.id == sid).first()
             if row is None:
                 continue
-            if row.cloud == "azure" and row.vm_resource_id:
-                rg, name = _parse_vm_id(row.vm_resource_id)
-                if rg and name:
-                    try:
-                        await azure_service.terminate_vm(rg, name)
-                    except Exception as exc:
-                        errors.append(f"{name}: terminate failed: {exc}")
-                        logger.warning("desktop seat terminate failed seat=%s vm=%s: %s", sid, name, exc)
+            last_cloud = row.cloud or last_cloud
+            # A seat on a records-only cloud has no VM to terminate — the same seats
+            # this code has always skipped, now skipped because there is no backend
+            # rather than because the string was not "azure".
+            backend = seat_backend(row.cloud)
+            if backend is not None and row.vm_resource_id:
+                try:
+                    name = await backend.terminate(row.vm_resource_id)
+                except Exception as exc:
+                    name = row.vm_resource_id
+                    errors.append(f"{name}: terminate failed: {exc}")
+                    logger.warning("desktop seat terminate failed seat=%s vm=%s: %s", sid, name, exc)
             # Phase 2: remove the seat's PRA RDP jump (+ vault account) — state-driven.
             if row.pra_tunnel_state:
                 try:
@@ -464,8 +712,9 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
         # it (ref-counted — now counts remaining VDI seats too). The torn-down rows
         # were deleted above, so the count reflects what remains. Best-effort.
         try:
-            from . import jumpoint_host_service
-            await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, "azure", _cfg("azure_location"))
+            reaper = seat_backend(last_cloud) if last_cloud else None
+            if reaper is not None:
+                await reaper.reap_idle_gateway(db)
         except Exception as jp_err:
             logger.warning("desktop teardown: idle gateway reap failed (non-fatal): %s", jp_err)
         if job_id:

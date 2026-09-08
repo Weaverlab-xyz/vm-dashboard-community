@@ -32,6 +32,17 @@ class PoolCreateRequest(BaseModel):
     ssh_username: str = "azureuser"         # admin username on Windows
     ssh_public_key: Optional[str] = None     # client-provided (as the Azure deploy form does); Linux only
 
+    # ── AWS deploy spec (required when cloud == "aws") ──
+    # `subnet_id`, `os_type` and `ssh_public_key` above are shared with Azure. AWS pools
+    # are Linux-only, so `ssh_public_key` is not optional in practice — the service's
+    # validator says so rather than the model, which keeps the refusal in one place with
+    # the reason attached.
+    region: Optional[str] = None            # falls back to the configured aws_region
+    ami_id: Optional[str] = None            # OR `image` above
+    instance_type: Optional[str] = None     # OR `size` above
+    security_group_ids: list[str] = []
+    iam_instance_profile: Optional[str] = None   # e.g. for SSM access
+
 
 class PoolScaleRequest(BaseModel):
     count: int                       # desired seat count
