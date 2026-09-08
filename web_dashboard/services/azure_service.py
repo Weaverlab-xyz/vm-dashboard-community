@@ -328,6 +328,128 @@ async def aks_azure_rbac_enabled(resource_group: str, cluster_name: str) -> Opti
     return False
 
 
+# ── Consumption budgets (services/provider_budget.py decides WHAT) ────────────
+# Subscription-scoped, and create-or-update in one verb: a PUT is the whole write surface,
+# so there is no separate create call and no "does it exist" race between checking and
+# writing. The GET exists only so the caller can DESCRIBE the change before making it.
+_BUDGETS_API_VERSION = "2023-05-01"
+
+
+def _budget_url(sub_id: str, name: str) -> str:
+    return (f"{_ARM}/subscriptions/{sub_id}/providers/Microsoft.Consumption"
+            f"/budgets/{name}?api-version={_BUDGETS_API_VERSION}")
+
+
+def _notification_key(threshold) -> str:
+    """Azure keys notifications by name inside the budget, so the name has to be derived
+    rather than invented: pushing a changed threshold under a new key would leave the old
+    notification in place and the budget would alert twice."""
+    return f"Actual_GreaterThan_{int(threshold)}_Percent"
+
+
+def _from_azure(props: dict, name: str) -> dict:
+    """An Azure budget in the provider-neutral shape ``provider_budget.diff`` compares."""
+    notes = list((props.get("notifications") or {}).values())
+    first = notes[0] if notes else {}
+    return {
+        "name": name,
+        "limit": float(props.get("amount") or 0),
+        # Consumption budgets are denominated in the subscription's billing currency and
+        # the API does not echo it. Reported as the caller's own value rather than
+        # guessed, so `diff` never shows a currency change that is not real.
+        "currency": props.get("currency") or "",
+        "time_unit": (props.get("timeGrain") or "Monthly").upper(),
+        "threshold_percent": int(float(first.get("threshold") or 0)),
+        "emails": sorted(first.get("contactEmails") or []),
+    }
+
+
+async def get_budget(name: str, currency_hint: str = ""):
+    """The named subscription budget in the neutral shape, or ``None`` when absent.
+
+    Absent is an ANSWER — the caller is deciding between create and update — so a 404 is
+    not an error here, exactly as on the AWS side.
+
+    ``currency_hint`` fills a field Azure does not return. A Consumption budget is
+    denominated in the subscription's own billing currency: the dashboard cannot set it
+    and the API does not echo it, so it is not a field this manages. Reporting the
+    caller's value keeps ``provider_budget.diff`` from showing a currency change on every
+    single read — a phantom edit that would make an unchanged budget look like it needed
+    pushing.
+    """
+    import httpx
+    cred, sub_id = await _ensure_creds()
+    token = (await _to_thread(cred.get_token, f"{_ARM}/.default")).token
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(_budget_url(sub_id, name),
+                                    headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        raise AzureError(f"Could not read Azure budget '{name}': {e}") from e
+    body = resp.json() or {}
+    out = _from_azure(body.get("properties") or {}, name)
+    if not out["currency"]:
+        out["currency"] = currency_hint or ""
+    return out
+
+
+def _budget_body(want: dict, start_date: str = "") -> dict:
+    """The Consumption budget document.
+
+    Notifications take **contactEmails** — a plain list of addresses. `contactGroups`
+    (action group resource ids) and `contactRoles` are alternatives, not requirements;
+    an earlier note in this tree claimed action groups were the only option and sent the
+    reader looking for plumbing they do not need.
+    """
+    props = {
+        "category": "Cost",
+        "amount": want["limit"],
+        "timeGrain": (want.get("time_unit") or "MONTHLY").capitalize(),
+        "notifications": {
+            _notification_key(want["threshold_percent"]): {
+                "enabled": True,
+                "operator": "GreaterThan",
+                "threshold": want["threshold_percent"],
+                "contactEmails": list(want["emails"]),
+                "thresholdType": "Actual",
+            }
+        },
+    }
+    if start_date:
+        # Only on CREATE. Azure requires a start date and refuses one in the past, but a
+        # monthly budget that reset in a prior month must not be re-dated on every push —
+        # doing so would restart its accumulated period and silence an alert that had
+        # already fired.
+        props["timePeriod"] = {"startDate": start_date}
+    return {"properties": props}
+
+
+async def put_budget(want: dict, start_date: str = "") -> None:
+    """Create or update the subscription budget. One PUT; the API is create-or-update."""
+    import httpx
+    cred, sub_id = await _ensure_creds()
+    token = (await _to_thread(cred.get_token, f"{_ARM}/.default")).token
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.put(
+                _budget_url(sub_id, want["name"]),
+                json=_budget_body(want, start_date),
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"})
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        raise AzureError(f"Could not write Azure budget '{want.get('name')}': {e}") from e
+
+
+async def subscription_id() -> str:
+    """The subscription these credentials belong to — the budget's scope."""
+    _cred, sub_id = await _ensure_creds()
+    return sub_id
+
+
 _GRAPH = "https://graph.microsoft.com"
 
 

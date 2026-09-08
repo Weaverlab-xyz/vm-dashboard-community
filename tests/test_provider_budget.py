@@ -179,8 +179,8 @@ def test_the_push_is_an_action_not_a_side_effect_of_saving_settings():
         for dec in node.decorator_list:
             if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute):
                 verbs[node.name] = dec.func.attr
-    assert verbs.get("read_aws_budget") == "get"
-    assert verbs.get("push_aws_budget") == "post"
+    assert verbs.get("read_budget") == "get"
+    assert verbs.get("push_budget") == "post"
     # No setup/config handler may reach the push.
     setup = open(os.path.join(_ROOT, "web_dashboard/api/setup.py"), encoding="utf-8").read()
     assert "put_budget" not in setup and "budgets_api" not in setup
@@ -196,10 +196,100 @@ def test_the_read_reports_instead_of_failing_when_nothing_is_configured():
     """"You have not set this up" is the answer to the question, not a fault — otherwise
     the page cannot say WHICH of the two settings is missing."""
     assert "configured\": False" in _API_SRC or '"configured": False' in _API_SRC
-    body = _API_SRC[_API_SRC.index("async def read_aws_budget"):
-                    _API_SRC.index("async def push_aws_budget")]
+    body = _API_SRC[_API_SRC.index("async def read_budget"):
+                    _API_SRC.index("async def push_budget")]
     assert "HTTPException" not in body, (
         "the read should answer 200 with a reason rather than raising")
+
+
+# ── Azure ─────────────────────────────────────────────────────────────────────
+
+def test_the_azure_notification_carries_plain_emails_not_an_action_group():
+    """The correction, as an assertion.
+
+    An earlier version of this feature's docstring claimed Azure required action groups.
+    Consumption budget notifications take `contactEmails` — a plain list of addresses —
+    with `contactGroups` and `contactRoles` as alternatives. The wrong claim would have
+    sent the next reader building plumbing they do not need, so it is pinned here rather
+    than only corrected in prose.
+    """
+    from web_dashboard.services import azure_service as az
+    want = pb.desired("azure", 500, currency="", emails=EMAILS, threshold=90)
+    body = az._budget_body(want, start_date="2026-09-01")
+    note = list(body["properties"]["notifications"].values())[0]
+    assert note["contactEmails"] == ["ops@example.com", "finance@example.com"]
+    assert "contactGroups" not in note
+    assert note["operator"] == "GreaterThan" and note["threshold"] == 90
+
+
+def test_the_azure_start_date_is_sent_on_create_and_not_on_update():
+    """Azure needs a start date and refuses one in the past. Re-dating an existing budget
+    on every push would restart its accumulated period and silence an alert that had
+    already fired."""
+    from web_dashboard.services import azure_service as az
+    want = pb.desired("azure", 500, currency="", emails=EMAILS)
+    created = az._budget_body(want, start_date="2026-09-01")
+    updated = az._budget_body(want, start_date="")
+    assert created["properties"]["timePeriod"] == {"startDate": "2026-09-01"}
+    assert "timePeriod" not in updated["properties"]
+
+
+def test_the_azure_notification_key_is_derived_from_the_threshold():
+    """Azure keys notifications by name inside the budget. A changed threshold written
+    under a new key would leave the old notification in place and the budget would alert
+    twice."""
+    from web_dashboard.services import azure_service as az
+    assert az._notification_key(80) != az._notification_key(90)
+    assert "80" in az._notification_key(80)
+
+
+def test_an_empty_currency_is_preserved_rather_than_defaulted_to_usd():
+    """Azure budgets use the subscription's own billing currency: the dashboard cannot
+    set it and the API does not echo it. Claiming USD would state a currency nobody chose,
+    on a page about money."""
+    assert pb.desired("azure", 500, currency="", emails=EMAILS)["currency"] == ""
+    assert pb.desired("aws", 500, emails=EMAILS)["currency"] == "USD"
+
+
+def test_an_unknown_azure_currency_does_not_read_as_a_change():
+    """The phantom-diff guard. Azure returns no currency, so without the hint every read
+    would report a currency edit and an unchanged budget would look like it needed
+    pushing."""
+    want = pb.desired("azure", 500, currency="", emails=EMAILS)
+    existing = dict(want)          # what get_budget returns once the hint is applied
+    assert pb.diff(existing, want)["action"] == "unchanged"
+
+
+# ── The per-cloud map ─────────────────────────────────────────────────────────
+
+def test_only_clouds_with_an_implementation_have_a_route():
+    """A cloud in the map but not implemented would 500; one implemented but not in the
+    map would be unreachable. GCP is deliberately absent — its billing-account id is held
+    nowhere, the SDK is not a dependency, and the audit found the API disabled."""
+    from web_dashboard.api import budgets as api
+    assert set(api._CLOUDS) == {"aws", "azure"}
+    assert api._CLOUDS["aws"]["scope_key"] == "account_id"
+    assert api._CLOUDS["azure"]["scope_key"] == "subscription_id"
+
+
+def test_an_unsupported_cloud_is_a_404_not_a_crash():
+    from fastapi import HTTPException
+    from web_dashboard.api import budgets as api
+    try:
+        api._backend("gcp")
+    except HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("gcp resolved to a backend")
+
+
+def test_the_read_and_push_are_written_once_for_both_clouds():
+    """A third cloud should be an entry in the map, not a third copy of the
+    orchestration."""
+    tree = ast.parse(_API_SRC)
+    handlers = [n.name for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name.endswith("_budget")]
+    assert sorted(handlers) == ["push_budget", "read_budget"], handlers
 
 
 def test_the_budgets_client_is_global_not_regional():

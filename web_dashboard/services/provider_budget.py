@@ -78,7 +78,7 @@ def parse_emails(raw) -> list:
     return [p.strip() for p in parts if p and "@" in str(p)]
 
 
-def desired(cloud: str, limit, currency: str = "USD", emails=None,
+def desired(cloud: str, limit, currency="USD", emails=None,
             threshold=None, scope: str = "monthly") -> dict:
     """The budget the dashboard would set. Raises ``BudgetError`` when it would be useless.
 
@@ -103,7 +103,11 @@ def desired(cloud: str, limit, currency: str = "USD", emails=None,
     return {
         "name": budget_name(cloud, scope),
         "limit": round(amount, 2),
-        "currency": (currency or "USD").upper(),
+        # An explicitly EMPTY currency is preserved, not defaulted. It means "the
+        # account's own billing currency" — true of Azure Consumption budgets, which the
+        # dashboard cannot set and the API does not echo. Collapsing "" to "USD" here
+        # would state a currency nobody chose, on a page about money.
+        "currency": ("USD" if currency is None else str(currency)).upper(),
         "time_unit": "MONTHLY",
         "threshold_percent": alert_percent(threshold),
         "emails": to,
