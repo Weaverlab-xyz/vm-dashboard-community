@@ -92,6 +92,62 @@ def test_stale_figures_are_visually_distinct():
         "stale figures render in the same colour as fresh ones")
 
 
+# ── The unattributed breakdown ────────────────────────────────────────────────
+
+def _unattributed_block(src, strip_comments=False):
+    """The markup for the unattributed disclosure, from its comment to the notes list.
+
+    ``strip_comments`` drops ``<!-- -->`` blocks, for the same reason ``_load_body``
+    drops ``//`` lines: the markup EXPLAINS that it deliberately has no reclaim control,
+    so a plain substring scan for "reclaim" finds the explanation and reports the thing
+    it is documenting the absence of.
+    """
+    start = src.index("Spend carrying no managed-by tag")
+    block = src[start:src.index('x-show="(c.notes || []).length"', start)]
+    if strip_comments:
+        block = re.sub(r"<!--.*?-->", "", block, flags=re.DOTALL)
+        # The opening marker itself is inside the first comment, which the slice above
+        # started partway through, so drop anything before the first real tag.
+        block = block[block.index("<"):] if "<" in block else ""
+    return block
+
+
+def test_the_unattributed_row_lists_what_is_in_it():
+    """The audit item: the number was already on the page, the list behind it was not."""
+    block = _unattributed_block(_src(_COSTS))
+    assert "scopeRows(c, 'unattributed')" in block, (
+        "the unattributed row shows a total with nothing behind it")
+    assert "s.service" in block and "s.amount" in block, (
+        "the expanded rows should render service and amount, like the scope tables above")
+
+
+def test_the_unattributed_list_offers_no_reclaim_action():
+    """Read-only BY DESIGN, and the one thing the audit is emphatic about.
+
+    A reclaim button here reverses the reapers' stated guard — they refuse to touch what
+    they did not create — and by the cost-guardrails note's own finding, two of the three
+    waste shapes are things a human built by hand. Deletion in this list is a per-resource
+    proof obligation, which is exactly what a generic control cannot encode.
+    """
+    block = _unattributed_block(_src(_COSTS), strip_comments=True).lower()
+    banned = ("reclaim", "destroy", "delete", "terminate", "release", "deallocate")
+    found = [w for w in banned if w in block]
+    assert not found, (
+        f"the unattributed list grew an action verb {found} — this list is read-only; "
+        "see docs/notes/feature-audit-2026-09.md and cloud-cost-guardrails.md")
+    assert "confirm" not in block, "a confirmation prompt implies an action to confirm"
+
+
+def test_a_cloud_that_cannot_list_the_remainder_gets_no_dead_control():
+    """OCI derives its number by subtraction and has no rows behind it. Rendering a
+    chevron there would be a control that does nothing when clicked."""
+    block = _unattributed_block(_src(_COSTS))
+    assert "scopeRows(c, 'unattributed').length &&" in block, (
+        "the toggle should be gated on there being rows to show")
+    assert 'x-show="scopeRows(c, \'unattributed\').length"' in block, (
+        "the expander chevron should only render when the list is non-empty")
+
+
 def test_the_dashboard_tile_surfaces_staleness():
     """The tile shows one cross-cloud total. If one cloud is serving a last-known-good
     figure, the total is not current and the tile has to say so.

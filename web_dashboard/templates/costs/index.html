@@ -147,11 +147,39 @@
               </table>
             </div>
           </template>
-          <!-- spend no tag can reach (untagged children, unlabellable services) -->
-          <div class="flex items-baseline justify-between px-4 py-2 border-t border-gray-200 bg-gray-50/40"
-               x-show="unattributed(c) != null">
-            <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">unattributed</span>
-            <span class="text-xs font-medium text-gray-600" x-text="money(unattributed(c), c.currency)"></span>
+          <!-- Spend carrying no managed-by tag: untagged children, unlabellable services,
+               and anything a human built by hand. READ-ONLY BY DESIGN — no reclaim
+               control here. The reapers refuse to touch what they did not create, and a
+               button here would quietly reverse that guard. -->
+          <div x-show="unattributed(c) != null" class="border-t border-gray-200">
+            <button type="button"
+                    class="w-full flex items-baseline justify-between px-4 py-2 bg-gray-50/40 text-left"
+                    :class="scopeRows(c, 'unattributed').length ? 'hover:bg-gray-100 cursor-pointer' : 'cursor-default'"
+                    :aria-expanded="!!openUn[c.cloud]"
+                    @click="scopeRows(c, 'unattributed').length && (openUn[c.cloud] = !openUn[c.cloud])">
+              <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 flex items-center gap-1">
+                <!-- Only a cloud that can list the remainder gets a control; one that
+                     merely derives the number must not look like a broken button. -->
+                <span x-show="scopeRows(c, 'unattributed').length" class="inline-block transition-transform"
+                      :class="openUn[c.cloud] ? 'rotate-90' : ''">&rsaquo;</span>
+                unattributed
+                <span class="text-gray-400 font-normal normal-case"
+                      x-show="scopeRows(c, 'unattributed').length"
+                      x-text="'(' + scopeRows(c, 'unattributed').length + ')'"></span>
+              </span>
+              <span class="text-xs font-medium text-gray-600" x-text="money(unattributed(c), c.currency)"></span>
+            </button>
+            <table class="w-full text-sm" x-show="openUn[c.cloud] && scopeRows(c, 'unattributed').length" x-cloak>
+              <tbody class="divide-y divide-gray-50">
+                <template x-for="s in scopeRows(c, 'unattributed')" :key="'un/' + s.service">
+                  <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-2 text-gray-700 truncate max-w-[180px]" x-text="s.service" :title="s.service"></td>
+                    <td class="px-4 py-2 text-right text-gray-900 font-medium whitespace-nowrap"
+                        x-text="money(s.amount, c.currency)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
           </div>
           <ul class="px-4 py-2 space-y-1" x-show="(c.notes || []).length">
             <template x-for="n in (c.notes || [])" :key="n">
@@ -185,6 +213,10 @@
       summary: {},
       breakdown: {},
       loading: true,
+      // Which clouds have their unattributed breakdown expanded, keyed by cloud.
+      // Collapsed by default: on a tag-inheritance-off Azure subscription this list is
+      // most of the bill, and it would push the attributed scopes off the card.
+      openUn: {},
 
       async init() {
         requireAuth();
@@ -251,9 +283,11 @@
       // measurable"); 0 means "measured, and it's zero". Don't collapse the two.
       scopeTotal(c, sc) { return (c.scopes && c.scopes[sc]) ? c.scopes[sc].total : null; },
 
-      // Prefer the cloud's own measured remainder. Otherwise derive it from that same
-      // cloud's account total — same currency by construction. Tag-filtered clouds
-      // (AWS/Azure) can't measure it, so this is where their untagged spend surfaces.
+      // Prefer the cloud's own measured remainder. AWS, Azure and GCP all measure it now
+      // that their breakdown queries are unfiltered, and a measured figure is the honest
+      // one — it can differ from the derived value, and it is the only one that can be
+      // broken down by service. The subtraction stays for a cloud that still cannot
+      // measure the scope (OCI), where it is the only number available.
       unattributed(c) {
         if (c.unattributed_total != null) return c.unattributed_total;
         const acct = (this.summary.clouds || []).find(s => s.cloud === c.cloud);
