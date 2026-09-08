@@ -396,6 +396,16 @@
                       <option :value="a" x-text="a"></option>
                     </template>
                   </select>
+                  <p x-show="winAssetsError" x-cloak class="text-[11px] text-red-700"
+                     x-text="winAssetsError"></p>
+                  <p x-show="!winAssetsError && !winAssets.length && winAssetsElsewhere.length"
+                     x-cloak class="text-[11px] text-amber-700">
+                    Staged, but not on
+                    <span x-text="activeBackendLabel"></span> — the backend the install
+                    fetches from:
+                    <span class="font-mono" x-text="winAssetsElsewhere.join(', ')"></span>.
+                    Move it on <a href="/storage" class="underline">Storage</a>.
+                  </p>
                   <input type="text" x-model="rbEdit.zone" placeholder="resource zone"
                          class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
                   <input type="password" x-model="rbEdit.installer_key" autocomplete="new-password"
@@ -900,6 +910,10 @@ function povPage() {
     // script too, and offering a .yml here would let someone stage a file the preflight
     // then refuses — better not to offer it.
     winAssets: [],
+    // The other two reasons the picker can be empty. See loadWinAssets().
+    winAssetsElsewhere: [],
+    winAssetsError: '',
+    activeBackendLabel: '',
     // Keyed by environment id and NOT persisted across a load(): a live appliance read is
     // true at the moment it was made, and showing yesterday's answer next to today's row
     // is the "still reads connected three weeks later" problem this page avoids.
@@ -1419,16 +1433,61 @@ function povPage() {
       } catch (e) { this.error = 'Could not reach the dashboard API.'; }
     },
 
+    // The staged Windows installers, for the Resource Broker asset picker. Read from
+    // /api/storage/list-all and NOT from /api/config-mgmt/assets: the two serve the same
+    // rows, but the config-mgmt router is mounted behind _feature_gate("ansible_enabled")
+    // (main.py), so with Configuration Management toggled off the request 404s, this list
+    // soft-failed to empty, and the field then told an SE that no installer was staged
+    // while the .exe was sitting on the Storage page in front of them. The storage router
+    // is ungated, and is the right dependency anyway -- whether an installer is staged is
+    // a storage question, not an Ansible one.
+    //
+    // Only assets on the ACTIVE backend may be offered: the install job is queued with
+    // asset_backend=active_backend() (pov_resource_broker.queue), so an .exe on any other
+    // backend is a run that fails when the agent fetches the bundle. Those are collected
+    // separately rather than dropped, so the field can name the backend and point at Move
+    // instead of claiming nothing is staged. Same call, same filter and same three-way
+    // message in the blueprint form on pov/templates.html, deliberately: the two fields
+    // write the same storage key, and the one place they disagreed was the bug.
     async loadWinAssets() {
+      this.winAssetsError = '';
+      this.winAssetsElsewhere = [];
       try {
-        const res = await this.apiFetch('/api/config-mgmt/assets');
-        if (!res.ok) { this.winAssets = []; return; }
-        const data = await res.json();
-        const rows = data.assets || data || [];
-        this.winAssets = rows
-          .map(a => (typeof a === 'string' ? a : (a.name || a.key || '')))
-          .filter(n => /\.(exe|msi)$/i.test(n));
-      } catch (e) { this.winAssets = []; }
+        const [listRes, bkRes] = await Promise.all([
+          this.apiFetch('/api/storage/list-all'),
+          this.apiFetch('/api/storage/backends'),
+        ]);
+        if (!listRes.ok || !bkRes.ok) {
+          this.winAssets = [];
+          this.winAssetsError = 'Could not read the staged assets from Storage ' +
+            `(HTTP ${listRes.ok ? bkRes.status : listRes.status}).`;
+          return;
+        }
+        const data = await listRes.json();
+        const bk = await bkRes.json();
+        const active = bk.active || '';
+        const labels = {};
+        for (const b of (bk.backends || [])) labels[b.id] = b.label || b.id;
+        this.activeBackendLabel = labels[active] || active || 'no active backend';
+        // /api/storage/list-all answers {items: [...]}; tolerate the bare list and
+        // {assets: [...]} shapes the same data has been served in elsewhere.
+        const rows = data.items || data.assets || data || [];
+        const wins = rows
+          .map(a => (typeof a === 'string'
+                       ? { name: a, backend: active }
+                       : { name: a.name || a.key || '', backend: a.backend || '' }))
+          .filter(a => /\.(exe|msi)$/i.test(a.name));
+        // With no active backend there is nothing to compare against, so filtering would
+        // empty the picker for the wrong reason -- offer everything and let preflight talk.
+        const onActive = wins.filter(a => !active || !a.backend || a.backend === active);
+        this.winAssets = [...new Set(onActive.map(a => a.name))];
+        this.winAssetsElsewhere = [...new Set(wins
+          .filter(a => !this.winAssets.includes(a.name))
+          .map(a => `${a.name} (on ${labels[a.backend] || a.backend})`))];
+      } catch (e) {
+        this.winAssets = [];
+        this.winAssetsError = 'Could not read the staged assets from Storage.';
+      }
     },
 
     startEditRb(env) {
