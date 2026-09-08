@@ -250,6 +250,17 @@ locals {
     var.db_admin_secret != "" ? { FN_DB_ADMIN_PASSWORD = var.db_admin_secret } : {},
     var.secret_environment
   )
+
+  # A gen2 function's CPU is DERIVED from its memory unless you name it: 256M gets
+  # ~0.17 vCPU. Cloud Run then refuses the service outright —
+  #   "Total cpu < 1 is not supported with concurrency > 1"
+  # — so asking for concurrency without asking for CPU is a 400 at APPLY time, after
+  # the secret and its accessor binding are already created. Concurrency > 1
+  # therefore pins a whole vCPU here rather than leaving it to the memory table.
+  #
+  # null, not a number, on every other path: an omitted available_cpu is how you ask
+  # for the derived value, so every function deployed before this plans unchanged.
+  available_cpu = var.concurrency > 1 ? "1" : null
 }
 
 resource "google_cloudfunctions2_function" "this" {
@@ -270,6 +281,7 @@ resource "google_cloudfunctions2_function" "this" {
 
   service_config {
     available_memory      = "${var.memory_mb}M"
+    available_cpu         = local.available_cpu
     timeout_seconds       = var.timeout_seconds
     max_instance_count    = var.max_instances
     min_instance_count    = var.min_instances

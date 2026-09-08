@@ -12,6 +12,7 @@ misconfiguration rather than an error:
 No database and no cloud: the row lookups are stubbed, and the terraform assertions
 read the .tf file. Stdlib only.
 """
+import inspect
 import os
 import sys
 
@@ -231,6 +232,27 @@ def test_the_new_module_variables_are_wired_not_just_declared():
     assert variables["max_instances"] == 5, variables
     assert variables["ingress_settings"] == "ALLOW_ALL", variables
     assert variables["invoker_members"] == ["serviceAccount:a@p.iam.gserviceaccount.com"]
+
+
+def test_concurrency_pins_a_whole_vcpu():
+    """The live failure this pins: a gen2 function derives CPU from memory (256M ->
+    ~0.17 vCPU) and Cloud Run then refuses the service with "Total cpu < 1 is not
+    supported with concurrency > 1" — a 400 at APPLY, after the shared secret and
+    its accessor binding already exist, so the retry needs a destroy first."""
+    source = _tf_source()
+    assert 'available_cpu = var.concurrency > 1 ? "1" : null' in source, source
+    # Wired, not merely computed — the ingress_settings lesson.
+    assert "available_cpu         = local.available_cpu" in source, source
+
+
+def test_the_dbops_deploy_asks_for_more_than_the_platform_floor():
+    """512M, not the 256M module default: the workload imports cryptography, pytds
+    and pymysql at cold start and holds a TLS session per concurrent request. An OOM
+    kill lands in the same mid-rotation window min_instances exists to close."""
+    assert clouddb_dbops_service._DEFAULT_MEMORY_MB >= 512, (
+        clouddb_dbops_service._DEFAULT_MEMORY_MB)
+    source = inspect.getsource(clouddb_dbops_service.run_deploy)
+    assert "memory_mb=_DEFAULT_MEMORY_MB" in source, source
 
 
 def test_existing_functions_get_the_old_behaviour_when_nothing_is_passed():
