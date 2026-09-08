@@ -749,6 +749,13 @@ def validate_selection(db: Session, *, pra_tenant_id: str = "", ps_tenant_id: st
     Blank is allowed and means "not chosen yet": a POV is provisioned before its wire-up
     slices run, and refusing to create one until all three are picked would make the
     registry a gate on a feature that does not need it yet.
+
+    **A blank comes back as None, never ""**, because every one of these three is a
+    foreign key into ``beyondtrust_tenants`` and this dict is handed straight to a model
+    constructor. "" is a *value*: PostgreSQL checks it against the parent table, finds no
+    row with an empty id, and refuses the INSERT — a 500 on saving a blueprint or creating
+    a POV with any one of the three left unchosen. SQLite does not enforce foreign keys at
+    all, so the whole suite passes either way and only the live instance says so.
     """
     chosen = {"pra_tenant_id": (pra_tenant_id or "").strip(),
               "ps_tenant_id": (ps_tenant_id or "").strip(),
@@ -757,6 +764,7 @@ def validate_selection(db: Session, *, pra_tenant_id: str = "", ps_tenant_id: st
              "entitle_tenant_id": "entitle"}
     for column, value in chosen.items():
         if not value:
+            chosen[column] = None
             continue
         # resolve() raises on a missing row, the wrong kind and an inactive one, with a
         # message naming which. Reusing it means the request and the job agree about what

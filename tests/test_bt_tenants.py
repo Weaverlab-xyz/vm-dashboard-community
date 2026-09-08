@@ -532,12 +532,18 @@ def test_a_destroyed_pov_does_not_pin_its_tenant_forever():
 
 # ── the POV selection ────────────────────────────────────────────────────────
 
-def test_a_blank_selection_is_allowed():
+def test_a_blank_selection_is_allowed_and_comes_back_as_null():
     """A POV is created before its wire-up runs; requiring all three would make the
-    registry a gate on a step that does not need it."""
+    registry a gate on a step that does not need it.
+
+    None rather than "": this dict goes straight into `PovEnvironment` and `PovBlueprint`,
+    where all three are foreign keys. PostgreSQL checks "" against `beyondtrust_tenants`,
+    finds no row with an empty id, and 500s the create; SQLite enforces no foreign key, so
+    nothing but this assertion notices.
+    """
     db = d.SessionLocal()
-    assert t.validate_selection(db) == {"pra_tenant_id": "", "ps_tenant_id": "",
-                                        "entitle_tenant_id": ""}
+    assert t.validate_selection(db) == {"pra_tenant_id": None, "ps_tenant_id": None,
+                                        "entitle_tenant_id": None}
     db.close()
 
 
