@@ -26,6 +26,7 @@ import asyncio
 import calendar
 import logging
 from datetime import date, timedelta
+from typing import NamedTuple, Optional
 
 import httpx
 
@@ -143,15 +144,55 @@ def _month_range() -> tuple:
     return today.replace(day=1).isoformat(), (today + timedelta(days=1)).isoformat()
 
 
-async def get_aws_mtd_cost() -> tuple:
-    """AWS account month-to-date UnblendedCost via Cost Explorer. Returns
-    (amount, currency). Reuses ``aws_service._aws_kwargs`` for credential/region
-    resolution; raises ``aws_service.AWSError`` on failure (incl. a missing
-    ``ce:GetCostAndUsage`` permission)."""
+class MtdCost(NamedTuple):
+    """One cloud's month-to-date spend, and the credits behind it where they can be seen.
+
+    ``amount`` is **net** — what the account actually pays — on every cloud. It has to be:
+    ``evaluate_budget`` compares the summed total against ``cost_monthly_budget``, and a
+    budget is about money leaving, so comparing a gross figure to it over-alerts for
+    exactly as long as the credits last.
+
+    ``gross`` and ``credits`` are ``None`` where the provider cannot separate them, NOT
+    zero — the same distinction ``_scoped_breakdown_result``'s ``measured=`` keeps, and for
+    the same reason. "This account has no credits" and "this API cannot tell me" are
+    different answers and the page must not render them alike.
+
+    **Why the split is on the page at all.** From docs/notes/cloud-cost-guardrails.md: an
+    audit began with "my GCP cost is climbing and I don't know what changed", and nothing
+    had. Gross usage had FALLEN 56%; the free-trial credit had expired on its 90-day clock.
+    A tile showing only net reports a credit expiry as an infrastructure problem, and
+    somebody spends a day hunting a resource that was always there.
+
+    Declared as a NamedTuple with defaults so it is still a tuple: every existing caller
+    and every test stub that returns a plain ``(amount, currency)`` pair keeps working,
+    and gets ``None`` for what it does not know.
+    """
+    amount: float
+    currency: str = "USD"
+    gross: Optional[float] = None
+    # Negative, following every provider's own convention for a credit line.
+    credits: Optional[float] = None
+
+
+async def get_aws_mtd_cost() -> MtdCost:
+    """AWS account month-to-date cost via Cost Explorer, gross and net.
+
+    Reuses ``aws_service._aws_kwargs`` for credential/region resolution; raises
+    ``aws_service.AWSError`` on failure (incl. a missing ``ce:GetCostAndUsage``
+    permission).
+
+    ``UnblendedCost`` is spend before credits and refunds; ``NetUnblendedCost`` is after.
+    Both come back from ONE call — Cost Explorer bills per request, not per metric — so
+    the split is free, and this used to report only the gross one as the account's spend.
+
+    ``NetUnblendedCost`` is missing on some accounts (it needs the relevant billing
+    features enabled). Rather than fail, ``amount`` falls back to the gross figure and the
+    split reports ``None``, which is exactly today's behaviour on such an account.
+    """
     aws_service._require_boto3()
     start, end = _month_range()
 
-    def _query() -> tuple:
+    def _query() -> MtdCost:
         import boto3
         from botocore.exceptions import BotoCoreError, ClientError
         ce = boto3.client("ce", **aws_service._aws_kwargs(""))
@@ -159,16 +200,25 @@ async def get_aws_mtd_cost() -> tuple:
             resp = ce.get_cost_and_usage(
                 TimePeriod={"Start": start, "End": end},
                 Granularity="MONTHLY",
-                Metrics=["UnblendedCost"],
+                Metrics=["UnblendedCost", "NetUnblendedCost"],
             )
         except (BotoCoreError, ClientError) as e:
             raise aws_service.AWSError(f"AWS Cost Explorer query failed: {e}") from e
-        amount, currency = 0.0, "USD"
+        gross, net, currency = 0.0, 0.0, "USD"
+        saw_net = False
         for period in resp.get("ResultsByTime", []):
-            blob = period.get("Total", {}).get("UnblendedCost", {})
-            amount += float(blob.get("Amount") or 0)
+            total = period.get("Total", {})
+            blob = total.get("UnblendedCost", {})
+            gross += float(blob.get("Amount") or 0)
             currency = blob.get("Unit") or currency
-        return amount, currency
+            net_blob = total.get("NetUnblendedCost")
+            if net_blob:
+                saw_net = True
+                net += float(net_blob.get("Amount") or 0)
+                currency = net_blob.get("Unit") or currency
+        if not saw_net:
+            return MtdCost(gross, currency)
+        return MtdCost(net, currency, gross=gross, credits=round(net - gross, 6))
 
     return await asyncio.to_thread(_query)
 
@@ -594,20 +644,31 @@ def _gcp_month_param(bigquery):
     ])
 
 
-async def get_gcp_mtd_cost() -> tuple:
-    """GCP account month-to-date **net** cost from the BigQuery billing export.
-    Returns (amount, currency). Raises ``gcp_service.GCPError`` (incl. when the
-    export table isn't configured)."""
+async def get_gcp_mtd_cost() -> MtdCost:
+    """GCP account month-to-date cost from the BigQuery billing export, gross and net.
+
+    Raises ``gcp_service.GCPError`` (incl. when the export table isn't configured).
+
+    This is the cloud the split exists for. ``_GCP_NET`` is already ``SUM(cost)`` plus the
+    credit sum, so gross is the first half of an expression the query computes anyway —
+    one more column, on a query the cost-guardrails note calls free and unthrottled. And
+    GCP is where a trial credit expires on a 90-day clock and takes the whole remaining
+    balance with it, which without the split reads as infrastructure that grew.
+    """
     table = _gcp_billing_table()
 
-    def _query() -> tuple:
+    def _query() -> MtdCost:
         bigquery, client = _gcp_bq_client(table)
-        sql = (f"SELECT {_GCP_NET} AS net, ANY_VALUE(currency) AS currency "
+        sql = (f"SELECT {_GCP_NET} AS net, SUM(cost) AS gross, "
+               f"ANY_VALUE(currency) AS currency "
                f"FROM `{table}` WHERE usage_start_time >= TIMESTAMP(@month_start)")
         rows = list(client.query(sql, job_config=_gcp_month_param(bigquery)).result())
         if not rows:
-            return 0.0, "USD"
-        return float(rows[0]["net"] or 0), (rows[0]["currency"] or "USD")
+            return MtdCost(0.0, "USD")
+        net = float(rows[0]["net"] or 0)
+        gross = float(rows[0]["gross"] or 0)
+        return MtdCost(net, (rows[0]["currency"] or "USD"),
+                       gross=gross, credits=round(net - gross, 6))
 
     try:
         return await asyncio.to_thread(_query)
@@ -877,6 +938,7 @@ def _unavailable_summary(cloud: str, detail: str, *, exc=None) -> dict:
     """The degraded summary entry. Mirror of :func:`_unavailable_breakdown` — see there
     for why the throttle tags ride on the failure and not on the success."""
     return {"cloud": cloud, "amount": None, "currency": None,
+            "gross": None, "credits": None,
             "status": "unavailable", "detail": detail,
             "throttled": _looks_throttled(exc) if exc is not None else False,
             "retry_after": getattr(exc, "retry_after", None)}
@@ -886,9 +948,14 @@ async def _cloud_entry(cloud: str, fetch) -> dict:
     """Run one cloud's MTD query, degrading any failure to status=unavailable so
     a single misconfigured cloud never sinks the whole summary."""
     try:
-        amount, currency = await fetch()
-        return {"cloud": cloud, "amount": round(amount, 2),
-                "currency": currency, "status": "ok", "detail": ""}
+        # MtdCost(*...) rather than unpacking: a fetcher — or a test stub — that still
+        # returns a plain (amount, currency) pair resolves here with gross/credits None,
+        # so adding the split did not have to touch Azure, OCI, or any existing caller.
+        cost = MtdCost(*await fetch())
+        return {"cloud": cloud, "amount": round(cost.amount, 2),
+                "currency": cost.currency, "status": "ok", "detail": "",
+                "gross": None if cost.gross is None else round(cost.gross, 2),
+                "credits": None if cost.credits is None else round(cost.credits, 2)}
     except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError, oci_service.OCIError) as e:
         return _unavailable_summary(cloud, str(e), exc=e)
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
@@ -927,7 +994,17 @@ def assemble_summary(clouds: list) -> dict:
     oks = [c for c in clouds if c["status"] == "ok"]
     total = round(sum(c["amount"] for c in oks), 2) if oks else None
     currency = oks[0]["currency"] if oks else "USD"
-    return {"total_mtd": total, "currency": currency, "clouds": clouds}
+    # Summed over only the clouds that actually report gross. A total mixing measured
+    # gross with net-only clouds would be neither number, and would understate the very
+    # gap the split exists to show — so it stays None until every ok cloud can answer.
+    grossable = [c for c in oks if c.get("gross") is not None]
+    gross_total = (round(sum(c["gross"] for c in grossable), 2)
+                   if grossable and len(grossable) == len(oks) else None)
+    return {"total_mtd": total, "currency": currency, "clouds": clouds,
+            "gross_mtd": gross_total,
+            # net - gross, so it is negative like every provider's own credit line.
+            "credits_mtd": (round(total - gross_total, 2)
+                            if gross_total is not None and total is not None else None)}
 
 
 async def get_cost_summary() -> dict:

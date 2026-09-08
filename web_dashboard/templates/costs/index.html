@@ -54,8 +54,14 @@
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-8">
     <div class="flex items-baseline justify-between mb-4">
       <h2 class="font-semibold text-gray-800">Account spend (MTD)</h2>
-      <span class="text-2xl font-bold text-gray-900"
-            x-text="summary.total_mtd == null ? '–' : money(summary.total_mtd, summary.currency)"></span>
+      <div class="text-right">
+        <span class="text-2xl font-bold text-gray-900"
+              x-text="summary.total_mtd == null ? '–' : money(summary.total_mtd, summary.currency)"></span>
+        <!-- Only when EVERY reporting cloud gives a gross; a mixed total would be neither
+             number. See assemble_summary, which returns null rather than a partial sum. -->
+        <p class="text-[11px] text-gray-500" x-show="summary.gross_mtd != null && summary.credits_mtd"
+           x-text="'gross ' + money(summary.gross_mtd, summary.currency) + ' · credits ' + money(summary.credits_mtd, summary.currency)"></p>
+      </div>
     </div>
     <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
       <template x-for="c in (summary.clouds || [])" :key="c.cloud">
@@ -64,6 +70,20 @@
           <p class="text-lg font-bold mt-0.5"
              x-text="c.status === 'ok' ? money(c.amount, c.currency) : 'unavailable'"
              :class="c.status !== 'ok' ? 'text-gray-400' : (c.stale ? 'text-amber-700' : 'text-gray-900')"></p>
+          <!-- Gross and credits, where the cloud can separate them. The headline above is
+               NET — what the account pays — so without this line a credit expiring reads
+               as infrastructure that grew. That is not hypothetical: a GCP audit began
+               with "my cost is climbing", and gross usage had fallen 56% while a trial
+               credit ran out on its 90-day clock. Shown only when credits are actually
+               non-zero, so an account that has never had one carries no empty column. -->
+          <p class="text-[11px] text-gray-500 mt-1"
+             x-show="c.status === 'ok' && c.gross != null && c.credits"
+             :title="'gross is spend before credits and refunds; the headline is net'">
+            <span x-text="'gross ' + money(c.gross, c.currency)"></span>
+            <span class="text-gray-400">·</span>
+            <span :class="c.credits < 0 ? 'text-emerald-700' : 'text-gray-500'"
+                  x-text="'credits ' + money(c.credits, c.currency)"></span>
+          </p>
           <!-- Three states, not two: fresh, stale-but-known, and never-known.
                `unavailable` now means the narrow thing it says — this cloud has never
                returned a figure — so `detail` is worth showing when it appears. -->
