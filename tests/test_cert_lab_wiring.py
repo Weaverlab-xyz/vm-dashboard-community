@@ -140,11 +140,11 @@ def test_a_failed_teardown_does_not_re_arm_the_timer():
 
 # ── the preview flag ──────────────────────────────────────────────────────────
 
-def test_it_ships_as_a_preview_flag_alongside_cloud_functions():
+def test_it_ships_as_a_preview_flag_alongside_workload_credentials():
     setup = _read("web_dashboard", "api", "setup.py")
     flags = setup.split("_PREVIEW_FLAGS = {")[1].split("\n}")[0]
     assert '"cert_lab_enabled"' in flags
-    assert '"cloud_functions_enabled"' in flags, "sanity: the reference preview flag"
+    assert '"workload_credentials_enabled"' in flags, "sanity: the reference preview flag"
     # And its config panel is reachable from the flag's Configure link.
     assert '"cert_lab_enabled": "cert_lab"' in setup
     assert '"cert_lab": CertLabFeatureConfig' in setup
@@ -162,7 +162,7 @@ def test_the_flag_gates_the_router_the_page_and_the_nav():
     assert '"cert_lab_enabled"' in flags
 
 
-def test_the_page_carries_the_preview_badge_like_functions():
+def test_the_page_carries_the_preview_badge():
     page = _read("web_dashboard", "templates", "cert_lab", "index.html")
     assert ">Preview</span>" in page
     # Every call goes through window.API, which attaches the bearer token. A bare fetch

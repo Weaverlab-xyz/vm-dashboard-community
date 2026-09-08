@@ -124,8 +124,8 @@ modify DB instances + subnet groups) and creates a private **DB subnet group**
 spanning two AZs, so the managed-database feature can deploy a private Postgres
 into the sandbox.
 
-For **Cloud Functions (preview)**, all three setup scripts emit
-`cloud_functions_enabled=true` (so the preview toggle is already on after the import)
+For **Cloud Functions**, all three setup scripts emit
+`cloud_functions_enabled=true` (so the feature is already on after the import)
 plus a package store pointing at the same image-hub bucket/container the scripts
 already create — no new storage. AWS additionally grants `lambda:*` and creates a
 Secrets Manager interface endpoint; Azure adds a `functions-subnet` delegated to

@@ -2,10 +2,12 @@
 
 > **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are bringing Cloud Functions up end to end for the first time.
 
-The first end-to-end run of the Cloud Functions preview. Nothing in this feature has
-been executed against a real cloud, so treat this as a bring-up: the goal of each
-stage is to retire one class of risk, not to reach a working Entitle grant on the
-first attempt. See [`../integrations/cloud-functions.md`](../integrations/cloud-functions.md)
+The first end-to-end run of Cloud Functions on a cloud. **GCP is proven** — the
+`db_grant` workload has been deployed and invoked against both a MySQL and a SQL
+Server managed database there, which is what took the feature out of preview. AWS and
+Azure have not been run end to end, so for those two treat this as a bring-up: the
+goal of each stage is to retire one class of risk, not to reach a working Entitle
+grant on the first attempt. See [`../integrations/cloud-functions.md`](../integrations/cloud-functions.md)
 for the reference and [`../design/cloud-functions.md`](../design/cloud-functions.md)
 for why it is built this way.
 
@@ -18,7 +20,7 @@ after two clouds have proven the contract makes any failure unambiguously Azure'
 
 ## 0. Before you start (10 minutes, no cloud)
 
-1. **Enable the feature.** Settings → Preview features → **Cloud Functions**. The
+1. **Enable the feature.** Settings → Integrations → **Cloud Functions**. The
    nav entry and `/api/functions` appear immediately; no restart.
 2. **Confirm the image has the modules.** A published image missing a Terraform
    module fails only at deploy time, inside a job:

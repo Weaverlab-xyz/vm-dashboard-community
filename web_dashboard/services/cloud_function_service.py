@@ -1,5 +1,5 @@
 """
-Cloud Functions — the cloud-agnostic service seam (preview).
+Cloud Functions — the cloud-agnostic service seam.
 
 Deploys a dashboard-authored handler (``web_dashboard/functions/``) as an AWS
 Lambda / Azure Linux Function App / GCP Cloud Run function, and records each in the

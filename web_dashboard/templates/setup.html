@@ -1267,6 +1267,12 @@ function wizard() {
         note:  '',
       },
       {
+        key:   'cloud_functions_enabled',
+        label: 'Cloud Functions',
+        desc:  'Deploy a dashboard-authored handler as an AWS Lambda, an Azure Function App, or a GCP Cloud Run function — optionally attached to a VPC/VNet so it can reach private resources. Each gets a stable HTTPS endpoint protected by a shared bearer secret.',
+        note:  '',
+      },
+      {
         key:   'remote_agents_enabled',
         label: 'Remote Agents',
         desc:  'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules.',

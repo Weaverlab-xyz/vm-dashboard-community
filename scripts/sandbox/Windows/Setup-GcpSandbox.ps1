@@ -152,7 +152,7 @@ Write-Section 'Enable APIs'
 # fail with a "403 Forbidden … :getIamPolicy" that is really a SERVICE_DISABLED.
 # bigquery.googleapis.com powers the Cloud Costs page: GCP has no cost API, so the
 # dashboard queries the Cloud Billing export table in BigQuery (see cost_service.py).
-# cloudfunctions.googleapis.com backs the Cloud Functions (preview) feature — the
+# cloudfunctions.googleapis.com backs the Cloud Functions feature — the
 # gen2 module targets the Cloud Functions v2 API, and without it the apply dies at
 # plan with a SERVICE_DISABLED. artifactregistry.googleapis.com is where Cloud Build
 # pushes the function image (the gcf-artifacts repo); it is usually auto-enabled
@@ -400,7 +400,7 @@ if ($LASTEXITCODE -ne 0) {
 # runs a query job (jobUser) against the Cloud Billing export table and reads its
 # rows (dataViewer). Both are granted at project scope — if your billing export
 # dataset lives in a DIFFERENT project, also grant dataViewer on that dataset there.
-# The last four roles are Cloud Functions (preview). cloudfunctions.developer
+# The last four roles are Cloud Functions. cloudfunctions.developer
 # creates/updates/deletes the gen2 function. secretmanager.admin is needed because
 # the module CREATES each function's bearer secret and sets an IAM member on it —
 # secretAccessor above only reads, so it cannot do either. cloudbuild.builds.builder
@@ -519,7 +519,7 @@ Remove-Item -Path $DaisyLifecycle -Force -ErrorAction SilentlyContinue
 # is the legacy <num>@cloudbuild SA on older projects and the Compute Engine
 # default <num>-compute@developer SA on newer ones — grant both; best-effort
 # since a project may not have the legacy SA.
-# artifactregistry.writer is the Cloud Functions (preview) addition: a gen2 deploy
+# artifactregistry.writer is the Cloud Functions addition: a gen2 deploy
 # builds through the same Cloud Build identity and pushes the result to the in-region
 # gcf-artifacts repo, which fails ~90s in — AFTER a clean plan — without it.
 Write-Section 'Cloud Build image-export IAM'
@@ -598,7 +598,7 @@ $cfg = @(
     '# BeyondTrust deploy key — set in /setup or /secrets:',
     'gcp_cloud_run_docker_deploy_key=…',
     "",
-    "# Cloud Functions (preview) — Cloud Run functions (gen2). Sources reuse the image-hub bucket:",
+    "# Cloud Functions — Cloud Run functions (gen2). Sources reuse the image-hub bucket:",
     "cloud_functions_enabled=true",
     "function_package_gcs_bucket=$StorageBucket               # Same bucket as the image hub, under function-packages/",
     "gcp_functions_service_account=$SaEmail   # Runtime SA; blank would fall back to the broad default compute SA",

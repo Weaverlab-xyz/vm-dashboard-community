@@ -230,6 +230,7 @@ class FeaturesSetup(BaseModel):
     admission_control_enabled: bool = False
     cloud_database_enabled: bool = False
     k8s_management_enabled: bool = False
+    cloud_functions_enabled: bool = False
     remote_agents_enabled: bool = False
     mcp_server_enabled: bool = False
     cloud_unmanaged_discovery_enabled: bool = False
@@ -535,6 +536,7 @@ def _apply_config(payload: SetupPayload) -> None:
         "admission_control_enabled": "1" if payload.features.admission_control_enabled else "0",
         "cloud_database_enabled":   "1" if payload.features.cloud_database_enabled else "0",
         "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
+        "cloud_functions_enabled":  "1" if payload.features.cloud_functions_enabled else "0",
         "remote_agents_enabled":    "1" if payload.features.remote_agents_enabled else "0",
         "mcp_server_enabled":       "1" if payload.features.mcp_server_enabled else "0",
         "cloud_unmanaged_discovery_enabled":
@@ -1723,13 +1725,17 @@ class OidcFeatureConfig(BaseModel):
 
 
 class CloudFunctionsFeatureConfig(BaseModel):
-    """Config-only panel (no `enabled`) for the Cloud Functions PREVIEW feature.
-    The preview toggle owns `cloud_functions_enabled`; this panel holds the package
-    stores and the optional VPC/VNet attachment ids. See _CONFIG_ONLY_FEATURES.
+    """Config panel for the Cloud Functions feature. Graduated from preview to GA once
+    a dashboard-authored handler was deployed and invoked end-to-end against both a
+    MySQL and a SQL Server managed database on GCP. The toggle owns
+    `cloud_functions_enabled` via its own `enabled` field (feature name → key through
+    _feature_to_cfg_key, like cost_explorer / cloud_database / k8s_management); the
+    rest hold the package stores and the optional VPC/VNet attachment ids.
 
     Azure has no bucket field on purpose: run-from-package needs a blob + SAS on the
     dashboard's own storage account (`storage_azure_account`), so only the container
     name is configurable here."""
+    enabled: bool = False
     function_package_s3_bucket: str = ""
     function_package_gcs_bucket: str = ""
     function_package_azure_container: str = "function-packages"
@@ -1918,7 +1924,7 @@ _FEATURE_MODELS = {
 #
 # "worker" is here because the job worker has no off position at all: it is the process
 # that runs every queued job, so an enable toggle could only ever mislead.
-_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker", "cloud_functions",
+_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker",
                          "cert_lab",
                          "workload_credentials"}
 
@@ -2319,14 +2325,6 @@ def put_azure_regions(payload: RegionConfigsPayload, request: Request):
 _PREVIEW_FLAGS = {
     "vdesktops_enabled": (
         "Virtual Desktops", "Desktop pools brokered as PRA sessions (Phase 1: Azure)."),
-    "cloud_functions_enabled": (
-        "Cloud Functions",
-        "Deploy dashboard-authored handlers as AWS Lambda / Azure Function Apps / "
-        "GCP Cloud Run functions, optionally attached to a VPC/VNet."),
-    # Preview because the product is not yet generally available and its API may still
-    # change. Deliberately no release dates here or in any operator-facing text: this
-    # repository is public, and a schedule is BeyondTrust's to announce. Off means the
-    # dashboard uses today's static cloud credentials, unchanged.
     # Preview because none of the plugin's four submission paths has been proven against
     # a live CA yet — the shared core is covered by the plugin's own 307-assertion suite,
     # but ADCS, AWS Private CA, GCP CAS and the Entra publishers can only be exercised
@@ -2338,6 +2336,10 @@ _PREVIEW_FLAGS = {
         "onboard certificate identities onto the Password Safe \"Certificate\" custom "
         "plugin — the managed account holds the PKCS#12 passphrase, Secrets Safe holds "
         "the bundle."),
+    # Preview because the product is not yet generally available and its API may still
+    # change. Deliberately no release dates here or in any operator-facing text: this
+    # repository is public, and a schedule is BeyondTrust's to announce. Off means the
+    # dashboard uses today's static cloud credentials, unchanged.
     "workload_credentials_enabled": (
         "Workload Credentials (BeyondTrust)",
         "Preview. Mint short-lived AWS and Azure credentials on demand instead of "
@@ -2350,7 +2352,6 @@ _PREVIEW_FLAGS = {
 # the panel is config-only (see _CONFIG_ONLY_FEATURES).
 _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
-    "cloud_functions_enabled": "cloud_functions",
     "workload_credentials_enabled": "workload_credentials",
     "cert_lab_enabled": "cert_lab",
 }

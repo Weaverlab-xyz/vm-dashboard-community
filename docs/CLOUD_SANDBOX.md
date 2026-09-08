@@ -50,7 +50,7 @@ A consistent topology across all three clouds:
 | **VM segment** | Hosts the lab [VMs you deploy](cloud-vms.md) via the dashboard. | ❌ No — only the Gateway can reach them, and they cannot reach the internet directly. |
 | **DB segment** | Dedicated private subnets for [managed cloud databases](databases.md) (AWS shown; Azure/GCP/OCI have their own DB subnets below). | ❌ No — brokered only through the PRA tunnel. |
 | **[Managed Kubernetes](kubernetes.md)** | Clusters build their **own** network — the dashboard's Terraform creates each cluster's VPC/VNet + subnets + egress (AWS: a small NAT instance) and destroys it on decommission. No sandbox k8s subnet. The AWS EKS build additionally VPC-peers back to the sandbox VPC and opens the DB/VM SGs for direct access. | Cluster-owned (per-cluster NAT). Management-plane access via Entitle/PRA + the AWS peering. |
-| **[Cloud Functions](integrations/cloud-functions.md)** (preview) | `network_mode=vpc` functions reach private resources. Azure gets a dedicated `functions-subnet` delegated to `Microsoft.Web/serverFarms`; AWS reuses the private subnet plus a Secrets Manager interface endpoint (without which a vpc-mode Lambda cannot read its bearer secret and 500s on every invoke); GCP uses Direct VPC egress into the VM subnet — no connector, nothing billed while idle. **No OCI support.** | ❌ No on AWS (no NAT unless a VM is up). Azure: Storage + Key Vault via service endpoints only — generic egress needs a NAT gateway. |
+| **[Cloud Functions](integrations/cloud-functions.md)** | `network_mode=vpc` functions reach private resources. Azure gets a dedicated `functions-subnet` delegated to `Microsoft.Web/serverFarms`; AWS reuses the private subnet plus a Secrets Manager interface endpoint (without which a vpc-mode Lambda cannot read its bearer secret and 500s on every invoke); GCP uses Direct VPC egress into the VM subnet — no connector, nothing billed while idle. **No OCI support.** | ❌ No on AWS (no NAT unless a VM is up). Azure: Storage + Key Vault via service endpoints only — generic egress needs a NAT gateway. |
 | **Desktops segment** (Azure) | Dedicated **non-delegated** subnet (`10.99.6.0/24`) for VDI desktop pools, separate from the VM segment because the RS jump client must register with the appliance at first boot. | ⚠️ **443 only** — the NSG allows outbound HTTPS (jump-client registration + Windows activation/updates) but denies other Internet; RDP brokered in via the Gateway. |
 
 Per-cloud isolation mechanism:
@@ -336,7 +336,7 @@ Service account dashboard-sandbox-sa@<project>.iam.gserviceaccount.com
   Roles: 21 project-level bindings — see the `for role in ...` loop in
          scripts/sandbox/Linux/setup-gcp.sh, which carries a why-comment per
          role. (Listing them here just went stale; the script is the source
-         of truth.) Cloud Functions (preview) adds cloudfunctions.developer,
+         of truth.) Cloud Functions adds cloudfunctions.developer,
          secretmanager.admin, cloudbuild.builds.builder and
          artifactregistry.writer, plus the cloudfunctions +
          artifactregistry APIs.
@@ -376,7 +376,7 @@ gcp_service_account_json=$(cat …/sa-key.json | jq -c .)
 # Managed databases (Cloud SQL private IP via the PRA tunnel):
 gcp_db_network=projects/my-lab-project/global/networks/dashboard-sandbox-vpc
 
-# Cloud Functions (preview) — gen2 sources reuse the image-hub bucket:
+# Cloud Functions — gen2 sources reuse the image-hub bucket:
 cloud_functions_enabled=true
 function_package_gcs_bucket=my-lab-project-dashboard-sandbox-storage
 gcp_functions_service_account=dashboard-sandbox-sa@my-lab-project.iam.gserviceaccount.com
@@ -388,7 +388,7 @@ gcp_cloud_run_docker_deploy_key=…
 ```
 
 Note that `cloud_functions_enabled=true` rides along in the import, so **Cloud
-Functions is already switched on** under Settings → Preview features when the
+Functions is already switched on** under Settings → Integrations when the
 dashboard comes up — no restart and no extra click.
 
 Three ways to apply these to a running dashboard:

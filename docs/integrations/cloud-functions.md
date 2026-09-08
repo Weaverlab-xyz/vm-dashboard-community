@@ -1,9 +1,9 @@
-# Cloud Functions (preview)
+# Cloud Functions
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a stable HTTPS endpoint external systems can call to act inside your network.
 
-> **Preview feature.** Enable it in **Settings → Preview features → Cloud Functions**,
-> then configure a package store in **Settings → Integrations → Cloud Functions**.
+> Enable it in **Settings → Integrations → Cloud Functions**, then configure a
+> package store in the same panel.
 > Design notes: [docs/design/cloud-functions.md](../design/cloud-functions.md).
 
 ## What is it?
@@ -45,10 +45,10 @@ this adds** — an always-on, externally callable endpoint is.
 
 ## Setup
 
-1. **Settings → Preview features** → turn on **Cloud Functions**. The nav entry and
+1. **Settings → Integrations** → turn on **Cloud Functions**. The nav entry and
    `/api/functions` appear immediately; no restart.
-2. **Settings → Integrations → Cloud Functions** → set the package store for each
-   cloud you intend to use. A cloud without one is shown in the deploy form but
+2. **Settings → Integrations → Cloud Functions** (Configure) → set the package store
+   for each cloud you intend to use. A cloud without one is shown in the deploy form but
    blocked, with the reason.
 3. *(Optional)* Fill in the **VPC / VNet attachment** section if you want functions
    that reach private resources. See [Networking](#networking).
