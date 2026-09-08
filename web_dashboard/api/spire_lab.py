@@ -191,27 +191,41 @@ async def build_options(db: Session = Depends(get_db),
     # A failure to LIST is reported, not swallowed. Silence here would be the exact thing
     # this check exists to prevent: the run fetches each playbook by filename at the
     # moment it needs it, so an asset nobody staged is a job that dies three stages in.
-    backend_name = (config_service.get("spire_lab_asset_backend") or "").strip()
-    try:
-        from ..services import storage_service
-        backend_name = backend_name or storage_service.active_backend()
-        if not backend_name:
-            raise RuntimeError("no storage backend is configured")
-        staged = [a.get("name") for a in
-                  (await storage_service.list_assets_in(backend_name) or [])]
-        absent = [a for a in spire_lab_service.STAGE_ASSETS if a not in staged]
-        if absent:
-            missing.append(
-                f"these playbooks are not on the {backend_name!r} storage backend: "
-                f"{', '.join(absent)} — upload them from examples/playbooks/spire/ on "
-                f"the Config Management page. A run fetches assets by filename from "
-                f"storage; the repo copy is a sample, not a source.")
-    except Exception as exc:  # noqa: BLE001 — log backend errors; avoid exposing internals to clients
-        logger.info("spire-lab: could not list assets on %r: %s", backend_name, exc)
+    #
+    # "no backend" is settled BEFORE the try so it keeps its own precise wording — it is
+    # a configuration state, not a failure, and it is the common case on a fresh install.
+    from ..services import storage_service
+    backend_name = ((config_service.get("spire_lab_asset_backend") or "").strip()
+                    or storage_service.active_backend() or "")
+    if not backend_name:
         missing.append(
-            f"could not check whether the four spire-*.yml playbooks are staged "
-            f"on {backend_name or 'no backend'}. A run fetches them by filename from "
-            f"storage, so verify on the Config Management page before building.")
+            "no storage backend is configured, so the four spire-*.yml playbooks have "
+            "nowhere to live. A run fetches assets by filename from storage — set a "
+            "backend on the Storage page, then upload them from "
+            "examples/playbooks/spire/.")
+    else:
+        try:
+            staged = [a.get("name") for a in
+                      (await storage_service.list_assets_in(backend_name) or [])]
+            absent = [a for a in spire_lab_service.STAGE_ASSETS if a not in staged]
+            if absent:
+                missing.append(
+                    f"these playbooks are not on the {backend_name!r} storage backend: "
+                    f"{', '.join(absent)} — upload them from examples/playbooks/spire/ "
+                    f"on the Config Management page. A run fetches assets by filename "
+                    f"from storage; the repo copy is a sample, not a source.")
+        except Exception as exc:  # noqa: BLE001 — a backend that cannot list still reports
+            # Log the real error server-side; return a generic reason. A storage-backend
+            # error carries provider response bodies and bucket detail, and this endpoint
+            # is reachable by any cloud_function reader — CodeQL py/stack-trace-exposure.
+            # Same rule as api/config_mgmt's managed-account lookup.
+            logger.warning("spire-lab: could not list assets on %r: %s",
+                           backend_name, exc)
+            missing.append(
+                f"could not read the {backend_name!r} storage backend to check whether "
+                f"the four spire-*.yml playbooks are staged — check the server logs. A "
+                f"run fetches them by filename from storage, so verify on the Config "
+                f"Management page before building.")
 
     return {"clouds": list(spire_lab_service.PROVISIONING_CLOUDS),
             "hosts": hosts,
@@ -322,8 +336,14 @@ async def reapply_acl(lab_id: str, db: Session = Depends(get_db),
     row = _visible_or_404(db, lab_id, user)
     import json
     from datetime import datetime
+    # Resolved OUTSIDE the try, so the generic handler below can name the ACL without
+    # risking an unbound local: `require_backend` raises only SpireLabError, which is
+    # a 400 either way.
     try:
         backend = spire_lab_service.require_backend(row.cloud)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
         cidrs = spire_lab_service.source_cidrs()
         res = await backend.apply_ingress(
             json.loads(row.vm_resource_id or "{}"), [row.bind_port], cidrs)
@@ -341,9 +361,19 @@ async def reapply_acl(lab_id: str, db: Session = Depends(get_db),
                          "spire-open-ports.yml from Config Management if you changed the "
                          "source set and the host runs firewalld or ufw.")}
     except SpireLabError as exc:
+        # Our own message, authored here — safe to return verbatim.
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:  # noqa: BLE001 — the cloud SDK's own error is the message
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        # Log the real error server-side; return a generic reason. A cloud SDK error
+        # carries request ids, subscription/project identifiers and response bodies, and
+        # this endpoint is reachable by any cloud_function writer — CodeQL
+        # py/stack-trace-exposure. The job path keeps the detail: a provision or teardown
+        # records the provider's own text on the row, which is where to look.
+        logger.warning("spire-lab: ACL re-apply failed for %s: %s", row.id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=(f"the {backend.acl_label} could not be updated — check the server "
+                    f"logs. Reachability is two gates; the host firewall is the other."))
 
 
 @router.delete("/{lab_id}")

@@ -241,6 +241,54 @@ def test_the_service_never_reads_the_credential_only_names_it():
     assert '"pfx"' not in reader and '"passphrase"' not in reader
 
 
+# ── a third party's exception text never reaches the caller ──────────────────
+
+def test_a_broad_except_logs_the_real_error_and_returns_a_generic_one():
+    """CodeQL ``py/stack-trace-exposure``, and the reason it matters here specifically.
+
+    Both broad handlers in this router wrap a THIRD PARTY: a storage backend and a cloud
+    SDK. Their exception strings carry request ids, subscription/project identifiers,
+    bucket names and whole response bodies, and every route here is reachable by any
+    ``cloud_function`` reader. So the rule the repo already follows (see
+    ``api/config_mgmt``'s managed-account lookup and ``api/k8s``'s token status) is: log
+    the real thing server-side, return a reason that names the server logs.
+
+    Our OWN ``SpireLabError`` is exempt and deliberately returned verbatim — it is a
+    message authored in this repo, which is the same exemption ``K8sError`` gets.
+    """
+    import ast as _ast
+    src = _read("web_dashboard", "api", "spire_lab.py")
+    tree = _ast.parse(src)
+    checked = 0
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.ExceptHandler):
+            continue
+        # Only the broad ones. A named app error is the exempt case.
+        if not (isinstance(node.type, _ast.Name) and node.type.id == "Exception"):
+            continue
+        checked += 1
+        body = chr(10).join(_ast.unparse(stmt) for stmt in node.body)
+        name = node.name or "exc"
+        assert "logger." in body, (
+            f"broad except at line {node.lineno} does not log the real error")
+        assert f"str({name})" not in body, (
+            f"broad except at line {node.lineno} returns str({name}) to the caller")
+        # An f-string interpolation is the same leak spelled differently, and is the
+        # form this actually shipped as before CodeQL caught it.
+        for stmt in node.body:
+            for sub in _ast.walk(stmt):
+                if isinstance(sub, _ast.FormattedValue):
+                    refs = {n.id for n in _ast.walk(sub) if isinstance(n, _ast.Name)}
+                    # The logger call is allowed to interpolate; a response is not.
+                    parent_is_log = "logger" in _ast.unparse(stmt)
+                    assert not (name in refs and not parent_is_log), (
+                        f"broad except at line {node.lineno} interpolates {name} into "
+                        f"a value returned to the caller")
+    assert checked >= 2, (
+        f"expected the storage-listing and ACL handlers to be broad excepts; "
+        f"found {checked}")
+
+
 # ── the auto-delete timer reaches the trust domain ───────────────────────────
 
 def test_spirelab_is_a_reapable_kind_with_an_idle_state_and_a_teardown():
