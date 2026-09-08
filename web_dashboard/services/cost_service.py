@@ -234,6 +234,12 @@ def _looks_throttled(exc) -> bool:
     return any(m in str(exc).lower() for m in _THROTTLE_MARKERS)
 
 
+# Azure's query API is free but aggressively throttled, so the risk a cap guards here is a
+# link that never terminates rather than a bill. Generous enough that no real month-to-date
+# result reaches it, and logged rather than silent when it does.
+_AZURE_MAX_COST_PAGES = 20
+
+
 async def _azure_cost_query(sub_id: str, token: str, body: dict, *, label: str) -> dict:
     """POST an Azure Cost Management query and return the parsed JSON body.
 
@@ -247,29 +253,61 @@ async def _azure_cost_query(sub_id: str, token: str, body: dict, *, label: str) 
     url = (f"{_AZURE_MGMT}/subscriptions/{sub_id}/providers/"
            "Microsoft.CostManagement/query?api-version=2023-03-01")
     headers = {"Authorization": f"Bearer {token}"}
+    merged: dict = {}
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            for attempt in (0, 1):
-                resp = await client.post(url, json=body, headers=headers)
-                if getattr(resp, "status_code", None) == 429:
-                    wait = _retry_after_seconds(
-                        resp.headers.get("Retry-After") if hasattr(resp, "headers") else None,
-                        default=10)
-                    if attempt == 0 and wait <= _INLINE_RETRY_MAX_WAIT:
-                        logger.warning(
-                            "azure cost 429 for %s; retrying in %ss (Retry-After honored)",
-                            label, wait)
-                        await asyncio.sleep(wait)
-                        continue
-                    # AzureError is not an httpx.HTTPError, so this propagates past the
-                    # handler below with its .throttled/.retry_after tags intact.
-                    logger.warning("azure cost 429 for %s; cooling down for %ss", label, wait)
-                    raise _throttled(azure_service.AzureError, label, wait)
-                resp.raise_for_status()
-                return resp.json() or {}
+            # `properties.nextLink` continues a truncated result set. Following it is not
+            # optional: a partial read is not an error here, it is a SMALLER NUMBER, and a
+            # cost page that silently under-reports is worse than one that fails. Bounded,
+            # because a service echoing the same link would loop forever.
+            for _ in range(_AZURE_MAX_COST_PAGES):
+                page = None
+                for attempt in (0, 1):
+                    resp = await client.post(url, json=body, headers=headers)
+                    if getattr(resp, "status_code", None) == 429:
+                        wait = _retry_after_seconds(
+                            resp.headers.get("Retry-After") if hasattr(resp, "headers") else None,
+                            default=10)
+                        if attempt == 0 and wait <= _INLINE_RETRY_MAX_WAIT:
+                            logger.warning(
+                                "azure cost 429 for %s; retrying in %ss (Retry-After honored)",
+                                label, wait)
+                            await asyncio.sleep(wait)
+                            continue
+                        # AzureError is not an httpx.HTTPError, so this propagates past the
+                        # handler below with its .throttled/.retry_after tags intact. Raised
+                        # even mid-pagination, and deliberately: returning the pages read so
+                        # far would hand the page a total that is real-looking and too low.
+                        logger.warning("azure cost 429 for %s; cooling down for %ss", label, wait)
+                        raise _throttled(azure_service.AzureError, label, wait)
+                    resp.raise_for_status()
+                    page = resp.json() or {}
+                    break
+                if page is None:
+                    raise azure_service.AzureError(f"{label}: rate limited after retry")
+
+                props = page.get("properties") or {}
+                if not merged:
+                    merged = page
+                else:
+                    # Columns come from the first page; only rows accumulate.
+                    (merged.setdefault("properties", {}).setdefault("rows", [])
+                     .extend(props.get("rows") or []))
+                nxt = props.get("nextLink")
+                if not nxt:
+                    # Page one's own nextLink is still on `merged` when it was the first
+                    # of several. Drop it: the result is fully drained, and leaving a link
+                    # on it would tell the next reader the opposite.
+                    (merged.get("properties") or {}).pop("nextLink", None)
+                    return merged
+                url = nxt
+            logger.warning(
+                "azure cost query for %s stopped at the %d-page cap with a nextLink "
+                "still outstanding; the figure may be incomplete.",
+                label, _AZURE_MAX_COST_PAGES)
+            return merged
     except httpx.HTTPError as e:
         raise azure_service.AzureError(f"{label}: {e}") from e
-    raise azure_service.AzureError(f"{label}: rate limited after retry")
 
 
 async def get_azure_mtd_cost() -> tuple:
@@ -353,14 +391,27 @@ def _breakdown_result(services: dict, currency: str) -> dict:
         measured=(SCOPE_DASHBOARD,))
 
 
-async def get_aws_managed_breakdown() -> dict:
-    """AWS MTD spend tagged ``managed-by``, split into dashboard vs sandbox scope and
-    grouped by service. Raises ``aws_service.AWSError`` (incl. when the ``managed-by``
-    cost-allocation tag isn't activated in Billing yet).
+# Hard stop on Cost Explorer pagination. Each page is another ~$0.01 request, so a token
+# CE never stops returning would bill in a loop; 20 pages is far past any realistic group
+# count for one month grouped by service, and the cap is logged rather than silent.
+_AWS_MAX_COST_PAGES = 20
 
-    ``unattributed_total`` is ``None`` for AWS: the tag filter structurally excludes
-    untagged spend, so we can't measure the remainder — the account-total card already
-    shows the whole number."""
+
+async def get_aws_managed_breakdown() -> dict:
+    """AWS MTD spend by ``managed-by`` scope and service. Raises ``aws_service.AWSError``
+    (incl. when the ``managed-by`` cost-allocation tag isn't activated in Billing yet).
+
+    **Deliberately UNFILTERED**, which is what makes ``unattributed_total`` a real measured
+    number here rather than ``None``. Grouping by the tag returns a bucket per value plus
+    one for resources carrying no tag at all — CE renders that as ``"managed-by$"`` — so a
+    single request answers all three scopes. It used to filter to the two known values,
+    which cost the same and structurally hid the remainder: the very thing an operator
+    opens this page to find.
+
+    Cost Explorer bills ~$0.01/request, so this stays ONE request per pass in the common
+    case. Dropping the filter grows the group count rather than the request count; only
+    genuine pagination adds a call, and only when CE hands back a token.
+    """
     aws_service._require_boto3()
     start, end = _month_range()
 
@@ -368,45 +419,57 @@ async def get_aws_managed_breakdown() -> dict:
         import boto3
         from botocore.exceptions import BotoCoreError, ClientError
         ce = boto3.client("ce", **aws_service._aws_kwargs(""))
-        try:
-            resp = ce.get_cost_and_usage(
+        amounts, currency = {}, "USD"
+        token = None
+        # Pagination is not optional now the filter is gone. Without it a response past
+        # one page is silently truncated — the totals just come back low, with no error,
+        # which reads as a cost DROP. Bounded so a malformed token cannot bill forever.
+        for _ in range(_AWS_MAX_COST_PAGES):
+            kwargs = dict(
                 TimePeriod={"Start": start, "End": end},
                 Granularity="MONTHLY",
                 Metrics=["UnblendedCost"],
-                # One request, both scopes: same tag KEY, two values (Values is an OR
-                # list). Cost Explorer bills ~$0.01/request — don't split this in two.
-                Filter={"Tags": {"Key": _MANAGED_TAG_KEY,
-                                 "Values": _SCOPE_TAG_VALUES,
-                                 "MatchOptions": ["EQUALS"]}},
                 # CE allows at most 2 GroupBy entries, and service + the scope tag is
                 # exactly 2 — there is no room for a third dimension here.
                 GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"},
                          {"Type": "TAG", "Key": _MANAGED_TAG_KEY}],
             )
-        except (BotoCoreError, ClientError) as e:
-            raise aws_service.AWSError(
-                f"AWS Cost Explorer breakdown failed: {e}. If this is a tag error, "
-                f"activate the '{_MANAGED_TAG_KEY}' cost-allocation tag in the AWS "
-                "Billing console (forward-only; ~24h to populate)."
-            ) from e
-        amounts, currency = {}, "USD"
-        for period in resp.get("ResultsByTime", []):
-            for grp in period.get("Groups", []):
-                keys = grp.get("Keys") or []
-                service = (keys[0] if keys else "") or "(unknown)"
-                # CE renders a TAG group key as "<key>$<value>" ("<key>$" when absent).
-                raw = keys[1] if len(keys) > 1 else ""
-                scope = _scope_of(raw.split("$", 1)[1] if "$" in raw else raw)
-                blob = grp.get("Metrics", {}).get("UnblendedCost", {})
-                k = (scope, service)
-                amounts[k] = amounts.get(k, 0.0) + float(blob.get("Amount") or 0)
-                currency = blob.get("Unit") or currency
-        return _scoped_breakdown_result(amounts, currency, basis={
+            if token:
+                kwargs["NextPageToken"] = token
+            try:
+                resp = ce.get_cost_and_usage(**kwargs)
+            except (BotoCoreError, ClientError) as e:
+                raise aws_service.AWSError(
+                    f"AWS Cost Explorer breakdown failed: {e}. If this is a tag error, "
+                    f"activate the '{_MANAGED_TAG_KEY}' cost-allocation tag in the AWS "
+                    "Billing console (forward-only; ~24h to populate)."
+                ) from e
+            for period in resp.get("ResultsByTime", []):
+                for grp in period.get("Groups", []):
+                    keys = grp.get("Keys") or []
+                    service = (keys[0] if keys else "") or "(unknown)"
+                    # CE renders a TAG group key as "<key>$<value>" ("<key>$" when absent).
+                    raw = keys[1] if len(keys) > 1 else ""
+                    scope = _scope_of(raw.split("$", 1)[1] if "$" in raw else raw)
+                    blob = grp.get("Metrics", {}).get("UnblendedCost", {})
+                    k = (scope, service)
+                    amounts[k] = amounts.get(k, 0.0) + float(blob.get("Amount") or 0)
+                    currency = blob.get("Unit") or currency
+            token = resp.get("NextPageToken")
+            if not token:
+                break
+        else:
+            logger.warning(
+                "AWS cost breakdown stopped at the %d-page cap with a token still "
+                "outstanding; the unattributed figure may be incomplete.",
+                _AWS_MAX_COST_PAGES)
+        return _scoped_breakdown_result(amounts, currency, measured=_SCOPES, basis={
             SCOPE_DASHBOARD: f"tag:{_MANAGED_TAG_KEY}={_MANAGED_TAG_VALUE}",
             SCOPE_SANDBOX: f"tag:{_MANAGED_TAG_KEY}={_SANDBOX_TAG_VALUE}",
+            SCOPE_UNATTRIBUTED: f"no {_MANAGED_TAG_KEY} tag",
         }, notes=[
-            "Untaggable line items (inter-AZ data transfer, some VPC charges) can't be "
-            "attributed to either scope; they show only in the account total.",
+            "Unattributed is spend on resources carrying no managed-by tag, plus line "
+            "items that cannot take one (inter-AZ data transfer, some VPC charges).",
         ])
 
     return await asyncio.to_thread(_query)
@@ -436,14 +499,18 @@ async def get_azure_managed_breakdown() -> dict:
     """Azure MTD spend tagged ``managed-by``, split into dashboard vs sandbox scope and
     grouped by service. Raises ``azure_service.AzureError``.
 
-    ``unattributed_total`` is ``None``: Azure tags do NOT inherit from a resource group
-    to its children, and Azure creates children (disks, NICs, public IPs, ACI) untagged,
-    so a tag-filtered query can't see them. Enabling *Cost Management → Manage tag
-    inheritance* at subscription scope fixes this with no code change — the sandbox
-    already tags its RG (setup-azure.sh:59) and inherited tags lose to resource tags, so
-    it yields exactly the right semantics. Note RG-dimension scoping is NOT an option:
-    the dashboard deploys into the same ``dashboard-sandbox-rg``, so the dimension can't
-    separate the two scopes."""
+    **Deliberately UNFILTERED**, so ``unattributed_total`` is measured rather than ``None``.
+    Grouping by the tag key returns a row per value plus rows with an empty tag, which
+    ``_scope_of`` already routes to ``unattributed``.
+
+    That remainder is large on Azure and worth understanding before reading it as waste:
+    tags do NOT inherit from a resource group to its children, and Azure creates children
+    (disks, NICs, public IPs, ACI) untagged, so they legitimately land here. Enabling
+    *Cost Management → Manage tag inheritance* at subscription scope moves them with no
+    code change — the sandbox already tags its RG (setup-azure.sh:59), and inherited tags
+    lose to resource tags, so it yields exactly the right semantics. Note RG-dimension
+    scoping is NOT an option: the dashboard deploys into the same ``dashboard-sandbox-rg``,
+    so the dimension can't separate the two scopes."""
     cred, sub_id = await azure_service._ensure_creds()
     token = (await asyncio.to_thread(cred.get_token, f"{_AZURE_MGMT}/.default")).token
     body = {
@@ -458,8 +525,9 @@ async def get_azure_managed_breakdown() -> dict:
                 {"type": "Dimension", "name": "ServiceName"},
                 {"type": "TagKey", "name": _MANAGED_TAG_KEY},
             ],
-            "filter": {"tags": {"name": _MANAGED_TAG_KEY, "operator": "In",
-                                "values": _SCOPE_TAG_VALUES}},
+            # No `filter`. An "In" filter on the two known values costs the same request
+            # and structurally hides untagged spend — which on Azure is most of it, and is
+            # what an operator opens this page to find.
         },
     }
     data = await _azure_cost_query(
@@ -478,13 +546,14 @@ async def get_azure_managed_breakdown() -> dict:
         amounts[k] = amounts.get(k, 0.0) + float(row[cost_idx] or 0)
         if cur_idx is not None and row[cur_idx]:
             currency = row[cur_idx]
-    return _scoped_breakdown_result(amounts, currency, basis={
+    return _scoped_breakdown_result(amounts, currency, measured=_SCOPES, basis={
         SCOPE_DASHBOARD: f"tag:{_MANAGED_TAG_KEY}={_MANAGED_TAG_VALUE}",
         SCOPE_SANDBOX: f"tag:{_MANAGED_TAG_KEY}={_SANDBOX_TAG_VALUE}",
+        SCOPE_UNATTRIBUTED: f"no {_MANAGED_TAG_KEY} tag",
     }, notes=[
         "Azure tags don't inherit to child resources (disks, NICs, public IPs, ACI), so "
-        "their cost is missing here. Enable Cost Management → Manage tag inheritance at "
-        "subscription scope to include it.",
+        "their cost lands in unattributed rather than against a scope. Enable Cost "
+        "Management → Manage tag inheritance at subscription scope to attribute it.",
     ])
 
 

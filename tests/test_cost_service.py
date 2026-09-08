@@ -35,13 +35,20 @@ _AWS_CE_GROUPED = {"ResultsByTime": [{"Groups": [
      "Metrics": {"UnblendedCost": {"Amount": "7.20", "Unit": "USD"}}},
     {"Keys": ["AWS Secrets Manager", "managed-by$dashboard-sandbox"],
      "Metrics": {"UnblendedCost": {"Amount": "0.40", "Unit": "USD"}}},
+    # Untagged spend. CE renders the absent tag as a bare "<key>$", and it only appears
+    # at all because the query no longer filters to the two known values.
+    {"Keys": ["Amazon Elastic Block Store", "managed-by$"],
+     "Metrics": {"UnblendedCost": {"Amount": "3.30", "Unit": "USD"}}},
 ]}]}
 _AZURE_GROUPED_RESULT = {"properties": {
     "columns": [{"name": "Cost"}, {"name": "ServiceName"},
                 {"name": "managed-by"}, {"name": "Currency"}],
     "rows": [[6.0, "Virtual Machines", "vm-dashboard", "USD"],
              [5.0, "Container Registry", "dashboard-sandbox", "USD"],
-             [1.5, "Storage", "dashboard-sandbox", "USD"]],
+             [1.5, "Storage", "dashboard-sandbox", "USD"],
+             # Untagged. Azure children (disks, NICs, public IPs) arrive like this because
+             # tags do not inherit from the resource group.
+             [2.25, "Storage", "", "USD"]],
 }}
 # GCP BigQuery billing-export fake rows (a Row supports r["col"]; dicts suffice).
 # The sandbox row is deliberately UNDERSCORED — that's what setup-gcp.sh used to
@@ -677,24 +684,41 @@ def test_aws_breakdown_splits_dashboard_and_sandbox():
     assert [s["amount"] for s in res["services"]] == [8.0, 7.2, 2.5, 0.4]
 
 
-def test_aws_breakdown_request_filters_both_values_with_two_groupbys():
+def test_aws_breakdown_sends_no_tag_filter():
+    """The load-bearing guard, and the same one OCI carries below.
+
+    An "EQUALS" filter on the two known values costs exactly the same request and
+    structurally hides every untagged resource — the thing an operator opens this page to
+    find. Grouping by the tag already yields a bucket per value plus one for the absent
+    case, so the filter bought nothing and cost the remainder.
+    """
     _restore()
     _run(svc.get_aws_managed_breakdown())
     kw = _last_call("aws_breakdown")
-    assert kw["Filter"]["Tags"]["Values"] == ["vm-dashboard", "dashboard-sandbox"]
-    assert kw["Filter"]["Tags"]["MatchOptions"] == ["EQUALS"]
+    assert "Filter" not in kw, "a tag filter here silently empties the unattributed list"
     # Cost Explorer caps GroupBy at 2 — pin it so nobody adds a third and gets a 400.
     assert len(kw["GroupBy"]) == 2
     assert kw["GroupBy"][1] == {"Type": "TAG", "Key": "managed-by"}
-    # Cost Explorer bills ~$0.01/request: both scopes must come from ONE call.
+    # Cost Explorer bills ~$0.01/request: all three scopes must come from ONE call.
+    # Dropping the filter grows the RESPONSE, and must not grow the request count.
     assert len([n for n, _ in CALLS if n == "aws_breakdown"]) == 1
 
 
-def test_aws_breakdown_unattributed_is_none():
-    """A tag-filtered query structurally cannot see untagged spend, so the remainder is
-    unknown — not zero. The template derives it from the account total instead."""
+def test_aws_breakdown_measures_the_untagged_remainder():
+    """`unattributed_total` is a measured number now, not `None`.
+
+    Previously the template had to derive it by subtracting the attributed total from the
+    account total. A measured figure is the honest one, and it is the only one that can be
+    broken down by service.
+    """
     _restore()
-    assert _run(svc.get_aws_managed_breakdown())["unattributed_total"] is None
+    res = _run(svc.get_aws_managed_breakdown())
+    assert res["unattributed_total"] == 3.3
+    assert _svc_amounts(res, S_U) == {"Amazon Elastic Block Store": 3.3}
+    # Still excluded from `total` and from the flat `services` list, which are the
+    # attributed view — folding it in would double-count against the account card.
+    assert res["total"] == 18.1
+    assert all(s["scope"] != S_U for s in res["services"])
 
 
 def test_aws_breakdown_malformed_tag_key_is_unattributed():
@@ -727,15 +751,178 @@ def test_azure_breakdown_splits_scopes_from_tag_column():
     assert _svc_amounts(res, S_D) == {"Virtual Machines": 6.0}
 
 
-def test_azure_breakdown_request_has_two_groupings_and_both_values():
+def test_azure_breakdown_sends_no_tag_filter():
+    """Same guard as AWS. On Azure it matters more: tags do not inherit to child
+    resources, so an "In" filter hides most of the subscription's spend."""
     _restore()
     _run(svc.get_azure_managed_breakdown())
     ds = _last_call("azure_breakdown")["json"]["dataset"]
-    assert ds["filter"]["tags"]["values"] == ["vm-dashboard", "dashboard-sandbox"]
-    assert ds["filter"]["tags"]["operator"] == "In"
+    assert "filter" not in ds, "a tag filter here silently empties the unattributed list"
     # Cost Management also caps grouping at 2 — ServiceName + the scope tag.
     assert len(ds["grouping"]) == 2
     assert ds["grouping"][1] == {"type": "TagKey", "name": "managed-by"}
+
+
+def test_azure_breakdown_measures_the_untagged_remainder():
+    _restore()
+    res = _run(svc.get_azure_managed_breakdown())
+    assert res["unattributed_total"] == 2.25
+    assert _svc_amounts(res, S_U) == {"Storage": 2.25}
+    # The same service name appears in two scopes; they must not be merged.
+    assert _svc_amounts(res, S_S)["Storage"] == 1.5
+
+
+# ── Pagination ────────────────────────────────────────────────────────────────
+# Dropping the tag filter grows the response, which is what makes these load-bearing.
+# An unfollowed page is not an error — it is a SMALLER NUMBER, and a cost page that
+# under-reports without saying so is worse than one that fails outright.
+
+def test_aws_breakdown_follows_next_page_token_and_merges():
+    _restore()
+    import boto3 as _boto3
+    orig = _boto3.client
+    seen = []
+
+    class _CE:
+        def get_cost_and_usage(self, **kw):
+            seen.append(kw)
+            if "NextPageToken" not in kw:
+                return {"NextPageToken": "page2", "ResultsByTime": [{"Groups": [
+                    {"Keys": ["Amazon EC2", "managed-by$vm-dashboard"],
+                     "Metrics": {"UnblendedCost": {"Amount": "4.00", "Unit": "USD"}}},
+                ]}]}
+            return {"ResultsByTime": [{"Groups": [
+                {"Keys": ["Amazon S3", "managed-by$"],
+                 "Metrics": {"UnblendedCost": {"Amount": "1.25", "Unit": "USD"}}},
+            ]}]}
+
+    _boto3.client = lambda name, **kw: _CE()
+    try:
+        res = _run(svc.get_aws_managed_breakdown())
+    finally:
+        _boto3.client = orig
+
+    assert len(seen) == 2, "the second page was never fetched"
+    assert seen[1]["NextPageToken"] == "page2"
+    # Both pages present, and the untagged row from page TWO is what proves the merge
+    # reaches the scope this change exists to populate.
+    assert res["dashboard_total"] == 4.0
+    assert res["unattributed_total"] == 1.25
+
+
+def test_aws_breakdown_stops_at_the_page_cap():
+    """A token CE never stops returning would bill ~$0.01 a page, forever."""
+    _restore()
+    import boto3 as _boto3
+    orig = _boto3.client
+    calls = {"n": 0}
+
+    class _CE:
+        def get_cost_and_usage(self, **kw):
+            calls["n"] += 1
+            return {"NextPageToken": "always", "ResultsByTime": [{"Groups": [
+                {"Keys": ["Amazon EC2", "managed-by$vm-dashboard"],
+                 "Metrics": {"UnblendedCost": {"Amount": "1.00", "Unit": "USD"}}},
+            ]}]}
+
+    _boto3.client = lambda name, **kw: _CE()
+    try:
+        res = _run(svc.get_aws_managed_breakdown())
+    finally:
+        _boto3.client = orig
+    assert calls["n"] == svc._AWS_MAX_COST_PAGES
+    # Capped, not crashed: what was read still renders.
+    assert res["dashboard_total"] == float(svc._AWS_MAX_COST_PAGES)
+
+
+def test_azure_breakdown_follows_next_link_and_merges():
+    _restore()
+    import httpx as _httpx
+    orig = _httpx.AsyncClient
+    urls = []
+
+    def _page(rows, nxt=None):
+        props = {"columns": [{"name": "Cost"}, {"name": "ServiceName"},
+                             {"name": "managed-by"}, {"name": "Currency"}],
+                 "rows": rows}
+        if nxt:
+            props["nextLink"] = nxt
+        return {"properties": props}
+
+    class _Resp:
+        def __init__(self, body): self._body = body
+        def raise_for_status(self): pass
+        def json(self): return self._body
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, **k):
+            urls.append(url)
+            if len(urls) == 1:
+                return _Resp(_page([[3.0, "Virtual Machines", "vm-dashboard", "USD"]],
+                                   nxt="https://example.invalid/page2"))
+            return _Resp(_page([[7.5, "Disks", "", "USD"]]))
+
+    _httpx.AsyncClient = _C
+    try:
+        res = _run(svc.get_azure_managed_breakdown())
+    finally:
+        _httpx.AsyncClient = orig
+
+    assert len(urls) == 2, "nextLink was not followed"
+    assert urls[1] == "https://example.invalid/page2"
+    assert res["dashboard_total"] == 3.0
+    assert res["unattributed_total"] == 7.5
+
+
+def test_azure_throttle_midway_raises_instead_of_returning_partial_rows():
+    """The failure that would otherwise read as a cost DROP.
+
+    Page one succeeded, page two is throttled. Returning what was read would hand the
+    page a plausible, too-low total with no indication anything was missing — so this
+    raises the tagged error and lets cost_cache serve the last known good figure.
+    """
+    _restore()
+    import httpx as _httpx
+    orig = _httpx.AsyncClient
+    calls = {"n": 0}
+
+    class _Resp:
+        def __init__(self, code=200, body=None, headers=None):
+            self.status_code, self._body = code, body or {}
+            self.headers = headers or {}
+        def raise_for_status(self): pass
+        def json(self): return self._body
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Resp(body={"properties": {
+                    "columns": [{"name": "Cost"}, {"name": "ServiceName"},
+                                {"name": "managed-by"}, {"name": "Currency"}],
+                    "rows": [[3.0, "Virtual Machines", "vm-dashboard", "USD"]],
+                    "nextLink": "https://example.invalid/page2"}})
+            # Long Retry-After, so it cools down rather than sleeping inline.
+            return _Resp(code=429, headers={"Retry-After": "3600"})
+
+    _httpx.AsyncClient = _C
+    try:
+        raised = None
+        try:
+            _run(svc.get_azure_managed_breakdown())
+        except Exception as exc:                       # noqa: BLE001
+            raised = exc
+    finally:
+        _httpx.AsyncClient = orig
+
+    assert raised is not None, "a partial read was returned as if it were the whole month"
+    assert getattr(raised, "throttled", False), f"lost the throttle tag: {raised!r}"
 
 
 def test_azure_tag_column_naming_variants():
