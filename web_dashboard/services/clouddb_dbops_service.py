@@ -49,6 +49,11 @@ _DEFAULT_MIN_INSTANCES = 1
 _DEFAULT_CONCURRENCY = 8
 _DEFAULT_TIMEOUT_SECONDS = 120
 _DEFAULT_MAX_INSTANCES = 5
+# Above the 256M platform floor because this workload vendors cryptography, pytds and
+# pymysql and imports all three at cold start, then holds a TLS database session per
+# concurrent request. An OOM kill lands mid-rotation, where a failed request may
+# ALREADY have applied the password change.
+_DEFAULT_MEMORY_MB = 512
 
 _INGRESS = {"all": "ALLOW_ALL", "internal": "ALLOW_INTERNAL_AND_GCLB"}
 
@@ -280,7 +285,8 @@ async def run_deploy(db: Session, *, region: str, job_id: str) -> None:
             concurrency=_int_cfg("clouddb_ps_gcp_dbops_concurrency",
                                  _DEFAULT_CONCURRENCY),
             timeout_seconds=_DEFAULT_TIMEOUT_SECONDS,
-            max_instances=_DEFAULT_MAX_INSTANCES)
+            max_instances=_DEFAULT_MAX_INSTANCES,
+            memory_mb=_DEFAULT_MEMORY_MB)
         fn_id = deployed["fn_id"]
         await cloud_function_service.run_deploy_apply(
             db, fn_id=fn_id, job_id=deployed["job_id"],

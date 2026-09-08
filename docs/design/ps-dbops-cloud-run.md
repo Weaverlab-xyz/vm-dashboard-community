@@ -136,6 +136,8 @@ Four `gcp_cloudrun` module variables were added; all default to today's behaviou
 | `--no-allow-unauthenticated` | `auth_mode = "run_invoker"` (existing) | forced; `none` is **refused** at the click |
 | `roles/run.invoker` for named brokers | `invoker_members` → `google_cloud_run_service_iam_member` `for_each` | from `clouddb_ps_gcp_dbops_invokers` |
 | `--timeout=120`, `--max-instances=5` | existing `timeout_seconds`, `max_instances` | `120`, `5` |
+| `--cpu=1` | derived in the module from `concurrency` | forced by `concurrency > 1` |
+| `--memory=512Mi` | existing `memory_mb` | `512` |
 
 `invoker_members` carries a Terraform `validation` that refuses `allUsers` and
 `allAuthenticatedUsers` outright — an operator who genuinely wants a public function says
@@ -150,6 +152,19 @@ Password Safe then holds a credential the database has replaced, and the account
 out until someone reconciles by hand. One warm instance per region removes that window. CPU
 throttling stays at the default: the instance staying *alive* is what keeps the network
 interface attached; it needs no CPU between requests.
+
+**`concurrency` and CPU are one setting, not two.** A gen2 function's CPU is *derived from
+its memory* unless the module names it, and the 256M default derives ~0.17 vCPU — which
+Cloud Run then refuses outright: *"Total cpu < 1 is not supported with concurrency > 1"*.
+That is a **400 at apply**, not a plan error, and it lands after the shared secret and its
+accessor binding have already been created, so the failed attempt's state has to be
+destroyed before a retry (the secret is `bt-dbops-fn-secret` and a second create 409s).
+The module therefore pins `available_cpu = "1"` whenever `concurrency > 1` and leaves it
+`null` — the derived value — otherwise, so nothing deployed before this plans differently.
+Memory goes to **512M** for this workload for a separate reason: it imports `cryptography`,
+`pytds` and `pymysql` at cold start and then holds a TLS database session per concurrent
+request, and an OOM kill lands in the same mid-rotation window `min-instances` exists to
+close.
 
 ## 5. The contract, implemented from the plugin repo's specification
 
@@ -305,7 +320,8 @@ Password Safe never notices.
 ## 8. What was built
 
 - `terraform/cloud_function/gcp_cloudrun/main.tf` — `min_instances`, `concurrency`,
-  `invoker_members`, a validated `ingress_settings`, and `FN_AUTH_MODE_FRONT_DOOR`.
+  the `available_cpu` derivation that makes concurrency legal, `invoker_members`, a
+  validated `ingress_settings`, and `FN_AUTH_MODE_FRONT_DOOR`.
 - `web_dashboard/functions/fnworkloads/ps_dbops.py` — the workload.
 - `web_dashboard/functions/fnruntime/auth.py` / `dispatch.py` — `verify_gcp_oidc`,
   `verify_for`, and the `AUTH_MODE` hook.
