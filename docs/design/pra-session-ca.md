@@ -1,11 +1,29 @@
 # Design: managing PRA's session-issuing CA with Password Safe
 
-> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are considering making Password Safe the issuer and rotator of the CA that PRA Vault uses to mint session certificates.
+> **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are making Password Safe the issuer and rotator of the CA that PRA Vault uses to mint session certificates, or deciding whether to.
 
-**Nothing described here is built.** This is the reasoning behind a proposal, recorded
-before the code so the PKI owners can refuse it on the merits rather than after a sprint.
-Facts about the PRA Vault side are marked where they come from the product rather than from
-anything this repo has exercised.
+**The Password Safe half is now built. Nothing on this side of it is.** The Certificate
+plugin issues a subordinate CA on either cloud backend — `isca=true`, with `pathlen=` and
+name constraints — and refuses it on ADCS and self-signed, for the reasons §7 gives. It is
+documented in **`Beekeeper-Certificate.docx`** ("Issuing a subordinate CA instead of a
+leaf"), with a lab procedure in **`Beekeeper-Certificate-TestCase.docx`** ("Topology D — a
+subordinate CA for PRA session certificates"). Both were written against this note, so the
+reasoning below and the plugin's own reasoning are one argument; where they diverge now,
+the plugin is the fact and this note has been corrected to match.
+
+What remains unbuilt is everything between Password Safe and PRA. Open question 1 — what
+PRA Vault's CA account accepts — **is now answered from the product UI**, and §9 records
+it: a PEM key, a passphrase and a certificate, as three fields on an **X.509 Parent
+Certificate Authority** shared account. That is better news than this note expected,
+because PRA splits the credential the same way Password Safe does — and it makes
+`bundle=PemBundle` mandatory here rather than optional. What it leaves behind is a narrower
+set of problems: the plugin's PEM bundle is a **zip**, the chain has no field on that form,
+PRA's accepted PKCS#8 ciphers are undocumented, and the dashboard's own onboarding
+validator refuses every new option (§4). So issuing and rotating a governed subordinate is
+real and testable today; an end-to-end session is not.
+
+Facts about the PRA Vault side are still marked where they come from the product rather
+than from anything this repo has exercised.
 
 **The case for building it is governance, not threat mitigation** — §11 says so plainly,
 including why the security argument is weak here and what the simpler stopping point is
@@ -113,6 +131,12 @@ would be the only available arrangement. That single capability is what moves th
 unbuildable to buildable, and it is the first thing to re-confirm if any of this is revived
 later.
 
+§9 now shows what the account form looks like, and it carries **one** certificate field —
+so the additional trust is presumably a second *X.509 Parent Certificate Authority* entry
+holding the root, certificate and no key. That is a more specific guess than this paragraph
+started with, and it is still a guess. Nothing below this line is safe until it is
+confirmed; it remains open question 2.
+
 A pleasant consequence worth stating, because it is not obvious: **rotation is graceful for
 in-flight sessions.** Leaves already minted chain to the root, which has not changed, so
 they stay valid until their own short expiry. There is no drain step and no break window —
@@ -162,25 +186,50 @@ ca_options {
 }
 ```
 
-A one-line change to `1`, but it was a deliberate narrowing and the comment above it becomes
-false, so it should be changed with intent rather than silently. The lab CA was scoped to
-issue leaves because that is all the Certificate plugin could ask for; widening it is the
-first structural admission that PRA is a different kind of consumer.
+The plugin can now ask for a subordinate, so this is no longer a hypothetical narrowing —
+it is the reason a sub-CA request against the lab CA fails today. It fails at CAS rather
+than in the plugin, which is the right place for it to fail, but the error names an
+issuance policy rather than a missing flag, so it reads as a permissions problem.
 
-## 4. The plugin has no CA vocabulary, and the address budget fights the fix
+**The answer is a second pool, not a wider lab root.**
+`Beekeeper-Certificate-TestCase.docx` §6.2 builds `demo-subca-pool` with
+`--max-chain-length=1` beside the existing one and leaves the leaf-issuing root alone.
+That is better than flipping this line: the comment above it stays true, the mTLS endpoint
+demo keeps a root that provably cannot sign a CA, and the two use cases stop sharing a
+blast radius. So what the module needs is a `max_issuer_path_length` *variable* defaulting
+to `0`, not an edit — and that change has not been made.
 
-Two gaps, and the second is the awkward one.
+## 4. The vocabulary now exists in the plugin and is missing in the dashboard
 
-**No CA semantics anywhere.** `_CERT_COMMON_KEYS` (`ps_resource_service.py:337-344`) is a
-closed set of leaf-shaped options, and an unrecognised key is *refused* rather than passed
-through (`ps_resource_service.py:426-433`) — deliberately, because the plugin only warns on
-a typo and carries on with a default. That guard is right and should stay; it just means
-`isca=` and name constraints are new grammar, not free-form additions.
+The gap this section described has moved rather than closed, and it is worth being precise
+about which side it is on now.
 
-The plugin can already generate a CA — `selfsignedtest` does — but that path is refused
+**The plugin has the grammar.** `isca=true` switches issuance from a leaf to a subordinate,
+`pathlen=` (default `0`) bounds what may appear beneath it, and `permitdns=`,
+`permitemail=`, `permitip=` and `excludedns=` carry name constraints. `permitip=` takes a
+network address rather than a host — `10.0.0.0/8`, not `10.1.2.3/8` — which is the kind of
+thing that would otherwise be discovered against a live CA.
+
+**The refusal this section used to describe is now ours.** `_CERT_COMMON_KEYS`
+(`ps_resource_service.py:337-344`) is still a closed set of leaf-shaped options, and an
+unrecognised key is *refused* rather than passed through
+(`ps_resource_service.py:424-433`) — deliberately, because the plugin only warns on a typo
+and carries on with a default. So the dashboard cannot onboard a sub-CA managed system at
+all today: `isca=true` fails validation as "not a recognised option", naming the alias
+table. That guard is right and should stay; widening it is a deliberate change, not a
+loosening.
+
+**The shape of that change is known exactly, and one detail is not obvious.** The six keys
+belong in `_CERT_COMMON_KEYS`, with an explicit refusal when the backend is `adcs`,
+`selfsigned` or `selfsignedtest`, mirroring the plugin's own refusals (§7).
+`_CERT_BACKEND_KEYS` cannot express this: it maps each key to exactly *one* owning backend
+and rejects on `owner != backend`, so it has no way to say "either cloud backend". Reaching
+for it would refuse `isca=` on `gcpcas` or on `awspca`, whichever was not named.
+
+`selfsignedtest` still generates its own CA, and the dashboard still refuses that backend
 outright because it "generates and persists its own CA private key UNENCRYPTED beside the
-plugin" (`ps_resource_service.py:414-420`). The capability half-exists; the key handling is
-harness-grade. Do not reach for it.
+plugin" (`ps_resource_service.py:414-420`). The plugin now also refuses `isca=true` on it —
+and on `selfsigned` — for a different and better reason (§7). Do not reach for either.
 
 **And the 255-character address is a real ceiling here.** Every value rides the managed
 system's Network Address because `appsettings.json` ships inside the `.psplugin`
@@ -188,7 +237,7 @@ system's Network Address because `appsettings.json` ships inside the `.psplugin`
 `project`, `location` and `pool` already runs to ~120 characters before anything else.
 
 The tension: **the control that makes this design defensible is name constraints (§5), and
-name constraints are long.** A permitted-DNS-subtree list plus a permitted-UPN suffix can
+name constraints are long.** A `permitdns=` subtree list plus a `permitemail=` suffix can
 exceed 100 characters on its own. So the safest configuration is the one least likely to
 fit, and the failure mode is the one [Certificates](../certificates.md) already warns about
 — a truncated address loses whatever sat at its end and reads as *absent* rather than as
@@ -202,6 +251,26 @@ system per constraint set. The first is almost certainly right and removes the t
 entirely — CAS supports name constraints at the pool's issuance policy, so the sub-CA
 inherits a boundary it cannot widen.
 
+**The arithmetic, now that there is a worked address to measure.**
+`Beekeeper-Certificate-TestCase.docx` §6.3 fits a `gcpcas` sub-CA profile with one
+permitted DNS suffix into **198 characters** — and that counts a `<project>` placeholder, so
+a real project id plus two more suffixes of the same length lands past 250. Note what is
+consuming it: `bundle=PemBundle` is mandatory on this topology (§9), and it is 17 characters
+that cannot be dropped as a default. The ceiling is reachable rather than theoretical, and
+it is reached by adding exactly the control §5 wants. §6.6 of that document makes "add a
+second and third `permitdns=` and watch the length" a test step for this reason.
+
+**And there is now a third escape, with a catch.** SDK 26.2 added
+`ManagedSystem_Attributes` and `ManagedAccount_Attributes`; the plugin reads any attribute
+prefixed `cert:` as the option after the prefix, so `cert:permitdns` costs nothing against
+the address at all — attributes beat the field on the same object, and a profile can live
+entirely in them with the Network Address left empty. Two caveats keep this from closing
+the question. It is **off by default behind an `appsettings.json` switch**, which is the one
+setting the plugin cannot take from a Password Safe field — so on Password Safe **Cloud**
+this path is unavailable and the address remains the only surface. And whether the host
+populates attributes for a plugin at all is unverified against a live BeyondInsight; if
+they arrive empty, nothing here changes.
+
 ## 5. Name constraints are what make an automated sub-CA defensible
 
 A vaulted CA key is not a credential to one system. It is the authority to **mint an
@@ -211,8 +280,19 @@ an answer to that.
 
 Name constraints turn a compromise from *mint anything* into *mint within a bounded
 namespace*, which is the difference between an incident and a catastrophe. They are the
-single control that most changes the risk posture here, and the CAS module has no
-`name_constraints` block today.
+single control that most changes the risk posture here.
+
+**The plugin now encodes them**, per RFC 5280 §4.2.1.10 and marked **critical** — so a
+relying party that cannot interpret the extension refuses the certificate rather than
+ignoring the boundary, which is the only version of this control worth having. Issuing a
+subordinate with no constraints at all is permitted but logged as a warning.
+
+**The CAS module still has no `name_constraints` block, and that is still where they
+belong.** §4's recommendation — put them on the parent's issuance policy, where the
+subordinate inherits a boundary it cannot widen and they cost nothing against the address
+budget — is now also the plugin's own recommendation, for the same two reasons. The address
+options are the fallback for a lab that wants to exercise the path, which is exactly how
+`Beekeeper-Certificate-TestCase.docx` §6.4 uses the single `permitdns=` in its example.
 
 Pair them with a short sub-CA lifetime and a parent the automation cannot reach. The
 subordinate should be the only thing Password Safe can issue; the root's own key should be
@@ -270,6 +350,15 @@ is in place, and no more. Rotate at day 7 of an 8-day subordinate, and the old a
 dies on its own a day later. That is what turns "we rotate" into an actual bound, and it is
 the answer open question 6 is really asking for.
 
+**The plugin carries this rule as a caution rather than an enforcement, correctly.** It
+cannot see the rotation schedule — Password Safe holds that, and the plugin is handed one
+action at a time — so it warns on any subordinate issued for more than 45 days instead of
+enforcing a ratio it has half the inputs for. The pairing therefore stays an operator
+decision, and `lifetime=8d` against a 7-day account policy is the configuration
+`Beekeeper-Certificate-TestCase.docx` §6.3 and §6.5 pin down for the lab. That is a
+recorded answer for the lab rather than for a customer; question 6 stays open for the
+latter, where the overlap has to be sized to the longest expected session.
+
 Note the interaction with §1's graceful-rotation property: the overlap is what keeps
 in-flight sessions working. Too little and rotation breaks live sessions; too much and the
 bound loosens. The overlap should be sized to the longest expected session, not picked
@@ -295,6 +384,24 @@ is a defensible story in a way "we turned off approval on the sub-CA template" i
 **So this design covers cloud CA backends only.** Shipping ADCS support would mostly produce
 a feature customers are forbidden to enable, and building it to be refused is worse than not
 building it.
+
+**This is now the plugin's implemented behaviour, and it refuses in two directions.**
+`isca=true` on `adcs` is refused with the approval-flag reasoning above. `isca=true` on
+`selfsigned` and `selfsignedtest` is refused for a different and equally deliberate reason:
+a self-signed CA certificate is a **new trust root**, not a subordinate — nothing above it
+constrains what it may assert, and every relying party would have to be visited to trust it
+and visited again to stop. Both refusals are policy positions rather than gaps, and both
+are worth being able to explain, because a customer will ask about each.
+
+**One AWS mechanic matters to the dashboard change in §4.** ACM PCA ignores the
+basic-constraints and key-usage extensions in a submitted CSR and builds the certificate
+from its template instead, so `isca=true` selects
+`arn:aws:acm-pca:::template/SubordinateCACertificate_PathLen{N}/V1` from `pathlen=`. The
+plugin reports a `templatearn=` that contradicts `isca=` rather than resolving it silently
+— and it has to, because without that check a request for a CA returns a perfectly valid
+*end-entity* certificate that fails at the relying party as an untrusted issuer, a long way
+from the cause. Whatever validation the dashboard grows should mirror that check rather than
+leave it to the plugin, since the dashboard is where the address is still editable.
 
 ## 8. Databases: three candidate engines, and the constraints are outside this design
 
@@ -406,7 +513,7 @@ backend TLS plus a client certificate on the two dedicated tunnel resources, and
 `sra` MongoDB tunnel resource. Both are bounded external asks rather than design flaws, and
 §1-§7 and §9-§11 stand independently of when either lands.
 
-## 9. The credential has to land whole, and the split model does not survive the promotion
+## 9. What PRA Vault accepts — answered, and the split survives after all
 
 Today a leaf is split on purpose: the managed account holds the PKCS#12 passphrase, Secrets
 Safe holds the bundle, and both halves are governed. The docs are explicit that the folder
@@ -415,21 +522,95 @@ your real access boundary"* ([certificates.md:47-49](../certificates.md)).
 
 For a leaf that is a sound design and a good demonstration. For a **CA signing key** the
 same sentence stops being a caution and becomes a finding: a folder-permission mistake would
-expose the issuer. So the sub-CA must reach PRA Vault as one object — key, certificate and
-chain together — and never be parked half-and-half across two ACL domains on the way.
+expose the issuer. The instinct was therefore that the sub-CA must reach PRA Vault as one
+object and never be parked half-and-half across two ACL domains on the way.
 
-Whether that is possible depends on what PRA Vault's CA account accepts (PKCS#12? PEM key
-plus chain? how is the passphrase handled?). **That is the single unknown that most shapes
-the implementation**, and it should be answered before any code is written, because a PRA
-side that only accepts the two halves separately would invalidate this section and probably
-the feature.
+**The PRA side is now known, and it does not work the way that instinct assumed.** In
+**Vault → Accounts → Add Shared Account**, Authentication offers **X.509 Parent Certificate
+Authority**, and that account type takes three values:
+
+| PRA Vault field | What goes in it | Where it comes from |
+|---|---|---|
+| the private-key box — *"Only PEM encoding is valid"* | the encrypted PKCS#8 key | the plugin's bundle |
+| **Key Passphrase** | the passphrase that opens it | the **managed account's** credential |
+| **X.509 Certificate** (required) | the subordinate's own certificate | the plugin's bundle |
+
+So **PRA is PEM, not PKCS#12**, and `bundle=PemBundle` is therefore *mandatory* on this
+topology rather than merely preferable — the key field states "Only PEM encoding is valid",
+and a PKCS#12 would have to be taken apart with `openssl` before any of it could be pasted
+in. `PemBundle` emits a zip of `cert.pem`, `key.pem`, `chain.pem` and `fullchain.pem`, and
+those map onto that form field for field: `key.pem` and `cert.pem` into the two boxes,
+`chain.pem` into neither.
+
+**One cipher question could still stop the upload, and there is a lever for it.** `key.pem`
+is an encrypted PKCS#8, AES-256-CBC by default. The presence of a Key Passphrase field says
+encrypted keys are expected, but which ciphers PRA's PEM parser accepts is not documented.
+If the upload is rejected, `pbe=Legacy` switches the PEM key to 3DES with the PKCS#12 KDF,
+which every OpenSSL-era parser reads — weaker, and a compatibility lever rather than a
+default. Worth knowing before a demo, because the failure would look like a malformed key.
+
+The plugin's own suite now covers this format specifically — that the zip carries all four
+files, that the passphrase opens the key and a wrong one does not, and that the key and
+certificate are a pair by comparing public keys rather than assuming. So the artifacts are
+proven to be the right shape; only the round trip into PRA is not.
+
+**And PRA splits the credential the same way Password Safe does.** The passphrase is a
+first-class field on the PRA side too, separate from the key it opens. This section
+previously warned that a PRA side accepting only two separate halves "would invalidate this
+section and probably the feature" — the opposite turned out to be true. The split is not a
+compromise forced by `ECredentialType` having no certificate type; it is the shape both
+products already use, and it is what makes §10's sync primitive applicable at all.
+
+**Note the Private Key Options radio, because one choice ends this design.** "Generated by
+BeyondTrust Privileged Remote Access" means PRA mints the CA key itself and it never
+leaves — at which point Password Safe has nothing to issue and no credential to govern.
+This design requires the other option, where the key is supplied. Worth stating explicitly
+because the generated option is the one a PRA administrator would reach for by habit.
+
+### What is left, and it is narrower than the original unknown
+
+- **The bundle is a zip.** Secrets Safe holds `cert.pem` and the key *inside* an archive, so
+  nothing can hand either to PRA as-is. A delivery step has to fetch the secret, unpack it
+  and write two PEM values. That puts something in the data path, which §10 is precisely a
+  warning about, and it is the part still unbuilt.
+- **There is no chain field on that form.** `cert.pem` has a home; `chain.pem` does not. The
+  tooltip says a parent CA is "utilized as a trust for Client Validation and Authentication"
+  and that at least one must exist before an X.509 Client Certificate can be created, which
+  reads as though the root is added as its own parent-CA entry — certificate only, no key —
+  to supply the anchor. **That is the mechanism §1 rests on and it is still unverified.**
+  Open question 2 is now sharper rather than answered: not "does PRA accept an additional
+  trust" but "is a second X.509 Parent Certificate Authority account how you supply it, and
+  does a leaf minted beneath the subordinate then validate to the root a target trusts."
 
 ## 10. Reuse the sync primitive — the lesson from k8s tokens generalises
 
 `ps_api_service.link_synced_account` (`ps_api_service.py:979`) already does the delivery:
 `POST ManagedAccounts/{id}/SyncedAccounts/{syncedAccountID}` makes one managed account a
 subscriber of another, and **Password Safe owns the propagation from then on**. It carries
-the k8s bearer token into PRA Vault today and would carry a CA unchanged.
+the k8s bearer token into PRA Vault today.
+
+**But it carries one credential, and a sub-CA is three values.** This section used to say it
+"would carry a CA unchanged"; §9 shows that is wrong. What a synced account propagates is
+the managed account's *password* — here the passphrase, which is the one of the three values
+Password Safe models as a credential at all. The certificate and key PEMs are a Secrets Safe
+file secret, and no synced-account link reaches them. So the primitive covers one field of
+three, and the rest is new work rather than reuse.
+
+**Which makes the ordering a correctness argument, not a detail.** Every rotation mints a
+new subordinate *and* a new passphrase. If the passphrase syncs to PRA automatically while
+the PEMs are delivered by hand or on a different schedule, PRA ends up holding the previous
+key encrypted under a passphrase that no longer matches it — and the sub-CA stops working
+until someone notices. **Partial automation here is worse than none**, and the fix is the
+same shape as the plugin's own write-first rule (§ "Why the write ordering is the
+correctness argument" in `Beekeeper-Certificate.docx`): write the two PEMs into PRA first,
+and let the passphrase land last. Any implementation that syncs the passphrase before it can
+deliver the key has built the failure rather than avoided it.
+
+**And one thing has to be established before the link can be made at all.** Whether an
+**X.509 Parent Certificate Authority** account in PRA Vault is a valid synced-account
+subscriber is unknown, and `expect_subscriber_platform` fails closed — so an unrecognised
+platform name is refused, which is the guard working correctly but is also a hard stop until
+the name is known. Establish it against a live PRA before assuming this path exists.
 
 Two of its properties matter more here than there:
 
@@ -490,6 +671,11 @@ That argument needs no belief that PRA will be compromised — only that archite
 leaked, what is our exposure window?" answers *indefinite*, or "we would have to go look up
 what we set," in almost every organisation. Here it answers **eight days, by policy,
 enforced by the rotation schedule** — a figure that is auditable, controlled, and reportable.
+
+The number is only worth as much as the automation under it, which is the honest caveat
+while the delivery half is unbuilt. Password Safe rotates the subordinate on schedule
+today; nothing yet puts the new one into PRA. Until §10's ordering problem is solved, eight
+days is the design's claim rather than the deployment's, and it should be presented that way.
 
 That is a risk-register artifact rather than a preventive control, which makes it governance
 after all: governance with something quantitative under it instead of an assertion about
@@ -565,13 +751,18 @@ bearer token nobody rotated, made into a managed account with Password Safe owni
 sync. "We already do this for tokens; the CA is the next unmanaged authority" is a much
 easier opening than introducing the pattern cold.
 
-## Open questions — answer these before writing code
+## Open questions — 1 answered, 6 partly; answer the rest before writing code
 
-1. **What does PRA Vault's CA account accept?** PKCS#12, or PEM key plus chain? How is the
-   passphrase supplied? §9 depends entirely on this.
-2. **Can PRA be pointed at a subordinate whose root is installed separately on targets?**
-   Reported yes, via the additional chain upload — this is the load-bearing assumption of
-   §1 and deserves one confirmed round trip before anything is built.
+1. ~~**What does PRA Vault's CA account accept?**~~ **Answered** — an *X.509 Parent
+   Certificate Authority* shared account, taking a PEM private key, a **Key Passphrase**
+   and the certificate as three separate fields. PEM only, so `bundle=PemBundle` is
+   mandatory. §9 has the mapping and the problems it leaves.
+2. **Is a second parent-CA account how the root chain is supplied, and does a leaf then
+   validate?** Sharpened by the answer to 1 rather than settled: that form has no chain
+   field, so the root presumably goes in as its own parent-CA entry, certificate and no
+   key. This is still the load-bearing assumption of §1 and still deserves one confirmed
+   round trip — mint a leaf beneath the subordinate and verify it against the root a target
+   trusts — before anything is built.
 3. **Will `sra_postgresql_tunnel_jump` / `sra_my_sql_tunnel_jump` gain backend TLS with a
    client certificate?** The database half of §8 waits on this. Precedent exists inside the
    product (`mssql` terminates TLS, `k8s` takes `ca_certificates`), so this is a feature
@@ -585,16 +776,34 @@ easier opening than introducing the pattern cold.
    the only managed cloud database this design reaches, which would change the §8 conclusion
    from "self-managed only" to "self-managed, plus Atlas".
 6. **What sub-CA lifetime, against what leaf lifetime?** Drives §6's un-revokable window and
-   the rotation cadence.
+   the rotation cadence. **Answered for the lab** — `lifetime=8d` against a 7-day account
+   policy — and open for a customer, where the overlap has to be sized to the longest
+   expected session rather than picked round.
 7. **Does PRA re-read the CA mid-session, or only at session launch?** Decides whether a
    rotation landing mid-session is genuinely invisible or merely usually invisible.
 8. **Which tier** for a non-lab deployment, given §6.
+9. **Can an X.509 Parent Certificate Authority account be a synced-account subscriber, and
+   under what platform name?** §10 cannot use the product's own propagation primitive
+   without this, and `expect_subscriber_platform` fails closed, so a guess is refused
+   rather than half-working.
+10. **Does the host populate `ManagedSystem_Attributes` for a plugin action?** If it does,
+    §4's address ceiling stops constraining the name constraints in §5. If they arrive
+    empty the address is the only surface, and on Password Safe Cloud it is regardless.
+11. **Which PKCS#8 ciphers does PRA's PEM parser accept?** The plugin's default is
+    AES-256-CBC and `pbe=Legacy` drops it to 3DES. Cheap to answer — one upload — and worth
+    answering before a demo, because a refused key looks like a malformed one (§9).
 
 ## Operator prerequisites this dashboard cannot automate
 
 - Install the **root** chain (`ca_chain_pem`) into every target's trust store. This is the
   step that makes rotation safe, and it happens once, outside anything here.
-- Upload the chain as PRA Vault's additional trust alongside the signing CA.
+- Upload the chain as PRA Vault's additional trust alongside the signing CA — on current
+  evidence a second **X.509 Parent Certificate Authority** shared account holding the root's
+  certificate with no private key (§9, unverified).
+- On the signing CA's own account, choose the Private Key Options radio that **supplies** the
+  key. "Generated by BeyondTrust Privileged Remote Access" is the habitual choice and it
+  ends this design — a key PRA generates is a key Password Safe never issued and cannot
+  govern (§9).
 - Grant the API identity the same Password Safe roles the k8s path needs for
   `SyncedAccounts` — Account Management (Full control), plus a Smart Rule containing both
   accounts. There is no Smart Rule API; this is out-of-band and it is the failure every
