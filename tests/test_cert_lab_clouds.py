@@ -133,7 +133,7 @@ def test_an_aws_build_records_its_arn_and_invents_no_pool():
                             "region": "us-east-2",
                             "ca_chain_pem": "-----BEGIN CERTIFICATE-----",
                             "enroll_access_key_id": "AKIAEXAMPLE"})
-    assert row.ca_arn.startswith("arn:aws:acm-pca:")
+    assert row.ca_arn == "arn:aws:acm-pca:us-east-2:1:certificate-authority/x"
     assert row.location == "us-east-2"
     assert row.enroll_account == "AKIAEXAMPLE"
     assert row.pool_id == "", "an AWS build must not invent a pool id"
@@ -145,7 +145,9 @@ def test_a_gcp_build_still_records_the_pool_and_the_service_account():
                             "ca_chain_pem": "-----BEGIN CERTIFICATE-----",
                             "service_account_email": "certauth@p.iam.gserviceaccount.com"})
     assert (row.pool_id, row.location) == ("demo-pool", "us-central1")
-    assert row.enroll_account.endswith("gserviceaccount.com")
+    # The whole value, not a suffix. `endswith("gserviceaccount.com")` would pass for
+    # `evilgserviceaccount.com` too — weaker than it reads, and CodeQL flags the shape.
+    assert row.enroll_account == "certauth@p.iam.gserviceaccount.com"
     assert row.ca_arn == "", "a GCP build has no ARN"
 
 
