@@ -47,13 +47,15 @@
       </div>
       <div class="flex items-center gap-2">
         <label class="text-sm font-medium text-gray-600">Kind:</label>
+        <!-- Derived from the rows, like Provider/Region/State beside it. It used to be a
+             hardcoded four, which silently omitted every kind added since: a CA pool, a
+             POV environment and a cloud function were all unfilterable. -->
         <select x-model="filterKind"
                 class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
           <option value="">All</option>
-          <option value="vm">VM</option>
-          <option value="database">Database</option>
-          <option value="k8s">Kubernetes</option>
-          <option value="desktop">Desktop</option>
+          <template x-for="k in kinds()" :key="k">
+            <option :value="k" x-text="kindLabel(k)"></option>
+          </template>
         </select>
       </div>
       <div class="flex items-center gap-2">
@@ -460,6 +462,10 @@
         return [...new Set(this.items.map(i => i.cloud))].sort();
       },
 
+      kinds() {
+        return [...new Set(this.items.map(i => i.kind).filter(Boolean))].sort();
+      },
+
       regions() {
         return [...new Set(this.items.map(i => i.region).filter(Boolean))].sort();
       },
@@ -481,8 +487,13 @@
           (!this.filterWorkgroup || i.workgroup === this.filterWorkgroup));
       },
 
+      // Every kind inventory_service.collect() can emit. A missing entry is not an
+      // error — the raw kind renders — but 'certlab' and 'pov' were showing up spelled
+      // exactly like that in the Kind column.
       kindLabel(k) {
-        return ({ vm: 'VM', database: 'Database', k8s: 'Kubernetes', desktop: 'Desktop' })[k] || k;
+        return ({ vm: 'VM', database: 'Database', k8s: 'Kubernetes', desktop: 'Desktop',
+                  function: 'Cloud Function', certlab: 'Certificate Authority',
+                  pov: 'POV Environment' })[k] || k;
       },
 
       stateBadge(state) {

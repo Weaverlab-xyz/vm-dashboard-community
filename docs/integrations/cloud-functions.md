@@ -91,6 +91,8 @@ this adds** — an always-on, externally callable endpoint is.
 | Test invoke with credentials attached | **Test invoke** button, `POST /api/functions/{id}/invoke` (takes `method` + `path`, so an adapter's own routes are reachable) |
 | Endpoint + secret for an external caller | **Endpoint** button (admin only), `GET /api/functions/{id}/invoke-info` |
 | Progress + logs for a deploy | **Jobs** page (`cloudfn_deploy` / `cloudfn_decommission`) |
+| Count of deployed functions, and how many are callable | **Cloud Functions** tile, Dashboard → *Managed Services* |
+| Every function alongside the rest of the estate | **Inventory** page, kind `function` (`GET /api/inventory?kind=function`) |
 
 ## Workloads
 

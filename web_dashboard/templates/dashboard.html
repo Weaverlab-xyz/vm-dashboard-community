@@ -398,11 +398,14 @@
           // other tile (a user without read permission sees "unavailable").
           id: 'managed',
           label: 'Managed Services',
-          gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
+          gridClass: 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4',
           refreshable: true,
           tiles: [
             { key: 'cloud_databases', title: 'Databases',           href: '/databases', flag: 'cloud_database',  description: 'provisioned + registered' },
             { key: 'k8s_clusters',    title: 'Kubernetes Clusters', href: '/k8s',       flag: 'k8s_management',  description: 'managed clusters' },
+            // Secondary is the count that is actually callable, not the row count: a
+            // function still deploying, or one whose apply failed, has no endpoint.
+            { key: 'cloud_functions', title: 'Cloud Functions',     href: '/functions', flag: 'cloud_functions', secondaryLabel: 'available' },
             // Counted from the cells' own VM-deploy job rows (DB-only, all three
             // clouds); gated on `pra` because the OT router itself is.
             // href is the fallback only: /api/dashboard/stats sends back the cloud

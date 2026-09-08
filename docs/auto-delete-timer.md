@@ -108,6 +108,10 @@ Deliberately excluded, and not oversights:
   deploy type. So excluding parents needs no special case.
 - **Virtual desktop seats.** A seat's teardown is a pool operation, so expiring one seat
   would silently shrink a live pool.
+- **Cloud functions.** They appear on Inventory and have a real teardown, but an idle
+  Lambda / Function App / Cloud Run function bills nothing, so there is no cost argument
+  for a timer — and `cloud_functions` has no `expires_at` column to stamp. Destroy one
+  from the Cloud Functions page.
 - **Gateways.** Not in the inventory at all, and the shared one is reference-counted.
 - **Anything you *registered* rather than provisioned.** A database or cluster you already
   ran and merely told the dashboard about is never stamped and never swept. The dashboard

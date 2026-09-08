@@ -2,6 +2,8 @@
 the dashboard knows about, built from its own DB records (no live cloud calls). That is
 mostly what it deployed, plus what it was told about: a registered cloud database, a
 registered K8s cluster, and every VM a remote agent has synced from a hypervisor.
+Deployed cloud functions are here too — a live function is an HTTPS endpoint into the
+network, so it belongs on the one page that answers "what is running".
 Cached (a handful of indexed queries) and filtered to the caller's workgroups; admins
 see everything.
 """
@@ -30,7 +32,8 @@ async def list_inventory(
     provider: Optional[str] = Query(None, description=(
         "Filter by cloud/provider (aws, azure, gcp, oci, and the hypervisor kinds "
         "proxmox, nutanix, vsphere, xcpng, hyperv, workstation)")),
-    kind: Optional[str] = Query(None, description="Filter by kind (vm, database, k8s, desktop)"),
+    kind: Optional[str] = Query(None, description=(
+        "Filter by kind (vm, database, k8s, function, certlab, pov, desktop)")),
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Every resource visible to the caller. Cached; RBAC + optional provider/kind
