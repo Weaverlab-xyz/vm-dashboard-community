@@ -391,6 +391,16 @@ gcloud iam service-accounts create bt-rotator --project=<project> \
 `clouddb_ps_gcp_rotator_service_account`; the dashboard registers it as an IAM database
 user on each instance it onboards.
 
+PostgreSQL has a second, tighter budget, and it is the one that bites first. A Postgres
+role name is capped at **63 characters** and the *whole email* has to fit, so the
+dashboard registers the email with the `.gserviceaccount.com` suffix dropped — Google's
+documented form, and the name the database then stores. That leaves
+`63 − len("@<project>.iam") ` for the local part: with a 30-character project id,
+`bt-rotator` fits with room to spare, but a long local part *and* a long project id can
+still overflow. When it does, onboarding fails at 25% with
+`HTTP 400 ... User name "..." to be created is too long (max 63)` and nothing is
+created — shorten the service account, not the project.
+
 For the `data-api` channel the smallest sufficient predefined role is:
 
 ```
@@ -742,6 +752,7 @@ whose only trace was a `Password Safe onboarding skipped (non-fatal)` log line.)
 | (AWS) `Index was outside the bounds of the array` in the plugin log | a packed field has too few segments for the plugin's fixed-position parse: an address with the wrong per-engine count (5 mssql / 6 psql / 7 mysql), a functional-account username without its `:`, or a password without both `:`s. Systems onboarded before the per-engine formats carry the old six-field address — use the row's **Register in Password Safe** action to rebuild them |
 | `role "psafe_…" already exists` / `CREATE USER` fails on **Register in Password Safe** | a previous attempt created the managed database user before failing later. Onboarding is create-or-reset on every engine, so this is fixed — a build from before 2026-08-27 needs the user dropped by hand, or the newer image |
 | (Azure, SQL Server) `Msg 15025 … The server principal 'psafe_…' already exists` at 25% *Creating the rotatable managed database user* | the create-or-reset guard above read `sys.server_principals`, which **Azure SQL Database does not populate with SQL logins** — so it matched nothing and the create ran anyway. Guards read `sys.sql_logins` from 2026-09-03; on an older build, drop the login by hand (`DROP LOGIN [psafe_…]` in `master`) or take the newer image. AWS and GCP never hit this |
+| (GCP, PostgreSQL) `create user 'bt-rotator@<project>.iam.gserviceaccount.com' … HTTP 400 … User name "…" to be created is too long (max 63)` at 25% *Creating the rotatable managed database user* | the rotator was registered under its **full email**, and a Postgres role name is capped at 63 characters — an ordinary `bt-rotator@<project>.iam.gserviceaccount.com` is 65, so *every* PostgreSQL onboarding failed on length alone while MySQL (which truncates at the `@` itself) was fine. From 2026-09-08 PostgreSQL is registered under Google's documented form, the email minus `.gserviceaccount.com`; on an older build there is no workaround short of the newer image. Nothing is created when this fires — re-run **Register in Password Safe** after rebuilding. A *long local part* can still overflow the 63 even stripped: shorten the service account (§1.7) |
 | (Azure, SQL Server) rotation or *Verify* fails with `Cannot open database "master" requested by the login` | the managed login has no `USER` in `master`, and Azure SQL disables `guest` there — see §0. Fixed at onboarding from 2026-09-03; re-run **Register in Password Safe** on the row to add the user to an existing system |
 | `Bad IP value: '<packed address>' in 'IPAddress' field` | a managed system registered by a build between 2026-08-25 and 2026-08-27, which put the packed address in the IP field. Re-register from the row's **Register in Password Safe** action |
 | (AWS) `Index and length must refer to a location within the string` | the address's assumeRole segment is under 12 characters — the pre-fix `local` default; re-register, or fix the address in BeyondInsight (`NoAssumeRole` or a full role ARN) |
