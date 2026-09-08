@@ -1,0 +1,489 @@
+{% extends "base.html" %}
+{% block title %}SPIRE{% endblock %}
+
+{# SPIRE Lab page (PREVIEW, gated by spire_lab_enabled).
+   Stands a SPIRE trust domain up on a VM this dashboard already deployed, for the
+   Password Safe "SPIFFE SVID" custom plugin to govern. Backed by /api/spire-lab.
+
+   Three things here are load-bearing and easy to mistake for decoration:
+     * the DISCOVERY COUNT. 11 entries go in and 8 should come back. "Discovery
+       succeeded" is not the assertion — the plugin once shipped with discovery
+       filtering on the MINTABLE prefix, which narrowed the inventory to 2 accounts
+       while the action still reported success.
+     * the SVID EXPIRY. ca_ttl caps the mint, so a 720h ask becomes ~7 days. Past it
+       every plugin action fails PERMISSION_DENIED and reads like an admin_ids problem.
+     * the SOURCE CIDR list. It is the cloud gate; the host firewall is a second one,
+       and the two fail identically (a gRPC timeout on Verify Functional Account).
+
+   The onboarding panel is the whole point of the page today: the dashboard does NOT
+   write the Password Safe objects yet, because whether BeyondInsight populates plugin
+   attributes is unresolved — see docs/runbooks/spire-lab-standup.md section 5. #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="spireLabPage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <div class="flex items-center gap-2">
+      <h1 class="text-2xl font-bold text-gray-800">SPIRE</h1>
+      <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Preview</span>
+    </div>
+    <button @click="openBuild()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Build a trust domain
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    A SPIRE <strong>trust domain</strong> on a VM this dashboard already deployed, so the
+    Password Safe <strong>SPIFFE SVID</strong> plugin has workload identities to govern.
+    The lab is four Ansible playbooks against an ordinary Linux host &mdash; there is no
+    Terraform module, because a SPIRE server is a Go binary and a sqlite file.
+    <a href="/docs/spiffe" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>
+    &middot;
+    <a href="/docs/runbooks/spire-lab-standup" target="_blank" class="text-blue-600 hover:underline">Standup runbook</a>.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm whitespace-pre-line" x-text="toast"></div>
+
+  <!-- What is not configured yet. Each item fails inside a playbook or inside the plugin
+       hours later rather than at the click, so it is named up front. -->
+  <div x-show="missing.length" x-cloak
+       class="mb-6 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3 text-sm text-amber-800">
+    <p class="font-medium mb-1">Check these before building</p>
+    <ul class="list-disc list-inside space-y-0.5">
+      <template x-for="m in missing" :key="m"><li x-text="m"></li></template>
+    </ul>
+    <p class="mt-2">
+      <a href="/settings" class="text-amber-900 underline">Settings &rarr; SPIRE Lab</a>
+      &middot;
+      <a href="/config-mgmt" class="text-amber-900 underline">Config Management (upload playbooks)</a>
+    </p>
+  </div>
+
+  <!-- Lab list -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div x-show="loading" class="px-4 py-8 text-center text-sm text-gray-400">Loading&hellip;</div>
+
+    <div x-show="!loading && labs.length === 0" x-cloak
+         class="px-4 py-10 text-center text-sm text-gray-500">
+      No trust domain yet. Deploy a small Ubuntu VM from a cloud page first &mdash; on a
+      subnet the Resource Broker can reach &mdash; then build the lab onto it. Tearing the
+      lab down closes <code>tcp/8081</code> and leaves the VM alone.
+    </div>
+
+    <table x-show="!loading && labs.length" x-cloak class="min-w-full text-sm">
+      <thead class="bg-gray-50 text-gray-600">
+        <tr>
+          <th class="text-left font-medium px-4 py-2">Trust domain</th>
+          <th class="text-left font-medium px-4 py-2">Host</th>
+          <th class="text-left font-medium px-4 py-2">Status</th>
+          <th class="text-left font-medium px-4 py-2">Stages</th>
+          <th class="text-left font-medium px-4 py-2">Reachable from</th>
+          <th class="text-left font-medium px-4 py-2">SVID expires</th>
+          <th class="px-4 py-2"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="lab in labs" :key="lab.id">
+          <tr>
+            <td class="px-4 py-2">
+              <div class="font-mono text-gray-800" x-text="lab.trust_domain"></div>
+              <div class="text-xs text-gray-400" x-text="lab.name"></div>
+            </td>
+            <td class="px-4 py-2">
+              <div class="text-gray-700" x-text="lab.vm_name"></div>
+              <div class="text-xs text-gray-400 font-mono"
+                   x-text="(lab.private_ip || lab.public_ip) + ':' + lab.bind_port"></div>
+              <div class="text-xs text-gray-400" x-text="lab.cloud + ' ' + (lab.region || '')"></div>
+            </td>
+            <td class="px-4 py-2 align-top">
+              <span class="text-xs font-medium px-2 py-0.5 rounded-full"
+                    :class="statusClass(lab.status)" x-text="lab.status"></span>
+              <div x-show="lab.error_message" x-cloak
+                   class="text-xs text-red-600 mt-1 max-w-xs break-words"
+                   x-text="lab.error_message"></div>
+            </td>
+            <td class="px-4 py-2 align-top">
+              <!-- One chip per playbook, linking its own job. A failed stage's Ansible
+                   output is the only place its error exists. -->
+              <div class="flex flex-wrap gap-1">
+                <template x-for="s in lab.stages" :key="s.key">
+                  <a :href="lab.stage_job_ids[s.key] ? '/jobs?job=' + lab.stage_job_ids[s.key] : '#'"
+                     :title="s.asset"
+                     class="text-[11px] px-1.5 py-0.5 rounded font-mono"
+                     :class="lab.stages_done.includes(s.key)
+                             ? 'bg-green-100 text-green-800'
+                             : (lab.stage_job_ids[s.key] ? 'bg-amber-100 text-amber-800'
+                                                         : 'bg-gray-100 text-gray-500')"
+                     x-text="s.key"></a>
+                </template>
+              </div>
+              <div class="text-xs text-gray-400 mt-1"
+                   x-show="lab.entries_seeded" x-cloak
+                   x-text="lab.entries_seeded + ' entries seeded, expect ' + lab.discovery_expected + ' discovered'"></div>
+            </td>
+            <td class="px-4 py-2 align-top">
+              <div x-show="lab.source_cidrs.length" x-cloak>
+                <template x-for="c in lab.source_cidrs" :key="c">
+                  <div class="text-xs font-mono text-gray-600" x-text="c"></div>
+                </template>
+              </div>
+              <div x-show="!lab.source_cidrs.length" x-cloak class="text-xs text-gray-400">
+                no cloud rule &mdash; in-network only
+              </div>
+            </td>
+            <td class="px-4 py-2 align-top">
+              <div class="text-xs" :class="expiryClass(lab.admin_svid_expires_at)"
+                   x-text="lab.admin_svid_expires_at ? lab.admin_svid_expires_at.slice(0, 10) : '—'"></div>
+            </td>
+            <td class="px-4 py-2 text-right whitespace-nowrap align-top">
+              <button @click="showOnboarding(lab)"
+                      class="text-blue-600 hover:underline text-xs mr-2">Onboarding</button>
+              <button @click="showBundle(lab)" x-show="lab.has_bundle" x-cloak
+                      class="text-blue-600 hover:underline text-xs mr-2">Bundle</button>
+              <button @click="reapplyAcl(lab)"
+                      class="text-blue-600 hover:underline text-xs mr-2">Re-apply ACL</button>
+              <button @click="destroy(lab)"
+                      class="text-red-600 hover:underline text-xs">Close</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Build ------------------------------------------------------------------->
+  <div x-show="buildOpen" x-cloak
+       class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg p-6 max-h-full overflow-y-auto">
+      <h2 class="text-lg font-semibold text-gray-800 mb-4">Build a trust domain</h2>
+
+      <label class="block text-sm font-medium text-gray-700 mb-1">Lab name</label>
+      <input type="text" x-model="form.name"
+             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3"
+             placeholder="weaverlab">
+
+      <label class="block text-sm font-medium text-gray-700 mb-1">Trust domain</label>
+      <input type="text" x-model="form.trust_domain"
+             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+             placeholder="weaverlab.test">
+      <p class="text-[11px] text-gray-400 mt-1 mb-3">
+        A bare DNS-style name, <em>not</em> a <code>spiffe://</code> URI. It is baked into
+        the server config, every SPIFFE ID and the Managed System, and the plugin asserts
+        it on every connect &mdash; so it cannot be changed afterwards.
+      </p>
+
+      <label class="block text-sm font-medium text-gray-700 mb-1">Cloud</label>
+      <select x-model="form.cloud" @change="form.host = ''"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3">
+        <template x-for="c in (options.clouds || [])" :key="c">
+          <option :value="c" x-text="c"></option>
+        </template>
+      </select>
+
+      <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
+      <select x-model="form.host"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        <option value="">Pick a VM this dashboard deployed&hellip;</option>
+        <template x-for="h in hostsFor(form.cloud)" :key="h.name">
+          <option :value="h.name" x-text="h.name + '  (' + h.ip + ')'"></option>
+        </template>
+      </select>
+      <p class="text-[11px] text-gray-400 mt-1 mb-3">
+        <span x-show="hostsFor(form.cloud).length === 0" x-cloak>
+          No <span x-text="form.cloud"></span> VM available. Deploy one from its cloud page
+          first &mdash; the lab attaches to an existing host so it inherits that VM's SSH
+          key, its auto-delete timer and its Destroy.
+        </span>
+        <span x-show="hostsFor(form.cloud).length" x-cloak>
+          Ubuntu 22.04 on the smallest shape that runs a Go binary is plenty. It must be on
+          a subnet the Resource Broker can reach.
+        </span>
+      </p>
+
+      <label class="block text-sm font-medium text-gray-700 mb-1">
+        Administrative SPIFFE ID <span class="text-gray-400 font-normal">(optional)</span>
+      </label>
+      <input type="text" x-model="form.admin_spiffe_id"
+             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+             :placeholder="form.trust_domain ? ('spiffe://' + form.trust_domain + '/password-safe/admin') : 'spiffe://<trust domain>/password-safe/admin'">
+      <p class="text-[11px] text-gray-400 mt-1 mb-4">
+        The functional account's <strong>name</strong> is this SPIFFE ID, not a username.
+        It goes into the server's <code>admin_ids</code> &mdash; which is the line people
+        get wrong: an entry-level <code>-admin</code> grants nothing to a minted SVID, and
+        a missing <code>admin_ids</code> surfaces much later as
+        <code>PERMISSION_DENIED</code> on <em>Verify Functional Account</em>.
+      </p>
+
+      <div class="border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 text-xs text-gray-500 mb-4">
+        <p class="mb-1"><strong>What this will do, in order:</strong></p>
+        <ol class="list-decimal list-inside space-y-0.5">
+          <li>Open <code>tcp/<span x-text="options.bind_port || 8081"></span></code> on the
+              cloud ACL to
+              <span x-show="(options.source_cidrs || []).length" x-cloak
+                    class="font-mono" x-text="(options.source_cidrs || []).join(', ')"></span>
+              <span x-show="!(options.source_cidrs || []).length" x-cloak>
+                &mdash; <strong>nothing</strong>, because no source CIDRs are configured</span>
+          </li>
+          <li>Install SPIRE <span x-text="options.spire_version || ''"></span> under systemd</li>
+          <li>Open the host firewall on the same sources</li>
+          <li>Seed <span x-text="options.entries_seeded || 11"></span> registration entries
+              (<span x-text="options.discovery_expected || 8"></span> should be discovered)</li>
+          <li>Mint the administrative credential into Secrets Safe</li>
+        </ol>
+      </div>
+
+      <div class="flex justify-end gap-2">
+        <button @click="buildOpen = false"
+                class="text-sm text-gray-600 hover:text-gray-800 px-3 py-1.5">Cancel</button>
+        <button @click="build()" :disabled="busy || !form.name || !form.trust_domain || !form.host"
+                class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+          Build
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Onboarding ------------------------------------------------------------->
+  <div x-show="onboardOpen" x-cloak
+       class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6 max-h-full overflow-y-auto">
+      <h2 class="text-lg font-semibold text-gray-800 mb-1">Onboard into BeyondInsight</h2>
+      <p class="text-sm text-gray-500 mb-4">
+        The dashboard does not write these objects. Whether BeyondInsight populates plugin
+        <em>attributes</em> for an action has never been observed, and the plugin takes its
+        whole configuration from them &mdash; so building a writer now would be betting on
+        the answer. These are the values;
+        <a href="/docs/runbooks/spire-lab-standup" target="_blank"
+           class="text-blue-600 hover:underline">&sect;5 of the runbook</a> is the order.
+      </p>
+
+      <template x-if="onboard">
+        <div class="space-y-3 text-sm">
+          <template x-for="f in onboardFields()" :key="f.label">
+            <div>
+              <div class="flex items-center justify-between">
+                <label class="text-xs font-semibold text-gray-400 uppercase tracking-wide"
+                       x-text="f.label"></label>
+                <button @click="copy(f.value)" class="text-xs text-blue-600 hover:underline">copy</button>
+              </div>
+              <div class="font-mono text-gray-800 break-all bg-gray-50 border border-gray-200 rounded px-2 py-1"
+                   x-text="f.value || '—'"></div>
+              <p class="text-[11px] text-gray-400 mt-0.5" x-text="f.hint"></p>
+            </div>
+          </template>
+
+          <div class="border border-blue-200 bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-800">
+            <p class="font-medium mb-1">Then run Verify Functional Account and read one line</p>
+            <p class="font-mono mb-1">Attributes received: system=[...] account=[...]</p>
+            <p>
+              <code>system=[SpiffeTrustDomain]</code> means the configuration model works
+              as designed. <code>system=[]</code> means it does not, and the whole
+              configuration surface has to move onto the managed system address like the
+              Certificate and Kubernetes plugins &mdash; a plugin change, not a dashboard
+              one. Either way, record it.
+            </p>
+            <p class="mt-1">
+              After that run <strong>Discovery Accounts</strong> and check the
+              <em>count</em>: <span x-text="onboard.discovery_expected"></span>, not
+              &ldquo;succeeded&rdquo;.
+            </p>
+          </div>
+        </div>
+      </template>
+
+      <div class="flex justify-end mt-4">
+        <button @click="onboardOpen = false"
+                class="text-sm text-gray-600 hover:text-gray-800 px-3 py-1.5">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Trust bundle ----------------------------------------------------------->
+  <div x-show="bundleOpen" x-cloak
+       class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6 max-h-full overflow-y-auto">
+      <h2 class="text-lg font-semibold text-gray-800 mb-1">Trust bundle</h2>
+      <p class="text-sm text-gray-500 mb-3">
+        Set <code>SpiffeTrustBundlePem</code> on the managed system to this. A SPIRE server
+        presents only its leaf certificate, so there is nothing in the handshake to chain
+        against and fingerprint pinning cannot substitute &mdash; without it every connect
+        fails <em>SPIRE Server certificate could not be validated</em>. Public by
+        construction: it is what every consumer of the trust domain has to trust.
+      </p>
+      <textarea readonly rows="14" x-text="bundlePem"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"></textarea>
+      <div class="flex justify-end gap-2 mt-3">
+        <button @click="copy(bundlePem)" class="text-sm text-blue-600 hover:underline px-3 py-1.5">Copy</button>
+        <button @click="bundleOpen = false"
+                class="text-sm text-gray-600 hover:text-gray-800 px-3 py-1.5">Close</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Every call goes through window.API, which attaches the bearer token from the auth
+// store. Calling an /api route with the browser's own fetch would be ANONYMOUS and 401 --
+// there is no auth cookie on this app.
+function spireLabPage() {
+  return {
+    loading: true,
+    busy: false,
+    labs: [],
+    options: { clouds: ['azure'], hosts: {}, bind_port: 8081, source_cidrs: [] },
+    missing: [],
+    toast: '',
+    toastType: 'info',
+
+    buildOpen: false,
+    form: { name: '', trust_domain: '', cloud: 'azure', host: '', admin_spiffe_id: '' },
+
+    onboardOpen: false,
+    onboard: null,
+
+    bundleOpen: false,
+    bundlePem: '',
+
+    async init() {
+      await Promise.all([this.load(), this.loadOptions()]);
+    },
+
+    async load() {
+      this.loading = true;
+      try {
+        this.labs = (await API.get('/api/spire-lab')) || [];
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.loading = false; }
+    },
+
+    async loadOptions() {
+      try {
+        const o = (await API.get('/api/spire-lab/options')) || {};
+        this.options = o;
+        this.missing = o.missing || [];
+        if ((o.clouds || []).length && !(o.clouds || []).includes(this.form.cloud)) {
+          this.form.cloud = o.clouds[0];
+        }
+      } catch (e) { /* the page still works without the hints */ }
+    },
+
+    hostsFor(cloud) { return (this.options.hosts || {})[cloud] || []; },
+
+    notify(msg, type) {
+      this.toast = msg;
+      this.toastType = type || 'info';
+      setTimeout(() => { this.toast = ''; }, 9000);
+    },
+
+    copy(text) {
+      if (!text) return;
+      navigator.clipboard.writeText(text)
+        .then(() => this.notify('Copied.'))
+        .catch(() => this.notify('Could not copy — select it by hand.', 'error'));
+    },
+
+    statusClass(s) {
+      if (s === 'available') return 'bg-green-100 text-green-800';
+      if (s === 'failed') return 'bg-red-100 text-red-800';
+      if (s === 'deleted') return 'bg-gray-100 text-gray-600';
+      return 'bg-blue-100 text-blue-800';
+    },
+
+    // Amber inside a week, red once lapsed. Past the expiry every plugin action fails
+    // PERMISSION_DENIED, which reads exactly like an admin_ids problem -- so the date is
+    // worth colouring rather than just printing.
+    expiryClass(iso) {
+      if (!iso) return 'text-gray-400';
+      const days = (new Date(iso) - new Date()) / 86400000;
+      if (days < 0) return 'text-red-600 font-medium';
+      if (days < 7) return 'text-amber-600 font-medium';
+      return 'text-gray-600';
+    },
+
+    openBuild() {
+      this.form = { name: '', trust_domain: '', cloud: this.form.cloud,
+                    host: '', admin_spiffe_id: '' };
+      this.buildOpen = true;
+    },
+
+    async build() {
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab', this.form);
+        this.buildOpen = false;
+        this.notify('Building — the four playbooks each get their own job. Follow them in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.busy = false; }
+    },
+
+    async showOnboarding(lab) {
+      try {
+        this.onboard = await API.get('/api/spire-lab/' + lab.id + '/onboarding');
+        this.onboardOpen = true;
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    onboardFields() {
+      const o = this.onboard || {};
+      return [
+        { label: 'Managed system address', value: o.host,
+          hint: 'One managed system per trust domain, on port ' + o.port + '.' },
+        { label: 'Platform', value: o.platform,
+          hint: 'The managed system inherits its platform from the functional account, so an account on the wrong platform onboards green and then fails every action.' },
+        { label: 'Functional account name', value: o.functional_account_name,
+          hint: 'A SPIFFE ID, not a username.' },
+        { label: 'DSS key', value: o.dss_key_secret,
+          hint: 'The text secret in safe "' + (o.safe || '') + '" holding the base64 PKCS#12. Paste its value, not this reference.' },
+        { label: 'DSS passphrase', value: o.dss_passphrase_secret,
+          hint: 'Its passphrase, generated on the VM so it never passed through this dashboard.' },
+        { label: 'Managed system attribute', value: o.attribute
+          ? (o.attribute.name + ' = ' + o.attribute.value) : '',
+          hint: 'Define the attribute type first, then set it on the managed system.' },
+        { label: 'Administrative SVID expires', value: o.admin_svid_expires_at || 'unknown',
+          hint: 'What SPIRE actually granted, which is shorter than what was asked for — ca_ttl caps the mint. Past it, everything fails PERMISSION_DENIED.' },
+      ];
+    },
+
+    async showBundle(lab) {
+      try {
+        const r = await API.get('/api/spire-lab/' + lab.id + '/bundle');
+        this.bundlePem = (r && r.trust_bundle_pem) || '';
+        this.bundleOpen = true;
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    async reapplyAcl(lab) {
+      try {
+        const r = await API.post('/api/spire-lab/' + lab.id + '/acl', {});
+        const where = r.opened
+          ? ('tcp/' + lab.bind_port + ' now allows ' + (r.source_cidrs || []).join(', '))
+          : ('tcp/' + lab.bind_port + ' is CLOSED — no source CIDRs are configured');
+        this.notify(where + '\n' + (r.note || ''));
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    async destroy(lab) {
+      const warning = 'Close ' + lab.trust_domain + '?\n\n'
+        + 'This removes the cloud rule allowing tcp/' + lab.bind_port + ', which is the '
+        + 'reachability kill switch. The VM is NOT destroyed — it has its own timer and '
+        + 'its own Destroy — and the SPIRE server stays installed and keeps its CA key, '
+        + 'so retire the host too if the lab is finished.';
+      if (!confirm(warning)) return;
+      try {
+        await API.del('/api/spire-lab/' + lab.id);
+        this.notify('Closing — follow progress in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+  };
+}
+</script>
+{% endblock %}

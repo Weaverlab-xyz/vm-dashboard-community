@@ -33,7 +33,7 @@ async def list_inventory(
         "Filter by cloud/provider (aws, azure, gcp, oci, and the hypervisor kinds "
         "proxmox, nutanix, vsphere, xcpng, hyperv, workstation)")),
     kind: Optional[str] = Query(None, description=(
-        "Filter by kind (vm, database, k8s, function, certlab, pov, desktop)")),
+        "Filter by kind (vm, database, k8s, function, certlab, spirelab, pov, desktop)")),
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Every resource visible to the caller. Cached; RBAC + optional provider/kind

@@ -24,6 +24,13 @@ Kubernetes/database image.
 
 ## The order to run them in
 
+> The dashboard's **SPIRE** page (preview: `spire_lab_enabled`) does all five steps below
+> as one job, on Azure, GCP or AWS, and opens the cloud ACL first — see
+> [docs/spiffe.md](../../../docs/spiffe.md#building-it-from-the-dashboard). It runs these
+> same files, fetched **by filename from the storage backend**, so upload them on the
+> Config Management page first; the build form names the ones it cannot find. The steps
+> below are the by-hand path and the explanation of what each one is for.
+
 1. **Deploy a VM** from the normal cloud page, on a subnet the Password Safe worker or
    Resource Broker can reach. Ubuntu 22.04 on a small shape is plenty.
 2. **`spire-server-install.yml`**, passing `trust_domain`. This is the only required

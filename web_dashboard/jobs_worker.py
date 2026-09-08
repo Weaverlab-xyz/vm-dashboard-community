@@ -66,6 +66,7 @@ HANDLED_TYPES = (
     "cloudfn_entitle_register",
     "clouddb_adapter_pair", "clouddb_dbops_deploy",
     "certca_provision", "certca_decommission", "cert_ps_register",
+    "spirelab_provision", "spirelab_decommission",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
@@ -200,6 +201,12 @@ LIGHT_TYPES = (
     # A runstate PUT and a poll loop. No local process, no streamed output, and the
     # waiting is almost all of it -- the definition of this tier.
     "pov_env_power",
+    # One cloud-SDK ingress write, then four `ansible_local` CHILD jobs it drives and
+    # awaits (spire_lab_service._run_stage). LIGHT is not a claim about duration — it is
+    # a DEADLOCK constraint. Each child is HEAVY, and the HEAVY cap can be 1, so a
+    # parent that held a HEAVY slot while waiting on a HEAVY child would wait forever.
+    # The parent itself runs no local process and streams no output; the children do.
+    "spirelab_provision", "spirelab_decommission",
     # One metadata write, then up to fourteen minutes of polling our own agent row for an
     # enrolment that happens in the APP process. Nothing local, nothing streamed -- and
     # tiering it heavier would let one POV's enrolment wait block another POV's provision.
@@ -486,6 +493,17 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                 account_name=meta["account_name"],
                 action=meta.get("action", "register"),
                 address=meta.get("address", ""))
+        elif job_type == "spirelab_provision":
+            # Opens the cloud ACL on tcp/8081, then drives the four SPIRE playbooks in
+            # order as child `ansible_local` rows. One job because the stages are useless
+            # individually — every one after the first asserts the server is up.
+            from .services import spire_lab_service
+            await spire_lab_service.run_provision(
+                db, lab_id=meta["lab_id"], job_id=job_id)
+        elif job_type == "spirelab_decommission":
+            from .services import spire_lab_service
+            await spire_lab_service.run_decommission(
+                db, lab_id=meta["lab_id"], job_id=job_id)
         elif job_type == "cloudfn_deploy":
             from .services import cloud_function_service
             await cloud_function_service.run_deploy_apply(

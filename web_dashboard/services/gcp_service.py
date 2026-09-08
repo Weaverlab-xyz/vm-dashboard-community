@@ -5212,3 +5212,134 @@ async def delete_regional_secret(project: str, region: str, resource_id: str) ->
     """Async wrapper for :func:`_delete_regional_secret_sync`."""
     return await _to_thread(_delete_regional_secret_sync, project, region, resource_id)
 
+
+# ── Inbound access to an instance the dashboard already launched ──────────────
+# `ensure_rancher_firewall` / `ensure_portainer_firewall` above each hard-code their
+# feature's ports and expect the LAUNCHER to have put the matching network tag on a new
+# VM. This pair is the generic, after-the-fact case: an instance that already exists,
+# opened on ports the caller names. It is what the SPIRE lab needs — the runbook's "cloud
+# gate".
+#
+# **A GCE firewall rule cannot name an instance.** It selects by network tag, so opening
+# a port here is two writes, not one: the tag goes on the instance and the rule targets
+# the tag. That is why a rule created by hand in the console appears correct and does
+# nothing — the tag is the half people miss.
+
+
+def _instance_tag_for(rule_name: str, instance_name: str) -> str:
+    """The network tag this rule targets.
+
+    GCE tags allow lowercase letters, digits and hyphens, must start with a letter and
+    are capped at 63 characters — a superset of neither the rule name nor an instance
+    name, so both are sanitized rather than trusted.
+    """
+    raw = f"{rule_name}-{instance_name}".lower()
+    cleaned = "".join(ch if (ch.isalnum() or ch == "-") else "-" for ch in raw)
+    cleaned = cleaned.strip("-") or "dashboard-ingress"
+    if not cleaned[0].isalpha():
+        cleaned = f"t-{cleaned}"
+    return cleaned[:63].rstrip("-")
+
+
+def _ensure_instance_tag_sync(client, compute_v1, project_id: str, zone: str,
+                              instance_name: str, tag: str) -> bool:
+    """Add ``tag`` to the instance, preserving the others. True if it was added.
+
+    Compute Engine requires the current tags fingerprint for optimistic concurrency, the
+    same as a label edit — so this is a read-modify-write and never a blind set.
+    """
+    info = client.get(project=project_id, zone=zone, instance=instance_name)
+    items = list(info.tags.items) if (info.tags and info.tags.items) else []
+    if tag in items:
+        return False
+    items.append(tag)
+    op = client.set_tags(
+        project=project_id, zone=zone, instance=instance_name,
+        tags_resource=compute_v1.Tags(
+            items=items,
+            fingerprint=info.tags.fingerprint if info.tags else None))
+    op.result(timeout=60)
+    return True
+
+
+def _ensure_instance_inbound_rule_sync(project_id: str, zone: str, instance_name: str,
+                                       rule_name: str, ports: list,
+                                       source_cidrs: list) -> dict:
+    """Converge one source-restricted INGRESS firewall rule for an existing instance.
+
+    Fail-closed on an empty ``source_cidrs``: the rule is DELETED, which is what closes
+    the port — a rule with no source ranges is rejected by the API. The instance's tag is
+    deliberately LEFT in place. It grants nothing on its own once no rule targets it, and
+    removing it is another read-modify-write against a fingerprint that a concurrent edit
+    can invalidate — a teardown must not fail on tidying up.
+    """
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    instances = compute_v1.InstancesClient(credentials=creds)
+    firewalls = compute_v1.FirewallsClient(credentials=creds)
+    tag = _instance_tag_for(rule_name, instance_name)
+    fw_name = tag                                  # one rule per instance per feature
+
+    if not source_cidrs:
+        try:
+            firewalls.delete(project=project_id, firewall=fw_name).result(timeout=60)
+            logger.warning("firewall %r deleted — no allowed source CIDRs (tcp/%s is "
+                           "closed on %s)", fw_name, ports, instance_name)
+        except NotFound:
+            pass
+        return {"firewall": fw_name, "tag": tag, "opened": False, "created": False}
+
+    info = instances.get(project=project_id, zone=zone, instance=instance_name)
+    nics = list(info.network_interfaces or [])
+    if not nics:
+        raise GCPError(f"GCE instance {instance_name!r} has no network interface")
+    network = nics[0].network
+
+    tagged = _ensure_instance_tag_sync(instances, compute_v1, project_id, zone,
+                                       instance_name, tag)
+
+    fw = compute_v1.Firewall()
+    fw.name = fw_name
+    fw.network = network
+    fw.direction = "INGRESS"
+    fw.allowed = [compute_v1.Allowed(I_p_protocol="tcp",
+                                     ports=[str(p) for p in ports])]
+    fw.source_ranges = list(source_cidrs)
+    fw.target_tags = [tag]
+    fw.description = "vm-dashboard: source-restricted ingress to a lab service"
+
+    try:
+        firewalls.get(project=project_id, firewall=fw_name)
+        firewalls.patch(project=project_id, firewall=fw_name,
+                        firewall_resource=fw).result(timeout=60)
+        created = False
+    except NotFound:
+        firewalls.insert(project=project_id, firewall_resource=fw).result(timeout=60)
+        created = True
+    logger.info("firewall %r %s (tcp %s, sources=%s, tag=%s, tag_added=%s)",
+                fw_name, "created" if created else "updated", ports, source_cidrs,
+                tag, tagged)
+    return {"firewall": fw_name, "tag": tag, "opened": True, "created": created,
+            "tag_added": tagged}
+
+
+async def ensure_instance_inbound_rule(project_id: str, zone: str, instance_name: str, *,
+                                       rule_name: str, ports: list,
+                                       source_cidrs: list) -> dict:
+    """Open (or close) ``ports`` inbound to an existing instance from ``source_cidrs``.
+
+    Fail-closed: an empty ``source_cidrs`` deletes the rule and returns
+    ``opened: False``. Callers key off that rather than off the absence of an error.
+    """
+    try:
+        return await _to_thread(
+            _ensure_instance_inbound_rule_sync, project_id, zone, instance_name,
+            rule_name, list(ports), list(source_cidrs))
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(
+            f"Failed to apply inbound rule for instance {instance_name}: {e}") from e

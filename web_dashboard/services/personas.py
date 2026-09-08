@@ -91,6 +91,7 @@ _FLAG_LABELS = {
     "cloud_database_enabled": "Cloud databases",
     "cloud_functions_enabled": "Cloud functions",
     "cert_lab_enabled": "Certificate Lab",
+    "spire_lab_enabled": "SPIRE Lab",
     "k8s_management_enabled": "Kubernetes",
     "portainer_enabled": "Portainer",
     "cost_explorer_enabled": "Cost reporting",
@@ -419,6 +420,18 @@ _DEVOPS = Persona(
             minutes=15,
             docs="certificates",
             requires_flags=("cert_lab_enabled",),
+        ),
+        UseCase(
+            id="devops-workload-identity-governed",
+            title="Every workload identity in a trust domain, inventoried and governed",
+            summary="Stand up a SPIRE trust domain, discover each registration entry as "
+                    "a managed account, and show which ones carry control-plane rights "
+                    "nobody meant to grant — then mint an audience-scoped JWT-SVID for "
+                    "the one consumer that cannot run an agent.",
+            target="/spire-lab",
+            minutes=20,
+            docs="spiffe",
+            requires_flags=("spire_lab_enabled",),
         ),
         UseCase(
             id="devops-function-secret",

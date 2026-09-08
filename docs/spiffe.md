@@ -69,21 +69,59 @@ cost beyond the VM itself**, which the auto-delete timer already reaps. The reas
 still gets its own record and its own timer is different: a forgotten trust domain keeps
 minting identities that relying services keep accepting, and it appears on no other page.
 
-## Building it
+## Building it from the dashboard
+
+The **SPIRE** page (preview; enable `spire_lab_enabled` under Settings → Preview
+features) does steps 1–5 below as one job. Configure it under **Settings → SPIRE Lab**,
+and upload the four `spire-*.yml` playbooks on the Config Management page first — a run
+fetches assets *by filename from the storage backend*, never from `examples/`, and the
+build form names the ones that are missing.
+
+**It attaches to a VM you already deployed rather than creating one.** That is not a
+shortcut: the Ansible runner resolves the host's SSH key from that VM's own *deploy job*,
+so a host built outside the normal cloud page is one the runner cannot log in to. The VM
+also keeps its own auto-delete timer and its own Destroy, which is why tearing the lab
+down closes `tcp/8081` and leaves the host alone.
+
+What the build does, in order:
+
+1. Opens `tcp/8081` on the cloud ACL — an NSG rule on Azure, a VPC firewall rule plus an
+   instance tag on GCP, a security-group permission on AWS — to the sources named in
+   `spire_lab_source_cidrs`. **Blank opens nothing**, which is correct for a broker
+   already inside the VNet and is the first thing to check otherwise.
+2. `spire-server-install.yml` — SPIRE under systemd, one trust domain, and `admin_ids`.
+3. `spire-open-ports.yml`, with the same source set, so the two gates cannot disagree.
+4. `spire-seed-entries.yml` — 11 entries, of which discovery should return **8**.
+5. `spire-admin-identity.yml` — mints the admin credential into Secrets Safe.
+
+Each playbook gets its own job row, so a failed stage's Ansible output is somewhere you
+can read it; the page links all four. The first failure stops the sequence, because every
+later stage asserts the server is up.
+
+**The dashboard does not write the Password Safe objects.** The plugin takes its whole
+configuration from BeyondInsight *attributes*, and whether the gateway populates those
+for a plugin action has never been observed — so a writer built now would be betting on
+the answer. The page's **Onboarding** panel resolves every value instead:
+
+- an Asset for the host, and a Managed System on the `SPIFFE SVID` platform at port 8081;
+- a Functional Account whose **name is a SPIFFE ID**
+  (`spiffe://<trust-domain>/password-safe/admin`), carrying the PKCS#12 as its DSS key —
+  the panel names the two Secrets Safe titles holding it and never reads them;
+- `SpiffeTrustDomain` on the managed system, and `SpiffeTrustBundlePem` from the
+  **Bundle** button.
+
+Then run *Verify Functional Account* and read the `Attributes received:` line.
+[The standup runbook](runbooks/spire-lab-standup.md) §5 is that procedure and what each
+answer means.
+
+### By hand
 
 Full detail, including what each playbook proves, is in
-[`examples/playbooks/spire/`](../examples/playbooks/spire/README.md). In short:
-
-1. Deploy a Linux VM from the normal cloud page, on a subnet the Password Safe worker or
-   Resource Broker can reach.
-2. `spire-server-install.yml` — SPIRE under systemd, one trust domain, and `admin_ids`.
-3. `spire-open-ports.yml`, then open the cloud ACL. **Both** are gates.
-4. `spire-seed-entries.yml` — 11 entries, of which discovery should return **8**.
-5. `spire-admin-identity.yml` — mints the admin credential into Password Safe.
-
-Then onboard it: an Asset for the host, a Managed System on the `SPIFFE SVID` platform
-at port 8081, and a Functional Account whose **name is a SPIFFE ID**
-(`spiffe://<trust-domain>/password-safe/admin`), carrying the PKCS#12 as its DSS key.
+[`examples/playbooks/spire/`](../examples/playbooks/spire/README.md). The playbooks are
+cloud-agnostic — they configure a Linux host over SSH — so only step 1 differs between
+Azure, GCP and AWS. Run them from Config Management on the **`ansible-winrm`** runner
+image: `spire-open-ports.yml` needs `ansible.posix` and `spire-admin-identity.yml` needs
+`beyondtrust.secrets_safe`, and neither is in `ansible-cloud`.
 
 ## Two numbers to check, because both have already been wrong
 
@@ -98,7 +136,11 @@ reported separately, and that is what tells you which one bit.
 server issues, so `-ttl 720h` against the default 168h gives a ~7-day credential and
 SPIRE says so rather than failing. Once it lapses, every action fails
 `PERMISSION_DENIED`, which reads exactly like an `admin_ids` misconfiguration. Schedule
-off the real expiry the playbook prints.
+off the real expiry the playbook prints — or off the date the SPIRE page shows, which
+is the same number: the playbook publishes it, and the trust bundle, as text secrets
+alongside the credential so the dashboard reads them as *values* rather than scraping a
+job log. Both are public by construction; the credential itself never leaves Secrets
+Safe.
 
 ## Boundaries
 

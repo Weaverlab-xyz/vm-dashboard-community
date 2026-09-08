@@ -4224,3 +4224,125 @@ async def delete_staged_blob(storage_account: str, container: str, blob_name: st
         )
     except Exception as e:
         raise AzureError(f"Failed to delete staged blob {storage_account}/{container}/{blob_name}: {e}") from e
+
+
+# ── Inbound access to a VM the dashboard already deployed ─────────────────────
+# `ensure_node_nsg` above converges a NSG the LAUNCHER then attaches to a new node's
+# NIC. This pair is the other case: a VM that already exists, whose NSG we did not
+# create and must not replace. It is what the SPIRE lab needs — the runbook's "cloud
+# gate" — and it is deliberately a separate rule NAME so opening 8081 for a lab cannot
+# disturb `allow-mgmt` on a VM that is also a managed node.
+
+_VM_RULE_PRIORITY = 320          # below _NODE_RULE_PRIORITY (300), above Azure's defaults
+
+
+def _vm_primary_nic_sync(compute, network, rg: str, vm_name: str):
+    """The VM's primary NIC object, its resource group and its name."""
+    vm = compute.virtual_machines.get(rg, vm_name)
+    nics = (vm.network_profile.network_interfaces or []) if vm.network_profile else []
+    if not nics:
+        raise AzureError(f"Azure VM {vm_name!r} has no network interface")
+    # `primary` is None on a single-NIC VM, which is the common case, so "the one marked
+    # primary, else the first" rather than a filter that would find nothing.
+    nic_ref = next((n for n in nics if getattr(n, "primary", False)), nics[0])
+    nic_id = nic_ref.id
+    nic_rg = nic_id.split("/resourceGroups/")[1].split("/")[0]
+    nic_name = nic_id.split("/")[-1]
+    return network.network_interfaces.get(nic_rg, nic_name), nic_rg, nic_name
+
+
+def _ensure_vm_inbound_rule_sync(cred, sub_id: str, rg: str, vm_name: str, *,
+                                 rule_name: str, ports: list, source_cidrs: list,
+                                 location: str = "") -> dict:
+    """Converge ONE inbound allow rule on the NSG governing an existing VM.
+
+    Resolution order is NIC first, then the NIC's subnet, because that is Azure's own
+    evaluation order and writing the rule anywhere else produces a rule that exists and
+    does nothing. When neither carries a NSG the VM has no inbound path at all (a
+    Standard public IP denies inbound by default), so one is created and attached to the
+    NIC rather than failing — otherwise the operator is told to go and do by hand the
+    only thing that could possibly work.
+
+    Fail-closed on an empty ``source_cidrs``: the rule is DELETED, not written with an
+    empty prefix list (which the API rejects). Same contract as `ensure_node_nsg`.
+    """
+    compute = _get_compute(cred, sub_id)
+    network = _get_network(cred, sub_id)
+    nic, nic_rg, nic_name = _vm_primary_nic_sync(compute, network, rg, vm_name)
+
+    nsg_id = getattr(nic.network_security_group, "id", None) if nic.network_security_group else None
+    attached_to = "nic"
+    if not nsg_id and nic.ip_configurations:
+        subnet_ref = nic.ip_configurations[0].subnet
+        if subnet_ref and subnet_ref.id:
+            sn_rg = subnet_ref.id.split("/resourceGroups/")[1].split("/")[0]
+            vnet_name = subnet_ref.id.split("/virtualNetworks/")[1].split("/")[0]
+            sn_name = subnet_ref.id.split("/")[-1]
+            try:
+                subnet = network.subnets.get(sn_rg, vnet_name, sn_name)
+                if subnet.network_security_group and subnet.network_security_group.id:
+                    nsg_id, attached_to = subnet.network_security_group.id, "subnet"
+            except Exception as exc:  # noqa: BLE001 — a subnet we cannot read is not a NSG
+                logger.info("VM %s: subnet NSG lookup failed (%s)", vm_name, exc)
+
+    created = False
+    if not nsg_id:
+        if not source_cidrs:
+            # Nothing to open and nothing to close. Creating a group here would leave
+            # litter on a VM that was never opened.
+            return {"nsg": "", "rule": rule_name, "opened": False, "created": False,
+                    "attached_to": "none"}
+        loc = location or compute.virtual_machines.get(rg, vm_name).location
+        nsg_name = f"{vm_name}-nsg"
+        network.network_security_groups.begin_create_or_update(
+            nic_rg, nsg_name, {"location": loc,
+                               "tags": {"managed-by": _NODE_MANAGED_TAG}}).result()
+        nsg = network.network_security_groups.get(nic_rg, nsg_name)
+        nic.network_security_group = nsg
+        network.network_interfaces.begin_create_or_update(nic_rg, nic_name, nic).result()
+        nsg_id, created, attached_to = nsg.id, True, "nic"
+        logger.info("VM %s: created and attached NSG %s (it had none)", vm_name, nsg_name)
+
+    nsg_rg = nsg_id.split("/resourceGroups/")[1].split("/")[0]
+    nsg_name = nsg_id.split("/")[-1]
+
+    if source_cidrs:
+        network.security_rules.begin_create_or_update(nsg_rg, nsg_name, rule_name, {
+            "protocol": "Tcp",
+            "source_address_prefixes": list(source_cidrs),
+            "source_port_range": "*",
+            "destination_address_prefix": "*",
+            "destination_port_ranges": [str(p) for p in ports],
+            "access": "Allow",
+            "direction": "Inbound",
+            "priority": _VM_RULE_PRIORITY,
+            "description": "vm-dashboard: source-restricted ingress to a lab service",
+        }).result()
+    else:
+        try:
+            network.security_rules.begin_delete(nsg_rg, nsg_name, rule_name).result()
+        except Exception as exc:  # noqa: BLE001 — already absent is the desired state
+            logger.info("NSG %s: no %s rule to remove (%s)", nsg_name, rule_name, exc)
+
+    return {"nsg": nsg_name, "rule": rule_name, "opened": bool(source_cidrs),
+            "created": created, "attached_to": attached_to}
+
+
+async def ensure_vm_inbound_rule(rg: str, vm_name: str, *, rule_name: str, ports: list,
+                                 source_cidrs: list, location: str = "") -> dict:
+    """Open (or close) ``ports`` inbound to an existing VM from ``source_cidrs``.
+
+    Fail-closed: an empty ``source_cidrs`` removes the rule and returns
+    ``opened: False``. Callers key off that rather than off the absence of an error.
+    """
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(
+            _ensure_vm_inbound_rule_sync, cred, sub_id, rg, vm_name,
+            rule_name=rule_name, ports=list(ports), source_cidrs=list(source_cidrs),
+            location=location)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(
+            f"Failed to apply inbound rule {rule_name!r} for VM {vm_name}: {e}") from e

@@ -25,7 +25,7 @@ def _install_stubs():
     # did. If you add a model to that import, add it here.
     for name in ("Job", "CertLab", "CloudDatabase", "CloudFunction", "K8sCluster",
                  "VirtualDesktop", "HypervisorConnection", "HypervisorVMCache",
-                 "PovEnvironment"):
+                 "PovEnvironment", "SpireLab"):
         setattr(db, name, type(name, (), {}))
     sys.modules["web_dashboard.database"] = db
 
