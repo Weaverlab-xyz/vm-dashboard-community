@@ -234,6 +234,27 @@ def test_the_project_is_still_required_when_nothing_supplies_one():
     assert "project-scoped" in block
 
 
+def test_the_sandbox_scripts_grant_everything_a_ca_build_needs():
+    """Both twins, because a CA build needs more than `privateca.admin`.
+
+    The module creates the plugin's enrollment service account and a key for it, so a
+    build with only `privateca.admin` gets the pool and then fails on
+    `iam.serviceAccounts.create` — an IAM error that names neither the script nor the
+    Certificate Lab. Live-observed 2026-09-09, on a project the script had already set up.
+    """
+    failures = []
+    for parts in (("scripts", "sandbox", "Linux", "setup-gcp.sh"),
+                  ("scripts", "sandbox", "Windows", "Setup-GcpSandbox.ps1")):
+        src, name = _read(*parts), parts[-1]
+        if "privateca.googleapis.com" not in src:
+            failures.append(f"{name}: does not enable privateca.googleapis.com")
+        for role in ("roles/privateca.admin", "roles/iam.serviceAccountAdmin",
+                     "roles/iam.serviceAccountKeyAdmin"):
+            if role not in src:
+                failures.append(f"{name}: does not grant {role}")
+    assert not failures, "a CA build would fail on:\n  " + "\n  ".join(failures)
+
+
 def test_it_ships_as_a_preview_flag_alongside_workload_credentials():
     setup = _read("web_dashboard", "api", "setup.py")
     flags = setup.split("_PREVIEW_FLAGS = {")[1].split("\n}")[0]

@@ -410,6 +410,11 @@ if ($LASTEXITCODE -ne 0) {
 # image-hub bucket, which already gets a BUCKET-SCOPED objectAdmin grant in 5b. If
 # you ever point function_package_gcs_bucket at a different bucket, grant it there
 # too — the feature docs list objectAdmin project-wide, which this narrows.
+#
+# The last three are the Certificate Lab's, and privateca.admin alone is not enough:
+# terraform/cert_ca/gcp_cas creates the plugin's ENROLLMENT service account and a key
+# for it, so a CA build fails on `iam.serviceAccounts.create` after the pool succeeds.
+# The error names IAM rather than this script, which is a long way from the cause.
 foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/iam.serviceAccountUser','roles/run.admin','roles/run.developer',
                     'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin',
@@ -419,11 +424,12 @@ foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/bigquery.jobUser','roles/bigquery.dataViewer',
                     'roles/cloudfunctions.developer','roles/secretmanager.admin',
                     'roles/cloudbuild.builds.builder','roles/artifactregistry.writer',
-                    'roles/privateca.admin')) {
+                    'roles/privateca.admin','roles/iam.serviceAccountAdmin',
+                    'roles/iam.serviceAccountKeyAdmin')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }
-Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, iam.roleAdmin, bigquery.jobUser, bigquery.dataViewer, cloudfunctions.developer, secretmanager.admin, cloudbuild.builds.builder, artifactregistry.writer'
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, iam.roleAdmin, bigquery.jobUser, bigquery.dataViewer, cloudfunctions.developer, secretmanager.admin, cloudbuild.builds.builder, artifactregistry.writer, privateca.admin, iam.serviceAccount{Admin,KeyAdmin}'
 
 $SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
 if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {
