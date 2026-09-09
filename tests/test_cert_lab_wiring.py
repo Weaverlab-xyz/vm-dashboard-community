@@ -205,6 +205,35 @@ def test_a_failed_teardown_does_not_re_arm_the_timer():
 
 # ── the preview flag ──────────────────────────────────────────────────────────
 
+def test_the_gcp_project_defaults_to_the_dashboards_own_credential():
+    # Three surfaces, and a miss on any one of them fails quietly: the service fallback is
+    # what actually works, the API field is what the form reads, and the prefill is what
+    # makes the value visible. Losing only the prefill leaves an operator typing a project
+    # id that was already known.
+    svc = _read("web_dashboard", "services", "cert_lab_service.py")
+    block = svc.split('elif cloud == "gcp":')[1].split("    else:")[0]
+    # The same two keys, in the same order, that gcp_env() reads to build GOOGLE_PROJECT.
+    assert '_cfg("gcp_project") or _cfg("gcp_project_id")' in block
+    env = _read("web_dashboard", "services", "terraform_provider_env.py")
+    assert '_cfg("gcp_project") or _cfg("gcp_project_id")' in env, \
+        "the fallback order must keep matching gcp_env(), or the pool and the credential " \
+        "can disagree about the project"
+
+    api = _read("web_dashboard", "api", "cert_lab.py")
+    assert '"default_project"' in api
+    page = _read("web_dashboard", "templates", "cert_lab", "index.html")
+    assert "o.default_project" in page, "the API exposes it but the form never reads it"
+
+
+def test_the_project_is_still_required_when_nothing_supplies_one():
+    # The fallback must not turn a missing project into an empty -var: terraform would
+    # fail inside the worker, after the row and the job row already exist.
+    svc = _read("web_dashboard", "services", "cert_lab_service.py")
+    block = svc.split('elif cloud == "gcp":')[1].split("    else:")[0]
+    assert "raise CertLabError" in block
+    assert "project-scoped" in block
+
+
 def test_it_ships_as_a_preview_flag_alongside_workload_credentials():
     setup = _read("web_dashboard", "api", "setup.py")
     flags = setup.split("_PREVIEW_FLAGS = {")[1].split("\n}")[0]

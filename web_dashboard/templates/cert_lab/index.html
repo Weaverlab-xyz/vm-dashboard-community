@@ -146,8 +146,14 @@
         </div>
         <div x-show="form.cloud !== 'aws'">
           <label class="block text-xs font-medium text-gray-600 mb-1">GCP project</label>
-          <input x-model="form.project" placeholder="bt-se-lab"
+          <input x-model="form.project"
+                 :placeholder="options.default_project || 'bt-se-lab'"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+          <p class="text-xs text-gray-400 mt-1">
+            The project <em>id</em>, not its display name or number. Defaults to the project
+            this dashboard's GCP credential is scoped to; the pool lands wherever this says,
+            so a different project needs the CA Service roles granted there too.
+          </p>
         </div>
         <div x-show="form.cloud !== 'aws'">
           <label class="block text-xs font-medium text-gray-600 mb-1">Location</label>
@@ -316,6 +322,10 @@ function certLabPage() {
         this.missing = o.missing || [];
         this.preview.limit = o.address_limit || 255;
         if (o.default_location) this.form.location = o.default_location;
+        // Prefilled rather than left as a placeholder so the project is visible and
+        // editable before the click. The module's provider block makes this value
+        // authoritative over the credential's own project, so seeing it matters.
+        if (o.default_project && !this.form.project) this.form.project = o.default_project;
       } catch (e) { /* the page still works without the hints */ }
     },
 
