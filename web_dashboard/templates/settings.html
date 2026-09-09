@@ -67,7 +67,7 @@
     <div x-show="namingKey" x-cloak
          class="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
       <p class="text-sm text-blue-800 mb-3 font-medium">Key registered! Give it a name so you can recognise it later.</p>
-      <div class="flex gap-2">
+      <div class="flex flex-wrap gap-2">
         <input type="text" x-model="deviceName" placeholder="e.g. YubiKey 5C, Windows Hello…"
                class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm
                       focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -522,7 +522,7 @@
             </p>
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Extend button adds</label>
               <input type="number" min="1" x-model.number="panelCfg.resource_expiry_extend_hours"
@@ -543,7 +543,7 @@
             </div>
           </div>
 
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Grace</label>
               <input type="number" min="15" x-model.number="panelCfg.resource_expiry_grace_minutes"
@@ -564,7 +564,7 @@
             </div>
           </div>
 
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Keep sweep history</label>
               <input type="number" min="0" x-model.number="panelCfg.resource_expiry_sweep_retention_days"
@@ -649,7 +649,7 @@
             <strong>poll-only</strong>.
           </div>
 
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Poll-only jobs</label>
               <input type="number" min="1" x-model.number="panelCfg.worker_light_concurrency"
@@ -705,7 +705,7 @@
             readout below says your total was reduced, raise those and redeploy the worker.
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Shutdown grace</label>
               <input type="number" min="0" x-model.number="panelCfg.worker_drain_timeout_s"
@@ -805,7 +805,7 @@
             </p>
           </div>
 
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Minimum severity</label>
               <select x-model="panelCfg.notify_min_severity"
@@ -832,7 +832,7 @@
             </div>
           </div>
 
-          <div class="grid grid-cols-4 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Attempts</label>
               <input type="number" min="1" max="5" x-model.number="panelCfg.notify_max_attempts"
@@ -930,7 +930,7 @@
 
             <!-- add / edit form -->
             <div x-show="notif.draft" x-cloak class="mt-3 rounded border border-blue-200 bg-white p-3 space-y-2">
-              <div class="grid grid-cols-3 gap-2">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div class="col-span-2">
                   <label class="block text-[11px] font-medium text-gray-600 mb-1">Name</label>
                   <input type="text" x-model="notif.draft.name"
@@ -1075,7 +1075,7 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="https://ps.company.com">
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
                   <input type="text" x-model="panelCfg.pscli_client_id"
@@ -1194,7 +1194,7 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="workgroup name or id">
               </div>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Functional account — AWS</label>
                   <input type="text" x-model="panelCfg.passwordsafe_vm_functional_account_aws"
@@ -1214,7 +1214,7 @@
                          placeholder="name or id">
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Managed account name</label>
                   <input type="text" x-model="panelCfg.passwordsafe_managed_account_name"
@@ -1259,7 +1259,7 @@
                   <input type="checkbox" x-model="panelCfg.ot_ps_checkout_converge" class="rounded text-blue-600">
                   Rotate once right after linking, so PRA holds a real credential immediately
                 </label>
-                <div class="grid grid-cols-2 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault mirror platform</label>
                     <input type="text" x-model="panelCfg.ot_ps_pravault_platform"
@@ -1293,7 +1293,7 @@
               All four are optional. Importing needs both the <code class="bg-gray-100 px-1 rounded">cloud_database:write</code>
               and <code class="bg-gray-100 px-1 rounded">secrets:use</code> permissions.
             </p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Import Workgroup <span class="text-gray-400 font-normal">(blank = everything visible)</span></label>
                 <input type="text" x-model="panelCfg.clouddb_ps_import_workgroup"
@@ -1313,7 +1313,7 @@
                 <p class="text-xs text-gray-400 mt-1">Preselected in the import dialog. Password Safe does not record a cloud, so this is a starting point, not a lookup.</p>
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-3 mt-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Max Candidates</label>
                 <input type="number" min="1" x-model.number="panelCfg.clouddb_ps_import_max_systems"
@@ -1349,7 +1349,7 @@
             <div x-show="panelCfg.clouddb_ps_onboarding_enabled" class="space-y-3">
               <!-- x-init default is load-bearing: an unset string config key reads back
                    as "" from /api/setup/feature, not as the model default. -->
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Functional account source</label>
                   <select x-model="panelCfg.clouddb_ps_functional_account_mode"
@@ -1365,7 +1365,7 @@
                    Spelled out one control per engine rather than an x-for over the
                    names: the panel-binding guard reads x-model literals, and a computed
                    key is a key an operator cannot find by searching the template. -->
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-xs font-medium text-gray-700 mb-1">PostgreSQL override</label>
                   <select x-model="panelCfg.clouddb_ps_functional_account_mode_postgres"
@@ -1403,7 +1403,7 @@
                    keys cannot express (one "PostgreSQL override" governs Azure and GCP
                    postgres, which want opposite answers). Same x-init "" default as the
                    engine row, same literal x-model per control. -->
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-xs font-medium text-gray-700 mb-1">AWS override</label>
                   <select x-model="panelCfg.clouddb_ps_functional_account_mode_aws"
@@ -1480,7 +1480,7 @@
                 The dashboard creates a functional account per database from the credential material below, and deletes it on
                 decommission. Switch to <em>Reference an existing account</em> to point at accounts you created yourself.
               </p>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
                   <input type="text" x-model="panelCfg.clouddb_ps_platform_postgres"
@@ -1500,7 +1500,7 @@
                          placeholder="mssql SSM Custom Plugin">
                 </div>
               </div>
-              <div class="grid grid-cols-3 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Functional Account</label>
                   <input type="text" x-model="panelCfg.clouddb_ps_functional_account_postgres"
@@ -1520,7 +1520,7 @@
                          placeholder="name or id">
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Platform</label>
                   <input type="text" x-model="panelCfg.clouddb_ps_pravault_platform"
@@ -1534,7 +1534,7 @@
                          placeholder="Default Workgroup">
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Functional Account</label>
                   <input type="text" x-model="panelCfg.clouddb_ps_pravault_functional_account"
@@ -1544,7 +1544,7 @@
               </div>
               <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode !== 'reference'">The functional account packs the AWS credentials for SSM SendCommand: setting <strong>both</strong> the Access Key ID and Secret selects IAM-user mode; leaving either blank selects EC2 instance-role mode (Password Safe node/broker on an EC2 with the SSM role). The account's username becomes <code>EC2:&lt;dbAdmin&gt;</code> / <code>IAM:&lt;dbAdmin&gt;</code> and its password the <code>keyId:secret:dbAdminPassword</code> triple the plugin parses.</p>
               <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">Not used in this mode — the functional account you name above carries it.</p>
-              <div class="grid grid-cols-3 gap-3" :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3" :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">IAM Username <span class="text-gray-400 font-normal">(informational)</span></label>
                   <input type="text" x-model="panelCfg.clouddb_ps_ssm_iam_username" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
@@ -1564,7 +1564,7 @@
                          placeholder="••••••••">
                 </div>
               </div>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Assume Role <span class="text-gray-400 font-normal">(address segment, ≥12 chars)</span></label>
                   <input type="text" x-model="panelCfg.clouddb_ps_ssm_account_suffix"
@@ -1589,7 +1589,7 @@
                 host so the SSM plugin can decrypt the RSA-wrapped login password. Use a <strong>separate</strong> key pair
                 from the Azure one below: these two private keys land on different hosts, so sharing one would mean a
                 compromise of either host also decrypts the other cloud&#39;s payloads. Blank leaves the staging manual.</p>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Plugin Private Key (PEM)</label>
                   <textarea x-model="panelCfg.clouddb_ps_ssm_plugin_private_key" rows="3"
@@ -1614,7 +1614,7 @@
                 <button type="button" @click="openPanelByKey('pra')" class="underline text-blue-600">Privileged
                 Remote Access</button> panel. Unsaved edits here are discarded when the panel switches.
               </p>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">psql Client Image</label>
                   <input type="text" x-model="panelCfg.clouddb_db_client_image_postgres"
@@ -1666,7 +1666,7 @@
                     way to disable Azure alone.
                   </p>
                 </div>
-                <div class="grid grid-cols-3 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
                     <input type="text" x-model="panelCfg.clouddb_ps_platform_azure_postgres"
@@ -1686,7 +1686,7 @@
                            placeholder="MSSQL Azure Run Command Plugin">
                   </div>
                 </div>
-                <div class="grid grid-cols-3 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Functional Account</label>
                     <input type="text" x-model="panelCfg.clouddb_ps_functional_account_azure_postgres"
@@ -1706,7 +1706,7 @@
                            placeholder="name or id">
                   </div>
                 </div>
-                <div class="grid grid-cols-3 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Auth Mode</label>
                     <select x-model="panelCfg.clouddb_ps_azure_auth_mode" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
@@ -1731,7 +1731,7 @@
                 </div>
                 <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode !== 'reference'">Azure service principal for the functional account — leave blank to reuse the dashboard&#39;s Azure credentials. It needs Virtual Machine Contributor on the jump-VM resource group.</p>
                 <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">Not used in this mode — the functional account you name above carries it.</p>
-                <div class="grid grid-cols-2 gap-3" :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" :class="panelCfg.clouddb_ps_functional_account_mode === 'reference' ? 'opacity-50' : ''">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">SP Client ID</label>
                     <input type="text" x-model="panelCfg.clouddb_ps_azure_sp_client_id" :disabled="panelCfg.clouddb_ps_functional_account_mode === 'reference'"
@@ -1746,7 +1746,7 @@
                   </div>
                 </div>
                 <p class="text-xs text-gray-400">Plugin RSA private key + passphrase the dashboard drops onto the jump VM at <code class="bg-gray-100 px-1 rounded">/root/psplugin</code> (matches the public cert on the Resource Broker).</p>
-                <div class="grid grid-cols-2 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Plugin Private Key (PEM)</label>
                     <textarea x-model="panelCfg.clouddb_ps_azure_plugin_private_key" rows="3"
@@ -1809,7 +1809,7 @@
                     <em>verify</em> a managed account&#39;s password or let one rotate itself.
                   </p>
                 </div>
-                <div class="grid grid-cols-3 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
                     <input type="text" x-model="panelCfg.clouddb_ps_platform_gcp_postgres"
@@ -1834,7 +1834,7 @@
                     Operator-created functional accounts, one per engine. This is the <strong>recommended</strong> mode on GCP: unlike Azure the
                     composite carries nothing per-database, so a single account covers every Cloud SQL instance on that platform.
                   </p>
-                  <div class="grid grid-cols-3 gap-3">
+                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
                       <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Functional Account</label>
                       <input type="text" x-model="panelCfg.clouddb_ps_functional_account_gcp_postgres"
@@ -1855,7 +1855,7 @@
                     </div>
                   </div>
                 </div>
-                <div class="grid grid-cols-2 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">GCP Identity Mode</label>
                     <select x-model="panelCfg.clouddb_ps_gcp_auth_mode"
@@ -1967,7 +1967,7 @@
                       because this is an API that changes credentials. Blank deploys a service nothing can call.
                     </p>
                   </div>
-                  <div class="grid grid-cols-3 gap-3">
+                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
                       <label class="block text-sm font-medium text-gray-700 mb-1">Ingress</label>
                       <select x-model="panelCfg.clouddb_ps_gcp_dbops_ingress"
@@ -2044,7 +2044,7 @@
               Enable Password Safe rotation for k8s ServiceAccount tokens
             </label>
             <div x-show="panelCfg.k8s_ps_token_rotation_enabled" class="space-y-3">
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Token Platform</label>
                   <input type="text" x-model="panelCfg.k8s_ps_token_platform"
@@ -2059,7 +2059,7 @@
                 </div>
               </div>
               <p class="text-xs text-gray-400">Functional accounts (name or id). Per cloud: an AWS access key, an Entra service principal (<code class="bg-gray-100 px-1 rounded">SP:&lt;tenantId&gt;:&lt;clientId&gt;</code>), a GCP service-account key, or a bootstrap ServiceAccount credential for on-prem/OKE. The PRA Vault mirror's is a PRA Config-API OAuth client.</p>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">AWS Functional Account</label>
                   <input type="text" x-model="panelCfg.k8s_ps_functional_account_aws"
@@ -2085,7 +2085,7 @@
                          placeholder="ps-k8s-rotator-generic">
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Mirror Functional Account</label>
                   <input type="text" x-model="panelCfg.k8s_ps_pravault_functional_account"
@@ -2099,7 +2099,7 @@
                          placeholder="Default Workgroup">
                 </div>
               </div>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Token Mode</label>
                   <select x-model="panelCfg.k8s_ps_token_mode"
@@ -2121,7 +2121,7 @@
                          placeholder="dnsEndpoint=true;serverName=…">
                 </div>
               </div>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <label class="flex items-center gap-2 text-sm text-gray-700">
                   <input type="checkbox" x-model="panelCfg.k8s_ps_token_change_on_register"
                          class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
@@ -2138,7 +2138,7 @@
                   Pre-tick on the provision form
                 </label>
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Token Checkout Duration (minutes) <span class="text-gray-400 font-normal">(Password Safe request)</span></label>
                   <input type="number" x-model="panelCfg.k8s_ps_token_checkout_duration_min" min="1"
@@ -2153,7 +2153,7 @@
               </div>
               <p class="text-xs text-gray-400">In-cluster rotator RBAC. The binding subject differs per cloud: AKS needs the service principal's <em>object id</em> (the plugin logs it on every run — not the client id), EKS the access-entry username + the IAM principal ARN behind the functional account's key. GKE derives the subject from the functional account's name when blank.</p>
               <p class="text-xs text-gray-400">On AKS and EKS the binding alone does not authorise anything: an AKS cluster with Azure RBAC (every cluster built here) decides from an <em>Azure role assignment</em>, and EKS from an access entry. Both are created for you when the identity below is set, and both fail only at the first rotation when they are missing — on AKS with <span class="font-mono">&quot;User does not have access to the resource in Azure&quot;</span>.</p>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <label class="flex items-center gap-2 text-sm text-gray-700 col-span-3">
                   <input type="checkbox" x-model="panelCfg.k8s_ps_rotator_apply_rbac"
                          class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
@@ -2200,7 +2200,7 @@
                          placeholder="passwordsafe-rotator">
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">EKS Principal ARN <span class="text-gray-400 font-normal">(behind the FA's access key)</span></label>
                   <input type="text" x-model="panelCfg.k8s_ps_rotator_eks_principal_arn"
@@ -2213,7 +2213,7 @@
                   Create the EKS access entry when the ARN is set
                 </label>
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Bootstrap SA Namespace <span class="text-gray-400 font-normal">(generic/on-prem)</span></label>
                   <input type="text" x-model="panelCfg.k8s_ps_rotator_bootstrap_namespace"
@@ -2272,7 +2272,7 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="pra.company.com">
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
                   <input type="text" x-model="panelCfg.bt_client_id"
@@ -2294,7 +2294,7 @@
               cloud-database onboarding. Optional: leave blank to reuse the credentials above.
             </p>
             <div class="space-y-3">
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client ID</label>
                   <input type="text" x-model="panelCfg.pra_config_api_client_id"
@@ -2316,7 +2316,7 @@
             <p class="text-xs text-gray-400 mb-3">
               The Jump Group and Gateway must already exist in PRA — the dashboard looks them up by name and creates Shell Jumps inside them.
             </p>
-            <div class="grid grid-cols-2 gap-3 mb-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(AWS)</span></label>
                 <input type="text" x-model="panelCfg.bt_jump_group_name"
@@ -2344,7 +2344,7 @@
               </p>
             </div>
             <p class="text-xs text-gray-400 mb-2">Azure overrides — leave blank to reuse the AWS values above.</p>
-            <div class="grid grid-cols-2 gap-3 mb-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(Azure)</span></label>
                 <input type="text" x-model="panelCfg.azure_bt_jump_group_name"
@@ -2420,7 +2420,7 @@
               </p>
             </div>
             <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(GCP)</span></label>
                 <input type="text" x-model="panelCfg.gcp_bt_jump_group_name"
@@ -2475,7 +2475,7 @@
               Safe</button> panel.
             </p>
             <div class="space-y-3">
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PRA SA Namespace</label>
                   <input type="text" x-model="panelCfg.pra_k8s_namespace"
@@ -2650,7 +2650,7 @@
                 </div>
 
                 <!-- GCP -->
-                <div x-show="nodeCloud === 'gcp'" class="grid grid-cols-2 gap-3">
+                <div x-show="nodeCloud === 'gcp'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
                     <input type="text" x-model="panelCfg.gcp_portainer_image"
@@ -2687,7 +2687,7 @@
                 <!-- AWS. No zone field: an EC2 subnet already pins the availability
                      zone, so one here could only contradict it. No network tag either
                      — a dedicated security group replaces GCE's target-tag model. -->
-                <div x-show="nodeCloud === 'aws'" class="grid grid-cols-2 gap-3">
+                <div x-show="nodeCloud === 'aws'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
                     <input type="text" x-model="panelCfg.aws_portainer_image"
@@ -2712,7 +2712,7 @@
 
                 <!-- Azure. Same omissions as AWS, plus: the Standard public IP is
                      Static, so this node KEEPS its address across a recreate. -->
-                <div x-show="nodeCloud === 'azure'" class="grid grid-cols-2 gap-3">
+                <div x-show="nodeCloud === 'azure'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
                     <input type="text" x-model="panelCfg.azure_portainer_image"
@@ -2838,7 +2838,7 @@
                   with a Vault account group the admin password is injected instead of shown. Can also be
                   chosen per-deploy on the Containers page.
                 </p>
-                <div class="grid grid-cols-2 gap-3 mt-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group</label>
                     <input type="text" x-model="panelCfg.portainer_ui_jump_group"
@@ -2938,7 +2938,7 @@
           <div class="rounded-lg border border-gray-200 p-3 space-y-2">
             <p class="text-sm font-semibold text-gray-700">Ansible (config-mgmt) runner</p>
             <p class="text-xs text-gray-400 -mt-1">Runs playbooks on your VMs over SSH, chosen by the run's target cloud.</p>
-            <div class="grid grid-cols-3 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">AWS targets</label>
                 <select x-model="panelCfg.ansible_runner_aws"
@@ -2970,7 +2970,7 @@
           <div class="rounded-lg border border-gray-200 p-3 space-y-2">
             <p class="text-sm font-semibold text-gray-700">Kubernetes (kubectl/helm) runner</p>
             <p class="text-xs text-gray-400 -mt-1">Runs cluster-API ops (Entitle agent, ESO, mgmt-plane) chosen by the cluster's cloud.</p>
-            <div class="grid grid-cols-3 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">EKS (AWS)</label>
                 <select x-model="panelCfg.k8s_runner_aws"
@@ -3047,7 +3047,7 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="sg-0abc1234,sg-0def5678">
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(blank → storage_s3_bucket)</span></label>
                   <input type="text" x-model="panelCfg.promote_runner_aws_staging_bucket"
@@ -3061,7 +3061,7 @@
                          placeholder="promote-staging">
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">ECS cluster <span class="text-gray-400 font-normal">(blank → ansible_ecs_cluster)</span></label>
                   <input type="text" x-model="panelCfg.promote_runner_ecs_cluster"
@@ -3075,7 +3075,7 @@
                          placeholder="promote-runner">
                 </div>
               </div>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">CPU units</label>
                   <input type="number" min="256" step="256" x-model="panelCfg.promote_runner_ecs_cpu"
@@ -3102,7 +3102,7 @@
             <div class="rounded-lg border border-gray-200 p-3 space-y-3">
               <p class="text-sm font-semibold text-gray-700">Azure — Container Instances</p>
               <p class="text-xs text-gray-400 -mt-1">The runner writes the staged VHD with the dashboard's own Azure service principal, so no extra IAM plumbing is needed — only the resource group and staging account matter, and both fall back to your Azure configuration.</p>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Staging storage account <span class="text-gray-400 font-normal">(blank → storage_azure_account)</span></label>
                   <input type="text" x-model="panelCfg.promote_runner_azure_staging_account"
@@ -3146,7 +3146,7 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="/subscriptions/…/storageAccounts/btimages">
               </div>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Location <span class="text-gray-400 font-normal">(blank → azure_location)</span></label>
                   <input type="text" x-model="panelCfg.promote_runner_azure_location"
@@ -3172,7 +3172,7 @@
             <div class="rounded-lg border border-gray-200 p-3 space-y-3">
               <p class="text-sm font-semibold text-gray-700">GCP — Cloud Run Jobs</p>
               <p class="text-xs text-gray-400 -mt-1">The project comes from gcp_project_id. The runner needs roles/storage.objectAdmin on the staging bucket — either via the service account below or the dashboard's own SA.</p>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(holds the disk.raw tar.gz; blank → storage_gcs_bucket)</span></label>
                   <input type="text" x-model="panelCfg.promote_runner_gcp_staging_bucket"
@@ -3204,7 +3204,7 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="bt-dashboard-images">
               </div>
-              <div class="grid grid-cols-3 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Region <span class="text-gray-400 font-normal">(blank → gcp_region)</span></label>
                   <input type="text" x-model="panelCfg.promote_runner_gcp_region"
@@ -3234,7 +3234,7 @@
             <div class="rounded-lg border border-gray-200 p-3 space-y-3">
               <p class="text-sm font-semibold text-gray-700">OCI — Container Instances</p>
               <p class="text-xs text-gray-400 -mt-1">OCI's only remote-worker task is the image-promote runner. The staging bucket is required; the rest fall back to your OCI configuration.</p>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(Object Storage bucket for the QCOW2 — required)</span></label>
                   <input type="text" x-model="panelCfg.promote_runner_oci_staging_bucket"
@@ -3266,7 +3266,7 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="Uocm:PHX-AD-1">
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">OCPUs</label>
                   <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_oci_ocpus"
@@ -3306,7 +3306,7 @@
               <div class="rounded-lg border border-gray-200 p-3 space-y-3"
                    x-show="panelCfg.ansible_runner_aws==='ecs' || panelCfg.k8s_runner_aws==='ecs'" x-cloak>
                 <p class="text-sm font-semibold text-gray-700">AWS — ECS Fargate</p>
-                <div class="grid grid-cols-2 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">ECS Cluster</label>
                     <input type="text" x-model="panelCfg.ansible_ecs_cluster"
@@ -3352,7 +3352,7 @@
                          placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...">
                 </div>
                 <p class="text-xs text-gray-400">ACR credentials <span class="font-normal">(only for a private registry image; blank for Docker Hub)</span>.</p>
-                <div class="grid grid-cols-2 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">ACR Server</label>
                     <input type="text" x-model="panelCfg.ansible_aci_acr_server"
@@ -3425,7 +3425,7 @@
                     rotate-on-check-in the dashboard applies).</span>
                   </span>
                 </label>
-                <div class="grid grid-cols-2 gap-3" x-show="panelCfg.ansible_cloud_ephemeral_secrets_enabled" x-cloak>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="panelCfg.ansible_cloud_ephemeral_secrets_enabled" x-cloak>
                   <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">GC TTL (min)</label>
                     <input type="number" x-model.number="panelCfg.ansible_ephemeral_secret_ttl_min"
@@ -3450,7 +3450,7 @@
           <!-- ── Ansible runner ── -->
           <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Ansible runner</p>
           <p class="text-xs text-gray-400 -mt-1">Config-management playbooks run on your VMs over SSH.</p>
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">AWS</label>
               <input type="text" x-model="panelCfg.ansible_aws_user"
@@ -3646,7 +3646,7 @@
               <span class="text-sm text-gray-700">Master gate <span class="text-xs text-gray-400">(cloud_identity_gate_enabled)</span></span>
             </div>
 
-            <div class="grid grid-cols-3 gap-3 mb-4" :class="ciMatrix.gate_enabled ? '' : 'opacity-50 pointer-events-none'">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4" :class="ciMatrix.gate_enabled ? '' : 'opacity-50 pointer-events-none'">
               <template x-for="c in ['aws','azure','gcp']" :key="c">
                 <label class="flex items-center gap-2 text-sm text-gray-700">
                   <input type="checkbox" x-model="ciMatrix.flags[c]"
@@ -3656,7 +3656,7 @@
               </template>
             </div>
 
-            <div class="grid grid-cols-3 gap-3 mb-4">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
               <div class="col-span-2">
                 <label class="block text-xs font-semibold text-gray-600 mb-1">Machine-identity email (behalfOf)</label>
                 <input type="email" x-model="ciMatrix.machine.identity_email"
@@ -3787,7 +3787,7 @@
           </p>
 
           <!-- Connection -->
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div class="col-span-2">
               <label class="block text-sm font-medium text-gray-700 mb-1">Hyper-V Host</label>
               <input type="text" x-model="panelCfg.hyperv_host"
@@ -3806,7 +3806,7 @@
           </div>
 
           <!-- Credentials -->
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">
                 Username
@@ -3884,7 +3884,7 @@
             Connects to a vCenter Server or standalone ESXi host via the vSphere Web Services API.
             Works with vCenter 6.7+ and ESXi 6.7+. Requires <code class="bg-gray-100 px-1 rounded">pyVmomi</code> (installed by default).
           </p>
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div class="col-span-2">
               <label class="block text-sm font-medium text-gray-700 mb-1">vCenter / ESXi Host</label>
               <input type="text" x-model="panelCfg.vsphere_host"
@@ -3956,7 +3956,7 @@
                    placeholder="https://cloud.skytap.com">
             <p class="text-xs text-gray-400 mt-1">Leave as the default unless your account is on another region's endpoint.</p>
           </div>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
               <input type="text" x-model="panelCfg.skytap_username"
@@ -4055,7 +4055,7 @@
           <template x-if="panelCfg.pov_cloud_platform === 'aws'">
             <div class="space-y-4">
               <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">AWS credentials</p>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Access key ID</label>
                   <input type="text" x-model="panelCfg.aws_access_key_id"
@@ -4094,7 +4094,7 @@
           <template x-if="panelCfg.pov_cloud_platform === 'azure'">
             <div class="space-y-4">
               <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Azure credentials</p>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
                   <input type="text" x-model="panelCfg.azure_client_id"
@@ -4150,7 +4150,7 @@
           <template x-if="panelCfg.pov_cloud_platform === 'gcp'">
             <div class="space-y-4">
               <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">GCP credentials</p>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Project ID</label>
                   <input type="text" x-model="panelCfg.gcp_project_id"
@@ -4193,7 +4193,7 @@
           <template x-if="panelCfg.pov_cloud_platform === 'oci'">
             <div class="space-y-4">
               <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">OCI credentials</p>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Tenancy OCID</label>
                   <input type="text" x-model="panelCfg.oci_tenancy_ocid"
@@ -4291,7 +4291,7 @@
           </p>
 
           <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Connection</p>
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div class="col-span-2">
               <label class="block text-sm font-medium text-gray-700 mb-1">Proxmox Host</label>
               <input type="text" x-model="panelCfg.proxmox_host"
@@ -4363,7 +4363,7 @@
             reset, pause, and resume.
           </p>
 
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div class="col-span-2">
               <label class="block text-sm font-medium text-gray-700 mb-1">Prism Central Host</label>
               <input type="text" x-model="panelCfg.nutanix_host"
@@ -4378,7 +4378,7 @@
             </div>
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
               <input type="text" x-model="panelCfg.nutanix_username"
@@ -4534,7 +4534,7 @@
                    placeholder="xcpng.corp.local or 192.168.1.60">
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
               <input type="text" x-model="panelCfg.xcpng_username"
@@ -4586,7 +4586,7 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                        placeholder="dashboard-sandbox-db">
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Parameter group <span class="text-gray-400">(force_ssl=0)</span></label>
                   <input type="text" x-model="panelCfg.aws_db_parameter_group_name"
@@ -4680,7 +4680,7 @@
           <div>
             <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">AWS EKS — cluster networking</p>
             <div class="space-y-3">
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">k8s subnet A <span class="text-gray-400">(AZ-a)</span></label>
                   <input type="text" x-model="panelCfg.aws_k8s_subnet_a_id"
@@ -4701,7 +4701,7 @@
           <!-- AWS EKS — defaults (optional) -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">AWS EKS — defaults <span class="normal-case text-gray-400">(optional)</span></p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Kubernetes version</label>
                 <input type="text" x-model="panelCfg.aws_eks_k8s_version"
@@ -4742,7 +4742,7 @@
             <p class="text-[11px] text-gray-400 mb-2">
               Default Entra (AAD) group the k8s <strong>Entra group</strong> cluster action binds — members get the role below, and Entitle's Entra-ID integration JIT-grants membership so a user signs in as <em>themselves</em> (no impersonation). Each cluster's action can override the group id.
             </p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Entra group Object ID</label>
                 <input type="text" x-model="panelCfg.entra_rbac_group_id"
@@ -4792,7 +4792,7 @@
                      placeholder="blank → https://login.microsoftonline.com/<tenant>/v2.0">
               <p class="text-[11px] text-gray-400 mt-1">Blank derives from the tenant id. The Entra app needs the <strong>groups</strong> claim on the ID token + public-client flows for <code>kubectl oidc-login</code>.</p>
             </div>
-            <div class="grid grid-cols-2 gap-3 mt-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Username claim</label>
                 <input type="text" x-model="panelCfg.entra_oidc_username_claim"
@@ -4814,7 +4814,7 @@
             <p class="text-[11px] text-gray-400 mb-2">
               GKE can't use an OIDC identity provider (GKE Identity Service is off for new orgs), so the <strong>Entra federation</strong> action wires the cluster to a <strong>Workforce Identity pool</strong> + Connect Gateway. The RBAC subject becomes <code>principalSet://…/workforcePools/&lt;pool&gt;/group/&lt;entra-oid&gt;</code> — the same Entra group. Create the pool + Entra OIDC provider once at the org level (<code>gcloud iam workforce-pools</code>); see the <a href="/docs/integrations/entra-k8s-federation" class="underline" target="_blank">federation guide</a>.
             </p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Workforce pool ID</label>
                 <input type="text" x-model="panelCfg.gcp_workforce_pool_id"
@@ -4864,7 +4864,7 @@
                      placeholder="auto-detected on deploy (e.g. 198.51.100.7/32)">
               <p class="text-[11px] text-gray-400 mt-1">The dashboard reaches the node over its <strong>public IP</strong> to bootstrap it, so its own egress must be allowed. Auto-detected + saved on deploy. Corp proxies (Cloudflare WARP) egress from a <strong>pool</strong> of IPs — set the pool's CIDR (e.g. <code>104.28.182.0/24</code>) and it is kept as long as the detected IP falls inside it. Bare IP → <code>/32</code>.</p>
             </div>
-            <div class="grid grid-cols-2 gap-3 mt-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">API transport</label>
                 <select x-model="panelCfg.rancher_api_transport"
@@ -4939,7 +4939,7 @@
               </div>
 
               <!-- GCP -->
-              <div x-show="nodeCloud === 'gcp'" class="grid grid-cols-2 gap-3">
+              <div x-show="nodeCloud === 'gcp'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
                   <input type="text" x-model="panelCfg.gcp_rancher_machine_type"
@@ -4981,7 +4981,7 @@
 
               <!-- AWS. No zone: an EC2 subnet already pins the availability zone. No
                    network tag: a dedicated security group replaces the target-tag model. -->
-              <div x-show="nodeCloud === 'aws'" class="grid grid-cols-2 gap-3">
+              <div x-show="nodeCloud === 'aws'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Instance type</label>
                   <input type="text" x-model="panelCfg.aws_rancher_instance_type"
@@ -5012,7 +5012,7 @@
               <!-- Azure. Same omissions, plus: the Standard public IP is Static, so this
                    node keeps its address (and its imported clusters' agent URL) across a
                    recreate. -->
-              <div x-show="nodeCloud === 'azure'" class="grid grid-cols-2 gap-3">
+              <div x-show="nodeCloud === 'azure'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">VM size</label>
                   <input type="text" x-model="panelCfg.azure_rancher_vm_size"
@@ -5060,7 +5060,7 @@
                 <label for="azure_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended) — Azure</span></label>
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-3 mt-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Readiness timeout (s)</label>
                 <input type="number" min="60" step="30" x-model.number="panelCfg.rancher_ready_timeout_s"
@@ -5089,7 +5089,7 @@
                 Gateway and Vault account group can also be chosen per-deploy on the Containers page —
                 these are the defaults it starts from.
               </p>
-              <div class="grid grid-cols-2 gap-3 mt-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group</label>
                   <input type="text" x-model="panelCfg.rancher_ui_jump_group"
@@ -5293,7 +5293,7 @@
               Password&nbsp;Safe's 255-character column — a fully spelled-out ADCS profile is 269
               characters before anyone types a real CA name.
             </p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Lifetime</label>
                 <input type="text" x-model="panelCfg.cert_default_lifetime"
@@ -5343,7 +5343,7 @@
 
           <div>
             <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">GCP CAS lab</p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
                 <input type="text" x-model="panelCfg.cert_gcp_cas_location"
@@ -5406,7 +5406,7 @@
 
           <div>
             <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Server</p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">SPIRE version</label>
                 <input type="text" x-model="panelCfg.spire_lab_version"
@@ -5438,7 +5438,7 @@
 
           <div>
             <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Where the credential lands</p>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Secrets Safe safe</label>
                 <input type="text" x-model="panelCfg.spire_lab_ps_safe"
@@ -5669,7 +5669,7 @@
                 — it replaces the per-cloud static keys rather than eliminating secrets entirely.
               </p>
             </div>
-            <div class="mt-3 grid grid-cols-2 gap-3">
+            <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">API version</label>
                 <input type="text" x-model="panelCfg.wlc_api_version"
@@ -5749,7 +5749,7 @@
                 </span>
               </span>
             </label>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">AWS — folder</label>
                 <input type="text" x-model="panelCfg.wlc_aws_folder"
@@ -5801,7 +5801,7 @@
                 </span>
               </span>
             </label>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Azure — folder</label>
                 <input type="text" x-model="panelCfg.wlc_azure_folder"
@@ -6036,7 +6036,7 @@
                       <button type="button" @click="removeRegion(cloud, loc)"
                               class="text-[11px] text-red-500 hover:text-red-700">Remove</button>
                     </div>
-                    <div class="grid grid-cols-2 gap-2">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <template x-for="field in regionSets[cloud].fields" :key="field">
                         <div>
                           <label class="block text-[11px] font-medium text-gray-500 mb-0.5" x-text="field"></label>

@@ -77,7 +77,7 @@
         <button @click="showCreate = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-5 space-y-4">
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Cloud *</label>
             <select x-model="form.cloud" @change="onCloudChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
@@ -123,7 +123,7 @@
                 <span class="text-xs text-gray-400">auto-set from the selected image; override for pasted ids</span>
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
                 <select x-model="form.location" @change="onAzureLocationChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
@@ -137,7 +137,7 @@
                 </select>
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Subnet *</label>
                 <select x-model="form.subnet_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
@@ -157,7 +157,7 @@
                 </select>
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Resource group</label>
                 <input type="text" x-model="form.resource_group" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(default)">
@@ -258,7 +258,7 @@
         </div>
         <template x-if="session?.brokered">
           <div class="space-y-3">
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div><div class="text-xs text-gray-400 uppercase">Jump Group</div><div x-text="session?.pra?.jump_group || '—'"></div></div>
               <div><div class="text-xs text-gray-400 uppercase">Gateway</div><div x-text="session?.pra?.jumpoint || '—'"></div></div>
             </div>

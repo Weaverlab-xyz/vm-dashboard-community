@@ -64,7 +64,7 @@
     </div>
 
     <!-- ── S3 fields ──────────────────────────────────────────────────────── -->
-    <div class="grid grid-cols-3 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
       <p class="col-span-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">AWS S3</p>
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
@@ -94,7 +94,7 @@
     </div>
 
     <!-- ── Azure fields ──────────────────────────────────────────────────── -->
-    <div class="grid grid-cols-3 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
       <p class="col-span-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Azure Blob Storage</p>
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Storage Account</label>
@@ -124,7 +124,7 @@
     </div>
 
     <!-- ── GCS fields ────────────────────────────────────────────────────── -->
-    <div class="grid grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
       <p class="col-span-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Google Cloud Storage</p>
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
@@ -148,7 +148,7 @@
     </div>
 
     <!-- ── OCI Object Storage fields ─────────────────────────────────────── -->
-    <div class="grid grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
       <div class="col-span-2 flex items-center gap-2">
         <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">OCI Object Storage</p>
         <span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">image hub only</span>
@@ -187,7 +187,7 @@
     </div>
 
     <!-- ── Local Filesystem / UNC fields ─────────────────────────────────── -->
-    <div class="grid grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
       <div class="col-span-2 flex items-center gap-2">
         <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Local Filesystem / UNC</p>
         <span class="text-[10px] uppercase font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">local runner only</span>
@@ -232,7 +232,7 @@
     </div>
 
     <!-- ── Remote Filesystem / UNC (via agent) fields ────────────────────── -->
-    <div class="grid grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
       <div class="col-span-2 flex items-center gap-2">
         <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Remote Filesystem / UNC (via agent)</p>
         <span class="text-[10px] uppercase font-semibold text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">via agent</span>
@@ -624,7 +624,7 @@
       the target are skipped unless you tick <em>Overwrite existing</em>.
     </p>
 
-    <div class="grid grid-cols-2 gap-4 mb-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Source</label>
         <select x-model="migrate.source"
