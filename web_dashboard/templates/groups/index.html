@@ -46,6 +46,7 @@
             <th class="pb-2 pr-4">Display Name</th>
             <th class="pb-2 pr-4">Entra Group Object ID</th>
             <th class="pb-2 pr-4">Workgroup</th>
+            <th class="pb-2 pr-4">Focus</th>
             <th class="pb-2 pr-4">Default Permissions</th>
             <th class="pb-2"></th>
           </tr>
@@ -58,6 +59,17 @@
               <td class="py-2.5 pr-4">
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700"
                       x-text="m.workgroup"></span>
+              </td>
+              <!-- Grey, never the accent the workgroup chip uses: a focus is not an
+                   access grant and must not read like one. -->
+              <td class="py-2.5 pr-4 text-xs">
+                <span x-show="!m.persona" class="text-gray-400">—</span>
+                <span x-show="m.persona" class="inline-flex items-center px-2 py-0.5 rounded-full
+                             text-xs font-medium bg-gray-100 text-gray-600">
+                  <span x-text="personaLabel(m.persona)"></span>
+                  <span x-show="m.persona_priority !== null && m.persona_priority !== undefined"
+                        class="ml-1 text-gray-400" x-text="'#' + m.persona_priority"></span>
+                </span>
               </td>
               <td class="py-2.5 pr-4 text-xs text-gray-500">
                 <span x-show="!m.default_permissions" class="text-gray-400">Full access</span>
@@ -117,6 +129,36 @@
             <option :value="wg" x-text="wg"></option>
           </template>
         </select>
+      </div>
+
+      <!-- Focus. Optional, and unlike the fields above it grants NOTHING: it decides
+           which role's material the dashboard leads with for members of this group. A
+           broad catch-all group usually wants to leave it unset. -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div class="sm:col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Focus <span class="text-gray-400 font-normal">(optional)</span>
+          </label>
+          <select x-model="form.persona"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— no focus —</option>
+            <template x-for="p in personaOptions" :key="p.key">
+              <option :value="p.key" x-text="p.label"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+          <input type="number" x-model.number="form.persona_priority" min="0" placeholder="50"
+                 :disabled="!form.persona"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <p class="sm:col-span-3 text-xs text-gray-500 -mt-1">
+          When someone is in several mapped groups, the <strong>lowest</strong> priority
+          number decides their focus. Leave it blank and this group loses to any group
+          that sets one. A focus never grants or removes access — it only changes what the
+          dashboard leads with, and the user can still switch it themselves.
+        </p>
       </div>
 
       <!-- Default Permissions for auto-provisioned users -->
@@ -202,6 +244,9 @@ function groupsPage() {
   return {
     mappings: [],
     availableWorkgroups: {{ workgroups | tojson }},
+    // Injected from services/personas so the dropdown cannot offer a focus the resolver
+    // does not know, and so no persona key is spelled in this file.
+    personaOptions: {{ persona_options | tojson }},
     permissionScopes: PERMISSION_SCOPES_G,
     permissionLevels: PERMISSION_LEVELS_G,
     loading: true,
@@ -209,7 +254,8 @@ function groupsPage() {
     saving: false,
     toast: '',
     toastType: 'success',
-    form: { display_name: '', entra_group_id: '', workgroup: '', permissions: {}, permissionsUnrestricted: true },
+    form: { display_name: '', entra_group_id: '', workgroup: '', persona: '', persona_priority: null,
+            permissions: {}, permissionsUnrestricted: true },
 
     async init() {
       requireAuth();
@@ -253,6 +299,10 @@ function groupsPage() {
           entra_group_id: this.form.entra_group_id,
           workgroup: this.form.workgroup,
           default_permissions: this.form.permissionsUnrestricted ? null : this.form.permissions,
+          persona: this.form.persona || null,
+          // Only meaningful alongside a persona, so it is not sent without one -- a
+          // priority on a mapping that expresses no focus is a value nothing reads.
+          persona_priority: this.form.persona ? (this.form.persona_priority ?? null) : null,
         };
         await API.post('/api/groups', payload);
         this.showToast('Mapping added successfully.');
@@ -277,8 +327,15 @@ function groupsPage() {
       }
     },
 
+    // From the injected registry, so the table never shows a raw key.
+    personaLabel(key) {
+      const p = this.personaOptions.find(o => o.key === key);
+      return p ? p.label : key;
+    },
+
     resetForm() {
-      this.form = { display_name: '', entra_group_id: '', workgroup: '', permissions: {}, permissionsUnrestricted: true };
+      this.form = { display_name: '', entra_group_id: '', workgroup: '', persona: '', persona_priority: null,
+                    permissions: {}, permissionsUnrestricted: true };
     },
 
     showToast(msg, type = 'success') {

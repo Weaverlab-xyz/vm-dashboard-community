@@ -48,6 +48,11 @@ document.addEventListener('alpine:init', () => {
             localStorage.removeItem('vm_cli_workgroups');
             localStorage.removeItem('vm_cli_is_admin');
             localStorage.removeItem('vm_cli_accessor_env');
+            // Both persona cookies, not just the assigned one. These are per-BROWSER and
+            // the next person to log in here would otherwise inherit this user's focus --
+            // harmless (a persona grants nothing) but baffling, and it would make an
+            // assignment look broken on any shared machine.
+            window.clearPersonaCookies();
             window.location.href = '/login';
         },
 
@@ -58,6 +63,37 @@ document.addEventListener('alpine:init', () => {
 });
 
 // ── API helper ────────────────────────────────────────────────────────────────
+// ── Assigned persona ────────────────────────────────────────────────────────────
+// The focus assigned to a user or their OIDC group, cached where the SERVER can read it.
+//
+// An HTML page load carries no identity in this app -- the token lives in localStorage and
+// only rides /api/* XHR as a Bearer header -- so services/personas.resolve cannot ask who
+// is asking. /api/auth/me can, and both login paths already call it for is_admin. This
+// writes its answer into a cookie the nav's own server-side render then reads.
+//
+// A cookie rather than localStorage precisely BECAUSE the server has to see it. That is
+// only acceptable while a persona cannot gate anything: the worst a forged value achieves
+// is reordering your own nav. The day a persona can hide a page, this is wrong.
+function setAssignedPersona(u) {
+    const key = (u && u.persona) || '';
+    const src = (u && u.persona_source) || '';
+    // Written on every login, or CLEARED -- never merely left alone. An admin removing an
+    // assignment has to actually take effect, and a stale cookie would outlive it.
+    if (key && (src === 'user' || src === 'group')) {
+        document.cookie = 'persona_assigned=' + encodeURIComponent(src + ':' + key)
+                        + '; path=/; max-age=31536000; samesite=lax';
+    } else {
+        document.cookie = 'persona_assigned=; path=/; max-age=0; samesite=lax';
+    }
+}
+window.setAssignedPersona = setAssignedPersona;
+
+function clearPersonaCookies() {
+    document.cookie = 'persona_assigned=; path=/; max-age=0; samesite=lax';
+    document.cookie = 'persona=; path=/; max-age=0; samesite=lax';
+}
+window.clearPersonaCookies = clearPersonaCookies;
+
 window.API = {
     async request(method, path, body = null, extraHeaders = {}) {
         const token = Alpine.store('auth').token;

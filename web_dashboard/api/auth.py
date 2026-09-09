@@ -38,7 +38,7 @@ from ..services.fido2_service import (
     b64url_encode,
     b64url_decode,
 )
-from ..services import login_guard, public_url
+from ..services import login_guard, personas, public_url
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -575,6 +575,13 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         if not matched:
             return RedirectResponse(url="/login?error=not_authorized", status_code=302)
         matched_workgroups = [wg for wg, _ in matched]
+        # The focus these groups confer. Computed HERE because this is the only place that
+        # knows WHICH groups matched: group_map above keys by id and the ids are gone
+        # immediately after, and /api/auth/me later has nothing but the user row. Empty on
+        # the .env fallback path below, which has no mapping rows and therefore cannot
+        # express a persona at all.
+        matched_persona = personas.persona_for_groups(
+            [m for m in db_mappings if m.entra_group_id in user_group_ids])
         # Entitle user-JIT Phase 0 (docs/design/entitle-user-jit.md):
         # union every matched group's default_permissions, not just the
         # first one's. The result becomes the user's session_permissions
@@ -607,6 +614,7 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
     else:
         matched_workgroups = None  # no mappings configured — legacy path
         matched_session_permissions = None
+        matched_persona = ""
 
     # ── Find or auto-create user ──────────────────────────────────────────────
     # Look up by stable subject first, then fall back to email
@@ -636,6 +644,11 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         # (user.permissions) is untouched, so admin-granted permissions
         # survive even when no group claims them.
         user.session_permissions_dict = matched_session_permissions or {}
+        # Unconditional, like the line above and for the same reason: this column is the
+        # GROUP's opinion, so a user removed from a persona-granting group must lose it at
+        # their next login. `user.persona` -- an admin's deliberate assignment -- is
+        # never touched here; see the columns' comment in database.py.
+        user.session_persona = matched_persona or None
         db.commit()
     elif matched_workgroups is not None:
         # Auto-create: derive a unique username from the email local-part
@@ -664,6 +677,11 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         # = union(empty admin baseline, group-derived session_permissions)
         # gives the same effective set as before for an auto-created user.
         user.session_permissions_dict = matched_session_permissions or {}
+        # Unconditional, like the line above and for the same reason: this column is the
+        # GROUP's opinion, so a user removed from a persona-granting group must lose it at
+        # their next login. `user.persona` -- an admin's deliberate assignment -- is
+        # never touched here; see the columns' comment in database.py.
+        user.session_persona = matched_persona or None
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -898,6 +916,7 @@ async def me(current_user: User = Depends(get_current_user)):
     control — it is driven from localStorage, which the holder can edit. The control is the
     allowlist above, and it does not consult anything the client sends.
     """
+    _persona_key, _persona_src = personas.resolve_for_user(current_user)
     return UserResponse(
         id=current_user.id,
         username=current_user.username,
@@ -912,6 +931,8 @@ async def me(current_user: User = Depends(get_current_user)):
         is_admin=current_user.is_effective_admin,
         auth_provider=current_user.auth_provider,
         mfa_required=current_user.mfa_required,
+        persona=_persona_key,
+        persona_source=_persona_src,
         # Return effective permissions (union of admin baseline + group-
         # derived session_permissions). The frontend uses this to gate
         # nav entries / action buttons, so it must reflect what

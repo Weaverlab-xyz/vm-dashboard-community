@@ -55,6 +55,16 @@
             <span x-show="o.key === persona.persona" class="text-blue-400">✓</span>
           </button>
         </template>
+        <!-- Only when an explicit pick is currently shadowing an assignment. Shown for
+             the `url` source too: arriving on a shared ?persona= link and wanting your
+             own focus back is the same need. -->
+        <div x-show="persona.source === 'cookie' || persona.source === 'url'"
+             class="border-t border-gray-100 mt-1 pt-1">
+          <button @click="clearPersona()"
+                  class="w-full text-left px-3 py-2 text-xs text-gray-500 hover:bg-gray-50 transition">
+            Use the focus assigned to me
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -552,6 +562,18 @@
       // had not would be a worse lie than a 200ms flash. `?persona=` deliberately does NOT
       // persist, so if the current persona came from the URL, switching from it has to
       // strip the parameter or the URL would immediately win again on the next load.
+      // Drop the explicit pick and fall back to whatever is assigned to this user or
+      // their group. Without it the lens is a one-way door -- picking a focus once would
+      // permanently shadow an assignment, and re-picking the "right" one is not the same
+      // thing: it would still be an override, so a later reassignment would not reach them.
+      clearPersona() {
+        this.lensOpen = false;
+        document.cookie = 'persona=; path=/; max-age=0; samesite=lax';
+        const u = new URL(window.location.href);
+        u.searchParams.delete('persona');
+        window.location.replace(u.toString());
+      },
+
       setPersona(key) {
         this.lensOpen = false;
         const val = encodeURIComponent(key || '');
@@ -576,6 +598,7 @@
       // and no way to tell them apart, which is a support question rather than a UI.
       personaSourceLabel() {
         return { cookie: 'your choice', url: 'from the URL',
+                 user: 'assigned to you', group: 'from your group',
                  default: 'instance default' }[this.persona.source] || '';
       },
 

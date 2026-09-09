@@ -141,6 +141,27 @@
             </template>
           </div>
         </div>
+        <!-- Focus. Edit only: it is a display preference, and asking for one before the
+             account exists implies it matters more than it does. Grants NOTHING -- it
+             decides which role's material the dashboard leads with. -->
+        <div x-show="editingUser">
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Focus <span class="text-gray-400 font-normal">(optional)</span>
+          </label>
+          <select x-model="form.persona"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— no focus assigned —</option>
+            <template x-for="p in personaOptions" :key="p.key">
+              <option :value="p.key" x-text="p.label"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-500 mt-1">
+            Overrides whatever focus their OIDC group confers. Leave it unassigned to let
+            the group decide. Either way the user can still switch focus themselves — this
+            sets their default, not a restriction.
+          </p>
+        </div>
+
         <!-- Flags -->
         <div class="flex gap-6">
           <label class="flex items-center gap-2 text-sm cursor-pointer">
@@ -320,6 +341,9 @@ function usersPage() {
     showUserModal: false,
     editingUser: null,
     form: {},
+    // Injected from services/personas, so the dropdown cannot offer a focus the resolver
+    // does not know and no persona key is spelled in this file.
+    personaOptions: {{ persona_options | tojson }},
 
     // tokens modal
     showTokensModal: false,
@@ -364,6 +388,9 @@ function usersPage() {
         is_active: u.is_active,
         permissions: hasPerms ? JSON.parse(JSON.stringify(u.permissions)) : {},
         permissionsUnrestricted: !hasPerms,
+        // The stored assignment. Empty when their focus comes from a group instead --
+        // persona_source says which, and the table shows it.
+        persona: u.persona || '',
       };
       this.showUserModal = true;
     },
@@ -408,6 +435,9 @@ function usersPage() {
             workgroups: this.form.workgroups,
             is_admin: this.form.is_admin,
             is_active: this.form.is_active,
+            // Always sent, so clearing the dropdown actually clears the assignment. The
+            // API reads "" as "hand them back to their group" and null as "no change".
+            persona: this.form.persona || '',
           };
           if (this.form.password) body.password = this.form.password;
           // Send permissions: null = no change to perms (only for create);

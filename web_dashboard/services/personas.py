@@ -1209,11 +1209,73 @@ def default_persona() -> str:
     return raw if raw in VALID_PERSONAS else NEUTRAL
 
 
+def resolve_for_user(user) -> tuple:
+    """``(key, source)`` for one user, from their own assignment then their groups'.
+
+    Duck-typed on ``.persona`` / ``.session_persona`` rather than typed against
+    ``database.User``, so this module keeps importing nothing but config_service and
+    feature_flags -- ``jobs_worker`` imports it, and the whole reason it lives in
+    ``services/`` is that it costs a process serving no requests nothing.
+
+    ``persona`` outranks ``session_persona`` because a decision about one person outranks
+    a rule about a group they happen to be in. Both are validated here rather than trusted:
+    a stale key left behind by a persona being retired from the registry must read as
+    "unset", not as a focus that no longer exists.
+    """
+    for attr, src in (("persona", "user"), ("session_persona", "group")):
+        raw = (getattr(user, attr, None) or "").strip().lower()
+        if raw in VALID_PERSONAS:
+            return raw, src
+    key = default_persona()
+    return (key, "default") if key else (NEUTRAL, "none")
+
+
+# Bigger than any priority an admin would plausibly type, so an unprioritised mapping
+# loses to every prioritised one without needing a second sort key or a sentinel column.
+_NO_PRIORITY = 1_000_000
+
+
+def persona_for_groups(mappings) -> str:
+    """The focus a set of matched OIDC group mappings confers, or :data:`NEUTRAL`.
+
+    Called from the login path, which is the ONLY place that knows which groups matched --
+    ``_complete_oauth_login`` maps group ids to workgroups and then forgets the ids, so the
+    answer has to be computed while they are in hand and stored on the user.
+
+    Lowest ``persona_priority`` wins. A mapping with no persona expresses no opinion, which
+    is what lets a broad catch-all group grant a workgroup without also dictating a focus.
+    Ties -- and rows with no priority at all -- fall back to ``display_name``, so the
+    outcome never depends on row order, which is not stable across databases.
+    """
+    claims = []
+    for m in mappings or []:
+        raw = (getattr(m, "persona", None) or "").strip().lower()
+        if raw not in VALID_PERSONAS:
+            continue
+        prio = getattr(m, "persona_priority", None)
+        # None sorts last, not first: an unprioritised row is the weakest opinion, not the
+        # strongest. `or ""` because display_name is nullable in practice on old rows.
+        claims.append((prio if isinstance(prio, int) else _NO_PRIORITY,
+                       (getattr(m, "display_name", None) or ""), raw))
+    if not claims:
+        return NEUTRAL
+    claims.sort(key=lambda c: (c[0], c[1]))
+    return claims[0][2]
+
+
+
 def resolve(request=None) -> tuple:
     """The active persona and where it came from, as ``(key, source)``.
 
     Precedence: ``?persona=`` (this render only, persists nothing) > the ``persona``
-    cookie (what the nav lens writes) > the instance default > neutral.
+    cookie (an explicit pick in the nav lens) > the ``persona_assigned`` cookie (the
+    focus assigned to this user or their OIDC group, cached from ``/api/auth/me``) > the
+    instance default > neutral.
+
+    An explicit pick outranks an assignment deliberately: an assignment is a default, not
+    a lock. An SE presenting to a different role must be able to switch without asking an
+    admin, and nothing is being protected by pinning it -- a persona cannot grant or
+    remove access. Clearing the ``persona`` cookie returns them to their assignment.
 
     ``source`` is returned rather than discarded because a shared ``?persona=`` link means
     "why is my nav in a strange order" has three possible causes. The lens control shows
@@ -1236,6 +1298,27 @@ def resolve(request=None) -> tuple:
             raw = ""
         if raw in VALID_PERSONAS:
             return raw, "cookie"
+        # The assigned focus, cached client-side. This tier exists because an HTML page
+        # load carries NO identity: the token lives in localStorage and is only sent as a
+        # Bearer header on /api/* XHR, so this function cannot ask who is asking. The
+        # client fetches /api/auth/me at login -- a hop it already makes for is_admin --
+        # and writes the server's answer here, where the nav's own render can read it.
+        #
+        # Format `<user|group>:<key>`, so the lens can say WHICH rule produced the focus
+        # rather than just naming it. An unparseable or unknown value is ignored rather
+        # than raising: it is attacker-editable input on the request path.
+        #
+        # Editable, and that is acceptable for exactly one reason -- a persona may never
+        # gate anything, so the most anyone achieves by forging this is reordering their
+        # own nav. The day a persona can hide a page, this whole tier becomes wrong.
+        try:
+            raw = (request.cookies.get("persona_assigned") or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            raw = ""
+        if ":" in raw:
+            src, _, key = raw.partition(":")
+            if key in VALID_PERSONAS and src in ("user", "group"):
+                return key, src
 
     key = default_persona()
     return (key, "default") if key else (NEUTRAL, "none")

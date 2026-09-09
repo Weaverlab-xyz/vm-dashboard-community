@@ -1683,6 +1683,12 @@ async def users_page(request: Request):
             # Inject the backend permission catalog so the assignment grid
             # can't drift from api/auth.py (was hard-coded in the template).
             "permission_scopes": auth.PERMISSION_SCOPES,
+            # Same reasoning for the persona picker: injected from the registry so the
+            # dropdown cannot name a focus the resolver does not know. NOT called
+            # "persona"/"persona_label"/"persona_source" -- _profile_context returns
+            # those and its return OVERWRITES a route's context, silently.
+            "persona_options": [{"key": p.key, "label": p.label}
+                                for p in personas.all_personas()],
             "permission_levels": auth.PERMISSION_LEVELS
         },
     )
@@ -1698,6 +1704,12 @@ async def groups_page(request: Request):
             # Inject the backend permission catalog so the assignment grid
             # can't drift from api/auth.py (was hard-coded in the template).
             "permission_scopes": auth.PERMISSION_SCOPES,
+            # Same reasoning for the persona picker: injected from the registry so the
+            # dropdown cannot name a focus the resolver does not know. NOT called
+            # "persona"/"persona_label"/"persona_source" -- _profile_context returns
+            # those and its return OVERWRITES a route's context, silently.
+            "persona_options": [{"key": p.key, "label": p.label}
+                                for p in personas.all_personas()],
             "permission_levels": auth.PERMISSION_LEVELS
         },
     )

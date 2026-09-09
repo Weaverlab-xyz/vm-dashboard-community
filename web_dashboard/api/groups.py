@@ -21,6 +21,12 @@ class GroupMappingCreate(BaseModel):
     display_name: str
     workgroup: str
     default_permissions: Optional[dict] = None  # None = all access for auto-provisioned users
+    # The focus this group confers, and the tie-break when a user matches several
+    # mappings. Both optional: a broad catch-all group can grant a workgroup without
+    # dictating a focus, and that is the common case. NOT a permission -- see
+    # services/personas on why a persona can only ever reorder.
+    persona: Optional[str] = None
+    persona_priority: Optional[int] = None
 
 
 class GroupMappingResponse(BaseModel):
@@ -29,6 +35,8 @@ class GroupMappingResponse(BaseModel):
     display_name: str
     workgroup: str
     default_permissions: Optional[dict] = None
+    persona: str = ""
+    persona_priority: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -37,6 +45,22 @@ class GroupMappingResponse(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 import json as _json
+
+
+def _valid_persona(raw) -> Optional[str]:
+    """A registry key, or None. Never the raw string.
+
+    An unvalidated column would store a focus that resolves to nothing and then reads as
+    "unset" with no way to tell it apart from a group that never had one -- and this value
+    is chosen from a dropdown, so anything else arriving here is a client bug or a script.
+    """
+    from ..services import personas
+    want = (raw or "").strip().lower()
+    if not want:
+        return None
+    if want not in personas.VALID_PERSONAS:
+        raise HTTPException(status_code=422, detail=f"Unknown persona '{want}'")
+    return want
 
 
 def _mapping_to_response(m: OAuthGroupMapping) -> GroupMappingResponse:
@@ -52,6 +76,8 @@ def _mapping_to_response(m: OAuthGroupMapping) -> GroupMappingResponse:
         display_name=m.display_name,
         workgroup=m.workgroup,
         default_permissions=perms,
+        persona=m.persona or "",
+        persona_priority=m.persona_priority,
     )
 
 
@@ -78,6 +104,8 @@ def create_group_mapping(payload: GroupMappingCreate, db: Session = Depends(get_
         display_name=payload.display_name.strip(),
         workgroup=payload.workgroup,
         default_permissions=_json.dumps(payload.default_permissions) if payload.default_permissions else None,
+        persona=_valid_persona(payload.persona),
+        persona_priority=payload.persona_priority,
     )
     db.add(mapping)
     db.commit()

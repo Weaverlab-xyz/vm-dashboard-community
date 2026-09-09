@@ -119,6 +119,26 @@ class User(Base):
     # gradual change rather than a cutover.
     jit_permissions = Column(Text, nullable=True)
 
+    # ── Persona (curation only) ──────────────────────────────────────────────
+    # Which role's material the dashboard leads with for this user. NOT a permission:
+    # services/personas may only reorder and surface, never gate, so neither column can
+    # grant or deny anything. See services/personas.py for why that invariant is what
+    # makes the whole layer safe.
+    #
+    # TWO columns, for exactly the reason jit_permissions is separate from
+    # session_permissions below: `_complete_oauth_login` overwrites the group-derived one
+    # on EVERY login -- that overwrite is load-bearing, because it is how removing someone
+    # from an Entra group actually stops giving them that focus. An admin's deliberate
+    # assignment written there would be silently wiped at the user's next login.
+    #
+    #   persona          an admin (or the user), in the dashboard -- never automatically
+    #   session_persona  the OIDC group mapping -- rewritten every login
+    #
+    # `persona` wins when both are set: a specific decision about one person outranks a
+    # rule about a group they happen to be in.
+    persona = Column(String(32), nullable=True)
+    session_persona = Column(String(32), nullable=True)
+
     # Non-NULL means this account is a POV ACCESSOR: a prospect's ephemeral login, bound
     # to exactly one POV environment and deleted when that POV is reaped. See
     # services/pov_accessor_service and PovAccessor below.
@@ -911,6 +931,14 @@ class OAuthGroupMapping(Base):
     workgroup = Column(String(100), nullable=False)       # must match a key in settings.workgroups
     # Default permissions for auto-created users from this group. NULL = all permissions.
     default_permissions = Column(Text, nullable=True)
+
+    # The focus this group confers, and the tie-break when a user matches several
+    # mappings. Lowest priority number wins; NULL persona means this mapping expresses no
+    # opinion, which is what lets a broad catch-all group grant a workgroup without also
+    # dictating a focus. Ties and absent priorities fall back to the mapping's
+    # display_name so the outcome is always deterministic rather than row-order dependent.
+    persona = Column(String(32), nullable=True)
+    persona_priority = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -2554,6 +2582,14 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN accessor_integration_id VARCHAR(64)",
             "ALTER TABLE pov_environments ADD COLUMN accessor_tf_state TEXT",
             "ALTER TABLE oauth_group_mappings ADD COLUMN default_permissions TEXT",
+            # Persona (curation only -- neither of these can grant or deny anything).
+            # Two user columns because the login path REWRITES the group-derived one on
+            # every login and must never touch the admin-set one; see the columns' own
+            # comment on User for why that split is load-bearing.
+            "ALTER TABLE users ADD COLUMN persona VARCHAR(32)",
+            "ALTER TABLE users ADD COLUMN session_persona VARCHAR(32)",
+            "ALTER TABLE oauth_group_mappings ADD COLUMN persona VARCHAR(32)",
+            "ALTER TABLE oauth_group_mappings ADD COLUMN persona_priority INTEGER",
             # The `arn=` an awspca certificate address is built from. See CertLab.ca_arn
             # for why it is not pool_id wearing a second hat.
             "ALTER TABLE cert_labs ADD COLUMN ca_arn VARCHAR(255)",
