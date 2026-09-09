@@ -15,6 +15,7 @@ No Docker: the Engine API is driven through a stubbed transport.
 Runs under pytest, or standalone:  python tests/test_agent_sibling_runner.py
 """
 import ast
+import errno
 import importlib.util
 import json
 import os
@@ -283,6 +284,30 @@ def test_the_sibling_is_off_by_default_in_the_policy_parser():
         assert policy.sibling_image == ""
     finally:
         os.unlink(path)
+
+
+def test_a_mounted_but_unopenable_socket_does_not_send_you_to_mount_it():
+    """EACCES is not ENOENT, and it has a different fix. The POV broker mounts the socket
+    unconditionally and still got this, because the agent runs as a non-root uid and the
+    socket is 0660 root:docker — and the one message this code used to have sent the
+    operator to check the mount, which was the only part that was right. Costly enough to
+    pin: it was debugged as a mounting problem across an afternoon."""
+    def _denied(*a, **kw):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    original = agent._UnixHTTP.connect
+    agent._UnixHTTP.connect = _denied
+    try:
+        agent._engine("GET", "/_ping")
+    except agent.PolicyRefusal as exc:
+        msg = str(exc)
+        assert "needs it mounted" not in msg, \
+            f"a permissions failure must not be reported as a missing mount: {msg}"
+        assert "--group-add" in msg, f"the refusal must name the fix: {msg}"
+    else:
+        raise AssertionError("expected a refusal")
+    finally:
+        agent._UnixHTTP.connect = original
 
 
 def test_an_unmounted_socket_says_which_overlay_to_apply():

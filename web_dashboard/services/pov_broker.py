@@ -84,6 +84,12 @@ GUEST_STATE_DIR = "/etc/dashboard-agent"
 # docstring.
 GUEST_STATE_VOLUME = "dashboard_agent_state"
 
+# The Docker socket, on the guest and inside the container — one constant because the
+# bootstrap mounts it at the same path it reads it from, and the agent's own default
+# (``AGENT_DOCKER_SOCKET``) is that path. A mount whose container side differs from what the
+# agent looks for is a "cannot reach the Docker socket" that no amount of mounting fixes.
+GUEST_DOCKER_SOCKET = "/var/run/docker.sock"
+
 # What the broker may reach. Ports rather than "any": the difference between "may look for
 # databases in the POV" and "may reach anything in the customer's environment". These are
 # the management ports the later wire-up slices actually use.
@@ -343,6 +349,17 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
     is a sibling container, so the socket is a prerequisite of the machine's only job. The
     line is worth seeing rather than inferring, which is why it is here and commented
     rather than folded into a shared flag block.
+
+    **And mounting it is not the same as being able to open it.** The socket is typically
+    ``srw-rw---- root docker``; the container runs as uid 10001 with no supplementary
+    groups, so it gets ``EACCES`` on a socket that is sitting right there. Every POV
+    Gateway install failed on this — the agent's refusal reads "the sibling runner needs it
+    mounted", which sends you to look at the one thing that was never wrong. So the
+    bootstrap resolves the socket's own group on the guest and passes ``--group-add``.
+
+    Adding a group is not a loosening: the socket already *is* root on this host, and that
+    is stated above and in the docs. What changes is only whether the process the dashboard
+    put there on purpose can use the thing the dashboard mounted on purpose.
     """
     stamp = (now or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%SZ")
     # The name reaches a shell comment. `api/pov` already constrains it to a slug, but a
@@ -371,10 +388,26 @@ chmod 0644 "$STATE/policy.yaml"
 docker rm -f dashboard-agent >/dev/null 2>&1 || true
 docker volume rm {GUEST_STATE_VOLUME} >/dev/null 2>&1 || true
 
+# The container runs as uid 10001 and the socket below is typically 0660 root:docker, so
+# uid 10001 cannot open it without the socket's GROUP. Mounting it is not enough: the agent
+# gets EACCES, and the refusal it prints says "the sibling runner needs it mounted", which
+# is the wrong thing to go and check.
+#
+# Resolved on the guest, not here, because the dashboard cannot know a GID it never chose:
+# it varies by distro and by install order. Unset when there is no socket (or no `stat`),
+# so the expansion below vanishes rather than passing an empty argument.
+DOCKER_GROUP=""
+DOCKER_SOCK_GID=$(stat -c '%g' {GUEST_DOCKER_SOCKET} 2>/dev/null || true)
+if [ -n "$DOCKER_SOCK_GID" ]; then
+  DOCKER_GROUP="--group-add $DOCKER_SOCK_GID"
+fi
+
+# $DOCKER_GROUP is deliberately unquoted: it is two words or none.
 docker run -d --name dashboard-agent --restart unless-stopped \\
   --read-only --cap-drop ALL --security-opt no-new-privileges:true \\
   --user 10001:10001 --tmpfs /tmp \\
-  -v /var/run/docker.sock:/var/run/docker.sock \\
+  $DOCKER_GROUP \\
+  -v {GUEST_DOCKER_SOCKET}:{GUEST_DOCKER_SOCKET} \\
   -v {GUEST_STATE_VOLUME}:/var/lib/dashboard-agent \\
   -v "$STATE/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z" \\
   -v "$STATE/enroll-code:/etc/dashboard-agent/enroll-code:ro,Z" \\

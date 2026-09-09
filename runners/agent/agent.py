@@ -3426,6 +3426,23 @@ def _engine(method: str, path: str, body=None, timeout: float = 60.0,
         resp = conn.getresponse()
         data = resp.read()
     except OSError as exc:
+        # EACCES is a different fault from ENOENT and has a different fix, so it does not
+        # get the "needs it mounted" line. A socket that is mounted and unopenable produces
+        # exactly the same PolicyRefusal on the job as one that is absent, and telling an
+        # operator to go and mount the thing already sitting in front of them costs the
+        # afternoon: the POV Gateway was debugged as a mounting problem for that reason.
+        if getattr(exc, "errno", None) in (errno.EACCES, errno.EPERM):
+            # getattr because this module is imported by tests on Windows, where os.getuid
+            # does not exist. The uid is the useful half of the diagnosis, so it is worth
+            # reporting when it can be had rather than dropping it for both platforms.
+            _getuid = getattr(os, "getuid", None)
+            whoami = f"uid {_getuid()}" if _getuid else "a non-root user"
+            raise PolicyRefusal(
+                f"the Docker socket at {DOCKER_SOCKET} is mounted but this process cannot "
+                f"open it: {exc}. This agent runs as {whoami}, and a socket owned "
+                f"root:docker mode 0660 is unopenable without that group — add the "
+                f"socket's group to the container (`--group-add <gid of the socket>`), or "
+                f"mount a rootless socket this user owns. Mounting it again will not help.")
         raise PolicyRefusal(
             f"cannot reach the Docker socket at {DOCKER_SOCKET}: {exc}. The sibling "
             f"runner needs it mounted — see docker-compose.sibling.yml.")

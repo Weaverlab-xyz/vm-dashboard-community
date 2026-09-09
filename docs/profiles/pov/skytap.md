@@ -220,6 +220,14 @@ starts the agent container. Two lines in it are load-bearing:
   adding it there is a separate considered act. A POV broker is different: the dashboard
   created that VM from a template for this POV, and running the Gateway beside itself is
   the machine's only job.
+- **And the container joins that socket's group**, resolved on the guest with `stat` at
+  bootstrap time. Mounting the socket is not the same as being able to open it: it is
+  typically `srw-rw---- root docker`, the container runs as uid 10001 with no supplementary
+  groups, and the result is `EACCES` on a socket that is sitting right there. Every POV
+  Gateway install failed on this, and the agent's refusal — "the sibling runner needs it
+  mounted" — pointed at the one thing that was already correct. The GID is read on the VM
+  because the dashboard never chose it; a guest with no socket gets no flag rather than an
+  empty argument.
 
 ### The ordering that matters
 
