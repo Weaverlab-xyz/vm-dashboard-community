@@ -145,6 +145,13 @@ def build_options(user: User = Depends(require_permission("cloud_function", "rea
             "locations": ["us-central1", "us-east1", "europe-west1", "asia-east1"],
             "tiers": ["DEVOPS", "ENTERPRISE"],
             "default_location": config_service.get("cert_gcp_cas_location") or "us-central1",
+            # The project the dashboard's own GCP credential is scoped to, so the build
+            # form can prefill it. `cert_lab_service.provision` falls back to the same two
+            # keys server-side, so a blank field still works — this only makes the value
+            # visible and editable before the click.
+            "default_project": (config_service.get("gcp_project")
+                                or config_service.get("gcp_project_id")
+                                or settings.gcp_project_id or ""),
             # AWS PCA is available in most regions, so this is a default for a free-text
             # field rather than the fixed list CAS's limited locations justify.
             "default_region": config_service.get("aws_region") or settings.aws_region,

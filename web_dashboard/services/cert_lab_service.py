@@ -190,8 +190,22 @@ def provision(db: Session, *, name: str, project: str, created_by: str,
         location = location or _cfg("aws_region", "us-east-2")
         pool_id = ""
     elif cloud == "gcp":
+        # Default to the project the dashboard is already authenticated against — the same
+        # two keys, in the same order, that `terraform_provider_env.gcp_env` reads to build
+        # GOOGLE_PROJECT, and the same request-then-config shape `api/desktops.py` uses for
+        # its own project.
+        #
+        # This is worth more than saving a field of typing. The CAS module's provider block
+        # sets `project = var.project` EXPLICITLY, which overrides GOOGLE_PROJECT — so this
+        # value decides where the pool lands regardless of how the credential is scoped.
+        # Defaulting it to the credential's own project is what stops a build landing in a
+        # project where the service account has no CAS permission, which fails partway
+        # through the apply rather than at the click.
+        project = (project or "").strip() or _cfg("gcp_project") or _cfg("gcp_project_id")
         if not project:
-            raise CertLabError("a GCP project id is required — CAS pools are project-scoped")
+            raise CertLabError(
+                "a GCP project id is required — CAS pools are project-scoped, and neither "
+                "the build form nor gcp_project/gcp_project_id in config supplies one")
         location = location or _cfg("cert_gcp_cas_location", "us-central1")
         # The pool id is what ends up in `pool=` on every managed-system address built
         # against this CA, so it is deterministic rather than random: an operator reading
