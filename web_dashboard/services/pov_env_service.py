@@ -27,8 +27,8 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
 from . import (job_service, lab_platforms, pov_accessor_entitle, pov_accessor_service,
-               pov_broker, pov_entitle_agent, pov_gateway, pov_resource_broker, pov_share,
-               pov_use_cases, pov_wireup)
+               pov_broker, pov_credentials, pov_entitle_agent, pov_gateway,
+               pov_resource_broker, pov_share, pov_use_cases, pov_wireup)
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +282,54 @@ async def refresh_vms(db: Session, env: PovEnvironment) -> int:
 
     db.commit()
     return len(seen)
+
+
+class VmLoginError(Exception):
+    """The per-VM login override could not be set. Operator-facing."""
+
+
+def set_vm_login(db: Session, env: PovEnvironment, vm_id: str, username: str) -> str:
+    """Say which stored credential this guest's runs should use. Returns a job-log line.
+
+    A **username**, and nothing else. The password is still read live off the lab platform
+    at the moment of every run and is still stored nowhere in this database — which is the
+    whole reason slice 5b holds no Windows credential, and is not weakened by recording
+    which of several accounts was meant.
+
+    Blank clears it, and blank is the normal state: it means "decide by guest OS", which
+    is the right answer for every guest whose box holds the ``root`` or ``administrator``
+    its template promised. See ``services/pov_credentials.pick``.
+
+    Survives a ``refresh_vms`` because that upserts by ``platform_vm_id`` rather than
+    rebuilding the rows — the same property the PAM artifact columns rely on.
+    """
+    row = db.query(PovEnvironmentVM).filter(
+        PovEnvironmentVM.environment_id == env.id,
+        PovEnvironmentVM.platform_vm_id == str(vm_id or "").strip()).first()
+    if row is None:
+        raise VmLoginError(
+            "this POV has no such VM. Re-read its VMs from the platform and try again.")
+
+    wanted = (username or "").strip()
+    if not wanted:
+        row.login_username = None
+        db.commit()
+        return (f"Cleared the login override on {row.name or vm_id}; its runs will choose "
+                f"by guest OS again.")
+
+    if not pov_credentials.valid_username(wanted):
+        # Refused at the form rather than at the run. A value the selector could never
+        # match would turn every subsequent run on this guest into the refusal this
+        # control exists to end.
+        raise VmLoginError(
+            f"{wanted!r} is not a login name this dashboard can match against a stored "
+            f"credential. Use the account name as the lab platform records it — "
+            f"'administrator', 'root', or a qualified form like 'CORP\\administrator'.")
+
+    row.login_username = wanted
+    db.commit()
+    logger.info("POV %s: VM %s pinned to the stored login %s", env.id, vm_id, wanted)
+    return f"{row.name or vm_id} will use the stored login {wanted}."
 
 
 # ── power ────────────────────────────────────────────────────────────────────

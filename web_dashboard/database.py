@@ -2194,6 +2194,17 @@ class PovEnvironmentVM(Base):
     entitle_tf_state = Column(Text, nullable=True)
     wiring_error = Column(Text, nullable=True)
 
+    # Which of this guest's stored platform credentials its runs should use, when the
+    # lab platform holds several and the guest-OS rule in `services/pov_credentials`
+    # cannot separate them. A USERNAME, never a credential: the password is still read
+    # live off the platform at the moment of every run and is still stored nowhere here.
+    #
+    # NULL throughout, and NULL is the normal state — it means "decide by guest OS",
+    # which is right for every VM whose box holds the `root` or `administrator` the
+    # template promised. So this backfills to the rule rather than to a refusal, and an
+    # existing estate needs nothing typed into it.
+    login_username = Column(String(104), nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -2781,6 +2792,9 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN spend_warned_at TIMESTAMP",
             "ALTER TABLE pov_environments ADD COLUMN spend_capped_at TIMESTAMP",
             "ALTER TABLE pov_blueprints ADD COLUMN spend_cap_usd FLOAT",
+            # NULL backfills to "choose by guest OS", so no existing POV changes
+            # behaviour when this lands. See PovEnvironmentVM.login_username.
+            "ALTER TABLE pov_environment_vms ADD COLUMN login_username VARCHAR(104)",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.

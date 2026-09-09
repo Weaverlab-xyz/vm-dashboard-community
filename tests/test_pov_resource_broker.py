@@ -132,18 +132,97 @@ def test_the_refusal_never_quotes_the_text():
         assert "hunter2" not in str(exc)
 
 
-def test_two_usable_credentials_are_refused_not_ordered():
-    """Which one an SE meant is not something a position in a list can answer — and *this*
-    caller cannot ask. `platform_login` seals one credential into a run bundle the agent
-    uses over WinRM, so it never authenticates and never learns the outcome; order is the
-    only thing it could go on. The template build, which does authenticate, uses
-    `candidates` instead. Do not turn this into ordering."""
+def test_two_indistinguishable_credentials_are_refused_not_ordered():
+    """Neither `a` nor `c` is a superuser and both are local, so the guest-OS rule cannot
+    separate them — and *this* caller cannot ask. `platform_login` seals one credential
+    into a run bundle the agent uses over WinRM, so it never authenticates and never learns
+    the outcome; position in a list is the only thing left, and that is still a guess. The
+    template build, which does authenticate, uses `candidates` instead.
+
+    **Do not turn this into ordering by position.** Ordering by RULE is what
+    `test_the_guest_os_superuser_wins` covers; that is a different thing."""
     try:
         pov_credentials.pick([{"text": "a / b"}, {"text": "c / d"}], vm_label="rb01")
         raise AssertionError("it picked one")
     except pov_credentials.CredentialParseError as exc:
-        assert "2 usable" in str(exc) and "rb01" in str(exc)
+        assert "equal standing" in str(exc) and "rb01" in str(exc)
         assert "a / b" not in str(exc), "the refusal quoted a credential"
+        # The usernames ARE named. A parsed username is not a credential, and withholding
+        # it left the reader with a count and no idea what to do about it.
+        assert "a, c" in str(exc), str(exc)
+
+
+def test_the_guest_os_superuser_wins():
+    """The reported failure: a broker VM whose box holds the template's administrator
+    beside a second login somebody left there. Several per host is the NORM, so this has
+    to resolve rather than refuse."""
+    entries = [{"text": "btadmin / Hunter2"}, {"text": "administrator / Passw0rd"}]
+    assert pov_credentials.pick(entries, vm_label="BtPocBroker01",
+                                os_family="windows") == ("administrator", "Passw0rd")
+    linux = [{"text": "ec2-user / a"}, {"text": "root / b"}, {"text": "ubuntu / c"}]
+    assert pov_credentials.pick(linux, os_family="linux") == ("root", "b")
+
+
+def test_local_beats_domain_qualified_but_only_as_a_tiebreak():
+    """A domain login depends on a domain controller having booted, which in a lab whose
+    boot order is not guaranteed fails at WinRM as an authentication error — i.e. reads as
+    a bad password. So local wins a tie. It does NOT win outright: privilege is what the
+    install needs, so a domain-qualified administrator still beats a local service
+    account."""
+    domain = "CORP" + chr(92) + "administrator"
+    assert pov_credentials.pick(
+        [{"text": domain + " / a"}, {"text": "administrator / b"}],
+        os_family="windows") == ("administrator", "b")
+    assert pov_credentials.pick(
+        [{"text": "svc_backup / a"}, {"text": domain + " / b"}],
+        os_family="windows") == (domain, "b")
+    # `.\` is Windows' own "this machine" prefix, so it counts as local.
+    dot = "." + chr(92) + "administrator"
+    assert pov_credentials.pick(
+        [{"text": domain + " / a"}, {"text": dot + " / b"}],
+        os_family="windows") == (dot, "b")
+
+
+def test_a_blank_os_family_is_not_read_as_linux():
+    """Slice 3's rule. A blank family widens the superuser set to both names rather than
+    picking one, so a guest holding exactly one of them still resolves — and a guest
+    holding BOTH is refused, because which family it is remains the unanswered question."""
+    assert pov_credentials.pick(
+        [{"text": "root / a"}, {"text": "btadmin / b"}], os_family="") == ("root", "a")
+    try:
+        pov_credentials.pick([{"text": "root / a"}, {"text": "administrator / b"}],
+                             vm_label="unknown01", os_family="")
+        raise AssertionError("it guessed the guest's operating system")
+    except pov_credentials.CredentialParseError as exc:
+        assert "equal standing" in str(exc)
+
+
+def test_an_override_outranks_the_rule_and_a_typo_is_refused():
+    """The remedy the ambiguity refusal now names. An override that quietly fell back to
+    the rule would turn a typo into a SUCCESSFUL run against the wrong account, which is
+    worse than a failure — so a name the platform does not hold is a refusal."""
+    entries = [{"text": "administrator / a"}, {"text": "btadmin / b"}]
+    assert pov_credentials.pick(entries, os_family="windows",
+                                prefer="btadmin") == ("btadmin", "b")
+    # Matched on the bare account name too, so an operator need not know the box holds a
+    # qualified form.
+    domain = "CORP" + chr(92) + "administrator"
+    assert pov_credentials.pick([{"text": domain + " / a"}, {"text": "svc / b"}],
+                                prefer="administrator") == (domain, "a")
+    try:
+        pov_credentials.pick(entries, vm_label="rb01", prefer="adminstrator")
+        raise AssertionError("a typo fell back to the rule")
+    except pov_credentials.CredentialParseError as exc:
+        assert "adminstrator" in str(exc) and "administrator, btadmin" in str(exc)
+
+
+def test_candidates_is_ranked_rather_than_platform_ordered():
+    """The SSH runner install can retry, so ordering is a courtesy rather than a
+    correctness rule — but the first attempt is the one that usually wins, and three failed
+    authentications in a job log is three lines an SE has to read past."""
+    entries = [{"text": "zed / 1"}, {"text": "root / 2"}, {"text": "sa@corp.local / 3"}]
+    assert [u for u, _ in pov_credentials.candidates(
+        entries, os_family="linux")] == ["root", "zed", "sa@corp.local"]
 
 
 def test_the_caller_can_say_what_the_remedy_is():
@@ -169,10 +248,12 @@ def test_an_unparseable_entry_beside_a_good_one_is_treated_as_a_note():
 
 # ── candidates(): the caller that can try ────────────────────────────────────
 
-def test_candidates_returns_every_usable_pair_in_platform_order():
+def test_candidates_keeps_platform_order_where_the_rule_cannot_separate():
     """The template build authenticates in process, so two logins are two things to try
-    rather than an ambiguity to refuse. The order is the platform's, because that is the
-    only order there is — but nothing depends on it being right, only on it being tried."""
+    rather than an ambiguity to refuse. The sort in `candidates` is STABLE, so the
+    platform's order survives wherever the rule has nothing to say — here both entries are
+    a local superuser and the guest's family was not given, so neither outranks the other.
+    Nothing depends on that order being right, only on it being tried."""
     got = pov_credentials.candidates(
         [{"text": "administrator / Passw0rd"}, {"text": "root:Hunter2"}], vm_label="rb01")
     assert got == [("administrator", "Passw0rd"), ("root", "Hunter2")], got
@@ -484,6 +565,90 @@ def test_the_login_comes_from_the_platform_and_is_never_stored():
     # Nothing about it was written to the row or the config space.
     db.refresh(env)
     assert "Passw0rd" not in json.dumps(env.metadata_dict)
+    db.close()
+
+
+def test_a_windows_guest_with_several_logins_resolves_rather_than_refusing():
+    """The whole point. `_vm` makes a Windows guest, so the box holding the template's
+    administrator beside a leftover service account is resolved by the guest-OS rule and
+    the install proceeds — where before it failed 409 at 90% with "2 usable stored
+    credentials"."""
+    db = d.SessionLocal()
+    env, _a, vm = _ready(db)
+    original = _with_credentials([{"text": "btadmin / Hunter2", "notes": "leftover"},
+                                  {"text": "administrator / Passw0rd", "notes": ""}])
+    try:
+        got = asyncio.run(rb.platform_login(db, env.id, vm.platform_vm_id))
+    finally:
+        _restore(original)
+    assert got == ("administrator", "Passw0rd")
+    db.close()
+
+
+def test_the_per_vm_override_is_read_off_the_row():
+    """The remedy the ambiguity refusal names, end to end: the column, the row lookup, and
+    `pick`'s `prefer`. It stores a USERNAME — the password is still read live off the
+    platform on every run and written nowhere, which is the property slice 5b exists for."""
+    db = d.SessionLocal()
+    env, _a, vm = _ready(db)
+    note = pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "btadmin")
+    assert "btadmin" in note
+    original = _with_credentials([{"text": "administrator / Passw0rd", "notes": ""},
+                                  {"text": "btadmin / Hunter2", "notes": ""}])
+    try:
+        got = asyncio.run(rb.platform_login(db, env.id, vm.platform_vm_id))
+    finally:
+        _restore(original)
+    assert got == ("btadmin", "Hunter2")
+    db.refresh(vm)
+    assert vm.login_username == "btadmin"
+    assert "Hunter2" not in json.dumps(env.metadata_dict)
+
+    # Clearing it restores the rule, which is the normal state.
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "")
+    db.refresh(vm)
+    assert vm.login_username is None
+    db.close()
+
+
+def test_an_override_that_cannot_be_a_login_is_refused_at_the_form():
+    """Refused when it is typed rather than at the next run. A value the selector could
+    never match would turn every subsequent run on this guest into a refusal, and the
+    operator would be nowhere near this page when it happened."""
+    db = d.SessionLocal()
+    env, _a, vm = _ready(db)
+    try:
+        pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "the admin account")
+        raise AssertionError("a sentence was stored as a login")
+    except pov_env_service.VmLoginError as exc:
+        assert "administrator" in str(exc)
+    db.close()
+
+
+def test_a_login_override_survives_a_vm_refresh():
+    """`refresh_vms` upserts by platform_vm_id rather than rebuilding the rows — the same
+    property the PAM artifact columns rely on. If that ever changes, an operator's answer
+    to an ambiguity would evaporate on the next sync and the refusal would come back."""
+    db = d.SessionLocal()
+    env, _a, vm = _ready(db)
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "btadmin")
+
+    from web_dashboard.services import lab_platforms
+
+    class _Fake:
+        async def get_environment(self, env_id):
+            return {"runstate": "running",
+                    "vms": [{"id": vm.platform_vm_id, "name": vm.name,
+                             "os_family": "windows", "runstate": "running",
+                             "private_ip": "10.9.0.10"}]}
+    original = lab_platforms.adapter
+    lab_platforms.adapter = lambda platform: _Fake()
+    try:
+        asyncio.run(pov_env_service.refresh_vms(db, env))
+    finally:
+        lab_platforms.adapter = original
+    db.refresh(vm)
+    assert vm.login_username == "btadmin"
     db.close()
 
 

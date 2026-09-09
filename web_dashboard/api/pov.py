@@ -181,6 +181,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     # instead of offering it and refusing. `/api/pov/platforms` serves the whole
     # capability map, but the detail page reads one environment, not the registry.
     out["vm_add"] = lab_platforms.supports(env.platform, "vm_add")
+    # Likewise for the per-VM Login column: on a platform that holds no VM credentials
+    # (AWS, GCP, OCI) there is nothing for it to choose between, so the page greys it out
+    # rather than offering a box whose value could never be used.
+    out["stored_credentials"] = lab_platforms.supports(env.platform, "stored_credentials")
     if broker is not None:
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
@@ -219,6 +223,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
             "ps_managed_account_id": v.ps_managed_account_id or "",
             "entitle_integration_id": v.entitle_integration_id or "",
             "wiring_error": v.wiring_error or "",
+            # Which stored platform credential this guest's runs use when its box holds
+            # several. Blank is the normal state and means "choose by guest OS". A
+            # username, never a credential — see PovEnvironmentVM.login_username.
+            "login_username": v.login_username or "",
         } for v in vms]
     return out
 
@@ -1048,6 +1056,45 @@ async def application_host(env_id: str, payload: ApplicationHostRequest,
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"note": note,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class VmLoginRequest(BaseModel):
+    """Say which of a guest's stored platform credentials its runs should use.
+
+    A **username**, not a credential, and the field is named so. The password stays on the
+    lab platform and is read live at the moment of every run, exactly as before; all this
+    records is which of several accounts an SE meant. Sending an empty string clears the
+    override, which restores the guest-OS rule and is the normal state.
+
+    The control exists because several credentials on one host is the norm, and the rule
+    in ``services/pov_credentials`` cannot separate two logins of equal standing — two
+    local service accounts, say. Without a way to answer that, the refusal it raises would
+    have no remedy but editing the credential box on the platform.
+    """
+    login_username: str = ""
+
+
+@router.post("/managed/{env_id}/vms/{vm_id}/login")
+async def set_vm_login(env_id: str, vm_id: str, payload: VmLoginRequest,
+                       db: Session = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
+    """Pin one POV guest to one stored login, or clear the pin."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    try:
+        note = pov_env_service.set_vm_login(db, env, vm_id, payload.login_username)
+    except pov_env_service.VmLoginError as exc:
+        # 400, not 409: this is about the value in the request, not a step still owed.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    vms = (db.query(PovEnvironmentVM)
+             .filter(PovEnvironmentVM.environment_id == env.id).all())
+    return {"note": note,
+            "environment": _serialize(env, vms=vms,
+                                      broker=pov_broker.describe(db, env))}
 
 
 class EntitleAgentRequest(BaseModel):

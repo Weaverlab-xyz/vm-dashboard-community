@@ -153,6 +153,10 @@
                 <th class="text-left px-4 py-2 font-medium">OS</th>
                 <th class="text-left px-4 py-2 font-medium">Runstate</th>
                 <th class="text-left px-4 py-2 font-medium">Private address</th>
+                <!-- Which of this guest's stored platform credentials its runs use. Blank
+                     is the normal state and means "choose by guest OS" — administrator on
+                     Windows, root on Linux. Only fill it in when a refusal asks you to. -->
+                <th class="text-left px-4 py-2 font-medium">Login</th>
                 <!-- The agent is granted a CLOSED list of addresses, so this checkbox is
                      what makes a guest reachable at all. Off by default on purpose. -->
                 <th class="text-left px-4 py-2 font-medium">Configure</th>
@@ -168,6 +172,17 @@
                   <td class="px-4 py-2 text-gray-600" x-text="vm.os_family || '—'"></td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.runstate || '—'"></td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.private_ip || '—'"></td>
+                  <!-- A USERNAME, never a credential. The password is still read live off
+                       the lab platform at the moment of every run and is stored nowhere
+                       here, so this box is not a secret and is not treated as one. -->
+                  <td class="px-4 py-2">
+                    <input type="text" x-model="vm.login_username"
+                           @change="saveVmLogin(vm)"
+                           :disabled="!env.stored_credentials"
+                           :placeholder="loginPlaceholder(vm)"
+                           :title="env.stored_credentials ? 'Blank means administrator on Windows, root on Linux. Set this only when a run refuses because two logins are of equal standing.' : 'This platform holds no VM credentials, so there is nothing to choose between.'"
+                           class="w-40 text-xs border border-gray-300 rounded px-2 py-1 disabled:bg-gray-100 disabled:text-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-400">
+                  </td>
                   <td class="px-4 py-2">
                     <label class="inline-flex items-center gap-1 text-xs text-gray-600">
                       <input type="checkbox" :checked="isOptedIn(vm)"
@@ -179,7 +194,7 @@
                 </tr>
               </template>
               <tr x-show="!(env.vms || []).length">
-                <td colspan="5" class="px-4 py-6 text-center text-gray-400">
+                <td colspan="6" class="px-4 py-6 text-center text-gray-400">
                   No VMs read back from the platform yet.
                 </td>
               </tr>
@@ -1030,6 +1045,36 @@
           ? current.filter(n => n.toLowerCase() !== name.toLowerCase())
           : current.concat([name]);
         await this.saveSteps(next);
+      },
+
+      // What the empty box means for THIS guest, spelled out rather than left as "by OS":
+      // an operator looking at the column should not have to know the rule to trust it.
+      loginPlaceholder(vm) {
+        if (!this.env.stored_credentials) return 'n/a';
+        if (vm.os_family === 'windows') return 'administrator';
+        if (vm.os_family === 'linux') return 'root';
+        return 'by guest OS';
+      },
+
+      // Which stored credential a guest's runs use, when its box holds several the
+      // guest-OS rule cannot separate. Posted on blur rather than batched into a Run
+      // click, for the same reason the opt-in checkbox is: it is configuration the next
+      // run reads, and an operator who typed it and walked away should not find it gone.
+      async saveVmLogin(vm) {
+        this.error = ''; this.notice = '';
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/vms/${encodeURIComponent(vm.id)}/login`,
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ login_username: vm.login_username || '' }) });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not save (${res.status}).`; return; }
+          this.env = data.environment || this.env;
+          this.notice = data.note || '';
+        } catch (e) {
+          this.error = 'Could not reach the dashboard to save that login.';
+        }
       },
 
       async saveSteps(vmNames) {

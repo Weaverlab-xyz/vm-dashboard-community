@@ -298,21 +298,48 @@ So the adapter has to **parse**, and parsing is where this goes wrong quietly. T
 * **Refuse rather than guess.** A `text` the parser cannot split into exactly one pair is
   an error naming the VM, not a best effort. A wrong username sends a WinRM auth failure
   back, which reads as a bad password and sends an SE to reset one.
-* **Refuse on ambiguity where nothing can resolve it.** More than one entry, or one entry
-  yielding more than one plausible pair, is a refusal *for this path* — the fallback in the
-  table above is what an operator reaches for when their template's credential box does not
-  parse. The reason is specific to the consumer rather than to credentials in general: this
-  one seals a single credential into a run bundle the agent uses, so it never authenticates
-  and a position in a list is the only thing it could go on.
+* **Resolve ambiguity by a RULE, never by position.** Several credentials on one host is
+  the norm — a lab guest carries the superuser its template promised plus whatever else an
+  SE left in the box — so refusing on *there are two* refused the common case. What
+  resolves it is the guest's own operating system: `administrator` on Windows, `root` on
+  Linux, both candidates when the family is blank (which slice 3 forbids guessing at, so
+  one of them present resolves and both present does not). Under that, two tie-breaks, in
+  this order: **privilege**, so a domain-qualified `administrator` beats a local
+  `svc_backup`; then **locality**, so a local `administrator` beats a domain-qualified one.
 
-  The template builder's SSH install is the exception, and it is an exception on exactly
-  that axis: it authenticates in process, so it takes the whole list (`candidates` rather
-  than `pick`) and tries each until one is accepted. Ambiguity a round trip can settle is
-  not ambiguity. It still refuses when *none* parse, in the same words, and it fails at once
-  when the guest answers and rejects them all — the retry ladder there is for a guest whose
-  sshd is not up yet, and a rejected password is not that.
+  Locality is second rather than first on purpose. What the install *needs* is privilege —
+  an RB installed as a service account fails in ways that do not say wrong account. What it
+  *prefers* is a login that does not depend on a domain controller having booted, because
+  in a lab whose boot order is not guaranteed that failure reaches WinRM as an
+  authentication error and reads as a bad password. A domain-qualified win is logged at
+  WARNING for exactly that reason.
+
+  Position in the list is still never used. It is still a guess, and this consumer seals a
+  single credential into a run bundle the agent uses, so it never authenticates and would
+  never discover the wrong one was chosen.
+
+* **Refuse only what the rule cannot separate — and name it.** Two logins of equal standing
+  are still a refusal, but it now lists the *usernames*, which the third rule below already
+  makes safe. Withholding them left the reader a count and no next move. The remedy is the
+  per-VM **Login** column on the POV's VMs tab (`PovEnvironmentVM.login_username`), which
+  stores a username and no credential — the password is still read live per run. An
+  override naming an account the platform does not hold is a refusal rather than a
+  fallback: silently reverting to the rule turns a typo into a *successful* run against the
+  wrong account, which is worse than a failure.
+
+  The template builder's SSH install needs none of this: it authenticates in process, so it
+  takes the whole list (`candidates` rather than `pick`) and tries each until one is
+  accepted. It gets the same ranking as an order to try them in — a stable sort, so entries
+  the rule cannot separate keep the platform's order — because the first attempt is the one
+  that usually wins and three failed authentications is three lines an SE reads past.
+  Ambiguity a round trip can settle is not ambiguity. It still refuses when *none* parse, in
+  the same words, and it fails at once when the guest answers and rejects them all — the
+  retry ladder there is for a guest whose sshd is not up yet, and a rejected password is not
+  that.
 * **Never log the `text`.** It contains the password by definition. The parsed username is
-  fine to name in a job log; nothing else from that field is.
+  fine to name in a job log — which is what lets the ambiguity refusal above list the
+  logins it could not choose between, and what lets a successful pick record the one it
+  took. Nothing else from that field is.
 
 The parsed pair maps onto the run as `login_user` plus a resolved password. Note the
 password must reach `ansible_credentials` as a *value* at bundle-assembly time rather than
