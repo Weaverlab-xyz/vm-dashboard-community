@@ -529,12 +529,45 @@ async def _run_stage(db: Session, *, row: SpireLab, stage: dict, actor: str,
     return (fresh.status if fresh else "failed") or "failed"
 
 
+async def ensure_secret_folder(row: SpireLab) -> dict:
+    """Create ``<safe>/<folder tree>`` for this lab's credential, if it is not there.
+
+    **The identity playbook writes into a folder and never creates one** — the same rule
+    the ``k3s-kubeconfig.yml`` it was modelled on states outright. Without this the fourth
+    and last stage fails on a folder-not-found *after* the server is installed and seeded,
+    which reads like a credential problem and is not. The Certificate Lab already
+    established that the folder is the dashboard's job; this is the same call.
+
+    Run as a PRE-FLIGHT, before the cloud ACL and before any playbook, because a lab whose
+    credential has nowhere to go is one we should not have started. It is also the cheapest
+    possible check: two list calls against a tenant we already talk to.
+
+    The safe is never created — it carries its own ACL, and a safe that appeared because
+    an automation asked for one is an access boundary nobody chose.
+    """
+    import asyncio
+    from . import secrets_backend_service
+    folder = (row.admin_secret_folder or "").strip("/")
+    safe = (row.ps_safe or "").strip("/")
+    if not (safe and folder):
+        raise SpireLabError(
+            "the lab has no Secrets Safe destination — set spire_lab_ps_safe and "
+            "spire_lab_secret_root under Settings → SPIRE Lab")
+    try:
+        return await asyncio.to_thread(
+            secrets_backend_service.ensure_bt_folder_path, f"{safe}/{folder}")
+    except ValueError as exc:
+        raise SpireLabError(
+            f"the administrative credential has nowhere to land: {exc}") from exc
+
+
 async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
     """Worker entry point for ``spirelab_provision``.
 
-    Opens the cloud ACL, then runs the four playbooks in order, then reads back the two
-    public artifacts. Stops at the first stage that fails: every later stage asserts the
-    server is up, so continuing would turn one legible Ansible error into four.
+    Ensures the credential's Secrets Safe folder, opens the cloud ACL, then runs the four
+    playbooks in order, then reads back the two public artifacts. Stops at the first stage
+    that fails: every later stage asserts the server is up, so continuing would turn one
+    legible Ansible error into four.
     """
     from ..api.websocket import broadcast_progress
     from . import storage_service
@@ -547,6 +580,22 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
         backend = require_backend(row.cloud)
         placement = json.loads(row.vm_resource_id or "{}")
         cidrs = _row_cidrs(row)
+
+        # ── where the credential will land ────────────────────────────────────
+        # FIRST, before the ACL and before any playbook. This is the one prerequisite
+        # that fails at the very LAST stage if it is missing, by which point the server
+        # is installed and seeded on somebody's VM and the error reads like a credential
+        # fault. Two list calls to find out is a bargain against that.
+        await broadcast_progress(
+            job_id, 4, f"Checking the Secrets Safe folder "
+                       f"{row.ps_safe}/{row.admin_secret_folder}…")
+        made = await ensure_secret_folder(row)
+        if made.get("created"):
+            await broadcast_progress(
+                job_id, 6,
+                f"Created Secrets Safe folder(s) {'/'.join(made['created'])} under "
+                f"{row.ps_safe}. The safe itself is never created — it carries its "
+                f"own ACL.")
 
         # ── the cloud gate ────────────────────────────────────────────────────
         await broadcast_progress(job_id, 8, f"Opening tcp/{row.bind_port} on the "

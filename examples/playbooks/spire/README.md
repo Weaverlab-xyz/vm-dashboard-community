@@ -28,7 +28,8 @@ Kubernetes/database image.
 > as one job, on Azure, GCP or AWS, and opens the cloud ACL first — see
 > [docs/spiffe.md](../../../docs/spiffe.md#building-it-from-the-dashboard). It runs these
 > same files, fetched **by filename from the storage backend**, so upload them on the
-> Config Management page first; the build form names the ones it cannot find. The steps
+> **Storage** page first (Config Management only *runs* them); the build form names the
+> ones it cannot find. The steps
 > below are the by-hand path and the explanation of what each one is for.
 
 1. **Deploy a VM** from the normal cloud page, on a subnet the Password Safe worker or

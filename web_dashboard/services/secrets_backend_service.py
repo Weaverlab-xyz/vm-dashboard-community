@@ -1191,6 +1191,64 @@ def delete_bt_folder(folder_id: str) -> None:
     logger.info("BT Safe: deleted folder %s", folder_id)
 
 
+
+def ensure_bt_folder_path(path: str) -> dict:
+    """Create a Secrets Safe folder tree, if it is not already there. Idempotent.
+
+    ``path`` is ``<safe>/<folder>/<folder>...``: the FIRST segment names an **existing
+    safe**, and everything after it is a folder tree created beneath it.
+
+    **A safe is never created here, on purpose.** It carries its own ACL, and that ACL is
+    half the access boundary on whatever lands inside — so a safe appearing because an
+    automation asked for one is a boundary nobody chose. A missing safe is an error that
+    names the ones the API user can actually see.
+
+    Returns ``{"folder_id", "created", "path"}``, where ``created`` lists only the
+    segments this call had to make.
+
+    Extracted from ``cert_ps_service.ensure_secrets_safe_folder`` so the SPIRE lab could
+    reuse it rather than grow a second copy: the two subtleties below are not obvious, and
+    a duplicate would have drifted from them.
+    """
+    segments = [s.strip() for s in (path or "").strip().strip("/").split("/") if s.strip()]
+    if not segments:
+        raise ValueError("no Secrets Safe folder path given")
+
+    safes = list_bt_safes()
+    safe = next((s for s in (safes or [])
+                 if (s.get("name") or "").casefold() == segments[0].casefold()), None)
+    if not safe:
+        known = ", ".join(sorted((s.get("name") or "") for s in (safes or []))) or "none"
+        raise ValueError(
+            f"Secrets Safe has no safe named {segments[0]!r} — the first segment of the "
+            f"path names an existing safe. Create it under Secrets → Safes and grant the "
+            f"run-as user write access, then re-run; the folder tree beneath it is "
+            f"created for you. Safes visible to the API user: {known}")
+
+    parent_id, created = str(safe.get("id") or ""), []
+    for segment in segments[1:]:
+        # Re-read each round: a folder created a moment ago has to be visible before its
+        # own child can be parented to it, and `folders list` is unscoped, so matching on
+        # BOTH name and parent_id is what keeps two same-named folders in different safes
+        # from being confused for one another.
+        folders = list_bt_folders()
+        match = next((f for f in (folders or [])
+                      if (f.get("name") or "").casefold() == segment.casefold()
+                      and str(f.get("parent_id") or "") == parent_id), None)
+        if match:
+            parent_id = str(match.get("id") or "")
+            continue
+        made = create_bt_folder(parent_id, segment)
+        new_id = str((made or {}).get("id") or "")
+        if not new_id:
+            raise ValueError(
+                f"Secrets Safe accepted the creation of folder {segment!r} but returned "
+                f"no id, so its children cannot be parented — check the run-as user's "
+                f"access to the {segments[0]!r} safe")
+        parent_id, _ = new_id, created.append(segment)
+    return {"folder_id": parent_id, "created": created, "path": "/".join(segments)}
+
+
 def list_bt_secrets_safe(folder: str = "") -> list[dict]:
     """Return secrets in a folder (or in the configured default folder if
     none specified). Each item carries `ref = "Folder/Title"` so the existing

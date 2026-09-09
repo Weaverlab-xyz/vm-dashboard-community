@@ -200,8 +200,8 @@ async def build_options(db: Session = Depends(get_db),
     if not backend_name:
         missing.append(
             "no storage backend is configured, so the four spire-*.yml playbooks have "
-            "nowhere to live. A run fetches assets by filename from storage — set a "
-            "backend on the Storage page, then upload them from "
+            "nowhere to live. A run fetches assets by filename from storage — set an "
+            "active backend on the Storage page and upload them there, from "
             "examples/playbooks/spire/.")
     else:
         try:
@@ -212,8 +212,8 @@ async def build_options(db: Session = Depends(get_db),
                 missing.append(
                     f"these playbooks are not on the {backend_name!r} storage backend: "
                     f"{', '.join(absent)} — upload them from examples/playbooks/spire/ "
-                    f"on the Config Management page. A run fetches assets by filename "
-                    f"from storage; the repo copy is a sample, not a source.")
+                    f"on the Storage page. A run fetches assets by filename from storage; "
+                    f"the repo copy is a sample, not a source.")
         except Exception as exc:  # noqa: BLE001 — a backend that cannot list still reports
             # Log the real error server-side; return a generic reason. A storage-backend
             # error carries provider response bodies and bucket detail, and this endpoint
@@ -224,8 +224,8 @@ async def build_options(db: Session = Depends(get_db),
             missing.append(
                 f"could not read the {backend_name!r} storage backend to check whether "
                 f"the four spire-*.yml playbooks are staged — check the server logs. A "
-                f"run fetches them by filename from storage, so verify on the Config "
-                f"Management page before building.")
+                f"run fetches them by filename from storage, so verify on the Storage "
+                f"page before building.")
 
     return {"clouds": list(spire_lab_service.PROVISIONING_CLOUDS),
             "hosts": hosts,

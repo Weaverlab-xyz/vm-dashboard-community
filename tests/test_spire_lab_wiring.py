@@ -289,6 +289,74 @@ def test_a_broad_except_logs_the_real_error_and_returns_a_generic_one():
         f"found {checked}")
 
 
+# ── the credential has somewhere to land, checked first ──────────────────────
+
+def test_the_secrets_folder_preflight_runs_before_the_acl():
+    """Ordering is the whole value. The identity playbook is the LAST of four and writes
+    into a folder it does not create, so a missing folder surfaces after the server is
+    installed and seeded — as an error that reads like a credential fault. Checking first
+    costs two list calls."""
+    svc = _read("web_dashboard", "services", "spire_lab_service.py")
+    block = svc.split("async def run_provision(")[1].split(chr(10) + "def ")[0]
+    assert "ensure_secret_folder(row)" in block
+    folder_at = block.index("ensure_secret_folder(row)")
+    acl_at = block.index("apply_ingress(")
+    assert folder_at < acl_at, "the folder check must precede the cloud ACL"
+    stage_at = block.index("_run_stage(")
+    assert folder_at < stage_at, "the folder check must precede every playbook"
+
+
+def test_the_folder_walk_has_exactly_one_implementation():
+    """`cert_ps_service` had this first; the SPIRE lab needs the identical thing. Two
+    copies would drift, and the two subtleties in it — re-reading the folder list each
+    round, and matching on BOTH name and parent_id — are not the kind anyone reproduces
+    correctly from memory.
+
+    Read from the AST, not the text. The first version of this test matched the NAME
+    anywhere in the file and so was satisfied by the docstring that merely *mentions* the
+    helper — it passed against a module that had stopped calling it.
+    """
+    import ast as _ast
+
+    def _referenced(module: str) -> set:
+        """Every attribute/function name this module actually references in code."""
+        tree = _ast.parse(_read("web_dashboard", "services", module))
+        names = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Attribute):
+                names.add(node.attr)
+            elif isinstance(node, _ast.Name):
+                names.add(node.id)
+        return names
+
+    secrets = _read("web_dashboard", "services", "secrets_backend_service.py")
+    assert "def ensure_bt_folder_path(" in secrets
+
+    for module in ("cert_ps_service.py", "spire_lab_service.py"):
+        refs = _referenced(module)
+        assert "ensure_bt_folder_path" in refs, (
+            f"{module} does not CALL the shared walk (a docstring mentioning it is not "
+            f"the same thing)")
+        # The primitives the walk is built from belong to it alone. A caller reaching for
+        # them is a caller growing a second copy.
+        for primitive in ("create_bt_folder", "list_bt_folders", "list_bt_safes"):
+            assert primitive not in refs, (
+                f"{module} references {primitive} — that is the shared walk's job")
+
+
+def test_the_safe_is_never_created_only_the_folders_under_it():
+    """A safe carries its own ACL, and that ACL is half the access boundary on whatever
+    lands inside. A safe appearing because an automation asked for one is a boundary
+    nobody chose."""
+    secrets = _read("web_dashboard", "services", "secrets_backend_service.py")
+    block = secrets.split("def ensure_bt_folder_path(")[1].split(chr(10) + "def ")[0]
+    assert "create_bt_safe" not in block
+    # A missing safe is an error that names the ones the API user can actually see —
+    # otherwise the operator cannot tell "wrong name" from "no access".
+    assert "has no safe named" in block
+    assert "Safes visible to the API user" in block
+
+
 # ── the auto-delete timer reaches the trust domain ───────────────────────────
 
 def test_spirelab_is_a_reapable_kind_with_an_idle_state_and_a_teardown():
