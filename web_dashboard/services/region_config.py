@@ -122,12 +122,23 @@ _SPECS: dict[str, _Spec] = {
             # collapsing them is what made the flat key outrank the regional one.
             "functions_subnet_ids":         "aws_functions_subnet_ids",
             "functions_security_group_ids": "aws_functions_security_group_ids",
+            # Where a virtual-desktop POOL lands. A separate question from
+            # default_subnet_id for the same reason functions_subnet_ids is: an
+            # operator may want desktops on their own segment. Unlike Azure, though,
+            # a plain VM subnet is a perfectly good desktop subnet here (nothing is
+            # delegated), so the secondary fallback below makes this optional.
+            "desktops_subnet_id":           "aws_desktops_subnet_id",
+            "desktops_instance_type":       "aws_desktops_instance_type",
         },
         # The Jumpoint host and the ECS runners share the sandbox's public subnet
         # unless split explicitly.
         secondary_fallbacks={
             "jumpoint_subnet_id":         "ansible_ecs_subnet_id",
             "jumpoint_security_group_id": "ansible_ecs_security_group_ids",
+            # Desktops inherit the VM subnet when nobody split them out. Azure cannot
+            # do this — its aci-subnet is DELEGATED and cannot host a VM NIC, which is
+            # why azure_desktops_subnet_id has no secondary. AWS has no such subnet.
+            "desktops_subnet_id":         "aws_default_subnet_id",
         },
     ),
     "gcp": _Spec(
@@ -158,10 +169,15 @@ _SPECS: dict[str, _Spec] = {
             # self-link — see cloud_function_service._resolved_network.
             "functions_network":    "gcp_functions_network",
             "functions_subnetwork": "gcp_functions_subnetwork",
+            # Where a virtual-desktop POOL lands. Optional: the secondary fallback
+            # below inherits the VM subnetwork, the same shape as jumpoint_subnetwork.
+            "desktops_subnetwork":  "gcp_desktops_subnetwork",
+            "desktops_machine_type": "gcp_desktops_machine_type",
         },
         # Historical: jumpoint subnet inherits the VM subnet; DB network the network.
         secondary_fallbacks={
             "jumpoint_subnetwork": "gcp_subnetwork",
+            "desktops_subnetwork": "gcp_subnetwork",
             "db_network":          "gcp_network",
             "ecs_subnetwork":      "gcp_subnetwork",
         },

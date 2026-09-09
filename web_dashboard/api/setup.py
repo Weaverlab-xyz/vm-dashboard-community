@@ -127,6 +127,8 @@ class AwsRegionConfig(BaseModel):
     jumpoint_security_group_id: str = ""
     functions_subnet_ids: str = ""
     functions_security_group_ids: str = ""
+    desktops_subnet_id: str = ""
+    desktops_instance_type: str = ""
 
 
 class GcpRegionConfig(BaseModel):
@@ -150,6 +152,8 @@ class GcpRegionConfig(BaseModel):
     k8s_node_tag: str = ""
     functions_network: str = ""
     functions_subnetwork: str = ""
+    desktops_subnetwork: str = ""
+    desktops_machine_type: str = ""
 
 
 # Cloud → per-region-config model. Drives the /import parser and the /regions/{cloud}
@@ -1575,9 +1579,11 @@ class K8sManagementFeatureConfig(BaseModel):
 
 class VirtualDesktopsFeatureConfig(BaseModel):
     """Config-only panel (no `enabled`) for the Virtual Desktops PREVIEW feature.
-    The preview toggle owns `vdesktops_enabled`; this panel holds the Azure VDI
-    pool defaults the sandbox emits. Normally pushed via /api/setup/import. See
-    _CONFIG_ONLY_FEATURES."""
+    The preview toggle owns `vdesktops_enabled`; this panel holds the per-cloud
+    desktop-pool defaults. Only the Azure keys are sandbox-emitted — the AWS and GCP
+    ones are set by hand, and both are OPTIONAL because each falls back to that
+    cloud's ordinary VM subnet (see region_config secondary_fallbacks). Normally
+    pushed via /api/setup/import. See _CONFIG_ONLY_FEATURES."""
     # The dedicated non-delegated desktops subnet (sandbox: desktops-subnet,
     # 10.99.6.0/24). Pools default here. Its NSG allows outbound 443 so the RS
     # jump client can register at first boot. aci-subnet (ACI-delegated) can't
@@ -1589,6 +1595,16 @@ class VirtualDesktopsFeatureConfig(BaseModel):
     # PRA Vault account-group id (numeric) for RDP credential injection on Windows
     # seats (Phase 2). Blank → the account lands in PRA's Default group.
     azure_desktops_vault_account_group_id: str = ""
+    # AWS. Blank → aws_region.<r>.desktops_subnet_id, then aws_default_subnet_id.
+    # Safe to inherit the VM subnet here: no AWS subnet is delegated the way Azure's
+    # aci-subnet is, so there is no subnet that silently cannot host a desktop.
+    aws_desktops_subnet_id: str = ""
+    # Blank → the pool form's own default. AWS pools are Linux-only.
+    aws_desktops_instance_type: str = ""
+    # GCP. Blank → gcp_region.<r>.desktops_subnetwork, then gcp_subnetwork. Full
+    # self-link, matching what /api/gcp/network-options returns.
+    gcp_desktops_subnetwork: str = ""
+    gcp_desktops_machine_type: str = ""
 
 
 class CostExplorerFeatureConfig(BaseModel):
@@ -2353,7 +2369,9 @@ def put_azure_regions(payload: RegionConfigsPayload, request: Request):
 # restart.
 _PREVIEW_FLAGS = {
     "vdesktops_enabled": (
-        "Virtual Desktops", "Desktop pools brokered as PRA sessions (Phase 1: Azure)."),
+        "Virtual Desktops",
+        "Desktop pools on AWS, Azure and GCP, brokered as PRA Jump Items. AWS and GCP "
+        "pools are Linux-only and their Shell Jumps inject no credential."),
     # Preview because none of the plugin's four submission paths has been proven against
     # a live CA yet — the shared core is covered by the plugin's own 307-assertion suite,
     # but ADCS, AWS Private CA, GCP CAS and the Entra publishers can only be exercised

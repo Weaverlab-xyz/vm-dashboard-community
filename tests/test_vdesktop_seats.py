@@ -1,17 +1,17 @@
 """What a desktop seat's provision and teardown actually do, written down.
 
-``vdesktop_service`` is 517 lines that create a VM per seat, vault a Windows password,
-stamp a pool tag, broker the seat over PRA and tear all of it back down — and it had no
-tests. Its own docstring says AWS and GCP "create seat *records* only (not provisioned
-until their Phase 1)", so two more backends are coming through this code.
+``vdesktop_service`` creates a VM per seat on all three clouds, vaults a Windows
+password, stamps a pool tag, brokers the seat over PRA and tears all of it back down.
 
-These are CHARACTERIZATION tests: they describe the Azure path as it behaves today, so the
-refactor that makes room for those backends can be shown to change nothing. They were
-written against the pre-refactor code and passed there first — a "no behaviour change"
-claim is worth nothing otherwise.
+The Azure tests here began as CHARACTERIZATION tests, written against the pre-refactor
+code and passing there first, so that extracting the per-cloud seat backend could be
+shown to change nothing. The AWS and GCP sections were added with those backends. The
+brokering section came last, and closed a real hole: both the Gateway warm-up and the
+jump registration were gated on ``is_windows``, so every Linux seat — which is every
+AWS and GCP seat — got a VM and was never brokered.
 
-What they pin is the ORDER and the RECOVERY, because that is where this kind of code goes
-wrong and none of it is obvious from a diff:
+What they pin is the ORDER and the RECOVERY, because that is where this kind of code
+goes wrong and none of it is obvious from a diff:
 
   * the PRA Gateway is warmed BEFORE any seat registers a jump item — register first and
     the items exist but read "Unavailable", with no Gateway to broker them;
@@ -73,7 +73,8 @@ CALLS = []
 
 # ── Stubs ─────────────────────────────────────────────────────────────────────
 
-def _install_stubs(*, deploy_fails_on=(), tag_raises=False, pra_raises=False):
+def _install_stubs(*, deploy_fails_on=(), tag_raises=False, pra_raises=False,
+                   shell_jump_id="shell-1"):
     """Rebind the service's collaborators. Returns the azure stub for assertions."""
     CALLS.clear()
 
@@ -116,8 +117,13 @@ def _install_stubs(*, deploy_fails_on=(), tag_raises=False, pra_raises=False):
 
     async def ensure_jumpoint_host(cloud, location):
         CALLS.append(("ensure_gateway", cloud))
+        # The REGION is recorded separately rather than folded into CALLS: the
+        # ordering test above pins ("ensure_gateway", cloud) and it should keep
+        # meaning what it meant.
+        jh.regions.append((cloud, location))
     async def teardown_jumpoint_host_if_idle(db, cloud, location):
         CALLS.append(("reap_gateway", cloud))
+    jh.regions = []
     jh.ensure_jumpoint_host = ensure_jumpoint_host
     jh.teardown_jumpoint_host_if_idle = teardown_jumpoint_host_if_idle
     sys.modules["web_dashboard.services.jumpoint_host_service"] = jh
@@ -125,15 +131,34 @@ def _install_stubs(*, deploy_fails_on=(), tag_raises=False, pra_raises=False):
     pra = types.ModuleType("web_dashboard.services.terraform_pra_service")
 
     async def provision_rdp_jump(**kw):
+        pra.calls.append(("rdp", kw))
         CALLS.append(("pra_register", kw.get("name")))
         if pra_raises:
             raise RuntimeError("PRA unreachable")
-        return {"rdp_jump_id": "jump-1", "tf_state_json": '{"state":1}'}
+        return {"rdp_jump_id": "jump-1",
+                "tf_state_json": '{"resources":[{"type":"sra_remote_rdp"}]}'}
+
+    async def provision_jump(**kw):
+        # Same CALLS entry as the RDP stub, so the ordering assertions stay about
+        # "a seat registered" rather than about which kind of item it registered.
+        pra.calls.append(("shell", kw))
+        CALLS.append(("pra_register", kw.get("vm_name")))
+        if pra_raises:
+            raise RuntimeError("PRA unreachable")
+        return {"shell_jump_id": shell_jump_id, "jump_group_name": kw.get("jump_group_name"),
+                "tf_state_json": '{"resources":[{"type":"sra_shell_jump"}]}'}
 
     async def remove_rdp_jump(state):
         CALLS.append(("pra_remove", state))
+
+    def _scrub_tf_state(state):
+        return state or None
+
+    pra.calls = []
     pra.provision_rdp_jump = provision_rdp_jump
+    pra.provision_jump = provision_jump
     pra.remove_rdp_jump = remove_rdp_jump
+    pra._scrub_tf_state = _scrub_tf_state
     sys.modules["web_dashboard.services.terraform_pra_service"] = pra
 
     cfg = types.ModuleType("web_dashboard.services.config_service")
@@ -146,7 +171,15 @@ def _install_stubs(*, deploy_fails_on=(), tag_raises=False, pra_raises=False):
              "bt_client_secret": "csecret",
              "bt_jump_group_name": "jg",
              "bt_jumpoint_name": "jp",
-             "azure_location": "eastus"}
+             "azure_location": "eastus",
+             # Per-cloud PRA targets. Azure and GCP have their own keys; AWS has
+             # none by design and must fall through to the bt_* pair above.
+             "azure_bt_jump_group_name": "azure-jg",
+             "azure_jumpoint_name": "azure-gw",
+             "gcp_bt_jump_group_name": "gcp-jg",
+             "gcp_jumpoint_name": "gcp-gw",
+             "aws_region": "us-east-2",
+             "gcp_zone": "us-central1-a"}
     cfg.get = lambda key, default="": _CONF.get(key, default)
     cfg.resolve_reference = lambda ref: "secret"
     sys.modules["web_dashboard.services.config_service"] = cfg
@@ -183,6 +216,12 @@ def _read(seat_id):
         return db.query(VirtualDesktop).filter(VirtualDesktop.id == seat_id).first()
     finally:
         db.close()
+
+
+def _pra():
+    """The terraform_pra_service stub currently bound into the service package."""
+    import web_dashboard.services as pkg
+    return pkg.terraform_pra_service
 
 
 def _names():
@@ -607,7 +646,11 @@ def test_every_backend_implements_the_whole_interface():
     required_attrs = ("cloud", "gateway_cloud", "pool_tag_key", "supports_windows",
                       "default_username", "pra_tag")
     required_methods = ("validate_spec", "deploy", "terminate", "tag_pool",
-                        "generate_password", "store_password", "reap_idle_gateway")
+                        "generate_password", "store_password", "reap_idle_gateway",
+                        # Where this cloud's Gateway is warmed. The spec key differs
+                        # per cloud (location / region / zone), so a shared
+                        # spec.get("location") silently mis-placed two of the three.
+                        "gateway_region")
     import inspect
     for cloud, backend in vd._SEAT_BACKENDS.items():
         for attr in required_attrs:
@@ -621,6 +664,18 @@ def test_every_backend_implements_the_whole_interface():
             "spec", "vm_name", "admin_password", "pool_name"], cloud
         assert list(inspect.signature(backend.tag_pool).parameters) == [
             "spec", "vm_name", "vm_resource_id", "pool_name"], cloud
+        # Per-cloud PRA config keys. "" is a legal value (see _AwsSeats) but the
+        # attribute must EXIST, or `_resolve_pra_targets` silently uses bt_* for a
+        # cloud that has its own keys.
+        for attr in ("pra_jump_group_key", "pra_jumpoint_key", "pra_vault_group_key",
+                     "region_spec_key"):
+            assert hasattr(backend, attr), f"{cloud} backend has no {attr}"
+        assert backend.region_spec_key, f"{cloud} declares no region spec key"
+    # And the conversion actually works from that cloud's own spec shape.
+    assert vd._AzureSeats.gateway_region({"location": "westus2"}) == "westus2"
+    assert vd._AwsSeats.gateway_region({"region": "eu-west-1"}) == "eu-west-1"
+    assert vd._GcpSeats.gateway_region({"zone": "europe-west1-b"}) == "europe-west1", (
+        "GCP must hand a REGION to the gateway, never the zone from its spec")
 
 
 def test_the_pool_tag_key_is_legal_for_its_cloud():
@@ -634,6 +689,283 @@ def test_the_pool_tag_key_is_legal_for_its_cloud():
         if cloud == "gcp":
             assert re.fullmatch(r"[a-z][a-z0-9_-]*", key), (
                 f"{key!r} is not a valid GCP label key")
+
+
+# ─ Brokering: which jump item a seat gets, and against whose config ──────
+#
+# Until this section existed, `provision_seats` gated BOTH the Gateway warm-up and the
+# jump registration on `is_windows`. AWS and GCP are Linux-only, so no seat on either
+# cloud was ever brokered — it got a VM, `pra_jump_id` stayed NULL, and the UI greyed
+# out "Open session" forever. Azure Linux seats had the same hole.
+
+
+def test_a_linux_aws_seat_is_brokered_over_a_shell_jump():
+    _install_aws_stubs()
+    pra = _pra()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+
+    assert len(pra.calls) == 1, "exactly one jump item per seat"
+    kind, kw = pra.calls[0]
+    assert kind == "shell", "a Linux seat gets a Shell Jump, not Remote RDP"
+    assert kw["port"] == 22
+    assert kw["hostname"] == "10.1.2.3", "the jump targets the seat's PRIVATE ip"
+    assert kw["tag"] == "AWS VDI"
+    assert _read(ids[0]).pra_jump_id == "shell-1"
+
+
+def test_a_linux_gcp_seat_is_brokered_over_a_shell_jump():
+    _install_gcp_stubs()
+    pra = _pra()
+    ids = _seed(n=1, cloud="gcp")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(GCP_SPEC)))
+
+    kind, kw = pra.calls[0]
+    assert kind == "shell"
+    assert kw["hostname"] == "10.2.0.9"
+    assert kw["tag"] == "GCP VDI"
+    assert _read(ids[0]).pra_jump_id == "shell-1"
+
+
+def test_a_linux_azure_seat_is_brokered_too_not_just_windows():
+    """The third seat this closed. Azure CAN do Windows, so the `is_windows` gate hid
+    the hole here: an Azure Linux pool provisioned VMs and brokered nothing."""
+    _install_stubs()
+
+    ids = _seed(n=1, cloud="azure")
+    spec = dict(SPEC, os_type="Linux", ssh_public_key="ssh-ed25519 AAAA")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, spec))
+
+    kind, kw = _pra().calls[0]
+    assert kind == "shell"
+    assert kw["tag"] == "Azure VDI"
+    assert "generate_password" not in _names(), "a Linux seat has no password to vault"
+
+
+def test_a_windows_azure_seat_still_gets_a_remote_rdp_jump():
+    """Regression: the Windows path is untouched, vault kwargs and all."""
+    _install_stubs()
+
+    ids = _seed(n=1)
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(SPEC)))
+
+    kind, kw = _pra().calls[0]
+    assert kind == "rdp"
+    assert kw["admin_password"] == "P@ssw0rd-generated"
+    assert kw["vault_account_name"].endswith("-admin")
+    assert _read(ids[0]).pra_jump_id == "jump-1"
+
+
+def test_a_linux_seat_vaults_no_password_and_asks_for_no_injection():
+    """A Linux seat authenticates with an SSH KEY. There is no password to vault, and
+    this provider wrapper has no SSH-key vault resource, so the item must register with
+    NO credential injection rather than with an empty one."""
+    _install_aws_stubs()
+    pra = _pra()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+
+    assert "generate_password" not in _names()
+    assert "store_password" not in _names()
+    injected = {"admin_password", "vault_account_name", "vault_account_group_id"}
+    assert not (injected & set(pra.calls[0][1])), "no vault kwargs on a Shell Jump"
+
+
+def test_the_gateway_is_warmed_for_a_linux_pool_too():
+    """The other half of the `is_windows` gate. A Shell Jump needs a Gateway exactly as
+    much as an RDP jump does; without one the item registers and reads "Unavailable"."""
+    _install_aws_stubs()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+
+    names = _names()
+    assert "ensure_gateway" in names, "no Gateway was warmed for a Linux pool"
+    assert names.index("ensure_gateway") < names.index("pra_register")
+
+
+def test_each_cloud_warms_its_gateway_in_its_own_region():
+    """`spec["location"]` is an AZURE key. Passing it for every cloud warmed AWS and
+    GCP against a blank region, which does not fail — it silently places the Gateway
+    somewhere nobody chose. GCP is the sharp one: its spec carries a ZONE and
+    `ensure_jumpoint_host` wants a REGION."""
+    import web_dashboard.services as pkg
+
+    _install_stubs()
+    asyncio.run(vd.provision_seats("pool-a", None, _seed(n=1), dict(SPEC)))
+    assert pkg.jumpoint_host_service.regions == [("azure", "eastus")]
+
+    _install_aws_stubs()
+    asyncio.run(vd.provision_seats("pool-a", None, _seed(n=1, cloud="aws"), dict(AWS_SPEC)))
+    assert pkg.jumpoint_host_service.regions == [("aws", "us-east-2")]
+
+    _install_gcp_stubs()
+    asyncio.run(vd.provision_seats("pool-a", None, _seed(n=1, cloud="gcp"), dict(GCP_SPEC)))
+    assert pkg.jumpoint_host_service.regions == [("gcp", "us-central1")], (
+        "a GCP gateway is placed by REGION; us-central1-a is a zone")
+
+
+def test_a_seat_brokers_against_its_own_clouds_pra_config():
+    """`_resolve_pra_targets` read the `azure_*` keys for every cloud, so a GCP seat's
+    jump item landed in the AZURE Jump Group."""
+    _install_stubs()
+    asyncio.run(vd.provision_seats("pool-a", None, _seed(n=1), dict(SPEC)))
+    assert _pra().calls[0][1]["jump_group_name"] == "azure-jg"
+    assert _pra().calls[0][1]["jumpoint_name"] == "azure-gw"
+
+    _install_gcp_stubs()
+    asyncio.run(vd.provision_seats("pool-a", None, _seed(n=1, cloud="gcp"), dict(GCP_SPEC)))
+    assert _pra().calls[0][1]["jump_group_name"] == "gcp-jg"
+    assert _pra().calls[0][1]["jumpoint_name"] == "gcp-gw"
+
+    _install_aws_stubs()
+    asyncio.run(vd.provision_seats("pool-a", None, _seed(n=1, cloud="aws"), dict(AWS_SPEC)))
+    assert _pra().calls[0][1]["jump_group_name"] == "jg", "AWS falls through to bt_*"
+    assert _pra().calls[0][1]["jumpoint_name"] == "jp"
+
+
+def test_aws_has_no_cloud_specific_pra_key_on_purpose():
+    """"" here is an answer, not a gap: `aws_vm_service` resolves straight from `bt_*`,
+    so inventing an `aws_bt_jump_group_name` would land VDI jump items somewhere the
+    AWS Shell Jump path does not. The second half of this assertion is the point — the
+    day somebody DOES add that setting, this test says "now wire it up here too"."""
+    from web_dashboard.config import settings
+    assert vd._AwsSeats.pra_jump_group_key == ""
+    assert vd._AwsSeats.pra_jumpoint_key == ""
+    for key in ("aws_bt_jump_group_name", "aws_jumpoint_name"):
+        assert not hasattr(settings, key), (
+            f"{key} now exists in config; wire it into _AwsSeats.pra_* keys")
+
+
+def test_a_blank_jump_id_is_stored_as_null_not_empty_string():
+    """Both provisioners return "" when the Terraform output is missing. A non-NULL ""
+    makes `_active_vdesktop_count` (pra_jump_id.isnot(None)) pin the shared Gateway
+    forever, while the UI's `:disabled="!s.pra_jump_id"` still greys the button out —
+    two symptoms and no visible cause."""
+    _install_aws_stubs()
+    async def _blank(**kw):
+        return {"shell_jump_id": "", "tf_state_json": '{"resources":[]}'}
+    _pra().provision_jump = _blank
+
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    assert _read(ids[0]).pra_jump_id is None
+
+
+def test_a_failing_shell_jump_registration_does_not_fail_the_seat():
+    """Brokering is best-effort. A running seat with no jump item is debuggable; a
+    seat marked failed because PRA was down is a VM nobody will clean up."""
+    _install_aws_stubs()
+    async def _boom(**kw):
+        raise RuntimeError("PRA unreachable")
+    _pra().provision_jump = _boom
+
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    row = _read(ids[0])
+    assert row.status == "running"
+    assert row.pra_jump_id is None
+
+
+# ─ Teardown, jump kind, and the session payload ───────────────@
+
+
+def test_teardown_removes_a_linux_seats_shell_jump_from_its_state():
+    """`remove_rdp_jump` is a misnomer: it destroys whatever `sra_*` resource the
+    stored state holds, so it is correct for a Shell Jump too and no per-kind dispatch
+    is needed. The ORDER still matters — a row dropped first is a VM nobody can find."""
+    _install_aws_stubs()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    state = _read(ids[0]).pra_tunnel_state
+    assert "sra_shell_jump" in state
+
+    CALLS.clear()
+    asyncio.run(vd.teardown_seats(ids))
+    names = _names()
+    assert ("pra_remove", state) in CALLS
+    assert names.index("terminate_vm") < names.index("pra_remove")
+    assert _read(ids[0]) is None
+
+
+def test_the_seats_jump_kind_is_read_off_its_state():
+    """Derived, not stored: a column could disagree with the state it describes, and
+    nothing needs it for teardown. A seat with no state predates Linux brokering, when
+    only Windows seats were ever registered — hence the RDP default."""
+    _install_aws_stubs()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    assert vd.jump_kind(_read(ids[0])) == "shell_jump"
+
+    _install_stubs()
+    wids = _seed(n=1)
+    asyncio.run(vd.provision_seats("pool-a", None, wids, dict(SPEC)))
+    assert vd.jump_kind(_read(wids[0])) == "remote_rdp"
+
+    legacy = _seed(n=1)
+    assert vd.jump_kind(_read(legacy[0])) == "remote_rdp", "no state == the old world"
+
+
+def test_the_session_targets_follow_the_seats_own_cloud():
+    """The endpoint used to hard-code the `azure_*` keys, so an AWS or GCP seat's
+    session named a Jump Group its item was never in."""
+    _install_gcp_stubs()
+    ids = _seed(n=1, cloud="gcp")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(GCP_SPEC)))
+
+    db = SessionLocal()
+    try:
+        info = vd.session_info(db, ids[0])
+    finally:
+        db.close()
+    assert info["brokered"] is True
+    assert info["cloud"] == "gcp"
+    assert info["pra"]["kind"] == "shell_jump"
+    assert info["pra"]["jump_group"] == "gcp-jg"
+    assert info["pra"]["jumpoint"] == "gcp-gw"
+
+
+def test_a_linux_seats_session_note_does_not_promise_an_admin_password():
+    """There is no admin password on a Linux seat and nothing is injected from the
+    Vault. Saying otherwise sends a rep looking for a credential that does not exist."""
+    _install_aws_stubs()
+    ids = _seed(n=1, cloud="aws")
+    asyncio.run(vd.provision_seats("pool-a", None, ids, dict(AWS_SPEC)))
+    db = SessionLocal()
+    try:
+        linux = vd.session_info(db, ids[0])
+    finally:
+        db.close()
+    note = linux["note"]
+    assert "Shell Jump" in note
+    # It may MENTION a password only to say there isn't one. What it must never do is
+    # send the rep to the Azure VM password lookup, which is what the single shared
+    # note used to do for every seat on every cloud.
+    assert "no admin password" in note
+    assert "VMs" not in note and "Vault when provisioned" not in note
+    assert "ec2-user" in note, "the note names the login user the seat actually has"
+
+    _install_stubs()
+    wids = _seed(n=1)
+    asyncio.run(vd.provision_seats("pool-a", None, wids, dict(SPEC)))
+    db = SessionLocal()
+    try:
+        win = vd.session_info(db, wids[0])
+    finally:
+        db.close()
+    assert win["pra"]["kind"] == "remote_rdp"
+    assert "password" in win["note"].lower(), "the Windows note still names one"
+
+
+def test_an_unbrokered_seat_reports_why_rather_than_404ing():
+    _install_aws_stubs()
+    ids = _seed(n=1, cloud="aws")
+    db = SessionLocal()
+    try:
+        info = vd.session_info(db, ids[0])
+        assert info["brokered"] is False
+        assert vd.session_info(db, "no-such-seat") is None
+    finally:
+        db.close()
 
 
 def _run_tests():

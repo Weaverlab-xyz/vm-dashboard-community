@@ -5132,10 +5132,17 @@
       <template x-if="panel?.key === 'vdesktops' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            Defaults for <strong>Azure VDI desktop pools</strong>. Normally populated by
-            <code>setup-azure.sh</code> + the sandbox import; set or override the values by hand
-            here. Each pool can still override them at create time. Enable/disable the feature with
-            the Preview toggle.
+            Defaults for <strong>desktop pools</strong> on all three clouds. Each pool can
+            still override them at create time. Enable/disable the feature with the Preview
+            toggle. See <a href="/docs/virtual-desktops" class="text-blue-600 hover:underline">Virtual Desktops</a>.
+          </p>
+          <p class="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-3">
+            <strong>AWS and GCP pools are Linux-only.</strong> EC2 returns Windows credentials
+            as password data encrypted to the launch key pair and GCE delivers them through
+            <code>windows-keys</code> metadata; neither is wired, so those backends refuse a
+            Windows pool rather than ship a seat nobody can sign into. Their Linux seats are
+            brokered as PRA Shell Jumps <strong>with no credential injection</strong> — the rep
+            supplies the SSH key. Only Azure Windows seats get a vaulted, injected password.
           </p>
 
           <!-- Azure VDI — pool networking -->
@@ -5170,7 +5177,54 @@
               <input type="text" x-model="panelCfg.azure_desktops_vault_account_group_id"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                      placeholder="(blank → PRA Default group)">
-              <p class="text-[11px] text-gray-400 mt-1">Numeric PRA Vault account-group id — the per-seat Windows admin credential is stored there and injected at RDP launch (Phase 2). Blank → the account lands in PRA's Default group.</p>
+              <p class="text-[11px] text-gray-400 mt-1">Numeric PRA Vault account-group id — the per-seat Windows admin credential is stored there and injected at RDP launch. Windows seats are Azure-only. Blank → the account lands in PRA's Default group.</p>
+            </div>
+          </div>
+
+
+          <!-- AWS desktop pool defaults -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">AWS — desktop pool defaults <span class="normal-case text-gray-400">(optional)</span></p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Desktops subnet ID</label>
+              <input type="text" x-model="panelCfg.aws_desktops_subnet_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="subnet-0123456789abcdef0">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Blank falls back to this region's <code>desktops_subnet_id</code>, then to
+                <code>aws_default_subnet_id</code>. Safe to leave blank: unlike Azure's
+                <code>aci-subnet</code>, no AWS subnet is delegated away from hosting a VM NIC,
+                so inheriting the ordinary VM subnet cannot produce a pool that fails to deploy.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Default instance type</label>
+              <input type="text" x-model="panelCfg.aws_desktops_instance_type"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(pool default — t3.medium)">
+              <p class="text-[11px] text-gray-400 mt-1">Offered in the pool form even if it isn't in the curated list.</p>
+            </div>
+          </div>
+
+          <!-- GCP desktop pool defaults -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">GCP — desktop pool defaults <span class="normal-case text-gray-400">(optional)</span></p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Desktops subnetwork</label>
+              <input type="text" x-model="panelCfg.gcp_desktops_subnetwork"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="projects/…/regions/us-central1/subnetworks/…">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Full self-link, matching what the pool form's picker returns. Blank falls back to
+                this region's <code>desktops_subnetwork</code>, then <code>gcp_subnetwork</code>.
+                A subnetwork is <strong>regional</strong> — one from another region fails at launch.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Default machine type</label>
+              <input type="text" x-model="panelCfg.gcp_desktops_machine_type"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(pool default — e2-medium)">
             </div>
           </div>
 
@@ -5182,8 +5236,9 @@
               gallery, and default VM size now live in the
               <button type="button" @click="openPanel(integrations.find(i => i.key === 'multi_region'))"
                       class="text-blue-600 hover:text-blue-800 underline">Multi-region</button>
-              panel (alongside AWS and GCP). Blank fields fall back to the flat <code>azure_*</code>
-              keys above, so single-region setups are unchanged.
+              panel (alongside AWS and GCP), which now carries each cloud's desktops subnet and
+              default size too. Blank fields fall back to the flat keys above, so single-region
+              setups are unchanged.
             </p>
           </div>
         </div>

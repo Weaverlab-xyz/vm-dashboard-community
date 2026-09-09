@@ -1,13 +1,13 @@
 """Virtual-desktop management API.
 
 Gated on ``vdesktops_enabled``. CRUD over the ``virtual_desktops`` table via
-``vdesktop_service``; Azure pools provision one private VM per seat (durable,
-via the job runner) and seats can be brokered as PRA RDP Jump Items. AWS/GCP
-create seat records only for now.
+``vdesktop_service``. **All three clouds** provision one private VM per seat,
+durably via the job runner, and every seat is brokered as a PRA Jump Item — a
+Remote RDP item for a Windows seat (Azure only), a Shell Jump on 22 for a Linux one.
 
   GET    /api/desktops                       — list seats
   GET    /api/desktops/pools                 — list pool summaries
-  POST   /api/desktops/pools                 — create a pool (Azure provisions VMs)
+  POST   /api/desktops/pools                 — create a pool (provisions VMs)
   POST   /api/desktops/pools/{name}/scale    — grow/shrink a pool
   DELETE /api/desktops/pools/{name}          — delete a pool
   GET    /api/desktops/pools/{name}/seats    — seats in one pool
@@ -35,8 +35,8 @@ def phase0_status() -> dict:
         "phase": 0,
         "ok": True,
         "note": (
-            "Virtual-desktop router mounted. Azure pools provision VMs via the "
-            "job runner; seats can be brokered as PRA RDP Jump Items."
+            "Virtual-desktop router mounted. AWS, Azure and GCP pools provision VMs "
+            "via the job runner; seats are brokered as PRA Jump Items."
         ),
     }
 
@@ -66,27 +66,64 @@ def _cfg(key: str, fallback: str = "") -> str:
     return config_service.get(key) or getattr(settings, key, fallback)
 
 
-def _azure_spec(payload: PoolCreateRequest) -> dict:
+async def _configured_ssh_key(cloud: str, *, region: str = "", project_id: str = "") -> str:
+    """The SSH public key configured for ``cloud``, or "" if it cannot be fetched.
+
+    Best-effort ON PURPOSE. The pool form on AWS and GCP does not collect a key — the
+    single-VM deploy paths on those clouds do not either (``aws_vm_service`` reads
+    Secrets Manager, ``gcp_vm_service`` reads Secret Manager), and GCP has no endpoint
+    that returns a full key anyway: ``/api/gcp/secrets/ssh-key`` truncates to 80 chars.
+    Resolving it here keeps the form honest instead of asking for something it cannot
+    show. On any failure this returns "" and ``validate_spec`` raises the accurate
+    "...pool requires: ssh_public_key" 400 rather than a secrets-store traceback.
+    """
+    from ..services import region_config
+    try:
+        if cloud == "azure":
+            from ..services import azure_service
+            return await azure_service.resolve_azure_ssh_public_key(
+                _cfg("azure_key_vault_url"),
+                _cfg("azure_ssh_keypair_secret_name"),
+                _cfg("azure_ssh_key_secret_name")) or ""
+        if cloud == "aws":
+            from ..services import aws_service
+            secret = region_config.resolve_region("aws", region)["ssh_key_secret"]
+            if not secret:
+                return ""
+            detail = await aws_service.get_ssh_public_key_from_secret(region, secret)
+            return (detail or {}).get("public_key") or ""
+        if cloud == "gcp":
+            from ..services import gcp_service
+            secret = region_config.resolve_region("gcp", region)["ssh_key_secret"]
+            if not (secret and project_id):
+                return ""
+            return await gcp_service.get_ssh_public_key(
+                project_id=project_id, secret_name=secret) or ""
+    except Exception as exc:                      # noqa: BLE001 - see the docstring
+        logger.warning("desktop pool: could not resolve the configured %s SSH key: %s",
+                       cloud, exc)
+    return ""
+
+
+async def _azure_spec(payload: PoolCreateRequest) -> dict:
     """The azure_service.deploy_vm spec built from the pool request.
 
     Resource group + location fall back to the configured Azure defaults
-    (``azure_resource_group`` / ``azure_location``) so the pool form can leave
-    them blank — same resolution the Azure deploy path uses (``_rg``/``_loc``).
-    Subnet + VM size fall back to the Virtual Desktops panel defaults
-    (``azure_desktops_subnet_id`` / ``azure_desktops_vm_size``) so pools land on
-    the non-delegated desktops subnet by default instead of whatever the picker
-    lists.
+    (``azure_resource_group`` / ``azure_location``) so the pool form can leave them
+    blank — the same resolution the Azure deploy path uses. Subnet + VM size fall back
+    to the Virtual Desktops panel defaults (``azure_desktops_subnet_id`` /
+    ``azure_desktops_vm_size``) so pools land on the non-delegated desktops subnet by
+    default instead of whatever the picker lists.
 
-    Multi-region (PR3): subnet / VM size / resource group resolve through the
-    chosen region's config set (``resolve_azure_region(location)``), which falls
-    back per-field to the flat keys when a region isn't configured — so a pool in
-    westus2 gets the westus2 desktops subnet + size, while a single-region setup
-    behaves exactly as before.
+    Multi-region: subnet / VM size / resource group resolve through the chosen region's
+    config set, which falls back per-field to the flat keys when a region isn't
+    configured — so a pool in westus2 gets the westus2 desktops subnet and size, while
+    a single-region setup behaves exactly as before.
     """
-    from ..services.region_config import resolve_azure_region
+    from ..services.region_config import resolve_region
 
     location = payload.location or _cfg("azure_location") or "centralus"
-    region = resolve_azure_region(location)
+    region = resolve_region("azure", location)
     return {
         "location": location,
         "resource_group": payload.resource_group or region["resource_group"] or "vm-cli-rg",
@@ -98,63 +135,95 @@ def _azure_spec(payload: PoolCreateRequest) -> dict:
         "create_public_ip": payload.create_public_ip,
         "os_type": payload.os_type,
         "trusted_launch": payload.trusted_launch,
-        "ssh_username": payload.ssh_username, "ssh_public_key": payload.ssh_public_key,
+        "ssh_username": payload.ssh_username or "azureuser",
+        # Azure's picker CAN show a key, so its form posts one; this only fires for an
+        # API caller that left it out.
+        "ssh_public_key": payload.ssh_public_key or await _configured_ssh_key("azure"),
     }
 
 
-def _aws_spec(payload: PoolCreateRequest) -> dict:
+async def _aws_spec(payload: PoolCreateRequest) -> dict:
     """The aws_service.launch_instance spec built from the pool request.
 
-    Region falls back to the configured ``aws_region`` the same way ``_azure_spec``
-    falls back to ``azure_location``, so a single-region setup can leave it blank. AMI
-    and instance type also accept the generic ``image`` / ``size`` fields, so a caller
-    that does not care which cloud it is talking to can fill those two and be understood
-    by either backend.
+    Region falls back to the configured ``aws_region``, so a single-region setup can
+    leave it blank. AMI and instance type also accept the generic ``image`` / ``size``
+    fields, so a caller that does not care which cloud it is talking to can fill those
+    two and be understood by either backend.
 
-    No default subnet: unlike Azure there is no desktops-subnet setting to fall back to,
-    and guessing one would put desktops somewhere nobody chose. ``_AwsSeats.validate_spec``
-    refuses a missing one by name.
+    Subnet and instance type resolve through the chosen region's config set:
+    ``payload -> aws_region.<r>.desktops_subnet_id -> aws_desktops_subnet_id ->
+    aws_default_subnet_id``. That last hop is the deliberate difference from Azure,
+    which has NO secondary fallback: an Azure sandbox's VM subnet may be DELEGATED
+    (aci-subnet cannot host a VM NIC), so inheriting it would produce a pool that
+    cannot deploy. Every AWS subnet can host an instance, so inheriting the VM subnet
+    is a default an operator can live with rather than a guess.
+
+    No ``ssh_username``: ``launch_instance`` takes none — cloud-init installs the key
+    for the AMI's own default user, which is what ``_AwsSeats.default_username``
+    records for the PRA side.
     """
+    from ..services.region_config import resolve_region
+
+    region_id = payload.region or _cfg("aws_region") or "us-east-1"
+    rc = resolve_region("aws", region_id)
     return {
-        "region": payload.region or _cfg("aws_region") or "us-east-1",
+        "region": region_id,
         "ami_id": payload.ami_id or payload.image,
-        "instance_type": payload.instance_type or payload.size,
-        "subnet_id": payload.subnet_id,
+        "instance_type": payload.instance_type or payload.size or rc["desktops_instance_type"],
+        "subnet_id": payload.subnet_id or rc["desktops_subnet_id"],
         "security_group_ids": payload.security_group_ids,
         "iam_instance_profile": payload.iam_instance_profile,
         "os_type": payload.os_type,
-        "ssh_public_key": payload.ssh_public_key,
+        "ssh_public_key": payload.ssh_public_key or await _configured_ssh_key(
+            "aws", region=region_id),
     }
 
 
-def _gcp_spec(payload: PoolCreateRequest) -> dict:
+async def _gcp_spec(payload: PoolCreateRequest) -> dict:
     """The gcp_service.launch_instance spec built from the pool request.
 
-    Project and zone fall back to the configured ``gcp_project`` / ``gcp_zone``, matching
-    how the Azure and AWS builders fall back. Machine type and image also accept the
-    generic ``size`` / ``image`` fields.
+    Project and zone fall back to the configured ``gcp_project`` / ``gcp_zone``,
+    matching how the other two builders fall back. Machine type and image also accept
+    the generic ``size`` / ``image`` fields.
 
-    No default subnetwork, for the same reason AWS has no default subnet: there is no
-    desktops-subnetwork setting to fall back to, and guessing puts desktops on a network
-    nobody chose. ``_GcpSeats.validate_spec`` refuses a missing one by name.
+    Subnetwork and machine type resolve through the region derived FROM THE ZONE — a
+    pool commits to a zone and ``resolve_region`` is keyed on regions — then fall back
+    ``gcp_desktops_subnetwork -> gcp_subnetwork``. Same reasoning as ``_aws_spec``:
+    every GCP subnetwork can host an instance, so inheriting the VM one is a usable
+    default rather than a guess.
+
+    ``ssh_username`` resolves to the configured ``gcp_ssh_username`` (default
+    ``gcp-user``) and NOT ``_GcpSeats.default_username``, whose "gcpuser" is a name
+    nothing else in the product uses.
     """
+    from ..services import region_catalog
+    from ..services.region_config import resolve_region
+
+    project_id = payload.project_id or _cfg("gcp_project")
+    zone = payload.zone or _cfg("gcp_zone") or "us-central1-a"
+    gcp_region = region_catalog.region_from_zone(zone)
+    rc = resolve_region("gcp", gcp_region)
     return {
-        "project_id": payload.project_id or _cfg("gcp_project"),
-        "zone": payload.zone or _cfg("gcp_zone") or "us-central1-a",
-        "machine_type": payload.machine_type or payload.size,
+        "project_id": project_id,
+        "zone": zone,
+        "machine_type": payload.machine_type or payload.size or rc["desktops_machine_type"],
         "image_self_link": payload.image_self_link or payload.image,
-        "subnetwork": payload.subnetwork,
+        "subnetwork": payload.subnetwork or rc["desktops_subnetwork"],
         "create_external_ip": payload.create_external_ip,
         "disk_size_gb": payload.disk_size_gb,
         "network_tags": payload.network_tags,
         "os_type": payload.os_type,
-        "ssh_username": payload.ssh_username,
-        "ssh_public_key": payload.ssh_public_key,
+        "ssh_username": payload.ssh_username or _cfg("gcp_ssh_username") or "gcp-user",
+        "ssh_public_key": payload.ssh_public_key or await _configured_ssh_key(
+            "gcp", region=gcp_region, project_id=project_id),
     }
 
 
 # Which builder makes a spec for which cloud. A cloud absent here sends `spec=None`,
-# which is what a records-only cloud wants — there are none left.
+# which is what a cloud with no seat backend wants — there are none.
+#
+# These are COROUTINES: each one may resolve the configured SSH key from its cloud's
+# secret store, the same way `aws_vm_service` / `gcp_vm_service` do for a single VM.
 _SPEC_BUILDERS = {"azure": _azure_spec, "aws": _aws_spec, "gcp": _gcp_spec}
 
 
@@ -164,15 +233,18 @@ async def create_pool(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Create a desktop pool. All three clouds now provision one private VM per seat,
+    """Create a desktop pool. All three clouds provision one private VM per seat,
     durably via the job runner and tagged for the pool.
 
     Only Azure supports Windows seats. EC2 hands back Windows credentials as password
     data encrypted to the launch key pair and GCE delivers them through windows-keys
-    instance metadata; neither is wired here yet, so an AWS or GCP Windows pool is
-    refused with that reason rather than provisioned into seats nobody can sign into."""
+    instance metadata; neither is wired here, so an AWS or GCP Windows pool is refused
+    with that reason rather than provisioned into seats nobody can sign into.
+
+    Linux seats are brokered as PRA Shell Jumps with no credential injection — see
+    ``vdesktop_service.provision_seats``."""
     builder = _SPEC_BUILDERS.get((payload.cloud or "").lower())
-    spec = builder(payload) if builder else None
+    spec = await builder(payload) if builder else None
     try:
         result = vdesktop_service.create_pool(
             db, cloud=payload.cloud, name=payload.name, count=payload.count,
@@ -195,8 +267,8 @@ async def scale_pool(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Grow/shrink a pool to ``count`` seats (Azure provisions/terminates VMs via
-    the durable job runner)."""
+    """Grow/shrink a pool to ``count`` seats (VMs are provisioned/terminated via the
+    durable job runner)."""
     try:
         result = vdesktop_service.scale_pool(db, name, payload.count)
     except VDesktopError as e:
@@ -225,8 +297,9 @@ async def delete_pool(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Delete a pool. Azure terminates the backing VMs (durable, via the job
-    runner) then drops the rows; AWS/GCP drop the records immediately."""
+    """Delete a pool: terminate the backing VMs (durable, via the job runner) then
+    drop the rows. A pool whose cloud has no seat backend has no VMs and its rows drop
+    immediately — the unknown-cloud path, not an AWS/GCP one."""
     result = vdesktop_service.delete_pool(db, name)
     if result["deleted_seats"] == 0:
         raise HTTPException(status_code=404, detail=f"Pool '{name}' not found.")
@@ -257,30 +330,16 @@ async def open_seat_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """PRA connection info for a seat: the auto-registered Remote RDP Jump Item +
-    a link to the PRA console. The web app can't drive the rep console directly —
-    the rep launches the Jump Item there (mirrors the k8s open_console pattern)."""
-    seat = vdesktop_service.get_seat(db, seat_id)
-    if seat is None:
+    """PRA connection info for a seat, plus a link to the PRA console.
+
+    Thin on purpose: the resolution lives in ``vdesktop_service.session_info`` so it
+    is testable without FastAPI and so the Jump Group / Gateway come from the SAME
+    per-cloud resolver the provisioner used. This endpoint used to read the
+    ``azure_*`` keys directly, which named the wrong Jump Group for an AWS or GCP
+    seat. The web app cannot drive the rep console, so the rep launches the Jump Item
+    there (mirrors the k8s open_console pattern).
+    """
+    info = vdesktop_service.session_info(db, seat_id)
+    if info is None:
         raise HTTPException(status_code=404, detail=f"Seat '{seat_id}' not found.")
-    vm_name = (seat.get("vm_resource_id") or "").split("/")[-1]
-    if not seat.get("pra_jump_id"):
-        return {
-            "brokered": False, "vm_name": vm_name,
-            "note": ("Not brokered yet — PRA registration is pending/failed, or this seat "
-                     "predates Phase 2. Confirm PRA is configured, or recreate the seat."),
-        }
-    host = _cfg("bt_api_host")
-    return {
-        "brokered": True,
-        "vm_name": vm_name,
-        "pra": {
-            "jump_id": seat.get("pra_jump_id"),
-            "jump_group": _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name"),
-            "jumpoint": _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name"),
-        },
-        "console_url": f"https://{host}/login" if host else "",
-        "note": ("Open the auto-registered Remote RDP Jump Item from your PRA representative "
-                 "console. Credentials inject from the PRA Vault when provisioned; otherwise use "
-                 "the seat's admin password (Azure → VMs → Password)."),
-    }
+    return info

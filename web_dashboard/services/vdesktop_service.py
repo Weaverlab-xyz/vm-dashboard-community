@@ -1,16 +1,26 @@
 """Virtual-desktop pool lifecycle.
 
-Phase 0 shipped the DB scaffold. **Phase 1 wires Azure** pool provisioning to the
-existing VM path: ``create_pool`` fans out to a per-cloud SEAT BACKEND (one **private**
-VM per seat, tagged with the backend's pool-tag key) and fills ``vm_resource_id``;
-``scale_pool`` / ``delete_pool`` provision / terminate through the same backend.
-AWS / GCP create seat *records* only — they have no backend yet, which is precisely
-what ``_SEAT_BACKENDS`` records and what ``PROVISIONING_CLOUDS`` is derived from.
-Phase 2 registers each seat on the PRA Gateway (``pra_jump_id``).
+**All three clouds provision.** ``create_pool`` fans out to a per-cloud SEAT
+BACKEND (one **private** VM per seat, tagged with the backend's pool-tag key) and
+fills ``vm_resource_id``; ``scale_pool`` / ``delete_pool`` provision / terminate
+through the same backend. ``PROVISIONING_CLOUDS`` is derived from
+``_SEAT_BACKENDS``, so the advertised set cannot drift from the implemented one.
 
-The backend split is what makes those two clouds addable without a branch per cloud
-through the middle of ``provision_seats``; see the section comment above
-``_AzureSeats`` for the three things they will not be able to share.
+Every seat is then brokered on the PRA Gateway (``pra_jump_id``), and **which kind
+of jump item depends on the guest OS, not the cloud**:
+
+  * **Windows** seats get a Remote RDP jump with a generated admin password vaulted
+    for credential injection. Azure is the only cloud that can do Windows — EC2 and
+    GCE each deliver Windows credentials by a different mechanism (see ``_AwsSeats``
+    / ``_GcpSeats``), so those backends refuse a Windows pool outright.
+  * **Linux** seats get a Shell Jump (SSH, port 22) with **no credential injection**:
+    they authenticate with the pool's SSH key, the dashboard never holds the private
+    half, and the provider wrapper has no SSH-key vault resource. The rep supplies
+    the key in PRA. Do not describe this as parity with the Windows path.
+
+The backend split is what keeps that from becoming a branch per cloud through the
+middle of ``provision_seats``; see the section comment above ``_AzureSeats`` for the
+things the three cannot share.
 
 Provisioning + teardown are **async** (``deploy_vm`` / ``terminate_vm`` are slow)
 and **durable**: the API enqueues a ``vdesktop_pool_provision`` /
@@ -33,7 +43,7 @@ logger = logging.getLogger(__name__)
 POOL_TAG = "dashboard:desktop_pool"
 
 VALID_CLOUDS = ("aws", "azure", "gcp")
-# Clouds that actually provision VMs (others create seat records only). DERIVED from
+# Clouds that provision real VMs. DERIVED from
 # `_SEAT_BACKENDS` at the bottom of the backend section, not maintained beside it: a
 # cloud listed here with no backend behind it hands an operator seat rows and no VMs,
 # which is the exact bug this whole item exists to fix.
@@ -70,9 +80,31 @@ def list_desktops(db: Session) -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
+def jump_kind(row: VirtualDesktop) -> str:
+    """``"shell_jump" | "remote_rdp"`` — read off the seat's stored Terraform state.
+
+    Derived rather than stored in a column so it cannot disagree with the state it
+    describes, and because nothing needs it for teardown: ``remove_rdp_jump`` is
+    state-driven and destroys whichever ``sra_*`` resource the state holds.
+
+    A seat with no state predates Linux brokering, when only Windows (Azure) seats
+    were ever registered — hence the RDP default.
+    """
+    state = row.pra_tunnel_state or ""
+    return "shell_jump" if "sra_shell_jump" in state else "remote_rdp"
+
+
 def get_seat(db: Session, seat_id: str) -> dict | None:
+    """One seat, plus its ``jump_kind``.
+
+    The kind is added HERE and not in ``_row_to_dict``, which ``list_desktops`` and
+    ``get_pool`` call once per row — reading a state blob per seat to render a
+    table would be paid on every page load for a fact only the session view needs.
+    """
     row = db.query(VirtualDesktop).filter(VirtualDesktop.id == seat_id).first()
-    return _row_to_dict(row) if row else None
+    if row is None:
+        return None
+    return dict(_row_to_dict(row), jump_kind=jump_kind(row))
 
 
 def get_pool(db: Session, name: str) -> list[dict]:
@@ -121,7 +153,7 @@ def _pool_cloud(db: Session, seat_ids: list) -> str:
 
 
 def _pool_spec(db: Session, name: str):
-    """The Azure spec + job id stored at create-time, for scale-up. (None, None) if absent."""
+    """The deploy spec + job id stored at create-time, for scale-up. (None, None) if absent."""
     from ..database import Job
     jobs = (db.query(Job).filter(Job.job_type == "vdesktop_pool_provision")
             .order_by(Job.created_at.desc()).all())
@@ -138,12 +170,13 @@ def _pool_spec(db: Session, name: str):
 # gateway warm-up ordering, per-seat error collection, PRA registration — is written
 # once and does not grow a branch per cloud.
 #
-# Azure is the only implementation today and this extraction is deliberately a MOVE:
-# `tests/test_vdesktop_seats.py` was written against the pre-extraction code and passes
-# unchanged, which is what makes "no behaviour change" checkable rather than asserted.
+# The extraction was deliberately a MOVE: `tests/test_vdesktop_seats.py` was written
+# against the pre-extraction Azure code and passed unchanged, which is what made "no
+# behaviour change" checkable rather than asserted. AWS and GCP were then added as
+# backends without a branch through the middle of `provision_seats`.
 #
-# Three things the next two backends will not be able to share, found by reading the
-# SDKs rather than assumed, and the reason this is an interface rather than a few `if`s:
+# Three things the three backends cannot share, found by reading the SDKs rather than
+# assumed, and the reason this is an interface rather than a few `if`s:
 #
 #   * **The pool tag key is not portable.** ``dashboard:desktop_pool`` is a fine Azure tag
 #     and a fine AWS tag. It is an INVALID GCP label key — GCP allows lowercase letters,
@@ -170,6 +203,19 @@ class _AzureSeats:
     supports_windows = True
     default_username = "azureuser"
     pra_tag = "Azure VDI"
+    # Config keys for this cloud's PRA targets. "" means "no cloud-specific key —
+    # go straight to bt_*"; see `_AwsSeats` for why that is a real answer.
+    pra_jump_group_key = "azure_bt_jump_group_name"
+    pra_jumpoint_key = "azure_jumpoint_name"
+    # Credential injection is Windows-only, and Windows is Azure-only, so this is the
+    # one backend with a vault group. The Linux/Shell-Jump path never reads it.
+    pra_vault_group_key = "azure_desktops_vault_account_group_id"
+    region_spec_key = "location"     # which spec key `gateway_region` reads
+
+    @staticmethod
+    def gateway_region(spec: dict) -> str:
+        """The region to warm a Gateway in. Azure's spec calls it ``location``."""
+        return spec.get("location") or _cfg("azure_location")
 
     @staticmethod
     def validate_spec(spec: dict) -> dict:
@@ -259,6 +305,21 @@ class _AwsSeats:
     supports_windows = False
     default_username = "ec2-user"
     pra_tag = "AWS VDI"
+    # **Deliberately empty, and not an oversight.** There is no `aws_bt_jump_group_name`
+    # / `aws_jumpoint_name` in config: `aws_vm_service` resolves straight from `bt_*`
+    # today, so inventing a pair here would land VDI jump items somewhere the AWS Shell
+    # Jump path does not. `ot_service._CLOUD_JUMP_GROUP_KEY` made the same call for the
+    # same reason. If those settings are ever added, wire them here — a test asserts
+    # this stays "" only for as long as `settings` has no such attribute.
+    pra_jump_group_key = ""
+    pra_jumpoint_key = ""
+    # Linux-only, so there is never a password to vault or inject.
+    pra_vault_group_key = ""
+    region_spec_key = "region"
+
+    @staticmethod
+    def gateway_region(spec: dict) -> str:
+        return spec.get("region") or _cfg("aws_region")
 
     @staticmethod
     def validate_spec(spec: dict) -> dict:
@@ -298,7 +359,11 @@ class _AwsSeats:
             security_group_ids=spec.get("security_group_ids") or [],
             iam_instance_profile=spec.get("iam_instance_profile") or "",
             os_type=spec.get("os_type") or "Linux",
-            workgroup=spec.get("workgroup") or "",
+            # No workgroup: desktop seats are listed from `virtual_desktops`, never
+            # from `ec2_deploy` jobs, so the tag has no reader and no builder writes
+            # the key. A `spec.get()` for a key nothing sets is the drift this
+            # module keeps getting caught by.
+            workgroup="",
         )
         # `vm_resource_id` carries the REGION as well as the instance id, because
         # teardown gets only this string — it has no spec to read a region from, and an
@@ -356,6 +421,19 @@ class _GcpSeats:
     supports_windows = False
     default_username = "gcpuser"
     pra_tag = "GCP VDI"
+    pra_jump_group_key = "gcp_bt_jump_group_name"
+    pra_jumpoint_key = "gcp_jumpoint_name"
+    pra_vault_group_key = ""
+    # A GCP spec commits to a ZONE, but `ensure_jumpoint_host` and
+    # `teardown_jumpoint_host_if_idle` are keyed on a REGION. `gateway_region` below is
+    # where that conversion happens; handing either one a zone silently mis-places the
+    # gateway rather than failing.
+    region_spec_key = "zone"
+
+    @staticmethod
+    def gateway_region(spec: dict) -> str:
+        from . import region_catalog
+        return region_catalog.region_from_zone(spec.get("zone") or _cfg("gcp_zone"))
 
     @staticmethod
     def _label_value(raw: str) -> str:
@@ -438,14 +516,19 @@ class _GcpSeats:
 
     @staticmethod
     async def reap_idle_gateway(db) -> None:
+        # REGION, not zone: `teardown_jumpoint_host_if_idle` passes this to
+        # `_gcp_jumpoint_zone`, whose `zone_in_region(override, region)` check is False
+        # for a zone-shaped argument — so a raw `gcp_zone` here quietly reaped against
+        # the wrong placement instead of erroring.
         from . import jumpoint_host_service
         await jumpoint_host_service.teardown_jumpoint_host_if_idle(
-            db, "gcp", _cfg("gcp_zone"))
+            db, "gcp", _GcpSeats.gateway_region({}))
 
 
-# Keyed by cloud. A cloud in VALID_CLOUDS but absent here creates seat RECORDS only —
-# which is exactly what AWS and GCP do today, and why PROVISIONING_CLOUDS is derived
-# from this rather than maintained beside it: the two cannot drift.
+# Keyed by cloud. All three of VALID_CLOUDS are implemented; a cloud listed there and
+# absent here would create seat RECORDS ONLY, which is why PROVISIONING_CLOUDS is
+# derived from this rather than maintained beside it: the two cannot drift. What the
+# derivation does NOT reach is the create form — see tests/test_vdesktop_form_clouds.py.
 _SEAT_BACKENDS = {
     "azure": _AzureSeats,
     "aws": _AwsSeats,
@@ -457,7 +540,12 @@ PROVISIONING_CLOUDS = tuple(c for c in VALID_CLOUDS if c in _SEAT_BACKENDS)
 
 
 def seat_backend(cloud: str):
-    """The backend for this cloud, or None when it provisions records only."""
+    """The backend for this cloud, or None for a cloud with no backend.
+
+    None is the unknown-cloud answer, not a records-only one: every cloud in
+    ``VALID_CLOUDS`` is implemented. ``VirtualDesktop.cloud`` is an unconstrained
+    ``String(20)``, so a row can still name something else.
+    """
     return _SEAT_BACKENDS.get((cloud or "").lower())
 
 
@@ -465,11 +553,14 @@ def seat_backend(cloud: str):
 
 def create_pool(db: Session, *, cloud: str, name: str, count: int, created_by: str,
                 spec: dict = None) -> dict:
-    """Create a pool. For Azure, validate the deploy spec and enqueue a
-    ``vdesktop_pool_provision`` job whose metadata carries everything the worker
-    handler needs (``pool_name`` + ``seat_ids`` + ``spec``) — so the job is
+    """Create a pool: validate the deploy spec against the cloud's seat backend and
+    enqueue a ``vdesktop_pool_provision`` job whose metadata carries everything the
+    worker handler needs (``pool_name`` + ``seat_ids`` + ``spec``) — so the job is
     self-contained from creation and the job runner can claim it without racing a
-    follow-up metadata write. AWS/GCP create pending rows only."""
+    follow-up metadata write.
+
+    A cloud with no seat backend creates pending rows only. That is the unknown-cloud
+    path; all of ``VALID_CLOUDS`` is implemented."""
     name = (name or "").strip()
     if cloud not in VALID_CLOUDS:
         raise VDesktopError(f"Unknown cloud '{cloud}'. Valid: {', '.join(VALID_CLOUDS)}.")
@@ -505,7 +596,7 @@ def create_pool(db: Session, *, cloud: str, name: str, count: int, created_by: s
 
     db.commit()
     logger.info("Created desktop pool %s (%s x%d)%s", name, cloud, count,
-                " — provisioning" if provision else " — records only")
+                " — provisioning" if provision else " — no backend, records only")
     return {
         "pool_name": name, "cloud": cloud, "count": count, "seats": get_pool(db, name),
         "job_id": job_id,
@@ -515,8 +606,8 @@ def create_pool(db: Session, *, cloud: str, name: str, count: int, created_by: s
 
 
 def scale_pool(db: Session, name: str, count: int) -> dict:
-    """Resize a pool to ``count`` seats. Azure: returns ids to provision (up) or
-    tear down (down); the caller schedules the cloud work."""
+    """Resize a pool to ``count`` seats: returns ids to provision (up) or tear down
+    (down); the caller schedules the cloud work."""
     if count < 0:
         raise VDesktopError("count must be >= 0.")
     seats = (db.query(VirtualDesktop).filter(VirtualDesktop.pool_name == name)
@@ -532,7 +623,7 @@ def scale_pool(db: Session, name: str, count: int) -> dict:
         if cloud in PROVISIONING_CLOUDS:
             spec, _ = _pool_spec(db, name)
             if not spec:
-                raise VDesktopError("Pool has no stored Azure spec; cannot scale up.")
+                raise VDesktopError("Pool has no stored deploy spec; cannot scale up.")
         new_ids = []
         for _ in range(count - cur):
             sid = str(uuid.uuid4())
@@ -560,9 +651,11 @@ def scale_pool(db: Session, name: str, count: int) -> dict:
 
 
 def delete_pool(db: Session, name: str) -> dict:
-    """Delete a pool. Azure: mark seats deprovisioning + return ids to tear down
-    (the caller schedules teardown, which terminates the VMs then drops the rows).
-    AWS/GCP: drop rows immediately."""
+    """Delete a pool: mark seats deprovisioning + return ids to tear down (the caller
+    schedules teardown, which terminates the VMs then drops the rows).
+
+    A pool whose cloud has no backend has no VMs, so its rows drop immediately. That
+    is the unknown-cloud path, not an AWS/GCP one — all three provision."""
     seats = db.query(VirtualDesktop).filter(VirtualDesktop.pool_name == name).all()
     n = len(seats)
     if n == 0:
@@ -580,7 +673,7 @@ def delete_pool(db: Session, name: str) -> dict:
     return {"deleted_seats": n, "to_teardown": []}
 
 
-# ── PRA brokering helpers (Phase 2) ─────────────────────────────────────────
+# ── PRA brokering helpers ────────────────────────────────────────────────────
 
 def _cfg(key: str, fallback: str = "") -> str:
     from ..config import settings
@@ -593,20 +686,87 @@ def _pra_configured() -> bool:
     return bool(_cfg("bt_api_host") and _cfg("bt_client_id") and _cfg("bt_client_secret"))
 
 
-def _resolve_pra_targets(spec: dict) -> dict:
-    """Jump Group / Gateway / Vault account-group for a pool's RDP jumps —
-    Azure-specific config wins over the shared defaults (mirrors the deploy path)."""
-    jump_group = (spec.get("jump_group") or "").strip() or \
-        _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
-    jumpoint = (spec.get("jumpoint_name") or "").strip() or \
-        _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
+def _resolve_pra_targets(spec: dict, backend) -> dict:
+    """Jump Group / Gateway / Vault account-group for a pool's jump items.
+
+    Resolves ``spec override -> the backend's cloud-specific key -> the shared bt_*``,
+    the same chain each cloud's own Shell Jump uses in ``*_vm_service``. A backend
+    whose key is ``""`` has no cloud-specific setting and goes straight to ``bt_*``
+    — see ``_AwsSeats``, where that is the correct answer and not a gap.
+
+    The ``spec`` overrides are read but not yet emitted by any spec builder; they
+    cost nothing and are where a per-pool override would land.
+    """
+    def _key(name: str) -> str:
+        k = getattr(backend, name, "") if backend is not None else ""
+        return _cfg(k) if k else ""
+
+    jump_group = ((spec.get("jump_group") or "").strip()
+                  or _key("pra_jump_group_key") or _cfg("bt_jump_group_name"))
+    jumpoint = ((spec.get("jumpoint_name") or "").strip()
+                or _key("pra_jumpoint_key") or _cfg("bt_jumpoint_name"))
     raw_group = str(spec.get("vault_account_group_id")
-                    or _cfg("azure_desktops_vault_account_group_id") or "").strip()
+                    or _key("pra_vault_group_key") or "").strip()
     try:
         vault_group_id = int(raw_group) if raw_group else None
     except ValueError:
         vault_group_id = None
     return {"jump_group": jump_group, "jumpoint": jumpoint, "vault_group_id": vault_group_id}
+
+
+def session_info(db: Session, seat_id: str) -> dict | None:
+    """PRA connection info for one seat, or None when the seat is gone.
+
+    Lives here rather than in the router so it is testable without importing
+    FastAPI, and so the per-cloud target resolution is the SAME function the
+    provisioner used — the endpoint used to hard-code the ``azure_*`` keys, which
+    named the wrong Jump Group for an AWS or GCP seat.
+    """
+    seat = get_seat(db, seat_id)
+    if seat is None:
+        return None
+    vm_name = (seat.get("vm_resource_id") or "").split("/")[-1]
+    if not seat.get("pra_jump_id"):
+        return {
+            "brokered": False, "vm_name": vm_name,
+            "note": ("Not brokered — PRA registration is pending or failed, or this seat "
+                     "predates brokering for its OS. Confirm PRA is configured, or "
+                     "recreate the seat."),
+        }
+    backend = seat_backend(seat.get("cloud"))
+    tgt = _resolve_pra_targets({}, backend)
+    kind = seat.get("jump_kind") or "remote_rdp"
+    # The username actually deployed, read off the pool's stored spec rather than
+    # guessed: a pool created before the per-cloud default was fixed really does log
+    # in as whatever it was given.
+    spec = _pool_spec(db, seat.get("pool_name") or "")[0] or {}
+    username = (spec.get("ssh_username")
+                or (backend.default_username if backend is not None else ""))
+    if kind == "shell_jump":
+        note = (f"Open the auto-registered Shell Jump (SSH, port 22) from your PRA "
+                f"representative console, as '{username}'. Linux seats authenticate "
+                f"with the SSH key the pool was created with — there is no admin "
+                f"password, and nothing is injected from the PRA Vault.")
+    else:
+        note = ("Open the auto-registered Remote RDP Jump Item from your PRA "
+                "representative console. Credentials inject from the PRA Vault when "
+                "provisioned; otherwise use the seat's admin password "
+                "(Azure → VMs → Password).")
+    host = _cfg("bt_api_host")
+    return {
+        "brokered": True,
+        "vm_name": vm_name,
+        "cloud": seat.get("cloud"),
+        "username": username,
+        "pra": {
+            "jump_id": seat.get("pra_jump_id"),
+            "kind": kind,
+            "jump_group": tgt["jump_group"],
+            "jumpoint": tgt["jumpoint"],
+        },
+        "console_url": f"https://{host}/login" if host else "",
+        "note": note,
+    }
 
 
 # ── Async cloud work (scheduled by the API as background tasks) ─────────────────
@@ -636,9 +796,10 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
     cloud = _pool_cloud(db, seat_ids)
     backend = seat_backend(cloud)
     if backend is None:
-        # Records-only cloud — AWS and GCP today. Reaching here means work was scheduled
-        # for a backend that does not exist yet, which is worth a line in the log rather
-        # than a traceback.
+        # Unknown cloud. Every cloud in VALID_CLOUDS has a backend, so reaching here
+        # means either the pool's rows were all deleted between enqueue and claim
+        # (`_pool_cloud` returns "") or a row names a cloud that no longer exists.
+        # Worth a log line rather than an AttributeError inside the job worker.
         logger.warning("desktop pool %s: no seat backend for cloud %r; nothing provisioned",
                        pool_name, cloud)
         db.close()
@@ -661,20 +822,27 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
         if job_id:
             job_service.set_running(db, job_id)
         # Bring the shared PRA Gateway node online BEFORE the seats register their
-        # Remote RDP jump items — otherwise the items register but read
-        # "Unavailable" (no Gateway to broker them). Idempotent find-or-create +
-        # best-effort, mirroring clouddb/k8s (jumpoint_host_service). It warms in
-        # parallel with the seats' VM creates (usually reused → instant; ~1-2 min
-        # only the first time), so it's typically online by the first registration.
-        # The gateway lands in azure_location's gateway subnet — for a seat in a
-        # different region the VNets must be peered (per-region gateways TODO).
-        if is_windows and _pra_configured():
+        # jump items — otherwise the items register but read "Unavailable" (no
+        # Gateway to broker them). Idempotent find-or-create + best-effort, mirroring
+        # clouddb/k8s (jumpoint_host_service). It warms in parallel with the seats' VM
+        # creates (usually reused -> instant; ~1-2 min only the first time), so it is
+        # typically online by the first registration.
+        #
+        # NOT gated on Windows any more: a Linux seat's Shell Jump needs a Gateway
+        # exactly as much as a Windows seat's RDP jump, and this gate was half of why
+        # no AWS or GCP seat was ever brokered.
+        #
+        # The region comes from the BACKEND rather than ``spec["location"]`` — that
+        # key exists only on an Azure spec, so the other two were warming against a
+        # blank region. The gateway lands in that region's gateway subnet; a seat in a
+        # different region needs the networks peered (per-region gateways TODO).
+        if _pra_configured():
             if job_id:
                 job_service.update_progress(db, job_id, 0, "Ensuring PRA Gateway host is online…")
             try:
                 from . import jumpoint_host_service
                 await jumpoint_host_service.ensure_jumpoint_host(
-                    backend.gateway_cloud, spec.get("location") or "")
+                    backend.gateway_cloud, backend.gateway_region(spec))
             except Exception as jp_err:
                 logger.warning("desktop pool %s: ensure gateway host failed (non-fatal): %s",
                                pool_name, jp_err)
@@ -697,32 +865,66 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                 row.vm_resource_id = res.get("vm_id") or vm_name
                 row.status = "running"
                 db.commit()
-                # Phase 2: broker the seat over PRA — register an agentless Remote
-                # RDP jump item at the VM's private IP, with a Vault account for
-                # credential injection. Best-effort: a running seat with no jump
-                # item is debuggable; never fail the seat over brokering.
                 private_ip = res.get("private_ip")
-                if is_windows and private_ip and not row.pra_jump_id and _pra_configured():
+                # Broker the seat over PRA. Best-effort: a running seat with no jump
+                # item is debuggable; never fail the seat over brokering.
+                #
+                # The KIND of jump follows the guest OS, not the cloud. Windows gets a
+                # Remote RDP item with the generated password vaulted for injection;
+                # Linux gets a Shell Jump on 22. Until this branch existed the whole
+                # block was gated on ``is_windows``, so every Linux seat — which is
+                # every AWS and GCP seat — provisioned a VM and was never brokered.
+                if private_ip and not row.pra_jump_id and _pra_configured():
                     try:
                         from . import terraform_pra_service as pra, config_service
-                        tgt = _resolve_pra_targets(spec)
+                        tgt = _resolve_pra_targets(spec, backend)
                         cred_ref = spec.get("pra_credential_ref")
                         client_secret = config_service.resolve_reference(cred_ref) if cred_ref else ""
-                        jump = await pra.provision_rdp_jump(
-                            name=vm_name, hostname=private_ip,
-                            jump_group_name=tgt["jump_group"], jumpoint_name=tgt["jumpoint"],
-                            rdp_username=spec.get("ssh_username") or backend.default_username,
-                            tag=backend.pra_tag,
-                            admin_password=admin_password,
-                            vault_account_name=f"{vm_name}-admin",
-                            vault_account_group_id=tgt["vault_group_id"],
-                            client_secret=client_secret,
-                        )
-                        row.pra_jump_id = jump.get("rdp_jump_id") or None
-                        row.pra_tunnel_state = jump.get("tf_state_json")
+                        if is_windows:
+                            jump = await pra.provision_rdp_jump(
+                                name=vm_name, hostname=private_ip,
+                                jump_group_name=tgt["jump_group"], jumpoint_name=tgt["jumpoint"],
+                                rdp_username=spec.get("ssh_username") or backend.default_username,
+                                tag=backend.pra_tag,
+                                admin_password=admin_password,
+                                vault_account_name=f"{vm_name}-admin",
+                                vault_account_group_id=tgt["vault_group_id"],
+                                client_secret=client_secret,
+                            )
+                            jump_id = jump.get("rdp_jump_id")
+                            state = jump.get("tf_state_json")
+                        else:
+                            # A Linux seat authenticates with an SSH KEY. There is no
+                            # password to vault, the dashboard never holds the private
+                            # half, and this provider wrapper has no SSH-key vault
+                            # resource (only sra_vault_username_password_account) — so
+                            # the item registers with NO credential injection and the
+                            # rep supplies the key in PRA. ``tgt["vault_group_id"]`` is
+                            # deliberately unused here rather than passed as None.
+                            jump = await pra.provision_jump(
+                                vm_name=vm_name, hostname=private_ip,
+                                jump_group_name=tgt["jump_group"], jumpoint_name=tgt["jumpoint"],
+                                port=22, tag=backend.pra_tag,
+                                client_secret=client_secret,
+                            )
+                            jump_id = jump.get("shell_jump_id")
+                            # ``provision_jump`` does not scrub its own state the way
+                            # the RDP path does. A shell jump holds no secret attribute,
+                            # so this is a no-op on success; it is here because the
+                            # column's contract says scrubbed. It fails CLOSED to None,
+                            # which only happens on unparseable state — state the
+                            # destroy could not have used either way.
+                            state = pra._scrub_tf_state(jump.get("tf_state_json") or "")
+                        # ``or None`` is load-bearing: both provisioners return "" when the
+                        # Terraform output is missing. A non-NULL "" makes
+                        # ``_active_vdesktop_count`` (pra_jump_id.isnot(None)) pin the shared
+                        # gateway forever while the UI still greys out Open session — two
+                        # symptoms and no cause.
+                        row.pra_jump_id = jump_id or None
+                        row.pra_tunnel_state = state
                         db.commit()
                     except Exception as pra_err:
-                        logger.warning("desktop seat PRA RDP registration failed pool=%s seat=%s: %s",
+                        logger.warning("desktop seat PRA jump registration failed pool=%s seat=%s: %s",
                                        pool_name, sid, pra_err)
                 if is_windows:
                     seat_passwords[vm_name] = {
@@ -778,7 +980,7 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
 
 async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
     """Terminate the VM behind each seat through its cloud's backend (best-effort),
-    then drop the row. A seat on a records-only cloud has no VM and is just dropped.
+    then drop the row. A seat whose cloud has no backend has no VM and is just dropped.
 
     Runs on the durable worker (scale-down / pool-delete schedule a
     ``vdesktop_pool_teardown`` job). When given the claiming ``job_id`` it owns
@@ -800,9 +1002,9 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
             if row is None:
                 continue
             last_cloud = row.cloud or last_cloud
-            # A seat on a records-only cloud has no VM to terminate — the same seats
-            # this code has always skipped, now skipped because there is no backend
-            # rather than because the string was not "azure".
+            # A seat whose cloud has no backend has no VM to terminate — the same
+            # seats this code has always skipped, now skipped because there is no
+            # backend rather than because the string was not "azure".
             backend = seat_backend(row.cloud)
             if backend is not None and row.vm_resource_id:
                 try:
@@ -811,7 +1013,12 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
                     name = row.vm_resource_id
                     errors.append(f"{name}: terminate failed: {exc}")
                     logger.warning("desktop seat terminate failed seat=%s vm=%s: %s", sid, name, exc)
-            # Phase 2: remove the seat's PRA RDP jump (+ vault account) — state-driven.
+            # Remove the seat's PRA jump item (+ vault account for a Windows seat).
+            # `remove_rdp_jump` is a misnomer: it delegates to `_destroy_state_only_sync`,
+            # which writes a provider-only config and destroys whatever `sra_*` resource
+            # the state holds — so it is correct for a Shell Jump too, and NOT
+            # `remove_jump`, which regenerates HCL and re-reads `bt_jump_group_name`
+            # (the wrong Jump Group for a GCP seat).
             if row.pra_tunnel_state:
                 try:
                     from . import terraform_pra_service as pra
