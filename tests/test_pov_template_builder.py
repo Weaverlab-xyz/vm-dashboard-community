@@ -17,6 +17,12 @@ so they are pinned here against the generated text:
   * **The already-ran marker is the payload's HASH.** A reboot must not re-run; a
     re-injection with a fresh enrolment code must. A boolean gets one of those right.
 
+And the container runtime it installs beside it, which was the other half of the same
+failure: the injected bootstrap ends in `docker run`, so a broker VM with a perfect runner
+and no Docker re-reads the payload every twenty seconds forever while the POV page says
+`enrolling` and names nothing. Found live on an AlmaLinux 8 broker carrying neither Docker
+nor Podman.
+
 And the job's own rules, which mirror the POV provision's for the same reasons:
 
   * **The scratch environment id is committed before anything else can fail.** An
@@ -78,6 +84,174 @@ def test_the_install_script_is_valid_shell_inside_and_out():
     inner = script.split("DASHBOARD_RUNNER_EOF")[1]
     ok, err = _sh_parses(inner)
     assert ok, f"the runner embedded in the install script does not parse: {err}"
+
+
+# ── the container runtime ────────────────────────────────────────────────────
+#
+# A runner without a runtime is the same failure one line later: the injected bootstrap
+# ends in `docker run`, everything above it is a mkdir, a heredoc and two `|| true`s, and a
+# broker VM with no Docker therefore re-reads the payload every twenty seconds forever
+# while the POV page says `enrolling` and names nothing. This is the half of the install
+# that can actually fail — it reaches a package repository from inside the guest — so it
+# gets run, not just read.
+
+def _run_block(block: str, prelude: str) -> subprocess.CompletedProcess:
+    """Run a generated shell block with commands stubbed as shell functions.
+
+    Functions rather than executables on ``PATH``: a function shadows a real command for
+    ``command -v`` as well as for a call, and it needs no temp directory, no execute bit
+    and no POSIX-path conversion — so this test reads the same on a Windows workstation as
+    it does in CI.
+    """
+    return subprocess.run(["sh", "-s"], input=prelude + "\n" + block,
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+
+
+# `apt-get` cannot be a shell function — POSIX function names take no hyphen and dash
+# refuses one outright — so the Debian branch is fenced off with an empty PATH instead:
+# if this block ever falls through to a package install, every command in it is
+# not-found and the run fails. `dnf` and `yum` are named because they *can* be, and a
+# named stub says which branch ran instead of only that something did.
+_NO_PACKAGES = """
+PATH=""
+dnf() { echo "PACKAGE-MANAGER-RAN" >&2; return 9; }
+yum() { echo "PACKAGE-MANAGER-RAN" >&2; return 9; }
+systemctl() { return 0; }
+service() { return 0; }
+"""
+
+
+def test_the_docker_install_is_valid_shell():
+    ok, err = _sh_parses(b.render_docker_install())
+    assert ok, f"the generated docker install is not valid /bin/sh: {err}"
+
+
+def test_the_generated_scripts_are_ascii_only():
+    """Because the operator of last resort types this into the platform's own console,
+    where there is no clipboard. An em dash or a box-drawing rule in a comment is a
+    character a console keymap may not offer and a guest codepage may mangle, and it buys
+    nothing: none of this is prose anyone reads for pleasure. The section rules and dashes
+    belong in the Python around it, which is only ever read in an editor."""
+    for name, text in (("runner", b.render_runner()),
+                       ("unit", b.render_runner_unit()),
+                       ("docker install", b.render_docker_install()),
+                       ("install script", b.render_install_script())):
+        bad = sorted({c for c in text if ord(c) > 127})
+        assert not bad, f"the generated {name} carries non-ASCII: {bad!r}"
+
+
+def test_a_guest_that_already_has_a_runtime_is_left_alone():
+    """Reinstalling over a working runtime is how a build breaks a template that was
+    fine — including the `podman` + `podman-docker` guest the contract accepts."""
+    p = _run_block(b.render_docker_install(),
+                   _NO_PACKAGES + "\ndocker() { return 0; }\n")
+    assert p.returncode == 0, f"rc={p.returncode} {p.stderr[:300]}"
+    assert "PACKAGE-MANAGER-RAN" not in (p.stdout + p.stderr), \
+        "a guest that already has docker must not have packages installed over it"
+    assert "already present" in p.stdout, p.stdout
+
+
+def test_a_runtime_that_does_not_answer_fails_the_install():
+    """The regression this exists for: a package that landed beside a daemon that will not
+    start fails the bootstrap in exactly the same place as a guest that never had one, and
+    the install script is the last moment anything is watching."""
+    p = _run_block(b.render_docker_install(),
+                   _NO_PACKAGES + "\ndocker() { case \"$1\" in version) return 1 ;; esac; return 0; }\n")
+    assert p.returncode != 0, "a runtime that cannot answer `docker version` must fail loudly"
+    assert "enrolling" in p.stderr, \
+        f"the refusal must name the symptom an SE would otherwise chase: {p.stderr[:300]}"
+
+
+def test_a_runtime_that_is_running_but_disabled_fails_the_install():
+    """The one found live. `dnf install docker-ce` leaves the unit **disabled** on the RHEL
+    family, and the guest it was found on was running only because somebody had just typed
+    `systemctl start docker`. A template is baked and then booted — for every POV, every
+    time — so "running now" is worth nothing here and this must not pass."""
+    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+docker() { return 0; }
+systemctl() { case "$1" in is-enabled) return 1 ;; *) return 0 ;; esac; }
+""")
+    assert p.returncode != 0, \
+        "a runtime that will not come back after a reboot must not bake into a template"
+    assert "boot" in p.stderr, \
+        f"the refusal must say it is about boot, not about now: {p.stderr[:300]}"
+
+
+def test_a_runtime_that_is_running_and_enabled_passes():
+    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+docker() { return 0; }
+systemctl() { return 0; }
+""")
+    assert p.returncode == 0, f"rc={p.returncode} {p.stderr[:300]}"
+    assert "enabled at boot" in p.stdout, p.stdout
+
+
+def test_a_guest_with_no_docker_unit_is_not_failed_for_not_enabling_one():
+    """The `podman` + `podman-docker` guest the contract accepts has no `docker.service` to
+    enable, and `is-enabled` on a unit that does not exist is not a finding about it. The
+    gate asks whether there is a unit first — otherwise the check that protects RHEL-family
+    templates would reject every Podman one."""
+    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+docker() { return 0; }
+systemctl() { case "$1" in cat) return 1 ;; is-enabled) return 1 ;; *) return 0 ;; esac; }
+""")
+    assert p.returncode == 0, \
+        f"a guest with no docker.service must not be failed for it: {p.stderr[:300]}"
+
+
+def test_the_state_probe_reports_the_boot_state_and_not_only_the_version():
+    """The Runner column is where an SE reads this, and `Docker version 26.1.0` beside a
+    disabled unit is a green-looking line about a template that cannot work."""
+    assert "is-enabled docker" in b._STATE_PROBE, b._STATE_PROBE
+    assert "cat docker.service" in b._STATE_PROBE, \
+        "the probe must ask whether there is a unit before reporting on one"
+
+
+def test_the_install_script_installs_the_runner_before_the_runtime():
+    """Ordering, and it is deliberate. The runner is local and cannot really fail; the
+    runtime reaches a package repository and can. Landing the cheap half first leaves a
+    guest with no route to Docker's repo one manual install from correct, rather than
+    needing the whole script run again."""
+    script = b.render_install_script()
+    runner_at = script.index(b.RUNNER_PATH)
+    docker_at = script.index("download.docker.com")
+    assert runner_at < docker_at, \
+        "the runtime install must come after the runner, or a repo with no route costs " \
+        "the runner too"
+
+
+def test_the_install_script_covers_both_package_families():
+    """A POV broker template may be RHEL-family or Debian-family, and one that installs on
+    only one of them is a builder that works for half the catalogue."""
+    script = b.render_install_script()
+    for needle in ("apt-get", "docker-ce", "download.docker.com",
+                   "/etc/apt/sources.list.d/docker.list",
+                   "/etc/yum.repos.d/docker-ce.repo"):
+        assert needle in script, f"the install script never mentions {needle}"
+    assert "dnf -y install" in script and "yum -y install" in script, \
+        "a RHEL 7-era guest has no dnf; both package managers are named on purpose"
+
+
+def test_the_rhel_repo_is_chosen_by_id_and_not_by_id_like():
+    """AlmaLinux — the distro this was found on — has `ID_LIKE="rhel centos fedora"`. A
+    family match that looked for fedora first would send every Alma and Rocky guest to a
+    repository directory that does not carry its major version."""
+    block = b.render_docker_install()
+    fedora_by_id = block.index('case "$ID" in')
+    assert block.index("fedora) DOCKER_REPO_DIR=fedora", fedora_by_id) > fedora_by_id, \
+        "the fedora repo must be selected from ID, never from ID_LIKE"
+
+
+def test_an_unsupported_distro_names_itself_and_says_the_runner_landed():
+    """The build's Runner detail is the only place anyone reads this. "Unsupported" without
+    the distro's own name is a line an SE cannot act on, and without "the runner is already
+    in place" they re-run a script that had in fact done half its job."""
+    block = b.render_docker_install()
+    tail = block[block.index("cannot install a container runtime automatically"):]
+    assert "$ID" in tail[:200], "the refusal must name the distro it found"
+    assert "already in place" in tail[:400], \
+        "the refusal must say the runner half landed, or the operator redoes it"
 
 
 def test_the_runner_matches_the_marker_stem_not_the_version():
@@ -413,7 +587,7 @@ def test_the_second_login_is_tried_when_the_first_is_refused():
         out = asyncio.run(b._ssh_install(
             "203.0.113.9", 40022, [("stale", "Sekrit1"), ("root", "Sekrit2")],
             sleep=sleep))
-    assert "runner installed over SSH as root" in out, out
+    assert "runner and runtime installed over SSH as root" in out, out
     assert ssh.attempts == ["stale", "root"], ssh.attempts
     assert waits == [], "a refused login must not spend the readiness ladder"
 

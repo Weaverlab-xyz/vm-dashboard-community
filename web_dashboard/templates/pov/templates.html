@@ -91,8 +91,9 @@
     <div x-show="showRunner" class="px-4 py-3 border-b border-gray-200 bg-gray-50">
       <p class="text-sm text-gray-600 mb-2">
         Run this as root on the broker VM if you would rather install the metadata runner
-        by hand — then bake the environment into a template. It is what the build installs
-        automatically, and it is idempotent.
+        and its container runtime by hand — then bake the environment into a template. It
+        is what the build installs automatically, it is idempotent, and it is deliberately
+        plain ASCII so it survives being typed into a console with no clipboard.
       </p>
       <pre class="text-xs bg-white border border-gray-200 rounded p-3 overflow-x-auto"
            x-text="runnerScript || 'Loading…'"></pre>
@@ -150,12 +151,14 @@
       <label class="flex items-start gap-2 md:col-span-2">
         <input type="checkbox" x-model="form.install_runner" class="mt-1 rounded">
         <span class="text-sm text-gray-700">
-          Install the metadata runner on the broker VM
+          Install the metadata runner and Docker on the broker VM
           <span class="block text-xs text-gray-500">
-            Publishes SSH on the broker for the length of the build, installs the runner,
-            and revokes it. This reaches a NAT-ed high port on the lab platform, not the
-            API host — if your egress only allows HTTPS to the API URL, clear this and use
-            the install script above.
+            Publishes SSH on the broker for the length of the build, installs the runner
+            and a container runtime, and revokes it. This reaches a NAT-ed high port on the
+            lab platform, not the API host — if your egress only allows HTTPS to the API
+            URL, clear this and use the install script above. The guest also needs a route
+            to <span class="font-mono">download.docker.com</span> unless it already has
+            Docker; the build says which half landed.
           </span>
         </span>
       </label>

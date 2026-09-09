@@ -66,9 +66,9 @@ you raise it.
 **The template builder** authors the templates a POV is built from — see
 [building a template](skytap.md#building-a-template). It exists because a POV
 *is* a template instantiated whole, so before it the whole feature was downstream of a
-catalogue nobody could author from here, and because the one piece of the
-[template contract](skytap.md#the-template-contract) that has to live in your
-image — the metadata runner — had no automation at all.
+catalogue nobody could author from here, and because the parts of the
+[template contract](skytap.md#the-template-contract) that have to live in your
+image — the metadata runner and a container runtime — had no automation at all.
 
 **A blueprint** is a saved POV recipe: the fields the create form asks, under one name. Pick
 one on the POV page and it fills the form; you still type the POV's own name. For a given
