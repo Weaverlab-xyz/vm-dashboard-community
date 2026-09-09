@@ -121,6 +121,58 @@ def test_no_hostconfig_field_comes_from_the_job():
     assert host["PidsLimit"] and host["Memory"]
 
 
+def test_the_ansible_cpu_cap_is_clamped_to_the_host():
+    """Docker REFUSES a create whose NanoCpus exceeds the host's CPU count -- `400 Range of
+    CPUs is from 0.01 to 1.00, as there are only 1 CPUs available`. The flat 2.0 this used
+    to send therefore did not degrade on a one-CPU host, it made Config Management
+    impossible there. A POV broker is a single small guest whose only job is to run the
+    agent, so one vCPU is its normal size: the feature was unreachable on exactly the host
+    it was built for."""
+    agent._host_ncpu_cached = None
+    try:
+        agent._host_ncpu_cached = 1
+        assert agent._ansible_nano_cpus() == 1_000_000_000
+        agent._host_ncpu_cached = 8
+        assert agent._ansible_nano_cpus() == 2_000_000_000, "the ceiling still applies"
+        agent._host_ncpu_cached = 2
+        assert agent._ansible_nano_cpus() == 2_000_000_000
+    finally:
+        agent._host_ncpu_cached = None
+
+
+def test_an_unknown_host_cpu_count_asks_for_one_cpu():
+    """A host that will not answer /info still runs containers, so refusing the job over a
+    diagnostic call would be the wrong trade. One CPU is the only request valid on every
+    host there is, and an Ansible run is bound by the network far more than by the
+    controller."""
+    agent._host_ncpu_cached = None
+    try:
+        agent._host_ncpu_cached = 0
+        assert agent._ansible_nano_cpus() == 1_000_000_000
+    finally:
+        agent._host_ncpu_cached = None
+
+
+def test_the_host_cpu_count_is_read_from_the_engine_not_the_interpreter():
+    """`os.cpu_count()` reports what THIS container may use, and a cgroup limit on the agent
+    would make it under-report a host the sibling could have used more of. NCPU is the
+    daemon's own view of the machine, which is also the number the daemon validates
+    against."""
+    with open(_PATH, encoding="utf-8") as fh:
+        src = ast.parse(fh.read())
+    fn = next(n for n in ast.walk(src)
+              if isinstance(n, ast.FunctionDef) and n.name == "_host_ncpu")
+    # The DOCSTRING is dropped before dumping: it names `os.cpu_count()` in order to say
+    # why the function does not call it, and matching that prose would pass this test for
+    # the wrong reason -- and fail it for the right one.
+    code = [n for n in fn.body
+            if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                    and isinstance(n.value.value, str))]
+    body = "".join(ast.dump(n) for n in code)
+    assert "'/info'" in body or '"/info"' in body, "it does not ask the Engine"
+    assert "cpu_count" not in body, "it asked the interpreter instead of the daemon"
+
+
 def test_the_image_comes_from_policy_not_the_job():
     engine = FakeEngine(logs=_OK)
     _run(engine, FakePolicy(image="my-registry/hv:1.2"))
