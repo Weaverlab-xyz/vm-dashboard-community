@@ -53,7 +53,7 @@
   </div>
 
   <div x-show="!notEnabled" x-cloak class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-    <div class="flex items-center justify-between mb-4">
+    <div class="flex flex-wrap items-center justify-between mb-4">
       <h2 class="text-base font-semibold text-gray-700">Enrolled Agents</h2>
       <div class="flex items-center gap-4">
         <label class="flex items-center gap-1.5 text-xs text-gray-500 select-none">
@@ -169,7 +169,7 @@
               <tr x-show="expanded === a.id" x-cloak class="border-b border-gray-50 bg-gray-50/60">
                 <td></td>
                 <td colspan="9" class="py-3 pr-4">
-                  <dl class="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-2 text-xs">
+                  <dl class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-2 text-xs">
                     <div>
                       <dt class="text-gray-400 uppercase tracking-wide">Agent id</dt>
                       <dd class="font-mono text-gray-700 break-all" x-text="a.id"></dd>

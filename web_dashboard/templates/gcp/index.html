@@ -368,7 +368,7 @@
 
         <!-- Instance name + count -->
         <div>
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div class="col-span-2">
               <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
               <input type="text" x-model="deployForm.instance_name"
@@ -467,7 +467,7 @@
           <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
             <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
           </p>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
               <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
@@ -637,7 +637,7 @@
           </select>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Machine Type <span class="text-gray-400 font-normal">(shared)</span></label>
             <select x-model="bulkModal.machine_type"
@@ -659,7 +659,7 @@
           </div>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Disk Size (GB) <span class="text-gray-400 font-normal">(shared)</span></label>
             <input type="number" min="10" x-model.number="bulkModal.disk_size_gb"
@@ -757,7 +757,7 @@
         </div>
 
         <!-- Machine Type + SSH Username -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Build Machine Type</label>
             <select x-model="gcpPackerForm.machine_type"
@@ -778,7 +778,7 @@
         </div>
 
         <!-- Boot Disk -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Boot Disk Type</label>
             <select x-model="gcpPackerForm.disk_type"
@@ -800,7 +800,7 @@
 
         <!-- Provisioner Script -->
         <div>
-          <div class="flex items-center justify-between mb-1">
+          <div class="flex flex-wrap items-center justify-between mb-1">
             <label class="block text-sm font-medium text-gray-700">Provisioner Script</label>
             <div class="flex items-center gap-2" x-show="storedScripts.length > 0">
               <label class="text-xs text-gray-500">Load from storage:</label>
@@ -832,7 +832,7 @@
           <p class="text-xs font-semibold text-gray-600">BeyondTrust provisioner options
             <span class="font-normal text-gray-400">— used by the bt-ready scripts; ignored by other provisioners.</span>
           </p>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Admin user (Password Safe / Entitle)</label>
               <input type="text" x-model="gcpPackerForm.bt_admin_user" placeholder="adminuser"
@@ -938,7 +938,7 @@
         <h3 class="text-sm font-semibold text-gray-700">Deploy a cell</h3>
 
         <div>
-          <div class="flex items-center justify-between mb-1">
+          <div class="flex flex-wrap items-center justify-between mb-1">
             <label class="block text-sm font-medium text-gray-700">Image <span class="text-red-500">*</span></label>
             <label class="flex items-center gap-1.5 text-xs text-gray-500">
               <input type="checkbox" x-model="otShowAllImages" class="rounded border-gray-300 h-3.5 w-3.5">
@@ -957,7 +957,7 @@
           </p>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
             <input type="text" x-model="otForm.instance_name" placeholder="ot-cell-01"
@@ -974,7 +974,7 @@
           </div>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
             <select x-model="otForm.zone"
@@ -1009,7 +1009,7 @@
           <p class="text-xs text-gray-400 mt-1">The cell gets no external IP — access is PRA-brokered only, which is the point.</p>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">PLC Protocols (one tunnel each)</label>
             <div class="border border-gray-300 rounded-lg p-2 space-y-1">
@@ -1039,7 +1039,7 @@
           <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA placement
             <span class="font-normal text-gray-400">— where the cell's jump items land; defaults are the configured gcp_bt_jump_group_name / gcp_jumpoint_name.</span>
           </p>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
               <select x-model="otForm.jump_group" :disabled="!praPickers.jump_groups.length"
@@ -1164,7 +1164,7 @@
             A generic-TCP PRA protocol tunnel to any host the gateway can reach — for demoing against
             your own lab gear without deploying a cell.
           </p>
-          <div class="grid grid-cols-2 gap-2 mb-2">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
             <input type="text" x-model="otTunnelForm.name" placeholder="name (e.g. lab-plc)"
                    class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
             <input type="text" x-model="otTunnelForm.hostname" placeholder="host or IP"

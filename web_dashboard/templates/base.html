@@ -20,6 +20,44 @@
        given the height a thumb needs here, scoped to the drawer, rather than in the
        shared class list where it would also widen the row it is trying to save. */
     .nav-drawer a { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+
+    /* Data tables: scroll the columns, never hide them.
+
+       The card pattern across the app is `rounded-xl ... overflow-hidden` wrapping a
+       table -- the clip is there to keep the first and last rows inside the rounded
+       corners. On a phone it does something else as well: measured at 393px, the
+       inventory table is 857px wide, jobs 622px, VMs 517px, and the columns past the
+       fold -- owner, environment, cost, last seen -- were not shrunk or wrapped. They
+       were cut off, with no scrollbar and nothing on screen to say a column existed.
+       That is the same defect the nav bar had, one layer down.
+
+       `overflow-x` alone, so `overflow-y` stays hidden and the corners still clip. The
+       app already writes this by hand where somebody noticed (audit/, pov/templates);
+       stating it once here fixes the ~50 places nobody did, and covers the next table
+       somebody adds without them having to know.
+       `:has(> table)` and not `:has(table)`: a card whose OWN child is a table is a
+       table card, and its clip is that table's clip. A card that merely contains one
+       somewhere deeper is holding something else too, and scrolling its header sideways
+       along with the table would be a different bug. */
+    main div.overflow-hidden:has(> table) { overflow-x: auto; }
+
+    /* Commands, ARNs, digests and kubeconfig snippets.
+
+       363 <code>/<pre> elements across the app, 15 of which say anything about wrapping.
+       The rest hold a single unbroken token -- a `docker run ...` line, an
+       arn:aws:iam::..., a sha256: digest -- and a token with no break opportunity in it
+       does not overflow its own box quietly: it sets the page's minimum width. Measured
+       at 393px that is what widened settings.html, and the one modal of 106 that did not
+       fit (k8s: a 518px code block inside a 361px panel).
+
+       `anywhere` rather than `break-word` on purpose. Only `anywhere` counts toward
+       min-content, and min-content is exactly what was pushing the page wide; break-word
+       would let the token still claim the width and merely render inside it.
+
+       Neither rule touches a <pre> that already scrolls: `overflow-wrap` does nothing
+       under `white-space: pre`, and overflow-x on something that fits is inert. */
+    main code, main pre { overflow-wrap: anywhere; }
+    main pre { max-width: 100%; overflow-x: auto; }
   </style>
 </head>
 <body class="{{ theme.body_bg }} min-h-screen font-sans text-gray-800">

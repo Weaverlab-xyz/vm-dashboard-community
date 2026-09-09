@@ -188,7 +188,7 @@
 
         <!-- Base Image -->
         <div>
-          <div class="flex items-center justify-between mb-1">
+          <div class="flex flex-wrap items-center justify-between mb-1">
             <label class="block text-sm font-medium text-gray-700">Base Image <span class="text-red-500">*</span></label>
             <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
               <input type="checkbox" x-model="packerIncludeCustomBases" class="h-3.5 w-3.5 rounded border-gray-300 text-red-600">
@@ -206,7 +206,7 @@
         </div>
 
         <!-- Shape + SSH Username -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Build Shape</label>
             <!-- Scoped to the AD + base image below, not region-wide: OCI does not
@@ -239,7 +239,7 @@
         </div>
 
         <!-- Flex shape sizing -->
-        <div class="grid grid-cols-2 gap-4" x-show="packerShapeIsFlex()" x-cloak>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4" x-show="packerShapeIsFlex()" x-cloak>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">OCPUs</label>
             <input type="number" x-model.number="ociPackerForm.ocpus" min="1" max="128" step="1"
@@ -254,7 +254,7 @@
         </div>
 
         <!-- Placement -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Availability Domain <span class="text-red-500">*</span></label>
             <!-- @change refetches Build Shape: the shape list is AD-scoped, so
@@ -292,7 +292,7 @@
 
         <!-- Provisioner Script -->
         <div>
-          <div class="flex items-center justify-between mb-1">
+          <div class="flex flex-wrap items-center justify-between mb-1">
             <label class="block text-sm font-medium text-gray-700">Provisioner Script</label>
             <div class="flex items-center gap-2" x-show="storedScripts.length > 0">
               <label class="text-xs text-gray-500">Load from storage:</label>
@@ -324,7 +324,7 @@
           <p class="text-xs font-semibold text-gray-600">BeyondTrust provisioner options
             <span class="font-normal text-gray-400">— used by the bt-ready scripts; ignored by other provisioners.</span>
           </p>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Admin user (Password Safe / Entitle)</label>
               <input type="text" x-model="ociPackerForm.bt_admin_user" placeholder="adminuser"
@@ -438,7 +438,7 @@
 
       <div class="space-y-4">
         <div>
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div class="col-span-2">
               <label class="block text-xs font-medium text-gray-600 mb-1">Instance name</label>
               <input type="text" x-model="deployForm.instance_name"
@@ -480,7 +480,7 @@
         </div>
 
         <!-- Flexible shape sizing (A1.Flex etc.) -->
-        <div x-show="selectedShapeIsFlex()" class="grid grid-cols-2 gap-3">
+        <div x-show="selectedShapeIsFlex()" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">OCPUs</label>
             <input type="number" min="1" step="1" x-model.number="deployForm.ocpus"
@@ -493,7 +493,7 @@
           </div>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Availability domain</label>
             <!-- @change refetches Shape above: the shape list is AD-scoped, so
@@ -525,7 +525,7 @@
           </select>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">SSH username</label>
             <input type="text" x-model="deployForm.ssh_username"
@@ -558,7 +558,7 @@
           <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
             <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
           </p>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
               <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
@@ -683,7 +683,7 @@
           </p>
         </div>
 
-        <div class="grid grid-cols-3 gap-3" x-show="bulkIsFlexShape()" x-cloak>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3" x-show="bulkIsFlexShape()" x-cloak>
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">OCPUs</label>
             <input type="number" min="1" x-model.number="bulkModal.ocpus"
