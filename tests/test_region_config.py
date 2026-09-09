@@ -171,9 +171,17 @@ def test_region_fields_and_unknown_cloud():
         # Where a Cloud Function's ENIs attach. Purpose-specific rather than reusing
         # default_subnet_id, so that "which subnet do functions use" stays a separate
         # question from "in which region" — see _resolved_network.
-        "functions_subnet_ids", "functions_security_group_ids")
+        "functions_subnet_ids", "functions_security_group_ids",
+        # Where a desktop POOL lands. Purpose-specific for the same reason
+        # functions_subnet_ids is: "which subnet do desktops use" is a different
+        # question from "which subnet do VMs use", and collapsing the two is how a
+        # flat key ends up outranking the regional one. Unlike Azure's, this one has
+        # a SECONDARY fallback to aws_default_subnet_id — no AWS subnet is delegated,
+        # so inheriting the VM subnet cannot produce a pool that fails to deploy.
+        "desktops_subnet_id", "desktops_instance_type")
     assert "vnet_resource_group" in rc.region_fields("azure")
     assert "ecs_subnetwork" in rc.region_fields("gcp")
+    assert "desktops_subnetwork" in rc.region_fields("gcp")
     # Every cloud carries its own functions network fields; Azure had none until the
     # adapter needed to land in a non-default region.
     assert "functions_subnet_id" in rc.region_fields("azure")

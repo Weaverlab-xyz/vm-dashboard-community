@@ -282,7 +282,9 @@ Facts, listed because each is load-bearing for something above:
   aggregate view, and none for PRA, Password Safe, Entitle, EPM-L, Portainer, the cloud
   credentials themselves, or OPA availability.
 - **Partially built surfaces**, flagged so nobody reads them as finished: virtual desktops
-  wire Azure only (*"AWS / GCP create seat records only"*); Certificate Lab is preview and
+  wire Azure only (*"AWS / GCP create seat records only"*) — **since resolved:** all
+  three clouds now provision and broker seats, AWS and GCP Linux-only, see
+  [Virtual Desktops](../virtual-desktops.md); Certificate Lab is preview and
   *"none of its four submission paths has been proven against a live authority"*, with only
   `terraform/cert_ca/gcp_cas` built though AWS Private CA is a named path; Cloud Functions is
   preview.

@@ -1377,30 +1377,44 @@ class RegisteredImage(Base):
 class VirtualDesktop(Base):
     """A single virtual-desktop seat in a dashboard-managed desktop pool.
 
-    Phase 0 of the virtual-desktop plan ships this table empty; the
-    vdesktop_service scaffold writes/reads rows but does no cloud provisioning
-    yet. Phase 1 fans pool creation out to the existing VM provisioning path
-    (one VM per seat, tagged dashboard:desktop_pool=<name>) and fills
-    vm_resource_id; Phase 2 registers each seat on the PRA Jumpoint and fills
-    pra_jump_id. One row per desktop (seat), not per pool.
+    One row per desktop (seat), not per pool. AWS, Azure and GCP each provision one
+    private VM per seat through their own seat backend in ``vdesktop_service`` and
+    fill ``vm_resource_id``, then broker the seat on the PRA Gateway and fill
+    ``pra_jump_id``.
+
+    Two things about this table are load-bearing and not obvious from the columns:
+
+      * ``cloud`` is an unconstrained ``String(20)``. Code that dispatches on it must
+        tolerate a value with no seat backend rather than assume one of three.
+      * The POOL TAG stamped on the backing VM is not one string. Azure and EC2 take
+        ``dashboard:desktop_pool``; a colon is ILLEGAL in a GCP label key, so GCP uses
+        ``dashboard_desktop_pool``. Each backend owns its own.
     """
     __tablename__ = "virtual_desktops"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     cloud = Column(String(20), nullable=False)              # aws | azure | gcp
     pool_name = Column(String(200), nullable=False, index=True)
-    # Backing kind: vm_pool (Phase 1) | avd | workspaces (Phase 4).
+    # Backing kind. Only vm_pool exists; avd / workspaces are the cloud-native
+    # services this table was shaped to leave room for.
     kind = Column(String(20), nullable=False, default="vm_pool")
-    # Cloud-native id of the backing VM once provisioned (Phase 1). Null until then.
+    # Cloud-native id of the backing VM once provisioned. Null until then. The shape
+    # is per cloud and carries what teardown needs, since teardown gets only this
+    # string: an Azure ARM id, "<region>/<instance-id>" on AWS,
+    # "<project>/<zone>/<name>" on GCP.
     vm_resource_id = Column(String(500), nullable=True)
     # pending | running | stopped | deprovisioning
     status = Column(String(20), nullable=False, default="pending", index=True)
     assigned_user = Column(String(200), nullable=True)
-    # PRA Jumpoint registration id once the seat is brokered (Phase 2).
+    # PRA jump-item id once the seat is brokered. NULL until then, and NULL rather
+    # than "" on a failed registration: jumpoint_host_service._active_vdesktop_count
+    # counts a non-NULL value as a live reference and would pin the shared Gateway.
     pra_jump_id = Column(String(200), nullable=True)
-    # Scrubbed Terraform state for the seat's PRA RDP jump item (+ vault account)
-    # so teardown can destroy them deterministically (Phase 2). Secret values are
-    # redacted before storage; never returned by the API.
+    # Scrubbed Terraform state for the seat's PRA jump item (a Remote RDP jump plus
+    # its vault account for a Windows seat, a Shell Jump for a Linux one) so teardown
+    # can destroy it deterministically. `vdesktop_service.jump_kind` reads WHICH kind
+    # off this state rather than storing it in a column that could disagree. Secret
+    # values are redacted before storage; never returned by the API.
     pra_tunnel_state = Column(Text, nullable=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

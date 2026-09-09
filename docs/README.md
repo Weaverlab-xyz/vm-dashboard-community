@@ -39,6 +39,7 @@ demoing, running a lab, or running production.
 | [Databases](databases.md) | you are standing up a managed database, or want to manage one you already run. |
 | [Kubernetes](kubernetes.md) | you are managing Kubernetes clusters and the privileged access into them. |
 | [Cloud Containers](cloud-containers.md) | you want a containerised app on a cloud runtime without standing up Portainer. |
+| [Virtual Desktops](virtual-desktops.md) | you need a pool of private desktop VMs that reps reach through the PRA Gateway rather than over the internet. |
 | [Image Management](image-management.md) | you are about to build a custom image and need to know how it will reach the other clouds. |
 | [Config Management](config-management.md) | you are about to run an Ansible job and want to know how the runner handles secrets and isolation. |
 | [Secrets Management](secrets-management.md) | you are deciding where to store cloud credentials, and how to evolve that over time. |

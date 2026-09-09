@@ -1,10 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Desktops{% endblock %}
 
-{# Virtual Desktops — Phase 1 (Azure). A pool is N private VMs from a desktop
-   image; Azure provisions them via the existing deploy path (tagged for the
-   pool). AWS/GCP create records only until their Phase 1. PRA-brokered
-   "Open session" is Phase 2. #}
+{# Virtual Desktops. A pool is N private VMs from a desktop image, provisioned on
+   AWS, Azure or GCP through that cloud's seat backend and tagged for the pool.
+   Every seat is brokered on the PRA Gateway: Windows seats (Azure only) as a
+   Remote RDP jump with a vaulted password, Linux seats as a Shell Jump on 22 with
+   no credential injection.
+
+   The cloud <select> below and each cloud's field block are pinned to
+   vdesktop_service._SEAT_BACKENDS by tests/test_vdesktop_form_clouds.py. Adding a
+   cloud to one and not the other is what made this page advertise AWS and GCP as
+   "records only" for a whole phase while the backend provisioned both. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="desktopsPage()" x-init="init()">
@@ -17,11 +23,12 @@
     </button>
   </div>
   <p class="text-sm text-gray-500 mb-6">
-    A desktop pool is <em>N</em> private VMs from a desktop image. <strong>Azure</strong>
-    provisions them now; AWS/GCP create records only (coming next). Brokered
-    "Open session" through the BeyondTrust PRA Gateway lands in Phase 2.
+    A desktop pool is <em>N</em> private VMs from a desktop image. AWS, Azure and GCP all
+    provision real VMs and broker each seat through the BeyondTrust PRA Gateway.
+    <strong>AWS and GCP pools are Linux-only</strong> and their seats are reached over a
+    Shell Jump; Windows seats are Azure-only and get a Remote RDP jump with credential
+    injection. <a href="/docs/virtual-desktops" class="text-blue-600 hover:underline">Details</a>.
   </p>
-
   <!-- Toast -->
   <div x-show="toast" x-cloak x-transition
        :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
@@ -82,8 +89,8 @@
             <label class="block text-sm font-medium text-gray-700 mb-1">Cloud *</label>
             <select x-model="form.cloud" @change="onCloudChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="azure">Azure</option>
-              <option value="aws">AWS (records only)</option>
-              <option value="gcp">GCP (records only)</option>
+              <option value="aws">AWS</option>
+              <option value="gcp">GCP</option>
             </select>
           </div>
           <div>
@@ -184,10 +191,139 @@
           </div>
         </template>
 
-        <div x-show="form.cloud !== 'azure'" x-cloak class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
-          AWS/GCP create pool <strong>records only</strong> in this phase — no VMs are provisioned.
-          Azure is the live provider for Phase 1.
-        </div>
+        <!-- AWS picker. Linux only: _AwsSeats.supports_windows is False, so there is
+             deliberately no Guest-OS control here. -->
+        <template x-if="form.cloud === 'aws'">
+          <div class="space-y-4 border-t border-gray-100 pt-4">
+            <div x-show="aws.loading" x-cloak class="text-xs text-gray-400">Loading AWS options…</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Region</label>
+                <select x-model="form.region" @change="onAwsRegionChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <template x-for="r in aws.regions" :key="r.id">
+                    <option :value="r.id" x-text="r.label ? (r.id + ' — ' + r.label) : r.id"></option>
+                  </template>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">The AMI, subnet and security groups below all belong to this region.</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Instance type *</label>
+                <select x-model="form.instance_type" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <template x-for="t in aws.instance_types" :key="t"><option :value="t" x-text="t"></option></template>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Desktop AMI *</label>
+              <select x-model="form.ami_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">— select an AMI —</option>
+                <template x-for="a in aws.amis" :key="a.ami_id">
+                  <option :value="a.ami_id" x-text="(a.name || a.ami_id) + ' (' + a.ami_id + ')'"></option>
+                </template>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">Windows AMIs are omitted — AWS pools are Linux-only. Paste an AMI id below if it isn't listed.</p>
+              <input type="text" x-model="form.ami_id" class="mt-1 w-full border border-gray-200 rounded-lg px-3 py-1.5 text-xs font-mono" placeholder="ami-0123456789abcdef0">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Subnet *</label>
+              <select x-model="form.subnet_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">— select —</option>
+                <template x-for="s in aws.subnets" :key="s.id"><option :value="s.id" x-text="s.name || s.id"></option></template>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">Defaults to the configured desktops subnet, then the region's default VM subnet.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Security groups *</label>
+              <div class="max-h-32 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-1">
+                <template x-for="sg in aws.security_groups" :key="sg.id">
+                  <label class="flex items-center gap-2 text-xs text-gray-700">
+                    <input type="checkbox" :value="sg.id" :checked="form.security_group_ids.includes(sg.id)"
+                           @change="toggleAwsSg($event, sg.id)">
+                    <span x-text="sg.name || sg.id"></span>
+                  </label>
+                </template>
+              </div>
+              <p x-show="form.security_group_ids.length === 0" x-cloak class="text-[11px] text-red-600 mt-1">Select at least one.</p>
+            </div>
+            <div x-show="aws.sshKeyName" x-cloak class="text-xs text-green-800 bg-green-50 border border-green-200 rounded-lg p-3">
+              SSH key <strong x-text="aws.sshKeyName"></strong> is applied server-side from Secrets Manager,
+              the same key the AWS deploy page uses. Nothing to paste here.
+            </div>
+            <div x-show="!aws.sshKeyName && !aws.loading" x-cloak class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+              No SSH key is configured for AWS, so a seat would come up unreachable.
+              Set one in <strong>Setup wizard → AWS</strong> first.
+            </div>
+          </div>
+        </template>
+
+        <!-- GCP picker. Linux only, same as AWS: _GcpSeats.supports_windows is False. -->
+        <template x-if="form.cloud === 'gcp'">
+          <div class="space-y-4 border-t border-gray-100 pt-4">
+            <div x-show="gcp.loading" x-cloak class="text-xs text-gray-400">Loading GCP options…</div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Desktop image *</label>
+              <select x-model="form.image_self_link" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">— select an image —</option>
+                <template x-for="im in gcp.images" :key="im.self_link">
+                  <option :value="im.self_link"
+                          x-text="(im.name || im.self_link) + (im.os_label ? ' — ' + im.os_label : '') + (im.source === 'custom' ? ' (custom)' : '')"></option>
+                </template>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">Custom images first, then public. Windows images are omitted — GCP pools are Linux-only.</p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
+                <select x-model="form.zone" @change="onGcpZoneChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <template x-for="z in gcp.zones" :key="z"><option :value="z" x-text="z"></option></template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Machine type *</label>
+                <select x-model="form.machine_type" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <template x-for="mt in gcp.machine_types" :key="mt"><option :value="mt" x-text="mt"></option></template>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Subnetwork *</label>
+              <select x-model="form.subnetwork" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">— select —</option>
+                <template x-for="sn in gcp.subnetworks" :key="sn.self_link">
+                  <option :value="sn.self_link"
+                          x-text="sn.name + ' (' + [sn.ip_cidr_range, gcp.region].filter(Boolean).join(', ') + ')'"></option>
+                </template>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                The region is in the label on purpose — a sandbox names its subnetwork the
+                same in every region, and one from the wrong region fails at launch.
+              </p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
+                <input type="number" min="10" x-model.number="form.disk_size_gb" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Project</label>
+                <input type="text" :value="gcp.projectId" disabled class="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 text-sm font-mono text-gray-500">
+              </div>
+            </div>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="form.create_external_ip"> Give each desktop an external IP
+              <span class="text-xs text-gray-400">(default off — desktops are private + brokered)</span>
+            </label>
+            <div x-show="gcp.sshKeyConfigured" x-cloak class="text-xs text-green-800 bg-green-50 border border-green-200 rounded-lg p-3">
+              An SSH key is configured for GCP and applied server-side from Secret Manager.
+              It isn't shown here because <code>/api/gcp/secrets/ssh-key</code> only returns
+              the first 80 characters.
+            </div>
+            <div x-show="!gcp.sshKeyConfigured && !gcp.loading" x-cloak class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+              No SSH key is configured for GCP, so a seat would come up unreachable.
+              Set one in <strong>Setup wizard → GCP</strong> first.
+            </div>
+          </div>
+        </template>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
         <button @click="showCreate = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
@@ -210,6 +346,11 @@
         <button @click="showSeats = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-5">
+        <p class="text-xs text-gray-400 mb-3">
+          Every seat is brokered once its VM is up — Windows seats (Azure) as a Remote RDP
+          jump with credential injection, Linux seats as a Shell Jump on 22 with none.
+          A dash means registration is still pending or it failed; open the pool's job for why.
+        </p>
         <div x-show="seatsLoading" x-cloak class="text-sm text-gray-400 text-center py-6">Loading…</div>
         <div x-show="!seatsLoading && seats.length === 0" x-cloak class="text-sm text-gray-400 text-center py-6">No seats.</div>
         <table x-show="!seatsLoading && seats.length > 0" x-cloak class="min-w-full text-sm">
@@ -261,6 +402,11 @@
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div><div class="text-xs text-gray-400 uppercase">Jump Group</div><div x-text="session?.pra?.jump_group || '—'"></div></div>
               <div><div class="text-xs text-gray-400 uppercase">Gateway</div><div x-text="session?.pra?.jumpoint || '—'"></div></div>
+              <div>
+                <div class="text-xs text-gray-400 uppercase">Jump type</div>
+                <div x-text="session?.pra?.kind === 'shell_jump' ? 'Shell Jump (SSH 22)' : 'Remote RDP'"></div>
+              </div>
+              <div><div class="text-xs text-gray-400 uppercase">Login user</div><div class="font-mono" x-text="session?.username || '—'"></div></div>
             </div>
             <p class="text-xs text-gray-500" x-text="session?.note"></p>
             <a :href="session?.console_url" target="_blank" x-show="session?.console_url"
@@ -284,15 +430,55 @@ function desktopsPage() {
     showCreate: false, saving: false,
     showSeats: false, seatsPool: '', seats: [], seatsLoading: false, session: null,
     azure: { loaded: false, loading: false, locations: [], vm_sizes: [], subnets: [], nsgs: [], images: [] },
+    aws: { loaded: false, loading: false, regions: [], amis: [], amisRegion: '',
+           instance_types: [], subnets: [], security_groups: [], sshKeyName: '' },
+    gcp: { loaded: false, loading: false, projectId: '', zones: [], machine_types: [],
+           subnetworks: [], images: [], region: '', sshKeyConfigured: false },
     form: {},
 
     _blankForm() {
       return {
         cloud: 'azure', name: '', count: 1,
+        // Azure
         image_id: '', location: '', vm_size: '', subnet_id: '', nsg_id: '',
         resource_group: '', os_type: 'Linux', trusted_launch: false, ssh_username: 'azureuser',
         ssh_public_key: '', create_public_ip: false,
+        // AWS. `subnet_id` is SHARED with Azure on purpose — PoolCreateRequest shares it
+        // too, and a second name here would be exactly the drift this page just had.
+        region: '', ami_id: '', instance_type: '', security_group_ids: [],
+        // GCP
+        zone: '', machine_type: '', image_self_link: '', subnetwork: '',
+        create_external_ip: false, disk_size_gb: 20,
       };
+    },
+
+    // What each cloud adds to the POST body. Mirrors the server's _SPEC_BUILDERS one
+    // for one; a cloud offered in the picker with no entry here posts {cloud,name,count}
+    // and takes a guaranteed 400 from validate_spec. That was the bug.
+    //
+    // AWS and GCP deliberately send NO ssh_public_key and NO ssh_username: the spec
+    // builders resolve both server-side from the configured secret, the same way the
+    // single-VM deploy paths on those clouds do. Both pin os_type to Linux because
+    // their seat backends refuse Windows.
+    _bodyFor: {
+      azure: f => ({
+        image_id: f.image_id, location: f.location, vm_size: f.vm_size,
+        subnet_id: f.subnet_id, nsg_ids: f.nsg_id ? [f.nsg_id] : [],
+        resource_group: f.resource_group, os_type: f.os_type || 'Linux',
+        trusted_launch: !!f.trusted_launch,
+        ssh_username: f.ssh_username || 'azureuser',
+        ssh_public_key: f.ssh_public_key, create_public_ip: !!f.create_public_ip,
+      }),
+      aws: f => ({
+        region: f.region, ami_id: f.ami_id, instance_type: f.instance_type,
+        subnet_id: f.subnet_id, security_group_ids: f.security_group_ids,
+        os_type: 'Linux',
+      }),
+      gcp: f => ({
+        zone: f.zone, machine_type: f.machine_type, image_self_link: f.image_self_link,
+        subnetwork: f.subnetwork, create_external_ip: !!f.create_external_ip,
+        disk_size_gb: f.disk_size_gb || 20, os_type: 'Linux',
+      }),
     },
 
     syncOsTypeFromImage() {
@@ -347,7 +533,157 @@ function desktopsPage() {
       }
     },
 
-    onCloudChange() { if (this.form.cloud === 'azure') this.loadAzure(); },
+    // Every cloud-scoped selection is cleared before dispatching. Without this,
+    // picking a Windows Azure image and then switching to AWS carries os_type
+    // "Windows" into a Linux-only backend and eats a 400 nobody can explain from
+    // the form.
+    onCloudChange() {
+      const f = this.form;
+      Object.assign(f, {
+        image_id: '', subnet_id: '', nsg_id: '', vm_size: '',
+        ami_id: '', instance_type: '', security_group_ids: [],
+        image_self_link: '', machine_type: '', subnetwork: '',
+      });
+      if (f.cloud !== 'azure') { f.os_type = 'Linux'; f.trusted_launch = false; }
+      ({ azure: () => this.loadAzure(),
+         aws: () => this.loadAws(),
+         gcp: () => this.loadGcp() }[f.cloud] || (() => {}))();
+    },
+
+    toggleAwsSg(ev, id) {
+      const list = this.form.security_group_ids;
+      if (ev.target.checked) { if (!list.includes(id)) list.push(id); }
+      else { this.form.security_group_ids = list.filter(x => x !== id); }
+    },
+
+    // The Virtual Desktops panel defaults, fetched once and shared by all three
+    // loaders (each cloud reads its own keys out of it).
+    async _panel() {
+      if (!this._vd) { try { this._vd = (await API.get('/api/setup/feature/vdesktops')) || {}; } catch (e) { this._vd = {}; } }
+      return this._vd;
+    },
+
+    // A configured default that the fetched list doesn't contain is still a real
+    // choice — aws_service returns a hard-coded instance-type list, so an m6i.large
+    // set in Settings would otherwise be silently dropped.
+    _withConfigured(list, configured) {
+      return (configured && !list.includes(configured)) ? [configured, ...list] : list;
+    },
+
+    async loadAws() {
+      if (this.aws.loaded || this.aws.loading) return;
+      this.aws.loading = true;
+      await this._panel();
+      try {
+        const r = await API.get('/api/regions?cloud=aws');
+        this.aws.regions = r.regions || [];
+        if (!this.form.region) this.form.region = r.default || (this.aws.regions[0] || {}).id || '';
+      } catch (e) {}
+      await Promise.all([
+        this.loadAwsNetwork(this.form.region),
+        this.loadAmis(this.form.region),
+        this.loadAwsSshKey(),
+      ]);
+      this.aws.loaded = true; this.aws.loading = false;
+    },
+
+    async loadAwsNetwork(region) {
+      const vd = this._vd || {};
+      try {
+        const q = region ? ('?region=' + encodeURIComponent(region)) : '';
+        const o = await API.get('/api/aws/network-options' + q);
+        this.aws.subnets = o.subnets || [];
+        this.aws.security_groups = o.security_groups || [];
+        this.aws.instance_types = this._withConfigured(o.instance_types || [], vd.aws_desktops_instance_type);
+        if (!this.form.instance_type || !this.aws.instance_types.includes(this.form.instance_type)) {
+          this.form.instance_type = vd.aws_desktops_instance_type
+            || (this.aws.instance_types.includes('t3.medium') ? 't3.medium' : (this.aws.instance_types[0] || ''));
+        }
+        if (!this.form.subnet_id || !this.aws.subnets.some(s => s.id === this.form.subnet_id)) {
+          const cfg = (vd.aws_desktops_subnet_id && this.aws.subnets.some(s => s.id === vd.aws_desktops_subnet_id))
+            ? vd.aws_desktops_subnet_id : '';
+          this.form.subnet_id = cfg || o.default_subnet_id || '';
+        }
+        if (this.form.security_group_ids.length === 0 && o.default_security_group_id) {
+          this.form.security_group_ids = [o.default_security_group_id];
+        }
+      } catch (e) { /* options unavailable — the fields still accept manual values */ }
+    },
+
+    async loadAmis(region) {
+      try {
+        const q = region ? ('?region=' + encodeURIComponent(region)) : '';
+        const r = await API.get('/api/aws/amis' + q);
+        // Windows AMIs are omitted rather than disabled: an AWS pool cannot be
+        // Windows at all, so offering one greyed out invites the question.
+        this.aws.amis = (r.amis || []).filter(a => (a.platform || '').toLowerCase() !== 'windows');
+        this.aws.amisRegion = r.region || region || '';
+      } catch (e) { this.aws.amis = []; }
+    },
+
+    async loadAwsSshKey() {
+      try {
+        const k = await API.get('/api/aws/secrets/ssh-key');
+        this.aws.sshKeyName = (k && k.name) || '';
+      } catch (e) { this.aws.sshKeyName = ''; }
+    },
+
+    // An AMI id is region-scoped and EC2 rejects a foreign one with
+    // InvalidAMIID.NotFound, which names no region at all. Clear and refetch.
+    async onAwsRegionChange() {
+      this.form.subnet_id = '';
+      this.form.security_group_ids = [];
+      this.form.ami_id = '';
+      await Promise.all([this.loadAwsNetwork(this.form.region), this.loadAmis(this.form.region)]);
+    },
+
+    async loadGcp() {
+      if (this.gcp.loaded || this.gcp.loading) return;
+      this.gcp.loading = true;
+      await this._panel();
+      const [custom, pub] = await Promise.all([
+        API.get('/api/gcp/custom-images').catch(() => ({})),
+        API.get('/api/gcp/public-images?os_filter=all').catch(() => ({})),
+      ]);
+      const merge = (r, source) => (r.images || []).map(i => ({ ...i, source: i.source || source }));
+      // Custom first: a desktop pool almost always wants the image this dashboard built.
+      this.gcp.images = [...merge(custom, 'custom'), ...merge(pub, 'public')]
+        .filter(i => (i.os_key || '').toLowerCase() !== 'windows');
+      this.gcp.projectId = custom.project_id || pub.project_id || '';
+      await this.loadGcpNetwork('');
+      this.gcp.loaded = true; this.gcp.loading = false;
+    },
+
+    async loadGcpNetwork(zone) {
+      const vd = this._vd || {};
+      try {
+        const q = zone ? ('?zone=' + encodeURIComponent(zone)) : '';
+        const o = await API.get('/api/gcp/network-options' + q);
+        this.gcp.zones = o.zones || [];
+        this.gcp.subnetworks = o.subnetworks || [];
+        this.gcp.region = o.region || '';
+        this.gcp.sshKeyConfigured = !!o.ssh_key_configured;
+        this.gcp.machine_types = this._withConfigured(o.machine_types || [], vd.gcp_desktops_machine_type);
+        if (!this.form.zone) this.form.zone = this.gcp.zones[0] || '';
+        if (!this.form.machine_type || !this.gcp.machine_types.includes(this.form.machine_type)) {
+          this.form.machine_type = vd.gcp_desktops_machine_type
+            || (this.gcp.machine_types.includes('e2-medium') ? 'e2-medium' : (this.gcp.machine_types[0] || ''));
+        }
+        if (!this.form.subnetwork || !this.gcp.subnetworks.some(s => s.self_link === this.form.subnetwork)) {
+          const cfg = (vd.gcp_desktops_subnetwork && this.gcp.subnetworks.some(s => s.self_link === vd.gcp_desktops_subnetwork))
+            ? vd.gcp_desktops_subnetwork : '';
+          this.form.subnetwork = cfg || (this.gcp.subnetworks[0] || {}).self_link || '';
+        }
+      } catch (e) { /* options unavailable — the fields still accept manual values */ }
+    },
+
+    // Not optional: a sandbox names its subnetwork identically in every region, so a
+    // stale self-link looks right and dies at launch on "Scope of the specified
+    // subnetwork doesn't match the scope of the zone".
+    async onGcpZoneChange() {
+      this.form.subnetwork = '';
+      await this.loadGcpNetwork(this.form.zone);
+    },
 
     async loadAzure() {
       if (this.azure.loaded || this.azure.loading) return;
@@ -396,14 +732,27 @@ function desktopsPage() {
       this.loadAzureNetwork(this.form.location);
     },
 
+    // Ends `return false`, not `return true`. The old fallthrough enabled Create for
+    // any non-Azure cloud, which meant a click that could only ever 400.
     canSubmit() {
-      if (!this.form.name || !this.form.count) return false;
-      if (this.form.cloud === 'azure') {
-        const common = this.form.image_id && this.form.vm_size && this.form.subnet_id;
-        if (this.form.os_type === 'Windows') return !!common;
-        return !!(common && this.form.ssh_public_key);
+      const f = this.form;
+      if (!f.name || !f.count) return false;
+      if (f.cloud === 'azure') {
+        const common = f.image_id && f.vm_size && f.subnet_id;
+        if (f.os_type === 'Windows') return !!common;
+        return !!(common && f.ssh_public_key);
       }
-      return true;
+      if (f.cloud === 'aws') {
+        // >=1 security group is required HERE only, not in _AWS_REQUIRED: EC2 falls
+        // back to the VPC default SG legitimately, so refusing that at the API would
+        // be the service inventing policy. The AWS deploy form asks for one too.
+        return !!(f.ami_id && f.instance_type && f.subnet_id
+                  && f.security_group_ids.length && this.aws.sshKeyName);
+      }
+      if (f.cloud === 'gcp') {
+        return !!(f.image_self_link && f.machine_type && f.subnetwork && this.gcp.sshKeyConfigured);
+      }
+      return false;
     },
 
     async submitCreate() {
@@ -411,19 +760,10 @@ function desktopsPage() {
       try {
         const f = this.form;
         const body = { cloud: f.cloud, name: f.name, count: f.count };
-        if (f.cloud === 'azure') {
-          Object.assign(body, {
-            image_id: f.image_id, location: f.location, vm_size: f.vm_size,
-            subnet_id: f.subnet_id, nsg_ids: f.nsg_id ? [f.nsg_id] : [],
-            resource_group: f.resource_group, os_type: f.os_type || 'Linux',
-            trusted_launch: !!f.trusted_launch,
-            ssh_username: f.ssh_username || 'azureuser',
-            ssh_public_key: f.ssh_public_key, create_public_ip: !!f.create_public_ip,
-          });
-        }
+        Object.assign(body, (this._bodyFor[f.cloud] || (() => ({})))(f));
         await API.post('/api/desktops/pools', body);
         this.showCreate = false;
-        this.flash(f.cloud === 'azure' ? 'Pool created — provisioning VMs…' : 'Pool created.');
+        this.flash('Pool created — provisioning VMs…');
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Create failed.', 'error');
@@ -445,7 +785,7 @@ function desktopsPage() {
     },
 
     async del(p) {
-      if (!confirm(`Delete pool "${p.pool_name}"?\n\nAzure pools terminate their VMs first.`)) return;
+      if (!confirm(`Delete pool "${p.pool_name}"?\n\nThe backing VMs are terminated first.`)) return;
       try {
         await API.del(`/api/desktops/pools/${encodeURIComponent(p.pool_name)}`);
         this.flash('Pool deleting…');

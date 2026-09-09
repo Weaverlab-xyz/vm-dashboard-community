@@ -91,7 +91,7 @@ Remote Access** on there — that step carries toggles only, so fill in the fiel
 
 | Feature | Description |
 |---|---|
-| **PRA jump items** | Shell Jump (VMs), Web Jump (Portainer / Rancher UIs), Remote RDP (virtual desktops) and Protocol Tunnel (databases, Kubernetes API) — created and torn down with the resource |
+| **PRA jump items** | Shell Jump (VMs, and Linux desktop seats), Web Jump (Portainer / Rancher UIs), Remote RDP (Windows desktop seats) and Protocol Tunnel (databases, Kubernetes API) — created and torn down with the resource. A Linux desktop seat registers with **no credential injection**: it authenticates with an SSH key, and there is no SSH-key vault account. |
 | **Gateway hosts** | The hosts those jumps broker *through*. One per cloud is auto-ensured and reference-counted; **Containers → Gateways** inventories them and deploys more to carry session load. See [Gateway hosts](gateways.md) |
 | **PRA Vault accounts** | Tunnel credentials are minted as PRA Vault accounts, which can themselves be onboarded into [Password Safe](password-safe.md) for rotation |
 

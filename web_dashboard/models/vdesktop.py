@@ -29,7 +29,10 @@ class PoolCreateRequest(BaseModel):
     create_public_ip: bool = False          # desktops are private + brokered
     os_type: str = "Linux"                  # "Linux" | "Windows" — Windows seats get generated passwords
     trusted_launch: bool = False            # Win 11 / Trusted-Launch gallery images (SecurityProfile + Windows_Client)
-    ssh_username: str = "azureuser"         # admin username on Windows
+    ssh_username: str = ""
+    # Blank means "let the spec builder choose for this cloud". It used to default to
+    # "azureuser", which is TRUTHY — so every backend's `or self.default_username`
+    # fallback was unreachable and a GCP seat really did log in as azureuser.         # admin username on Windows
     ssh_public_key: Optional[str] = None     # client-provided (as the Azure deploy form does); Linux only
 
     # ── AWS deploy spec (required when cloud == "aws") ──
