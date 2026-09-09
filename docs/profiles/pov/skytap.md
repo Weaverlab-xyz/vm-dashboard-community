@@ -36,6 +36,7 @@ instance the integration is masked off and Settings refuses to enable it.
 | Credential | An **API security token** from the Skytap account page — **not** your account password |
 | Network | Outbound HTTPS from the dashboard to `cloud.skytap.com` |
 | Network, for template builds only | Outbound **TCP to an arbitrary high port** at a Skytap NAT address. Only the automatic runner install needs this — see [building a template](#building-a-template). An egress rule that allows 443 to the API host and nothing else will block it, and the builder says so rather than reporting a generic connection failure |
+| Network **from the guest**, for template builds only | Outbound HTTPS from the **broker VM** to `download.docker.com`, unless the base template already carries a container runtime. This is the guest's route out of the lab, not the dashboard's — the only prerequisite on this list that nothing on this side can test for you. A build that cannot reach it still bakes, with the reason in the **Runner** column |
 
 ### Getting the token
 
@@ -193,7 +194,7 @@ That VM needs three things:
 
 | | |
 |---|---|
-| **Docker** | The agent is a container, and so is the Gateway it later runs beside itself. Podman works if `docker` resolves to it |
+| **Docker** | The agent is a container, and so is the Gateway it later runs beside itself. The build installs Docker CE if the base template carries no runtime, and leaves an existing one alone — Podman works if `docker` resolves to it, though what the builder bakes is Docker, because the agent drives the Engine API over the socket rather than a CLI |
 | **An automatic network** | Skytap's metadata service answers only on VMs attached to one. On a manual network the VM gets no metadata at all, which looks exactly like a missing runner |
 | **The metadata runner** | Below. Skytap hands `user_data` to the guest and **nothing executes it** |
 
@@ -262,7 +263,7 @@ moment Skytap returns it, before anything else can fail, for the reason the whol
 not in this database is the one failure nothing can clean up — and a scratch one bills
 until somebody notices.
 
-### What the build does about the runner
+### What the build does about the runner and Docker
 
 This is the point of the page. [The template contract](#the-template-contract) below
 requires the broker VM to carry a metadata runner, because Skytap hands `user_data` to the
@@ -270,16 +271,24 @@ guest and **nothing executes it**. Before this, that runner existed only as an e
 this document for somebody to copy into an image by hand — and it is the single most common
 way a POV fails.
 
-The build installs it. It publishes SSH on the broker VM, reads the login from Skytap's own
-[stored credentials](#capabilities), installs the runner and its systemd unit, and revokes
-the published service in a `finally`. If the VM carries more than one credential it tries
+**And a runner with no container runtime is the same failure one line later.** The payload
+ends in `docker run`; everything above it is a `mkdir`, a heredoc and two `|| true`s. A
+broker VM with a perfect runner and no Docker therefore reads the payload, dies on that
+line, and re-reads it every twenty seconds forever — while the POV page says `enrolling`
+and names nothing, exactly as if no runner existed. Base templates that carry neither are
+common: a stock AlmaLinux 8 guest has no `docker`, no `podman`, and no socket.
+
+The build installs both. It publishes SSH on the broker VM, reads the login from Skytap's
+own [stored credentials](#capabilities), installs the runner and its systemd unit, then
+Docker CE from `download.docker.com` if — and only if — `docker` does not already resolve,
+and revokes the published service in a `finally`. If the VM carries more than one credential it tries
 each in turn — the first the guest accepts wins, and the **Runner** detail names it — so a
 box holding a stale login beside a good one builds rather than refusing. Three things are
 worth knowing before you rely on it:
 
 - **It reaches a NAT-ed high port, not the API host.** See the prerequisites table above.
   If your egress only allows HTTPS to `cloud.skytap.com`, clear **Install the metadata
-  runner** and use the install script the page offers instead.
+  runner and Docker** and use the install script the page offers instead.
 - **There is no host key to pin.** The VM was created minutes ago by the same API call that
   said where to reach it, and it is destroyed at the end of the job. That trade is
   acceptable for one connection to a machine with a lifetime in minutes, and it is exactly
@@ -289,6 +298,12 @@ worth knowing before you rely on it:
   still a usable template; you paste the script in, which is what you do today. The reason
   lands in the **Runner** column, never in the build's error — which means "this build is
   broken".
+- **The runner goes on first, and the column says which half landed.** The runner is local
+  and cannot really fail; the Docker install reaches a package repository from inside the
+  guest and can. Doing the cheap half first means a guest with no route to Docker's repo
+  ends up one `dnf install` from correct rather than needing the whole script again — and
+  the **Runner** detail carries the state read back off the VM (`docker: MISSING`, or the
+  version it found), not just an exit status.
 
 Published services are otherwise [deliberately unused](#what-is-deliberately-not-used),
 because a published address changes per environment and per power cycle. A build is the one
@@ -311,8 +326,11 @@ Only a `fail` stops a build. A warning is a statement about what a template is *
 defect in it.
 
 Whether the runner is actually installed cannot be read from the platform at all — it is a
-file inside the guest. A Verify says so rather than guessing; a build answers it by
-installing one.
+file inside the guest. Neither can whether Docker is: `command -v docker` is not a thing an
+API answers. So a template carrying **neither** still reports `pass` on all four checks
+above, which is correct — those checks are about what the platform can see — and is also
+the reason a build installs both rather than trusting a green report. A Verify says what it
+cannot know rather than guessing.
 
 ### The scratch environment bills
 
@@ -334,9 +352,11 @@ and the guest fetches it. There is no cloud-init datasource and nothing runs it 
 the broker VM in your template must carry a small runner.
 
 > **The builder writes this for you.** [Building a template](#building-a-template) generates
-> the runner from the same marker constants the dashboard writes into the payload, and
-> installs it. The shape below is what it generates, and what you need if you are baking a
-> template by hand — **POV → Templates** will also just hand you the script to paste.
+> the runner from the same marker constants the dashboard writes into the payload, installs
+> it, and installs Docker beside it when the guest has no runtime. The shape below is what
+> it generates, and what you need if you are baking a template by hand — **POV → Templates**
+> will also just hand you the script to paste. That script is plain ASCII on purpose: the
+> console you may have to type it into has no clipboard.
 
 The runner has to do four things. Anything that does them is fine; this is the shape:
 
@@ -509,14 +529,15 @@ rather than failing somewhere inside a job.
 | **Test connection** says the host could not be reached | DNS, a firewall or an outbound proxy | Not a credential problem. Check outbound HTTPS to the API URL from wherever the dashboard runs |
 | VM counts show `—` | The collection read did not include the VM array | Expected. Open the environment for the measured count — a dash means "not measured", never zero |
 | The Broker column reads **none** and the row names other VMs | No VM matches the POV's Broker VM name | Rename the template's broker VM, or create the POV with the name your template actually uses. The match is exact |
-| The Broker column reads **enrolling** and never changes | Nothing executed the payload | The broker VM has no metadata runner ([template contract](#the-template-contract)), is on a manual network, or cannot reach the agent endpoint. Fix it and press **Broker** to re-issue |
-| "no agent enrolled within 14 minutes" | Same causes as above | The bootstrap is still on the VM — `docker logs dashboard-agent` there, if it ever started, says which |
+| The Broker column reads **enrolling** and never changes | Nothing executed the payload, or it executed and died | The broker VM has no metadata runner ([template contract](#the-template-contract)), **has no `docker`**, is on a manual network, or cannot reach the agent endpoint. Fix it and press **Broker** to re-issue |
+| "no agent enrolled within 14 minutes" | Same causes as above | The bootstrap is still on the VM — `user_data` is only cleared on a successful enrolment, so being able to read it proves the agent never enrolled. On the guest: `journalctl -u dashboard-bootstrap-runner -n1 -o cat` names the line that failed, and `docker logs dashboard-agent`, if it ever started, names the rest. A `docker: command not found` there is the base template, not this POV |
 | "this dashboard does not know its own public URL" | No pinned audience and no `public_base_url` | An agent inside a customer network needs an address. Set it in Settings → Integrations → Remote Agents |
 | "the agent endpoint is `http://…`" | The audience is plaintext | The agent refuses to sign over plaintext, so the broker would never enrol. Terminate TLS and correct **Public base URL** |
 | A build fails with "does not satisfy the template contract" | The base template has no broker VM, or its broker is on a manual network | Read the contract report on the build row. Press **Discard** to reap the scratch environment, fix the base template, and build again |
-| The **Runner** column reads `failed` and names a firewall | The SSH install could not reach the published port | It dials a NAT-ed high port, not `cloud.skytap.com`. Either open that egress or clear **Install the metadata runner** and paste the install script onto the broker VM by hand — the template itself is fine |
+| The **Runner** column reads `failed` and names a firewall | The SSH install could not reach the published port | It dials a NAT-ed high port, not `cloud.skytap.com`. Either open that egress or clear **Install the metadata runner and Docker** and paste the install script onto the broker VM by hand — the template itself is fine |
 | The **Runner** column reads `failed` with "refused all N stored credentials" | Every login stored against the broker VM was rejected by its sshd | The detail names the usernames it tried. Correct the credential on that VM in Skytap and build again — SSH answered, so this is the login and not the route |
-| The **Runner** column reads `failed` with "the runner install exited …" | A login worked but the script did not finish | The runner installs as root, so check that the credential you left is an administrator with `sudo`. The template still bakes; paste the script in by hand |
+| The **Runner** column reads `failed` with "the install exited …" | A login worked but the script did not finish | It installs as root, so check that the credential you left is an administrator with `sudo`. The detail carries the state read back off the VM afterwards, so it says which half landed. The template still bakes; paste the script in by hand |
+| The **Runner** detail says `docker: MISSING` | The runner landed and the runtime did not | Almost always no route from the **guest** to `download.docker.com` (see [prerequisites](#prerequisites)), or a distro Docker's repo does not serve — the detail names it. Install a runtime on the broker VM by hand and re-bake; the runner on it is already correct |
 | The **Runner** column reads `skipped` | You cleared the checkbox, or no broker VM was resolved | Not a failure. Paste the install script from **POV → Templates** onto the broker VM |
 | A build row shows a **build env** that is still running | The build failed, or you asked to keep it | It is billing. Press **Discard** to reap it. A failed build keeps the id on purpose, so this always works |
 | Discard says the environment could not be deleted | Skytap refused the delete | The row stays visible with its id rather than being marked discarded — marking it would hide a running environment. Clear the cause and press Discard again |

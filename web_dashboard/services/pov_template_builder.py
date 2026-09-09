@@ -112,6 +112,35 @@ RUNNER_MARK_DIR = "/var/lib/dashboard-bootstrap"
 # boot and again on every re-broker, so this is a liveness interval, not a poll for work.
 _RUNNER_INTERVAL_S = 20
 
+# The container runtime the broker VM must have, and where its packages come from.
+#
+# **A runner without a runtime is the same failure, one line later.** The bootstrap the
+# dashboard injects ends in `docker run`, and everything above that line is `mkdir`, a
+# heredoc and two `|| true`s — so `docker run` is the first line in it that can fail. A
+# broker VM with a perfect runner and no Docker reads the payload, dies on that line, and
+# re-reads it every twenty seconds forever, while the POV page says `enrolling` and names
+# nothing. That is indistinguishable from having no runner at all, which is why installing
+# one without the other was only ever half a fix.
+#
+# **Docker CE from Docker's own repo, not the distro's `podman` + `podman-docker`.** The
+# shim satisfies `command -v docker` and would satisfy the check below, and the contract in
+# docs/profiles/pov/skytap.md still accepts it on a template somebody else authored. But
+# the agent does not drive a CLI: it speaks the Docker Engine API over the socket directly,
+# and the parts of it most likely to differ under Podman are the ones that have already
+# produced a bug here — binary log frames and a privileged sibling holding /dev/net/tun.
+# What this builder BAKES should be the runtime the feature is tested against.
+#
+# A base image that already carries either is left alone: reinstalling over a working
+# runtime is how a build breaks a template that was fine.
+DOCKER_PACKAGES = "docker-ce docker-ce-cli containerd.io"
+DOCKER_REPO_BASE = "https://download.docker.com/linux"
+
+# What the post-install probe asks the guest. One constant because it is read on both
+# paths — after a success, to name what landed, and after a failure, to name which half.
+_STATE_PROBE = ("systemctl is-active dashboard-bootstrap-runner 2>/dev/null "
+                "|| echo 'runner: INACTIVE'; "
+                "docker --version 2>/dev/null || echo 'docker: MISSING'")
+
 
 # ── the runner ───────────────────────────────────────────────────────────────
 
@@ -192,7 +221,7 @@ read_payload() {{
       # Pull the user_data string out of the JSON document without a JSON parser: the
       # payload is a shell script, and python may not be installed on a minimal guest.
       #
-      # The capture is \\([^"\\\\]|\\\\.\\)* — a JSON string body — and NOT `.*`. A greedy
+      # The capture is \\([^"\\\\]|\\\\.\\)* - a JSON string body - and NOT `.*`. A greedy
       # `.*` runs to the last quote on the line, so every field that happens to follow
       # user_data is appended to a script this runner then executes as root. That is a
       # remote-content-to-root-shell bug, not a formatting nit.
@@ -254,19 +283,147 @@ WantedBy=multi-user.target
 """
 
 
+def render_docker_install() -> str:
+    """The container runtime install, as a ``/bin/sh`` block the install script appends.
+
+    Its own renderer rather than more lines inside ``render_install_script`` because it is
+    the half that can actually fail — it reaches a package repository over the network from
+    inside the guest — and a thing that can fail is a thing to be able to test on its own.
+
+    Three properties, and each is a way a build produces a template that looks fine:
+
+    1. **It is idempotent, and "already present" means left alone.** A base image with
+       Docker, or with ``podman`` + ``podman-docker`` aliasing it, satisfies the contract.
+       Reinstalling over either is how a build breaks a template that worked.
+    2. **It verifies the daemon runs, not that a package landed.** A runtime installed and
+       not started fails the bootstrap in exactly the same place as one never installed.
+    3. **An unsupported distro says so, naming itself.** ``download.docker.com`` serves the
+       Debian and RHEL families; on anything else this exits non-zero with the distro's own
+       ``ID`` in the message, so the build's Runner detail names the thing to fix rather
+       than a package manager's error.
+
+    Written without ``${...}`` parameter expansion on purpose: every variable it reads
+    from ``/etc/os-release`` is initialised to empty first, because the script runs under
+    ``set -u`` and a Debian guest has no ``VERSION_ID`` field to speak of.
+    """
+    return f"""# --- the container runtime ----------------------------------------
+# The injected bootstrap ends in `docker run`, and that is the first line in it that can
+# fail. A broker with a runner and no runtime re-runs the payload every {_RUNNER_INTERVAL_S}s forever
+# while the POV page says `enrolling` and names nothing.
+if command -v docker >/dev/null 2>&1; then
+  echo "docker: already present, left alone"
+else
+  ID=""
+  ID_LIKE=""
+  VERSION_ID=""
+  VERSION_CODENAME=""
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+  fi
+
+  case " $ID $ID_LIKE " in
+    *" ubuntu "*|*" debian "*)
+      case " $ID $ID_LIKE " in
+        *" ubuntu "*) DOCKER_REPO_DIR=ubuntu ;;
+        *) DOCKER_REPO_DIR=debian ;;
+      esac
+      if [ -z "$VERSION_CODENAME" ]; then
+        echo "this guest's /etc/os-release names no VERSION_CODENAME, and Docker's apt repository is per-release. Install docker by hand, then re-run this script." >&2
+        exit 1
+      fi
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get -y -q update
+      apt-get -y -q install ca-certificates curl gnupg
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL "{DOCKER_REPO_BASE}/$DOCKER_REPO_DIR/gpg" -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] {DOCKER_REPO_BASE}/$DOCKER_REPO_DIR $VERSION_CODENAME stable" \\
+        > /etc/apt/sources.list.d/docker.list
+      apt-get -y -q update
+      apt-get -y -q install {DOCKER_PACKAGES}
+      ;;
+    *" rhel "*|*" centos "*|*" fedora "*)
+      # ID before ID_LIKE: an AlmaLinux guest's ID_LIKE is "rhel centos fedora", so a
+      # family match that looked for fedora first would send it to the wrong repo.
+      case "$ID" in
+        fedora) DOCKER_REPO_DIR=fedora ;;
+        *) DOCKER_REPO_DIR=centos ;;
+      esac
+      DOCKER_MAJOR=$(echo "$VERSION_ID" | cut -d. -f1)
+      if [ -z "$DOCKER_MAJOR" ]; then
+        echo "this guest's /etc/os-release names no VERSION_ID, and Docker's yum repository is per-major-release. Install docker by hand, then re-run this script." >&2
+        exit 1
+      fi
+      cat > /etc/yum.repos.d/docker-ce.repo <<DASHBOARD_DOCKER_REPO_EOF
+[docker-ce-stable]
+name=Docker CE Stable
+baseurl={DOCKER_REPO_BASE}/$DOCKER_REPO_DIR/$DOCKER_MAJOR/$(uname -m)/stable
+enabled=1
+gpgcheck=1
+gpgkey={DOCKER_REPO_BASE}/$DOCKER_REPO_DIR/gpg
+DASHBOARD_DOCKER_REPO_EOF
+      # --allowerasing: on a RHEL-family guest carrying the distro's own container stack,
+      # containerd.io replaces runc, and without this dnf reports a dependency conflict
+      # rather than resolving it.
+      if command -v dnf >/dev/null 2>&1; then
+        dnf -y install {DOCKER_PACKAGES} --allowerasing
+      else
+        yum -y install {DOCKER_PACKAGES}
+      fi
+      ;;
+    *)
+      echo "cannot install a container runtime automatically on '$ID': download.docker.com serves the debian and rhel families. Install docker on the broker VM by hand and re-run this script; the runner above is already in place." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Enable and start it whether this script installed it or found it. A present-but-stopped
+# daemon fails the bootstrap in exactly the same place as a missing one, and neither of
+# these is an error worth stopping on: a `podman-docker` guest has no `docker` unit at all
+# and is perfectly able to answer the check below.
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl enable docker >/dev/null 2>&1 || true
+  systemctl start docker >/dev/null 2>&1 || true
+else
+  service docker start >/dev/null 2>&1 || true
+fi
+
+# Working, not merely installed. A package that landed beside a daemon that will not start
+# fails the bootstrap in the same place as a guest that never had one, and this is the last
+# moment anything is watching.
+if ! docker version >/dev/null 2>&1; then
+  echo "the broker VM still has no working 'docker' after this script. The injected bootstrap ends in 'docker run', so every POV built from this template would sit at 'enrolling' with nothing in the job to say why. Fix the runtime on this VM before baking it." >&2
+  exit 1
+fi
+echo "docker: ready"
+"""
+
+
 def render_install_script() -> str:
-    """Runner + unit + enable, as one script an operator can paste into a root shell.
+    """Runner + unit + enable + the container runtime, for one paste into a root shell.
 
     This is the fallback path, and it is offered on every build rather than only on a
     failed one: an SE baking a template on a platform with no published-service capability,
     or from a network with no route to a NAT-ed high port, needs it as the *primary* route
     and should not have to fail once to find it.
+
+    **The runner is installed before the runtime, and that ordering is deliberate.** The
+    runner is local, costs nothing and cannot really fail; the Docker install reaches a
+    package repository from inside the guest and can. Landing the cheap half first means a
+    guest with no route to ``download.docker.com`` still ends up with a runner — the
+    template is one manual ``dnf install`` from correct instead of needing this script run
+    again — while the exit status still says the script failed.
+
+    Note for anyone tempted to put a timeout around this later: the package install makes
+    it a multi-minute script, where the runner alone was a multi-second one.
     """
     runner = render_runner()
     unit = render_runner_unit()
+    docker = render_docker_install()
     return f"""#!/bin/sh
-# Install the dashboard's metadata runner. Run as root on the broker VM, then bake the
-# environment into a template.
+# Install the dashboard's metadata runner and the container runtime it needs. Run as root
+# on the broker VM, then bake the environment into a template.
 set -eu
 
 cat > {RUNNER_PATH} <<'DASHBOARD_RUNNER_EOF'
@@ -280,7 +437,8 @@ mkdir -p {RUNNER_MARK_DIR}
 systemctl daemon-reload
 systemctl enable --now dashboard-bootstrap-runner
 systemctl is-active dashboard-bootstrap-runner
-"""
+
+{docker}"""
 
 
 # ── the template contract ────────────────────────────────────────────────────
@@ -401,7 +559,7 @@ def contract_ok(report: list[dict]) -> bool:
 
 async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
                        sleep=None) -> str:
-    """Install the runner over SSH, trying each login in turn. Returns a summary line.
+    """Install the runner and the runtime over SSH, each login in turn. Returns a summary.
 
     **Two loops, because two different failures wear the same costume.** A brand-new guest
     answers TCP before sshd is ready, so *unreachable* has to be retried on a ladder — ten
@@ -455,21 +613,26 @@ async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
                                             check=False)
                     if result.exit_status != 0:
                         stderr = (result.stderr or "").strip()[:400]
+                        # Which half landed is the useful part. The script installs the
+                        # runner first and the container runtime second, so the common
+                        # failure leaves a template with a runner and no Docker — which
+                        # dies at `docker run` on every POV built from it, not at
+                        # enrolment. Probing says that; an exit status does not.
+                        probe = await conn.run(_STATE_PROBE, check=False)
+                        landed = " ".join((probe.stdout or "").split())[:200]
                         raise TemplateBuildError(
-                            f"the runner install exited {result.exit_status} on the broker "
-                            f"VM as {username}{': ' + stderr if stderr else ''}. The runner "
-                            f"installs as root, so a credential without sudo gets exactly "
-                            f"this far. The template can still be baked and the script "
-                            f"pasted in by hand.")
-                    check = await conn.run(
-                        "systemctl is-active dashboard-bootstrap-runner; "
-                        "docker --version 2>/dev/null || echo 'docker: MISSING'",
-                        check=False)
+                            f"the install exited {result.exit_status} on the broker VM as "
+                            f"{username}{': ' + stderr if stderr else ''}. State on the VM "
+                            f"now: {landed or 'unknown'}. It installs as root, so a "
+                            f"credential without sudo gets exactly this far. The template "
+                            f"can still be baked and the script pasted in by hand.")
+                    check = await conn.run(_STATE_PROBE, check=False)
                     detail = " ".join((check.stdout or "").split())[:300]
                     # Naming the login that worked is the whole point of trying several: the
                     # build row is where an SE finds out which one the VM accepted.
-                    return f"runner installed over SSH as {username}; {detail}" if detail \
-                        else f"runner installed over SSH as {username}"
+                    return f"runner and runtime installed over SSH as {username}; " \
+                           f"{detail}" if detail \
+                        else f"runner and runtime installed over SSH as {username}"
             except TemplateBuildError:
                 # This login worked and the install did not. Another login does not fix a
                 # script that ran and failed, and re-running it under one would re-apply a
@@ -510,7 +673,7 @@ async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
 
 
 async def prepare_broker_vm(mod, env_id: str, vm: dict) -> str:
-    """Publish SSH, install the runner, revoke the published service. Returns a summary.
+    """Publish SSH, install the runner and Docker, revoke the service. Returns a summary.
 
     ``docs/profiles/pov/skytap.md`` rules published services out for POV *wiring*, because a
     published address changes per environment and per power cycle. A build is the one case
@@ -702,7 +865,7 @@ async def run_template_build(job_id: str, meta: dict) -> None:
             # Never fatal. A template that bakes without the runner is still a usable
             # template — the operator pastes the script in, which is what they do today.
             job_service.update_progress(db, job_id, 60,
-                                        "Installing the metadata runner…")
+                                        "Installing the metadata runner and Docker…")
             if not meta.get("install_runner", True):
                 build.prepare_method = "skipped"
                 build.prepare_detail = ("the runner install was not requested; paste the "
@@ -837,7 +1000,8 @@ def serialize(build: PovTemplateBuild) -> dict:
 __all__ = [
     "TemplateBuildError", "STATUS_BUILDING", "STATUS_PREPARING", "STATUS_BAKING",
     "STATUS_READY", "STATUS_FAILED", "STATUS_DISCARDED",
-    "render_runner", "render_runner_unit", "render_install_script",
+    "render_runner", "render_runner_unit", "render_docker_install",
+    "render_install_script",
     "check_contract", "contract_ok", "prepare_broker_vm", "run_template_build",
     "discard", "get", "serialize", "CHECK_PASS", "CHECK_WARN", "CHECK_FAIL",
 ]
