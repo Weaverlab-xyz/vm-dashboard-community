@@ -210,6 +210,58 @@ def test_the_bootstrap_is_valid_shell():
         os.unlink(path)
 
 
+def test_the_bootstrap_pulls_the_images_the_policy_names():
+    """Naming an image is not the same as having it. The agent refuses to pull -- correct on
+    a customer's host, wrong on a VM the dashboard built and whose image names it chose --
+    so `agent_gateway` failed with "not present on this host" on a machine nobody had logged
+    into. The bootstrap fetches them instead."""
+    script = pov_broker.render_bootstrap(
+        env_name="poc-01", dashboard_url="https://d", enroll_code="a",
+        policy_yaml="v: 1\n",
+        images=(pov_broker.GATEWAY_IMAGE, pov_broker.ANSIBLE_VM_IMAGE))
+    assert pov_broker.GATEWAY_IMAGE in script
+    assert pov_broker.ANSIBLE_VM_IMAGE in script
+    assert "docker pull" in script
+
+
+def test_the_pull_runs_before_the_agent_is_replaced():
+    """A slow registry must not cost a re-broker its running agent. Pull first, and the one
+    already serving keeps serving until its replacement is ready."""
+    script = pov_broker.render_bootstrap(
+        env_name="poc-01", dashboard_url="https://d", enroll_code="a",
+        policy_yaml="v: 1\n", images=(pov_broker.GATEWAY_IMAGE,))
+    assert script.index("docker pull") < script.index("docker rm -f dashboard-agent")
+
+
+def test_a_failed_pull_never_costs_the_pov_its_agent():
+    """`set -eu` is in force, so an unguarded pull failure would abort the bootstrap and
+    leave no agent at all. A POV with an enrolled agent and one missing image refuses one
+    job and names it; that is much the better failure, so the pull is guarded."""
+    script = pov_broker.render_bootstrap(
+        env_name="poc-01", dashboard_url="https://d", enroll_code="a",
+        policy_yaml="v: 1\n", images=(pov_broker.GATEWAY_IMAGE,))
+    pull = next(ln for ln in script.splitlines() if "docker pull" in ln)
+    assert "||" in pull, pull
+
+
+def test_no_images_emits_no_loop_at_all():
+    """`for IMAGE in ; do` is a syntax error that would take the whole bootstrap with it,
+    and "no guest opted in for configuration yet" is an ordinary state."""
+    script = pov_broker.render_bootstrap(
+        env_name="poc-01", dashboard_url="https://d", enroll_code="a",
+        policy_yaml="v: 1\n")
+    assert "for IMAGE" not in script and "docker pull" not in script
+
+
+def test_the_ansible_image_is_pulled_only_when_config_management_is_on():
+    """`render_policy` names `ansible.vm_image` only when there are targets, so pulling it
+    unconditionally would fetch a large image for a POV that may never configure a guest.
+    Opting a guest in takes a re-broker anyway, which is this same code path."""
+    assert pov_broker.ANSIBLE_VM_IMAGE not in pov_broker.render_bootstrap(
+        env_name="p", dashboard_url="https://d", enroll_code="a",
+        policy_yaml="v: 1\n", images=(pov_broker.GATEWAY_IMAGE,))
+
+
 def test_the_bootstrap_is_ascii_only():
     """It travels as a JSON string through a metadata service, out of it through two `sed`
     passes in the guest runner, and into `sh` — and in the worst case a human retypes it

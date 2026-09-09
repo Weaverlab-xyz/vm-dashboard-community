@@ -330,7 +330,8 @@ def render_policy(targets: list[str], ansible_targets: list[str] | None = None,
 
 
 def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
-                     policy_yaml: str, now: datetime | None = None) -> str:
+                     policy_yaml: str, images: tuple = (),
+                     now: datetime | None = None) -> str:
     """The script the guest runs, between its two markers.
 
     A ``/bin/sh`` script rather than cloud-init: Skytap's mechanism hands bytes to the
@@ -360,7 +361,42 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
     Adding a group is not a loosening: the socket already *is* root on this host, and that
     is stated above and in the docs. What changes is only whether the process the dashboard
     put there on purpose can use the thing the dashboard mounted on purpose.
+
+    **And naming an image is not the same as having it.** ``images`` are pulled here, before
+    the agent that needs them starts. The agent will not pull one for itself and says so in
+    three separate refusals -- a rule that is right where it was written: on a customer's
+    own agent host a pull is a network fetch of executable content, so ``policy.yaml``
+    grants and the operator provisions.
+
+    A POV broker inverts every clause of that. The dashboard built the VM, wrote the policy
+    and **chose the image names**, so leaving the fetch to a human who was never told is how
+    ``agent_gateway`` failed with "not present on this host" on a machine nobody had ever
+    logged into. The pull therefore happens in the script the dashboard already writes,
+    under the same argument as the socket mount above -- and the agent's own promise stays
+    literally true, because the agent still is not the thing doing it.
+
+    Two properties it depends on, both deliberate:
+
+    * **Before the** ``docker rm -f`` **below.** A slow registry then costs a re-broker
+      nothing: the agent already running keeps serving until its replacement is ready.
+    * **Non-fatal.** ``set -eu`` is in force, so an unguarded pull failure would abort the
+      bootstrap and leave the POV with no agent at all. A POV with an enrolled agent and one
+      missing image refuses one job and names it, which is much the better failure.
     """
+    # Built separately so an EMPTY list emits nothing at all: `for IMAGE in ; do` is a
+    # syntax error that would take the whole bootstrap with it, and "this POV has no guest
+    # opted in for configuration yet" is an ordinary state rather than an impossible one.
+    pulls = ""
+    if images:
+        pulls = (
+            "# The images this broker's policy names, fetched before the agent that needs\n"
+            "# them. The AGENT refuses to pull -- right on a customer's own host, but this\n"
+            "# VM is the dashboard's: it built it, wrote the policy and chose these names.\n"
+            "# A failure here warns and carries on: one refused job beats no agent at all.\n"
+            "for IMAGE in " + " ".join(images) + "; do\n"
+            "  docker pull \"$IMAGE\" || echo \"WARNING: could not pull $IMAGE\"\n"
+            "done\n\n")
+
     stamp = (now or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%SZ")
     # The name reaches a shell comment. `api/pov` already constrains it to a slug, but a
     # newline here would end the comment and put whatever followed on its own line, so it
@@ -382,7 +418,7 @@ chmod 0644 "$STATE/policy.yaml"
 # 022, not 077: the container runs as uid 10001 and cannot read a root-owned 0600 file.
 ( umask 022 && printf '%s' '{enroll_code}' > "$STATE/enroll-code" )
 
-# Replace any previous agent AND its state volume. The volume holds the identity written
+{pulls}# Replace any previous agent AND its state volume. The volume holds the identity written
 # at first enrolment; leaving it means the new code is never redeemed, the container signs
 # with a key the dashboard has already cleared, and every poll 401s.
 docker rm -f dashboard-agent >/dev/null 2>&1 || true
@@ -593,9 +629,22 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     # failing as a connection timeout twenty minutes later. What is stored is what was
     # written, which is why it happens here and not in the module that reads it.
     pov_guest_step.record_grant(db, env, win_targets + ssh_targets)
+    # Exactly the images the policy above names, and no others. Computed here for the same
+    # reason the target lists are: `render_policy` and `render_bootstrap` both stay pure,
+    # and the two cannot drift into naming an image the other never fetched.
+    #
+    # The Gateway's is unconditional because its block is (`gateway.enabled: true`, always).
+    # The Ansible one follows the same `if` `render_policy` uses, so a POV with no guest
+    # opted in yet does not pay for an image it may never run -- and when a guest IS opted
+    # in, that takes a re-broker anyway, which is this same code path.
+    images = [GATEWAY_IMAGE]
+    if win_targets or ssh_targets:
+        images.append(ANSIBLE_VM_IMAGE)
+
     payload = render_bootstrap(
         env_name=env.name, dashboard_url=dashboard_url, enroll_code=code,
-        policy_yaml=render_policy(targets, win_targets, ssh_targets))
+        policy_yaml=render_policy(targets, win_targets, ssh_targets),
+        images=tuple(images))
 
     mod = lab_platforms.adapter(env.platform)
     if mechanism == "metadata":

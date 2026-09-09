@@ -62,6 +62,47 @@ to start a Gateway without it rather than start one that cannot work. Without th
 capabilities a Gateway registers **online** and every tunnel silently times out, which
 reads as a firewall problem for a long time.
 
+### The images, and who fetches them
+
+On a customer-owned agent host the agent **will not pull an image for you** — a pull is a
+network fetch of executable content, so `policy.yaml` grants and the operator provisions.
+That rule is unchanged, and [the remote-agent guide](../../remote-agents.md) still
+describes it.
+
+**A POV broker is the exception, because every clause of that argument inverts.** The
+dashboard built the VM, wrote the `policy.yaml` and *chose the image names*, so leaving the
+fetch to a person who was never told produced `agent_gateway` failing with *"is not present
+on this host"* on a machine nobody had ever logged into. The **bootstrap** therefore pulls
+them — the same script that mounts the Docker socket, under the same argument, and without
+the agent doing the pulling.
+
+Two images, and only the ones the generated policy actually names:
+
+| Image | Pulled | Used by |
+|---|---|---|
+| `beyondtrust/sra-jumpoint:latest` | always | the POV Gateway |
+| `chrweav/ansible-winrm:latest` | only once a guest is opted in for configuration | the Resource Broker and Entitle agent installs |
+
+The pull runs **before** the agent is replaced, so a slow registry costs a re-broker
+nothing, and it is **non-fatal**: a POV with an enrolled agent and one missing image
+refuses one job and names it, which beats a bootstrap that died at a registry hiccup and
+left no agent at all. If a pull did fail you get the old refusal, which is now accurate —
+`docker pull` it on the broker and run the job again.
+
+This needs **outbound HTTPS from the broker VM to Docker Hub**, alongside the
+`download.docker.com` reachability the runtime install already needs.
+
+### How big the broker VM has to be
+
+One vCPU is enough. It did not used to be: the Config-Management runner asked for a flat
+2.0 CPUs, and **Docker refuses a create whose CPU limit exceeds the host's CPU count** —
+`400 Range of CPUs is from 0.01 to 1.00, as there are only 1 CPUs available`. So a
+one-vCPU broker could not run Config Management at all, which is the size most lab
+templates give it. The runner now clamps its ceiling to what the host reports.
+
+Memory is the real floor: the runner caps a run at 1 GiB and the controller alone is
+~150-200 MB once its dependencies import, so give the broker **at least 2 GB of RAM**.
+
 ### Why "is it there?" is the wrong question
 
 A Gateway is a **cluster**, not a host. Re-installing on a rebuilt broker VM adds a node

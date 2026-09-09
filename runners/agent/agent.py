@@ -3660,6 +3660,11 @@ _JOB_DIR = "/opt/job"
 #               not file-based, and journald is the default on RHEL, Fedora, Rocky and Alma —
 #               so without this the whole feature is dead on those hosts, reported as "the
 #               runner produced no output". The rotation is free for a streaming reader.
+#
+# `NanoCpus` is NOT in the dict below, and it is the one field that cannot be: see
+# `_ansible_nano_cpus`. It is still not derived from the job — the host's own CPU count is
+# a fact about this machine, which is the same class of input as `policy.ansible_network`
+# and the opposite of anything the dashboard sends.
 _ANSIBLE_MEMORY = 1024 * 1024 * 1024
 _ANSIBLE_HOSTCONFIG = {
     "AutoRemove": False,        # the log stream and /wait both outlive the container
@@ -3675,11 +3680,65 @@ _ANSIBLE_HOSTCONFIG = {
     "PidsLimit": 512,
     "Memory": _ANSIBLE_MEMORY,
     "MemorySwap": _ANSIBLE_MEMORY,
-    "NanoCpus": 2_000_000_000,
     "SecurityOpt": ["no-new-privileges:true"],
     "LogConfig": {"Type": "json-file",
                   "Config": {"max-size": "16m", "max-file": "2"}},
 }
+
+# What a run may have when the host can spare it. A ceiling, never a reservation.
+_ANSIBLE_CPUS = 2.0
+
+# What to ask for when the host will not say how many CPUs it has. One CPU is the only
+# answer that is valid on every host there is, and an Ansible run is bound by the network
+# and the target far more than by the controller, so the cost of being wrong here is small
+# and the cost of guessing high is a run that cannot start at all.
+_ANSIBLE_CPUS_FALLBACK = 1.0
+
+_host_ncpu_cached = None
+
+
+def _host_ncpu() -> int:
+    """How many CPUs the Docker host has, or 0 if it will not say.
+
+    Read from the Engine rather than from `os.cpu_count()`: this agent is itself a
+    container, and a cgroup CPU limit on IT would make the interpreter under-report a host
+    that is in fact larger. `NCPU` is the daemon's own view of the machine the sibling will
+    actually run on, which is the number the daemon then validates against.
+
+    Cached for the process's lifetime. A host does not grow a CPU while the agent is up,
+    and a `GET /info` on every Config-Management run is a round trip for an answer that
+    cannot have changed.
+    """
+    global _host_ncpu_cached
+    if _host_ncpu_cached is None:
+        try:
+            status, body = _engine("GET", "/info", timeout=15.0)
+            value = (body or {}).get("NCPU") if status == 200 else 0
+            _host_ncpu_cached = int(value or 0)
+        except Exception:  # noqa: BLE001
+            # Never fatal. A host that will not answer /info still runs containers, and
+            # refusing the job over a diagnostic call would be a worse trade than asking
+            # for the one CPU every host has.
+            _host_ncpu_cached = 0
+    return _host_ncpu_cached
+
+
+def _ansible_nano_cpus() -> int:
+    """The `NanoCpus` for a runner, clamped to what this host actually has.
+
+    **Docker REFUSES a create whose NanoCpus exceeds the host's CPU count**, with
+    `400 Range of CPUs is from 0.01 to 1.00, as there are only 1 CPUs available`. So the
+    flat 2.0 this used to send did not degrade on a one-CPU host — it made Config
+    Management impossible there, and reported it as an opaque 400 from the daemon.
+
+    That is not a rare shape. A POV broker VM is a single small guest whose only job is to
+    run the agent; one vCPU is the sensible size for it and the default in more than one
+    lab template. The feature was unreachable on exactly the host it was built for.
+    """
+    ncpu = _host_ncpu()
+    cpus = min(_ANSIBLE_CPUS, float(ncpu)) if ncpu > 0 else _ANSIBLE_CPUS_FALLBACK
+    return int(cpus * 1_000_000_000)
+
 
 # Ansible writes outside /tmp by default — ~/.ansible/tmp for local temp, ~/.ansible/cp for
 # SSH ControlPersist sockets — and both runner images run as root with HOME=/root. On a
@@ -3902,7 +3961,8 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
         "WorkingDir": _JOB_DIR,
         "Tty": False,              # the deframer's precondition, stated rather than assumed
         "Labels": {SIBLING_LABEL: "1"},
-        "HostConfig": {**_ANSIBLE_HOSTCONFIG, "NetworkMode": policy.ansible_network},
+        "HostConfig": {**_ANSIBLE_HOSTCONFIG, "NetworkMode": policy.ansible_network,
+                       "NanoCpus": _ansible_nano_cpus()},
     }
     status, body = _engine("POST", "/containers/create", spec)
     if status == 404:
