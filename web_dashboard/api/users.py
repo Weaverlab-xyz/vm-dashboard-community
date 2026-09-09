@@ -36,6 +36,11 @@ class UserUpdateRequest(BaseModel):
     is_admin: Optional[bool] = None
     password: Optional[str] = None   # supply to reset password
     permissions: Optional[dict] = None  # None = no change; {} = clear (full access); dict = set specific perms
+    # Which role's material the dashboard leads with for this user. NOT a permission --
+    # services/personas may only reorder and surface. "" clears the assignment and hands
+    # the user back to their OIDC group's focus, or the instance default; None leaves it
+    # alone, like every field above.
+    persona: Optional[str] = None
 
 
 class UserTokenItem(BaseModel):
@@ -89,6 +94,11 @@ async def list_users(
             auth_provider=u.auth_provider,
             mfa_required=u.mfa_required,
             permissions=u.permissions_dict or None,
+            # The ASSIGNED value, not the resolved one: an admin editing this row needs to
+            # see what is stored here, and `persona_source` tells them when the focus a
+            # user actually gets comes from their group instead.
+            persona=u.persona or "",
+            persona_source=("user" if u.persona else "group" if u.session_persona else ""),
         )
         for u in users
     ]
@@ -159,6 +169,15 @@ async def update_user(
         user.is_admin = body.is_admin
     if body.password:
         user.hashed_password = get_password_hash(body.password)
+    if body.persona is not None:
+        # Validated against the registry, never stored raw: a free-text column here would
+        # be a focus that resolves to nothing and reads as "unset" with no way to tell why.
+        # Writes `persona`, never `session_persona` -- that one belongs to the login path.
+        from ..services import personas
+        want = (body.persona or "").strip().lower()
+        if want and want not in personas.VALID_PERSONAS:
+            raise HTTPException(status_code=422, detail=f"Unknown persona '{want}'")
+        user.persona = want or None
     if body.permissions is not None:
         # Empty dict {} clears restrictions (full access); non-empty dict sets specific perms
         user.permissions_dict = body.permissions if body.permissions else None

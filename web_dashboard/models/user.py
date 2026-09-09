@@ -32,6 +32,16 @@ class UserResponse(BaseModel):
     # client can send them there instead of a dashboard that would refuse every call.
     # It is not what confines them -- see api/auth._ACCESSOR_ALLOWED_PREFIXES.
     accessor_env_id: str = ""
+    # The focus assigned to this user, and which rule produced it ("user" | "group" |
+    # "default" | "none"). Returned here because /api/auth/me is the hop both login paths
+    # ALREADY make for is_admin, and an HTML page load carries no identity of its own --
+    # the client caches this into the `persona_assigned` cookie, which is the only way the
+    # nav's server-side render can know whose nav it is. See services/personas.resolve.
+    #
+    # Curation only. Neither field grants or denies anything, which is what makes caching
+    # it in an editable cookie acceptable at all.
+    persona: str = ""
+    persona_source: str = "none"
 
     class Config:
         from_attributes = True

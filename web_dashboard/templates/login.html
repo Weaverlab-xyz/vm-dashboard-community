@@ -160,6 +160,9 @@
                 // so this is always "", and NOT clearing it would carry a stale binding
                 // over from a previous session in the same browser.
                 localStorage.setItem('vm_cli_accessor_env', u.accessor_env_id || '');
+                // The assigned focus, into a cookie the nav's server-side render reads.
+                // Same "always written, never left alone" rule as the line above.
+                window.setAssignedPersona(u);
               })
               .finally(() => { window.location.href = '/'; });
           } catch {
@@ -303,10 +306,15 @@
             }).then(r => r.json());
             localStorage.setItem('vm_cli_is_admin', me.is_admin ? 'true' : 'false');
             localStorage.setItem('vm_cli_accessor_env', me.accessor_env_id || '');
+            window.setAssignedPersona(me);
             if (me.accessor_env_id) home = '/pov/access';
           } catch {
             localStorage.setItem('vm_cli_is_admin', 'false');
             localStorage.setItem('vm_cli_accessor_env', '');
+            // The /me call failed, so we do not know the assignment. Clear rather than
+            // keep: a stale cookie from a previous user of this browser would otherwise
+            // decide this session's nav.
+            window.clearPersonaCookies();
           }
           window.location.href = home;
         },
