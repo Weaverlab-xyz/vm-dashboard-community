@@ -24,8 +24,37 @@
 </head>
 <body class="{{ theme.body_bg }} min-h-screen font-sans text-gray-800">
 
-  <!-- Navigation -->
-  <nav class="{{ theme.nav_bg }} text-white shadow-lg relative" x-data="responsiveNav()" x-cloak x-show="$store.auth.isLoggedIn" @keydown.escape.window="mobileNav = false; moreOpen = false">
+  {# Navigation.
+
+     The Alpine root is this wrapper rather than <nav> itself, and the wrapper is
+     `display: contents` -- it generates no box at all. Two things need that.
+
+     The drawer and the backdrop have to be OUTSIDE <nav>: `position: sticky` creates a
+     stacking context whatever its z-index, so a sticky bar would trap them at its own
+     level, and the `fixed inset-0 z-40` modals in users/, cert_lab/, functions/ and
+     inventory/ would then paint over an open menu. Out here they stay in the root
+     stacking context at the z-50/z-40 they were always written for. They still need
+     `compact` and `mobileNav`, hence one component spanning all three.
+
+     And `contents` rather than a real div because a sticky element only sticks within its
+     PARENT's box: wrapped in an ordinary 64px-tall div, the bar would have 64px of travel
+     and would scroll away exactly as before. With no box generated, <nav>'s containing
+     block is <body> and it sticks for the length of the page. #}
+  <div class="contents"
+       x-data="responsiveNav()" x-cloak x-show="$store.auth.isLoggedIn"
+       @keydown.escape.window="mobileNav = false; moreOpen = false">
+  {# `sticky` only while the row is folded. On a phone the bar is the only navigation
+     affordance there is, and a dashboard runs 4+ screens: unpinned, reaching the menu
+     means scrolling back to the top of the page first. It costs 64px of a ~850px
+     viewport, which is the trade the pin is worth making and the wide row is not -- so
+     the wide row keeps `relative` and every desktop pixel it had.
+
+     z-30 is the floor that clears scrolling page content and stays UNDER the z-40 modal
+     overlays, which should cover the bar. The More popover is a child and would be
+     trapped at z-30 too, but it renders only when `!compact`, i.e. only when this
+     branch is not taken. #}
+  <nav class="{{ theme.nav_bg }} text-white shadow-lg"
+       :class="compact ? 'sticky top-0 z-30' : 'relative'">
     <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
       <div x-ref="navRow" class="flex items-center justify-between h-16 overflow-hidden">
         <!-- Brand -->
@@ -146,10 +175,11 @@
         </div>
       </div>
     </div>
-    {# The overflow popover. A child of <nav> (which is `relative`) rather than of the row
-       holding its button, so navRow's `overflow-hidden` cannot clip it — the nav is the
-       nearest unclipped positioned ancestor, so `top-16` lands it flush under the 64px
-       row and positionMore() supplies the `right` that keeps it under its button.
+    {# The overflow popover. A child of <nav> rather than of the row holding its button,
+       so navRow's `overflow-hidden` cannot clip it — the nav is the nearest unclipped
+       positioned ancestor (`relative` whenever this panel can be seen at all, since it
+       renders only when the row is inline), so `top-16` lands it flush under the 64px row
+       and positionMore() supplies the `right` that keeps it under its button.
 
        `!compact` as well as moreOpen: the button is inside navInline and disappears with
        it when the row folds, but this panel is not, so without the guard a popover left
@@ -165,10 +195,12 @@
          class="absolute top-16 mt-1 w-56 flex flex-col items-stretch space-y-1
                 max-h-[calc(100vh-5rem)] overflow-y-auto
                 {{ theme.nav_bg }} shadow-2xl rounded-lg z-50 p-2"></div>
+  </nav>
 
-    {# The compact flyout drawer. A sibling of navRow rather than a child: it is a
-       viewport overlay, and it has no business living inside the 64px `overflow-hidden`
-       row whose width decides whether it is ever shown.
+    {# The compact flyout drawer. A sibling of <nav>, not a descendant: it is a viewport
+       overlay, and it must stay out of the stacking context a sticky bar creates (see the
+       wrapper above) as well as out of the 64px `overflow-hidden` row whose width decides
+       whether it is ever shown.
 
        Full height, and it therefore paints over the bar's own toggle — so it carries its
        own close button. Before that the X you press to dismiss the drawer sat underneath
@@ -244,7 +276,7 @@
          x-transition:leave-end="opacity-0"
          class="fixed inset-0 bg-black/40 z-40 touch-none"
          x-cloak></div>
-  </nav>
+  </div>
 
   {# Profile accent rail. Empty on a demo instance; on POV it is the one bit of chrome
      that stays visible in a cropped screenshot of the page body. #}

@@ -75,9 +75,32 @@ def _element(src, needle):
 
 
 def _open_tag(src, needle):
-    """The opening tag of whichever element carries ``needle``."""
+    """The opening tag of whichever element carries ``needle``.
+
+    ``needle`` must be something INSIDE the tag (an attribute, a class). To read a tag by
+    its own name, use :func:`_tag_named` — ``rindex`` would otherwise walk backwards past
+    ``<`` characters in the Jinja comment above it and hand back the prose, which
+    describes the very classes a test is trying to assert on.
+    """
     at = src.index(needle)
     return src[src.rindex("<", 0, at):src.index(">", at) + 1]
+
+
+def _tag_named(src, name):
+    """The opening ``<name ...>`` tag itself, quote-aware so an attribute value holding a
+    ``>`` cannot end it early."""
+    i = src.index(f"<{name} ")
+    quote = None
+    for j in range(i, len(src)):
+        c = src[j]
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == ">":
+            return src[i:j + 1]
+    raise AssertionError(f"<{name}> never closes its opening tag")
 
 
 def _nav_row(src):
@@ -309,6 +332,69 @@ def test_the_backdrop_does_not_scroll_the_page_behind_it():
     backdrop = _open_tag(src, "bg-black/40")
     assert "touch-none" in backdrop, (
         f"a swipe on the drawer's backdrop still scrolls the page behind it: {backdrop}")
+
+
+# ── the bar pins on a phone, and only there ──────────────────────────────────
+#
+# Measured in Chromium at 393px on a dashboard 4.3 screens tall: unpinned, the nav's
+# bottom edge sits at -2755px once you reach the end of the page, so the only navigation
+# affordance a phone has is off-screen and reaching it means scrolling all the way back
+# up first. Pinned, the bar reads top 0 / bottom 64 at any scroll offset, and opening the
+# menu from 2000px down leaves the reader at 2000px.
+#
+# The pin costs 64px of a ~850px viewport, which is why it is the FOLDED row's trade and
+# not the wide row's: at 1440px the inline row measures 1376px either way.
+
+def test_the_bar_pins_only_while_the_row_is_folded():
+    tag = _tag_named(_read(), "nav")
+    assert ":class" in tag and "compact" in tag, (
+        f"the bar's positioning does not depend on the fold: {tag}")
+    assert "sticky" in tag and "top-0" in tag, (
+        f"the folded bar is not pinned to the top of the viewport: {tag}")
+    assert "relative" in tag, (
+        "the inline row lost `relative`. The overflow popover is absolutely positioned "
+        f"against <nav> and would escape to the nearest positioned ancestor: {tag}")
+
+
+def test_the_pinned_bar_stays_under_the_pages_modal_overlays():
+    """A pinned bar has to clear scrolling content and duck under a modal. The page's
+    overlays are z-40 (users/, cert_lab/, functions/, inventory/), so the bar's z-index
+    is bounded on both sides: high enough to beat ordinary content, below 40."""
+    tag = _tag_named(_read(), "nav")
+    z = re.search(r"\bz-(\d+)\b", tag)
+    assert z, f"the pinned bar has no z-index and will be painted over by page content: {tag}"
+    assert 0 < int(z.group(1)) < 40, (
+        f"the pinned bar is at z-{z.group(1)}; the page's modal overlays are z-40 and must "
+        "still be able to cover it")
+
+
+def test_the_overlays_are_outside_the_nav_a_sticky_bar_would_trap_them_in():
+    """`position: sticky` creates a stacking context whatever its z-index. With the drawer
+    still inside <nav>, a pinned bar would trap it at the bar's own z-30 — and the
+    `fixed inset-0 z-40` modals in users/, cert_lab/, functions/ and inventory/ would paint
+    over an open menu."""
+    src = _read()
+    nav = src[src.index("<nav "):src.index("</nav>")]
+    assert 'x-show="compact && mobileNav"' not in nav, (
+        "the drawer or its backdrop is back inside <nav>. A sticky bar's stacking context "
+        "would drag it below the page's z-40 modal overlays.")
+    assert 'x-show="compact && mobileNav"' in src, "the drawer left base.html entirely"
+
+
+def test_the_component_root_generates_no_box():
+    """Two things need this. A sticky element only sticks within its PARENT's box, so an
+    ordinary wrapper div — 64px tall, since the drawer and backdrop are `fixed` and add no
+    height — would give the bar 64px of travel and it would scroll away exactly as before.
+    And the drawer, now a sibling of <nav>, still needs `compact` and `mobileNav`, so one
+    component has to span all three."""
+    src = _read()
+    root = _open_tag(src, 'x-data="responsiveNav()"')
+    assert "<nav" not in root, "responsiveNav is still rooted on <nav>; the drawer cannot leave it"
+    assert "contents" in root, (
+        "the component root generates a box. <nav>'s containing block is then that box "
+        f"rather than <body>, and `sticky` has nothing to stick through: {root}")
+    assert 'x-show="$store.auth.isLoggedIn"' in root, \
+        "the nav group is no longer hidden before login"
 
 
 if __name__ == "__main__":
