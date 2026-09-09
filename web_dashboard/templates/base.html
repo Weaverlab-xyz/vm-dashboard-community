@@ -208,7 +208,7 @@
       {# The complete, un-curated link list. `nav-drawer` gives each row a thumb-sized
          height in CSS rather than in the shared classes — the same anchors are measured
          in the bar, where a taller row would spend width this fold exists to save. #}
-      <div class="nav-drawer flex-1 overflow-y-auto flex flex-col items-stretch space-y-1 p-4"
+      <div class="nav-drawer flex-1 overflow-y-auto overscroll-contain flex flex-col items-stretch space-y-1 p-4"
            @click="mobileNav = false">
         {% include '_nav_links.html' %}
       </div>
@@ -226,8 +226,14 @@
       </div>
     </div>
 
-    <!-- Flyout backdrop: dims the page while the drawer is open. Click
-         to dismiss. Sits below the drawer (z-40 < drawer's z-50). -->
+    {# Flyout backdrop: dims the page while the drawer is open. Click to dismiss. Sits
+       below the drawer (z-40 < drawer's z-50).
+
+       touch-none because a swipe here is not a scroll: the backdrop is `fixed` and has
+       nothing to scroll of its own, so a drag on it scrolls the DOCUMENT behind the open
+       menu — the user lets go, taps to dismiss, and finds the page somewhere they did not
+       put it. responsiveNav locks the body as well; this is the half of that lock which
+       iOS honours. #}
     <div x-show="compact && mobileNav"
          @click="mobileNav = false"
          x-transition:enter="transition ease-out duration-200"
@@ -236,7 +242,7 @@
          x-transition:leave="transition ease-in duration-200"
          x-transition:leave-start="opacity-100"
          x-transition:leave-end="opacity-0"
-         class="fixed inset-0 bg-black/40 z-40"
+         class="fixed inset-0 bg-black/40 z-40 touch-none"
          x-cloak></div>
   </nav>
 

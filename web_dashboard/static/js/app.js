@@ -589,6 +589,24 @@ function responsiveNav() {
                 this._t = setTimeout(measure, 50);
             };
             window.addEventListener('resize', onResize);
+            // Scroll lock while the flyout is open. A drawer that lets the page scroll
+            // underneath it costs the user their place: they swipe to reach a link near
+            // the bottom of a ~28-item list, the swipe lands on the backdrop or runs past
+            // the end of the list, and the page behind moves instead. They dismiss the
+            // menu and are somewhere they did not choose.
+            //
+            // `overflow: hidden` on <body> rather than `position: fixed`: html's overflow
+            // is `visible`, so body's propagates to the viewport and the page locks in
+            // place WITHOUT the scroll position being reset, which the position:fixed
+            // version of this trick famously loses. The two chaining paths that overflow
+            // alone does not close are handled in the template — `overscroll-contain` on
+            // the link list, `touch-none` on the backdrop.
+            //
+            // Watching mobileNav alone is enough: measure() bails while the drawer is
+            // open, so `compact` cannot flip underneath it and strand the lock on.
+            this.$watch('mobileNav', open => {
+                document.body.classList.toggle('overflow-hidden', open);
+            });
             // The nav is x-show=isLoggedIn, so it has zero size until login;
             // re-measure when the token changes to catch that transition.
             this.$watch('$store.auth.token', () => this.$nextTick(measure));

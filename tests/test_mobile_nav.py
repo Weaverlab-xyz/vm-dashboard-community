@@ -41,6 +41,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 _BASE = os.path.join(_ROOT, "web_dashboard", "templates", "base.html")
+_APP_JS = os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js")
 
 # Apple's HIG and Android's Material both put the floor for a control a thumb presses at
 # 44px / 48dp. `p-2.5` around a `h-6 w-6` icon is 44; `py-3` around `text-sm` is 44.
@@ -259,6 +260,55 @@ def test_the_drawer_leaves_the_backdrop_reachable_on_a_narrow_phone():
     tag = _open_tag(_drawer(_read()), 'class="fixed inset-y-0 right-0')
     assert "max-w-[" in tag, \
         f"the drawer has no width cap; at 320px it covers the viewport: {tag}"
+
+
+# ── the page must not move underneath the open drawer ────────────────────────
+#
+# Measured in Chromium at 393px on a 4.3-screen dashboard: with the drawer open, a
+# 800px wheel over the backdrop moved the document from 1200 to 1800. The user swipes to
+# reach a link near the bottom of a ~28-item list, the swipe lands on the backdrop or
+# runs past the end of the list, and the page behind moves instead — then they dismiss
+# the menu and are somewhere they did not choose. Three separate paths chain, so three
+# separate guards.
+
+def test_the_body_is_locked_while_the_drawer_is_open():
+    src = _read(_APP_JS)
+    assert "init() {" in src
+    body = src.split("init() {", 1)[1].split("\n        },", 1)[0]
+    assert "$watch('mobileNav'" in body, (
+        "responsiveNav does not watch mobileNav, so nothing locks the page while the "
+        "drawer is open and a swipe on the backdrop scrolls it")
+    assert "document.body.classList" in body and "overflow-hidden" in body, (
+        "the mobileNav watcher does not lock body scroll")
+
+
+def test_the_lock_does_not_throw_the_reader_back_to_the_top():
+    """`position: fixed` is the other way to lock a page and it loses the scroll
+    position — you open the menu, change your mind, and the article you were reading is
+    back at its first line. html's overflow is `visible`, so `overflow: hidden` on body
+    propagates to the viewport and pins the page exactly where it stands."""
+    body = _read(_APP_JS).split("init() {", 1)[1].split("\n        },", 1)[0]
+    watcher = body.split("$watch('mobileNav'", 1)[1].split("});", 1)[0]
+    assert "position" not in watcher and "scrollTo" not in watcher, (
+        f"the scroll lock moves the page rather than pinning it: {watcher}")
+
+
+def test_the_link_list_does_not_chain_its_scroll_to_the_page():
+    """`overflow: hidden` on body does not stop a scroll that STARTED inside the drawer
+    from continuing into the document once the list hits its end."""
+    scroller = _open_tag(_drawer(_read()), "nav-drawer")
+    assert "overscroll-contain" in scroller, (
+        f"the drawer's link list chains its overscroll to the page behind it: {scroller}")
+
+
+def test_the_backdrop_does_not_scroll_the_page_behind_it():
+    """The backdrop is `fixed` with nothing of its own to scroll, so a drag on it goes
+    straight to the document. iOS honours touch-action here where it is unreliable about
+    body overflow."""
+    src = _read()
+    backdrop = _open_tag(src, "bg-black/40")
+    assert "touch-none" in backdrop, (
+        f"a swipe on the drawer's backdrop still scrolls the page behind it: {backdrop}")
 
 
 if __name__ == "__main__":
