@@ -549,6 +549,28 @@ def test_the_sibling_overlay_targets_the_base_files_service_key():
             f"{name}: AGENT_DOCKER_SOCKET={target} matches no mount target")
 
 
+def test_the_sibling_overlay_grants_the_sockets_group():
+    """A mount without the group is a socket the agent cannot open.
+
+    The image runs as uid 10001, a socket is mode 0660, and the failure is `EACCES` at job
+    time on a socket that is present and correct — which the agent's old single message
+    reported as a missing mount. The overlay that hands out the socket has to hand out the
+    group with it, or it hands out nothing.
+    """
+    overlay = yaml.safe_load(_read(os.path.join(_EXAMPLES,
+                                                "docker-compose.sibling.yml")))
+    for name, svc in overlay["services"].items():
+        added = svc.get("group_add") or []
+        assert added, (
+            f"{name}: mounts a socket but adds no group; uid 10001 cannot open a 0660 "
+            f"socket, so the whole opt-in path is unreachable again")
+        # Unset rather than defaulted, so Compose refuses by name instead of the agent
+        # failing a job later with a gid that grants nothing.
+        assert any(":?" in str(g) for g in added), (
+            f"{name}: the gid must be required, not guessed — a wrong gid grants nothing "
+            f"and fails exactly like no gid at all")
+
+
 def test_the_base_example_mounts_no_container_socket():
     """The promise that makes the overlay a separate file: without it the agent holds no
     socket, launches nothing, and cannot be made to."""

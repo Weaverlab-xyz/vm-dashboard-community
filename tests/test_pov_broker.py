@@ -15,6 +15,10 @@ Six properties, each of which fails quietly rather than loudly when it is wrong:
     reapable; failing it would trade a fixable gap for a destroyed environment.
   * **Destroy revokes the agent before deleting the environment.** An enrolled agent whose
     VM has just been deleted keeps polling from nowhere and keeps holding its job.
+  * **The agent joins the Docker socket's group.** Mounting the socket is not the same as
+    being able to open it: the container runs as uid 10001 and the socket is 0660
+    root:docker, so without the group every Gateway install gets EACCES on a socket that
+    is sitting right there — while the agent's refusal says "needs it mounted".
 
 Uses a real SQLite database and a fake adapter, so the orchestrator runs for real. No
 network, no FastAPI.
@@ -24,7 +28,9 @@ Runs under pytest, or standalone:
 """
 import asyncio
 import os
+import subprocess
 import sys
+import tempfile
 import uuid
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -180,6 +186,81 @@ def test_the_code_file_is_written_world_readable():
         policy_yaml=pov_broker.render_policy(["10.0.0.5"]))
     assert "umask 022" in script
     assert "umask 077" not in script
+
+
+def _bootstrap() -> str:
+    return pov_broker.render_bootstrap(
+        env_name="poc-1", dashboard_url=_AGENT_URL, enroll_code="agte_x",
+        policy_yaml=pov_broker.render_policy(["10.0.0.5"]))
+
+
+def test_the_bootstrap_is_valid_shell():
+    """It is generated shell that runs as root on a guest nobody will log into to find out
+    it did not parse. `$DOCKER_GROUP` is deliberately unquoted, which is exactly the kind of
+    line worth having a parser confirm."""
+    script = _bootstrap()
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False,
+                                     encoding="utf-8") as fh:
+        fh.write(script)
+        path = fh.name
+    try:
+        p = subprocess.run(["sh", "-n", path], capture_output=True, text=True)
+        assert p.returncode == 0, f"the bootstrap is not valid /bin/sh: {p.stderr[:300]}"
+    finally:
+        os.unlink(path)
+
+
+def test_the_bootstrap_is_ascii_only():
+    """It travels as a JSON string through a metadata service, out of it through two `sed`
+    passes in the guest runner, and into `sh` — and in the worst case a human retypes it
+    into a console with no clipboard. Nothing in a comment here is worth spending any of
+    that on, so the em dashes stay in the Python and out of the payload."""
+    bad = sorted({c for c in _bootstrap() if ord(c) > 127})
+    assert not bad, f"the bootstrap carries non-ASCII: {bad!r}"
+
+
+def test_the_agent_joins_the_docker_sockets_group():
+    """The bug this exists for. The socket is mounted and the container runs as uid 10001,
+    so without the socket's group the agent gets EACCES and every POV Gateway install is
+    refused — with a message that says the socket needs mounting, which it already is."""
+    script = _bootstrap()
+    assert "--group-add" in script, \
+        "the agent cannot open a 0660 root:docker socket without its group"
+    # Resolved from the socket itself rather than from `getent group docker`: what has to
+    # be opened is the socket, and on a rootless install its group is not `docker` at all.
+    assert f"stat -c '%g' {pov_broker.GUEST_DOCKER_SOCKET}" in script, script
+    assert f"-v {pov_broker.GUEST_DOCKER_SOCKET}:{pov_broker.GUEST_DOCKER_SOCKET}" in script, \
+        "the mount's container side must be the path the agent actually reads"
+
+
+def _run_group_resolution(script: str, stat_stub: str) -> str:
+    """Run just the group-resolution block out of the generated bootstrap.
+
+    Sliced rather than reimplemented, because a copy of these four lines in a test would
+    keep passing after the real ones changed. The slice boundaries are asserted, so a
+    rename fails here loudly instead of silently testing nothing.
+    """
+    start = script.index('DOCKER_GROUP=""')
+    end = script.index("docker run ")
+    return subprocess.run(
+        ["sh", "-s"],
+        input="set -eu\n" + stat_stub + "\n" + script[start:end] + '\necho "[$DOCKER_GROUP]"\n',
+        capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
+
+
+def test_the_group_is_resolved_on_the_guest_not_guessed_here():
+    """The GID varies by distro and by install order, and the dashboard never chose it —
+    so it is read on the VM. 992 here stands for "whatever this guest happens to use"."""
+    out = _run_group_resolution(_bootstrap(), "stat() { echo 992; }")
+    assert out.strip() == "[--group-add 992]", out
+
+
+def test_no_socket_means_no_flag_rather_than_an_empty_argument():
+    """A guest with no socket must still get a runnable `docker run`. An empty but present
+    `--group-add` argument is a container that never starts, and the bootstrap's own
+    `docker rm -f` has already removed the agent that was working."""
+    out = _run_group_resolution(_bootstrap(), "stat() { return 1; }")
+    assert out.strip() == "[]", out
 
 
 def test_the_policy_grants_a_slash_32_per_vm_not_a_subnet():

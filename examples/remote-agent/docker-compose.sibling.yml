@@ -68,6 +68,20 @@ services:
       # you accept that the agent then holds root on this host.
       - ${XDG_RUNTIME_DIR:-/run/user/1000}/docker.sock:/var/run/docker.sock
 
+    # MOUNTING THE SOCKET IS NOT THE SAME AS BEING ABLE TO OPEN IT.
+    #
+    # This image runs as uid 10001 (runners/agent/Dockerfile) and a socket is mode 0660,
+    # so without the socket's GROUP every Engine call gets EACCES on a socket that is
+    # sitting right there. The agent says which of the two it is, but only after a job has
+    # been refused — so set it now. The gid of whichever socket you mounted above:
+    #
+    #   stat -c '%g' ${XDG_RUNTIME_DIR:-/run/user/1000}/docker.sock
+    #
+    # Unset on purpose rather than defaulted: a guessed gid grants nothing and fails
+    # identically, so Compose refusing by name is the shorter road.
+    group_add:
+      - "${DOCKER_SOCKET_GID:?set DOCKER_SOCKET_GID to the gid of the socket mounted above — stat -c %g <socket>}"
+
     # The agent still runs read-only with every capability dropped. Holding the socket
     # does not require loosening the agent's own hardening, and it should not be
     # loosened: the socket is the capability, the container flags are not.
