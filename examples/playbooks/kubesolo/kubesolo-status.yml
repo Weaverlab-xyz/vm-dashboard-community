@@ -1,0 +1,119 @@
+# Read-only smoke test for a KubeSolo node
+# Target: any KubeSolo host. Reports the service state, the node, the bundled
+# control-plane pods, the footprint, and the Entitle agent release if one is
+# installed. Changes nothing.
+#
+# Run it after kubesolo-install.yml to capture the idle baseline, and again after
+# entitle-agent-install.yml to get the delta — that pair of numbers is the sizing
+# answer the PoC exists to produce.
+#
+# extra_vars (all optional):
+#   kubesolo_path: /var/lib/kubesolo
+#   entitle_agent_namespace: entitle
+- name: Report KubeSolo status
+  hosts: all
+  become: true
+  vars:
+    kubesolo_path: /var/lib/kubesolo
+    entitle_agent_namespace: entitle
+    entitle_agent_release: entitle-agent
+  tasks:
+    - name: Detect the KubeSolo service
+      ansible.builtin.command: systemctl is-active kubesolo
+      register: kubesolo_state
+      changed_when: false
+      failed_when: false
+
+    - name: Report a host with no KubeSolo
+      ansible.builtin.debug:
+        msg: >-
+          No KubeSolo service is active here. Run kubesolo-install.yml to install it.
+      when: kubesolo_state.stdout != "active"
+
+    - name: Look for the admin kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: kubeconfig
+
+    - name: Read the node
+      ansible.builtin.command: /usr/local/bin/kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: node_list
+      changed_when: false
+      failed_when: false
+      when: kubeconfig.stat.exists
+
+    - name: Read the bundled control-plane pods
+      ansible.builtin.command: /usr/local/bin/kubectl get pods -n kube-system
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: system_pods
+      changed_when: false
+      failed_when: false
+      when: kubeconfig.stat.exists
+
+    - name: Read the Entitle namespace
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl get deploy,pods -n {{ entitle_agent_namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: entitle_workloads
+      changed_when: false
+      failed_when: false
+      when: kubeconfig.stat.exists
+
+    # The pull policy is hardcoded in the chart and cannot be overridden through
+    # values. Reading it back is how you show an OT reviewer that a pod restart
+    # needs the registry, which is the node's behaviour during a WAN outage.
+    - name: Read the agent's image pull policy
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl get deploy {{ entitle_agent_release }}
+        -n {{ entitle_agent_namespace }}
+        -o jsonpath={.spec.template.spec.containers[*].imagePullPolicy}
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: pull_policy
+      changed_when: false
+      failed_when: false
+      when: kubeconfig.stat.exists
+
+    - name: Read the helm release
+      ansible.builtin.command: >-
+        /usr/local/bin/helm list -n {{ entitle_agent_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: helm_releases
+      changed_when: false
+      failed_when: false
+      when: kubeconfig.stat.exists
+
+    - name: Read the footprint
+      ansible.builtin.command: free -m
+      register: memory
+      changed_when: false
+
+    - name: Measure the state directory
+      ansible.builtin.command: du -sh {{ kubesolo_path }}
+      register: state_size
+      changed_when: false
+      failed_when: false
+
+    - name: Overview
+      ansible.builtin.debug:
+        msg:
+          - "── node ──"
+          - "{{ node_list.stdout_lines | default(['(no kubeconfig)']) }}"
+          - "── kube-system ──"
+          - "{{ system_pods.stdout_lines | default(['(no kubeconfig)']) }}"
+          - "── {{ entitle_agent_namespace }} ──"
+          - "{{ entitle_workloads.stdout_lines | default(['(no kubeconfig)']) }}"
+          - "── helm releases ──"
+          - "{{ helm_releases.stdout_lines | default(['(no kubeconfig)']) }}"
+          - "── agent imagePullPolicy ──"
+          - "{{ pull_policy.stdout | default('(no agent installed)') }}"
+          - "── memory ──"
+          - "{{ memory.stdout_lines }}"
+          - "── state dir ──"
+          - "{{ state_size.stdout | default('(unavailable)') }}"
+      when: kubesolo_state.stdout == "active"

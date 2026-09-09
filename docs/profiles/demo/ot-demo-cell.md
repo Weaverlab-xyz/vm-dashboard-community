@@ -58,6 +58,11 @@ S7comm, Rockwell EtherNet/IP and OPC UA**, so the story holds whichever protocol
 customer's plant speaks. Ticking several protocols on one cell is what turns "we are a
 Siemens shop" and "we are a Rockwell shop" into the same demo.
 
+For the *identity* half of the same conversation — governing who gets access to what,
+from a host inside the plant rather than from the cloud — see
+[KubeSolo](../../kubesolo.md): a single-node Kubernetes small enough for a plant IPC,
+running the same BeyondTrust Entitle agent as the datacenter.
+
 ## Deploying a cell
 
 1. **Bake the image once per cloud**: Storage page → upload
