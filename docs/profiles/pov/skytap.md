@@ -194,7 +194,7 @@ That VM needs three things:
 
 | | |
 |---|---|
-| **Docker** | The agent is a container, and so is the Gateway it later runs beside itself. The build installs Docker CE if the base template carries no runtime, and leaves an existing one alone — Podman works if `docker` resolves to it, though what the builder bakes is Docker, because the agent drives the Engine API over the socket rather than a CLI |
+| **Docker**, enabled at boot | The agent is a container, and so is the Gateway it later runs beside itself. **Enabled** matters as much as installed: a POV boots the template, so a daemon that is merely running when the template was baked is a broker with no runtime on every POV. The build installs Docker CE if the base template carries no runtime, enables it, and leaves an existing one alone — Podman works if `docker` resolves to it, though what the builder bakes is Docker, because the agent drives the Engine API over the socket rather than a CLI |
 | **An automatic network** | Skytap's metadata service answers only on VMs attached to one. On a manual network the VM gets no metadata at all, which looks exactly like a missing runner |
 | **The metadata runner** | Below. Skytap hands `user_data` to the guest and **nothing executes it** |
 
@@ -298,6 +298,13 @@ worth knowing before you rely on it:
   still a usable template; you paste the script in, which is what you do today. The reason
   lands in the **Runner** column, never in the build's error — which means "this build is
   broken".
+- **It gates on "enabled at boot", not on "running now".** `dnf install docker-ce` leaves
+  the unit **disabled** on the RHEL family. A template is baked and then booted, for every
+  POV, every time — so a guest whose daemon is up because somebody typed `systemctl start
+  docker` an hour ago bakes into a template that comes up with no runtime and sits at
+  `enrolling`. The install refuses that, and the **Runner** detail reports the boot state
+  beside the version. A guest with no `docker.service` at all — the Podman shim — is not
+  failed for having no unit to enable.
 - **The runner goes on first, and the column says which half landed.** The runner is local
   and cannot really fail; the Docker install reaches a package repository from inside the
   guest and can. Doing the cheap half first means a guest with no route to Docker's repo
@@ -537,6 +544,7 @@ rather than failing somewhere inside a job.
 | The **Runner** column reads `failed` and names a firewall | The SSH install could not reach the published port | It dials a NAT-ed high port, not `cloud.skytap.com`. Either open that egress or clear **Install the metadata runner and Docker** and paste the install script onto the broker VM by hand — the template itself is fine |
 | The **Runner** column reads `failed` with "refused all N stored credentials" | Every login stored against the broker VM was rejected by its sshd | The detail names the usernames it tried. Correct the credential on that VM in Skytap and build again — SSH answered, so this is the login and not the route |
 | The **Runner** column reads `failed` with "the install exited …" | A login worked but the script did not finish | It installs as root, so check that the credential you left is an administrator with `sudo`. The detail carries the state read back off the VM afterwards, so it says which half landed. The template still bakes; paste the script in by hand |
+| The **Runner** detail says `docker at boot: disabled` | The daemon is up but its unit is not enabled | The build refuses this rather than baking it: a template is booted for every POV, so a daemon that is only running *now* gives each one a broker with no runtime. `systemctl enable docker` on the broker VM and build again — `dnf install docker-ce` leaves it disabled on the RHEL family |
 | The **Runner** detail says `docker: MISSING` | The runner landed and the runtime did not | Almost always no route from the **guest** to `download.docker.com` (see [prerequisites](#prerequisites)), or a distro Docker's repo does not serve — the detail names it. Install a runtime on the broker VM by hand and re-bake; the runner on it is already correct |
 | The **Runner** column reads `skipped` | You cleared the checkbox, or no broker VM was resolved | Not a failure. Paste the install script from **POV → Templates** onto the broker VM |
 | A build row shows a **build env** that is still running | The build failed, or you asked to keep it | It is billing. Press **Discard** to reap it. A failed build keeps the id on purpose, so this always works |

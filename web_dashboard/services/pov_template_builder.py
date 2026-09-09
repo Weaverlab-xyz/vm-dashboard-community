@@ -137,9 +137,17 @@ DOCKER_REPO_BASE = "https://download.docker.com/linux"
 
 # What the post-install probe asks the guest. One constant because it is read on both
 # paths — after a success, to name what landed, and after a failure, to name which half.
+#
+# It asks `is-enabled` as well as `--version` because the state that matters to a TEMPLATE
+# is the one that survives a bake and a boot: a `docker` that answers today because
+# somebody started it by hand is a template every POV comes up broken from. The unit is
+# only asked about when there is one, so a `podman-docker` guest is not reported as
+# disabled for having no `docker.service` to enable.
 _STATE_PROBE = ("systemctl is-active dashboard-bootstrap-runner 2>/dev/null "
                 "|| echo 'runner: INACTIVE'; "
-                "docker --version 2>/dev/null || echo 'docker: MISSING'")
+                "docker --version 2>/dev/null || echo 'docker: MISSING'; "
+                "if systemctl cat docker.service >/dev/null 2>&1; then "
+                "echo \"docker at boot: $(systemctl is-enabled docker 2>&1)\"; fi")
 
 
 # ── the runner ───────────────────────────────────────────────────────────────
@@ -295,8 +303,13 @@ def render_docker_install() -> str:
     1. **It is idempotent, and "already present" means left alone.** A base image with
        Docker, or with ``podman`` + ``podman-docker`` aliasing it, satisfies the contract.
        Reinstalling over either is how a build breaks a template that worked.
-    2. **It verifies the daemon runs, not that a package landed.** A runtime installed and
-       not started fails the bootstrap in exactly the same place as one never installed.
+    2. **It verifies the daemon runs, and separately that it is enabled at boot.** A
+       runtime installed and not started fails the bootstrap in exactly the same place as
+       one never installed — and `dnf install docker-ce` leaves the unit *disabled* on the
+       RHEL family, so "running now" is worth nothing for a template. A template is baked
+       and then booted, for every POV, so enabled-at-boot is the property that survives the
+       bake and the only one worth gating on. Found the hard way on a guest that was
+       running because somebody had just started it by hand.
     3. **An unsupported distro says so, naming itself.** ``download.docker.com`` serves the
        Debian and RHEL families; on anything else this exits non-zero with the distro's own
        ``ID`` in the message, so the build's Runner detail names the thing to fix rather
@@ -378,10 +391,9 @@ DASHBOARD_DOCKER_REPO_EOF
   esac
 fi
 
-# Enable and start it whether this script installed it or found it. A present-but-stopped
-# daemon fails the bootstrap in exactly the same place as a missing one, and neither of
-# these is an error worth stopping on: a `podman-docker` guest has no `docker` unit at all
-# and is perfectly able to answer the check below.
+# Enable and start it whether this script installed it or found it. Neither is an error
+# worth stopping on here: a `podman-docker` guest has no `docker` unit at all and is
+# perfectly able to answer the checks below, which are what actually decide.
 if command -v systemctl >/dev/null 2>&1; then
   systemctl enable docker >/dev/null 2>&1 || true
   systemctl start docker >/dev/null 2>&1 || true
@@ -390,13 +402,23 @@ else
 fi
 
 # Working, not merely installed. A package that landed beside a daemon that will not start
-# fails the bootstrap in the same place as a guest that never had one, and this is the last
-# moment anything is watching.
+# fails the bootstrap in the same place as a guest that never had one.
 if ! docker version >/dev/null 2>&1; then
   echo "the broker VM still has no working 'docker' after this script. The injected bootstrap ends in 'docker run', so every POV built from this template would sit at 'enrolling' with nothing in the job to say why. Fix the runtime on this VM before baking it." >&2
   exit 1
 fi
-echo "docker: ready"
+
+# AND enabled at boot, which is the check that matters for a TEMPLATE. `dnf install
+# docker-ce` leaves the unit disabled on the RHEL family, so a guest can pass the check
+# above while being one power cycle from having no runtime at all - and a template is
+# baked and then booted, every time, for every POV. "Running now" is worth nothing here.
+if command -v systemctl >/dev/null 2>&1 && systemctl cat docker.service >/dev/null 2>&1; then
+  if ! systemctl is-enabled docker >/dev/null 2>&1; then
+    echo "docker is running on the broker VM but its unit is NOT enabled at boot, and 'systemctl enable docker' did not take. A template is baked and then booted, so every POV built from this one would come up with no daemon and sit at 'enrolling'. Enable it on this VM before baking." >&2
+    exit 1
+  fi
+fi
+echo "docker: ready and enabled at boot"
 """
 
 

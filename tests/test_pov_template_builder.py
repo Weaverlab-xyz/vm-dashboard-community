@@ -163,6 +163,51 @@ def test_a_runtime_that_does_not_answer_fails_the_install():
         f"the refusal must name the symptom an SE would otherwise chase: {p.stderr[:300]}"
 
 
+def test_a_runtime_that_is_running_but_disabled_fails_the_install():
+    """The one found live. `dnf install docker-ce` leaves the unit **disabled** on the RHEL
+    family, and the guest it was found on was running only because somebody had just typed
+    `systemctl start docker`. A template is baked and then booted — for every POV, every
+    time — so "running now" is worth nothing here and this must not pass."""
+    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+docker() { return 0; }
+systemctl() { case "$1" in is-enabled) return 1 ;; *) return 0 ;; esac; }
+""")
+    assert p.returncode != 0, \
+        "a runtime that will not come back after a reboot must not bake into a template"
+    assert "boot" in p.stderr, \
+        f"the refusal must say it is about boot, not about now: {p.stderr[:300]}"
+
+
+def test_a_runtime_that_is_running_and_enabled_passes():
+    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+docker() { return 0; }
+systemctl() { return 0; }
+""")
+    assert p.returncode == 0, f"rc={p.returncode} {p.stderr[:300]}"
+    assert "enabled at boot" in p.stdout, p.stdout
+
+
+def test_a_guest_with_no_docker_unit_is_not_failed_for_not_enabling_one():
+    """The `podman` + `podman-docker` guest the contract accepts has no `docker.service` to
+    enable, and `is-enabled` on a unit that does not exist is not a finding about it. The
+    gate asks whether there is a unit first — otherwise the check that protects RHEL-family
+    templates would reject every Podman one."""
+    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+docker() { return 0; }
+systemctl() { case "$1" in cat) return 1 ;; is-enabled) return 1 ;; *) return 0 ;; esac; }
+""")
+    assert p.returncode == 0, \
+        f"a guest with no docker.service must not be failed for it: {p.stderr[:300]}"
+
+
+def test_the_state_probe_reports_the_boot_state_and_not_only_the_version():
+    """The Runner column is where an SE reads this, and `Docker version 26.1.0` beside a
+    disabled unit is a green-looking line about a template that cannot work."""
+    assert "is-enabled docker" in b._STATE_PROBE, b._STATE_PROBE
+    assert "cat docker.service" in b._STATE_PROBE, \
+        "the probe must ask whether there is a unit before reporting on one"
+
+
 def test_the_install_script_installs_the_runner_before_the_runtime():
     """Ordering, and it is deliberate. The runner is local and cannot really fail; the
     runtime reaches a package repository and can. Landing the cheap half first leaves a
