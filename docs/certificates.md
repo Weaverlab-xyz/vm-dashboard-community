@@ -129,9 +129,26 @@ by accident** — the problem first appears at a customer whose CA is segmented.
 ### GCP
 
 The sandbox setup scripts enable `privateca.googleapis.com` and grant the sandbox service
-account the CA Service roles. If your project was bootstrapped before this feature, re-run
-`scripts/sandbox/Linux/setup-gcp.sh` (or `Setup-GcpSandbox.ps1`) — a missing API surfaces
-as a `terraform apply` failure naming the service.
+account `roles/privateca.admin` plus `roles/iam.serviceAccountAdmin` and
+`roles/iam.serviceAccountKeyAdmin`. If your project was bootstrapped before this feature,
+re-run `scripts/sandbox/Linux/setup-gcp.sh` (or `Setup-GcpSandbox.ps1`) — a missing API
+surfaces as a `terraform apply` failure naming the service.
+
+**The two `serviceAccount*` roles are not optional, and they were added later than the
+first two.** The module creates the plugin's own *enrollment* service account and a key for
+it, so a project with only `privateca.admin` builds the CA pool and then fails on
+`iam.serviceAccounts.create` — an `IAM_PERMISSION_DENIED` that names neither this feature
+nor the setup script. If you re-ran the script before they were added, re-run it again or
+grant them by hand:
+
+```bash
+for ROLE in privateca.admin iam.serviceAccountAdmin iam.serviceAccountKeyAdmin; do gcloud projects add-iam-policy-binding "$PROJECT" --member "serviceAccount:$SANDBOX_SA" --role "roles/$ROLE" --condition=None; done
+```
+
+Both the API enable and the IAM grants are eventually consistent — wait a couple of minutes
+before retrying a build, or it can fail the same way once more. Where
+`constraints/iam.disableServiceAccountKeyCreation` is enforced, the key grant is not enough
+and the CA build cannot complete as written; that is an org policy rather than a role.
 
 ---
 
