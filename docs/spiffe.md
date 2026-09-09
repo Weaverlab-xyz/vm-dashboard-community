@@ -73,9 +73,10 @@ minting identities that relying services keep accepting, and it appears on no ot
 
 The **SPIRE** page (preview; enable `spire_lab_enabled` under Settings → Preview
 features) does steps 1–5 below as one job. Configure it under **Settings → SPIRE Lab**,
-and upload the four `spire-*.yml` playbooks on the Config Management page first — a run
+and upload the four `spire-*.yml` playbooks on the **Storage** page first — a run
 fetches assets *by filename from the storage backend*, never from `examples/`, and the
-build form names the ones that are missing.
+build form names the ones that are missing. Storage is where assets are uploaded; Config
+Management only *runs* them.
 
 **It attaches to a VM you already deployed rather than creating one.** That is not a
 shortcut: the Ansible runner resolves the host's SSH key from that VM's own *deploy job*,
@@ -85,6 +86,11 @@ down closes `tcp/8081` and leaves the host alone.
 
 What the build does, in order:
 
+0. Creates the credential's Secrets Safe folder tree (`<root>/<lab>` under the safe) if it
+   is absent — a pre-flight, before anything is touched. The identity playbook is the
+   *last* of the four and writes into a folder it does not create, so without this a
+   missing folder surfaces only after the server is installed and seeded, as an error that
+   reads like a credential fault. The **safe** is never created: it carries its own ACL.
 1. Opens `tcp/8081` on the cloud ACL — an NSG rule on Azure, a VPC firewall rule plus an
    instance tag on GCP, a security-group permission on AWS — to the sources named in
    `spire_lab_source_cidrs`. **Blank opens nothing**, which is correct for a broker

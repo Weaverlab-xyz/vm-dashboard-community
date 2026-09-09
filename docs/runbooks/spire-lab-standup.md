@@ -49,8 +49,16 @@ SSH — so GCP and AWS differ only in §1 and §2. Those sections name what chan
   state, the subscription is in a **different tenant** from your current `az` session and
   needs its own `az login --tenant <id> --use-device-code` first — that is an auth
   failure, not an answer about the provider.
-- **A Secrets Safe safe to write into**, with create rights. §4 stores two secrets in it.
-  `examples/playbooks/password-safe/onboard-safe-and-account.yml` creates one.
+- **A Secrets Safe safe to write into**, with create rights. §4 stores four secrets in
+  it. `examples/playbooks/password-safe/onboard-safe-and-account.yml` creates one.
+
+  **The safe, not the folder.** The identity playbook writes *into* a folder and creates
+  none — the same rule `k3s-kubeconfig.yml` states. The SPIRE page creates the folder tree
+  (`<root>/<lab>`) for you as a pre-flight, before it touches the ACL or the VM, so a
+  missing folder fails in two seconds instead of at the fourth and last stage. Running the
+  playbooks by hand, create it yourself first. **The safe is never created either way** —
+  it carries its own ACL, and a safe that appeared because an automation asked for one is
+  an access boundary nobody chose.
 - Decide the trust domain name now. It is baked into the server config, every SPIFFE ID,
   and the Managed System. `weaverlab.test` is what the plugin's own lab uses.
 

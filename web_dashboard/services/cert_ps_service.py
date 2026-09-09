@@ -277,52 +277,27 @@ async def ensure_secrets_safe_folder(folder_path: str = "") -> dict:
 
     ``folder_path`` is ``<safe>/<folder>/<folder>``: the FIRST segment names an existing
     **safe**, and everything after it is a folder tree created beneath it. A safe is not
-    created here on purpose — it carries its own ACL, and the Secrets Safe folder's
-    permissions are half the access boundary on the certificate (the managed account's
-    access policy is the other half; the weaker of the two is the real one).
+    created on purpose — it carries its own ACL, and the Secrets Safe folder's permissions
+    are half the access boundary on the certificate (the managed account's access policy
+    is the other half; the weaker of the two is the real one).
 
-    Returns ``{"folder_id", "created", "path"}``. Idempotent."""
+    Returns ``{"folder_id", "created", "path"}``. Idempotent.
+
+    The tree-walk itself now lives in ``secrets_backend_service.ensure_bt_folder_path``,
+    because the SPIRE lab needs the identical thing and a second copy of it would have
+    drifted. This keeps the cert-specific parts: the ``cert_ps_folder`` default, and
+    ``CertPSError`` so callers here catch what they always did.
+    """
     import asyncio
     from . import secrets_backend_service
     path = (folder_path or _cfg("cert_ps_folder", "Certificates")).strip().strip("/")
-    segments = [s.strip() for s in path.split("/") if s.strip()]
-    if not segments:
+    if not [seg for seg in path.split("/") if seg.strip()]:
         raise CertPSError("no Secrets Safe folder configured — set cert_ps_folder")
-
-    safes = await asyncio.to_thread(secrets_backend_service.list_bt_safes)
-    safe = next((s for s in (safes or [])
-                 if (s.get("name") or "").casefold() == segments[0].casefold()), None)
-    if not safe:
-        known = ", ".join(sorted((s.get("name") or "") for s in (safes or []))) or "none"
-        raise CertPSError(
-            f"Secrets Safe has no safe named {segments[0]!r} — the first segment of "
-            f"cert_ps_folder names an existing safe. Create it under Secrets → Safes and "
-            f"grant the run-as user write access, then re-run; the folder tree beneath it "
-            f"is created for you. Safes visible to the API user: {known}")
-
-    parent_id, created = str(safe.get("id") or ""), []
-    for segment in segments[1:]:
-        # Re-read each round: a folder created a moment ago has to be visible before its
-        # own child can be parented to it, and `folders list` is unscoped, so matching on
-        # BOTH name and parent_id is what keeps two same-named folders in different safes
-        # from being confused for one another.
-        folders = await asyncio.to_thread(secrets_backend_service.list_bt_folders)
-        match = next((f for f in (folders or [])
-                      if (f.get("name") or "").casefold() == segment.casefold()
-                      and str(f.get("parent_id") or "") == parent_id), None)
-        if match:
-            parent_id = str(match.get("id") or "")
-            continue
-        made = await asyncio.to_thread(
-            secrets_backend_service.create_bt_folder, parent_id, segment)
-        new_id = str((made or {}).get("id") or "")
-        if not new_id:
-            raise CertPSError(
-                f"Secrets Safe accepted the creation of folder {segment!r} but returned no "
-                f"id, so its children cannot be parented — check the run-as user's access "
-                f"to the {segments[0]!r} safe")
-        parent_id, _ = new_id, created.append(segment)
-    return {"folder_id": parent_id, "created": created, "path": path}
+    try:
+        return await asyncio.to_thread(
+            secrets_backend_service.ensure_bt_folder_path, path)
+    except ValueError as exc:
+        raise CertPSError(str(exc)) from exc
 
 
 async def register(*, system_name: str, account_name: str, address: str,

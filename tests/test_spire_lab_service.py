@@ -60,7 +60,8 @@ CALLS = []
 # ── Stubs ─────────────────────────────────────────────────────────────────────
 
 def _install_stubs(*, cidrs=("10.1.0.0/24",), acl_opened=True, acl_raises=False,
-                   stage_fails_on=None, bundle="-----BEGIN CERTIFICATE-----\nx\n"
+                   stage_fails_on=None, folder_created=("weaverlab",),
+                   folder_error="", bundle="-----BEGIN CERTIFICATE-----\nx\n"
                                                  "-----END CERTIFICATE-----",
                    expires="Sep 15 12:04:31 2026 GMT"):
     """Rebind the service's collaborators and return the reloaded service module."""
@@ -98,6 +99,14 @@ def _install_stubs(*, cidrs=("10.1.0.0/24",), acl_opened=True, acl_raises=False,
     sys.modules["web_dashboard.services.ansible_local_run_service"] = runner
 
     secrets = types.ModuleType("web_dashboard.services.secrets_backend_service")
+
+    def ensure_bt_folder_path(path):
+        CALLS.append(("folder", path))
+        if folder_error:
+            # The real one raises ValueError; the service translates it.
+            raise ValueError(folder_error)
+        return {"folder_id": "f-1", "created": list(folder_created), "path": path}
+    secrets.ensure_bt_folder_path = ensure_bt_folder_path
 
     def read_bt_secrets_safe(ref, vault_id=None):
         CALLS.append(("read_secret", ref))
@@ -257,8 +266,8 @@ def test_the_happy_path_opens_the_acl_then_runs_four_playbooks_in_order():
     assert row.status == "available", row.error_message
     # The ACL comes first. Opening it after the install would leave a window where the
     # server is up and unreachable, and the ordering is the whole reachability story.
-    kinds = [c[0] for c in CALLS if c[0] in ("acl", "stage")]
-    assert kinds == ["acl", "stage", "stage", "stage", "stage"], kinds
+    kinds = [c[0] for c in CALLS if c[0] in ("folder", "acl", "stage")]
+    assert kinds == ["folder", "acl", "stage", "stage", "stage", "stage"], kinds
     assert [c[1] for c in _stages()] == list(svc.STAGE_ASSETS)
     assert row.stages_done == "install,ports,seed,identity"
     assert row.entries_seeded == svc.ENTRIES_SEEDED == 11
@@ -425,6 +434,75 @@ def test_an_unreadable_artifact_does_not_fail_a_working_lab():
     assert row.status == "available", row.error_message
     assert not row.trust_bundle_pem
     assert row.admin_svid_expires_at is None
+    db.close()
+
+
+
+# ── the credential's folder, checked before anything is touched ──────────────
+
+def test_the_secrets_folder_is_ensured_before_the_acl_and_before_any_playbook():
+    """The identity playbook WRITES INTO a folder and never creates one. Without this
+    pre-flight the fourth and last stage fails on a folder-not-found, by which point the
+    server is installed and seeded on somebody's VM — and the error reads like a
+    credential fault."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db)
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+
+    ordered = [c[0] for c in CALLS if c[0] in ("folder", "acl", "stage")]
+    assert ordered[0] == "folder", ordered
+    folder = next(c for c in CALLS if c[0] == "folder")
+    # <safe>/<folder tree>: the FIRST segment names an existing safe.
+    assert folder[1] == "Automation/spire/lab"
+    db.close()
+
+
+def test_a_missing_safe_stops_the_build_before_anything_is_touched():
+    """A lab whose credential has nowhere to go is one we should not have started. The
+    safe is never created for you — it carries its own ACL."""
+    svc = _install_stubs(folder_error="Secrets Safe has no safe named 'Automation'")
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db)
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+
+    db.expire_all()
+    row = svc.get_lab(db, row.id)
+    assert row.status == "failed"
+    assert "nowhere to land" in (row.error_message or "")
+    assert "no safe named" in (row.error_message or ""), "the real reason must survive"
+    assert not [c for c in CALLS if c[0] == "acl"], "the ACL must not be touched"
+    assert not _stages(), "no playbook may run"
+    db.close()
+
+
+def test_an_existing_folder_is_not_announced_as_created():
+    """Idempotent: a second lab in the same tree creates nothing, and saying it did would
+    have an operator looking for a folder that was always there."""
+    svc = _install_stubs(folder_created=())
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db)
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+
+    db.expire_all()
+    assert svc.get_lab(db, row.id).status == "available"
+    said = " ".join(str(c[2]) for c in CALLS if c[0] == "progress")
+    assert "Created Secrets Safe folder" not in said
+    db.close()
+
+
+def test_the_folder_path_follows_the_configured_root_and_the_lab_name():
+    """`<root>/<slug(name)>` under the safe. The slug matters: a lab called "Weaver Lab"
+    must not ask Secrets Safe for a folder with a space in it."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    _deploy_job(db)
+    out = svc.provision(db, name="Weaver Lab", trust_domain="weaverlab.test",
+                        cloud="azure", host="spire-01", created_by="tester")
+    row = svc.get_lab(db, out["lab_id"])
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=out["job_id"]))
+    folder = next(c for c in CALLS if c[0] == "folder")
+    assert folder[1] == "Automation/spire/weaver-lab"
     db.close()
 
 
