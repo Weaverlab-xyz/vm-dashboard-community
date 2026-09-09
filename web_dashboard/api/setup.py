@@ -2361,7 +2361,8 @@ _PREVIEW_FLAGS = {
     # as it did before, and no CA pool can be created to bill for.
     "cert_lab_enabled": (
         "Certificate Lab",
-        "Preview. Build a private CA (GCP CAS) that can be destroyed on a timer, and "
+        "Preview. Build a private CA (GCP CAS or AWS Private CA) that can be destroyed "
+        "on a timer, and "
         "onboard certificate identities onto the Password Safe \"Certificate\" custom "
         "plugin — the managed account holds the PKCS#12 passphrase, Secrets Safe holds "
         "the bundle."),

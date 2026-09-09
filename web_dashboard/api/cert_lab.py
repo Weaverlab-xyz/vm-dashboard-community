@@ -3,7 +3,7 @@ Certificate Lab API — preview (gated by the ``cert_lab_enabled`` flag).
 
   GET    /api/cert-lab                    — list dashboard-built certificate authorities
   POST   /api/cert-lab                    — build a CA (record + schedule apply)
-  GET    /api/cert-lab/options            — locations, tiers and what config is missing
+  GET    /api/cert-lab/options            — clouds, locations, tiers and what is missing
   GET    /api/cert-lab/{id}               — one CA
   GET    /api/cert-lab/{id}/chain         — the CA chain PEM, for the mTLS endpoint
   POST   /api/cert-lab/{id}/identities    — onboard a certificate identity onto it
@@ -129,10 +129,25 @@ def build_options(user: User = Depends(require_permission("cloud_function", "rea
         missing.append("cert_ps_functional_account — one account carries BOTH the CA "
                        "enrollment credential and the BeyondInsight API user, split on "
                        "the last colon")
-    return {"clouds": ["gcp"],
+    # A stamped timer is necessary and not sufficient: the reaper only DELETES when
+    # `resource_expiry_enforce` is on and dry-run is off. `cert_lab_service.provision`
+    # refuses an AWS build that would get no timer at all; this is the other half, and it
+    # belongs on `missing` rather than in a refusal because arming enforcement is a thing
+    # an operator may be part-way through, not a reason to have no timer.
+    from ..services import expiry_policy
+    if not expiry_policy.enforce() or expiry_policy.dry_run():
+        missing.append("resource_expiry_enforce, with resource_expiry_dry_run off — a "
+                       "timer is stamped but the reaper only reports, so an AWS Private "
+                       "CA at ~$400/month standing would keep billing until somebody "
+                       "destroys it by hand")
+
+    return {"clouds": list(cert_lab_service.PROVISIONING_CLOUDS),
             "locations": ["us-central1", "us-east1", "europe-west1", "asia-east1"],
             "tiers": ["DEVOPS", "ENTERPRISE"],
             "default_location": config_service.get("cert_gcp_cas_location") or "us-central1",
+            # AWS PCA is available in most regions, so this is a default for a free-text
+            # field rather than the fixed list CAS's limited locations justify.
+            "default_region": config_service.get("aws_region") or settings.aws_region,
             "biurl": cert_ps_service.default_biurl(),
             "folder": config_service.get("cert_ps_folder") or settings.cert_ps_folder,
             "address_limit": 255,

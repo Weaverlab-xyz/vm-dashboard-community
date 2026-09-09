@@ -2,8 +2,13 @@
 {% block title %}Certificates{% endblock %}
 
 {# Certificate Lab page (PREVIEW, gated by cert_lab_enabled).
-   Builds a private CA — today a GCP CAS DevOps-tier pool — and onboards certificate
-   identities onto the Password Safe "Certificate" custom plugin. Backed by /api/cert-lab.
+   Builds a private CA — a GCP CAS DevOps-tier pool or an AWS Private CA — and onboards
+   certificate identities onto the Password Safe "Certificate" custom plugin. Backed by
+   /api/cert-lab.
+
+   The cloud selector only appears when more than one module is built: it is filled from
+   /api/cert-lab/options, which derives the list from the modules that actually exist
+   rather than naming them here.
 
    Two things on this page are load-bearing and easy to mistake for decoration:
      * the address character counter. The managed system's Network Address is the ENTIRE
@@ -113,10 +118,16 @@
        @click.self="buildOpen = false">
     <div class="bg-white rounded-xl shadow-lg w-full max-w-lg p-6">
       <h2 class="text-lg font-semibold text-gray-800 mb-1">Build a certificate authority</h2>
-      <p class="text-xs text-gray-500 mb-4">
+      <p class="text-xs text-gray-500 mb-4" x-show="form.cloud !== 'aws'">
         A CAS pool, a self-signed root CA, and the enrollment service account the plugin
         authenticates as. Destroying it removes all three in one pass — the module sets the
         three flags CAS otherwise uses to refuse deletion.
+      </p>
+      <p class="text-xs text-gray-500 mb-4" x-show="form.cloud === 'aws'" x-cloak>
+        A private CA, its self-signed root certificate, and the IAM user the plugin
+        authenticates as. <strong>~$400/month standing</strong>, twenty times the GCP pool,
+        billed whether or not it issues anything — so it is refused outright unless
+        auto-delete would stamp a timer on it.
       </p>
       <div class="space-y-3">
         <div>
@@ -124,12 +135,21 @@
           <input x-model="form.name" placeholder="demo-pipeline"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
         </div>
-        <div>
+        <div x-show="(options.clouds || []).length > 1">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
+          <select x-model="form.cloud" @change="cloudChanged()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <template x-for="c in (options.clouds || ['gcp'])" :key="c">
+              <option :value="c" x-text="c.toUpperCase()"></option>
+            </template>
+          </select>
+        </div>
+        <div x-show="form.cloud !== 'aws'">
           <label class="block text-xs font-medium text-gray-600 mb-1">GCP project</label>
           <input x-model="form.project" placeholder="bt-se-lab"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
         </div>
-        <div>
+        <div x-show="form.cloud !== 'aws'">
           <label class="block text-xs font-medium text-gray-600 mb-1">Location</label>
           <select x-model="form.location"
                   class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
@@ -139,6 +159,15 @@
           </select>
           <p class="text-xs text-gray-400 mt-1">
             The pool, its CAs and any certificate template are all location-scoped and must agree.
+          </p>
+        </div>
+        <div x-show="form.cloud === 'aws'" x-cloak>
+          <label class="block text-xs font-medium text-gray-600 mb-1">AWS region</label>
+          <input x-model="form.location" placeholder="us-east-2"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+          <p class="text-xs text-gray-400 mt-1">
+            A free-text field rather than a list: a Private CA is regional, and it is
+            available in far more regions than CAS is.
           </p>
         </div>
       </div>
@@ -252,13 +281,13 @@ function certLabPage() {
     loading: true,
     busy: false,
     authorities: [],
-    options: { locations: ['us-central1'], address_limit: 255 },
+    options: { clouds: ['gcp'], locations: ['us-central1'], address_limit: 255 },
     missing: [],
     toast: '',
     toastType: 'info',
 
     buildOpen: false,
-    form: { name: '', project: '', location: 'us-central1' },
+    form: { name: '', cloud: 'gcp', project: '', location: 'us-central1' },
 
     identityOpen: false,
     identTarget: null,
@@ -288,6 +317,14 @@ function certLabPage() {
         this.preview.limit = o.address_limit || 255;
         if (o.default_location) this.form.location = o.default_location;
       } catch (e) { /* the page still works without the hints */ }
+    },
+
+    // `location` carries the region on AWS and the CAS location on GCP — one field, as on
+    // the row — so switching cloud has to move it, or an AWS build inherits us-central1.
+    cloudChanged() {
+      this.form.location = this.form.cloud === 'aws'
+        ? (this.options.default_region || 'us-east-2')
+        : (this.options.default_location || 'us-central1');
     },
 
     notify(msg, type) {
