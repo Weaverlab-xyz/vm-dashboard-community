@@ -521,17 +521,18 @@ def test_describe_makes_no_network_call():
 # ── the page ─────────────────────────────────────────────────────────────────
 
 def test_the_vms_tab_colspan_matches_its_header_count():
-    """The Configure column was added to a table whose empty-state row spans it.
-    `tests/test_templates_parse` checks this for the inventory tables and not for the POV
-    ones, so it is pinned here — a mismatched colspan is a page that renders subtly wrong
-    only when a POV has no VMs yet, which is exactly when nobody is looking."""
+    """The Configure column, and then the Login column, were each added to a table whose
+    empty-state row spans it. `tests/test_templates_parse` checks this for the inventory
+    tables and not for the POV ones, so it is pinned here — a mismatched colspan is a page
+    that renders subtly wrong only when a POV has no VMs yet, which is exactly when nobody
+    is looking. It has now caught the same slip twice; bump both numbers together."""
     import re
     with open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "detail.html"),
               encoding="utf-8") as fh:
         src = fh.read()
     blk = src.split("tab === 'vms'", 1)[1].split("tab === 'wired'", 1)[0]
     headers = len(re.findall(r"<th ", blk))
-    assert headers == 5, f"the VMs tab has {headers} columns; the test expected 5"
+    assert headers == 6, f"the VMs tab has {headers} columns; the test expected 6"
     for span in re.findall(r'colspan="(\d+)"', blk):
         assert int(span) == headers, f"colspan {span} disagrees with {headers} columns"
 

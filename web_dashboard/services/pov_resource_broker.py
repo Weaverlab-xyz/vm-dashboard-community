@@ -397,11 +397,19 @@ async def platform_login(db: Session, env_id: str, vm_id: str) -> tuple:
             f"({type(exc).__name__}). Check the platform is reachable and the account can "
             f"see the environment.") from None
 
-    label = next((v.name for v in db.query(PovEnvironmentVM).filter(
+    # The row, not just its name: it carries the two things that decide WHICH stored
+    # credential this run means when the platform holds several — the guest OS, and the
+    # operator's explicit override if one was set. Several per host is the norm; see
+    # services/pov_credentials.
+    row = db.query(PovEnvironmentVM).filter(
         PovEnvironmentVM.environment_id == env.id,
-        PovEnvironmentVM.platform_vm_id == vm_id).all()), None) or "that VM"
+        PovEnvironmentVM.platform_vm_id == vm_id).first()
+    label = (row.name if row is not None else None) or "that VM"
     try:
-        return pov_credentials.pick(entries, vm_label=label)
+        return pov_credentials.pick(
+            entries, vm_label=label,
+            os_family=(row.os_family or "") if row is not None else "",
+            prefer=(row.login_username or "") if row is not None else "")
     except pov_credentials.CredentialParseError as exc:
         raise ResourceBrokerError(str(exc)) from None
 

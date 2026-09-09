@@ -531,9 +531,14 @@ async def prepare_broker_vm(mod, env_id: str, vm: dict) -> str:
         entries = await mod.stored_credentials(env_id, vm.get("id"))
         # `candidates`, not `pick`: this is the one credential consumer that authenticates
         # in process, so a VM carrying two logins is a question SSH answers rather than an
-        # ambiguity to refuse. See pov_credentials.candidates.
+        # ambiguity to refuse -- and it takes them in the same ranked order `pick` decides
+        # by, so the answer usually arrives on the first attempt. See
+        # pov_credentials.candidates.
         logins = pov_credentials.candidates(
             entries, vm_label=f"the broker VM {vm.get('name')!r}",
+            # A broker VM is Linux by construction — this function reaches it over SSH —
+            # so `root` sorts to the front and the usual case authenticates first try.
+            os_family="linux",
             # A build has no login field to fall back on, so the only remedy is on the
             # platform side. See pov_credentials.DEFAULT_REMEDY.
             remedy=("Add one on that VM in the lab platform and build again, or install "

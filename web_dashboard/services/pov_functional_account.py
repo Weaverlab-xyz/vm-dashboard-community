@@ -184,7 +184,12 @@ async def pov_wide_credential(db: Session, env: PovEnvironment, family: str) -> 
             problems.append(f"{label} ({type(exc).__name__})")
             continue
         try:
-            pair = pov_credentials.pick(entries, vm_label=label)
+            # `fam` and the VM's own override, for the same reason `platform_login` passes
+            # them: a guest holding `root` beside a service account is the norm, and the
+            # agreement check below is only meaningful once each guest has resolved to the
+            # ONE login its runs would actually use.
+            pair = pov_credentials.pick(entries, vm_label=label, os_family=fam,
+                                        prefer=vm.login_username or "")
         except pov_credentials.CredentialParseError as exc:
             # `pick`'s message is already operator-facing and already quotes nothing.
             problems.append(str(exc))

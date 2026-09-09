@@ -148,22 +148,56 @@ parses it, and **refuses rather than guesses**. `administrator / Passw0rd`,
 multi-line note is refused, naming the VM. A bare space is not treated as a separator,
 because a password containing one would split in the wrong place.
 
-Two usable credentials on one VM are answered differently by the two callers, and the
-difference is whether the caller can *ask*:
+### Several credentials on one VM
 
-- **The Resource Broker install refuses.** It seals one credential into a run bundle the
-  agent uses over WinRM, so it never authenticates and never learns the outcome — order is
-  the only thing it could go on, and installing an RB as the wrong account is not a mistake
-  worth being clever about.
-- **A [template build](skytap.md#building-a-template) tries each in turn**,
-  because it opens the SSH connection itself. The first login the VM accepts wins, and the
-  build row records which one it was. If the guest answers and refuses them all, that
-  fails immediately rather than on the readiness ladder: a rejected password does not
-  become right in fifteen seconds.
+This is the normal state, not a fault: a lab guest carries the superuser its template
+promised plus whatever else somebody left in the box. The dashboard picks between them by
+**the guest's own operating system**:
 
-If a template's credential box cannot be parsed, fix the box — a wrong username comes back
-from WinRM as an authentication failure, which reads as a bad password and sends you to
-reset one that was fine.
+| Guest OS | The login its runs use |
+|---|---|
+| Windows | `administrator` |
+| Linux | `root` |
+| blank (not established) | either — one of them present resolves, both present is refused |
+
+Two tie-breaks sit under that rule:
+
+- **Privilege first.** The OS superuser wins even when it is domain-qualified, because a
+  Resource Broker installed as a service account fails in ways that do not say *wrong
+  account*.
+- **Local second.** Between two logins the OS rule cannot separate, the unqualified one
+  wins. A `DOMAIN\user` login needs a domain controller up and reachable at the moment of
+  the run — in a lab whose boot order is not guaranteed, that failure arrives at WinRM as
+  an authentication error and reads as a bad password. When a domain-qualified login is
+  chosen anyway, the job log says so.
+
+**Position in the list is never used.** That is still a guess, and it is still refused.
+
+#### When the rule cannot decide
+
+Two logins of equal standing — two local service accounts, say, or `root` and
+`administrator` on a guest whose OS nobody has established — are refused, and the refusal
+**names the usernames** it could not choose between. A parsed username is not a credential;
+the password and the raw text it came from stay out of every message and every log line.
+
+Answer it once in the **Login** column on the POV's *VMs* tab. Type the account name as the
+platform records it, or just the bare name — `administrator` selects a stored
+`CORP\administrator`. Leave it blank, which is the normal state, to let the OS rule decide.
+An account the platform does not hold is refused when you type it rather than at the next
+run, and a name you set survives a VM re-read.
+
+That column stores a **username and nothing else**. The password is still read live off the
+lab platform at the moment of every run and is still stored nowhere here.
+
+A [template build](skytap.md#building-a-template) is the one caller that does not need any
+of this: it opens the SSH connection itself, so it takes the whole list — best first, by the
+same rule — and tries each until one is accepted. The build row records which one won. If
+the guest answers and refuses them all, that fails immediately rather than on the readiness
+ladder: a rejected password does not become right in fifteen seconds.
+
+If a credential box cannot be parsed at all, fix the box — a wrong username comes back from
+WinRM as an authentication failure, which reads as a bad password and sends you to reset one
+that was fine.
 
 ### What it grants, and why the scope is narrow
 
