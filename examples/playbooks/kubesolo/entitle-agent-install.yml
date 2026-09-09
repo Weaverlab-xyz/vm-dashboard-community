@@ -1,0 +1,242 @@
+# Install the BeyondTrust Entitle agent on a KubeSolo node
+# Target: an on-prem Linux host already running KubeSolo (kubesolo-install.yml).
+# Idempotent — `helm upgrade --install` converges an existing release.
+#
+# TOKEN — bind it, do not type it. In the run form use "Use a secret" and map a
+# Secrets-Management secret to the variable `entitle_agent_token`. The dashboard
+# resolves the reference only when the agent fetches the job bundle, and adds the
+# value to the job's scrub list. Setting entitle_agent_token_secret instead fetches
+# it from Password Safe mid-run. Either way it never appears in job output, and it is
+# passed to helm through a 0600 values file rather than --set, because --set would put
+# it in argv where `ps` shows it to every local user on the node.
+#
+# THE DEFAULTS BELOW ARE THE POINT OF THIS PLAY. Against chart 2.11.0 the shipped
+# defaults are wrong for a single node in three ways:
+#   * agent.replicas is 3, and the chart carries no anti-affinity, so all three
+#     schedule here and reserve 3 CPU / 3Gi of requests before doing any work;
+#   * datadog.enabled is already false AND STILL RUNS DATADOG — it injects a sidecar
+#     container into every agent pod. datadog.sidecarLogs: false is the real switch;
+#   * platform.mode must be `native` for a non-cloud install (the enum is
+#     gcp|aws|azure|native).
+# With the values here you get ONE pod of TWO containers: the healthcheck init
+# container and the agent.
+#
+# NEEDS EGRESS to the chart repo and to agent.<region>.entitle.io on 443 AND 8080.
+# 8080 is not telemetry and not optional — it is the agent's primary channel, and it
+# is plain HTTP. A current tenant needs that one hostname and nothing else; a tenant
+# onboarded before 2026-07-07 also needs ghcr.io and gcr.io/datadoghq.
+#
+# extra_vars:
+#   entitle_agent_token: <secret>       # bind via "Use a secret" (recommended)
+#   entitle_agent_token_secret: entitle/agent-token   # or a Password Safe SECRET path
+#   entitle_agent_version: "2.17.0"     # PIN THIS for OT change control. Left at
+#                                       # "default", a token carrying autoUpdate=v1
+#                                       # makes the agent update itself.
+#   entitle_agent_chart_version: 2.11.0 # pin the chart too; blank = latest
+#   entitle_agent_ca_bundle_path: /etc/ssl/certs/ca-certificates.crt
+#                                       # a COMBINED bundle on this host (public CAs
+#                                       # plus your corporate root) for the agent's
+#                                       # own TLS. Needs agent image 2.9.10+. This is
+#                                       # a DIFFERENT trust store from the node's.
+#   entitle_agent_replicas: 1
+#   entitle_agent_kms_type: kubernetes_secret_manager   # or hashicorp_vault
+- name: Install the Entitle agent on KubeSolo
+  hosts: all
+  become: true
+  vars:
+    entitle_agent_token: ""
+    # Optional Password Safe source for the token above (blank = don't use it).
+    entitle_agent_token_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+    kubesolo_path: /var/lib/kubesolo
+    entitle_agent_namespace: entitle
+    entitle_agent_release: entitle-agent
+    entitle_agent_chart: entitle-agent
+    entitle_agent_chart_repo: "https://anycred.github.io/entitle-charts/"
+    entitle_agent_chart_version: ""
+    entitle_agent_version: "default"
+    entitle_agent_replicas: 1
+    entitle_agent_cpu_request: 250m
+    entitle_agent_memory_request: 512Mi
+    entitle_agent_cpu_limit: 2000m
+    entitle_agent_memory_limit: 2Gi
+    entitle_agent_kms_type: kubernetes_secret_manager
+    entitle_agent_ca_bundle_path: ""
+    entitle_agent_ca_configmap: entitle-custom-ca
+    _values_file: /root/.entitle-agent-values.yaml
+  tasks:
+    # Fetched into its OWN fact, never onto entitle_agent_token: extra vars outrank
+    # set_fact, so writing back to that name would be silently ignored whenever the
+    # token was also supplied as an extra var / "Use a secret" binding.
+    - name: Fetch the agent token from Password Safe
+      ansible.builtin.set_fact:
+        _ps_entitle_agent_token: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=entitle_agent_token_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: entitle_agent_token_secret | length > 0
+
+    - name: Resolve the effective token (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _entitle_agent_token: "{{ _ps_entitle_agent_token | default(entitle_agent_token, true) }}"
+      no_log: true
+
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - _entitle_agent_token | length > 0
+          - entitle_agent_replicas | int >= 1
+          - entitle_agent_chart_repo | length > 0
+        fail_msg: >-
+          An agent token is required. Bind one to entitle_agent_token with the run
+          form's "Use a secret", or set entitle_agent_token_secret to a Password Safe
+          SECRET path (folder/title). Issue the token in Entitle → Org Settings.
+
+    - name: Confirm KubeSolo is here
+      ansible.builtin.stat:
+        path: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: kubeconfig
+
+    - name: Require a cluster to install into
+      ansible.builtin.assert:
+        that: kubeconfig.stat.exists
+        fail_msg: >-
+          No kubeconfig at {{ kubesolo_path }}/pki/admin/admin.kubeconfig — run
+          kubesolo-install.yml against this host first.
+
+    # Written OUTSIDE the block on purpose. A task nested in a block is invisible to
+    # the repo's no_log sweep (tests/test_playbook_ps_lookup.py walks top-level tasks
+    # only), so the one task that handles the token is kept where the sweep can see
+    # it. Its removal still happens in the block's `always`, below.
+    - name: Write the values file
+      ansible.builtin.copy:
+        content: |
+          agent:
+            token: "{{ _entitle_agent_token }}"
+            replicas: {{ entitle_agent_replicas }}
+          {% if entitle_agent_version | length > 0 and entitle_agent_version != 'default' %}
+            agent_version: "{{ entitle_agent_version }}"
+          {% endif %}
+            resources:
+              requests:
+                cpu: "{{ entitle_agent_cpu_request }}"
+                memory: "{{ entitle_agent_memory_request }}"
+              limits:
+                cpu: "{{ entitle_agent_cpu_limit }}"
+                memory: "{{ entitle_agent_memory_limit }}"
+          kmsType: "{{ entitle_agent_kms_type }}"
+          platform:
+            mode: native
+          datadog:
+            enabled: false
+            sidecarLogs: false
+          global:
+            environment: onprem
+          {% if entitle_agent_ca_bundle_path | length > 0 %}
+          customCa:
+            configMapName: "{{ entitle_agent_ca_configmap }}"
+            key: ca-bundle.pem
+          {% endif %}
+        dest: "{{ _values_file }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Install the Entitle agent
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      block:
+        - name: Look for the namespace
+          ansible.builtin.command: /usr/local/bin/kubectl get namespace {{ entitle_agent_namespace }}
+          register: ns_probe
+          changed_when: false
+          failed_when: false
+
+        - name: Create the namespace
+          ansible.builtin.command: /usr/local/bin/kubectl create namespace {{ entitle_agent_namespace }}
+          register: ns_created
+          changed_when: ns_created.rc == 0
+          when: ns_probe.rc != 0
+
+        # The agent's trust store, not the node's. The bundle must be COMBINED —
+        # the corporate root alone breaks every other TLS call the agent makes.
+        - name: Publish the custom CA bundle
+          ansible.builtin.shell:
+            cmd: >-
+              /usr/local/bin/kubectl -n {{ entitle_agent_namespace }} create configmap
+              {{ entitle_agent_ca_configmap }}
+              --from-file=ca-bundle.pem={{ entitle_agent_ca_bundle_path }}
+              --dry-run=client -o yaml | /usr/local/bin/kubectl apply -f -
+          register: ca_configmap
+          changed_when: "'created' in ca_configmap.stdout or 'configured' in ca_configmap.stdout"
+          when: entitle_agent_ca_bundle_path | length > 0
+
+        - name: Install the chart
+          ansible.builtin.command:
+            cmd: >-
+              /usr/local/bin/helm upgrade --install {{ entitle_agent_release }}
+              {{ entitle_agent_chart }} --repo {{ entitle_agent_chart_repo }}
+              {% if entitle_agent_chart_version | length > 0 %}--version {{ entitle_agent_chart_version }}{% endif %}
+              --namespace {{ entitle_agent_namespace }} --create-namespace
+              --values {{ _values_file }} --wait --timeout 600s
+          register: helm_out
+          changed_when: helm_out.rc == 0
+
+        - name: Read back what was created
+          ansible.builtin.command: >-
+            /usr/local/bin/kubectl get deploy,pods -n {{ entitle_agent_namespace }} -o wide
+          register: workloads
+          changed_when: false
+
+      rescue:
+        - name: Collect diagnostics
+          ansible.builtin.shell:
+            cmd: >-
+              /usr/local/bin/kubectl get pods -n {{ entitle_agent_namespace }} -o wide || true;
+              /usr/local/bin/kubectl describe pods -n {{ entitle_agent_namespace }} || true;
+              /usr/local/bin/kubectl get events -n {{ entitle_agent_namespace }}
+              --sort-by=.lastTimestamp | tail -25 || true
+          register: diagnostics
+          changed_when: false
+
+        - name: Explain the failure
+          ansible.builtin.fail:
+            msg:
+              - "The Entitle agent did not reach ready. The three usual causes:"
+              - "  Pending          — the node cannot satisfy the requests. Lower"
+              - "                     entitle_agent_cpu_request / _memory_request."
+              - "  ErrImagePull     — either no route to the registry, or an inspecting"
+              - "                     proxy the NODE does not trust. Re-run"
+              - "                     kubesolo-install.yml with node_ca_pem set."
+              - "  Init:CrashLoop   — the healthcheck validators failed; the agent could"
+              - "                     not reach agent.<region>.entitle.io on 443 and 8080."
+              - "{{ diagnostics.stdout_lines | default([]) }}"
+
+      always:
+        # The token is in this file. It goes even when the install failed.
+        - name: Remove the values file
+          ansible.builtin.file:
+            path: "{{ _values_file }}"
+            state: absent
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "{{ workloads.stdout_lines | default(['(no workloads read)']) }}"
+          - "Expect ONE pod with TWO containers — entitle-agent-healthcheck (init)"
+          - "and entitle-agent. A third named datadog-agent means sidecarLogs did not"
+          - "take effect."
+          - "An empty `kubectl logs` is EXPECTED here, not a fault: with the Datadog"
+          - "sidecar off the agent still runs with ENTITLE_LOG_TO_FILE=true and nothing"
+          - "collects the file. Read it in-pod instead:"
+          - "  kubectl -n {{ entitle_agent_namespace }} exec deploy/{{ entitle_agent_release }} -c entitle-agent -- sh -c 'tail -n 200 /var/log/entitle-agent/*'"
+          - "Then confirm the agent shows healthy in the Entitle console."

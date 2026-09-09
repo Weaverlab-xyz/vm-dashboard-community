@@ -1,0 +1,137 @@
+# Remove KubeSolo from a host
+# Target: the KubeSolo node you want to wipe. Idempotent — a host with no KubeSolo is
+# a no-op, not a failure.
+#
+# DESTRUCTIVE, and requires confirm: true to do anything. This is a single-node
+# distribution, so removing it DESTROYS the cluster: every workload, every Secret —
+# including the Entitle agent's stored access tokens — and any local-path volume data
+# under the state directory. There is no other node holding a copy.
+#
+# Run entitle-agent-uninstall.yml first if you want the agent removed cleanly rather
+# than deleted underneath.
+#
+# KubeSolo publishes no uninstall procedure, so this play prefers an official script
+# if the installer left one and falls back to stopping the unit and removing the
+# state directory. If a future release ships an uninstaller under a path not probed
+# here, add it to uninstall_candidates rather than widening the fallback.
+#
+# extra_vars:
+#   confirm: true                 # required — nothing happens without it
+#   kubesolo_path: /var/lib/kubesolo
+#   keep_state: false             # true = stop the service but leave the state dir
+- name: Uninstall KubeSolo from this host
+  hosts: all
+  become: true
+  vars:
+    confirm: false
+    keep_state: false
+    kubesolo_path: /var/lib/kubesolo
+    uninstall_candidates:
+      - /usr/local/bin/kubesolo-uninstall.sh
+      - /usr/local/bin/kubesolo/uninstall.sh
+      - /opt/kubesolo/uninstall.sh
+  tasks:
+    - name: Detect the KubeSolo service
+      ansible.builtin.command: systemctl is-active kubesolo
+      register: kubesolo_state
+      changed_when: false
+      failed_when: false
+
+    - name: Look for the state directory
+      ansible.builtin.stat:
+        path: "{{ kubesolo_path }}"
+      register: state_dir
+
+    - name: Look for an official uninstall script
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: uninstall_probe
+      loop: "{{ uninstall_candidates }}"
+
+    - name: Pick the uninstall script
+      ansible.builtin.set_fact:
+        _uninstall_script: >-
+          {{ (uninstall_probe.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default('', true) }}
+
+    - name: Nothing to do
+      ansible.builtin.debug:
+        msg: >-
+          No KubeSolo service and no {{ kubesolo_path }} — KubeSolo does not appear to
+          be installed here.
+      when:
+        - kubesolo_state.stdout != "active"
+        - not state_dir.stat.exists
+
+    - name: Require explicit confirmation
+      ansible.builtin.assert:
+        that: confirm | bool
+        fail_msg: >-
+          Refusing to uninstall KubeSolo without confirm: true. This is the only node,
+          so it destroys the cluster{{ ' — including every Secret, which is where the
+          Entitle agent keeps its access tokens' if not keep_state | bool else '' }}.
+      when: kubesolo_state.stdout == "active" or state_dir.stat.exists
+
+    # ── Uninstall ────────────────────────────────────────────────────────────
+    - name: Run the official uninstall script
+      ansible.builtin.command: "{{ _uninstall_script }}"
+      register: script_removed
+      changed_when: script_removed.rc == 0
+      when:
+        - confirm | bool
+        - _uninstall_script | length > 0
+
+    - name: Stop and disable the service
+      ansible.builtin.command: systemctl disable --now kubesolo
+      register: unit_stopped
+      changed_when: unit_stopped.rc == 0
+      failed_when: false
+      when:
+        - confirm | bool
+        - _uninstall_script | length == 0
+        - kubesolo_state.stdout == "active"
+
+    - name: Remove the unit file
+      ansible.builtin.file:
+        path: /etc/systemd/system/kubesolo.service
+        state: absent
+      register: unit_removed
+      when:
+        - confirm | bool
+        - _uninstall_script | length == 0
+
+    - name: Reload systemd
+      ansible.builtin.command: systemctl daemon-reload
+      register: systemd_reloaded
+      changed_when: systemd_reloaded.rc == 0
+      when:
+        - confirm | bool
+        - unit_removed is changed
+
+    - name: Remove the binary
+      ansible.builtin.file:
+        path: /usr/local/bin/kubesolo
+        state: absent
+      when:
+        - confirm | bool
+        - _uninstall_script | length == 0
+
+    - name: Remove the state directory
+      ansible.builtin.file:
+        path: "{{ kubesolo_path }}"
+        state: absent
+      when:
+        - confirm | bool
+        - not keep_state | bool
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          KubeSolo removed from this node
+          {{ 'with its official uninstall script' if _uninstall_script | length > 0
+             else 'by stopping the unit and clearing its files' }}.
+          {{ 'The state directory was kept at ' ~ kubesolo_path ~ '.' if keep_state | bool
+             else 'The state directory is gone, and with it every Secret it held.' }}
+          helm and kubectl were left in /usr/local/bin.
+      when:
+        - confirm | bool
+        - kubesolo_state.stdout == "active" or state_dir.stat.exists

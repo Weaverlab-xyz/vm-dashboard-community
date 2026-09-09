@@ -1,0 +1,108 @@
+# Remove the Entitle agent from a KubeSolo node
+# Target: the KubeSolo host holding the release. Idempotent — a host with no release
+# is a no-op, not a failure.
+#
+# DESTRUCTIVE, and requires confirm: true to do anything.
+#   * The agent stops brokering access immediately; anything Entitle grants through
+#     this agent stops working.
+#   * With kmsType: kubernetes_secret_manager the agent's stored access tokens live in
+#     Secrets in this namespace. Deleting the namespace destroys them, and Entitle
+#     will re-seed on the next install — so a reinstall is clean, not a recovery.
+#
+# The agent token itself is NOT revoked here. It stays valid in Entitle; retire it in
+# Org Settings if this host is gone for good.
+#
+# extra_vars:
+#   confirm: true                 # required — nothing happens without it
+#   delete_namespace: false       # also remove the namespace and its Secrets
+#   kubesolo_path: /var/lib/kubesolo
+- name: Uninstall the Entitle agent
+  hosts: all
+  become: true
+  vars:
+    confirm: false
+    delete_namespace: false
+    kubesolo_path: /var/lib/kubesolo
+    entitle_agent_namespace: entitle
+    entitle_agent_release: entitle-agent
+  tasks:
+    - name: Look for the admin kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: kubeconfig
+
+    - name: Nothing to do
+      ansible.builtin.debug:
+        msg: >-
+          No kubeconfig at {{ kubesolo_path }}/pki/admin/admin.kubeconfig — KubeSolo
+          does not appear to be installed here, so there is no release to remove.
+      when: not kubeconfig.stat.exists
+
+    - name: Look for the release
+      ansible.builtin.command: >-
+        /usr/local/bin/helm status {{ entitle_agent_release }} -n {{ entitle_agent_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: release_probe
+      changed_when: false
+      failed_when: false
+      when: kubeconfig.stat.exists
+
+    - name: Report a host with no release
+      ansible.builtin.debug:
+        msg: >-
+          No helm release '{{ entitle_agent_release }}' in namespace
+          '{{ entitle_agent_namespace }}' — nothing to remove.
+      when:
+        - kubeconfig.stat.exists
+        - release_probe.rc != 0
+
+    - name: Require explicit confirmation
+      ansible.builtin.assert:
+        that: confirm | bool
+        fail_msg: >-
+          Refusing to remove the Entitle agent without confirm: true. This stops all
+          access this agent brokers{{ ', and delete_namespace: true would also destroy
+          the agent Secrets in the namespace' if delete_namespace | bool else '' }}.
+      when:
+        - kubeconfig.stat.exists
+        - release_probe.rc == 0
+
+    # ── Uninstall ────────────────────────────────────────────────────────────
+    - name: Uninstall the release
+      ansible.builtin.command: >-
+        /usr/local/bin/helm uninstall {{ entitle_agent_release }}
+        -n {{ entitle_agent_namespace }} --wait --timeout 300s
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: removed
+      changed_when: removed.rc == 0
+      when:
+        - kubeconfig.stat.exists
+        - release_probe.rc == 0
+        - confirm | bool
+
+    - name: Delete the namespace
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl delete namespace {{ entitle_agent_namespace }} --wait=false
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: ns_removed
+      changed_when: ns_removed.rc == 0
+      when:
+        - kubeconfig.stat.exists
+        - confirm | bool
+        - delete_namespace | bool
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          Entitle agent removed from this node.
+          {{ 'The namespace and its Secrets went with it.' if delete_namespace | bool
+             else 'The namespace and the agent Secrets remain — a reinstall will reuse them.' }}
+          The agent token is still valid in Entitle; retire it in Org Settings if this
+          host is not coming back.
+      when:
+        - kubeconfig.stat.exists
+        - release_probe.rc == 0
+        - confirm | bool

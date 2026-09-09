@@ -1,0 +1,217 @@
+# Install KubeSolo — single-node Kubernetes for an edge or OT host
+# Target: an on-prem Linux host, via a remote agent (Config Management → agent target).
+# Idempotent — a host already running KubeSolo is left alone.
+#
+# This is step 1 of 2. Run entitle-agent-install.yml afterwards to put the Entitle
+# agent on it. KubeSolo bundles CoreDNS, kube-proxy, containerd's default CNI plugins
+# and local-path storage, so there is NO separate networking step — unlike a kubeadm
+# cluster, and like k3s.
+#
+# It does NOT bundle a kubectl (k3s's `k3s kubectl` has no equivalent here), and the
+# VM runner image ships neither kubectl nor helm, so this play installs both on the
+# host. Everything shells out for the same reason the k3s samples do: the runner for
+# an SSH target is chrweav/ansible-winrm, which carries no kubernetes.core.
+#
+# NEEDS EGRESS to get.kubesolo.io, get.helm.sh and dl.k8s.io. Set kubesolo_proxy if
+# the host reaches them through a corporate proxy.
+#
+# TLS-INSPECTING PROXY — read this before blaming the network. There are TWO trust
+# stores. node_ca_pem below fixes the HOST's, which is what containerd uses to pull
+# images; that one fails first, as ErrImagePull / "x509: certificate signed by unknown
+# authority", and reads exactly like a blocked port. The Entitle agent's own bundle is
+# separate — see entitle_agent_ca_bundle_path in entitle-agent-install.yml.
+#
+# extra_vars (all optional):
+#   kubesolo_version: v1.1.0      # pin the release; blank = latest
+#   kubesolo_proxy: http://proxy.corp:8080   # corporate proxy for the install
+#   kubesolo_path: /var/lib/kubesolo         # state dir; the kubeconfig lives under it
+#   helm_version: v3.16.3         # helm to install on the host
+#   kubectl_version: ""           # blank = whatever dl.k8s.io calls stable
+#   node_ca_pem: |                # a corporate root CA to trust, as PEM text
+#     -----BEGIN CERTIFICATE-----
+#     ...
+- name: Install KubeSolo on this host
+  hosts: all
+  become: true
+  vars:
+    kubesolo_version: ""
+    kubesolo_proxy: ""
+    kubesolo_path: /var/lib/kubesolo
+    helm_version: v3.16.3
+    kubectl_version: ""
+    node_ca_pem: ""
+  tasks:
+    - name: Validate the requested state
+      ansible.builtin.assert:
+        that:
+          - kubesolo_path | length > 0
+          - node_ca_pem | length == 0 or 'BEGIN CERTIFICATE' in node_ca_pem
+        fail_msg: >-
+          kubesolo_path must be set, and node_ca_pem — when given — must be PEM text
+          containing a BEGIN CERTIFICATE line, not a file path.
+
+    - name: Detect KubeSolo
+      ansible.builtin.command: systemctl is-active kubesolo
+      register: kubesolo_state
+      changed_when: false
+      failed_when: false
+
+    - name: Report an existing installation
+      ansible.builtin.debug:
+        msg: >-
+          KubeSolo is already active here — leaving it untouched. Run
+          kubesolo-status.yml to inspect it, or kubesolo-uninstall.yml to remove it
+          first. helm and kubectl are still checked below.
+      when: kubesolo_state.stdout == "active"
+
+    # ── Corporate CA, before anything downloads ──────────────────────────────
+    # Deliberately first: the installer, helm, kubectl and every later image pull all
+    # cross the same inspecting proxy, so trusting the root once here saves diagnosing
+    # four different-looking failures.
+    - name: Install the corporate root CA (Debian family)
+      ansible.builtin.copy:
+        content: "{{ node_ca_pem }}"
+        dest: /usr/local/share/ca-certificates/corp-root-ca.crt
+        mode: "0644"
+      register: ca_debian
+      when:
+        - node_ca_pem | length > 0
+        - ansible_facts['os_family'] == "Debian"
+
+    - name: Install the corporate root CA (RedHat family)
+      ansible.builtin.copy:
+        content: "{{ node_ca_pem }}"
+        dest: /etc/pki/ca-trust/source/anchors/corp-root-ca.crt
+        mode: "0644"
+      register: ca_redhat
+      when:
+        - node_ca_pem | length > 0
+        - ansible_facts['os_family'] == "RedHat"
+
+    - name: Rebuild the host trust store
+      ansible.builtin.command: >-
+        {{ 'update-ca-certificates' if ansible_facts['os_family'] == 'Debian' else 'update-ca-trust extract' }}
+      register: ca_rebuilt
+      changed_when: ca_rebuilt.rc == 0
+      when: (ca_debian is changed) or (ca_redhat is changed)
+
+    # containerd reads the root pool once, at process start.
+    - name: Restart KubeSolo so containerd picks up the new CA
+      ansible.builtin.command: systemctl restart kubesolo
+      register: kubesolo_restarted
+      changed_when: kubesolo_restarted.rc == 0
+      when:
+        - ca_rebuilt is changed
+        - kubesolo_state.stdout == "active"
+
+    # ── Client tools ─────────────────────────────────────────────────────────
+    # Absolute paths throughout: RHEL's sudo secure_path excludes /usr/local/bin, so
+    # a bare `helm` works interactively and fails under become.
+    - name: Look for kubectl
+      ansible.builtin.stat:
+        path: /usr/local/bin/kubectl
+      register: kubectl_bin
+
+    - name: Resolve the stable kubectl release
+      ansible.builtin.uri:
+        url: https://dl.k8s.io/release/stable.txt
+        return_content: true
+      register: kubectl_stable
+      changed_when: false
+      when:
+        - not kubectl_bin.stat.exists
+        - kubectl_version | length == 0
+
+    - name: Install kubectl
+      ansible.builtin.get_url:
+        url: >-
+          https://dl.k8s.io/release/{{ kubectl_version | default(kubectl_stable.content | trim, true) }}/bin/linux/{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}/kubectl
+        dest: /usr/local/bin/kubectl
+        mode: "0755"
+      when: not kubectl_bin.stat.exists
+
+    - name: Look for helm
+      ansible.builtin.stat:
+        path: /usr/local/bin/helm
+      register: helm_bin
+
+    - name: Unpack helm
+      ansible.builtin.unarchive:
+        src: "https://get.helm.sh/helm-{{ helm_version }}-linux-{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}.tar.gz"
+        dest: /tmp
+        remote_src: true
+      when: not helm_bin.stat.exists
+
+    - name: Install helm
+      ansible.builtin.copy:
+        src: "/tmp/linux-{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}/helm"
+        dest: /usr/local/bin/helm
+        mode: "0755"
+        remote_src: true
+      when: not helm_bin.stat.exists
+
+    # ── Install KubeSolo ─────────────────────────────────────────────────────
+    # Guarded on the state probe rather than `creates:` so a version bump is not
+    # silently skipped when the binary already exists — same reasoning as k3s.
+    - name: Install KubeSolo
+      ansible.builtin.shell:
+        cmd: curl -sfL https://get.kubesolo.io | sh -
+      environment:
+        KUBESOLO_VERSION: "{{ kubesolo_version }}"
+        KUBESOLO_PROXY: "{{ kubesolo_proxy }}"
+        KUBESOLO_PATH: "{{ kubesolo_path }}"
+      register: kubesolo_install
+      changed_when: kubesolo_install.rc == 0
+      when: kubesolo_state.stdout != "active"
+
+    - name: Wait for the admin kubeconfig
+      ansible.builtin.wait_for:
+        path: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+        timeout: 180
+
+    - name: Wait for the node to become Ready
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl wait --for=condition=Ready node --all --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: node_ready
+      until: node_ready.rc == 0
+      retries: 10
+      delay: 15
+      changed_when: false
+
+    # DNS is a hard requirement for the Entitle agent, and a broken bridge here reads
+    # as an Entitle egress failure later. Prove it now, while it is cheap.
+    - name: Check the bundled control-plane pods
+      ansible.builtin.command: /usr/local/bin/kubectl get pods -n kube-system -o wide
+      environment:
+        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: system_pods
+      changed_when: false
+
+    - name: Read the idle footprint
+      ansible.builtin.command: free -m
+      register: idle_memory
+      changed_when: false
+
+    - name: Measure the state directory
+      ansible.builtin.command: du -sh {{ kubesolo_path }}
+      register: state_size
+      changed_when: false
+      failed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "KubeSolo is up. kubeconfig: {{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+          - "── kube-system ──"
+          - "{{ system_pods.stdout_lines }}"
+          - "── idle memory ──"
+          - "{{ idle_memory.stdout_lines }}"
+          - "── state dir ──"
+          - "{{ state_size.stdout | default('(unavailable)') }}"
+          - "Next: run entitle-agent-install.yml against this host, binding the agent"
+          - "token to the var entitle_agent_token via the run form's 'Use a secret'."
+          - "Secrets are stored in a SQLite file under {{ kubesolo_path }} — there is no"
+          - "etcd and no documented encryption-at-rest, so encrypt that filesystem if"
+          - "the agent will hold real access tokens."

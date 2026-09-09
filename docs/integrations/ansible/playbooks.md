@@ -96,6 +96,13 @@ runs, so they need the **local runner** (see that README for the walkthrough and
 token-visibility caveat — either token can be routed through Password Safe instead of
 job output).
 
+A third set, **KubeSolo**
+([`examples/playbooks/kubesolo/`](../../../examples/playbooks/kubesolo)), goes the other
+way: install, status, uninstall for a deliberately *single-node* Kubernetes, plus the
+BeyondTrust Entitle agent on top of it. It is the edge and OT case — one machine, no
+join token, no node-by-node relay — and it runs over the agent path rather than the
+local runner. See [KubeSolo](../../kubesolo.md).
+
 The k3s set closes the loop with the section below: `k3s-kubeconfig.yml` rewrites k3s's
 loopback API address to the node's real one and prints a registration-ready payload, so
 the cluster you just built can be registered (`cloud = local`) and then become a

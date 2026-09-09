@@ -65,6 +65,13 @@ The agent is **shared**: one per VPC/network serves every private integration in
 referenced by `entitle_agent_token_name`. So you provision the agent **once per
 environment** (not per build).
 
+"Only in a Kubernetes cluster" does not have to mean a real one. For an edge or
+plant-floor host that will not carry a cluster, [KubeSolo](../kubesolo.md) is a
+single-node, etcd-free distribution that takes the same chart unmodified — Config
+Management playbooks install it and the agent on an on-prem host through a remote
+agent. That page also covers what the chart's defaults get wrong on one node, and why
+the agent needs port 8080 as well as 443.
+
 > **On a POV instance the agent is per POV, not per install.** A POV's VMs are on their own
 > private network, so the shared one above cannot reach them. The POV page installs a
 > single-node k3s on a Linux guest and Helm-installs the agent there, minting the token in
