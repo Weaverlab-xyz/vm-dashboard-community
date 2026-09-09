@@ -124,7 +124,7 @@
   <!-- VM table -->
   <div x-show="!loading || allVms.length > 0"
        class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-    <table class="w-full text-sm">
+    <table class="w-full text-sm stack-sm">
       <thead>
         <tr class="bg-gray-50 border-b border-gray-200 text-left">
           <th class="px-4 py-3 w-10" x-show="$store.auth.isAdmin">
@@ -154,29 +154,29 @@
              two rows without a path would collide into one and share power state. -->
         <template x-for="vm in filteredVms" :key="vm.vm_id">
           <tr class="hover:bg-gray-50 transition">
-            <td class="px-4 py-3" x-show="$store.auth.isAdmin">
+            <td class="px-4 py-3" x-show="$store.auth.isAdmin" data-label="Select" data-cell="select">
               <input type="checkbox" :value="vm.vm_id" x-model="selectedVmIds"
                      class="h-4 w-4 rounded border-gray-300">
             </td>
-            <td class="px-4 py-3">
+            <td class="px-4 py-3" data-label="Status" data-cell="lead">
               <span class="inline-block h-2.5 w-2.5 rounded-full"
                     :class="vm.is_running ? 'bg-green-500' : 'bg-gray-300'"
                     :title="vm.is_running ? 'Running' : 'Stopped'"></span>
             </td>
-            <td class="px-4 py-3 font-medium text-gray-800">
+            <td class="px-4 py-3 font-medium text-gray-800" data-label="VM name" data-cell="title">
               <span x-text="vm.vm_name"></span>
               <span x-show="vm.source" x-cloak
                     class="ml-2 text-[10px] uppercase bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded"
                     :title="'Synced by remote agent ' + vm.source"
                     x-text="vm.source"></span>
             </td>
-            <td class="px-4 py-3 text-xs text-gray-500" x-text="vm.os_type || '–'"></td>
-            <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="vm.ip_address || '–'"></td>
+            <td class="px-4 py-3 text-xs text-gray-500" data-label="OS" x-text="vm.os_type || '–'"></td>
+            <td class="px-4 py-3 font-mono text-xs text-gray-500" data-label="IP address" x-text="vm.ip_address || '–'"></td>
             <!-- Truncated with the full path on hover: a VMX path is long and the useful
                  reading is the tail. -->
-            <td class="px-4 py-3 font-mono text-xs text-gray-500 max-w-xs truncate"
+            <td class="px-4 py-3 font-mono text-xs text-gray-500 max-w-xs truncate" data-label="Path"
                 :title="vm.vmx_path || ''" x-text="vm.vmx_path || '–'"></td>
-            <td class="px-4 py-3 text-right space-x-2">
+            <td class="px-4 py-3 text-right space-x-2" data-cell="actions">
               <template x-if="!vm.is_running">
                 <button @click="startVm(vm)"
                         :disabled="pendingVms.has(vm.vm_id) || !canOp('start')"

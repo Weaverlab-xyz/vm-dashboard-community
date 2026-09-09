@@ -58,6 +58,86 @@
        under `white-space: pre`, and overflow-x on something that fits is inert. */
     main code, main pre { overflow-wrap: anywhere; }
     main pre { max-width: 100%; overflow-x: auto; }
+
+    /* Stacked rows: a table that becomes one card per row below `sm`.
+
+       Opt in with `stack-sm` on the <table> and a data-label on each <td>. The columns
+       already scroll horizontally (see the rule above), which makes a 9-column table
+       reachable but not pleasant -- reading one VM means swiping back and forth past
+       eight neighbours. Below 640px the row becomes a label/value list instead, so a
+       phone reads down a card rather than across a spreadsheet.
+
+       Deliberately CSS and data attributes rather than a second `x-for` rendering the
+       same rows as <div>s. The nav bar already proves what the duplicate costs:
+       _nav_links.html is rendered twice and every change since has had to remember both.
+       A row defined once cannot drift from itself.
+
+       The label comes from the cell rather than from the <th> because CSS cannot reach
+       sideways to a header; `data-label` is the cell saying what it is, which is also what
+       a screen reader in a linearised table wants.
+
+       No !important anywhere: `table.stack-sm > tbody > tr > td` is four elements and a
+       class, so it already outranks the single utility classes it has to beat -- the
+       `truncate`, `text-right` and `max-w-[220px]` that are right in a grid and wrong in
+       a card. */
+    @media (max-width: 639.98px) {
+      table.stack-sm, table.stack-sm > tbody { display: block; }
+      /* The header row's job is done by the per-cell labels now. */
+      table.stack-sm > thead { display: none; }
+      table.stack-sm > tbody > tr {
+        display: flex; flex-direction: column; gap: 0.125rem; padding: 0.875rem 1rem;
+      }
+      table.stack-sm > tbody > tr > td {
+        display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
+        width: auto; max-width: none; padding: 0.1875rem 0;
+        text-align: left; white-space: normal; overflow: visible;
+      }
+      table.stack-sm > tbody > tr > td::before {
+        content: attr(data-label);
+        flex: 0 0 auto; font-size: 0.75rem; font-weight: 600; color: #6b7280;
+        /* The label is chrome, not data, so it must not inherit the cell's treatment of
+           its VALUE. Measured: the provider cell is `uppercase` to render "aws" as "AWS"
+           and served a label reading "PROVIDER"; the IP and path cells are `font-mono`
+           and served monospaced labels. Both times the column heading had quietly taken
+           on the formatting of the thing it was labelling. */
+        text-transform: none;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+                     "Helvetica Neue", Arial, sans-serif;
+        letter-spacing: normal;
+      }
+      /* Actions, and the loading/empty rows, carry no label and must not reserve one. */
+      table.stack-sm > tbody > tr > td:not([data-label])::before { content: none; }
+
+      /* Give the value side the leftover room, the way the table column used to.
+
+         A `flex-1` child is `flex: 1 1 0%` -- zero basis, grows into free space. A table
+         cell had free space; a stacked cell is shrink-to-fit around its content and has
+         none, so the jobs progress track measured 0px wide and the bar was simply absent.
+         Widening the track in the template fixes the phone and costs the desktop: an
+         explicit width raises the column's min-content, which took Progress from 172px to
+         232px and squeezed all six other columns. So the room is restored here, where
+         only the stacked layout sees it, and the track grows to the same 80px cap it
+         reaches in the column. flex-end so the value still reads against the right edge
+         like every other row on the card. */
+      table.stack-sm > tbody > tr > td > div {
+        flex: 1 1 auto; min-width: 0; justify-content: flex-end;
+      }
+
+      /* Three roles, because reading order on a card is not column order in a grid: the
+         thing's NAME leads, its state sits under it, and the buttons go last however far
+         left they were in the row. */
+      table.stack-sm td[data-cell="select"] { order: -3; justify-content: flex-start; }
+      table.stack-sm td[data-cell="title"]  { order: -2; font-size: 0.9375rem; font-weight: 600; }
+      table.stack-sm td[data-cell="title"]::before { content: none; }
+      table.stack-sm td[data-cell="lead"]   { order: -1; }
+      table.stack-sm td[data-cell="actions"] {
+        order: 99; justify-content: flex-end; gap: 0.5rem;
+        margin-top: 0.5rem; padding-top: 0.625rem; border-top: 1px solid #f3f4f6;
+      }
+      /* The loading / "nothing here" rows span the grid with a colspan that means nothing
+         once the row is a column. Let them be the one plain centred block they are. */
+      table.stack-sm > tbody > tr > td[colspan] { display: block; text-align: center; }
+    }
   </style>
 </head>
 <body class="{{ theme.body_bg }} min-h-screen font-sans text-gray-800">

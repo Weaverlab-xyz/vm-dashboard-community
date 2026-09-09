@@ -165,6 +165,103 @@ def test_every_page_still_extends_the_shell_that_carries_the_rules():
     assert len(pages) >= 38, f"only {len(pages)} page templates found; expected 38+"
 
 
+# ── stacked rows: one card per row below `sm` ────────────────────────────────
+#
+# Horizontal scroll made the wide tables reachable; it did not make them readable.
+# Measured at 393px, inventory is 9 columns in a 359px box, so reading one resource meant
+# swiping back and forth past eight neighbours. Below 640px these three -- the list pages
+# you would actually open on a phone -- become a label/value card instead.
+#
+# Done in CSS off `data-label`, not as a second `x-for` rendering the same rows as divs.
+# The nav bar is the cautionary tale: _nav_links.html is rendered twice and every change
+# since has had to remember both. A row defined once cannot drift from itself.
+
+_STACKED = ("inventory/list.html", "jobs/list.html", "vms/list.html")
+
+
+def _stacked_table(src):
+    """The <table class="... stack-sm ...">'s markup, header row and data row."""
+    m = re.search(r'<table[^>]*\bstack-sm\b[^>]*>', src)
+    assert m, "no stack-sm table"
+    table = src[m.start():]
+    thead = table[table.index("<thead"):table.index("</thead>")]
+    # the row the x-for repeats -- not the colspan loading/empty rows above it
+    body = table[table.index("<template x-for"):]
+    row = body[:body.index("</tr>")]
+    return thead, row
+
+
+def test_the_phone_list_pages_opt_into_stacked_rows():
+    for rel in _STACKED:
+        src = _read(os.path.join(_TPL, rel))
+        assert re.search(r'<table[^>]*\bstack-sm\b', src), (
+            f"{rel} no longer opts into stacked rows; on a phone it goes back to being a "
+            "table you read by swiping sideways")
+
+
+def test_every_stacked_cell_says_what_it_is():
+    """A stacked card has no header row to look up at, so a cell with no data-label and no
+    role renders as a bare value with nothing to say which field it is."""
+    naked = []
+    for rel in _STACKED:
+        _thead, row = _stacked_table(_read(os.path.join(_TPL, rel)))
+        for td in re.findall(r"<td\b[^>]*>", row, re.S):
+            if "data-label=" not in td and "data-cell=" not in td:
+                naked.append(f"{rel}: {' '.join(td.split())[:75]}")
+    assert not naked, "stacked cells with no label and no role:\n  " + "\n  ".join(naked)
+
+
+def test_no_column_loses_its_label_when_a_column_is_added():
+    """The header count and the cell count move together -- including through the Jinja
+    conditionals, which wrap the <th> and its <td> as a pair. A column added to one and
+    not the other is the failure this catches."""
+    for rel in _STACKED:
+        thead, row = _stacked_table(_read(os.path.join(_TPL, rel)))
+        ths = len(re.findall(r"<th\b", thead))
+        tds = len(re.findall(r"<td\b", row))
+        assert ths == tds, (
+            f"{rel}: {ths} headers but {tds} cells -- a column was added to one side only, "
+            "so on a phone a value renders under the wrong label or under none")
+
+
+def test_the_stacked_layout_hides_the_header_row():
+    src = _read(_BASE)
+    block = src[src.index("table.stack-sm"):]
+    assert re.search(r"table\.stack-sm > thead \{[^}]*display: none", block), (
+        "the stacked layout still renders <thead>. Its labels are per-cell now, so the "
+        "header row would sit on top of the cards as a stack of orphaned column names.")
+    assert "@media (max-width: 639.98px)" in src, (
+        "the stacked rules are not gated below Tailwind's `sm`, so they would reach the "
+        "desktop table too")
+
+
+def test_the_cell_label_does_not_inherit_the_value_styling():
+    """Measured before this: the provider cell is `uppercase` to render "aws" as "AWS" and
+    served a label reading "PROVIDER"; the IP and path cells are `font-mono` and served
+    monospaced labels. The label is chrome, not data."""
+    src = _read(_BASE)
+    before = src[src.index("table.stack-sm > tbody > tr > td::before"):]
+    before = before[:before.index("}")]
+    assert "text-transform: none" in before, f"the label still inherits case: {before}"
+    assert "font-family:" in before, f"the label still inherits the cell's font: {before}"
+
+
+def test_a_stacked_cell_hands_its_value_the_leftover_width():
+    """`flex-1` is a zero basis that grows into free space. A table cell had some; a
+    stacked cell is shrink-to-fit and has none, so the jobs progress track measured 0px
+    and the bar was absent. Widening the track in the template fixes the phone and costs
+    the desktop -- it took that column from 172px to 232px and squeezed the other six."""
+    src = _read(_BASE)
+    assert re.search(r"table\.stack-sm > tbody > tr > td > div \{[^}]*flex: 1 1 auto", src), (
+        "stacked cells no longer give their value area the leftover width; anything using "
+        "`flex-1` inside one collapses to zero")
+    jobs = _read(os.path.join(_TPL, "jobs", "list.html"))
+    assert 'class="flex-1 bg-gray-200 rounded-full h-1.5 max-w-[80px]"' in jobs, (
+        "the jobs progress track was given an explicit width. That raises the column's "
+        "min-content and re-widens the desktop table; the room belongs in the stacked "
+        "rule, where only a phone sees it.")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

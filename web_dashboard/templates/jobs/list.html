@@ -69,7 +69,7 @@
 
   <!-- Jobs table -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-    <table class="w-full text-sm">
+    <table class="w-full text-sm stack-sm">
       <thead>
         <tr class="bg-gray-50 border-b border-gray-200 text-left">
           <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
@@ -90,11 +90,11 @@
         </tr>
         <template x-for="job in jobs" :key="job.id">
           <tr class="hover:bg-gray-50 transition">
-            <td class="px-4 py-3">
+            <td class="px-4 py-3" data-label="Status" data-cell="lead">
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                     :class="statusBadge(job.status)" x-text="job.status"></span>
             </td>
-            <td class="px-4 py-3 font-medium text-gray-800">
+            <td class="px-4 py-3 font-medium text-gray-800" data-label="Type" data-cell="title">
               <span x-text="jobLabel(job)"></span>
               <!-- One of N jobs from a bulk run — click to see its siblings. -->
               <button x-show="job.batch_id && job.batch_id !== filterBatch" x-cloak
@@ -105,9 +105,9 @@
                 batch
               </button>
             </td>
-            <td class="px-4 py-3 text-gray-500 max-w-[200px] truncate"
+            <td class="px-4 py-3 text-gray-500 max-w-[200px] truncate" data-label="Target"
                 x-text="job.vm_path ? vmName(job.vm_path) : (job.workgroup || '–')"></td>
-            <td class="px-4 py-3">
+            <td class="px-4 py-3" data-label="Progress">
               <div x-show="job.status === 'running'" class="flex items-center gap-2">
                 <div class="flex-1 bg-gray-200 rounded-full h-1.5 max-w-[80px]">
                   <div class="bg-blue-500 h-1.5 rounded-full progress-bar-fill"
@@ -117,9 +117,9 @@
               </div>
               <span x-show="job.status !== 'running'" class="text-gray-400 text-xs">–</span>
             </td>
-            <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(job.created_at)"></td>
-            <td class="px-4 py-3 text-gray-500 text-xs" x-text="formatDuration(job.duration_seconds)"></td>
-            <td class="px-4 py-3 text-right">
+            <td class="px-4 py-3 text-gray-500 text-xs" data-label="Created" x-text="timeAgo(job.created_at)"></td>
+            <td class="px-4 py-3 text-gray-500 text-xs" data-label="Duration" x-text="formatDuration(job.duration_seconds)"></td>
+            <td class="px-4 py-3 text-right" data-cell="actions">
               <a :href="'/jobs/' + job.id"
                  class="text-blue-500 hover:underline text-xs font-medium mr-2">Details</a>
               <button x-show="job.status === 'pending' || job.status === 'running'"

@@ -146,7 +146,7 @@
 
   <!-- Inventory table -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-    <table class="w-full text-sm">
+    <table class="w-full text-sm stack-sm">
       <thead>
         <tr class="bg-gray-50 border-b border-gray-200 text-left">
           <th class="px-4 py-3 w-10">
@@ -180,24 +180,24 @@
         </tr>
         <template x-for="r in filtered()" :key="r.id">
           <tr class="group hover:bg-gray-50 transition" :class="isSelected(r) ? 'bg-blue-50' : ''">
-            <td class="px-4 py-3">
+            <td class="px-4 py-3" data-label="Select" data-cell="select">
               <input type="checkbox" :checked="isSelected(r)" @change="toggle(r)"
                      :disabled="!selectable(r)" :title="disabledReason(r)"
                      class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30 disabled:cursor-not-allowed">
             </td>
-            <td class="px-4 py-3 font-medium text-gray-800 uppercase" x-text="r.cloud"></td>
-            <td class="px-4 py-3 text-gray-600" x-text="kindLabel(r.kind)"></td>
-            <td class="px-4 py-3 text-gray-800 max-w-[220px] truncate" x-text="r.name" :title="r.name"></td>
-            <td class="px-4 py-3 text-gray-500" x-text="r.region || '–'"></td>
-            <td class="px-4 py-3">
+            <td class="px-4 py-3 font-medium text-gray-800 uppercase" data-label="Provider" x-text="r.cloud"></td>
+            <td class="px-4 py-3 text-gray-600" data-label="Kind" x-text="kindLabel(r.kind)"></td>
+            <td class="px-4 py-3 text-gray-800 max-w-[220px] truncate" data-label="Name" data-cell="title" x-text="r.name" :title="r.name"></td>
+            <td class="px-4 py-3 text-gray-500" data-label="Region" x-text="r.region || '–'"></td>
+            <td class="px-4 py-3" data-label="State" data-cell="lead">
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                     :class="stateBadge(r.state)" x-text="r.state"></span>
             </td>
-            <td class="px-4 py-3 text-gray-500" x-text="r.workgroup || '–'"></td>
-            <td class="px-4 py-3 text-gray-500" x-text="r.deployed_by || '–'"></td>
-            <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(r.created_at)"></td>
+            <td class="px-4 py-3 text-gray-500" data-label="Workgroup" x-text="r.workgroup || '–'"></td>
+            <td class="px-4 py-3 text-gray-500" data-label="Deployed by" x-text="r.deployed_by || '–'"></td>
+            <td class="px-4 py-3 text-gray-500 text-xs" data-label="Created" x-text="timeAgo(r.created_at)"></td>
             {% if resource_expiry_enabled %}
-            <td class="px-4 py-3 whitespace-nowrap">
+            <td class="px-4 py-3 whitespace-nowrap" data-label="Expires">
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                     :class="expiryBadge(r)" :title="expiryTitle(r)"
                     x-text="expiryLabel(r)"></span>
@@ -207,7 +207,7 @@
               </button>
             </td>
             {% endif %}
-            <td class="px-4 py-3 text-right">
+            <td class="px-4 py-3 text-right" data-cell="actions">
               <a :href="r.detail_href"
                  class="text-blue-500 hover:underline text-xs font-medium" x-text="'Open →'"></a>
             </td>
