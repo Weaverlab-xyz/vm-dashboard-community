@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}AWS{% endblock %}
 
@@ -350,11 +351,32 @@
       No instances deployed from this dashboard yet. Deploy an AMI from the Private AMIs tab.
     </div>
 
+    <!-- Bulk power. No workgroup buttons here: a cloud VM carries its workgroup as a
+         cloud-side tag, and services/workgroup_override_service rejects cloud providers
+         outright — so unlike the on-prem toolbar there is nothing here to admin-gate.
+         `aws:write` plus the per-VM ownership check on the endpoint is the whole gate. -->
+    <div x-show="selectedVmIds.length > 0" x-cloak
+         class="flex items-center justify-between bg-blue-50 border border-blue-200 rounded-xl px-4 py-2 mb-3">
+      <span class="text-sm text-blue-800">
+        Selected: <strong x-text="selectedVmIds.length"></strong>
+      </span>
+      <div class="flex items-center gap-2">
+        {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}) }}
+        <button @click="clearSelection()" class="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+    </div>
+
     <div x-show="!loadingInstances && instances.length > 0"
          class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
       <table class="w-full text-sm">
         <thead>
           <tr class="bg-gray-50 border-b border-gray-200 text-left">
+            <th class="px-4 py-3 w-10">
+              <input type="checkbox" :checked="selectAll"
+                     @change="toggleSelectAll($event.target.checked)"
+                     class="h-4 w-4 rounded border-gray-300"
+                     title="Select every instance shown">
+            </th>
             <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
             <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
             <th class="px-4 py-3 font-semibold text-gray-600">Instance ID</th>
@@ -368,12 +390,19 @@
         </thead>
         <tbody class="divide-y divide-gray-50">
           <tr x-show="filterRegion && filteredInstances().length === 0">
-            <td colspan="9" class="px-4 py-10 text-center text-gray-400">
+            <td colspan="10" class="px-4 py-10 text-center text-gray-400">
               No instances in <span class="font-medium" x-text="filterRegion"></span>.
             </td>
           </tr>
           <template x-for="inst in filteredInstances()" :key="inst.instance_id">
             <tr class="hover:bg-gray-50 transition">
+              <td class="px-4 py-3">
+                {#- A terminated instance is not selectable: it can neither start nor
+                    stop, so every op offered on it is a job that can only fail. -#}
+                <input type="checkbox" :value="_vmKey(inst)" x-model="selectedVmIds"
+                       x-show="inst.state !== 'terminated'"
+                       class="h-4 w-4 rounded border-gray-300">
+              </td>
               <td class="px-4 py-3">
                 <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium"
                       :class="instanceStateBadge(inst.state)">
@@ -399,6 +428,29 @@
                                  text-white text-xs font-medium rounded-lg transition"
                           title="Retrieve SSH private key from Secrets Manager">
                     SSH Key
+                  </button>
+                  {#- Power, which this page has never had: the endpoints existed and
+                      only the suspend schedule and the spend cap ever called them, so
+                      an operator wanting one instance off used the AWS console and put
+                      this inventory out of step. Start shows when it is not running,
+                      Suspend when it is; a transitional state shows neither, because
+                      the answer changes in seconds. -#}
+                  <button @click="powerInstance(inst, 'start')"
+                          x-show="inst.state === 'stopped'"
+                          :disabled="pendingPower.has(inst.instance_id)"
+                          class="px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-40
+                                 text-white text-xs font-medium rounded-lg transition">
+                    <span x-show="!pendingPower.has(inst.instance_id)">Start</span>
+                    <span x-show="pendingPower.has(inst.instance_id)" x-cloak>Starting…</span>
+                  </button>
+                  <button @click="powerInstance(inst, 'stop')"
+                          x-show="inst.state === 'running'"
+                          :disabled="pendingPower.has(inst.instance_id)"
+                          class="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-40
+                                 text-white text-xs font-medium rounded-lg transition"
+                          title="Stop the instance — it stops billing for compute and keeps its disks">
+                    <span x-show="!pendingPower.has(inst.instance_id)">Suspend</span>
+                    <span x-show="pendingPower.has(inst.instance_id)" x-cloak>Suspending…</span>
                   </button>
                   <button @click="openCreateImageModal(inst)"
                           :disabled="inst.state !== 'running'"
@@ -1798,6 +1850,22 @@
       sshKeyData: null,
       sshKeyVisible: false,
 
+      // ── Power: per-row and bulk ──────────────────────────────────────────
+      // `pendingPower` disables a row's buttons between the click and the redirect,
+      // the way `pendingDestroy` does for Destroy.
+      pendingPower: new Set(),
+      selectedVmIds: [],
+      selectAll: false,
+      ...bulkPowerState(),
+      bulkPowerUrl: '/api/aws/power/bulk',
+      // The default `stop` sentence describes a power cut with unsaved work lost. An
+      // EC2 stop is not that: the guest is asked, the disks persist, and the point is
+      // the bill. No test can catch a confirmation that is merely untrue.
+      bulkPowerConfirmText: {
+        stop: 'Suspend the selected instances? Each stops billing for compute and keeps '
+            + 'its disks, so it can be started again later.',
+      },
+
       // Create Image modal
       showCreateImageModal: false,
       selectedInstance: null,
@@ -2494,6 +2562,76 @@
           this.deployError = e.message;
         } finally {
           this.deploying = false;
+        }
+      },
+
+      // ── Power ────────────────────────────────────────────────────────────
+      _vmKey(inst) {
+        return String(inst.instance_id || '');
+      },
+
+      clearSelection() {
+        this.selectedVmIds = [];
+        this.selectAll = false;
+      },
+
+      toggleSelectAll(checked) {
+        this.selectAll = checked;
+        // The FILTERED rows, and terminated ones excluded exactly as the row checkbox
+        // excludes them — select-all must not select something unclickable.
+        this.selectedVmIds = checked
+          ? this.filteredInstances()
+              .filter(i => i.state !== 'terminated')
+              .map(i => this._vmKey(i))
+          : [];
+      },
+
+      // ── Bulk power seams ─────────────────────────────────────────────────
+      _bulkPowerRows() {
+        return this.filteredInstances();
+      },
+
+      // The same payload the row's own powerInstance posts.
+      _bulkPowerTarget(inst) {
+        return { instance_id: inst.instance_id };
+      },
+
+      // boto3's State.Name, lowercase. `pending`/`stopping`/`shutting-down` are
+      // transitional — 'other', so both ops still reach them, which matches an API that
+      // queues the call anyway. `terminated` cannot be selected at all, so it never
+      // arrives here. An absent state is unknown, and the mixin treats unknown as
+      // eligible rather than silently skipping it.
+      _bulkPowerState(inst) {
+        if (!inst.state) return null;
+        if (inst.state === 'running') return 'on';
+        if (inst.state === 'stopped') return 'off';
+        return 'other';
+      },
+
+      // Prose for a VM a stop may break, not a reason to refuse one — the server
+      // decides again per VM and returns the authoritative list. Mirrors
+      // services/vm_suspend_policy's first refusal: a wire-up pinned to a public
+      // address that does not survive the stop.
+      _bulkPowerWarn(inst, op) {
+        return op === 'stop' ? (inst.suspend_warning || '') : '';
+      },
+
+      async powerInstance(inst, op) {
+        if (op === 'stop' && !confirm(
+              `Suspend ${inst.name || inst.instance_id}? It stops billing for compute `
+              + `and keeps its disks.`)) return;
+        this.pendingPower = new Set([...this.pendingPower, inst.instance_id]);
+        try {
+          const resp = await API.post(`/api/aws/power/${op}`,
+                                      { instance_id: inst.instance_id });
+          toast(`${op === 'start' ? 'Start' : 'Suspend'} queued for `
+                + `${inst.name || inst.instance_id}`, 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          toast(`${op} failed: ${e.message}`, 'error');
+          const next = new Set(this.pendingPower);
+          next.delete(inst.instance_id);
+          this.pendingPower = next;
         }
       },
 

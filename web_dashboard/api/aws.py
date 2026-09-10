@@ -335,6 +335,15 @@ async def _fetch_instances(db: Session) -> list:
             continue
         job = job_by_instance.get(iid)
         wg = (job.workgroup or "").lower() if job and job.workgroup else None
+        # Pure policy, no I/O — the same function api/aws.py's power path warns with and
+        # the suspend scheduler refuses with. Computed here so the page can name the
+        # count in its confirmation BEFORE queueing, which is the whole point of a
+        # warning that does not block.
+        warn = ""
+        if job is not None:
+            ok, reason = vm_suspend_policy.schedulable(job.job_type, job.metadata_dict)
+            if not ok:
+                warn = reason
         result.append({
             **live,
             "key_name": live.get("key_name"),
@@ -342,6 +351,7 @@ async def _fetch_instances(db: Session) -> list:
             "workgroup": wg,
             "job_id": job.id if job else None,
             "deployed_by": job.created_by if job else None,
+            "suspend_warning": warn or None,
         })
     return result
 

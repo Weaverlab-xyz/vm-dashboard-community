@@ -10,6 +10,11 @@
     {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
     {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'restart']) }}
 
+  `labels` overrides a button's text per op. The cloud pages need it: their `stop` is a
+  deallocate or a SOFTSTOP, which is a Suspend, not a Force Off — and the wording of the
+  CONFIRM has to move with it, via the page's `bulkPowerConfirmText`.
+    {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}) }}
+
   The ops list must match that router's BULK_OPS, and
   tests/test_hypervisor_power_routing.py::test_no_bulk_button_offers_an_op_its_router_will_refuse
   is what says so — a button here for an op the server does not accept would 400 the
@@ -43,14 +48,14 @@
      'hard_reboot': 'bg-orange-500 hover:bg-orange-600 text-white',
    } %}
 
-{% macro bulk_power_buttons(ops) %}
+{% macro bulk_power_buttons(ops, labels={}) %}
 {% for op in ops %}
 <button @click="submitBulkPower('{{ op }}')"
         :disabled="bulkPowerBusy || !bulkOpAllowed('{{ op }}')"
         :title="bulkOpTitle('{{ op }}')"
         class="text-xs px-3 py-1.5 rounded font-medium disabled:opacity-50
                transition-colors {{ _BULK_CLASSES.get(op, 'bg-gray-600 hover:bg-gray-700 text-white') }}">
-  <span x-show="bulkPowerOp === '{{ op }}'">…&nbsp;</span>{{ _BULK_LABELS.get(op, op) }}
+  <span x-show="bulkPowerOp === '{{ op }}'">…&nbsp;</span>{{ labels.get(op) or _BULK_LABELS.get(op, op) }}
 </button>
 {% endfor %}
 {# The divider is inside the macro so a page cannot render the power buttons without

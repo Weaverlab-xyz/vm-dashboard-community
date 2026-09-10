@@ -46,6 +46,13 @@ class EC2InstanceInfo(BaseModel):
     # Dashboard-specific fields (from DB)
     job_id: Optional[str] = None
     deployed_by: Optional[str] = None
+    # Why a SUSPEND of this instance may need repairing afterwards, or None. The reason
+    # string straight out of services/vm_suspend_policy — carried rather than recomputed
+    # on the page, because the policy is subtle (it turns on WHICH address was wired, not
+    # on whether a public one exists) and a second implementation in JavaScript would
+    # drift from the one the server warns with. It is a WARNING, never a refusal: the
+    # per-VM Suspend button has always been allowed here.
+    suspend_warning: Optional[str] = None
 
 
 class EC2InstanceListResponse(BaseModel):
