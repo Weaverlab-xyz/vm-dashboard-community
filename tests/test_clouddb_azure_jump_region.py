@@ -174,7 +174,7 @@ _WESTUS2 = json.dumps({"westus2": {"resource_group": "sandbox-westus2-rg"}})
 def _create(row=None, **conf):
     _reset(**conf)
     return _run(svc._create_db_managed_user_azure(
-        _FakeDB(), row=row or _row(), job_id="job-1", engine="mysql",
+        _FakeDB(), row=row or _row(), log_job_id="job-1", engine="mysql",
         tf_variables=dict(_TF_VARS)))
 
 
@@ -226,7 +226,7 @@ def test_the_failure_names_the_vm_that_actually_ran_the_client():
                   "'clouddb-6496f193.mysql.database.azure.com' (-2)"})
     try:
         _run(svc._create_db_managed_user_azure(
-            _FakeDB(), row=_row(), job_id="job-1", engine="mysql",
+            _FakeDB(), row=_row(), log_job_id="job-1", engine="mysql",
             tf_variables=dict(_TF_VARS)))
     except Exception as exc:
         msg = str(exc)

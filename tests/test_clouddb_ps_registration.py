@@ -19,6 +19,11 @@ What is easy to get wrong here, and therefore what these pin:
 - **the ids reach the job metadata before the next remote call is made.** Everything used
   to be written in one go at the end, so a failure in the PRA Vault half left a real
   managed system in the customer's Password Safe with nothing recorded to remove it;
+- **ids and log lines go to DIFFERENT jobs, on purpose.** The post-hoc path stashes on
+  the provisioning job (where teardown reads) but logs onto the registration job (where
+  the operator is looking). One argument served both until 2026-09-10, when a
+  PostgreSQL rotation failure was investigated as "the dashboard never issued the
+  grant" and the attempt turned out to have been logged on a job nobody reopens;
 - **teardown clears only what it actually removed.** The standalone Remove action leaves
   the database in place, so a key left behind has the next decommission destroy something
   already gone, and a key cleared after a FAILED removal is an object nothing retries;
@@ -68,8 +73,22 @@ class _CloudDatabase:
         self.__dict__.update(kw)
 
 
+class _Column:
+    """Enough of a SQLAlchemy column for the two lookups these tests reach:
+    ``filter(Job.job_type == ...)`` (the fake query ignores its arguments) and
+    ``order_by(Job.created_at.desc())``."""
+
+    def __eq__(self, _other):
+        return True
+
+    def desc(self):
+        return self
+
+
 class _Job:
     id = None
+    job_type = _Column()
+    created_at = _Column()
 
 
 class _FakeJobRow:
@@ -156,7 +175,7 @@ def _install_stubs():
 
     js = types.ModuleType("web_dashboard.services.job_service")
     js.update_progress = lambda *a, **k: None
-    js.append_job_log = lambda _db, _job_id, msg: JOB_LOGS.append(msg)
+    js.append_job_log = lambda _db, job_id, msg: JOB_LOGS.append((job_id, msg))
     js.set_running = lambda *a, **k: None
     js.set_failed = lambda *a, **k: None
     js.set_completed = lambda *a, **k: None
@@ -186,6 +205,13 @@ class _Query:
 
     def filter(self, *_a, **_k):
         return self
+
+    # _provision_job_for reads the provisioning job with .order_by(...).all()
+    def order_by(self, *_a, **_k):
+        return self
+
+    def all(self):
+        return [self._row] if self._row is not None else []
 
     def first(self):
         return self._row
@@ -492,7 +518,7 @@ def _ref_conf(**extra):
 def test_aws_reference_mode_is_told_to_create_the_functional_accounts_login():
     _reset(**_ref_conf())
     _onboard(_row(cloud="aws"), _FakeJobRow())
-    logs = " ".join(JOB_LOGS)
+    logs = " ".join(m for _j, m in JOB_LOGS)
     assert "psfa_pg" in logs and "CREATE ROLE" in logs, JOB_LOGS
     assert "third ':'-segment" in logs, JOB_LOGS
     # and the grant that rotation needs on top of it
@@ -502,7 +528,7 @@ def test_aws_reference_mode_is_told_to_create_the_functional_accounts_login():
 def test_azure_reference_mode_is_told_the_same():
     _reset(**_ref_conf())
     _onboard(_row(cloud="azure"), _FakeJobRow())
-    logs = " ".join(JOB_LOGS)
+    logs = " ".join(m for _j, m in JOB_LOGS)
     assert "psfa_pg" in logs and "CREATE ROLE" in logs, JOB_LOGS
     assert "ADMIN OPTION" in logs, JOB_LOGS
 
@@ -510,7 +536,7 @@ def test_azure_reference_mode_is_told_the_same():
 def test_create_mode_is_told_nothing_because_its_account_is_the_minted_admin():
     _reset(clouddb_ps_ssm_public_key_path=CERT_PATH)
     _onboard(_row(cloud="azure"), _FakeJobRow())
-    logs = " ".join(JOB_LOGS)
+    logs = " ".join(m for _j, m in JOB_LOGS)
     assert "CREATE ROLE" not in logs and "ADMIN OPTION" not in logs, JOB_LOGS
 
 
@@ -519,9 +545,120 @@ def test_self_rotation_drops_the_grant_but_keeps_the_login():
     but Verify Functional Account still signs in as the functional account's login."""
     _reset(**_ref_conf(clouddb_ps_self_rotation=True))
     _onboard(_row(cloud="azure"), _FakeJobRow())
-    logs = " ".join(JOB_LOGS)
+    logs = " ".join(m for _j, m in JOB_LOGS)
     assert "CREATE ROLE" in logs, JOB_LOGS
     assert "ADMIN OPTION" not in logs, JOB_LOGS
+
+
+# ── the substance lands on the job the operator is WATCHING ───────────────────
+#
+# The post-hoc registration has two jobs in play and they are not interchangeable. Ids
+# and teardown state belong on the PROVISIONING job, because that is the single place
+# run_decommission looks for them. Operator-facing log lines belong on the REGISTRATION
+# job, because that is the one the operator opened when they pressed the button.
+#
+# Both used to be the same argument. _ps_onboard_post_hoc passed prov_job.id to the
+# three managed-user builders, whose only use for a job id is append_job_log -- so every
+# remedy they had ("Applied the Password Safe rotation grant ...", and the "could not
+# issue it itself -- run it as an admin: ..." fallback) was written into a completed
+# provisioning job while the registration job showed progress and nothing else. Live
+# 2026-09-10: a PostgreSQL rotation failure was investigated as "the dashboard never
+# issued the grant" when the attempt had been logged, out of sight.
+#
+# Hence the parameter names. `log_job_id` is where lines GO, `job_id` is where ids are
+# STASHED, and only the helper that stashes still takes a `job_id` at all.
+
+_POST_HOC_META = {"db_id": "db-abc12345",
+                  "tf_variables": {"identifier": "clouddb-abc",
+                                   "master_username": "dbadmin"}}
+
+
+def _post_hoc(row, prov_job, *, reg_job_id="job-reg"):
+    """Run the row action end to end with only the cloud-specific managed-user builder
+    faked out (it is the half that needs SSM / Run Command / the Cloud SQL API)."""
+    seen = {}
+
+    async def _fake_builder(_db, *, row, log_job_id, engine, tf_variables):
+        seen["log_job_id"] = log_job_id
+        return _ctx()
+
+    names = ("_create_db_managed_user", "_create_db_managed_user_azure",
+             "_create_db_managed_user_gcp")
+    originals = {n: getattr(svc, n) for n in names}
+    for n in names:
+        setattr(svc, n, _fake_builder)
+    try:
+        _run(svc._ps_onboard_post_hoc(_FakeDB(prov_job), row=row, job_id=reg_job_id))
+    finally:
+        for n, fn in originals.items():
+            setattr(svc, n, fn)
+    return seen
+
+
+def _prov_job():
+    job = _FakeJobRow(dict(_POST_HOC_META))
+    job.id = "job-prov"
+    return job
+
+
+def test_the_builders_log_to_the_registration_job_not_the_provisioning_one():
+    """The builders' job id is a LOG SINK. Handing them prov_job.id put the grant --
+    applied or not -- somewhere nobody looks."""
+    _reset(clouddb_ps_ssm_public_key_path=CERT_PATH)
+    seen = _post_hoc(_row(), _prov_job())
+    assert seen["log_job_id"] == "job-reg", \
+        "the managed-user builder must log onto the job the operator is watching"
+
+
+def test_the_ids_are_still_stashed_on_the_provisioning_job():
+    """The other half of the split, and the half that must NOT move: run_decommission
+    reads teardown state off the provisioning job and nowhere else."""
+    _reset(clouddb_ps_ssm_public_key_path=CERT_PATH)
+    prov_job, row = _prov_job(), _row()
+    _post_hoc(row, prov_job)
+    assert prov_job.metadata_dict.get("ps_db_registration_tf_state"), \
+        "teardown state must stay on the provisioning job"
+    assert prov_job.metadata_dict.get("ps_db_managed_user")
+    assert row.ps_managed_system_id == "1"
+
+
+def test_the_database_side_prerequisites_follow_the_operator_too():
+    """_report_fa_db_prereqs is the line whose absence cost a live afternoon once
+    already (Azure postgres, 2026-09-02). On a post-hoc registration it is emitted from
+    _onboard_ps_managed_systems, which stashes on the provisioning job -- so it needs
+    the log/stash split as much as the builders do."""
+    _reset(**_ref_conf())
+    _post_hoc(_row(cloud="azure"), _prov_job())
+    routed = [(j, m) for j, m in JOB_LOGS if "psfa_pg" in m]
+    assert routed, JOB_LOGS
+    assert all(j == "job-reg" for j, _m in routed), routed
+
+
+def test_provisioning_still_logs_to_its_own_job():
+    """Same argument, same job, on the path where the two ids coincide -- the split must
+    not send a provision-time line to a registration job that does not exist."""
+    _reset(**_ref_conf())
+    _onboard(_row(cloud="azure"), _FakeJobRow())
+    routed = [(j, m) for j, m in JOB_LOGS if "psfa_pg" in m]
+    assert routed and all(j == "job-1" for j, _m in routed), routed
+
+
+def test_only_the_stashing_helper_still_takes_a_job_id():
+    """A guard against the rename being undone one call site at a time: a builder that
+    takes `job_id` again is a builder a caller can reasonably hand the stash target."""
+    tree = ast.parse(open(_SVC, encoding="utf-8").read())
+    fns = {n.name: n for n in ast.walk(tree)
+           if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))}
+    for name in ("_create_db_managed_user", "_create_db_managed_user_azure",
+                 "_create_db_managed_user_gcp", "_apply_fa_grant_gcp",
+                 "_stage_fa_secret_gcp", "_report_fa_db_prereqs",
+                 "_admit_instance_to_dbops"):
+        args = [a.arg for a in fns[name].args.args + fns[name].args.kwonlyargs]
+        assert "job_id" not in args, f"{name} only logs — its job id must be log_job_id"
+        assert "log_job_id" in args, f"{name} lost its log_job_id"
+    stashing = [a.arg for a in fns["_onboard_ps_managed_systems"].args.kwonlyargs]
+    assert "job_id" in stashing and "log_job_id" in stashing, \
+        "the registration helper needs both: one to stash on, one to log to"
 
 
 def test_nothing_recorded_means_nothing_attempted():

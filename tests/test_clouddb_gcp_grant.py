@@ -160,7 +160,7 @@ def _apply(**kw):
     kw.setdefault("admin_username", "dbadmin")
     kw.setdefault("admin_password", "s3cret")
     kw.setdefault("grant", "GRANT CREATE USER ON *.* TO 'bt-rotator'@'%';")
-    return _run(svc._apply_fa_grant_gcp(_FakeDB(), row=row, job_id="job-1", **kw))
+    return _run(svc._apply_fa_grant_gcp(_FakeDB(), row=row, log_job_id="job-1", **kw))
 
 
 def _of(kind):

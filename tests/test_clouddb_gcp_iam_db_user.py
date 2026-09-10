@@ -182,7 +182,8 @@ def _onboard(engine="postgres", **kw):
                     "db_name": "app_db"}
     tf_variables.update(kw)
     return _run(svc._create_db_managed_user_gcp(
-        _FakeDB(), row=row, job_id="job-1", engine=engine, tf_variables=tf_variables))
+        _FakeDB(), row=row, log_job_id="job-1", engine=engine,
+        tf_variables=tf_variables))
 
 
 def _registered():
