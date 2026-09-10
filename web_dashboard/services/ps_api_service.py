@@ -85,16 +85,31 @@ def _tcfg(key: str, tenant=None) -> str:
     return _cfg(key)
 
 
-def _base_url(tenant=None) -> str:
-    """Normalize pscli_api_url to the public-API base. ps-cli configs store
-    either the bare host or the full /BeyondTrust/api/public/v3 path — accept both."""
-    host = _tcfg("pscli_api_url", tenant).rstrip("/")
+def api_base(url: str) -> str:
+    """Normalize a Password Safe URL to the public-API base. ps-cli configs store
+    either the bare host or the full /BeyondTrust/api/public/v3 path, and the tenant
+    registry's form asks for a hostname — accept all of them. ``""`` stays ``""``.
+
+    Public and taking its URL as an argument because the REST client is no longer the
+    only consumer: ``ps_resource_service`` hands the same value to the
+    ``BeyondTrust/passwordsafe`` Terraform provider, which validates it before
+    connecting and refuses a URL that is not https. Two copies of this rule would mean a
+    tenant the dashboard can read from and Terraform cannot onboard against.
+    """
+    host = (url or "").strip().rstrip("/")
     if not host:
-        raise PSApiError("pscli_api_url is not configured")
+        return ""
     if not host.lower().startswith("http"):
         host = f"https://{host}"
     if "/beyondtrust/api/public/" not in host.lower():
         host = f"{host}/BeyondTrust/api/public/v3"
+    return host
+
+
+def _base_url(tenant=None) -> str:
+    host = api_base(_tcfg("pscli_api_url", tenant))
+    if not host:
+        raise PSApiError("pscli_api_url is not configured")
     return host
 
 

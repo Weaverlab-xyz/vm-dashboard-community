@@ -283,3 +283,17 @@ existing functional account on the tenant.
 **A VM shows as skipped with "did not report an OS".** The lab platform reported a blank
 `os_family`, and guessing would build the wrong kind of jump item. Power it on and refresh
 the POV so the platform re-reads it.
+
+**Every VM's Password Safe half failed with `is not support. Use https`.** Fixed — the
+dashboard no longer produces it. The message came from the `passwordsafe` Terraform
+provider validating its own inputs before it connects. It requires two things of the URL:
+the scheme must be `https`, and the path must contain `/BeyondTrust/api/public/v`. The
+first refusal prints the *scheme* it parsed, so a tenant URL with no scheme left a blank
+where the offending value should be. A hostname is exactly what the tenant form asks for,
+and the dashboard's REST calls have always normalised one — which is why the workgroup
+resolved, the functional accounts were created, the PRA jump items were created, and only
+Terraform failed, once per VM. Terraform is now handed the same normalised base the REST
+calls use, so a hostname, an origin and a full `.../BeyondTrust/api/public/v3` URL all
+work, on the tenant and in Settings alike. A URL written `http://` is refused up front
+instead, naming itself, rather than being silently promoted to a TLS connection nobody
+asked for.

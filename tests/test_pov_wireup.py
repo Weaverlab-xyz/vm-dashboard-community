@@ -904,11 +904,30 @@ def test_a_partial_password_safe_override_is_refused_in_both_services():
 
 
 def test_a_full_password_safe_override_replaces_the_singletons():
-    from web_dashboard.services import ps_resource_service
+    from web_dashboard.services import ps_api_service, ps_resource_service
     env = ps_resource_service._tf_env(
         None, ps_resource_service.tenant_creds("https://t.example", "cid", "sec", "svc"))
-    assert env["TF_VAR_ps_url"] == "https://t.example"
+    assert env["TF_VAR_ps_url"] == ps_api_service.api_base("https://t.example")
     assert env["TF_VAR_ps_api_account_name"] == "svc"
+
+
+def test_a_povs_tenant_hostname_reaches_terraform_as_a_url_the_provider_accepts():
+    """A POV's Password Safe tenant holds what the tenant form asks for — a HOSTNAME.
+    The REST half normalises it, so the workgroup and the functional accounts resolve and
+    the wire-up looks healthy right up to Terraform, which used to be handed the raw value.
+    The provider validates its inputs before connecting, refuses a scheme that is not
+    https, and interpolates the scheme it found into the message — an empty one:
+
+        provider "passwordsafe" { is not support. Use https
+
+    That named neither the URL nor the tenant, and it repeated once per VM."""
+    from web_dashboard.services import ps_api_service, ps_resource_service
+    host = "poc-testing.ps.beyondtrustcloud.com"
+    env = ps_resource_service._tf_env(
+        None, ps_resource_service.tenant_creds(host, "cid", "sec", "svc"))
+    assert env["TF_VAR_ps_url"] == ps_api_service.api_base(host), (
+        "the two halves of the wire-up must reach the same tenant")
+    assert env["TF_VAR_ps_url"].startswith("https://"), env["TF_VAR_ps_url"]
 
 
 # ── the Entitle half ─────────────────────────────────────────────────────────
