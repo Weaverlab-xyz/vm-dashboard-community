@@ -93,6 +93,40 @@ finish queues it, and it sees everything the burst moved. A graceful `shutdown` 
 `reboot` is the case where one press is not enough: the sync runs seconds later, while the
 guest is still on its way down, so it honestly records a VM that is still running.
 
+### Powering a selection
+
+Every hypervisor page, and the Workstation page, has a checkbox on each row. Tick some and
+the toolbar above the table offers **Start**, **Shutdown**, **Force Off** and that
+product's restart — the same four operations as the row buttons, over the whole selection.
+It queues **one job per VM**, all sharing a batch id, and takes you to
+`/jobs?batch_id=…`, which counts them by status as they go.
+
+Nothing about the verbs changes. Each VM in a selection goes through the same code as its
+own row button, so the same `policy.yaml` grant is required, an op with no verb for that
+product is greyed out in the toolbar exactly as it is on the row, and a VM you cannot
+reach fails on its own without stopping the rest — the response names each one that could
+not be queued, and the reason.
+
+Four things worth knowing before you tick fifty boxes:
+
+- **They run one at a time, not all at once.** An agent leases a single job, finishes it,
+  then asks for the next; a connection the dashboard dials directly is walked the same way
+  on purpose. So twenty VMs is twenty sequential jobs and the last one starts last — bulk
+  saves you the clicking and the twenty trips back to the page, not the waiting. The batch
+  page is where you watch the queue drain.
+- **One inventory sync, not one per VM.** The automatic sync above collapses across the
+  whole batch: the last job to finish queues it, and it sees every VM the batch moved.
+- **VMs already in the target state are skipped, and the dialog says how many.** Start over
+  a selection of sixteen where five are running sends seven — the confirm names both
+  numbers before anything is queued. A VM whose power state the page does not know is
+  *included*, not skipped: an agent-synced row may carry no state at all, and a job that
+  turns out to be unnecessary says so out loud, where a silent skip does not.
+- **Fifty VMs per operation.** Above that it refuses and asks you to narrow the selection,
+  the same cap and the same wording as a bulk Config-Management run.
+
+Only **Start** goes without a confirmation, matching the row button. Force Off and the
+restarts name the count and say plainly that the guests are not being asked.
+
 Not every button on those pages has one of them behind it, and the ones that do not are
 **refused rather than approximated**. `restart` is why the mapping is per product rather
 than shared: each kind resolves it differently — Proxmox `/status/shutdown` (graceful),
