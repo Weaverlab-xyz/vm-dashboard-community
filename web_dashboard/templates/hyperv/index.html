@@ -103,19 +103,24 @@
     <div x-show="!loading && allVms.length === 0 && !error"
          class="py-16 text-center text-gray-400 text-sm">No VMs found on this host.</div>
 
-    <!-- Bulk action toolbar -->
-    <div x-show="selectedVmIds.length > 0"
+    <!-- Bulk action toolbar.
+         The power buttons are require_permission("vms","write") plus a per-VM workgroup
+         check, the same as the Start/Stop on every row of this table, so the selection
+         grants no reach the rows did not already give. Tagging is different:
+         /api/workgroup-overrides/bulk is admin-only, so showing those two buttons to
+         anyone else is a button that can only 403. The gate sits on them alone. -->
+    <div x-show="selectedVmIds.length > 0" x-cloak
          class="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
       <span class="text-sm text-blue-900">
         Selected: <strong x-text="selectedVmIds.length"></strong>
       </span>
       <div class="flex items-center gap-2">
         {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'restart']) }}
-        <button @click="openBulkAssign()"
+        <button x-show="$store.auth.isAdmin" @click="openBulkAssign()"
                 class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
           Assign workgroup
         </button>
-        <button @click="submitBulkClear()"
+        <button x-show="$store.auth.isAdmin" @click="submitBulkClear()"
                 class="text-xs px-3 py-1.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium">
           Clear workgroup
         </button>
