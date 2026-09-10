@@ -284,7 +284,12 @@ def apply_page(db: Session, job: Job, result: dict) -> dict:
 
     page_no = int(meta.get("sync_page") or 1)
     if page["next_cursor"] and not page["complete"] and page_no < MAX_SYNC_PAGES:
-        _queue(db, conn, cursor=page["next_cursor"], batch_id=job.batch_id or job.id,
+        # NOT `job.id`: that is a 36-character dashed UUID and `Job.batch_id` is
+        # String(32), so a first page with no batch would be rejected by PostgreSQL with
+        # StringDataRightTruncation (SQLite does not enforce VARCHAR length, which is why
+        # this survived). 12 hex, the same shape every other batch id here uses.
+        _queue(db, conn, cursor=page["next_cursor"],
+               batch_id=job.batch_id or (job.id or "").replace("-", "")[:12],
                page=page_no + 1, started=started, created_by=job.created_by or "",
                trigger=str(meta.get("sync_trigger") or ""))
         logger.info("hypervisor sync: queued page %d for %s", page_no + 1, conn.name)

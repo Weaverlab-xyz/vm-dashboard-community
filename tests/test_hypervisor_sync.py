@@ -120,7 +120,14 @@ def test_the_agent_sync_scenario():
     follow = [j for j in jobs if j.id != job.id][0]
     assert follow.metadata_dict["cursor"] == "250"
     assert follow.metadata_dict["sync_page"] == 2
-    assert follow.batch_id == (job.batch_id or job.id), "pages must share a batch"
+    # Pages must share a batch — but NOT the raw job id. Job.batch_id is String(32) and
+    # a job id is a 36-char dashed UUID, so seeding a batch from the id whole is rejected
+    # by PostgreSQL (StringDataRightTruncation) while SQLite, which does not enforce
+    # VARCHAR length, accepts it. This assertion used to pin the broken form.
+    expected_batch = job.batch_id or job.id.replace("-", "")[:12]
+    assert follow.batch_id == expected_batch, "pages must share a batch"
+    assert len(follow.batch_id) <= 32, (
+        f"batch_id is {len(follow.batch_id)} chars; the column is 32")
     _ok("page 2 is chained, carrying the cursor and sharing a batch id")
 
     # A VM absent from page 2 is not deleted — it was on page 1. Pruning per page would

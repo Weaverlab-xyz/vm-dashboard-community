@@ -326,6 +326,22 @@ def _stages_done(row: SpireLab) -> list:
     return [s for s in (row.stages_done or "").split(",") if s]
 
 
+def batch_id_for(row: SpireLab) -> str:
+    """The ``batch_id`` this lab's four stage jobs share, so /jobs can roll them up.
+
+    ``Job.batch_id`` is **``String(32)``** and a row id is a 36-character dashed UUID, so
+    the id cannot go in whole — a live PostgreSQL rejects it with
+    ``StringDataRightTruncation`` while SQLite, which does not enforce VARCHAR length at
+    all, accepts it happily. That is why this needs a function and a test rather than a
+    field reference.
+
+    12 hex characters, matching every other batch id in the codebase
+    (``uuid.uuid4().hex[:12]`` in the bulk deploy and bulk run paths). Derived from the
+    lab id rather than random so the same lab always groups under the same batch.
+    """
+    return (row.id or "").replace("-", "")[:12]
+
+
 def stage_jobs(row: SpireLab) -> dict:
     """``{stage key: ansible_local job id}``. Public because the page links each stage's
     Live Output, and a failed stage's Ansible error exists nowhere else."""
@@ -514,7 +530,7 @@ async def _run_stage(db: Session, *, row: SpireLab, stage: dict, actor: str,
     meta = _stage_meta(row, stage, asset_backend)
     child = job_service.create_job(
         db, "ansible_local", actor, workgroup="ansible", status="queued",
-        metadata=meta, batch_id=row.id)
+        metadata=meta, batch_id=batch_id_for(row))
     jobs = stage_jobs(row)
     jobs[stage["key"]] = child.id
     row.stage_job_ids = json.dumps(jobs)
