@@ -638,11 +638,12 @@ function proxmoxDashboard() {
       return { node: vm.node, vmid: vm.vmid, vm_type: vm.type, name: vm.name };
     },
 
-    // Proxmox reports a boolean. `undefined` for a row with no status at all, and the
+    // Proxmox reports a boolean, and this page's rows offer nothing for a third state,
+    // so there is none to report. `undefined` is a row with no status at all, and the
     // mixin treats unknown as eligible rather than silently skipping it.
-    _bulkPowerRunning(vm) {
+    _bulkPowerState(vm) {
       if (vm.is_running === undefined || vm.is_running === null) return null;
-      return !!vm.is_running;
+      return vm.is_running ? 'on' : 'off';
     },
 
     toggleSelectAll(checked) {

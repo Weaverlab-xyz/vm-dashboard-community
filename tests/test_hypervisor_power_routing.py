@@ -822,6 +822,34 @@ def test_the_bulk_toolbar_greys_through_the_same_helper_the_rows_use():
         "the toolbar and the rows can now disagree about what the agent can express")
 
 
+def test_every_page_with_a_bulk_toolbar_defines_all_of_its_seams():
+    """window.bulkPowerState() reads four things off the page. A missing one is an
+    unbound name inside an Alpine expression, which fails SILENTLY — the toolbar renders,
+    the button is live, and pressing it does nothing at all.
+
+    The seam list is read out of app.js's own header rather than restated here, so adding
+    a fifth seam fails this test until every page has it.
+    """
+    mixin = _read(os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js"))
+    header = mixin[mixin.index("// ── Reusable bulk power toolbar"):
+                   mixin.index("window.bulkPowerState = function")]
+    seams = set(re.findall(r"^//   (_?bulkPower\w+)", header, re.M))
+    assert len(seams) >= 4, f"only found {sorted(seams)} in the mixin's seam list"
+
+    for kind in sorted(set(_AGENT_ROUTED) | {"nutanix"}):
+        markup = _read(_template(kind))
+        assert "...bulkPowerState()" in markup, (
+            f"{kind} page renders the bulk toolbar but never spreads bulkPowerState()")
+        for seam in sorted(seams):
+            if seam == "bulkPowerUrl":
+                assert re.search(r"\n\s*bulkPowerUrl:\s*'/api/", markup), (
+                    f"{kind} page does not set bulkPowerUrl")
+                continue
+            assert re.search(r"\n\s*" + seam + r"\s*\(", markup), (
+                f"{kind} page never defines {seam}(), so the bulk toolbar would call an "
+                f"unbound name — which Alpine fails silently on")
+
+
 def test_every_destructive_bulk_op_has_a_confirmation_sentence():
     """A new bulk op must not arrive with no dialog.
 

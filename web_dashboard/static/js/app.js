@@ -336,7 +336,14 @@ window.afterDeploy = function (resp, opts) {
 //   _bulkPowerTarget(vm)    the per-VM payload — the SAME object shape the row's own
 //                           powerOp already POSTs, so bulk cannot address a VM
 //                           differently from the button beside it
-//   _bulkPowerRunning(vm)   true / false / null, where null means "not known"
+//   _bulkPowerState(vm)     'on' | 'off' | 'other' | null
+//
+// `_bulkPowerState` is three states and a null rather than a boolean, and that is not
+// fussiness. A Hyper-V VM can be Saved and an XCP-ng one Suspended or Paused, and the
+// per-row buttons treat those as neither on nor off: Start resumes them and Force Off
+// cuts their power. A boolean "is it running" collapses Saved into `off`, which would
+// make bulk Force Off silently skip exactly the VMs whose own row offers it — the
+// under-offering, silent-skip failure this whole helper is written to avoid.
 //
 // It also uses the page's existing `_vmKey(vm)` (must match the server's
 // `_override_key`), its `showToast` if it has one, and its `guestToolsMaybeReady` and
@@ -355,7 +362,7 @@ window.bulkPowerState = function () {
         // also have to remember the toolbar.
         bulkGuestOps: ['shutdown', 'reboot'],
 
-        // The op the toolbar may send. Falls back to ALLOWED when the page has no
+        // The op the toolbar may send. Falls back to allowed when the page has no
         // `canOp` — templates/nutanix/index.html has no agent path and therefore no
         // canOp/agentOps at all, and `!canOp(op)` there would be an unbound name, which
         // Alpine fails silently on.
@@ -377,9 +384,17 @@ window.bulkPowerState = function () {
         // guestToolsMaybeReady: the page must not refuse on the strength of a field it
         // never measured.
         bulkPowerEligible(vm, op) {
-            const running = this._bulkPowerRunning(vm);
-            if (op === 'start') return running !== true;
-            if (running === false) return false;
+            const state = this._bulkPowerState(vm);
+            // Start: anything not already on. That includes Saved and Suspended, where
+            // the row's own Start button resumes rather than boots — same button, same
+            // set of VMs.
+            if (op === 'start') return state !== 'on';
+            // Force Off: anything not already off. A Saved or Paused VM still holds
+            // power, and its row offers Force Off for exactly that reason.
+            if (op === 'stop') return state !== 'off';
+            // Everything else asks the guest to do something, so the guest has to be
+            // running. 'other' is not enough and null (unknown) still is.
+            if (state !== 'on' && state !== null) return false;
             if (this.bulkGuestOps.includes(op)
                 && typeof this.guestToolsMaybeReady === 'function'
                 && !this.guestToolsMaybeReady(vm)) {

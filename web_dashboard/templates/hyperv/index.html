@@ -529,12 +529,15 @@ function hypervDashboard() {
       return { vmid: vm.vmid, name: vm.name };
     },
 
-    // Hyper-V's WMI EnabledState: 2 running, 3 off, 6 saved, 9 paused. `undefined` for
-    // a row this page never got a state for, and the mixin treats unknown as eligible
-    // rather than silently skipping it.
-    _bulkPowerRunning(vm) {
+    // Hyper-V's WMI EnabledState. 6 (Saved) and 9 (Paused) are 'other', not 'off':
+    // they still hold power, which is why the row offers both Start and Force Off for
+    // them. `undefined` is a row this page never got a state for, and the mixin treats
+    // unknown as eligible rather than silently skipping it.
+    _bulkPowerState(vm) {
       if (vm.state === undefined || vm.state === null) return null;
-      return vm.state === 2;
+      if (vm.state === 2) return 'on';
+      if (vm.state === 3) return 'off';
+      return 'other';
     },
 
     toggleSelectAll(checked) {

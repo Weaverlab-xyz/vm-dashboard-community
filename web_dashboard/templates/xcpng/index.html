@@ -461,12 +461,15 @@ function xcpngDashboard() {
       return { uuid: vm.uuid, name: vm.name };
     },
 
-    // XAPI's power_state: Running / Halted / Suspended / Paused. An absent value is
-    // unknown, and the mixin treats unknown as eligible rather than silently skipping
-    // it.
-    _bulkPowerRunning(vm) {
+    // XAPI's power_state. Suspended and Paused are 'other', not 'off' — the row offers
+    // Resume/Unpause and Force Off for them, so Force Off must reach them here too. An
+    // absent value is unknown, and the mixin treats unknown as eligible rather than
+    // silently skipping it.
+    _bulkPowerState(vm) {
       if (!vm.power_state) return null;
-      return vm.power_state === 'Running';
+      if (vm.power_state === 'Running') return 'on';
+      if (vm.power_state === 'Halted') return 'off';
+      return 'other';
     },
 
     toggleSelectAll(checked) {

@@ -721,8 +721,9 @@ const GUEST_OPS = (() => {
   return m[1].split(',').map(v => v.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
 })();
 
-// Two methods and the seams a page supplies. `running` is the tri-state
-// _bulkPowerRunning returns: true / false / null for "not known".
+// The methods under test plus the seams a page supplies. A row's `state` here is what
+// `_bulkPowerState` returns: 'on' | 'off' | 'other' | null, where 'other' is a Hyper-V
+// Saved or an XCP-ng Suspended/Paused VM and null means the page does not know.
 function planner(rows, selected, extra) {
   return Object.assign(
     eval('({' + extract(APPJS, 'bulkPowerPlan') + ','
@@ -735,18 +736,23 @@ function planner(rows, selected, extra) {
       _bulkPowerRows: () => rows,
       _vmKey: (vm) => String(vm.id),
       _bulkPowerTarget: (vm) => ({ id: vm.id, name: vm.name }),
-      _bulkPowerRunning: (vm) => (vm.running === undefined ? null : vm.running),
+      _bulkPowerState: (vm) => (vm.state === undefined ? null : vm.state),
     },
     extra || {});
 }
 
 const VMS = [
-  { id: '1', name: 'dc01', running: true },
-  { id: '2', name: 'sql01', running: true },
-  { id: '3', name: 'web01', running: false },
-  { id: '4', name: 'app01', running: false },
+  { id: '1', name: 'dc01', state: 'on' },
+  { id: '2', name: 'sql01', state: 'on' },
+  { id: '3', name: 'web01', state: 'off' },
+  { id: '4', name: 'app01', state: 'off' },
 ];
 const ALL = ['1', '2', '3', '4'];
+
+// A Hyper-V Saved VM, an XCP-ng Suspended one, a Nutanix PAUSED one. Neither on nor
+// off: the row offers Start (which resumes) AND Force Off (there is still power to
+// cut), and the toolbar has to agree with the row.
+const SAVED = [{ id: '5', name: 'saved01', state: 'other' }];
 
 ok('bulkPowerPlan: Start targets only the VMs that are not running',
    (() => { const p = planner(VMS, ALL).bulkPowerPlan('start');
@@ -767,11 +773,42 @@ ok('bulkPowerPlan: Start over an all-running selection plans nothing',
 // happened to it, with nothing said. A job that should not have run fails out loud
 // instead. Same reasoning as guestToolsMaybeReady: unknown is not absent.
 ok('bulkPowerPlan: a VM with an UNKNOWN power state is planned, never skipped',
-   (() => { const rows = [{ id: '9', name: 'mystery' }];   // running: undefined
-            const start = planner(rows, ['9']).bulkPowerPlan('start');
-            const stop = planner(rows, ['9']).bulkPowerPlan('stop');
-            return start.targets.length === 1 && start.skipped === 0
-                   && stop.targets.length === 1 && stop.skipped === 0; })());
+   (() => { const rows = [{ id: '9', name: 'mystery' }];   // state: undefined
+            return ['start', 'stop', 'shutdown', 'restart'].every(op => {
+              const p = planner(rows, ['9']).bulkPowerPlan(op);
+              return p.targets.length === 1 && p.skipped === 0;
+            }); })());
+
+// The defect this seam shape exists for. With a boolean "is it running", Saved
+// collapsed into `off` and bulk Force Off silently skipped precisely the VMs whose own
+// row offers it.
+ok('bulkPowerPlan: Force Off reaches a SAVED/SUSPENDED VM, as its row button does',
+   (() => { const p = planner(SAVED, ['5']).bulkPowerPlan('stop');
+            return p.targets.length === 1 && p.skipped === 0; })());
+
+ok('bulkPowerPlan: Start reaches a SAVED/SUSPENDED VM, which is a resume',
+   (() => { const p = planner(SAVED, ['5']).bulkPowerPlan('start');
+            return p.targets.length === 1 && p.skipped === 0; })());
+
+// The other direction: these ask software inside the guest, and a suspended guest is
+// not running to answer. Skipping is right here, and the dialog says how many.
+ok('bulkPowerPlan: Shutdown and Restart skip a SAVED/SUSPENDED VM',
+   ['shutdown', 'restart'].every(op => {
+     const p = planner(SAVED, ['5']).bulkPowerPlan(op);
+     return p.targets.length === 0 && p.skipped === 1;
+   }));
+
+ok('bulkPowerPlan: Start skips only the VMs that are already on',
+   (() => { const rows = VMS.concat(SAVED);
+            const p = planner(rows, ALL.concat(['5'])).bulkPowerPlan('start');
+            return p.targets.map(t => t.name).join() === 'web01,app01,saved01'
+                   && p.skipped === 2; })());
+
+ok('bulkPowerPlan: Force Off skips only the VMs that are already off',
+   (() => { const rows = VMS.concat(SAVED);
+            const p = planner(rows, ALL.concat(['5'])).bulkPowerPlan('stop');
+            return p.targets.map(t => t.name).join() === 'dc01,sql01,saved01'
+                   && p.skipped === 2; })());
 
 // Select-all, then narrow the filter: the button must act on what is on screen.
 ok('bulkPowerPlan: a selected VM no longer in the filtered rows is not targeted',
@@ -783,7 +820,7 @@ ok('bulkPowerPlan: targets carry the page\'s own payload shape',
             return JSON.stringify(p.targets) === '[{"id":"3","name":"web01"}]'; })());
 
 ok('bulkPowerPlan: the key is compared as a string, so a numeric id still matches',
-   (() => { const rows = [{ id: 7, name: 'seven', running: false }];
+   (() => { const rows = [{ id: 7, name: 'seven', state: 'off' }];
             return planner(rows, [7]).bulkPowerPlan('start').targets.length === 1; })());
 
 // Hyper-V and vSphere gate their per-row Shutdown on the guest agent; the toolbar has

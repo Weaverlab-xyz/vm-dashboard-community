@@ -636,11 +636,14 @@ function nutanixDashboard() {
       return { uuid: vm.uuid, name: vm.name, cluster: vm.cluster || '' };
     },
 
-    // Prism's power_state: ON / OFF / PAUSED / SUSPENDED. An absent value is unknown,
-    // and the mixin treats unknown as eligible rather than silently skipping it.
-    _bulkPowerRunning(vm) {
+    // Prism's power_state. PAUSED and SUSPENDED are 'other', not 'off' — the row
+    // offers Resume and Force Off for them. An absent value is unknown, and the mixin
+    // treats unknown as eligible rather than silently skipping it.
+    _bulkPowerState(vm) {
       if (!vm.power_state) return null;
-      return vm.power_state === 'ON';
+      if (vm.power_state === 'ON') return 'on';
+      if (vm.power_state === 'OFF') return 'off';
+      return 'other';
     },
 
     toggleSelectAll(checked) {

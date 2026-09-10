@@ -446,11 +446,13 @@ function vsphereDashboard() {
       return { moref: vm.moref, name: vm.name, host: vm.host };
     },
 
-    // vSphere reports a boolean. `undefined` for a row with no power state at all, and
-    // the mixin treats unknown as eligible rather than silently skipping it.
-    _bulkPowerRunning(vm) {
+    // vSphere reports a boolean here: a suspended VM reads as not running, which is
+    // also how this page's own Start button treats it. `undefined` is a row with no
+    // power state at all, and the mixin treats unknown as eligible rather than silently
+    // skipping it.
+    _bulkPowerState(vm) {
       if (vm.is_running === undefined || vm.is_running === null) return null;
-      return !!vm.is_running;
+      return vm.is_running ? 'on' : 'off';
     },
 
     toggleSelectAll(checked) {
