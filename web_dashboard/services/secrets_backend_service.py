@@ -148,6 +148,24 @@ _PSCLI_STDOUT_ERROR_PREFIXES = (
 
 
 def _ps_run(args: list, timeout: int = 30):
+    """Run one ps-cli subcommand and return its parsed JSON.
+
+    **``args`` must start with a SERVICE, then a verb**: ``["folders",
+    "create-folder", ...]``, never ``["create", ...]``. ps-cli groups every
+    subcommand under a service (``safes`` / ``folders`` / ``secrets`` / ``settings``),
+    and argparse rejects a bare verb with ``invalid choice`` — a runtime error that
+    only appears the first time that particular call is exercised.
+
+    Six calls here shipped without the service token and went unnoticed for exactly
+    that reason: nothing had ever created a Secrets Safe folder or safe from the
+    dashboard until the SPIRE lab did. ``beyondtrust-bips-cli`` is UNPINNED in requirements.txt,
+    so a rebuild can move the CLI under us; `tests/test_pscli_grammar.py` pins the
+    shape statically rather than waiting for the next live failure.
+
+    Each verb has a long name and a short alias (``list-safes`` / ``list``,
+    ``create-folder`` / ``create``). Both work; the long form is used here because it
+    is greppable and unambiguous.
+    """
     result = subprocess.run(
         # -y auto-confirms destructive subcommands (delete, etc.) that would
         # otherwise call input() and EOF against our closed stdin. Cheap
@@ -1080,7 +1098,7 @@ def list_bt_safes() -> list[dict]:
     Description + Id; callers thread the Id through to create-folder
     (`-pid`) and delete-safe (`-id`) as the upstream parent reference.
     """
-    raw = _ps_run(["list-safes"])
+    raw = _ps_run(["safes", "list-safes"])
     if not isinstance(raw, list):
         return []
     out: list[dict] = []
@@ -1097,7 +1115,7 @@ def create_bt_safe(name: str, description: str = "") -> dict:
     """Create a new BeyondTrust Safe. Returns {name, id, description}."""
     if not name:
         raise ValueError("Safe name is required.")
-    args = ["create-safe", "-n", name]
+    args = ["safes", "create-safe", "-n", name]
     if description:
         args.extend(["-d", description])
     raw = _ps_run(args, timeout=30)
@@ -1114,7 +1132,7 @@ def update_bt_safe(safe_id: str, new_name: str) -> dict:
     """Rename a BeyondTrust Safe by GUID."""
     if not safe_id or not new_name:
         raise ValueError("safe_id and new_name are required.")
-    _ps_run(["update-safe", "-id", safe_id, "-n", new_name], timeout=30)
+    _ps_run(["safes", "update-safe", "-id", safe_id, "-n", new_name], timeout=30)
     logger.info("BT Safe: renamed safe %s → %s", safe_id, new_name)
     return {"id": safe_id, "name": new_name}
 
@@ -1123,7 +1141,7 @@ def delete_bt_safe(safe_id: str) -> None:
     """Delete a BeyondTrust Safe by GUID."""
     if not safe_id:
         raise ValueError("safe_id is required.")
-    _ps_run(["delete-safe", "-id", safe_id], timeout=30)
+    _ps_run(["safes", "delete-safe", "-id", safe_id], timeout=30)
     logger.info("BT Safe: deleted safe %s", safe_id)
 
 
@@ -1171,7 +1189,8 @@ def create_bt_folder(parent_id: str, name: str) -> dict:
     """
     if not parent_id or not name:
         raise ValueError("parent_id and folder name are required.")
-    raw = _ps_run(["create", "-pid", parent_id, "-n", name], timeout=30)
+    raw = _ps_run(["folders", "create-folder", "-pid", parent_id, "-n", name],
+                   timeout=30)
     folder_id = ""
     if isinstance(raw, dict):
         folder_id = raw.get("Id") or raw.get("FolderId") or ""
@@ -1187,7 +1206,7 @@ def delete_bt_folder(folder_id: str) -> None:
     and the error gets surfaced through _ps_run."""
     if not folder_id:
         raise ValueError("folder_id is required.")
-    _ps_run(["delete", "-id", folder_id], timeout=30)
+    _ps_run(["folders", "delete-folder", "-id", folder_id], timeout=30)
     logger.info("BT Safe: deleted folder %s", folder_id)
 
 
