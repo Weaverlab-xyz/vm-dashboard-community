@@ -348,6 +348,81 @@ def test_the_walk_does_not_swallow_a_task_that_raises():
         raise AssertionError("run_power_batch swallowed a task failure")
 
 
+# ── The two ways a batch could leave job rows nothing will ever run ───────────
+
+def test_a_crash_mid_batch_still_schedules_the_jobs_already_created():
+    """A non-HTTPException is NOT swallowed — but it must not strand the earlier rows.
+
+    By the time target 3 blows up, targets 1 and 2 already have committed job rows, and
+    on the direct path those only ever run because something scheduled the walk. Letting
+    the exception skip the scheduling would leave them `pending` until
+    `reconcile_stale_jobs` failed them ~12 minutes later, having powered nothing: the
+    operator watches two VMs go grey on the Jobs page for no reason they can see.
+    """
+    bg = _Background()
+    calls = []
+
+    async def queue_one(target, batch_id):
+        if target.name == "boom":
+            raise RuntimeError("the database went away")
+        calls.append(target.name)
+
+        async def _task():
+            pass
+
+        return {"job_id": f"job-{target.name}", "status": "queued", "task": _task}
+
+    restore = _patch_audit(_AuditSpy())
+    try:
+        asyncio.run(deps.queue_power_batch(
+            object(), kind="hyperv", op="start",
+            targets=[_Target("dc01", "1"), _Target("sql01", "2"), _Target("boom", "3")],
+            allowed_ops=ALLOWED, queue_one=queue_one, label_of=lambda t: t.name,
+            created_by="alice", background_tasks=bg))
+    except RuntimeError as exc:
+        assert "database went away" in str(exc), exc
+    else:
+        raise AssertionError(
+            "an unexpected exception was swallowed, so a part-queued batch would be "
+            "reported as a success")
+    finally:
+        restore()
+
+    assert calls == ["dc01", "sql01"], calls
+    assert len(bg.tasks) == 1, (
+        "the two committed job rows were left with nothing to execute them")
+    assert len(bg.tasks[0][1][0]) == 2, bg.tasks[0][1][0]
+
+
+def test_direct_tasks_with_nowhere_to_run_them_is_a_loud_error():
+    """A router with a direct path that forgets to pass its BackgroundTasks.
+
+    Without this the rows are all created and none of them run — the quietest possible
+    failure, and from the Jobs page indistinguishable from an agent that never picked
+    the work up. `api/vms.py` legitimately passes none, but it is agent-only and every
+    target returns task=None, so it never reaches here.
+    """
+    restore = _patch_audit(_AuditSpy())
+    try:
+        _run([_Target("dc01", "1")], direct=True, background=None)
+    except RuntimeError as exc:
+        assert "no background_tasks" in str(exc), exc
+        assert "nothing would execute them" in str(exc), exc
+    else:
+        raise AssertionError(
+            "a direct batch with no background_tasks queued silently")
+    finally:
+        restore()
+
+
+def test_an_agent_only_batch_needs_no_background_tasks():
+    """The other side of the guard: every target agent-bound, so there is nothing to
+    schedule and passing none is correct rather than an oversight."""
+    result, _ = _run([_Target("dc01", "1"), _Target("sql01", "2")], direct=False,
+                     background=None)
+    assert result["count"] == 2, result
+
+
 # ── The audit row ─────────────────────────────────────────────────────────────
 
 def test_one_audit_row_per_batch_recording_what_ran_and_what_did_not():

@@ -220,6 +220,10 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
       can be true of one VM and not another. Those land in ``failed`` and the remaining
       targets still run, rather than aborting a batch that is already part-queued.
 
+    Exactly ONE background task is scheduled for the whole batch, never one per VM —
+    see :func:`run_power_batch` for why that is this module's decision rather than
+    Starlette's.
+
     Returns ``{batch_id, op, count, jobs, failed}``; raises 400 when nothing queued,
     because a response saying ``count: 0`` next to a 200 reads as success.
     """
@@ -262,17 +266,42 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
 
     batch_id = uuid.uuid4().hex[:12]
     jobs, failed, tasks = [], [], []
-    for target in targets:
-        label = label_of(target)
-        try:
-            result = await queue_one(target, batch_id)
-        except HTTPException as exc:
-            failed.append({"name": label, "error": str(exc.detail)})
-            continue
-        jobs.append({"name": label, "job_id": result["job_id"],
-                     "status": result.get("status") or "queued"})
-        if result.get("task") is not None:
-            tasks.append(result["task"])
+    try:
+        for target in targets:
+            label = label_of(target)
+            try:
+                result = await queue_one(target, batch_id)
+            except HTTPException as exc:
+                # An expected, per-target refusal: a 501 for an op with no verb on this
+                # kind, a 403 for a workgroup this caller cannot reach, a 409 for an
+                # offline agent. None of them necessarily applies to the next VM.
+                failed.append({"name": label, "error": str(exc.detail)})
+                continue
+            jobs.append({"name": label, "job_id": result["job_id"],
+                         "status": result.get("status") or "queued"})
+            if result.get("task") is not None:
+                tasks.append(result["task"])
+    finally:
+        # In a `finally`, and this is the part worth keeping. Anything that is NOT an
+        # HTTPException — a DB error, a bug in a router's queue function — is deliberately
+        # not caught: swallowing it would report a partial batch as a success. But by the
+        # time it is raised the earlier targets already HAVE job rows, and on the direct
+        # path those rows only ever run because something scheduled this walk. Letting the
+        # exception skip the scheduling would leave them `pending` until
+        # `reconcile_stale_jobs` failed them ~12 minutes later, having powered nothing —
+        # a VM the operator watched go grey for no reason. So the work already committed
+        # to the database gets scheduled either way, and the caller still gets the 500.
+        if tasks:
+            if background_tasks is None:
+                # A programming error, said out loud. A router with a direct path that
+                # forgets to pass its BackgroundTasks would otherwise create every job
+                # row and run none of them: the quietest possible failure, indistinguishable
+                # from an agent that never picked the work up.
+                raise RuntimeError(
+                    f"{kind}: queue_power_batch was given {len(tasks)} direct power "
+                    f"task(s) and no background_tasks to run them on. The job rows "
+                    f"exist and nothing would execute them.")
+            background_tasks.add_task(run_power_batch, tasks)
 
     if not jobs:
         # Surface the first reason rather than a misleading empty success. The operator
@@ -285,10 +314,6 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
         raise HTTPException(
             status_code=400,
             detail=f"No jobs were queued. The first VM failed with: {detail}")
-
-    # ONE task for the whole direct batch — see run_power_batch for why N would be wrong.
-    if tasks and background_tasks is not None:
-        background_tasks.add_task(run_power_batch, tasks)
 
     job_service.log_audit(
         db, created_by, f"{kind}_power_bulk",
