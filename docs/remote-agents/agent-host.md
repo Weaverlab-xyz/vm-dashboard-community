@@ -144,6 +144,12 @@ Six things to know before you start:
   that logging out stops the agent. This is the Windows counterpart of the rootless-Podman
   caveat above. For an agent that must stay up unattended, use Windows Server with the WSL2
   engine, or run it in a Linux VM on the same host.
+- **Whatever the agent talks to on this host needs its own autostart.** The container comes
+  back at logon; a hypervisor daemon on the Windows side does not, and the agent cannot
+  start it — it can dial the host but not launch a process there. `vmrest` is the case that
+  bites, because the agent then reports itself healthy and fails every Workstation job on a
+  closed port: see
+  [Keep it running](../integrations/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows).
 - **The source IP the dashboard records is Docker's NAT gateway,** not the Windows host's LAN
   address. The **Source IP** column and the audit rows will show that. It is not a fault, and
   it does mean the column cannot identify *which* Windows host an agent is on.

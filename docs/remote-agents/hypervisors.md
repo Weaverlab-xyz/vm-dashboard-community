@@ -246,6 +246,18 @@ vmrest -C     # set the API credentials, once
 vmrest        # run the daemon — 127.0.0.1:8697
 ```
 
+**Neither of those lines survives a reboot, and the first one is a prerequisite rather
+than a nicety** — with no stored credential `vmrest` refuses to listen and exits
+("Not listening to either Unix Socket or TCP port"), so the symptom is a closed port and
+not a 401. And because `vmrest` is a foreground console program, it also stops when its
+window is closed or when you log out, while the agent container restarts at logon
+perfectly happily — an agent that is online and failing every Workstation job on a
+refused connection is what that looks like from the dashboard. The agent cannot start it:
+a Linux container in Docker Desktop's VM can dial the host but cannot launch a process on
+it. Register the host-side autostart once, with
+[`scripts\Enable-VmrestAutostart.ps1`](../../scripts/Enable-VmrestAutostart.ps1) — see
+[Keep it running](../integrations/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows).
+
 Then add a `workstation` connection bound to that host's agent. It is **agent-bound
 only**: the dashboard has no transport for Workstation, so a connection without an agent
 is refused rather than created and left broken.
