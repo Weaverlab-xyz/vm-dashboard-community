@@ -217,6 +217,69 @@ def test_an_empty_child_list_still_closes_the_parent():
     assert parent.metadata_dict["batch_total"] == 0
 
 
+# ── batch_id is String(32), and every id in this codebase is 36 ──────────────
+
+def test_no_caller_puts_a_row_id_into_batch_id():
+    """``Job.batch_id`` is **String(32)**. Every ``id`` column here is
+    ``String(36)`` — a dashed UUID — so ``batch_id=something.id`` overflows.
+
+    **SQLite does not enforce VARCHAR length and PostgreSQL does**, so this passes every
+    local test and then fails on a live tenant with
+    ``psycopg2.errors.StringDataRightTruncation: value too long for type character
+    varying(32)``, mid-INSERT, with the session left needing a rollback. It has happened
+    twice: ``hypervisor_sync_service`` (``job.batch_id or job.id``, only reachable on a
+    multi-page sync whose first page had no batch) and ``spire_lab_service`` (``row.id``,
+    which failed the first time anyone built a SPIRE lab).
+
+    The house shape is 12 hex characters — ``uuid.uuid4().hex[:12]`` in the bulk deploy
+    and bulk run paths — so a derived id must be ``.replace("-", "")[:12]``.
+
+    Same family as the foreign-key gap in tests/: the test database is more permissive
+    than the real one, so the check has to be explicit rather than emergent.
+    """
+    import ast as _ast
+    import os as _os
+
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    app = _os.path.join(root, "web_dashboard")
+    offenders = []
+    for dirpath, _dirs, files in _os.walk(app):
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            path = _os.path.join(dirpath, fname)
+            with open(path, encoding="utf-8") as fh:
+                try:
+                    tree = _ast.parse(fh.read())
+                except SyntaxError:  # pragma: no cover - not this test's job
+                    continue
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.Call):
+                    continue
+                for kw in node.keywords:
+                    if kw.arg != "batch_id":
+                        continue
+                    for sub in _ast.walk(kw.value):
+                        # `x.id` anywhere in the expression. `x.batch_id` is fine, and so
+                        # is a `[:12]` slice of an id — the slice makes it a Subscript,
+                        # so the bare Attribute no longer stands alone.
+                        if (isinstance(sub, _ast.Attribute) and sub.attr == "id"
+                                and not _sliced(kw.value)):
+                            rel = _os.path.relpath(path, root).replace(chr(92), "/")
+                            offenders.append(f"{rel}:{node.lineno} batch_id="
+                                             f"{_ast.unparse(kw.value)}")
+    assert not offenders, (
+        "batch_id is String(32) but these pass a 36-char id "
+        "(use .replace('-','')[:12]):" + chr(10) + "  "
+        + (chr(10) + "  ").join(sorted(set(offenders))))
+
+
+def _sliced(node) -> bool:
+    """True if the expression contains a subscript — i.e. the id was cut down."""
+    import ast as _ast
+    return any(isinstance(n, _ast.Subscript) for n in _ast.walk(node))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

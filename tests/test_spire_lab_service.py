@@ -292,7 +292,9 @@ def test_every_stage_child_is_queued_not_pending():
         # The stub set it completed; what matters is that it never sat at 'pending',
         # which is the only status the runner's claim query looks at.
         assert child.status == "completed", key
-        assert child.batch_id == row.id, "the batch groups the lab's own runs"
+        # The 12-hex derived form, not the row id: Job.batch_id is String(32) and a
+        # row id is 36 chars. See test_the_stage_batch_id_is_the_house_shape.
+        assert child.batch_id == svc.batch_id_for(row),             "the batch groups the lab's own runs"
     db.close()
 
 
@@ -503,6 +505,65 @@ def test_the_folder_path_follows_the_configured_root_and_the_lab_name():
     asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=out["job_id"]))
     folder = next(c for c in CALLS if c[0] == "folder")
     assert folder[1] == "Automation/spire/weaver-lab"
+    db.close()
+
+
+
+def test_no_row_written_exceeds_its_declared_column_width():
+    """**SQLite does not enforce VARCHAR length; PostgreSQL does.**
+
+    `Job.batch_id` is String(32) and a lab id is a 36-character dashed UUID, so passing
+    the id whole passed every test here and then died on the live tenant with
+    `StringDataRightTruncation: value too long for type character varying(32)` — mid
+    INSERT, leaving the session needing a rollback, so the job died at 12% with a SQL
+    dump instead of a message.
+
+    This walks every row a full provision actually wrote and compares each string value
+    against its own declared width, which is the check the test database is not giving
+    us. Same family as the foreign-key gap: the test DB is more permissive than the real
+    one, so the constraint has to be asserted rather than relied on.
+    """
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db)
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+
+    db.expire_all()
+    offenders = []
+    checked = 0
+    for record in list(db.query(Job).all()) + list(db.query(SpireLab).all()):
+        for col in record.__table__.columns:
+            limit = getattr(col.type, "length", None)
+            if not limit:
+                continue
+            value = getattr(record, col.name, None)
+            if not isinstance(value, str):
+                continue
+            checked += 1
+            if len(value) > limit:
+                offenders.append(
+                    f"{record.__tablename__}.{col.name} is {len(value)} chars, "
+                    f"column is {limit}: {value!r}")
+    assert checked > 40, f"the sweep should see many columns; saw {checked}"
+    assert not offenders, ("a value PostgreSQL would reject:" + chr(10) + "  "
+                           + (chr(10) + "  ").join(offenders))
+
+
+def test_the_stage_batch_id_is_the_house_shape():
+    """12 hex characters, matching `uuid.uuid4().hex[:12]` everywhere else, and derived
+    from the lab so all four stages roll up together on /jobs."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db)
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+
+    batch = svc.batch_id_for(row)
+    assert len(batch) == 12 and batch.isalnum() and "-" not in batch, batch
+    assert batch == row.id.replace("-", "")[:12]
+    db.expire_all()
+    children = [db.query(Job).filter(Job.id == cid).first()
+                for cid in svc.stage_jobs(svc.get_lab(db, row.id)).values()]
+    assert children and all(c.batch_id == batch for c in children),         [c.batch_id for c in children]
     db.close()
 
 
