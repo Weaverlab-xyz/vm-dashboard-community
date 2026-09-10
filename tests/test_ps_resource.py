@@ -1070,12 +1070,17 @@ def test_the_singleton_url_is_normalised_too_not_just_a_tenants():
 
 def test_an_http_url_is_refused_by_name_rather_than_promoted():
     """A scheme somebody typed is not one to rewrite — that would claim a TLS connection
-    nobody asked for. The provider refuses it either way; this refusal says which URL."""
+    nobody asked for. The provider refuses it either way; this refusal says which URL.
+
+    Asserted as ``repr(raw)`` rather than as a URL substring: the refusal quotes the
+    value back with ``{raw!r}``, so this pins the whole value being echoed rather than
+    some fragment of it appearing anywhere in the sentence."""
+    raw = "http://acme.ps.example"
     try:
-        ps._tf_env(None, ps.tenant_creds("http://acme.ps.example", "cid", "sec", "svc"))
+        ps._tf_env(None, ps.tenant_creds(raw, "cid", "sec", "svc"))
         raise AssertionError("an http provider url was accepted")
     except ps.PSResourceError as exc:
-        assert "http://acme.ps.example" in str(exc), str(exc)
+        assert repr(raw) in str(exc), str(exc)
         assert "https" in str(exc), str(exc)
 
 
